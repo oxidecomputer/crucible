@@ -3583,7 +3583,7 @@ impl Downstairs {
      * for this client, but don't yet have a response.
      */
     fn submitted_work(&self, client_id: ClientId) -> usize {
-        self.io_state_count.in_progress[client_id.get() as usize] as usize
+        self.io_state_count.in_progress[client_id] as usize
     }
 
     /**
@@ -3591,9 +3591,8 @@ impl Downstairs {
      * work we have for a downstairs.
      */
     fn total_live_work(&self, client_id: ClientId) -> usize {
-        (self.io_state_count.new[client_id.get() as usize]
-            + self.io_state_count.in_progress[client_id.get() as usize])
-            as usize
+        (self.io_state_count.new[client_id]
+            + self.io_state_count.in_progress[client_id]) as usize
     }
 
     /**
@@ -8344,21 +8343,21 @@ impl fmt::Display for IOState {
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub struct IOStateCount {
-    pub new: [u32; 3],
-    pub in_progress: [u32; 3],
-    pub done: [u32; 3],
-    pub skipped: [u32; 3],
-    pub error: [u32; 3],
+    pub new: ClientData<u32>,
+    pub in_progress: ClientData<u32>,
+    pub done: ClientData<u32>,
+    pub skipped: ClientData<u32>,
+    pub error: ClientData<u32>,
 }
 
 impl IOStateCount {
     fn new() -> IOStateCount {
         IOStateCount {
-            new: [0; 3],
-            in_progress: [0; 3],
-            done: [0; 3],
-            skipped: [0; 3],
-            error: [0; 3],
+            new: ClientData::new(0),
+            in_progress: ClientData::new(0),
+            done: ClientData::new(0),
+            skipped: ClientData::new(0),
+            error: ClientData::new(0),
         }
     }
 
@@ -8397,15 +8396,14 @@ impl IOStateCount {
             }
         }
         let mut sum = 0;
-        for ds_stat in &state_stat {
-            print!("{:4}   ", ds_stat);
-            sum += ds_stat;
+        for cid in ClientId::iter() {
+            print!("{:4}   ", state_stat[cid]);
+            sum += state_stat[cid];
         }
         println!("{:4}", sum);
     }
 
     pub fn incr(&mut self, state: &IOState, cid: ClientId) {
-        let cid = cid.get() as usize;
         match state {
             IOState::New => {
                 self.new[cid] += 1;
@@ -8426,7 +8424,6 @@ impl IOStateCount {
     }
 
     pub fn decr(&mut self, state: &IOState, cid: ClientId) {
-        let cid = cid.get() as usize;
         match state {
             IOState::New => {
                 self.new[cid] -= 1;
