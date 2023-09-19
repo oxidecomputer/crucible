@@ -4287,7 +4287,7 @@ pub mod repair_test {
         //   1 | RpRpRp| 0
         //   2 | RpRpRp| 1
         //   3 | RpRpRp| 2
-        let up = create_test_upstairs(1).await;
+        let up = create_test_upstairs(ClientId::new(1)).await;
         let eid = 0;
         create_and_enqueue_repair_ops(&up, eid).await;
 
