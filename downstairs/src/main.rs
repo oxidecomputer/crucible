@@ -182,6 +182,25 @@ enum Args {
         bind_addr: SocketAddr,
     },
     Version,
+    /*
+    Measure an isolated downstairs
+    */
+    Dynamometer {
+        #[clap(long, default_value = "512", action)]
+        block_size: u64,
+
+        #[clap(short, long, name = "DIRECTORY", action)]
+        data: PathBuf,
+
+        #[clap(long, default_value = "100", action)]
+        extent_size: u64,
+
+        #[clap(long, default_value = "15", action)]
+        extent_count: u64,
+
+        #[clap(long, action)]
+        encrypted: bool,
+    },
 }
 
 #[tokio::main]
@@ -384,6 +403,29 @@ async fn main() -> Result<()> {
                 "Upstairs <-> Downstairs Message Version: {}",
                 CRUCIBLE_MESSAGE_VERSION
             );
+            Ok(())
+        }
+        Args::Dynamometer {
+            block_size,
+            data,
+            extent_size,
+            extent_count,
+            encrypted,
+        } => {
+            let uuid = Uuid::new_v4();
+
+            let region = create_region(
+                block_size,
+                data,
+                extent_size,
+                extent_count,
+                uuid,
+                encrypted,
+                log.clone(),
+            )
+            .await?;
+
+            dynamometer(region).await?;
             Ok(())
         }
     }

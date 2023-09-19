@@ -888,6 +888,7 @@ dependencies = [
  "slog-async",
  "slog-dtrace",
  "slog-term",
+ "statistical",
  "tempfile",
  "tokio",
  "tokio-rustls",
