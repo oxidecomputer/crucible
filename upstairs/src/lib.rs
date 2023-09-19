@@ -3258,7 +3258,11 @@ impl Downstairs {
      * Mark a reconcile work request as done for this client and return
      * true if all work requests are done
      */
-    fn rep_done(&mut self, client_id: ClientId, rep_id: RepairId) -> bool {
+    fn rep_done(
+        &mut self,
+        client_id: ClientId,
+        rep_id: ReconciliationId,
+    ) -> bool {
         if let Some(job) = &mut self.reconcile_current_work {
             let old_state = job.state.insert(client_id, IOState::Done);
             assert_eq!(old_state, IOState::InProgress);
@@ -3295,7 +3299,7 @@ impl Downstairs {
         max_flush: u64,
         max_gen: u64,
     ) {
-        let mut rep_id = RepairId(0);
+        let mut rep_id = ReconciliationId(0);
         info!(self.log, "Full repair list: {:?}", rec_list);
         for (ext, ef) in rec_list.drain() {
             /*
@@ -6531,7 +6535,7 @@ impl Upstairs {
     async fn ds_repair_done_notify(
         &self,
         client_id: ClientId,
-        rep_id: RepairId,
+        rep_id: ReconciliationId,
         ds_reconcile_done_tx: &mpsc::Sender<Repair>,
     ) -> Result<()> {
         debug!(
@@ -7977,13 +7981,13 @@ struct WorkSummary {
 
 #[derive(Debug)]
 struct ReconcileIO {
-    id: RepairId,
+    id: ReconciliationId,
     op: Message,
     state: ClientData<IOState>,
 }
 
 impl ReconcileIO {
-    fn new(id: RepairId, op: Message) -> ReconcileIO {
+    fn new(id: ReconciliationId, op: Message) -> ReconcileIO {
         ReconcileIO {
             id,
             op,
@@ -9459,7 +9463,7 @@ impl Default for Guest {
 struct Repair {
     repair: bool,
     client_id: ClientId,
-    rep_id: RepairId,
+    rep_id: ReconciliationId,
 }
 
 /**
