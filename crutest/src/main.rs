@@ -1164,8 +1164,11 @@ fn fill_vec(
     wl: &WriteLog,
     bs: u64,
 ) -> Vec<u8> {
-    assert_ne!(blocks, 0);
+    if blocks == 0 {
+        println!("Warning: fill requested of zero length buffer");
+    }
     assert_ne!(bs, 0);
+
     /*
      * Each block we are filling the buffer for can have a different
      * seed value.  For multiple block sized writes, we need to create
@@ -1229,7 +1232,9 @@ fn validate_vec(
 ) -> ValidateStatus {
     let bs = bs as usize;
     assert_eq!(data.len() % bs, 0);
-    assert_ne!(data.len(), 0);
+    if data.is_empty() {
+        println!("Warning: Validation of zero length buffer");
+    }
 
     let blocks = data.len() / bs;
     let mut data_offset: usize = 0;

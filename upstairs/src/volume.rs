@@ -472,6 +472,15 @@ impl Volume {
             cdt::volume__write__start!(|| (cc, self.uuid));
         }
 
+        if data.is_empty() {
+            if is_write_unwritten {
+                cdt::volume__writeunwritten__done!(|| (cc, self.uuid));
+            } else {
+                cdt::volume__write__done!(|| (cc, self.uuid));
+            }
+            return Ok(());
+        }
+
         let affected_sub_volumes = self.sub_volumes_for_lba_range(
             offset.value,
             data.len() as u64 / self.block_size,
@@ -608,6 +617,12 @@ impl BlockIO for Volume {
         // reads directly from that
         let cc = self.next_count();
         cdt::volume__read__start!(|| (cc, self.uuid));
+
+        if data.is_empty() {
+            cdt::volume__read__done!(|| (cc, self.uuid));
+            return Ok(());
+        }
+
         if self.sub_volumes.is_empty() {
             if let Some(ref read_only_parent) = &self.read_only_parent {
                 let res = read_only_parent.read(offset, data).await;

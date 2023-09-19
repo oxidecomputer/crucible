@@ -9354,6 +9354,9 @@ impl BlockIO for Guest {
             crucible_bail!(BlockSizeMismatch);
         }
 
+        if data.is_empty() {
+            return Ok(());
+        }
         let rio = BlockOp::Read { offset, data };
         Ok(self.send(rio).await.wait().await?)
     }
@@ -9373,6 +9376,9 @@ impl BlockIO for Guest {
             crucible_bail!(BlockSizeMismatch);
         }
 
+        if data.is_empty() {
+            return Ok(());
+        }
         let wio = BlockOp::Write { offset, data };
         Ok(self.send(wio).await.wait().await?)
     }
@@ -9392,6 +9398,9 @@ impl BlockIO for Guest {
             crucible_bail!(BlockSizeMismatch);
         }
 
+        if data.is_empty() {
+            return Ok(());
+        }
         let wio = BlockOp::WriteUnwritten { offset, data };
         Ok(self.send(wio).await.wait().await?)
     }
