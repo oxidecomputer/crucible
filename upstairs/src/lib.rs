@@ -8361,7 +8361,7 @@ impl IOStateCount {
         }
     }
 
-    fn show_all(&mut self) {
+    fn show_all(&self) {
         println!("   STATES      DS:0   DS:1   DS:2   TOTAL");
         self.show(IOState::New);
         self.show(IOState::InProgress);
@@ -8371,27 +8371,42 @@ impl IOStateCount {
         self.show(IOState::Error(e));
     }
 
-    fn show(&mut self, state: IOState) {
-        let state_stat;
+    fn get_mut(&mut self, state: &IOState) -> &mut ClientData<u32> {
+        match state {
+            IOState::New => &mut self.new,
+            IOState::InProgress => &mut self.in_progress,
+            IOState::Done => &mut self.done,
+            IOState::Skipped => &mut self.skipped,
+            IOState::Error(_) => &mut self.error,
+        }
+    }
+
+    fn get(&self, state: &IOState) -> &ClientData<u32> {
+        match state {
+            IOState::New => &self.new,
+            IOState::InProgress => &self.in_progress,
+            IOState::Done => &self.done,
+            IOState::Skipped => &self.skipped,
+            IOState::Error(_) => &self.error,
+        }
+    }
+
+    fn show(&self, state: IOState) {
+        let state_stat = self.get(&state);
         match state {
             IOState::New => {
-                state_stat = self.new;
                 print!("    New        ");
             }
             IOState::InProgress => {
-                state_stat = self.in_progress;
                 print!("    Sent       ");
             }
             IOState::Done => {
-                state_stat = self.done;
                 print!("    Done       ");
             }
             IOState::Skipped => {
-                state_stat = self.skipped;
                 print!("    Skipped    ");
             }
             IOState::Error(_) => {
-                state_stat = self.error;
                 print!("    Error      ");
             }
         }
@@ -8404,43 +8419,11 @@ impl IOStateCount {
     }
 
     pub fn incr(&mut self, state: &IOState, cid: ClientId) {
-        match state {
-            IOState::New => {
-                self.new[cid] += 1;
-            }
-            IOState::InProgress => {
-                self.in_progress[cid] += 1;
-            }
-            IOState::Done => {
-                self.done[cid] += 1;
-            }
-            IOState::Skipped => {
-                self.skipped[cid] += 1;
-            }
-            IOState::Error(_) => {
-                self.error[cid] += 1;
-            }
-        }
+        self.get_mut(state)[cid] += 1;
     }
 
     pub fn decr(&mut self, state: &IOState, cid: ClientId) {
-        match state {
-            IOState::New => {
-                self.new[cid] -= 1;
-            }
-            IOState::InProgress => {
-                self.in_progress[cid] -= 1;
-            }
-            IOState::Done => {
-                self.done[cid] -= 1;
-            }
-            IOState::Skipped => {
-                self.skipped[cid] -= 1;
-            }
-            IOState::Error(_) => {
-                self.error[cid] -= 1;
-            }
-        }
+        self.get_mut(state)[cid] -= 1;
     }
 }
 
