@@ -208,6 +208,18 @@ enum Args {
         // Number of samples to exit for
         #[clap(short, long, action, default_value = "10")]
         samples: usize,
+
+        // Flush per iops
+        #[clap(long, action, default_value = None)]
+        flush_per_iops: Option<usize>,
+
+        // Flush per blocks written
+        #[clap(long, action, default_value = None)]
+        flush_per_blocks: Option<usize>,
+
+        // Flush per ms
+        #[clap(long, action, default_value = None)]
+        flush_per_ms: Option<usize>,
     },
 }
 
@@ -421,6 +433,9 @@ async fn main() -> Result<()> {
             encrypted,
             num_writes,
             samples,
+            flush_per_iops,
+            flush_per_blocks,
+            flush_per_ms,
         } => {
             let uuid = Uuid::new_v4();
 
@@ -435,7 +450,37 @@ async fn main() -> Result<()> {
             )
             .await?;
 
-            dynamometer(region, num_writes, samples).await?;
+            eprintln!(
+                "{:?} {:?} {:?}",
+                flush_per_iops, flush_per_blocks, flush_per_ms
+            );
+
+            let mut flush_types_set = 0;
+            if flush_per_iops.is_some() {
+                flush_types_set += 1;
+            }
+            if flush_per_blocks.is_some() {
+                flush_types_set += 1;
+            }
+            if flush_per_ms.is_some() {
+                flush_types_set += 1;
+            }
+
+            if flush_types_set > 1 {
+                bail!("too many flush types set!");
+            }
+
+            let flush_config = if flush_per_iops.is_some() {
+                DynoFlushConfig::FlushPerIops(flush_per_iops.unwrap())
+            } else if flush_per_blocks.is_some() {
+                DynoFlushConfig::FlushPerBlocks(flush_per_iops.unwrap())
+            } else if flush_per_ms.is_some() {
+                DynoFlushConfig::FlushPerMs(flush_per_ms.unwrap())
+            } else {
+                panic!("wat");
+            };
+
+            dynamometer(region, num_writes, samples, flush_config).await?;
 
             Ok(())
         }

@@ -1,10 +1,17 @@
 // Copyright 2023 Oxide Computer Company
 use super::*;
 
+pub enum DynoFlushConfig {
+    FlushPerIops(usize),
+    FlushPerBlocks(usize),
+    FlushPerMs(usize),
+}
+
 pub async fn dynamometer(
     mut region: Region,
     num_writes: usize,
     samples: usize,
+    flush_config: DynoFlushConfig,
 ) -> Result<()> {
     // TODO: pull into another crate? this is copied from measure-iops tool
     let mut io_operations_sent = 0;
@@ -13,6 +20,12 @@ pub async fn dynamometer(
     let mut total_io_time = Duration::ZERO;
     let mut iops: Vec<f32> = vec![];
     let mut bws: Vec<f32> = vec![];
+
+    let mut flush_number = 0;
+    let mut gen_number = 0;
+    let mut flush_time = Instant::now();
+    let mut iops_since_last_flush = 0;
+    let mut blocks_since_last_flush = 0;
 
     let ddef = region.def();
 
@@ -62,7 +75,9 @@ pub async fn dynamometer(
                 region.region_write(&writes, JobId(1000), false).await?;
 
                 total_io_time += io_operation_time.elapsed();
-                io_operations_sent += num_writes;
+                io_operations_sent += 1;
+                iops_since_last_flush += 1;
+                blocks_since_last_flush += num_writes;
                 bw_consumed += num_writes * ddef.block_size() as usize;
 
                 if measurement_time.elapsed() > Duration::from_secs(1) {
@@ -80,6 +95,64 @@ pub async fn dynamometer(
 
                     if iops.len() >= samples {
                         break 'outer;
+                    }
+                }
+
+                match flush_config {
+                    DynoFlushConfig::FlushPerIops(value) => {
+                        if iops_since_last_flush > value {
+                            region
+                                .region_flush(
+                                    flush_number,
+                                    gen_number,
+                                    &None, // snapshot_details
+                                    JobId(1000),
+                                    None, // extent_limit
+                                )
+                                .await?;
+
+                            flush_number += 1;
+                            gen_number += 1;
+                            iops_since_last_flush = 0;
+                        }
+                    }
+
+                    DynoFlushConfig::FlushPerBlocks(value) => {
+                        if blocks_since_last_flush > value {
+                            region
+                                .region_flush(
+                                    flush_number,
+                                    gen_number,
+                                    &None, // snapshot_details
+                                    JobId(1000),
+                                    None, // extent_limit
+                                )
+                                .await?;
+
+                            flush_number += 1;
+                            gen_number += 1;
+                            blocks_since_last_flush = 0;
+                        }
+                    }
+
+                    DynoFlushConfig::FlushPerMs(value) => {
+                        if flush_time.elapsed()
+                            > Duration::from_millis(value as u64)
+                        {
+                            region
+                                .region_flush(
+                                    flush_number,
+                                    gen_number,
+                                    &None, // snapshot_details
+                                    JobId(1000),
+                                    None, // extent_limit
+                                )
+                                .await?;
+
+                            flush_number += 1;
+                            gen_number += 1;
+                            flush_time = Instant::now();
+                        }
                     }
                 }
 
