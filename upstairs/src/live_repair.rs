@@ -4138,7 +4138,6 @@ pub mod repair_test {
         let ds = up.downstairs.lock().await;
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
-        // 4 Jobs were created
         assert_eq!(jobs.len(), 7);
 
         // The three writes don't depend on anything
@@ -4195,7 +4194,6 @@ pub mod repair_test {
         let ds = up.downstairs.lock().await;
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
-        // 4 Jobs were created
         assert_eq!(jobs.len(), 7);
 
         // The three reads don't depend on anything
@@ -4263,7 +4261,6 @@ pub mod repair_test {
         let ds = up.downstairs.lock().await;
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
-        // 4 Jobs were created
         assert_eq!(jobs.len(), 7);
 
         // The read and the write don't depend on anything
@@ -4276,15 +4273,49 @@ pub mod repair_test {
     }
 
     #[tokio::test]
+    async fn test_live_repair_deps_repair() {
+        // Basic test for inter-repair dependencies
+        //
+        // This only actually tests our test function
+        // (`create_and_enqueue_repair_ops`), not the actual `repair_extent`,
+        // but is still worthwhile
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | RpRpRp|
+        //   1 | RpRpRp| 0
+        //   2 | RpRpRp| 1
+        //   3 | RpRpRp| 2
+        let up = create_test_upstairs(1).await;
+        let eid = 0;
+        create_and_enqueue_repair_ops(&up, eid).await;
+
+        let ds = up.downstairs.lock().await;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+
+        assert_eq!(jobs.len(), 4);
+
+        assert_eq!(jobs[0].ds_id, JobId(1000));
+        assert!(jobs[0].work.deps().is_empty());
+        assert_eq!(jobs[1].ds_id, JobId(1001));
+        assert_eq!(jobs[1].work.deps(), &[JobId(1000)]);
+        assert_eq!(jobs[2].ds_id, JobId(1002));
+        assert_eq!(jobs[2].work.deps(), &[JobId(1001)]);
+        assert_eq!(jobs[3].ds_id, JobId(1003));
+        assert_eq!(jobs[3].work.deps(), &[JobId(1002)]);
+    }
+
+    #[tokio::test]
     async fn test_live_repair_deps_repair_write() {
         // Write after repair depends on the repair
         //       block
         // op# | 0 1 2 | deps
         // ----|-------|-----
         //   0 | RpRpRp|
-        //   1 | RpRpRp|
-        //   2 | RpRpRp|
-        //   3 | RpRpRp|
+        //   1 | RpRpRp| 0
+        //   2 | RpRpRp| 1
+        //   3 | RpRpRp| 2
         //   4 |     W | 3
 
         let up = create_test_upstairs(ClientId::new(1)).await;
@@ -4313,7 +4344,6 @@ pub mod repair_test {
         let ds = up.downstairs.lock().await;
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
-        // 2 Jobs were created
         assert_eq!(jobs.len(), 5);
 
         assert_eq!(jobs[0].ds_id, JobId(1000));
