@@ -200,6 +200,14 @@ enum Args {
 
         #[clap(long, action)]
         encrypted: bool,
+
+        // Number of writes to submit at one time to region_write
+        #[clap(short, long, action, default_value = "1")]
+        num_writes: usize,
+
+        // Number of samples to exit for
+        #[clap(short, long, action, default_value = "10")]
+        samples: usize,
     },
 }
 
@@ -411,6 +419,8 @@ async fn main() -> Result<()> {
             extent_size,
             extent_count,
             encrypted,
+            num_writes,
+            samples,
         } => {
             let uuid = Uuid::new_v4();
 
@@ -425,7 +435,8 @@ async fn main() -> Result<()> {
             )
             .await?;
 
-            dynamometer(region).await?;
+            dynamometer(region, num_writes, samples).await?;
+
             Ok(())
         }
     }

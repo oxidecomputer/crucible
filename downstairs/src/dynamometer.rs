@@ -1,7 +1,11 @@
 // Copyright 2023 Oxide Computer Company
 use super::*;
 
-pub async fn dynamometer(mut region: Region) -> Result<()> {
+pub async fn dynamometer(
+    mut region: Region,
+    num_writes: usize,
+    samples: usize,
+) -> Result<()> {
     // TODO: pull into another crate? this is copied from measure-iops tool
     let mut io_operations_sent = 0;
     let mut bw_consumed = 0;
@@ -22,49 +26,64 @@ pub async fn dynamometer(mut region: Region) -> Result<()> {
     ];
     let hash = integrity_hash(&[&nonce, &tag, &block]);
 
-    for eid in 0..ddef.extent_count() {
-        for block_offset in 0..ddef.extent_size().value {
-            let block = block.clone();
-            let nonce = nonce.clone();
-            let tag = tag.clone();
+    'outer: loop {
+        for eid in 0..ddef.extent_count() {
+            let mut block_offset = 0;
+            loop {
+                if block_offset >= ddef.extent_size().value {
+                    break;
+                }
 
-            let io_operation_time = Instant::now();
-            region
-                .region_write(
-                    &[crucible_protocol::Write {
+                let block = block.clone();
+                let nonce = nonce.clone();
+                let tag = tag.clone();
+
+                let writes: Vec<_> = (0..num_writes)
+                    .map(|i| crucible_protocol::Write {
                         eid: eid as u64,
-                        offset: Block::new_with_ddef(block_offset, &ddef),
-                        data: bytes::Bytes::from(block),
+                        offset: Block::new_with_ddef(
+                            i as u64 + block_offset,
+                            &ddef,
+                        ),
+                        data: bytes::Bytes::from(block.clone()),
                         block_context: BlockContext {
                             hash,
                             encryption_context: Some(
                                 crucible_protocol::EncryptionContext {
-                                    nonce,
-                                    tag,
+                                    nonce: nonce.clone(),
+                                    tag: tag.clone(),
                                 },
                             ),
                         },
-                    }],
-                    JobId(1000),
-                    false,
-                )
-                .await?;
+                    })
+                    .collect();
 
-            total_io_time += io_operation_time.elapsed();
-            io_operations_sent += 1;
-            bw_consumed += ddef.block_size();
+                let io_operation_time = Instant::now();
+                region.region_write(&writes, JobId(1000), false).await?;
 
-            if measurement_time.elapsed() > Duration::from_secs(1) {
-                let fractional_seconds: f32 = total_io_time.as_secs() as f32
-                    + (total_io_time.subsec_nanos() as f32 / 1e9);
+                total_io_time += io_operation_time.elapsed();
+                io_operations_sent += num_writes;
+                bw_consumed += num_writes * ddef.block_size() as usize;
 
-                iops.push(io_operations_sent as f32 / fractional_seconds);
-                bws.push(bw_consumed as f32 / fractional_seconds);
+                if measurement_time.elapsed() > Duration::from_secs(1) {
+                    let fractional_seconds: f32 = total_io_time.as_secs()
+                        as f32
+                        + (total_io_time.subsec_nanos() as f32 / 1e9);
 
-                io_operations_sent = 0;
-                bw_consumed = 0;
-                measurement_time = Instant::now();
-                total_io_time = Duration::ZERO;
+                    iops.push(io_operations_sent as f32 / fractional_seconds);
+                    bws.push(bw_consumed as f32 / fractional_seconds);
+
+                    io_operations_sent = 0;
+                    bw_consumed = 0;
+                    measurement_time = Instant::now();
+                    total_io_time = Duration::ZERO;
+
+                    if iops.len() >= samples {
+                        break 'outer;
+                    }
+                }
+
+                block_offset += num_writes as u64;
             }
         }
     }
