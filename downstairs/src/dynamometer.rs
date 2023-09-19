@@ -28,18 +28,25 @@ pub async fn dynamometer(
     let mut blocks_since_last_flush = 0;
 
     let ddef = region.def();
+    eprintln!("{:?}", ddef);
 
     // Fill test: write bytes in whole region
-    let block = vec![0x1; ddef.block_size() as usize];
-    let nonce =
-        vec![0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xa, 0xb];
-    let tag = vec![
-        0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x6, 0x7, 0x8, 0x9, 0xa, 0xb, 0xc, 0xd,
-        0xe, 0xf,
-    ];
-    let hash = integrity_hash(&[&nonce, &tag, &block]);
+
+    let mut rng = SmallRng::from_entropy();
 
     'outer: loop {
+        let block = (0..ddef.block_size() as usize)
+            .map(|_| rng.sample(rand::distributions::Standard))
+            .collect::<Vec<u8>>();
+        let nonce = (0..12)
+            .map(|_| rng.sample(rand::distributions::Standard))
+            .collect::<Vec<u8>>();
+        let tag = (0..16)
+            .map(|_| rng.sample(rand::distributions::Standard))
+            .collect::<Vec<u8>>();
+
+        let hash = integrity_hash(&[&nonce, &tag, &block]);
+
         for eid in 0..ddef.extent_count() {
             let mut block_offset = 0;
             loop {
