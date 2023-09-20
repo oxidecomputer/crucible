@@ -850,14 +850,14 @@ pub(crate) mod up_test {
 
         ds.enqueue(op, ds_done_tx.clone()).await;
 
-        ds.in_progress(next_id, 0);
-        ds.in_progress(next_id, 1);
-        ds.in_progress(next_id, 2);
+        ds.in_progress(next_id, ClientId::new(0));
+        ds.in_progress(next_id, ClientId::new(1));
+        ds.in_progress(next_id, ClientId::new(2));
 
         assert!(!ds
             .process_ds_completion(
                 next_id,
-                0,
+                ClientId::new(0),
                 Ok(vec![]),
                 &None,
                 UpState::Active,
@@ -871,7 +871,7 @@ pub(crate) mod up_test {
         assert!(!ds
             .process_ds_completion(
                 next_id,
-                1,
+                ClientId::new(1),
                 Ok(vec![]),
                 &None,
                 UpState::Active,
@@ -885,7 +885,7 @@ pub(crate) mod up_test {
         assert!(ds
             .process_ds_completion(
                 next_id,
-                2,
+                ClientId::new(2),
                 Ok(vec![]),
                 &None,
                 UpState::Active,
@@ -895,7 +895,7 @@ pub(crate) mod up_test {
 
         assert_eq!(ds.ackable_work().len(), 1);
 
-        let state = ds.ds_active.get_mut(&next_id).unwrap().ack_status;
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
         assert_eq!(state, AckStatus::AckReady);
         ds.ack(next_id);
 
