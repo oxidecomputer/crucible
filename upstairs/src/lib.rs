@@ -3251,19 +3251,18 @@ impl Downstairs {
      * Mark a reconcile work request as done for this client and return
      * true if all work requests are done
      */
-    fn rep_done(&mut self, client_id: ClientId, rep_id: u64) -> bool {
+    fn rep_done(
+        &mut self,
+        client_id: ClientId,
+        rep_id: ReconciliationId,
+    ) -> bool {
         if let Some(job) = &mut self.reconcile_current_work {
             let old_state = job.state.insert(client_id, IOState::Done);
             assert_eq!(old_state, IOState::InProgress);
             assert_eq!(job.id, rep_id);
-            let mut done = 0;
-
-            for s in job.state.iter() {
-                if s == &IOState::Done || s == &IOState::Skipped {
-                    done += 1;
-                }
-            }
-            done == 3
+            job.state
+                .iter()
+                .all(|s| matches!(s, IOState::Done | IOState::Skipped))
         } else {
             panic!(
                 "[{}] Attempted to complete job {} that does not exist",
@@ -3293,7 +3292,7 @@ impl Downstairs {
         max_flush: u64,
         max_gen: u64,
     ) {
-        let mut rep_id = 0;
+        let mut rep_id = ReconciliationId(0);
         info!(self.log, "Full repair list: {:?}", rec_list);
         for (ext, ef) in rec_list.drain() {
             /*
@@ -3314,7 +3313,7 @@ impl Downstairs {
                     gen_number: max_gen,
                 },
             ));
-            rep_id += 1;
+            rep_id.0 += 1;
 
             self.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -3323,7 +3322,7 @@ impl Downstairs {
                     extent_id: ext,
                 },
             ));
-            rep_id += 1;
+            rep_id.0 += 1;
 
             let repair = self.repair_addr(ef.source);
             self.reconcile_task_list.push_back(ReconcileIO::new(
@@ -3336,7 +3335,7 @@ impl Downstairs {
                     dest_clients: ef.dest,
                 },
             ));
-            rep_id += 1;
+            rep_id.0 += 1;
 
             self.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -3345,7 +3344,7 @@ impl Downstairs {
                     extent_id: ext,
                 },
             ));
-            rep_id += 1;
+            rep_id.0 += 1;
         }
 
         info!(self.log, "Task list: {:?}", self.reconcile_task_list);
@@ -6516,7 +6515,7 @@ impl Upstairs {
     async fn ds_repair_done_notify(
         &self,
         client_id: ClientId,
-        rep_id: u64,
+        rep_id: ReconciliationId,
         ds_reconcile_done_tx: &mpsc::Sender<Repair>,
     ) -> Result<()> {
         debug!(
@@ -7962,13 +7961,13 @@ struct WorkSummary {
 
 #[derive(Debug)]
 struct ReconcileIO {
-    id: u64,
+    id: ReconciliationId,
     op: Message,
     state: ClientData<IOState>,
 }
 
 impl ReconcileIO {
-    fn new(id: u64, op: Message) -> ReconcileIO {
+    fn new(id: ReconciliationId, op: Message) -> ReconcileIO {
         ReconcileIO {
             id,
             op,
@@ -9434,7 +9433,7 @@ impl Default for Guest {
 struct Repair {
     repair: bool,
     client_id: ClientId,
-    rep_id: u64,
+    rep_id: ReconciliationId,
 }
 
 /**
