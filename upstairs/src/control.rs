@@ -36,7 +36,7 @@ pub(crate) fn build_api() -> ApiDescription<Arc<UpstairsInfo>> {
 pub async fn start(
     up: &Arc<Upstairs>,
     addr: SocketAddr,
-    ds_done_tx: mpsc::Sender<u64>,
+    ds_done_tx: mpsc::Sender<()>,
 ) -> Result<(), String> {
     /*
      * Setup dropshot
@@ -86,7 +86,7 @@ pub struct UpstairsInfo {
     /**
      * Notify channel for work completed by the downstairs.
      */
-    ds_done_tx: mpsc::Sender<u64>,
+    ds_done_tx: mpsc::Sender<()>,
 }
 
 impl UpstairsInfo {
@@ -95,7 +95,7 @@ impl UpstairsInfo {
      */
     pub fn new(
         up: &Arc<Upstairs>,
-        ds_done_tx: mpsc::Sender<u64>,
+        ds_done_tx: mpsc::Sender<()>,
     ) -> UpstairsInfo {
         UpstairsInfo {
             up: up.clone(),
@@ -143,24 +143,29 @@ async fn upstairs_fill_info(
     let ds_jobs = ds.ds_active.len();
     let repair_done = ds.reconcile_repaired;
     let repair_needed = ds.reconcile_repair_needed;
-    let extents_repaired = ds.extents_repaired.clone();
-    let extents_confirmed = ds.extents_confirmed.clone();
-    let extent_limit = ds.extent_limit.clone();
-    let live_repair_completed = ds.live_repair_completed.clone();
-    let live_repair_aborted = ds.live_repair_aborted.clone();
+    let extents_repaired = ds.extents_repaired;
+    let extents_confirmed = ds.extents_confirmed;
+    let extent_limit = ds.extent_limit;
+    let live_repair_completed = ds.live_repair_completed;
+    let live_repair_aborted = ds.live_repair_aborted;
+
+    // Convert from a map of extent limits to a Vec<Option<usize>>
+    let extent_limit = ClientId::iter()
+        .map(|i| extent_limit.get(&i).cloned())
+        .collect();
 
     Ok(HttpResponseOk(UpstairsStats {
         state: act,
-        ds_state,
+        ds_state: ds_state.0.to_vec(),
         up_jobs,
         ds_jobs,
         repair_done,
         repair_needed,
-        extents_repaired,
-        extents_confirmed,
+        extents_repaired: extents_repaired.0.to_vec(),
+        extents_confirmed: extents_confirmed.0.to_vec(),
         extent_limit,
-        live_repair_completed,
-        live_repair_aborted,
+        live_repair_completed: live_repair_completed.0.to_vec(),
+        live_repair_aborted: live_repair_aborted.0.to_vec(),
     }))
 }
 
@@ -175,7 +180,7 @@ struct DownstairsWork {
 
 async fn build_downstairs_job_list(up: &Arc<Upstairs>) -> Vec<WorkSummary> {
     let ds = up.downstairs.lock().await;
-    let mut kvec: Vec<u64> = ds.ds_active.keys().cloned().collect::<Vec<u64>>();
+    let mut kvec: Vec<_> = ds.ds_active.keys().cloned().collect();
     kvec.sort_unstable();
 
     let mut jobs = Vec::new();
@@ -233,6 +238,7 @@ async fn fault_downstairs(
             format!("Invalid downstairs client id: {}", cid),
         ));
     }
+    let cid = ClientId::new(cid);
 
     /*
      * Verify the downstairs is currently in a state where we can
@@ -248,7 +254,7 @@ async fn fault_downstairs(
         ));
     }
     let mut ds = api_context.up.downstairs.lock().await;
-    match ds.ds_state[cid as usize] {
+    match ds.ds_state[cid] {
         DsState::Active
         | DsState::Offline
         | DsState::LiveRepair
@@ -278,7 +284,7 @@ async fn fault_downstairs(
      * a job was "completed" (aka, skipped).
      */
     if ds.ds_set_faulted(cid) {
-        let _ = api_context.ds_done_tx.send(0).await;
+        let _ = api_context.ds_done_tx.send(()).await;
     }
 
     Ok(HttpResponseUpdatedNoContent())

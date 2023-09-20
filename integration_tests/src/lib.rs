@@ -352,6 +352,48 @@ mod test {
     }
 
     #[tokio::test]
+    async fn volume_zero_length_io() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        let tds = TestDownstairsSet::small(false).await?;
+        let opts = tds.opts();
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
+                    opts,
+                    gen: 1,
+                }],
+                read_only_parent: None,
+            };
+
+        let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
+
+        volume.activate().await?;
+
+        // A read of zero length does not error.
+        let buffer = Buffer::new(0);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
+
+        // A write of zero length does not return error.
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![0x55; 0]),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn integration_test_two_layers() -> Result<()> {
         let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
@@ -2715,6 +2757,40 @@ mod test {
             .await?;
 
         assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_guest_zero_length_io() -> Result<()> {
+        // Test the guest layer with a write and read of zero length
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let tds = TestDownstairsSet::small(false).await?;
+        let opts = tds.opts();
+
+        let guest = Arc::new(Guest::new());
+        let gc = guest.clone();
+
+        let _join_handle = up_main(opts, 1, None, gc, None, None).await?;
+
+        guest.activate().await?;
+        guest.query_work_queue().await?;
+
+        // Read of length 0
+        let buffer = Buffer::new(0);
+        guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
+
+        // Write of length 0
+        guest
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(Vec::new()),
+            )
+            .await?;
 
         Ok(())
     }

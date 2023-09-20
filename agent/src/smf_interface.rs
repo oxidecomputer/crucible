@@ -518,9 +518,12 @@ impl SmfInstance for MockSmfInstance {
         (Option<crucible_smf::State>, Option<crucible_smf::State>),
         crucible_smf::ScfError,
     > {
-        // TODO is this necessary for testing? it's only used for debug print
-        // right now
-        Ok((None, None))
+        let inner = self.inner.lock().unwrap();
+        if inner.enabled {
+            Ok((Some(crucible_smf::State::Online), None))
+        } else {
+            Ok((Some(crucible_smf::State::Disabled), None))
+        }
     }
 
     fn disable(&self, temporary: bool) -> Result<(), crucible_smf::ScfError> {

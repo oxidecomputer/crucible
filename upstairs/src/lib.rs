@@ -4,7 +4,7 @@
 #![allow(clippy::mutex_atomic)]
 
 use std::clone::Clone;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
@@ -67,6 +67,9 @@ pub use impacted_blocks::*;
 
 mod live_repair;
 pub use live_repair::{check_for_repair, ExtentInfo, RepairCheck};
+
+mod active_jobs;
+use active_jobs::ActiveJobs;
 
 use async_trait::async_trait;
 
@@ -299,7 +302,7 @@ impl Debug for ReplaceResult {
 mod cdt {
     use crate::Arg;
     fn up__status(_: String, arg: Arg) {}
-    fn ds__ping__sent(_: u64, _: u64) {}
+    fn ds__ping__sent(_: u64, _: u8) {}
     fn volume__read__start(_: u32, _: Uuid) {}
     fn volume__write__start(_: u32, _: Uuid) {}
     fn volume__writeunwritten__start(_: u32, _: Uuid) {}
@@ -318,22 +321,22 @@ mod cdt {
     fn up__to__ds__write__start(_: u64) {}
     fn up__to__ds__write__unwritten__start(_: u64) {}
     fn up__to__ds__flush__start(_: u64) {}
-    fn ds__read__io__start(_: u64, _: u64) {}
-    fn ds__write__io__start(_: u64, _: u64) {}
-    fn ds__write__unwritten__io__start(_: u64, _: u64) {}
-    fn ds__flush__io__start(_: u64, _: u64) {}
-    fn ds__close__start(_: u64, _: u64, _: usize) {}
-    fn ds__repair__start(_: u64, _: u64, _: usize) {}
-    fn ds__noop__start(_: u64, _: u64) {}
-    fn ds__reopen__start(_: u64, _: u64, _: usize) {}
-    fn ds__read__io__done(_: u64, _: u64) {}
-    fn ds__write__io__done(_: u64, _: u64) {}
-    fn ds__write__unwritten__io__done(_: u64, _: u64) {}
-    fn ds__flush__io__done(_: u64, _: u64) {}
-    fn ds__close__done(_: u64, _: u64) {}
-    fn ds__repair__done(_: u64, _: u64) {}
-    fn ds__noop__done(_: u64, _: u64) {}
-    fn ds__reopen__done(_: u64, _: u64) {}
+    fn ds__read__io__start(_: u64, _: u8) {}
+    fn ds__write__io__start(_: u64, _: u8) {}
+    fn ds__write__unwritten__io__start(_: u64, _: u8) {}
+    fn ds__flush__io__start(_: u64, _: u8) {}
+    fn ds__close__start(_: u64, _: u8, _: usize) {}
+    fn ds__repair__start(_: u64, _: u8, _: usize) {}
+    fn ds__noop__start(_: u64, _: u8) {}
+    fn ds__reopen__start(_: u64, _: u8, _: usize) {}
+    fn ds__read__io__done(_: u64, _: u8) {}
+    fn ds__write__io__done(_: u64, _: u8) {}
+    fn ds__write__unwritten__io__done(_: u64, _: u8) {}
+    fn ds__flush__io__done(_: u64, _: u8) {}
+    fn ds__close__done(_: u64, _: u8) {}
+    fn ds__repair__done(_: u64, _: u8) {}
+    fn ds__noop__done(_: u64, _: u8) {}
+    fn ds__reopen__done(_: u64, _: u8) {}
     fn up__to__ds__read__done(_: u64) {}
     fn up__to__ds__write__done(_: u64) {}
     fn up__to__ds__write__unwritten__done(_: u64) {}
@@ -361,6 +364,81 @@ pub fn deadline_secs(secs: f32) -> Instant {
         .unwrap()
 }
 
+/// Array of data associated with three clients, indexed by `ClientId`
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct ClientData<T>([T; 3]);
+
+impl<T> std::ops::Index<ClientId> for ClientData<T> {
+    type Output = T;
+    fn index(&self, index: ClientId) -> &Self::Output {
+        &self.0[index.get() as usize]
+    }
+}
+
+impl<T> std::ops::IndexMut<ClientId> for ClientData<T> {
+    fn index_mut(&mut self, index: ClientId) -> &mut Self::Output {
+        &mut self.0[index.get() as usize]
+    }
+}
+
+impl<T: Clone> ClientData<T> {
+    pub fn new(t: T) -> Self {
+        Self([t.clone(), t.clone(), t])
+    }
+}
+impl<T> ClientData<T> {
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.0.iter()
+    }
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.0.iter_mut()
+    }
+    /// Inserts a new value, returning the old value
+    pub fn insert(&mut self, c: ClientId, mut v: T) -> T {
+        std::mem::swap(&mut self[c], &mut v);
+        v
+    }
+}
+
+/// Map of data associated with clients, keyed by `ClientId`
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(transparent)]
+pub struct ClientMap<T>(ClientData<Option<T>>);
+
+impl<T> ClientMap<T> {
+    fn new() -> Self {
+        Self(ClientData([None, None, None]))
+    }
+    fn is_empty(&self) -> bool {
+        self.0.iter().all(Option::is_none)
+    }
+    /// Removes a value, returning the old value (or `None`)
+    fn remove(&mut self, c: &ClientId) -> Option<T> {
+        self.0.insert(*c, None)
+    }
+    /// Inserts a new value, returning the old value (or `None`)
+    pub fn insert(&mut self, c: ClientId, v: T) -> Option<T> {
+        self.0.insert(c, Some(v))
+    }
+    pub fn iter(&self) -> impl Iterator<Item = (ClientId, &T)> {
+        self.0
+            .iter()
+            .enumerate()
+            .flat_map(|(i, v)| v.as_ref().map(|v| (ClientId::new(i as u8), v)))
+    }
+    pub fn get(&self, c: &ClientId) -> Option<&T> {
+        self.0[*c].as_ref()
+    }
+}
+
+impl<T> std::ops::Index<ClientId> for ClientMap<T> {
+    type Output = T;
+    fn index(&self, index: ClientId) -> &Self::Output {
+        self.get(&index).unwrap()
+    }
+}
+
 /*
  * We are taking a message from the downstairs and translating it into
  * something we can process.  There is some stuff going on here and we
@@ -371,8 +449,8 @@ pub fn deadline_secs(secs: f32) -> Instant {
 async fn process_message(
     u: &Arc<Upstairs>,
     m: &Message,
-    client_id: u8,
-    ds_done_tx: &mpsc::Sender<u64>,
+    client_id: ClientId,
+    ds_done_tx: &mpsc::Sender<()>,
 ) -> Result<()> {
     let (upstairs_id, session_id, ds_id, result, extent_info) = match m {
         Message::Imok => return Ok(()),
@@ -382,7 +460,7 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__write__io__done!(|| (job_id, client_id as u64));
+            cdt::ds__write__io__done!(|| (job_id.0, client_id.get()));
             (
                 *upstairs_id,
                 *session_id,
@@ -397,7 +475,10 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__write__unwritten__io__done!(|| (job_id, client_id as u64));
+            cdt::ds__write__unwritten__io__done!(|| (
+                job_id.0,
+                client_id.get()
+            ));
             (
                 *upstairs_id,
                 *session_id,
@@ -412,7 +493,7 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__flush__io__done!(|| (job_id, client_id as u64));
+            cdt::ds__flush__io__done!(|| (job_id.0, client_id.get()));
             (
                 *upstairs_id,
                 *session_id,
@@ -427,7 +508,7 @@ async fn process_message(
             job_id,
             responses,
         } => {
-            cdt::ds__read__io__done!(|| (job_id, client_id as u64));
+            cdt::ds__read__io__done!(|| (job_id.0, client_id.get()));
             (*upstairs_id, *session_id, *job_id, responses.clone(), None)
         }
         Message::ExtentLiveCloseAck {
@@ -456,7 +537,7 @@ async fn process_message(
                     );
                 }
             };
-            cdt::ds__close__done!(|| (job_id, client_id as u64));
+            cdt::ds__close__done!(|| (job_id.0, client_id.get()));
             (
                 *upstairs_id,
                 *session_id,
@@ -471,8 +552,8 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__noop__done!(|| (job_id, client_id as u64));
-            cdt::ds__reopen__done!(|| (job_id, client_id as u64));
+            cdt::ds__noop__done!(|| (job_id.0, client_id.get()));
+            cdt::ds__reopen__done!(|| (job_id.0, client_id.get()));
             (
                 *upstairs_id,
                 *session_id,
@@ -487,7 +568,7 @@ async fn process_message(
             job_id,
             result,
         } => {
-            cdt::ds__repair__done!(|| (job_id, client_id as u64));
+            cdt::ds__repair__done!(|| (job_id.0, client_id.get()));
             (
                 *upstairs_id,
                 *session_id,
@@ -523,7 +604,7 @@ async fn process_message(
                 if job.work.is_repair() {
                     // Return the error and let the previously written error
                     // processing code work.
-                    cdt::ds__repair__done!(|| (job_id, client_id as u64));
+                    cdt::ds__repair__done!(|| (job_id.0, client_id.get()));
 
                     // XXX uncomment this to see the upstairs disconnect this
                     // bad downstairs. test_error_during_live_repair_no_halt
@@ -591,7 +672,7 @@ async fn process_message(
     {
         Ok(notify_guest) => {
             if notify_guest {
-                match ds_done_tx.send(ds_id).await {
+                match ds_done_tx.send(()).await {
                     Ok(()) => {}
                     Err(e) => {
                         error!(
@@ -627,7 +708,7 @@ async fn process_message(
 async fn io_send<WT>(
     u: &Arc<Upstairs>,
     fw: &mut FramedWrite<WT, CrucibleEncoder>,
-    client_id: u8,
+    client_id: ClientId,
 ) -> Result<bool>
 where
     WT: tokio::io::AsyncWrite
@@ -659,25 +740,18 @@ where
      * lock for the hashmap while we do work, and if we release the lock
      * to do work, we would have to start over and look at all jobs in the
      * map to see if they are new.
-     *
-     * This also allows us to sort the job ids and do them in order they
-     * were put into the hashmap, though I don't think that is required.
      */
-    new_work.sort_unstable();
-
     let mut active_count = u.downstairs.lock().await.submitted_work(client_id);
-    for ndx in 0..new_work.len() {
+    while let Some(new_id) = new_work.pop_first() {
         if active_count >= MAX_ACTIVE_COUNT {
             // Flow control enacted, stop sending work -- and requeue all of
             // our remaining work to assure it isn't dropped
+            new_work.insert(new_id);
             let mut ds = u.downstairs.lock().await;
-            ds.requeue_work(client_id, &new_work[ndx..]);
-            ds.flow_control[client_id as usize] += 1;
-            drop(ds);
+            ds.requeue_work(client_id, new_work);
+            ds.flow_control[client_id] += 1;
             return Ok(true);
         }
-
-        let new_id = new_work[ndx];
 
         /*
          * Walk the list of work to do, update its status as in progress
@@ -687,7 +761,7 @@ where
             /*
              * Requeue this work so it isn't completely lost.
              */
-            u.downstairs.lock().await.requeue_work(client_id, &[new_id]);
+            u.downstairs.lock().await.requeue_one(client_id, new_id);
             continue;
         }
 
@@ -707,19 +781,15 @@ where
                 writes,
             } => {
                 let deps = u
-                    .live_repair_dep_check(
-                        client_id,
-                        dependencies.clone(),
-                        new_id,
-                    )
+                    .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
-                cdt::ds__write__io__start!(|| (new_id, client_id as u64));
+                cdt::ds__write__io__start!(|| (new_id.0, client_id.get()));
                 fw.send(Message::Write {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
                     job_id: new_id,
-                    dependencies: deps.clone(),
-                    writes: writes.clone(),
+                    dependencies: deps,
+                    writes,
                 })
                 .await?
             }
@@ -728,22 +798,18 @@ where
                 writes,
             } => {
                 let deps = u
-                    .live_repair_dep_check(
-                        client_id,
-                        dependencies.clone(),
-                        new_id,
-                    )
+                    .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
                 cdt::ds__write__unwritten__io__start!(|| (
-                    new_id,
-                    client_id as u64
+                    new_id.0,
+                    client_id.get()
                 ));
                 fw.send(Message::WriteUnwritten {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
                     job_id: new_id,
-                    dependencies: deps.clone(),
-                    writes: writes.clone(),
+                    dependencies: deps,
+                    writes,
                 })
                 .await?
             }
@@ -755,28 +821,24 @@ where
                 extent_limit,
             } => {
                 let deps = u
-                    .live_repair_dep_check(
-                        client_id,
-                        dependencies.clone(),
-                        new_id,
-                    )
+                    .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
                 // If our downstairs is under repair, then include any extent
                 // limit sent in the IOop.
                 let my_extent_limit = if u.downstairs.lock().await.ds_state
-                    [client_id as usize]
+                    [client_id]
                     == DsState::LiveRepair
                 {
                     extent_limit
                 } else {
                     None
                 };
-                cdt::ds__flush__io__start!(|| (new_id, client_id as u64));
+                cdt::ds__flush__io__start!(|| (new_id.0, client_id.get()));
                 fw.send(Message::Flush {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
                     job_id: new_id,
-                    dependencies: deps.clone(),
+                    dependencies: deps,
                     flush_number,
                     gen_number,
                     snapshot_details,
@@ -789,18 +851,14 @@ where
                 requests,
             } => {
                 let deps = u
-                    .live_repair_dep_check(
-                        client_id,
-                        dependencies.clone(),
-                        new_id,
-                    )
+                    .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
-                cdt::ds__read__io__start!(|| (new_id, client_id as u64));
+                cdt::ds__read__io__start!(|| (new_id.0, client_id.get()));
                 fw.send(Message::ReadRequest {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
                     job_id: new_id,
-                    dependencies: deps.clone(),
+                    dependencies: deps,
                     requests,
                 })
                 .await?
@@ -823,20 +881,16 @@ where
                 repair_downstairs,
             } => {
                 let deps = u
-                    .live_repair_dep_check(
-                        client_id,
-                        dependencies.clone(),
-                        new_id,
-                    )
+                    .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
-                cdt::ds__close__start!(|| (new_id, client_id as u64, extent));
+                cdt::ds__close__start!(|| (new_id.0, client_id.get(), extent));
                 if repair_downstairs.contains(&client_id) {
                     // We are the downstairs being repaired, so just close.
                     fw.send(Message::ExtentLiveClose {
                         upstairs_id: u.uuid,
                         session_id: u.session_id,
                         job_id: new_id,
-                        dependencies: deps.clone(),
+                        dependencies: deps,
                         extent_id: extent,
                     })
                     .await?
@@ -845,7 +899,7 @@ where
                         upstairs_id: u.uuid,
                         session_id: u.session_id,
                         job_id: new_id,
-                        dependencies: deps.clone(),
+                        dependencies: deps,
                         extent_id: extent,
                         flush_number,
                         gen_number,
@@ -861,19 +915,15 @@ where
                 repair_downstairs,
             } => {
                 let deps = u
-                    .live_repair_dep_check(
-                        client_id,
-                        dependencies.clone(),
-                        new_id,
-                    )
+                    .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
-                cdt::ds__repair__start!(|| (new_id, client_id as u64, extent));
+                cdt::ds__repair__start!(|| (new_id.0, client_id.get(), extent));
                 if repair_downstairs.contains(&client_id) {
                     fw.send(Message::ExtentLiveRepair {
                         upstairs_id: u.uuid,
                         session_id: u.session_id,
                         job_id: new_id,
-                        dependencies: deps.clone(),
+                        dependencies: deps,
                         extent_id: extent,
                         source_client_id: source_downstairs,
                         source_repair_address,
@@ -884,7 +934,7 @@ where
                         upstairs_id: u.uuid,
                         session_id: u.session_id,
                         job_id: new_id,
-                        dependencies: deps.clone(),
+                        dependencies: deps,
                     })
                     .await?
                 }
@@ -894,36 +944,28 @@ where
                 extent,
             } => {
                 let deps = u
-                    .live_repair_dep_check(
-                        client_id,
-                        dependencies.clone(),
-                        new_id,
-                    )
+                    .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
-                cdt::ds__reopen__start!(|| (new_id, client_id as u64, extent));
+                cdt::ds__reopen__start!(|| (new_id.0, client_id.get(), extent));
                 fw.send(Message::ExtentLiveReopen {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
                     job_id: new_id,
-                    dependencies: deps.clone(),
+                    dependencies: deps,
                     extent_id: extent,
                 })
                 .await?
             }
             IOop::ExtentLiveNoOp { dependencies } => {
                 let deps = u
-                    .live_repair_dep_check(
-                        client_id,
-                        dependencies.clone(),
-                        new_id,
-                    )
+                    .live_repair_dep_check(client_id, dependencies, new_id)
                     .await;
-                cdt::ds__noop__start!(|| (new_id, client_id as u64));
+                cdt::ds__noop__start!(|| (new_id.0, client_id.get()));
                 fw.send(Message::ExtentLiveNoOp {
                     upstairs_id: u.uuid,
                     session_id: u.session_id,
                     job_id: new_id,
-                    dependencies: deps.clone(),
+                    dependencies: deps,
                 })
                 .await?
             }
@@ -991,7 +1033,7 @@ where
     // re_new.
     {
         let mut ds = up.downstairs.lock().await;
-        let my_state = ds.ds_state[up_coms.client_id as usize];
+        let my_state = ds.ds_state[up_coms.client_id];
 
         info!(
             up.log,
@@ -1022,7 +1064,7 @@ where
                  * any work that we were holding that we did not flush.
                  */
                 ds.re_new(up_coms.client_id);
-                assert!(ds.extent_limit[up_coms.client_id as usize].is_none());
+                assert!(ds.extent_limit.get(&up_coms.client_id).is_none());
             }
             _ => {
                 panic!(
@@ -1502,7 +1544,7 @@ where
                         // Match on the current state of this downstairs
                         let my_state = {
                             let state = &up.downstairs.lock().await.ds_state;
-                            state[up_coms.client_id as usize]
+                            state[up_coms.client_id]
                         };
                         match my_state {
                             DsState::Offline => {
@@ -1569,7 +1611,7 @@ where
                         let mut ds = up.downstairs.lock().await;
                         drop(active);
 
-                        let my_state = ds.ds_state[up_coms.client_id as usize];
+                        let my_state = ds.ds_state[up_coms.client_id];
                         if my_state == DsState::Replacing {
                             bail!(
                                 "[{}] exits negotiation, replacing",
@@ -1587,7 +1629,7 @@ where
                         // Assert now, but this should eventually be an
                         // error and move the downstairs to failed. XXX
                         assert_eq!(
-                            ds.ds_last_flush[up_coms.client_id as usize],
+                            ds.ds_last_flush[up_coms.client_id],
                             last_flush_number
                         );
                         up.ds_transition_with_lock(
@@ -1613,7 +1655,7 @@ where
                         let mut ds = up.downstairs.lock().await;
                         drop(active);
 
-                        let my_state = ds.ds_state[up_coms.client_id as usize];
+                        let my_state = ds.ds_state[up_coms.client_id];
                         match my_state {
                             DsState::WaitActive => {
                                 up.ds_transition_with_lock(
@@ -1813,7 +1855,7 @@ where
     };
     {
         let mut ds = up.downstairs.lock().await;
-        let state = ds.ds_state[up_coms.client_id as usize];
+        let state = ds.ds_state[up_coms.client_id];
         match state {
             DsState::Replay => {
                 info!(
@@ -1919,8 +1961,7 @@ where
                  * tear down this connection and require the downstairs to
                  * reconnect and eventually go into LiveRepair mode.
                  */
-                let my_state =
-                    up_c.downstairs.lock().await.ds_state[client_id as usize];
+                let my_state = up_c.downstairs.lock().await.ds_state[client_id];
                 if my_state == DsState::Faulted
                     || my_state == DsState::Replacing
                 {
@@ -2100,7 +2141,7 @@ where
                  */
                 fw.send(Message::Ruok).await?;
                 ping_count += 1;
-                cdt::ds__ping__sent!(|| (ping_count, up_coms.client_id as u64));
+                cdt::ds__ping__sent!(|| (ping_count, up_coms.client_id.get()));
 
                 if up.lossy {
                     /*
@@ -2534,7 +2575,7 @@ struct UpComs {
     /**
      * The client ID (a downstairs) who will be using these channels.
      */
-    client_id: u8,
+    client_id: ClientId,
     /**
      * This channel is used to receive a notification that new work has
      * (possibly) arrived on the work queue and this client should go
@@ -2551,7 +2592,7 @@ struct UpComs {
      * upstairs to all required downstairs has completed. The receiver is
      * the up_ds_listen() task.
      */
-    ds_done_tx: mpsc::Sender<u64>,
+    ds_done_tx: mpsc::Sender<()>,
     /**
      * This channel is used to notify the proc task that it's time to
      * promote this downstairs to active.
@@ -2609,7 +2650,7 @@ async fn looper(
         }
         // Get the specific information for the downstairs we will operate on.
         let ds = up.downstairs.lock().await;
-        let target: SocketAddr = ds.ds_target[up_coms.client_id as usize];
+        let target: SocketAddr = ds.ds_target[up_coms.client_id];
         drop(ds);
 
         /*
@@ -2686,7 +2727,7 @@ async fn looper(
             }
         };
 
-        up.downstairs.lock().await.connected[up_coms.client_id as usize] += 1;
+        up.downstairs.lock().await.connected[up_coms.client_id] += 1;
 
         /*
          * Once we have a connected downstairs, the proc task takes over and
@@ -2774,59 +2815,61 @@ struct Downstairs {
     /**
      * UUID for each downstairs, index by client ID
      */
-    ds_uuid: HashMap<u8, Uuid>,
+    ds_uuid: ClientMap<Uuid>,
 
-    /**
-     * The IP:Port of each of the downstairs
-     */
-    ds_target: Vec<SocketAddr>,
+    /// The IP:Port of each of the downstairs
+    ///
+    /// This is left unpopulated in some unit tests
+    ds_target: ClientMap<SocketAddr>,
 
     /**
      * The IP:Port for repair when contacting the downstairs, hashed by
      * the client index the upstairs gives it.
      */
-    ds_repair: HashMap<u8, SocketAddr>,
+    ds_repair: ClientMap<SocketAddr>,
 
     /**
      * The state of a downstairs connection, based on client ID
      * Ready here indicates it can receive IO.
      */
-    ds_state: Vec<DsState>,
+    ds_state: ClientData<DsState>,
 
     /**
-     * The last flush ID that each downstairs has acked.
+     * The last flush job ID that each downstairs has acked.
+     *
+     * Note that this is a job ID; not a flush ID!
      */
-    ds_last_flush: Vec<u64>,
+    ds_last_flush: ClientData<JobId>,
 
     /**
      * Errors recorded, indexed by client ID.
      */
-    downstairs_errors: HashMap<u8, u64>, // client id -> errors
+    downstairs_errors: ClientData<usize>,
 
     /**
      * The active list of IO for the downstairs.
      */
-    ds_active: BTreeMap<u64, DownstairsIO>,
+    ds_active: ActiveJobs,
 
     /**
      * Cache of new jobs, indexed by client ID.
      */
-    ds_new: Vec<Vec<u64>>,
+    ds_new: ClientData<BTreeSet<JobId>>,
 
     /**
      * Jobs that have been skipped, indexed by client ID.
      */
-    ds_skipped_jobs: [HashSet<u64>; 3],
+    ds_skipped_jobs: ClientData<HashSet<JobId>>,
 
     /**
      * The next Job ID this Upstairs should use for downstairs work.
      */
-    next_id: u64,
+    next_id: JobId,
 
     /**
      * Ringbuf of completed downstairs job IDs.
      */
-    completed: AllocRingBuffer<u64>,
+    completed: AllocRingBuffer<JobId>,
 
     /**
      * Ringbuf of a summary of each recently completed downstairs IO.
@@ -2842,7 +2885,7 @@ struct Downstairs {
      * We also determine the next flush ID and verify the generation
      * number.
      */
-    region_metadata: HashMap<u8, RegionMetadata>,
+    region_metadata: ClientMap<RegionMetadata>,
 
     /**
      * This holds the current piece of repair work that the three
@@ -2880,27 +2923,27 @@ struct Downstairs {
      * by those downstairs and is used to decide if an extent requires
      * repair or not.
      */
-    repair_info: HashMap<u8, ExtentInfo>,
+    repair_info: ClientMap<ExtentInfo>,
 
     /**
      * Count of extents repaired live.
      */
-    extents_repaired: Vec<usize>,
+    extents_repaired: ClientData<usize>,
 
     /**
      * Count of extents checked but not needing live repair.
      */
-    extents_confirmed: Vec<usize>,
+    extents_confirmed: ClientData<usize>,
 
     /**
      * Count of time a downstairs LiveRepair completed.
      */
-    live_repair_completed: Vec<usize>,
+    live_repair_completed: ClientData<usize>,
 
     /**
      * Count of time a downstairs LiveRepair was aborted.
      */
-    live_repair_aborted: Vec<usize>,
+    live_repair_aborted: ClientData<usize>,
 
     /**
      * Extent limit, if set, indicates the extent where LiveRepair has already
@@ -2920,7 +2963,7 @@ struct Downstairs {
      * This is only used during live repair, and will only ever be
      * set on a downstairs that is undergoing live repair.
      */
-    extent_limit: Vec<Option<usize>>,
+    extent_limit: ClientMap<usize>,
 
     /**
      * Live Repair Job IDs
@@ -2938,57 +2981,57 @@ struct Downstairs {
      * indicates a live repair task is running and being `Some` is used to
      * prevent more than one repair task from running at the same time.
      */
-    repair_min_id: Option<u64>,
+    repair_min_id: Option<JobId>,
 
     /**
      * Count of downstairs connections
      */
-    connected: Vec<usize>,
+    connected: ClientData<usize>,
 
     /**
      * Count of downstairs replacements
      */
-    replaced: Vec<usize>,
+    replaced: ClientData<usize>,
 
     /**
      * Count of times a downstairs has had flow control turned on
      */
-    flow_control: Vec<usize>,
+    flow_control: ClientData<usize>,
 }
 
 impl Downstairs {
-    fn new(log: Logger, ds_target: Vec<SocketAddr>) -> Self {
+    fn new(log: Logger, ds_target: ClientMap<SocketAddr>) -> Self {
         Self {
-            ds_uuid: HashMap::new(),
+            ds_uuid: ClientMap::new(),
             ds_target,
-            ds_repair: HashMap::new(),
-            ds_state: vec![DsState::New; 3],
-            ds_last_flush: vec![0; 3],
-            downstairs_errors: HashMap::new(),
-            ds_active: BTreeMap::new(),
-            ds_new: vec![Vec::new(); 3],
-            ds_skipped_jobs: [HashSet::new(), HashSet::new(), HashSet::new()],
+            ds_repair: ClientMap::new(),
+            ds_state: ClientData::new(DsState::New),
+            ds_last_flush: ClientData::new(JobId(0)),
+            downstairs_errors: ClientData::new(0),
+            ds_active: ActiveJobs::new(),
+            ds_new: ClientData::new(BTreeSet::new()),
+            ds_skipped_jobs: ClientData::new(HashSet::new()),
             completed: AllocRingBuffer::new(2048),
             completed_jobs: AllocRingBuffer::new(8),
-            next_id: 1000,
-            region_metadata: HashMap::new(),
+            next_id: JobId(1000),
+            region_metadata: ClientMap::new(),
             reconcile_current_work: None,
             reconcile_task_list: VecDeque::new(),
             reconcile_repaired: 0,
             reconcile_repair_needed: 0,
             log: log.new(o!("" => "downstairs".to_string())),
             io_state_count: IOStateCount::new(),
-            repair_info: HashMap::new(),
-            extents_repaired: vec![0; 3],
-            extents_confirmed: vec![0; 3],
-            live_repair_completed: vec![0; 3],
-            live_repair_aborted: vec![0; 3],
-            extent_limit: vec![None; 3],
+            repair_info: ClientMap::new(),
+            extents_repaired: ClientData::new(0),
+            extents_confirmed: ClientData::new(0),
+            live_repair_completed: ClientData::new(0),
+            live_repair_aborted: ClientData::new(0),
+            extent_limit: ClientMap::new(),
             repair_job_ids: HashMap::new(),
             repair_min_id: None,
-            connected: vec![0; 3],
-            replaced: vec![0; 3],
-            flow_control: vec![0; 3],
+            connected: ClientData::new(0),
+            replaced: ClientData::new(0),
+            flow_control: ClientData::new(0),
         }
     }
 
@@ -2996,8 +3039,8 @@ impl Downstairs {
      * Live repair is over, Clean up any repair related settings.
      */
     fn end_live_repair(&mut self) {
-        self.repair_info = HashMap::new();
-        self.extent_limit = vec![None; 3];
+        self.repair_info = ClientMap::new();
+        self.extent_limit = ClientMap::new();
         self.repair_job_ids = HashMap::new();
         self.repair_min_id = None;
     }
@@ -3005,15 +3048,15 @@ impl Downstairs {
     /**
      * Assign a new downstairs ID.
      */
-    fn next_id(&mut self) -> u64 {
+    fn next_id(&mut self) -> JobId {
         let id = self.next_id;
-        self.next_id += 1;
+        self.next_id.0 += 1;
         id
     }
     /**
      * See what the next ID will be, without getting it.
      */
-    fn peek_next_id(&self) -> u64 {
+    fn peek_next_id(&self) -> JobId {
         self.next_id
     }
 
@@ -3024,9 +3067,13 @@ impl Downstairs {
      * If the job state is already IOState::Skipped, then this task
      * has no work to do, so return None.
      */
-    fn in_progress(&mut self, ds_id: u64, client_id: u8) -> Option<IOop> {
-        let job = match self.ds_active.get_mut(&ds_id) {
-            Some(job) => job,
+    fn in_progress(
+        &mut self,
+        ds_id: JobId,
+        client_id: ClientId,
+    ) -> Option<IOop> {
+        let mut handle = match self.ds_active.get_mut(&ds_id) {
+            Some(handle) => handle,
             None => {
                 // This job, that we thought was good, is not.  As we don't
                 // keep the lock when gathering job IDs to work on, it is
@@ -3035,14 +3082,15 @@ impl Downstairs {
                 return None;
             }
         };
+        let job = handle.job();
 
         // If current state is Skipped, then we have nothing to do here.
-        if job.state[&client_id] == IOState::Skipped {
+        if matches!(job.state[client_id], IOState::Skipped) {
             return None;
         }
 
         let new_state = IOState::InProgress;
-        let old_state = job.state.insert(client_id, new_state.clone()).unwrap();
+        let old_state = job.state.insert(client_id, new_state.clone());
         assert_eq!(old_state, IOState::New);
         self.io_state_count.decr(&old_state, client_id);
         self.io_state_count.incr(&new_state, client_id);
@@ -3055,9 +3103,9 @@ impl Downstairs {
      * downstairs in question is in LiveRepair, and there are skipped
      * jobs for this downstairs.
      */
-    fn dependencies_need_cleanup(&mut self, client_id: u8) -> bool {
-        self.ds_state[client_id as usize] == DsState::LiveRepair
-            && !self.ds_skipped_jobs[client_id as usize].is_empty()
+    fn dependencies_need_cleanup(&mut self, client_id: ClientId) -> bool {
+        self.ds_state[client_id] == DsState::LiveRepair
+            && !self.ds_skipped_jobs[client_id].is_empty()
     }
 
     // Given a client ID that is undergoing LiveRepair, go through the list
@@ -3066,22 +3114,22 @@ impl Downstairs {
     // these IOs..
     fn remove_dep_if_live_repair(
         &mut self,
-        client_id: u8,
-        mut deps: Vec<u64>,
-        ds_id: u64,
-    ) -> Vec<u64> {
+        client_id: ClientId,
+        mut deps: Vec<JobId>,
+        ds_id: JobId,
+    ) -> Vec<JobId> {
         debug!(
             self.log,
             "[{}] {} Remove check skipped:{:?} from deps:{:?}",
             client_id,
             ds_id,
-            self.ds_skipped_jobs[client_id as usize],
+            self.ds_skipped_jobs[client_id],
             deps
         );
-        assert_eq!(self.ds_state[client_id as usize], DsState::LiveRepair);
+        assert_eq!(self.ds_state[client_id], DsState::LiveRepair);
         assert!(self.repair_min_id.is_some());
 
-        deps.retain(|x| !self.ds_skipped_jobs[client_id as usize].contains(x));
+        deps.retain(|x| !self.ds_skipped_jobs[client_id].contains(x));
 
         // If we are repairing, then there must be a repair_min_id set so we
         // know where to stop with dependency inclusion.
@@ -3167,8 +3215,8 @@ impl Downstairs {
      *    the other downstairs are not yet ready, so this downstairs
      *    should just continue waiting for work to show up.
      */
-    fn rep_in_progress(&mut self, client_id: u8) -> Option<Message> {
-        if self.ds_state[client_id as usize] != DsState::Repair {
+    fn rep_in_progress(&mut self, client_id: ClientId) -> Option<Message> {
+        if self.ds_state[client_id] != DsState::Repair {
             return None;
         }
         if let Some(job) = &mut self.reconcile_current_work {
@@ -3180,7 +3228,7 @@ impl Downstairs {
              * work for this client to do. Make sure we don't send the the
              * same message twice.
              */
-            if old_state != Some(IOState::New) {
+            if old_state != IOState::New {
                 info!(
                     self.log,
                     "[{}] rep_in_progress ignore submitted job {:?}",
@@ -3203,14 +3251,14 @@ impl Downstairs {
      * Mark a reconcile work request as done for this client and return
      * true if all work requests are done
      */
-    fn rep_done(&mut self, client_id: u8, rep_id: u64) -> bool {
+    fn rep_done(&mut self, client_id: ClientId, rep_id: u64) -> bool {
         if let Some(job) = &mut self.reconcile_current_work {
-            let old_state = job.state.insert(client_id, IOState::Done).unwrap();
+            let old_state = job.state.insert(client_id, IOState::Done);
             assert_eq!(old_state, IOState::InProgress);
             assert_eq!(job.id, rep_id);
             let mut done = 0;
 
-            for (_, s) in job.state.iter() {
+            for s in job.state.iter() {
                 if s == &IOState::Done || s == &IOState::Skipped {
                     done += 1;
                 }
@@ -3227,7 +3275,7 @@ impl Downstairs {
     /*
      * Given a client ID, return the SocketAddr for repair to use.
      */
-    fn repair_addr(&mut self, client_id: u8) -> SocketAddr {
+    fn repair_addr(&mut self, client_id: ClientId) -> SocketAddr {
         *self.ds_repair.get(&client_id).unwrap()
     }
 
@@ -3314,7 +3362,7 @@ impl Downstairs {
      * deactivate does not support having any (or all) downstairs offline
      * when there is work in the queue.
      */
-    fn ds_deactivate_offline(&mut self, client_id: u8) {
+    fn ds_deactivate_offline(&mut self, client_id: ClientId) {
         info!(
             self.log,
             "[{}] client skip all {} jobs for deactivate",
@@ -3322,22 +3370,21 @@ impl Downstairs {
             self.ds_active.len(),
         );
 
-        for (ds_id, job) in self.ds_active.iter_mut() {
-            let state = job.state.get(&client_id).unwrap();
+        self.ds_active.for_each(|ds_id, job| {
+            let state = &job.state[client_id];
 
-            if *state == IOState::InProgress || *state == IOState::New {
+            if matches!(state, IOState::InProgress | IOState::New) {
                 info!(self.log, "{} change {} to skipped", client_id, ds_id);
-                let old_state =
-                    job.state.insert(client_id, IOState::Skipped).unwrap();
+                let old_state = job.state.insert(client_id, IOState::Skipped);
                 self.io_state_count.decr(&old_state, client_id);
                 self.io_state_count.incr(&IOState::Skipped, client_id);
-                self.ds_skipped_jobs[client_id as usize].insert(*ds_id);
+                self.ds_skipped_jobs[client_id].insert(*ds_id);
             }
-        }
+        });
 
         // All of IOState::New jobs are now IOState::Skipped, so clear our
         // cache of new jobs for this downstairs.
-        self.ds_new[client_id as usize].clear();
+        self.ds_new[client_id].clear();
     }
 
     /**
@@ -3356,8 +3403,8 @@ impl Downstairs {
      * switch the overall job back to NotAcked, and then let the replay
      * happen.
      */
-    fn re_new(&mut self, client_id: u8) {
-        let lf = self.ds_last_flush[client_id as usize];
+    fn re_new(&mut self, client_id: ClientId) {
+        let lf = self.ds_last_flush[client_id];
 
         info!(
             self.log,
@@ -3365,7 +3412,7 @@ impl Downstairs {
             self.ds_active.len(),
         );
 
-        for (ds_id, job) in self.ds_active.iter_mut() {
+        self.ds_active.for_each(|ds_id, job| {
             let is_read = job.work.is_read();
             let is_write = matches!(job.work, IOop::Write { .. });
             let wc = job.state_count();
@@ -3373,8 +3420,8 @@ impl Downstairs {
 
             // We don't need to send anything before our last good flush
             if *ds_id <= lf {
-                assert_eq!(Some(&IOState::Done), job.state.get(&client_id));
-                continue;
+                assert_eq!(IOState::Done, job.state[client_id]);
+                return;
             }
 
             /*
@@ -3382,7 +3429,7 @@ impl Downstairs {
              * to New and no extra work is required.
              * If it's Done, then we need to look further
              */
-            if Some(&IOState::Done) == job.state.get(&client_id) {
+            if IOState::Done == job.state[client_id] {
                 /*
                  * If the job is acked, then we are good to go and
                  * we can re-send it downstairs and the upstairs ack
@@ -3422,14 +3469,14 @@ impl Downstairs {
                     }
                 }
             }
-            let old_state = job.state.insert(client_id, IOState::New).unwrap();
+            let old_state = job.state.insert(client_id, IOState::New);
             job.replay = true;
             if old_state != IOState::New {
                 self.io_state_count.decr(&old_state, client_id);
                 self.io_state_count.incr(&IOState::New, client_id);
-                self.ds_new[client_id as usize].push(*ds_id);
+                self.ds_new[client_id].insert(*ds_id);
             }
-        }
+        });
     }
 
     // This method is called when we have decided to fault a downstairs
@@ -3439,7 +3486,7 @@ impl Downstairs {
     // and if so, we return true to indicate that the caller should
     // notify the correct upstairs task that all downstairs related work
     // for a skipped job has completed.
-    fn ds_set_faulted(&mut self, client_id: u8) -> bool {
+    fn ds_set_faulted(&mut self, client_id: ClientId) -> bool {
         info!(
             self.log,
             "[{client_id}] client skip {} in process jobs because fault",
@@ -3450,15 +3497,14 @@ impl Downstairs {
         let mut retire_check = vec![];
         let mut number_jobs_skipped = 0;
 
-        for (ds_id, job) in self.ds_active.iter_mut() {
-            let state = job.state.get(&client_id).unwrap();
+        self.ds_active.for_each(|ds_id, job| {
+            let state = &job.state[client_id];
 
-            if *state == IOState::InProgress || *state == IOState::New {
-                let old_state =
-                    job.state.insert(client_id, IOState::Skipped).unwrap();
+            if matches!(state, IOState::InProgress | IOState::New) {
+                let old_state = job.state.insert(client_id, IOState::Skipped);
                 self.io_state_count.decr(&old_state, client_id);
                 self.io_state_count.incr(&IOState::Skipped, client_id);
-                self.ds_skipped_jobs[client_id as usize].insert(*ds_id);
+                self.ds_skipped_jobs[client_id].insert(*ds_id);
                 number_jobs_skipped += 1;
 
                 // Check to see if this being skipped means we can ACK
@@ -3487,7 +3533,7 @@ impl Downstairs {
                     );
                 }
             }
-        }
+        });
 
         info!(
             self.log,
@@ -3502,10 +3548,10 @@ impl Downstairs {
 
         // We have eliminated all of our jobs in IOState::New above; flush
         // our cache to reflect that.
-        self.ds_new[client_id as usize].clear();
+        self.ds_new[client_id].clear();
 
         // As this downstairs is now faulted, we clear the extent_limit.
-        self.extent_limit[client_id as usize] = None;
+        self.extent_limit.remove(&client_id);
         notify_guest
     }
 
@@ -3513,47 +3559,48 @@ impl Downstairs {
      * Return a list of downstairs request IDs that represent unissued
      * requests for this client.
      */
-    fn new_work(&mut self, client_id: u8) -> Vec<u64> {
-        self.ds_new[client_id as usize].drain(..).collect()
+    fn new_work(&mut self, client_id: ClientId) -> BTreeSet<JobId> {
+        std::mem::take(&mut self.ds_new[client_id])
     }
 
     /**
      * Called to requeue work that was previously found by calling
      * [`new_work`], presumably due to flow control.
      */
-    fn requeue_work(&mut self, client_id: u8, work: &[u64]) {
-        self.ds_new[client_id as usize].extend_from_slice(work);
+    fn requeue_work(&mut self, client_id: ClientId, mut work: BTreeSet<JobId>) {
+        self.ds_new[client_id].append(&mut work);
+    }
+
+    /**
+     * Called to requeue a single job that was previously found by calling
+     * [`new_work`], presumably due to flow control.
+     */
+    fn requeue_one(&mut self, client_id: ClientId, work: JobId) {
+        self.ds_new[client_id].insert(work);
     }
 
     /**
      * Return a count of downstairs request IDs of work we have sent
      * for this client, but don't yet have a response.
      */
-    fn submitted_work(&self, client_id: u8) -> usize {
-        self.io_state_count.in_progress[client_id as usize] as usize
+    fn submitted_work(&self, client_id: ClientId) -> usize {
+        self.io_state_count.in_progress[client_id] as usize
     }
 
     /**
      * Return a count of downstairs request IDs of total new and submitted
      * work we have for a downstairs.
      */
-    fn total_live_work(&self, client_id: u8) -> usize {
-        (self.io_state_count.new[client_id as usize]
-            + self.io_state_count.in_progress[client_id as usize])
-            as usize
+    fn total_live_work(&self, client_id: ClientId) -> usize {
+        (self.io_state_count.new[client_id]
+            + self.io_state_count.in_progress[client_id]) as usize
     }
 
     /**
      * Build a list of jobs that are ready to be acked.
      */
-    fn ackable_work(&mut self) -> Vec<u64> {
-        let mut ackable = Vec::new();
-        for (ds_id, job) in &self.ds_active {
-            if job.ack_status == AckStatus::AckReady {
-                ackable.push(*ds_id);
-            }
-        }
-        ackable
+    fn ackable_work(&mut self) -> Vec<JobId> {
+        self.ds_active.ackable_work()
     }
 
     /**
@@ -3562,14 +3609,14 @@ impl Downstairs {
     async fn enqueue(
         &mut self,
         mut io: DownstairsIO,
-        ds_done_tx: mpsc::Sender<u64>,
+        ds_done_tx: mpsc::Sender<()>,
     ) {
         let mut skipped = 0;
         let is_write = matches!(io.work, IOop::Write { .. });
-        for cid in 0..3 {
-            assert_eq!(io.state[&cid], IOState::New);
+        for cid in ClientId::iter() {
+            assert_eq!(io.state[cid], IOState::New);
 
-            let current = self.ds_state[cid as usize];
+            let current = self.ds_state[cid];
             // If a downstairs is faulted or ready for repair, we can move
             // that job directly to IOState::Skipped
             // If a downstairs is in repair, then we need to see if this
@@ -3585,27 +3632,30 @@ impl Downstairs {
                     io.state.insert(cid, IOState::Skipped);
                     self.io_state_count.incr(&IOState::Skipped, cid);
                     skipped += 1;
-                    self.ds_skipped_jobs[cid as usize].insert(io.ds_id);
+                    self.ds_skipped_jobs[cid].insert(io.ds_id);
                 }
                 DsState::LiveRepair => {
-                    let my_limit = self.extent_limit[cid as usize];
+                    let my_limit = self.extent_limit.get(&cid).cloned();
                     assert!(self.repair_min_id.is_some());
-                    if io.work.send_io_live_repair(my_limit) {
+                    if io
+                        .work
+                        .send_io_live_repair(my_limit, &self.repair_job_ids)
+                    {
                         // Leave this IO as New, the downstairs will receive it.
                         self.io_state_count.incr(&IOState::New, cid);
-                        self.ds_new[cid as usize].push(io.ds_id);
+                        self.ds_new[cid].insert(io.ds_id);
                     } else {
                         // Move this IO to skipped, we are not ready for
                         // the downstairs to receive it.
                         io.state.insert(cid, IOState::Skipped);
                         self.io_state_count.incr(&IOState::Skipped, cid);
                         skipped += 1;
-                        self.ds_skipped_jobs[cid as usize].insert(io.ds_id);
+                        self.ds_skipped_jobs[cid].insert(io.ds_id);
                     }
                 }
                 _ => {
                     self.io_state_count.incr(&IOState::New, cid);
-                    self.ds_new[cid as usize].push(io.ds_id);
+                    self.ds_new[cid].insert(io.ds_id);
                 }
             }
         }
@@ -3621,18 +3671,20 @@ impl Downstairs {
             warn!(self.log, "job {} skipped on all downstairs", &ds_id);
 
             // Move this job to done ourselves.
-            let job = self.ds_active.get_mut(&ds_id).unwrap();
+            let mut handle = self.ds_active.get_mut(&ds_id).unwrap();
+            let job = handle.job();
             assert_eq!(job.ack_status, AckStatus::NotAcked);
             job.ack_status = AckStatus::AckReady;
             info!(self.log, "Enqueue job {} goes straight to AckReady", ds_id);
 
-            ds_done_tx.send(ds_id).await.unwrap();
+            ds_done_tx.send(()).await.unwrap();
         } else if is_write {
-            let job = self.ds_active.get_mut(&ds_id).unwrap();
+            let mut handle = self.ds_active.get_mut(&ds_id).unwrap();
+            let job = handle.job();
             assert_eq!(job.ack_status, AckStatus::NotAcked);
             job.ack_status = AckStatus::AckReady;
 
-            ds_done_tx.send(ds_id).await.unwrap();
+            ds_done_tx.send(()).await.unwrap();
         }
     }
 
@@ -3641,10 +3693,10 @@ impl Downstairs {
      */
     async fn enqueue_repair(&mut self, mut io: DownstairsIO) {
         // Puts the repair IO onto the downstairs work queue.
-        for cid in 0..3 {
-            assert_eq!(io.state[&cid], IOState::New);
+        for cid in ClientId::iter() {
+            assert_eq!(io.state[cid], IOState::New);
 
-            let current = self.ds_state[cid as usize];
+            let current = self.ds_state[cid];
             // If a downstairs is faulted, we can move that job directly
             // to IOState::Skipped.
             match current {
@@ -3654,11 +3706,11 @@ impl Downstairs {
                 | DsState::LiveRepairReady => {
                     io.state.insert(cid, IOState::Skipped);
                     self.io_state_count.incr(&IOState::Skipped, cid);
-                    self.ds_skipped_jobs[cid as usize].insert(io.ds_id);
+                    self.ds_skipped_jobs[cid].insert(io.ds_id);
                 }
                 _ => {
                     self.io_state_count.incr(&IOState::New, cid);
-                    self.ds_new[cid as usize].push(io.ds_id);
+                    self.ds_new[cid].insert(io.ds_id);
                 }
             }
         }
@@ -3668,27 +3720,16 @@ impl Downstairs {
         self.ds_active.insert(ds_id, io);
     }
 
-    /**
-     * Collect the state of the jobs from each client.
-     */
-    fn state_count(&mut self, ds_id: u64) -> Result<WorkCounts> {
-        /* XXX Should this support invalid ds_ids? */
-        let job = self
-            .ds_active
-            .get_mut(&ds_id)
-            .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
-        Ok(job.state_count())
-    }
-
-    fn ack(&mut self, ds_id: u64) {
+    fn ack(&mut self, ds_id: JobId) {
         /*
          * Move AckReady to Acked.
          */
-        let job = self
+        let mut handle = self
             .ds_active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))
             .unwrap();
+        let job = handle.job();
 
         if job.ack_status != AckStatus::AckReady {
             panic!(
@@ -3716,16 +3757,16 @@ impl Downstairs {
      * recover if we are repairing a downstairs and one of the
      * valid remaining downstairs goes offline.
      */
-    fn result(&mut self, ds_id: u64) -> Result<(), CrucibleError> {
+    fn result(&mut self, ds_id: JobId) -> Result<(), CrucibleError> {
         /*
          * TODO: this doesn't tell the Guest what the error(s) were?
          */
-        let wc = self.state_count(ds_id).unwrap();
 
         let job = self
             .ds_active
-            .get_mut(&ds_id)
+            .get(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
+        let wc = job.state_count();
 
         let bad_job = match &job.work {
             IOop::Read { .. } => wc.error == 3,
@@ -3760,7 +3801,7 @@ impl Downstairs {
      */
     async fn cdt_gw_work_done(
         &self,
-        ds_id: u64,
+        ds_id: JobId,
         gw_id: u64,
         io_size: usize,
         stats: &UpStatOuter,
@@ -4060,8 +4101,8 @@ impl Downstairs {
      */
     fn process_ds_completion(
         &mut self,
-        ds_id: u64,
-        client_id: u8,
+        ds_id: JobId,
+        client_id: ClientId,
         responses: Result<Vec<ReadResponse>, CrucibleError>,
         encryption_context: &Option<Arc<EncryptionContext>>,
         up_state: UpState,
@@ -4074,21 +4115,14 @@ impl Downstairs {
         let mut notify_guest = false;
         let deactivate = up_state == UpState::Deactivating;
 
-        /*
-         * Get the completed count now,
-         * because the job self ref won't let us call state_count once we are
-         * using that ref, and the number won't change while we are in
-         * this method (you did get the lock first, right??).
-         */
-        let wc = self.state_count(ds_id)?;
-        let mut jobs_completed_ok = wc.completed_ok();
-
-        let job = self
+        let mut handle = self
             .ds_active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
+        let job = handle.job();
+        let mut jobs_completed_ok = job.state_count().completed_ok();
 
-        if job.state[&client_id] == IOState::Skipped {
+        if job.state[client_id] == IOState::Skipped {
             // This job was already marked as skipped, and at that time
             // all required action was taken on it.  We can drop any more
             // processing of it here and return.
@@ -4186,7 +4220,7 @@ impl Downstairs {
             IOState::Done
         };
 
-        let old_state = job.state.insert(client_id, new_state.clone()).unwrap();
+        let old_state = job.state.insert(client_id, new_state.clone());
         self.io_state_count.decr(&old_state, client_id);
         self.io_state_count.incr(&new_state, client_id);
 
@@ -4232,13 +4266,7 @@ impl Downstairs {
                             snapshot_details: _,
                             extent_limit: _,
                         } => {
-                            let errors: u64 =
-                                match self.downstairs_errors.get(&client_id) {
-                                    Some(v) => *v,
-                                    None => 0,
-                                };
-                            self.downstairs_errors
-                                .insert(client_id, errors + 1);
+                            self.downstairs_errors[client_id] += 1;
                         }
 
                         // If a repair job errors, mark that downstairs as bad
@@ -4272,13 +4300,7 @@ impl Downstairs {
                             // well as throw out the whole repair and start
                             // over as we can no longer trust results from
                             // the downstairs under repair.
-                            let errors: u64 =
-                                match self.downstairs_errors.get(&client_id) {
-                                    Some(v) => *v,
-                                    None => 0,
-                                };
-                            self.downstairs_errors
-                                .insert(client_id, errors + 1);
+                            self.downstairs_errors[client_id] += 1;
                         }
 
                         // If a read job fails, we sometimes need to panic.
@@ -4334,7 +4356,7 @@ impl Downstairs {
                     snapshot_details: _,
                     extent_limit: _,
                 } => {
-                    self.ds_last_flush[client_id as usize] = ds_id;
+                    self.ds_last_flush[client_id] = ds_id;
                 }
                 IOop::Read {
                     dependencies: _dependencies,
@@ -4512,7 +4534,7 @@ impl Downstairs {
                             );
                         }
                     }
-                    self.ds_last_flush[client_id as usize] = ds_id;
+                    self.ds_last_flush[client_id] = ds_id;
                 }
                 IOop::ExtentClose {
                     dependencies: _,
@@ -4611,6 +4633,7 @@ impl Downstairs {
          * but messages may still be unprocessed.
          */
         if job.ack_status == AckStatus::Acked {
+            drop(handle);
             self.retire_check(ds_id);
         } else if job.ack_status == AckStatus::NotAcked {
             // If we reach this then the job probably has errors and
@@ -4645,41 +4668,35 @@ impl Downstairs {
      * writes and if they aren't included in replay then the write will
      * never start.
      */
-    fn retire_check(&mut self, ds_id: u64) {
+    fn retire_check(&mut self, ds_id: JobId) {
         if !self.is_flush(ds_id).unwrap() {
             return;
         }
 
         // Only a completed flush will remove jobs from the active queue -
         // currently we have to keep everything around for use during replay
-        let wc = self.state_count(ds_id).unwrap();
+        let wc = self.ds_active.get(&ds_id).unwrap().state_count();
         if (wc.error + wc.skipped + wc.done) == 3 {
             assert!(!self.completed.contains(&ds_id));
             assert_eq!(wc.active, 0);
 
             // Retire all the jobs that happened before and including this
-            // flush, with a few exceptions.  For these, we need to make
-            // a prevent_retire list and keep track of them so we can put
-            // them back on the ds_active list after we have finished
-            // processing it.
+            // flush, with a few exceptions.  Because we can't iterate and
+            // modify the list simultaneously, we mark to-be-retired jobs in
+            // `retired`, then remove them in bulk after checking the list.
             let mut retired = Vec::new();
-            let mut prevent_retire = BTreeMap::new();
 
-            loop {
-                let id = match self.ds_active.keys().next() {
-                    Some(id) if *id > ds_id => break,
-                    None => break,
-                    Some(id) => *id,
+            for (&id, job) in &self.ds_active {
+                if id > ds_id {
+                    break;
                 };
-
                 assert!(id <= ds_id);
 
                 // While we don't expect any jobs to still be in progress,
                 // there is nothing to prevent a flush ACK from getting
                 // ahead of the ACK from something that flush depends on.
                 // The downstairs does handle the dependency.
-                let wc = self.state_count(id).unwrap();
-                let job = self.ds_active.remove(&id).unwrap();
+                let wc = job.state_count();
                 if wc.active != 0 || job.ack_status != AckStatus::Acked {
                     warn!(
                         self.log,
@@ -4688,7 +4705,6 @@ impl Downstairs {
                         ds_id,
                         wc,
                     );
-                    prevent_retire.insert(id, job);
                     continue;
                 }
 
@@ -4702,16 +4718,19 @@ impl Downstairs {
                 self.completed.push(id);
                 let summary = job.io_summarize();
                 self.completed_jobs.push(summary);
-                for cid in 0..3 {
-                    let old_state = job.state.get(&cid).unwrap();
+                for cid in ClientId::iter() {
+                    let old_state = &job.state[cid];
                     self.io_state_count.decr(old_state, cid);
                 }
             }
-            self.ds_active.extend(prevent_retire);
+            // Now that we've collected jobs to retire, remove them from the map
+            for &id in &retired {
+                self.ds_active.remove(&id).unwrap();
+            }
 
             debug!(self.log, "[rc] retire {} clears {:?}", ds_id, retired);
             // Only keep track of skipped jobs at or above the flush.
-            for cid in 0..3 {
+            for cid in ClientId::iter() {
                 self.ds_skipped_jobs[cid].retain(|&x| x >= ds_id);
             }
         }
@@ -4720,7 +4739,7 @@ impl Downstairs {
     /**
      * Check if an active job is a flush or not.
      */
-    fn is_flush(&self, ds_id: u64) -> Result<bool> {
+    fn is_flush(&self, ds_id: JobId) -> Result<bool> {
         let job = self
             .ds_active
             .get(&ds_id)
@@ -4740,18 +4759,15 @@ impl Downstairs {
 
     fn client_error(
         &self,
-        ds_id: u64,
-        client_id: u8,
+        ds_id: JobId,
+        client_id: ClientId,
     ) -> Result<(), CrucibleError> {
         let job = self
             .ds_active
             .get(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
 
-        let state = job
-            .state
-            .get(&client_id)
-            .ok_or_else(|| anyhow!("state for client {} missing", client_id))?;
+        let state = &job.state[client_id];
 
         if let IOState::Error(e) = state {
             Err(e.clone())
@@ -4821,14 +4837,34 @@ impl Downstairs {
     fn query_repair_ids(&mut self, eid: u32) -> bool {
         self.repair_job_ids.contains_key(&eid)
     }
+
+    /// Returns the current extent under repair (from `self.extent_limit`)
+    ///
+    /// # Panics
+    /// If the different downstairs have different extents under repair (which
+    /// is not allowed)
+    fn get_extent_under_repair(&self) -> Option<u64> {
+        let mut extent_under_repair = None;
+        for cid in ClientId::iter() {
+            if let Some(&eur) = self.extent_limit.get(&cid) {
+                if extent_under_repair.is_none() {
+                    extent_under_repair = Some(eur as u64);
+                } else {
+                    // We only support one extent being repaired at a time
+                    assert_eq!(Some(eur as u64), extent_under_repair);
+                }
+            }
+        }
+        extent_under_repair
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
 pub struct ExtentRepairIDs {
-    close_id: u64,
-    repair_id: u64,
-    noop_id: u64,
-    reopen_id: u64,
+    close_id: JobId,
+    repair_id: JobId,
+    noop_id: JobId,
+    reopen_id: JobId,
 }
 
 /// Implement AES-GCM-SIV encryption
@@ -5172,6 +5208,13 @@ impl Upstairs {
         #[cfg(not(test))]
         assert_eq!(opt.target.len(), 3);
 
+        // Build the target map, which is either empty (during some tests) or
+        // fully populated with all three targets.
+        let mut ds_target = ClientMap::new();
+        for (i, v) in opt.target.iter().enumerate() {
+            ds_target.insert(ClientId::new(i as u8), *v);
+        }
+
         // Create an encryption context if a key is supplied.
         let encryption_context = opt.key_bytes().map(|key| {
             Arc::new(EncryptionContext::new(
@@ -5208,10 +5251,7 @@ impl Upstairs {
             session_id: Uuid::new_v4(),
             generation: Mutex::new(gen),
             guest,
-            downstairs: Mutex::new(Downstairs::new(
-                log.clone(),
-                opt.target.to_owned(),
-            )),
+            downstairs: Mutex::new(Downstairs::new(log.clone(), ds_target)),
             flush_info: Mutex::new(FlushInfo::new()),
             ddef: Mutex::new(rd_status),
             encryption_context,
@@ -5242,29 +5282,29 @@ impl Upstairs {
         let ds_io_count = ds.io_state_count;
         let ds_reconciled = ds.reconcile_repaired;
         let ds_reconcile_needed = ds.reconcile_repair_needed;
-        let ds_live_repair_completed = ds.live_repair_completed.clone();
-        let ds_live_repair_aborted = ds.live_repair_aborted.clone();
-        let ds_connected = ds.connected.clone();
-        let ds_replaced = ds.replaced.clone();
-        let ds_flow_control = ds.flow_control.clone();
-        let ds_extents_repaired = ds.extents_repaired.clone();
-        let ds_extents_confirmed = ds.extents_confirmed.clone();
+        let ds_live_repair_completed = ds.live_repair_completed;
+        let ds_live_repair_aborted = ds.live_repair_aborted;
+        let ds_connected = ds.connected;
+        let ds_replaced = ds.replaced;
+        let ds_flow_control = ds.flow_control;
+        let ds_extents_repaired = ds.extents_repaired;
+        let ds_extents_confirmed = ds.extents_confirmed;
 
         cdt::up__status!(|| {
             let arg = Arg {
                 up_count,
                 ds_count,
-                ds_state,
+                ds_state: ds_state.0,
                 ds_io_count,
                 ds_reconciled,
                 ds_reconcile_needed,
-                ds_live_repair_completed,
-                ds_live_repair_aborted,
-                ds_connected,
-                ds_replaced,
-                ds_flow_control,
-                ds_extents_repaired,
-                ds_extents_confirmed,
+                ds_live_repair_completed: ds_live_repair_completed.0,
+                ds_live_repair_aborted: ds_live_repair_aborted.0,
+                ds_connected: ds_connected.0,
+                ds_replaced: ds_replaced.0,
+                ds_flow_control: ds_flow_control.0,
+                ds_extents_repaired: ds_extents_repaired.0,
+                ds_extents_confirmed: ds_extents_confirmed.0,
             };
             (msg, arg)
         });
@@ -5355,7 +5395,7 @@ impl Upstairs {
     async fn set_deactivate(
         &self,
         req: Option<BlockReq>,
-        ds_done_tx: mpsc::Sender<u64>,
+        ds_done_tx: mpsc::Sender<()>,
     ) -> Result<(), ()> {
         /*
          * We are changing (maybe) the upstairs state, to make
@@ -5363,7 +5403,7 @@ impl Upstairs {
          * guest and downstairs lock at the same time.
          */
         let mut active = self.active.lock().await;
-        let gw = self.guest.guest_work.lock().await;
+        let mut gw = self.guest.guest_work.lock().await;
         let mut ds = self.downstairs.lock().await;
         /*
          * Protect us from double deactivation, or deactivation
@@ -5398,7 +5438,7 @@ impl Upstairs {
         let mut offline_ds = Vec::new();
         for (index, state) in ds.ds_state.iter().enumerate() {
             if *state == DsState::Offline {
-                offline_ds.push(index as u8);
+                offline_ds.push(ClientId::new(index as u8));
             }
         }
 
@@ -5410,7 +5450,7 @@ impl Upstairs {
             panic!("Can't deactivate with downstairs offline (yet)");
         }
 
-        if ds.ds_active.keys().len() == 0 {
+        if ds.ds_active.is_empty() {
             debug!(self.log, "No work, no need to flush, return OK");
             if let Some(req) = req {
                 req.send_ok().await;
@@ -5422,7 +5462,7 @@ impl Upstairs {
          * Now, create the "final" flush and submit it to all the
          * downstairs queues.
          */
-        self.submit_flush_internal(gw, ds, req, None, ds_done_tx)
+        self.submit_flush_internal(&mut gw, &mut ds, req, None, ds_done_tx)
             .await
     }
 
@@ -5480,14 +5520,14 @@ impl Upstairs {
      */
     async fn live_repair_dep_check(
         &self,
-        client_id: u8,
-        deps: Vec<u64>,
-        ds_id: u64,
-    ) -> Vec<u64> {
+        client_id: ClientId,
+        deps: Vec<JobId>,
+        ds_id: JobId,
+    ) -> Vec<JobId> {
         let mut ds = self.downstairs.lock().await;
 
         if ds.dependencies_need_cleanup(client_id) {
-            ds.remove_dep_if_live_repair(client_id, deps.clone(), ds_id)
+            ds.remove_dep_if_live_repair(client_id, deps, ds_id)
         } else {
             deps
         }
@@ -5499,7 +5539,7 @@ impl Upstairs {
      *
      * Return true if we deactivated this downstairs.
      */
-    async fn ds_deactivate(&self, client_id: u8) -> bool {
+    async fn ds_deactivate(&self, client_id: ClientId) -> bool {
         let active = self.active.lock().await;
         let up_state = active.up_state;
         /*
@@ -5542,7 +5582,7 @@ impl Upstairs {
              * we are not ready to deactivate.
              */
             for (id, job) in &ds.ds_active {
-                let state = job.state.get(&client_id).unwrap();
+                let state = &job.state[client_id];
                 if state == &IOState::New || state == &IOState::InProgress {
                     info!(
                         self.log,
@@ -5646,9 +5686,9 @@ impl Upstairs {
         fi.get_next_flush()
     }
 
-    async fn last_flush_id(&self, client_id: u8) -> u64 {
+    async fn last_flush_id(&self, client_id: ClientId) -> JobId {
         let ds = self.downstairs.lock().await;
-        ds.ds_last_flush[client_id as usize]
+        ds.ds_last_flush[client_id]
     }
 
     async fn set_flush_clear(&self) {
@@ -5680,19 +5720,19 @@ impl Upstairs {
         &self,
         req: Option<BlockReq>,
         snapshot_details: Option<SnapshotDetails>,
-        ds_done_tx: mpsc::Sender<u64>,
+        ds_done_tx: mpsc::Sender<()>,
     ) -> Result<(), ()> {
         /*
          * Lock first the guest_work struct where this new job will go,
          * then lock the downstairs struct. Once we have both we can proceed
          * to build our flush command.
          */
-        let gw = self.guest.guest_work.lock().await;
-        let downstairs = self.downstairs.lock().await;
+        let mut gw = self.guest.guest_work.lock().await;
+        let mut downstairs = self.downstairs.lock().await;
 
         self.submit_flush_internal(
-            gw,
-            downstairs,
+            &mut gw,
+            &mut downstairs,
             req,
             snapshot_details,
             ds_done_tx,
@@ -5702,11 +5742,11 @@ impl Upstairs {
 
     async fn submit_flush_internal(
         &self,
-        mut gw: MutexGuard<'_, GuestWork>,
-        mut downstairs: MutexGuard<'_, Downstairs>,
+        gw: &mut GuestWork,
+        downstairs: &mut Downstairs,
         req: Option<BlockReq>,
         snapshot_details: Option<SnapshotDetails>,
-        ds_done_tx: mpsc::Sender<u64>,
+        ds_done_tx: mpsc::Sender<()>,
     ) -> Result<(), ()> {
         self.set_flush_clear().await;
 
@@ -5724,33 +5764,7 @@ impl Upstairs {
             info!(self.log, "flush with snap requested");
         }
 
-        /*
-         * To build the dependency list for this flush, iterate from the end of
-         * the downstairs work active list in reverse order and check each job
-         * in that list to see if this new flush must depend on it.
-         *
-         * We can safely ignore everything before the last flush, because the
-         * last flush will depend on jobs before it. But this flush must depend
-         * on the last flush - flush and gen numbers downstairs need to be
-         * sequential and the same for each downstairs.
-         *
-         * The downstairs currently assumes that all jobs previous to the last
-         * flush have completed, so the Upstairs must set that flushes depend on
-         * all jobs. It's currently important that flushes depend on everything,
-         * and everything depends on flushes.
-         */
-        let num_jobs = downstairs.ds_active.len();
-        let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
-
-        for (id, job) in downstairs.ds_active.iter().rev() {
-            // Flushes must depend on everything
-            dep.push(*id);
-
-            // Depend on the last flush, but then bail out
-            if job.work.is_flush() {
-                break;
-            }
-        }
+        let mut dep = downstairs.ds_active.deps_for_flush();
         debug!(self.log, "IO Flush {} has deps {:?}", next_id, dep);
 
         /*
@@ -5758,17 +5772,20 @@ impl Upstairs {
          * and make sure it matches.
          */
 
-        let mut extent_under_repair = None;
-        for cid in 0..3 {
-            if let Some(eur) = downstairs.extent_limit[cid] {
-                if extent_under_repair.is_none() {
-                    extent_under_repair = Some(eur);
-                } else {
-                    // We only support one extent being repaired at a time
-                    assert_eq!(Some(eur), extent_under_repair);
+        let mut extent_under_repair =
+            downstairs.get_extent_under_repair().map(|i| i as usize);
+        for (target_extent, id) in &downstairs.repair_job_ids {
+            // Depend on the final job in the repair jobs
+            dep.push(id.reopen_id);
+            if let Some(eur) = extent_under_repair {
+                if *target_extent as usize > eur {
+                    extent_under_repair = Some(*target_extent as usize);
                 }
+            } else {
+                extent_under_repair = Some(*target_extent as usize);
             }
         }
+
         /*
          * Build the flush request, and take note of the request ID that
          * will be assigned to this new piece of work.
@@ -5813,7 +5830,7 @@ impl Upstairs {
         data: Bytes,
         req: Option<BlockReq>,
         is_write_unwritten: bool,
-        ds_done_tx: mpsc::Sender<u64>,
+        ds_done_tx: mpsc::Sender<()>,
     ) -> Result<(), ()> {
         if !self.guest_io_ready().await {
             if let Some(req) = req {
@@ -5883,79 +5900,21 @@ impl Upstairs {
          * Create the list of downstairs request numbers (ds_id) we created
          * on behalf of this guest job.
          */
-        let mut sub = HashMap::new();
-        let mut cur_offset: usize = 0;
-
-        /*
-         * To build the dependency list for this write, iterate from the end
-         * of the downstairs work active list in reverse order and
-         * check each job in that list to see if this new write must
-         * depend on it.
-         *
-         * Construct a list of dependencies for this write based on the
-         * following rules:
-         *
-         * - writes have to depend on the last flush completing (because
-         *   currently everything has to depend on flushes)
-         * - any overlap of impacted blocks requires a dependency
-         *
-         * It's important to remember that jobs may arrive at different
-         * Downstairs in different orders but they should still complete in job
-         * dependency order.
-         *
-         * TODO: any overlap of impacted blocks will create a dependency.
-         * take this an example (this shows three writes, all to the
-         * same block, along with the dependency list for each
-         * write):
-         *
-         *       block
-         * op# | 0 1 2 | deps
-         * ----|-------------
-         *   0 | W     |
-         *   1 | W     | 0
-         *   2 | W     | 0,1
-         *
-         * op 2 depends on both op 1 and op 0. If dependencies are transitive
-         * with an existing job, it would be nice if those were removed from
-         * this job's dependencies.
-         */
-        let num_jobs = downstairs.ds_active.len();
-        let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
-
-        // Search backwards in the list of active jobs
-        for (id, job) in downstairs.ds_active.iter().rev() {
-            // Depend on the last flush - flushes are a barrier for
-            // all writes.
-            if job.work.is_flush() {
-                dep.push(*id);
-            }
-
-            // If this job impacts the same blocks as something already active,
-            // create a dependency.
-            if impacted_blocks.conflicts(&job.impacted_blocks) {
-                dep.push(*id);
-            }
-        }
-
-        cdt::gw__write__deps!(|| (num_jobs as u64, dep.len() as u64));
+        let mut dep =
+            downstairs.ds_active.deps_for_write(impacted_blocks, ddef);
+        cdt::gw__write__deps!(|| (
+            downstairs.ds_active.len() as u64,
+            dep.len() as u64
+        ));
 
         let mut writes: Vec<crucible_protocol::Write> =
             Vec::with_capacity(impacted_blocks.len(&ddef));
 
         let mut future_repair = false;
-        let mut deps_to_add: HashSet<u32> = HashSet::new();
-        let mut extent_under_repair = None;
-        for cid in 0..3 {
-            if let Some(eur) = downstairs.extent_limit[cid] {
-                if extent_under_repair.is_none() {
-                    extent_under_repair = Some(eur as u64);
-                } else {
-                    // We only support one extent being repaired at a time
-                    assert_eq!(Some(eur as u64), extent_under_repair);
-                }
-            }
-        }
+        let mut deps_to_add: BTreeSet<u32> = BTreeSet::new();
+        let extent_under_repair = downstairs.get_extent_under_repair();
 
+        let mut cur_offset: usize = 0;
         for (eid, offset) in impacted_blocks.blocks(&ddef) {
             if let Some(eur) = extent_under_repair {
                 // We are in the middle of a live repair. See if we
@@ -5996,6 +5955,11 @@ impl Upstairs {
                         offset.shift,
                         eur
                     );
+                } else if let Some(rep) =
+                    downstairs.repair_job_ids.get(&(eid as u32))
+                {
+                    dep.push(rep.reopen_id);
+                    future_repair = true;
                 }
             }
             let byte_len: usize = ddef.block_size() as usize;
@@ -6053,9 +6017,6 @@ impl Upstairs {
 
         for new_dep in deps_to_add.iter() {
             let ids = downstairs.reserve_repair_ids(*new_dep);
-            dep.push(ids.close_id);
-            dep.push(ids.repair_id);
-            dep.push(ids.noop_id);
             dep.push(ids.reopen_id);
         }
 
@@ -6086,6 +6047,7 @@ impl Upstairs {
             impacted_blocks,
         );
 
+        let mut sub = HashMap::new();
         sub.insert(next_id, 0); // XXX does value here matter?
 
         /*
@@ -6118,7 +6080,7 @@ impl Upstairs {
         offset: Block,
         data: Buffer,
         req: Option<BlockReq>,
-        ds_done_tx: mpsc::Sender<u64>,
+        ds_done_tx: mpsc::Sender<()>,
     ) -> Result<(), ()> {
         if !self.guest_io_ready().await {
             if let Some(req) = req {
@@ -6169,50 +6131,11 @@ impl Upstairs {
         let gw_id: u64 = gw.next_gw_id();
         cdt::gw__read__start!(|| (gw_id));
 
-        /*
-         * To build the dependency list for this read, iterate from the end
-         * of the downstairs work active list in reverse order and
-         * check each job in that list to see if this new read must
-         * depend on it.
-         *
-         * Construct a list of dependencies for this read based on the
-         * following rules:
-         *
-         * - reads depend on flushes (because currently everything has to depend
-         *   on flushes)
-         * - any write with an overlap of impacted blocks requires a
-         *   dependency
-         */
-        let num_jobs = downstairs.ds_active.keys().len();
-        let mut dep: Vec<u64> = Vec::with_capacity(num_jobs);
-
-        // Search backwards in the list of active jobs
-        for (id, job) in downstairs.ds_active.iter().rev() {
-            if job.work.is_flush() {
-                dep.push(*id);
-                break;
-            } else if (job.work.is_write() | job.work.is_repair())
-                && impacted_blocks.conflicts(&job.impacted_blocks)
-            {
-                // If this is a write or repair and it impacts the same blocks
-                // as something already active, create a dependency.
-                dep.push(*id);
-            }
-        }
+        let mut dep = downstairs.ds_active.deps_for_read(impacted_blocks, ddef);
 
         let mut future_repair = false;
-        let mut deps_to_add: HashSet<u32> = HashSet::new();
-        let mut extent_under_repair = None;
-        for cid in 0..3 {
-            if let Some(eur) = downstairs.extent_limit[cid] {
-                if extent_under_repair.is_none() {
-                    extent_under_repair = Some(eur as u64);
-                } else {
-                    // We only support one extent being repaired at a time
-                    assert_eq!(Some(eur as u64), extent_under_repair);
-                }
-            }
-        }
+        let mut deps_to_add: BTreeSet<u32> = BTreeSet::new();
+        let extent_under_repair = downstairs.get_extent_under_repair();
 
         /*
          * Now create a downstairs work job for each (eid, bo) returned
@@ -6227,6 +6150,11 @@ impl Upstairs {
                     future_repair = true;
                 } else if future_repair && eid > eur {
                     deps_to_add.insert(eid as u32);
+                } else if let Some(rep) =
+                    downstairs.repair_job_ids.get(&(eid as u32))
+                {
+                    dep.push(rep.reopen_id);
+                    future_repair = true;
                 }
             }
             requests.push(ReadRequest { eid, offset });
@@ -6235,9 +6163,6 @@ impl Upstairs {
         for new_dep in deps_to_add.iter() {
             warn!(self.log, "Create read repair deps for extent {}", new_dep);
             let ids = downstairs.reserve_repair_ids(*new_dep);
-            dep.push(ids.close_id);
-            dep.push(ids.repair_id);
-            dep.push(ids.noop_id);
             dep.push(ids.reopen_id);
         }
 
@@ -6298,9 +6223,9 @@ impl Upstairs {
      * If we were disconnected because the downstairs decided to kick us
      * out, then we should go back to New.
      */
-    async fn ds_missing(&self, client_id: u8) {
+    async fn ds_missing(&self, client_id: ClientId) {
         let mut ds = self.downstairs.lock().await;
-        let current = ds.ds_state[client_id as usize];
+        let current = ds.ds_state[client_id];
         let new_state = match current {
             DsState::Active => DsState::Offline,
             DsState::Replay => DsState::Offline,
@@ -6334,7 +6259,7 @@ impl Upstairs {
 
         // Should we move jobs now?  When do we move work that has
         // been submitted over to "skipped"
-        ds.ds_state[client_id as usize] = new_state;
+        ds.ds_state[client_id] = new_state;
     }
 
     /*
@@ -6346,16 +6271,16 @@ impl Upstairs {
      * IOs.  We return false if this downstairs should enter the
      * repair path and reconcile with the other downstairs.
      */
-    async fn _ds_is_replay(&self, client_id: u8) -> bool {
+    async fn _ds_is_replay(&self, client_id: ClientId) -> bool {
         let mut ds = self.downstairs.lock().await;
-        if ds.ds_state[client_id as usize] == DsState::Replay {
+        if ds.ds_state[client_id] == DsState::Replay {
             info!(
                 self.log,
                 "[{}] {} Transition from Replay to Active",
                 client_id,
                 self.uuid
             );
-            ds.ds_state[client_id as usize] = DsState::Active;
+            ds.ds_state[client_id] = DsState::Active;
             return true;
         }
         false
@@ -6364,7 +6289,7 @@ impl Upstairs {
     /*
      * Move a single downstairs to this new state.
      */
-    async fn ds_transition(&self, client_id: u8, new_state: DsState) {
+    async fn ds_transition(&self, client_id: ClientId, new_state: DsState) {
         let active = self.active.lock().await;
         let up_state = active.up_state;
         let mut ds = self.downstairs.lock().await;
@@ -6379,9 +6304,9 @@ impl Upstairs {
      */
     fn ds_transition_with_lock(
         &self,
-        ds: &mut MutexGuard<'_, Downstairs>,
+        ds: &mut Downstairs,
         up_state: UpState,
-        client_id: u8,
+        client_id: ClientId,
         new_state: DsState,
     ) {
         info!(
@@ -6390,13 +6315,13 @@ impl Upstairs {
             client_id,
             self.uuid,
             self.session_id,
-            ds.ds_state[0],
-            ds.ds_state[1],
-            ds.ds_state[2],
+            ds.ds_state[ClientId::new(0)],
+            ds.ds_state[ClientId::new(1)],
+            ds.ds_state[ClientId::new(2)],
             new_state
         );
 
-        let old_state = ds.ds_state[client_id as usize];
+        let old_state = ds.ds_state[client_id];
 
         /*
          * Check that this is a valid transition
@@ -6562,18 +6487,18 @@ impl Upstairs {
                 self.log,
                 "[{}] Transition from {} to {}",
                 client_id,
-                ds.ds_state[client_id as usize],
+                ds.ds_state[client_id],
                 new_state,
             );
-            ds.ds_state[client_id as usize] = new_state;
+            ds.ds_state[client_id] = new_state;
         } else {
             panic!("[{}] transition to same state: {}", client_id, new_state);
         }
     }
 
-    async fn ds_state(&self, client_id: u8) -> DsState {
+    async fn ds_state(&self, client_id: ClientId) -> DsState {
         let ds = self.downstairs.lock().await;
-        ds.ds_state[client_id as usize]
+        ds.ds_state[client_id]
     }
 
     /*
@@ -6583,9 +6508,9 @@ impl Upstairs {
      * at it.
      */
     fn mismatch_list(&self, ds: &Downstairs) -> Option<DownstairsMend> {
-        let c0_rec = ds.region_metadata.get(&0).unwrap();
-        let c1_rec = ds.region_metadata.get(&1).unwrap();
-        let c2_rec = ds.region_metadata.get(&2).unwrap();
+        let c0_rec = ds.region_metadata.get(&ClientId::new(0)).unwrap();
+        let c1_rec = ds.region_metadata.get(&ClientId::new(1)).unwrap();
+        let c2_rec = ds.region_metadata.get(&ClientId::new(2)).unwrap();
 
         let log = self.log.new(o!("" => "mend".to_string()));
         DownstairsMend::new(c0_rec, c1_rec, c2_rec, log)
@@ -6597,7 +6522,7 @@ impl Upstairs {
      */
     async fn ds_repair_done_notify(
         &self,
-        client_id: u8,
+        client_id: ClientId,
         rep_id: u64,
         ds_reconcile_done_tx: &mpsc::Sender<Repair>,
     ) -> Result<()> {
@@ -6647,7 +6572,7 @@ impl Upstairs {
             // Assert if not None, then job is all done.
             if let Some(job) = &mut ds.reconcile_current_work {
                 let mut done = 0;
-                for (_, s) in job.state.iter() {
+                for s in job.state.iter() {
                     if s == &IOState::Done || s == &IOState::Skipped {
                         done += 1;
                     }
@@ -6684,7 +6609,7 @@ impl Upstairs {
          */
         let mut max_flush = 0;
         let mut max_gen = 0;
-        for (cid, rec) in &ds.region_metadata {
+        for (cid, rec) in ds.region_metadata.iter() {
             let mf = rec.flush_numbers.iter().max().unwrap() + 1;
             if mf > max_flush {
                 max_flush = mf;
@@ -7182,8 +7107,8 @@ impl Upstairs {
      * Return a copy of the DsState vec.
      * DTraces uses this.
      */
-    async fn ds_state_copy(&self) -> Vec<DsState> {
-        self.downstairs.lock().await.ds_state.clone()
+    async fn ds_state_copy(&self) -> ClientData<DsState> {
+        self.downstairs.lock().await.ds_state
     }
 
     /**
@@ -7225,7 +7150,7 @@ impl Upstairs {
      */
     async fn add_ds_region(
         &self,
-        client_id: u8,
+        client_id: ClientId,
         client_ddef: RegionDefinition,
     ) -> Result<()> {
         info!(self.log, "[{}] Got region def {:?}", client_id, client_ddef);
@@ -7256,7 +7181,7 @@ impl Upstairs {
             if *uuid != client_ddef.uuid() {
                 // If we are replacing the downstairs, then a new UUID is
                 // okay.
-                if ds.ds_state[client_id as usize] == DsState::Replaced {
+                if ds.ds_state[client_id] == DsState::Replaced {
                     warn!(
                         self.log,
                         "[{}] replace downstairs uuid:{} with {}",
@@ -7330,8 +7255,8 @@ impl Upstairs {
      */
     async fn process_ds_operation(
         &self,
-        ds_id: u64,
-        client_id: u8,
+        ds_id: JobId,
+        client_id: ClientId,
         read_data: Result<Vec<ReadResponse>, CrucibleError>,
         extent_info: Option<ExtentInfo>,
     ) -> Result<bool> {
@@ -7364,7 +7289,7 @@ impl Upstairs {
          * While the downstairs is away, it's OK to act on the result that
          * we already received, because it may never come back.
          */
-        let ds_state = ds.ds_state[client_id as usize];
+        let ds_state = ds.ds_state[client_id];
         match ds_state {
             DsState::Active | DsState::Repair | DsState::LiveRepair => {}
             DsState::Faulted => {
@@ -7398,7 +7323,7 @@ impl Upstairs {
             extent_info,
         ) {
             Err(e) => {
-                match ds.ds_active.get_mut(&ds_id) {
+                match ds.ds_active.get(&ds_id) {
                     Some(job) => {
                         error!(
                             self.log,
@@ -7467,7 +7392,7 @@ impl Upstairs {
                 );
             } else if matches!(err, CrucibleError::SnapshotExistsAlready(_)) {
                 // skip
-            } else if let Some(job) = ds.ds_active.get_mut(&ds_id) {
+            } else if let Some(job) = ds.ds_active.get(&ds_id) {
                 if matches!(
                     job.work,
                     IOop::Write { .. }
@@ -7501,12 +7426,16 @@ impl Upstairs {
         Ok(notify_guest)
     }
 
-    async fn ds_set_repair_address(&self, client_id: u8, addr: SocketAddr) {
+    async fn ds_set_repair_address(
+        &self,
+        client_id: ClientId,
+        addr: SocketAddr,
+    ) {
         let mut ds = self.downstairs.lock().await;
         ds.ds_repair.insert(client_id, addr);
     }
 
-    async fn ds_clear_repair_address(&self, client_id: u8) {
+    async fn ds_clear_repair_address(&self, client_id: ClientId) {
         let mut ds = self.downstairs.lock().await;
         ds.ds_repair.remove(&client_id);
     }
@@ -7516,7 +7445,7 @@ impl Upstairs {
         id: Uuid,
         old: SocketAddr,
         new: SocketAddr,
-        ds_done_tx: &mpsc::Sender<u64>,
+        ds_done_tx: &mpsc::Sender<()>,
     ) -> Result<ReplaceResult, CrucibleError> {
         warn!(
             self.log,
@@ -7529,9 +7458,9 @@ impl Upstairs {
         // We check all targets first to not only find our current target,
         // but to be sure our new target is not an already active target
         // for a different downstairs.
-        let mut new_client_id: Option<usize> = None;
-        let mut old_client_id: Option<usize> = None;
-        for (client_id, ds_target) in ds.ds_target.iter_mut().enumerate() {
+        let mut new_client_id: Option<ClientId> = None;
+        let mut old_client_id: Option<ClientId> = None;
+        for (client_id, ds_target) in ds.ds_target.iter() {
             if *ds_target == new {
                 new_client_id = Some(client_id);
                 info!(self.log, "{id} found new target: {new} at {client_id}");
@@ -7579,12 +7508,12 @@ impl Upstairs {
             warn!(self.log, "{id} downstairs {old} not found");
             return Ok(ReplaceResult::Missing);
         }
-        let old_client_id: usize = old_client_id.unwrap();
+        let old_client_id = old_client_id.unwrap();
 
         // Check for and Block a replacement if any (other) downstairs are
         // in any of these states as we don't want to take more than one
         // downstairs offline at the same time.
-        for client_id in 0..3 {
+        for client_id in ClientId::iter() {
             if client_id == old_client_id {
                 continue;
             }
@@ -7607,16 +7536,16 @@ impl Upstairs {
         // elsewhere, verified no other downstairs are in a bad state, we can
         // move forward with the replacement.
         info!(self.log, "{id} replacing old: {old} at {old_client_id}");
-        ds.ds_target[old_client_id] = new;
+        ds.ds_target.insert(old_client_id, new);
 
-        if ds.ds_set_faulted(old_client_id as u8) {
-            let _ = ds_done_tx.send(1).await;
+        if ds.ds_set_faulted(old_client_id) {
+            let _ = ds_done_tx.send(()).await;
         }
-        ds.region_metadata.remove(&(old_client_id as u8));
+        ds.region_metadata.remove(&old_client_id);
         self.ds_transition_with_lock(
             &mut ds,
             up_state,
-            old_client_id as u8,
+            old_client_id,
             DsState::Replacing,
         );
         ds.replaced[old_client_id] += 1;
@@ -7885,21 +7814,13 @@ impl std::fmt::Display for DsState {
  */
 #[derive(Debug, Clone)]
 struct DownstairsIO {
-    ds_id: u64, // This MUST match our hashmap index
+    ds_id: JobId, // This MUST match our hashmap index
 
     guest_id: u64, // The hahsmap ID from the parent guest work.
     work: IOop,
 
-    /*
-     * Hash of work status where key is the downstairs "client id" and the
-     * hash value is the current state of the IO request with respect to the
-     * upstairs.
-     * The length and keys on this hashmap will be used to determine which
-     * downstairs will receive the IO request.
-     * XXX Determine if it is required for all downstairs to get an entry
-     * or if by not putting a downstairs in the hash, if that is valid.
-     */
-    state: HashMap<u8, IOState>,
+    /// Map of work status, tracked on a per-client basis
+    state: ClientData<IOState>,
 
     /*
      * Has this been acked to the guest yet?
@@ -7927,7 +7848,7 @@ impl DownstairsIO {
     fn state_count(&self) -> WorkCounts {
         let mut wc: WorkCounts = Default::default();
 
-        for state in self.state.values() {
+        for state in self.state.iter() {
             match state {
                 IOState::New | IOState::InProgress => wc.active += 1,
                 IOState::Error(_) => wc.error += 1,
@@ -8010,16 +7931,13 @@ impl DownstairsIO {
         /*
          * Convert the possible job states (and handle the None)
          */
-        for cid in 0..3 {
+        for cid in ClientId::iter() {
             /*
              * We don't ever expect the job state to return None, but
              * if it does because something else is wrong, I don't want
              * to panic here while trying to debug it.
              */
-            let dss = match self.state.get(&(cid as u8)) {
-                Some(x) => format!("{}", x).to_string(),
-                None => " ???".to_string(),
-            };
+            let dss = format!("{}", self.state[cid]);
             state.push(dss);
         }
 
@@ -8040,11 +7958,11 @@ impl DownstairsIO {
  */
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 struct WorkSummary {
-    id: u64,
+    id: JobId,
     replay: bool,
     job_type: String,
     num_blocks: usize,
-    deps: Vec<u64>,
+    deps: Vec<JobId>,
     ack_status: AckStatus,
     state: Vec<String>,
 }
@@ -8053,16 +7971,16 @@ struct WorkSummary {
 struct ReconcileIO {
     id: u64,
     op: Message,
-    state: HashMap<u8, IOState>,
+    state: ClientData<IOState>,
 }
 
 impl ReconcileIO {
     fn new(id: u64, op: Message) -> ReconcileIO {
-        let mut state = HashMap::new();
-        for cl in 0..3 {
-            state.insert(cl, IOState::New);
+        ReconcileIO {
+            id,
+            op,
+            state: ClientData::new(IOState::New),
         }
-        ReconcileIO { id, op, state }
     }
 }
 /*
@@ -8072,19 +7990,19 @@ impl ReconcileIO {
 #[derive(Debug, Clone, PartialEq)]
 pub enum IOop {
     Write {
-        dependencies: Vec<u64>, // Jobs that must finish before this
+        dependencies: Vec<JobId>, // Jobs that must finish before this
         writes: Vec<crucible_protocol::Write>,
     },
     WriteUnwritten {
-        dependencies: Vec<u64>, // Jobs that must finish before this
+        dependencies: Vec<JobId>, // Jobs that must finish before this
         writes: Vec<crucible_protocol::Write>,
     },
     Read {
-        dependencies: Vec<u64>, // Jobs that must finish before this
+        dependencies: Vec<JobId>, // Jobs that must finish before this
         requests: Vec<ReadRequest>,
     },
     Flush {
-        dependencies: Vec<u64>, // Jobs that must finish before this
+        dependencies: Vec<JobId>, // Jobs that must finish before this
         flush_number: u64,
         gen_number: u64,
         snapshot_details: Option<SnapshotDetails>,
@@ -8094,35 +8012,35 @@ pub enum IOop {
      * These operations are for repairing a bad downstairs
      */
     ExtentClose {
-        dependencies: Vec<u64>, // Jobs that must finish before this
+        dependencies: Vec<JobId>, // Jobs that must finish before this
         extent: usize,
     },
     ExtentFlushClose {
-        dependencies: Vec<u64>, // Jobs that must finish before this
+        dependencies: Vec<JobId>, // Jobs that must finish before this
         extent: usize,
         flush_number: u64,
         gen_number: u64,
-        source_downstairs: u8,
-        repair_downstairs: Vec<u8>,
+        source_downstairs: ClientId,
+        repair_downstairs: Vec<ClientId>,
     },
     ExtentLiveRepair {
-        dependencies: Vec<u64>, // Jobs that must finish before this
+        dependencies: Vec<JobId>, // Jobs that must finish before this
         extent: usize,
-        source_downstairs: u8,
+        source_downstairs: ClientId,
         source_repair_address: SocketAddr,
-        repair_downstairs: Vec<u8>,
+        repair_downstairs: Vec<ClientId>,
     },
     ExtentLiveReopen {
-        dependencies: Vec<u64>, // Jobs that must finish before this
+        dependencies: Vec<JobId>, // Jobs that must finish before this
         extent: usize,
     },
     ExtentLiveNoOp {
-        dependencies: Vec<u64>, // Jobs that must finish before this
+        dependencies: Vec<JobId>, // Jobs that must finish before this
     },
 }
 
 impl IOop {
-    pub fn deps(&self) -> &Vec<u64> {
+    pub fn deps(&self) -> &Vec<JobId> {
         match &self {
             IOop::Write {
                 dependencies,
@@ -8202,7 +8120,7 @@ impl IOop {
      * The size of the IO, or extent number if a repair operation.
      * A Vec of the dependencies.
      */
-    pub fn ioop_summary(&self) -> (String, usize, Vec<u64>) {
+    pub fn ioop_summary(&self) -> (String, usize, Vec<JobId>) {
         let (job_type, num_blocks, deps) = match self {
             IOop::Read {
                 dependencies,
@@ -8291,12 +8209,16 @@ impl IOop {
         (job_type, num_blocks, deps)
     }
 
-    // We have a downstairs in LiveRepair.
-    // Compare the extent IDs for this IO and where we have repaired
-    // so far, and determine if this IO should be sent to the downstairs
-    // or not (skipped).
+    // We have a downstairs in LiveRepair. Compare the extent IDs for this IO
+    // and where we have repaired so far (or reserved dependencies for a
+    // repair), and determine if this IO should be sent to the downstairs or not
+    // (skipped).
     // Return true if we should send it.
-    pub fn send_io_live_repair(&self, extent_limit: Option<usize>) -> bool {
+    pub fn send_io_live_repair(
+        &self,
+        extent_limit: Option<usize>,
+        repair_job_ids: &HashMap<u32, ExtentRepairIDs>,
+    ) -> bool {
         if let Some(extent_limit) = extent_limit {
             // The extent_limit has been set, so we have repair work in
             // progress.  If our IO touches an extent less than or equal
@@ -8311,7 +8233,9 @@ impl IOop {
                     writes,
                 } => {
                     for write in writes {
-                        if write.eid <= extent_limit as u64 {
+                        if write.eid <= extent_limit as u64
+                            || repair_job_ids.contains_key(&(write.eid as u32))
+                        {
                             return true;
                         }
                     }
@@ -8322,7 +8246,9 @@ impl IOop {
                     writes,
                 } => {
                     for write in writes {
-                        if write.eid <= extent_limit as u64 {
+                        if write.eid <= extent_limit as u64
+                            || repair_job_ids.contains_key(&(write.eid as u32))
+                        {
                             return true;
                         }
                     }
@@ -8339,7 +8265,9 @@ impl IOop {
                     requests,
                 } => {
                     for req in requests {
-                        if req.eid <= extent_limit as u64 {
+                        if req.eid <= extent_limit as u64
+                            || repair_job_ids.contains_key(&(req.eid as u32))
+                        {
                             return true;
                         }
                     }
@@ -8403,25 +8331,25 @@ impl fmt::Display for IOState {
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub struct IOStateCount {
-    pub new: [u32; 3],
-    pub in_progress: [u32; 3],
-    pub done: [u32; 3],
-    pub skipped: [u32; 3],
-    pub error: [u32; 3],
+    pub new: ClientData<u32>,
+    pub in_progress: ClientData<u32>,
+    pub done: ClientData<u32>,
+    pub skipped: ClientData<u32>,
+    pub error: ClientData<u32>,
 }
 
 impl IOStateCount {
     fn new() -> IOStateCount {
         IOStateCount {
-            new: [0; 3],
-            in_progress: [0; 3],
-            done: [0; 3],
-            skipped: [0; 3],
-            error: [0; 3],
+            new: ClientData::new(0),
+            in_progress: ClientData::new(0),
+            done: ClientData::new(0),
+            skipped: ClientData::new(0),
+            error: ClientData::new(0),
         }
     }
 
-    fn show_all(&mut self) {
+    fn show_all(&self) {
         println!("   STATES      DS:0   DS:1   DS:2   TOTAL");
         self.show(IOState::New);
         self.show(IOState::InProgress);
@@ -8431,80 +8359,59 @@ impl IOStateCount {
         self.show(IOState::Error(e));
     }
 
-    fn show(&mut self, state: IOState) {
-        let state_stat;
+    fn get_mut(&mut self, state: &IOState) -> &mut ClientData<u32> {
+        match state {
+            IOState::New => &mut self.new,
+            IOState::InProgress => &mut self.in_progress,
+            IOState::Done => &mut self.done,
+            IOState::Skipped => &mut self.skipped,
+            IOState::Error(_) => &mut self.error,
+        }
+    }
+
+    fn get(&self, state: &IOState) -> &ClientData<u32> {
+        match state {
+            IOState::New => &self.new,
+            IOState::InProgress => &self.in_progress,
+            IOState::Done => &self.done,
+            IOState::Skipped => &self.skipped,
+            IOState::Error(_) => &self.error,
+        }
+    }
+
+    fn show(&self, state: IOState) {
+        let state_stat = self.get(&state);
         match state {
             IOState::New => {
-                state_stat = self.new;
                 print!("    New        ");
             }
             IOState::InProgress => {
-                state_stat = self.in_progress;
                 print!("    Sent       ");
             }
             IOState::Done => {
-                state_stat = self.done;
                 print!("    Done       ");
             }
             IOState::Skipped => {
-                state_stat = self.skipped;
                 print!("    Skipped    ");
             }
             IOState::Error(_) => {
-                state_stat = self.error;
                 print!("    Error      ");
             }
         }
         let mut sum = 0;
-        for ds_stat in state_stat {
-            print!("{:4}   ", ds_stat);
-            sum += ds_stat;
+        for cid in ClientId::iter() {
+            print!("{:4}   ", state_stat[cid]);
+            sum += state_stat[cid];
         }
         println!("{:4}", sum);
     }
 
-    pub fn incr(&mut self, state: &IOState, cid: u8) {
-        assert!(cid < 3);
-        let cid = cid as usize;
-        match state {
-            IOState::New => {
-                self.new[cid] += 1;
-            }
-            IOState::InProgress => {
-                self.in_progress[cid] += 1;
-            }
-            IOState::Done => {
-                self.done[cid] += 1;
-            }
-            IOState::Skipped => {
-                self.skipped[cid] += 1;
-            }
-            IOState::Error(_) => {
-                self.error[cid] += 1;
-            }
-        }
+    pub fn incr(&mut self, state: &IOState, cid: ClientId) {
+        self.get_mut(state)[cid] += 1;
     }
 
-    pub fn decr(&mut self, state: &IOState, cid: u8) {
-        assert!(cid < 3);
-        let cid = cid as usize;
-        match state {
-            IOState::New => {
-                self.new[cid] -= 1;
-            }
-            IOState::InProgress => {
-                self.in_progress[cid] -= 1;
-            }
-            IOState::Done => {
-                self.done[cid] -= 1;
-            }
-            IOState::Skipped => {
-                self.skipped[cid] -= 1;
-            }
-            IOState::Error(_) => {
-                self.error[cid] -= 1;
-            }
-        }
+    pub fn decr(&mut self, state: &IOState, cid: ClientId) {
+        self.get_mut(state)[cid] -= 1;
     }
 }
 
@@ -8797,8 +8704,8 @@ struct GtoS {
      * downstairs work. The value is the buffer size of the operation in
      * blocks.
      */
-    submitted: HashMap<u64, u64>,
-    completed: Vec<u64>,
+    submitted: HashMap<JobId, u64>,
+    completed: Vec<JobId>,
 
     /*
      * This buffer is provided by the guest request. If this is a read,
@@ -8815,7 +8722,7 @@ struct GtoS {
      * Data moving in/out of this buffer will be encrypted or decrypted
      * depending on the operation.
      */
-    downstairs_buffer: HashMap<u64, Vec<ReadResponse>>,
+    downstairs_buffer: HashMap<JobId, Vec<ReadResponse>>,
 
     /*
      * Notify the caller waiting on the job to finish.
@@ -8831,10 +8738,10 @@ struct GtoS {
 
 impl GtoS {
     pub fn new(
-        submitted: HashMap<u64, u64>,
-        completed: Vec<u64>,
+        submitted: HashMap<JobId, u64>,
+        completed: Vec<JobId>,
         guest_buffer: Option<Buffer>,
-        downstairs_buffer: HashMap<u64, Vec<ReadResponse>>,
+        downstairs_buffer: HashMap<JobId, Vec<ReadResponse>>,
         req: Option<BlockReq>,
     ) -> GtoS {
         GtoS {
@@ -8957,7 +8864,7 @@ impl GuestWork {
     async fn gw_ds_complete(
         &mut self,
         gw_id: u64,
-        ds_id: u64,
+        ds_id: JobId,
         data: Option<Vec<ReadResponse>>,
         result: Result<(), CrucibleError>,
         log: &Logger,
@@ -9415,6 +9322,9 @@ impl BlockIO for Guest {
             crucible_bail!(BlockSizeMismatch);
         }
 
+        if data.is_empty() {
+            return Ok(());
+        }
         let rio = BlockOp::Read { offset, data };
         Ok(self.send(rio).await.wait().await?)
     }
@@ -9434,6 +9344,9 @@ impl BlockIO for Guest {
             crucible_bail!(BlockSizeMismatch);
         }
 
+        if data.is_empty() {
+            return Ok(());
+        }
         let wio = BlockOp::Write { offset, data };
         Ok(self.send(wio).await.wait().await?)
     }
@@ -9453,6 +9366,9 @@ impl BlockIO for Guest {
             crucible_bail!(BlockSizeMismatch);
         }
 
+        if data.is_empty() {
+            return Ok(());
+        }
         let wio = BlockOp::WriteUnwritten { offset, data };
         Ok(self.send(wio).await.wait().await?)
     }
@@ -9524,7 +9440,7 @@ impl Default for Guest {
 #[derive(Debug)]
 struct Repair {
     repair: bool,
-    client_id: u8,
+    client_id: ClientId,
     rep_id: u64,
 }
 
@@ -9536,9 +9452,22 @@ struct Repair {
  * Send a message there is repair work to do.
  */
 pub struct Target {
+    /// Used to indicate that new work has arrived for a downstairs
+    ///
+    /// This is a doorbell; the value is not used
     ds_work_tx: mpsc::Sender<u64>,
-    ds_done_tx: mpsc::Sender<u64>,
+
+    /// Indicates that we can send a reply to a guest
+    ds_done_tx: mpsc::Sender<()>,
+
+    /// Receives an activation request
+    ///
+    /// The value being sent is the generation number, but is not used
     ds_active_tx: watch::Sender<u64>,
+
+    /// Notifies a downstairs that reconciliation work needs to happen
+    ///
+    /// The value is unused
     ds_reconcile_work_tx: watch::Sender<u64>,
 }
 
@@ -9546,7 +9475,7 @@ pub struct Target {
 struct Condition {
     target: SocketAddr,
     connected: bool,
-    client_id: u8,
+    client_id: ClientId,
 }
 
 /**
@@ -9604,7 +9533,7 @@ fn send_active(t: &[Target], gen: u64) {
  * complete any buffer transfers (reads) and then notify the guest that
  * their work has been completed.
  */
-async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
+async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<()>) {
     /*
      * Accept _any_ ds_done message, but work on the whole list of ackable
      * work.
@@ -9633,7 +9562,8 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
             let mut ds = up.downstairs.lock().await;
             debug!(up.log, "up_ds_listen process {}", ds_id_done);
 
-            let done = ds.ds_active.get_mut(ds_id_done).unwrap();
+            let mut handle = ds.ds_active.get_mut(ds_id_done).unwrap();
+            let done = handle.job();
             /*
              * Make sure the job state has not changed since we made the
              * list.
@@ -9652,6 +9582,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
 
             let io_size = done.io_size();
             let data = done.data.take();
+            drop(handle);
 
             ds.ack(ds_id);
             debug!(ds.log, "[A] ack job {}:{}", ds_id, gw_id);
@@ -9671,7 +9602,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<u64>) {
     warn!(up.log, "up_ds_listen loop done");
 }
 
-async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<u64>) {
+async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<()>) {
     // Check outstanding IOops for each downstairs.
     // If the number is too high, then mark that downstairs as failed, scrub
     // any outstanding jobs.
@@ -9685,9 +9616,9 @@ async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<u64>) {
     drop(active);
 
     let mut notify_guest = false;
-    for cid in 0..3 {
+    for cid in ClientId::iter() {
         // Only downstairs in these states are checked.
-        match ds.ds_state[cid as usize] {
+        match ds.ds_state[cid] {
             DsState::Active
             | DsState::LiveRepair
             | DsState::Offline
@@ -9720,7 +9651,7 @@ async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<u64>) {
         }
     }
     if notify_guest {
-        match ds_done_tx.send(0).await {
+        match ds_done_tx.send(()).await {
             Ok(()) => {}
             Err(e) => {
                 error!(
@@ -9987,17 +9918,17 @@ async fn process_new_io(
 pub struct Arg {
     pub up_count: u32,
     pub ds_count: u32,
-    pub ds_state: Vec<DsState>,
+    pub ds_state: [DsState; 3],
     pub ds_io_count: IOStateCount,
     pub ds_reconciled: usize,
     pub ds_reconcile_needed: usize,
-    pub ds_live_repair_completed: Vec<usize>,
-    pub ds_live_repair_aborted: Vec<usize>,
-    pub ds_connected: Vec<usize>,
-    pub ds_replaced: Vec<usize>,
-    pub ds_flow_control: Vec<usize>,
-    pub ds_extents_repaired: Vec<usize>,
-    pub ds_extents_confirmed: Vec<usize>,
+    pub ds_live_repair_completed: [usize; 3],
+    pub ds_live_repair_aborted: [usize; 3],
+    pub ds_connected: [usize; 3],
+    pub ds_replaced: [usize; 3],
+    pub ds_flow_control: [usize; 3],
+    pub ds_extents_repaired: [usize; 3],
+    pub ds_extents_confirmed: [usize; 3],
 }
 
 /**
@@ -10298,7 +10229,7 @@ pub async fn up_main(
      * tasks.
      */
     let mut dst = Vec::new();
-    for client_id in 0..3 {
+    for client_id in ClientId::iter() {
         /*
          * Create the channel that we will use to request that the loop
          * check for work to do in the central structure.
@@ -10374,8 +10305,8 @@ pub async fn up_main(
  * construct the proper IOop to submit to the downstairs.
  */
 fn create_write_eob(
-    ds_id: u64,
-    dependencies: Vec<u64>,
+    ds_id: JobId,
+    dependencies: Vec<JobId>,
     gw_id: u64,
     writes: Vec<crucible_protocol::Write>,
     is_write_unwritten: bool,
@@ -10397,16 +10328,11 @@ fn create_write_eob(
         }
     };
 
-    let mut state = HashMap::new();
-    for cl in 0..3 {
-        state.insert(cl, IOState::New);
-    }
-
     DownstairsIO {
         ds_id,
         guest_id: gw_id,
         work: awrite,
-        state,
+        state: ClientData::new(IOState::New),
         ack_status: AckStatus::NotAcked,
         replay: false,
         data: None,
@@ -10421,8 +10347,8 @@ fn create_write_eob(
  * DownstairsIO that the downstairs can understand.
  */
 fn create_read_eob(
-    ds_id: u64,
-    dependencies: Vec<u64>,
+    ds_id: JobId,
+    dependencies: Vec<JobId>,
     gw_id: u64,
     requests: Vec<ReadRequest>,
     impacted_blocks: ImpactedBlocks,
@@ -10432,16 +10358,11 @@ fn create_read_eob(
         requests,
     };
 
-    let mut state = HashMap::new();
-    for cl in 0..3 {
-        state.insert(cl, IOState::New);
-    }
-
     DownstairsIO {
         ds_id,
         guest_id: gw_id,
         work: aread,
-        state,
+        state: ClientData::new(IOState::New),
         ack_status: AckStatus::NotAcked,
         replay: false,
         data: None,
@@ -10455,8 +10376,8 @@ fn create_read_eob(
  */
 #[allow(clippy::too_many_arguments)]
 fn create_flush(
-    ds_id: u64,
-    dependencies: Vec<u64>,
+    ds_id: JobId,
+    dependencies: Vec<JobId>,
     flush_number: u64,
     guest_id: u64,
     gen_number: u64,
@@ -10472,15 +10393,11 @@ fn create_flush(
         extent_limit,
     };
 
-    let mut state = HashMap::new();
-    for cl in 0..3 {
-        state.insert(cl, IOState::New);
-    }
     DownstairsIO {
         ds_id,
         guest_id,
         work: flush,
-        state,
+        state: ClientData::new(IOState::New),
         ack_status: AckStatus::NotAcked,
         replay: false,
         data: None,
@@ -10625,18 +10542,11 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
                 job.guest_id, ack, id, job_type, num_blocks
             );
 
-            for cid in 0..3 {
-                let state = job.state.get(&cid);
-                match state {
-                    Some(state) => {
-                        // XXX I have no idea why this is two spaces instead of
-                        // one...
-                        print!("  {0:>5}", state);
-                    }
-                    _x => {
-                        print!("  {0:>5}", "????");
-                    }
-                }
+            for cid in ClientId::iter() {
+                let state = &job.state[cid];
+                // XXX I have no idea why this is two spaces instead of
+                // one...
+                print!("  {0:>5}", state);
             }
             print!(" {0:>6}", job.replay);
 
