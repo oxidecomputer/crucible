@@ -106,62 +106,45 @@ pub async fn dynamometer(
                     }
                 }
 
-                match flush_config {
-                    DynoFlushConfig::FlushPerIops(value) => {
-                        if iops_since_last_flush > value {
-                            region
-                                .region_flush(
-                                    flush_number,
-                                    gen_number,
-                                    &None, // snapshot_details
-                                    JobId(1000),
-                                    None, // extent_limit
-                                )
-                                .await?;
-
-                            flush_number += 1;
-                            gen_number += 1;
-                            iops_since_last_flush = 0;
-                        }
+                let needs_flush = match flush_config {
+                    DynoFlushConfig::FlushPerIops(value)
+                        if iops_since_last_flush > value =>
+                    {
+                        iops_since_last_flush = 0;
+                        true
                     }
 
-                    DynoFlushConfig::FlushPerBlocks(value) => {
-                        if blocks_since_last_flush > value {
-                            region
-                                .region_flush(
-                                    flush_number,
-                                    gen_number,
-                                    &None, // snapshot_details
-                                    JobId(1000),
-                                    None, // extent_limit
-                                )
-                                .await?;
-
-                            flush_number += 1;
-                            gen_number += 1;
-                            blocks_since_last_flush = 0;
-                        }
+                    DynoFlushConfig::FlushPerBlocks(value)
+                        if blocks_since_last_flush > value =>
+                    {
+                        blocks_since_last_flush = 0;
+                        true
                     }
 
-                    DynoFlushConfig::FlushPerMs(value) => {
+                    DynoFlushConfig::FlushPerMs(value)
                         if flush_time.elapsed()
-                            > Duration::from_millis(value as u64)
-                        {
-                            region
-                                .region_flush(
-                                    flush_number,
-                                    gen_number,
-                                    &None, // snapshot_details
-                                    JobId(1000),
-                                    None, // extent_limit
-                                )
-                                .await?;
-
-                            flush_number += 1;
-                            gen_number += 1;
-                            flush_time = Instant::now();
-                        }
+                            > Duration::from_millis(value as u64) =>
+                    {
+                        flush_time = Instant::now();
+                        true
                     }
+
+                    _ => false,
+                };
+
+                if needs_flush {
+                    region
+                        .region_flush(
+                            flush_number,
+                            gen_number,
+                            &None, // snapshot_details
+                            JobId(1000),
+                            None, // extent_limit
+                        )
+                        .await?;
+
+                    flush_number += 1;
+                    gen_number += 1;
                 }
 
                 block_offset += num_writes as u64;
