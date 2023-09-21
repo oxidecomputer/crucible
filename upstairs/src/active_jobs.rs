@@ -437,7 +437,7 @@ impl BlockMap {
         // new range:          |============|
         // result:               |--------|
         for i in [r.start, r.end] {
-            if let Some(split) = self.find_range_containing(i) {
+            if let Some(split) = self.find_split_location(i) {
                 let prev = self.addr_to_jobs.get_mut(&split).unwrap();
                 let v = prev.clone();
                 prev.0 = i;
@@ -446,11 +446,11 @@ impl BlockMap {
         }
     }
 
-    /// Looks for a range that contains the given address
+    /// Looks for a range that should be split to insert the given address
     ///
     /// If such a range exists, returns its starting address (i.e. the key to
     /// look it up in [`self.addr_to_jobs`].
-    fn find_range_containing(&self, i: ImpactedAddr) -> Option<ImpactedAddr> {
+    fn find_split_location(&self, i: ImpactedAddr) -> Option<ImpactedAddr> {
         match self.addr_to_jobs.range(..i).rev().next() {
             Some((start, (end, _))) if i < *end => Some(*start),
             _ => None,
@@ -754,7 +754,6 @@ mod test {
         }
         fn remove_job(&mut self, job: JobId) {
             let r = self.job_to_range.remove(&job).unwrap();
-            // TODO: why does `blocks` not return an ImpactedAddr?
             for (i, b) in r.blocks(&self.ddef) {
                 let addr = ImpactedAddr {
                     extent_id: i,
