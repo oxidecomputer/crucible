@@ -4500,20 +4500,27 @@ impl Downstairs {
                     dependencies: _dependencies,
                     flush_number: _flush_number,
                     gen_number: _gen_number,
-                    snapshot_details: _,
+                    snapshot_details,
                     extent_limit: _,
                 } => {
                     assert!(read_data.is_empty());
                     assert!(extent_info.is_none());
                     /*
-                     * If we are deactivating, then we want an ACK from
-                     * all three downstairs, not the usual two.
+                     * If we are deactivating or have requested a
+                     * snapshot, then we want an ACK from all three
+                     * downstairs, not the usual two.
+                     *
                      * TODO here for handling the case where one (or two,
                      * or three! gasp!) downstairs are Offline.
                      */
-                    if (deactivate && jobs_completed_ok == 3)
-                        || (!deactivate && jobs_completed_ok == 2)
-                    {
+                    let ack_at_num_jobs =
+                        if deactivate || snapshot_details.is_some() {
+                            3
+                        } else {
+                            2
+                        };
+
+                    if jobs_completed_ok == ack_at_num_jobs {
                         notify_guest = true;
                         job.ack_status = AckStatus::AckReady;
                         cdt::up__to__ds__flush__done!(|| job.guest_id);

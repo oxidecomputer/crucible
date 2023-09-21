@@ -825,6 +825,85 @@ pub(crate) mod up_test {
         assert_eq!(ds.completed.len(), 1);
     }
 
+    // Ensure that a snapshot requires all three downstairs to return Ok
+    #[tokio::test]
+    async fn work_flush_snapshot_needs_three() {
+        let upstairs = Upstairs::test_default(None);
+        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        upstairs.set_active().await.unwrap();
+        let mut ds = upstairs.downstairs.lock().await;
+
+        let next_id = ds.next_id();
+
+        let op = create_flush(
+            next_id,
+            vec![],
+            10,
+            0,
+            0,
+            Some(SnapshotDetails {
+                snapshot_name: String::from("snap"),
+            }),
+            ImpactedBlocks::Empty,
+            None,
+        );
+
+        ds.enqueue(op, ds_done_tx.clone()).await;
+
+        ds.in_progress(next_id, ClientId::new(0));
+        ds.in_progress(next_id, ClientId::new(1));
+        ds.in_progress(next_id, ClientId::new(2));
+
+        assert!(!ds
+            .process_ds_completion(
+                next_id,
+                ClientId::new(0),
+                Ok(vec![]),
+                &None,
+                UpState::Active,
+                None,
+            )
+            .unwrap());
+
+        assert_eq!(ds.ackable_work().len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        assert!(!ds
+            .process_ds_completion(
+                next_id,
+                ClientId::new(1),
+                Ok(vec![]),
+                &None,
+                UpState::Active,
+                None,
+            )
+            .unwrap());
+
+        assert_eq!(ds.ackable_work().len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        assert!(ds
+            .process_ds_completion(
+                next_id,
+                ClientId::new(2),
+                Ok(vec![]),
+                &None,
+                UpState::Active,
+                None,
+            )
+            .unwrap());
+
+        assert_eq!(ds.ackable_work().len(), 1);
+
+        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
+        assert_eq!(state, AckStatus::AckReady);
+        ds.ack(next_id);
+
+        ds.retire_check(next_id);
+
+        assert_eq!(ds.completed.len(), 1);
+    }
+
     #[tokio::test]
     async fn work_flush_one_error_then_ok() {
         let upstairs = Upstairs::test_default(None);
