@@ -5,6 +5,7 @@ pub enum DynoFlushConfig {
     FlushPerIops(usize),
     FlushPerBlocks(usize),
     FlushPerMs(Duration),
+    None,
 }
 
 pub async fn dynamometer(

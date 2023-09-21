@@ -211,15 +211,15 @@ enum Args {
         samples: usize,
 
         // Flush per iops
-        #[clap(long)]
+        #[clap(long, conflicts_with_all = ["flush_per_blocks", "flush_per_ms"])]
         flush_per_iops: Option<usize>,
 
         // Flush per blocks written
-        #[clap(long)]
+        #[clap(long, conflicts_with_all = ["flush_per_iops", "flush_per_ms"])]
         flush_per_blocks: Option<usize>,
 
         // Flush per ms
-        #[clap(long, value_parser = parse_duration)]
+        #[clap(long, value_parser = parse_duration, conflicts_with_all = ["flush_per_iops", "flush_per_blocks"])]
         flush_per_ms: Option<Duration>,
     },
 }
@@ -456,26 +456,6 @@ async fn main() -> Result<()> {
             )
             .await?;
 
-            eprintln!(
-                "{:?} {:?} {:?}",
-                flush_per_iops, flush_per_blocks, flush_per_ms
-            );
-
-            let mut flush_types_set = 0;
-            if flush_per_iops.is_some() {
-                flush_types_set += 1;
-            }
-            if flush_per_blocks.is_some() {
-                flush_types_set += 1;
-            }
-            if flush_per_ms.is_some() {
-                flush_types_set += 1;
-            }
-
-            if flush_types_set > 1 {
-                bail!("too many flush types set!");
-            }
-
             let flush_config = if flush_per_iops.is_some() {
                 DynoFlushConfig::FlushPerIops(flush_per_iops.unwrap())
             } else if flush_per_blocks.is_some() {
@@ -483,7 +463,7 @@ async fn main() -> Result<()> {
             } else if flush_per_ms.is_some() {
                 DynoFlushConfig::FlushPerMs(flush_per_ms.unwrap())
             } else {
-                panic!("wat");
+                DynoFlushConfig::None
             };
 
             dynamometer(region, num_writes, samples, flush_config).await?;
