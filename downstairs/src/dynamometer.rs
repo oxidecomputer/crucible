@@ -4,7 +4,7 @@ use super::*;
 pub enum DynoFlushConfig {
     FlushPerIops(usize),
     FlushPerBlocks(usize),
-    FlushPerMs(usize),
+    FlushPerMs(Duration),
 }
 
 pub async fn dynamometer(
@@ -122,8 +122,7 @@ pub async fn dynamometer(
                     }
 
                     DynoFlushConfig::FlushPerMs(value)
-                        if flush_time.elapsed()
-                            > Duration::from_millis(value as u64) =>
+                        if flush_time.elapsed() > value =>
                     {
                         flush_time = Instant::now();
                         true

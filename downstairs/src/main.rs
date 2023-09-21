@@ -4,6 +4,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 use clap::Parser;
@@ -210,17 +211,22 @@ enum Args {
         samples: usize,
 
         // Flush per iops
-        #[clap(long, action, default_value = None)]
+        #[clap(long)]
         flush_per_iops: Option<usize>,
 
         // Flush per blocks written
-        #[clap(long, action, default_value = None)]
+        #[clap(long)]
         flush_per_blocks: Option<usize>,
 
         // Flush per ms
-        #[clap(long, action, default_value = None)]
-        flush_per_ms: Option<usize>,
+        #[clap(long, value_parser = parse_duration)]
+        flush_per_ms: Option<Duration>,
     },
+}
+
+fn parse_duration(arg: &str) -> Result<Duration, std::num::ParseIntError> {
+    let ms = arg.parse()?;
+    Ok(Duration::from_millis(ms))
 }
 
 #[tokio::main]
