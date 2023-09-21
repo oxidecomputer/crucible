@@ -3598,7 +3598,7 @@ impl Downstairs {
     /**
      * Build a list of jobs that are ready to be acked.
      */
-    fn ackable_work(&mut self) -> Vec<JobId> {
+    fn ackable_work(&mut self) -> BTreeSet<JobId> {
         self.ds_active.ackable_work()
     }
 
@@ -9539,14 +9539,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<()>) {
          * process the set of things we know are done now, then the
          * ds_done_rx.recv() should trigger when we loop.
          */
-        let mut ack_list = up.downstairs.lock().await.ackable_work();
-        /*
-         * This needs some sort order.  If we are not acking things in job
-         * ID order, then we must use a queue or something that will allow
-         * the jobs to be acked in the order they were completed on the
-         * downstairs.
-         */
-        ack_list.sort_unstable();
+        let ack_list = up.downstairs.lock().await.ackable_work();
 
         let jobs_checked = ack_list.len();
         let mut gw = up.guest.guest_work.lock().await;
