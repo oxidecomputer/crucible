@@ -9028,6 +9028,13 @@ pub struct Guest {
      */
     bw_tokens: std::sync::Mutex<usize>, // bytes
     bw_limit: Option<usize>,            // bytes per second
+
+    /// Local cache for block size
+    ///
+    /// This is 0 when unpopulated, and non-zero otherwise; storing it locally
+    /// saves a round-trip through the `reqs` queue, and using an atomic means
+    /// it can be read from a `&self` reference.
+    block_size: AtomicU64,
 }
 
 /*
@@ -9060,6 +9067,8 @@ impl Guest {
 
             bw_tokens: std::sync::Mutex::new(0),
             bw_limit: None,
+
+            block_size: AtomicU64::new(0),
         }
     }
 
@@ -9311,12 +9320,19 @@ impl BlockIO for Guest {
     }
 
     async fn get_block_size(&self) -> Result<u64, CrucibleError> {
-        let data = Arc::new(Mutex::new(0));
-        let size_query = BlockOp::QueryBlockSize { data: data.clone() };
-        self.send(size_query).await.wait().await?;
+        let bs = self.block_size.load(std::sync::atomic::Ordering::Relaxed);
+        if bs == 0 {
+            let data = Arc::new(Mutex::new(0));
+            let size_query = BlockOp::QueryBlockSize { data: data.clone() };
+            self.send(size_query).await.wait().await?;
 
-        let result = *data.lock().await;
-        Ok(result)
+            let result = *data.lock().await;
+            self.block_size
+                .store(result, std::sync::atomic::Ordering::Relaxed);
+            Ok(result)
+        } else {
+            Ok(bs)
+        }
     }
 
     async fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
