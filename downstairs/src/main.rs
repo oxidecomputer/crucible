@@ -183,9 +183,7 @@ enum Args {
         bind_addr: SocketAddr,
     },
     Version,
-    /*
-    Measure an isolated downstairs
-    */
+    /// Measure an isolated downstairs
     Dynamometer {
         #[clap(long, default_value_t = 512, action)]
         block_size: u64,
@@ -202,23 +200,23 @@ enum Args {
         #[clap(long, action)]
         encrypted: bool,
 
-        // Number of writes to submit at one time to region_write
+        /// Number of writes to submit at one time to region_write
         #[clap(short, long, action, default_value_t = 1)]
         num_writes: usize,
 
-        // Number of samples to exit for
+        /// Number of samples to exit for
         #[clap(short, long, action, default_value_t = 10)]
         samples: usize,
 
-        // Flush per iops
+        /// Flush per iops
         #[clap(long, conflicts_with_all = ["flush_per_blocks", "flush_per_ms"])]
         flush_per_iops: Option<usize>,
 
-        // Flush per blocks written
+        /// Flush per blocks written
         #[clap(long, conflicts_with_all = ["flush_per_iops", "flush_per_ms"])]
         flush_per_blocks: Option<usize>,
 
-        // Flush per ms
+        /// Flush per ms
         #[clap(long, value_parser = parse_duration, conflicts_with_all = ["flush_per_iops", "flush_per_blocks"])]
         flush_per_ms: Option<Duration>,
     },
