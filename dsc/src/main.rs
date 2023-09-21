@@ -152,7 +152,7 @@ enum Action {
         block_size: u32,
 
         /// Delete all existing test and region directories
-        #[clap(long, action)]
+        #[clap(long, action, requires = "create")]
         cleanup: bool,
 
         /// The IP/Port where the control server will listen

@@ -3,6 +3,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt;
+use std::fmt::Debug;
 use std::fs::{rename, File, OpenOptions};
 use std::io::{BufReader, IoSlice, IoSliceMut, Read, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
@@ -48,6 +49,36 @@ pub struct DownstairsBlockContext {
 
     pub block: u64,
     pub on_disk_hash: u64,
+}
+
+/// Wrapper type for either a job or reconciliation ID
+///
+/// This is useful for debug logging / DTrace probes, and not much else
+#[derive(Copy, Clone, Debug)]
+pub(crate) enum JobOrReconciliationId {
+    JobId(JobId),
+    ReconciliationId(ReconciliationId),
+}
+
+impl JobOrReconciliationId {
+    fn get(self) -> u64 {
+        match self {
+            Self::JobId(i) => i.0,
+            Self::ReconciliationId(i) => i.0,
+        }
+    }
+}
+
+impl From<JobId> for JobOrReconciliationId {
+    fn from(i: JobId) -> Self {
+        Self::JobId(i)
+    }
+}
+
+impl From<ReconciliationId> for JobOrReconciliationId {
+    fn from(i: ReconciliationId) -> Self {
+        Self::ReconciliationId(i)
+    }
 }
 
 #[derive(Debug)]
@@ -1327,13 +1358,14 @@ impl Extent {
     }
 
     #[instrument]
-    pub async fn flush(
+    pub(crate) async fn flush<I: Into<JobOrReconciliationId> + Debug>(
         &self,
         new_flush: u64,
         new_gen: u64,
-        job_id: JobId,
+        id: I, // only used for logging
         log: &Logger,
     ) -> Result<(), CrucibleError> {
+        let job_id: JobOrReconciliationId = id.into();
         let mut inner = self.inner.lock().await;
 
         if !inner.dirty()? {
@@ -1356,7 +1388,7 @@ impl Extent {
         let n_dirty_blocks = inner.dirty_blocks.len() as u64;
 
         cdt::extent__flush__start!(|| {
-            (job_id.0, self.number, n_dirty_blocks)
+            (job_id.get(), self.number, n_dirty_blocks)
         });
 
         /*
@@ -1364,7 +1396,7 @@ impl Extent {
          * This must be done before we update the flush number.
          */
         cdt::extent__flush__file__start!(|| {
-            (job_id.0, self.number, n_dirty_blocks)
+            (job_id.get(), self.number, n_dirty_blocks)
         });
         if let Err(e) = inner.file.sync_all() {
             /*
@@ -1378,7 +1410,7 @@ impl Extent {
             );
         }
         cdt::extent__flush__file__done!(|| {
-            (job_id.0, self.number, n_dirty_blocks)
+            (job_id.get(), self.number, n_dirty_blocks)
         });
 
         // Clear old block contexts. In order to be crash consistent, only
@@ -1390,7 +1422,7 @@ impl Extent {
         // file is rehashed, since in that case we don't have that luxury.
 
         cdt::extent__flush__collect__hashes__start!(|| {
-            (job_id.0, self.number, n_dirty_blocks)
+            (job_id.get(), self.number, n_dirty_blocks)
         });
 
         // Rehash any parts of the file that we *may have written* data to since
@@ -1399,11 +1431,11 @@ impl Extent {
         let n_rehashed = inner.rehash_dirty_blocks(self.block_size)?;
 
         cdt::extent__flush__collect__hashes__done!(|| {
-            (job_id.0, self.number, n_rehashed as u64)
+            (job_id.get(), self.number, n_rehashed as u64)
         });
 
         cdt::extent__flush__sqlite__insert__start!(|| {
-            (job_id.0, self.number, n_dirty_blocks)
+            (job_id.get(), self.number, n_dirty_blocks)
         });
 
         // We put all of our metadb updates into a single transaction to
@@ -1419,7 +1451,7 @@ impl Extent {
         )?;
 
         cdt::extent__flush__sqlite__insert__done!(|| {
-            (job_id.0, self.number, n_dirty_blocks)
+            (job_id.get(), self.number, n_dirty_blocks)
         });
 
         inner.set_flush_number(new_flush, new_gen)?;
@@ -1430,7 +1462,7 @@ impl Extent {
         inner.file.seek(SeekFrom::Start(0))?;
 
         cdt::extent__flush__done!(|| {
-            (job_id.0, self.number, n_dirty_blocks)
+            (job_id.get(), self.number, n_dirty_blocks)
         });
 
         Ok(())
@@ -2305,12 +2337,14 @@ impl Region {
      * what an extent should use if a flush is required.
      */
     #[instrument]
-    pub async fn region_flush_extent(
+    pub(crate) async fn region_flush_extent<
+        I: Into<JobOrReconciliationId> + Debug,
+    >(
         &self,
         eid: usize,
         gen_number: u64,
         flush_number: u64,
-        job_id: JobId, // only used for logging
+        job_id: I, // only used for logging
     ) -> Result<(), CrucibleError> {
         debug!(
             self.log,

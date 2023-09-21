@@ -4490,7 +4490,7 @@ pub(crate) mod up_test {
         // downstairs is not in the correct state, and that it will
         // clear the work queue and mark other downstairs as failed.
         let up = Upstairs::test_default(None);
-        let rep_id = 0;
+        let rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
             // Put a jobs on the todo list
@@ -4527,7 +4527,7 @@ pub(crate) mod up_test {
         // in the FailedRepair state. Verify that attempts to get new work
         // after a failed repair now return none.
         let up = Upstairs::test_default(None);
-        let rep_id = 0;
+        let rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
             ds.ds_state[ClientId::new(0)] = DsState::Repair;
@@ -4580,7 +4580,7 @@ pub(crate) mod up_test {
         // Verify that a downstairs not in repair mode will ignore new
         // work requests until it transitions to repair.
         let up = Upstairs::test_default(None);
-        let rep_id = 0;
+        let rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
             ds.ds_state[ClientId::new(0)] = DsState::Repair;
@@ -4616,7 +4616,7 @@ pub(crate) mod up_test {
     async fn reconcile_rep_in_progress_bad1() {
         // Verify the same downstairs can't mark a job in progress twice
         let up = Upstairs::test_default(None);
-        let rep_id = 0;
+        let rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
             ds.ds_state[ClientId::new(0)] = DsState::Repair;
@@ -4643,7 +4643,7 @@ pub(crate) mod up_test {
     async fn reconcile_rep_done_too_soon() {
         // Verify a job can't go new -> done
         let up = Upstairs::test_default(None);
-        let rep_id = 0;
+        let rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
             ds.ds_state[ClientId::new(0)] = DsState::Repair;
@@ -4667,7 +4667,7 @@ pub(crate) mod up_test {
     #[tokio::test]
     async fn reconcile_repair_workflow_1() {
         let up = Upstairs::test_default(None);
-        let mut rep_id = 0;
+        let mut rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
             ds.ds_state[ClientId::new(0)] = DsState::Repair;
@@ -4682,7 +4682,7 @@ pub(crate) mod up_test {
                 },
             ));
             ds.reconcile_task_list.push_back(ReconcileIO::new(
-                rep_id + 1,
+                ReconciliationId(rep_id.0 + 1),
                 Message::ExtentClose {
                     repair_id: rep_id,
                     extent_id: 1,
@@ -4714,7 +4714,7 @@ pub(crate) mod up_test {
         assert!(ds.rep_in_progress(ClientId::new(2)).is_some());
 
         // Now, make sure we consider this done only after all three are done
-        rep_id += 1;
+        rep_id.0 += 1;
         assert!(!ds.rep_done(ClientId::new(0), rep_id));
         assert!(!ds.rep_done(ClientId::new(1), rep_id));
         assert!(ds.rep_done(ClientId::new(2), rep_id));
@@ -4729,7 +4729,7 @@ pub(crate) mod up_test {
     async fn reconcile_leave_no_job_behind() {
         // Verify we can't start a new job before the old is finished.
         let up = Upstairs::test_default(None);
-        let rep_id = 0;
+        let rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
             ds.ds_state[ClientId::new(0)] = DsState::Repair;
@@ -4744,7 +4744,7 @@ pub(crate) mod up_test {
                 },
             ));
             ds.reconcile_task_list.push_back(ReconcileIO::new(
-                rep_id + 1,
+                ReconciliationId(rep_id.0 + 1),
                 Message::ExtentClose {
                     repair_id: rep_id,
                     extent_id: 1,
@@ -4775,7 +4775,7 @@ pub(crate) mod up_test {
     async fn reconcile_repair_workflow_2() {
         // Verify Done or Skipped works for rep_done
         let up = Upstairs::test_default(None);
-        let rep_id = 0;
+        let rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
             ds.ds_state[ClientId::new(0)] = DsState::Repair;
@@ -4816,7 +4816,7 @@ pub(crate) mod up_test {
     async fn reconcile_repair_inprogress_not_done() {
         // Verify Done or Skipped works for rep_done
         let up = Upstairs::test_default(None);
-        let rep_id = 0;
+        let rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
             ds.ds_state[ClientId::new(0)] = DsState::Repair;
@@ -4852,7 +4852,7 @@ pub(crate) mod up_test {
     async fn reconcile_repair_workflow_too_soon() {
         // Verify that jobs must be in progress before done.
         let up = Upstairs::test_default(None);
-        let rep_id = 0;
+        let rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
             ds.ds_state[ClientId::new(0)] = DsState::Repair;
@@ -4906,7 +4906,7 @@ pub(crate) mod up_test {
 
         // First task, flush
         let rio = ds.reconcile_task_list.pop_front().unwrap();
-        assert_eq!(rio.id, 0);
+        assert_eq!(rio.id, ReconciliationId(0));
         match rio.op {
             Message::ExtentFlush {
                 repair_id,
@@ -4915,7 +4915,7 @@ pub(crate) mod up_test {
                 flush_number,
                 gen_number,
             } => {
-                assert_eq!(repair_id, 0);
+                assert_eq!(repair_id, ReconciliationId(0));
                 assert_eq!(extent_id, repair_extent);
                 assert_eq!(client_id, ClientId::new(0));
                 assert_eq!(flush_number, max_flush);
@@ -4931,13 +4931,13 @@ pub(crate) mod up_test {
 
         // Second task, close extent
         let rio = ds.reconcile_task_list.pop_front().unwrap();
-        assert_eq!(rio.id, 1);
+        assert_eq!(rio.id, ReconciliationId(1));
         match rio.op {
             Message::ExtentClose {
                 repair_id,
                 extent_id,
             } => {
-                assert_eq!(repair_id, 1);
+                assert_eq!(repair_id, ReconciliationId(1));
                 assert_eq!(extent_id, repair_extent);
             }
             m => {
@@ -4950,7 +4950,7 @@ pub(crate) mod up_test {
 
         // Third task, repair extent
         let rio = ds.reconcile_task_list.pop_front().unwrap();
-        assert_eq!(rio.id, 2);
+        assert_eq!(rio.id, ReconciliationId(2));
         match rio.op {
             Message::ExtentRepair {
                 repair_id,
@@ -4978,13 +4978,13 @@ pub(crate) mod up_test {
 
         // Third task, close extent
         let rio = ds.reconcile_task_list.pop_front().unwrap();
-        assert_eq!(rio.id, 3);
+        assert_eq!(rio.id, ReconciliationId(3));
         match rio.op {
             Message::ExtentReopen {
                 repair_id,
                 extent_id,
             } => {
-                assert_eq!(repair_id, 3);
+                assert_eq!(repair_id, ReconciliationId(3));
                 assert_eq!(extent_id, repair_extent);
             }
             m => {
@@ -5026,7 +5026,7 @@ pub(crate) mod up_test {
 
         // First task, flush
         let rio = ds.reconcile_task_list.pop_front().unwrap();
-        assert_eq!(rio.id, 0);
+        assert_eq!(rio.id, ReconciliationId(0));
         match rio.op {
             Message::ExtentFlush {
                 repair_id,
@@ -5035,7 +5035,7 @@ pub(crate) mod up_test {
                 flush_number,
                 gen_number,
             } => {
-                assert_eq!(repair_id, 0);
+                assert_eq!(repair_id, ReconciliationId(0));
                 assert_eq!(extent_id, repair_extent);
                 assert_eq!(client_id, ClientId::new(2));
                 assert_eq!(flush_number, max_flush);
@@ -5051,13 +5051,13 @@ pub(crate) mod up_test {
 
         // Second task, close extent
         let rio = ds.reconcile_task_list.pop_front().unwrap();
-        assert_eq!(rio.id, 1);
+        assert_eq!(rio.id, ReconciliationId(1));
         match rio.op {
             Message::ExtentClose {
                 repair_id,
                 extent_id,
             } => {
-                assert_eq!(repair_id, 1);
+                assert_eq!(repair_id, ReconciliationId(1));
                 assert_eq!(extent_id, repair_extent);
             }
             m => {
@@ -5070,7 +5070,7 @@ pub(crate) mod up_test {
 
         // Third task, repair extent
         let rio = ds.reconcile_task_list.pop_front().unwrap();
-        assert_eq!(rio.id, 2);
+        assert_eq!(rio.id, ReconciliationId(2));
         match rio.op {
             Message::ExtentRepair {
                 repair_id,
@@ -5098,13 +5098,13 @@ pub(crate) mod up_test {
 
         // Third task, close extent
         let rio = ds.reconcile_task_list.pop_front().unwrap();
-        assert_eq!(rio.id, 3);
+        assert_eq!(rio.id, ReconciliationId(3));
         match rio.op {
             Message::ExtentReopen {
                 repair_id,
                 extent_id,
             } => {
-                assert_eq!(repair_id, 3);
+                assert_eq!(repair_id, ReconciliationId(3));
                 assert_eq!(extent_id, repair_extent);
             }
             m => {

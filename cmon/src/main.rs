@@ -1,6 +1,7 @@
 // Copyright 2022 Oxide Computer Company
 use clap::{Parser, Subcommand, ValueEnum};
 use crucible_control_client::Client;
+use crucible_protocol::ClientId;
 use std::fmt;
 use std::io::{self, BufRead};
 use tokio::time::{sleep, Duration};
@@ -223,33 +224,33 @@ fn print_dtrace_row(d_out: Arg, dd: &[DtraceDisplay]) {
             DtraceDisplay::IoCount => {
                 print!(
                     " {:4} {:4} {:4}",
-                    d_out.ds_io_count.new[0],
-                    d_out.ds_io_count.new[1],
-                    d_out.ds_io_count.new[2],
+                    d_out.ds_io_count.new[ClientId::new(0)],
+                    d_out.ds_io_count.new[ClientId::new(1)],
+                    d_out.ds_io_count.new[ClientId::new(2)],
                 );
                 print!(
                     " {:4} {:4} {:4}",
-                    d_out.ds_io_count.in_progress[0],
-                    d_out.ds_io_count.in_progress[1],
-                    d_out.ds_io_count.in_progress[2],
+                    d_out.ds_io_count.in_progress[ClientId::new(0)],
+                    d_out.ds_io_count.in_progress[ClientId::new(1)],
+                    d_out.ds_io_count.in_progress[ClientId::new(2)],
                 );
                 print!(
                     " {:4} {:4} {:4}",
-                    d_out.ds_io_count.done[0],
-                    d_out.ds_io_count.done[1],
-                    d_out.ds_io_count.done[2],
+                    d_out.ds_io_count.done[ClientId::new(0)],
+                    d_out.ds_io_count.done[ClientId::new(1)],
+                    d_out.ds_io_count.done[ClientId::new(2)],
                 );
                 print!(
                     " {:4} {:4} {:4}",
-                    d_out.ds_io_count.skipped[0],
-                    d_out.ds_io_count.skipped[1],
-                    d_out.ds_io_count.skipped[2],
+                    d_out.ds_io_count.skipped[ClientId::new(0)],
+                    d_out.ds_io_count.skipped[ClientId::new(1)],
+                    d_out.ds_io_count.skipped[ClientId::new(2)],
                 );
                 print!(
                     " {:4} {:4} {:4}",
-                    d_out.ds_io_count.error[0],
-                    d_out.ds_io_count.error[1],
-                    d_out.ds_io_count.error[2],
+                    d_out.ds_io_count.error[ClientId::new(0)],
+                    d_out.ds_io_count.error[ClientId::new(1)],
+                    d_out.ds_io_count.error[ClientId::new(2)],
                 );
             }
             DtraceDisplay::Reconcile => {

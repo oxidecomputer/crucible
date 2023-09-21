@@ -740,25 +740,18 @@ where
      * lock for the hashmap while we do work, and if we release the lock
      * to do work, we would have to start over and look at all jobs in the
      * map to see if they are new.
-     *
-     * This also allows us to sort the job ids and do them in order they
-     * were put into the hashmap, though I don't think that is required.
      */
-    new_work.sort_unstable();
-
     let mut active_count = u.downstairs.lock().await.submitted_work(client_id);
-    for ndx in 0..new_work.len() {
+    while let Some(new_id) = new_work.pop_first() {
         if active_count >= MAX_ACTIVE_COUNT {
             // Flow control enacted, stop sending work -- and requeue all of
             // our remaining work to assure it isn't dropped
+            new_work.insert(new_id);
             let mut ds = u.downstairs.lock().await;
-            ds.requeue_work(client_id, &new_work[ndx..]);
+            ds.requeue_work(client_id, new_work);
             ds.flow_control[client_id] += 1;
-            drop(ds);
             return Ok(true);
         }
-
-        let new_id = new_work[ndx];
 
         /*
          * Walk the list of work to do, update its status as in progress
@@ -768,7 +761,7 @@ where
             /*
              * Requeue this work so it isn't completely lost.
              */
-            u.downstairs.lock().await.requeue_work(client_id, &[new_id]);
+            u.downstairs.lock().await.requeue_one(client_id, new_id);
             continue;
         }
 
@@ -2861,7 +2854,7 @@ struct Downstairs {
     /**
      * Cache of new jobs, indexed by client ID.
      */
-    ds_new: ClientData<Vec<JobId>>,
+    ds_new: ClientData<BTreeSet<JobId>>,
 
     /**
      * Jobs that have been skipped, indexed by client ID.
@@ -3016,7 +3009,7 @@ impl Downstairs {
             ds_last_flush: ClientData::new(JobId(0)),
             downstairs_errors: ClientData::new(0),
             ds_active: ActiveJobs::new(),
-            ds_new: ClientData::new(vec![]),
+            ds_new: ClientData::new(BTreeSet::new()),
             ds_skipped_jobs: ClientData::new(HashSet::new()),
             completed: AllocRingBuffer::new(2048),
             completed_jobs: AllocRingBuffer::new(8),
@@ -3258,19 +3251,18 @@ impl Downstairs {
      * Mark a reconcile work request as done for this client and return
      * true if all work requests are done
      */
-    fn rep_done(&mut self, client_id: ClientId, rep_id: u64) -> bool {
+    fn rep_done(
+        &mut self,
+        client_id: ClientId,
+        rep_id: ReconciliationId,
+    ) -> bool {
         if let Some(job) = &mut self.reconcile_current_work {
             let old_state = job.state.insert(client_id, IOState::Done);
             assert_eq!(old_state, IOState::InProgress);
             assert_eq!(job.id, rep_id);
-            let mut done = 0;
-
-            for s in job.state.iter() {
-                if s == &IOState::Done || s == &IOState::Skipped {
-                    done += 1;
-                }
-            }
-            done == 3
+            job.state
+                .iter()
+                .all(|s| matches!(s, IOState::Done | IOState::Skipped))
         } else {
             panic!(
                 "[{}] Attempted to complete job {} that does not exist",
@@ -3300,7 +3292,7 @@ impl Downstairs {
         max_flush: u64,
         max_gen: u64,
     ) {
-        let mut rep_id = 0;
+        let mut rep_id = ReconciliationId(0);
         info!(self.log, "Full repair list: {:?}", rec_list);
         for (ext, ef) in rec_list.drain() {
             /*
@@ -3321,7 +3313,7 @@ impl Downstairs {
                     gen_number: max_gen,
                 },
             ));
-            rep_id += 1;
+            rep_id.0 += 1;
 
             self.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -3330,7 +3322,7 @@ impl Downstairs {
                     extent_id: ext,
                 },
             ));
-            rep_id += 1;
+            rep_id.0 += 1;
 
             let repair = self.repair_addr(ef.source);
             self.reconcile_task_list.push_back(ReconcileIO::new(
@@ -3343,7 +3335,7 @@ impl Downstairs {
                     dest_clients: ef.dest,
                 },
             ));
-            rep_id += 1;
+            rep_id.0 += 1;
 
             self.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -3352,7 +3344,7 @@ impl Downstairs {
                     extent_id: ext,
                 },
             ));
-            rep_id += 1;
+            rep_id.0 += 1;
         }
 
         info!(self.log, "Task list: {:?}", self.reconcile_task_list);
@@ -3481,7 +3473,7 @@ impl Downstairs {
             if old_state != IOState::New {
                 self.io_state_count.decr(&old_state, client_id);
                 self.io_state_count.incr(&IOState::New, client_id);
-                self.ds_new[client_id].push(*ds_id);
+                self.ds_new[client_id].insert(*ds_id);
             }
         });
     }
@@ -3566,16 +3558,24 @@ impl Downstairs {
      * Return a list of downstairs request IDs that represent unissued
      * requests for this client.
      */
-    fn new_work(&mut self, client_id: ClientId) -> Vec<JobId> {
-        self.ds_new[client_id].drain(..).collect()
+    fn new_work(&mut self, client_id: ClientId) -> BTreeSet<JobId> {
+        std::mem::take(&mut self.ds_new[client_id])
     }
 
     /**
      * Called to requeue work that was previously found by calling
      * [`new_work`], presumably due to flow control.
      */
-    fn requeue_work(&mut self, client_id: ClientId, work: &[JobId]) {
-        self.ds_new[client_id].extend_from_slice(work);
+    fn requeue_work(&mut self, client_id: ClientId, mut work: BTreeSet<JobId>) {
+        self.ds_new[client_id].append(&mut work);
+    }
+
+    /**
+     * Called to requeue a single job that was previously found by calling
+     * [`new_work`], presumably due to flow control.
+     */
+    fn requeue_one(&mut self, client_id: ClientId, work: JobId) {
+        self.ds_new[client_id].insert(work);
     }
 
     /**
@@ -3583,7 +3583,7 @@ impl Downstairs {
      * for this client, but don't yet have a response.
      */
     fn submitted_work(&self, client_id: ClientId) -> usize {
-        self.io_state_count.in_progress[client_id.get() as usize] as usize
+        self.io_state_count.in_progress[client_id] as usize
     }
 
     /**
@@ -3591,15 +3591,14 @@ impl Downstairs {
      * work we have for a downstairs.
      */
     fn total_live_work(&self, client_id: ClientId) -> usize {
-        (self.io_state_count.new[client_id.get() as usize]
-            + self.io_state_count.in_progress[client_id.get() as usize])
-            as usize
+        (self.io_state_count.new[client_id]
+            + self.io_state_count.in_progress[client_id]) as usize
     }
 
     /**
      * Build a list of jobs that are ready to be acked.
      */
-    fn ackable_work(&mut self) -> Vec<JobId> {
+    fn ackable_work(&mut self) -> BTreeSet<JobId> {
         self.ds_active.ackable_work()
     }
 
@@ -3643,7 +3642,7 @@ impl Downstairs {
                     {
                         // Leave this IO as New, the downstairs will receive it.
                         self.io_state_count.incr(&IOState::New, cid);
-                        self.ds_new[cid].push(io.ds_id);
+                        self.ds_new[cid].insert(io.ds_id);
                     } else {
                         // Move this IO to skipped, we are not ready for
                         // the downstairs to receive it.
@@ -3655,7 +3654,7 @@ impl Downstairs {
                 }
                 _ => {
                     self.io_state_count.incr(&IOState::New, cid);
-                    self.ds_new[cid].push(io.ds_id);
+                    self.ds_new[cid].insert(io.ds_id);
                 }
             }
         }
@@ -3710,7 +3709,7 @@ impl Downstairs {
                 }
                 _ => {
                     self.io_state_count.incr(&IOState::New, cid);
-                    self.ds_new[cid].push(io.ds_id);
+                    self.ds_new[cid].insert(io.ds_id);
                 }
             }
         }
@@ -3718,18 +3717,6 @@ impl Downstairs {
         let ds_id = io.ds_id;
         debug!(self.log, "Enqueue repair job {}", ds_id);
         self.ds_active.insert(ds_id, io);
-    }
-
-    /**
-     * Collect the state of the jobs from each client.
-     */
-    fn state_count(&self, ds_id: JobId) -> Result<WorkCounts> {
-        /* XXX Should this support invalid ds_ids? */
-        let job = self
-            .ds_active
-            .get(&ds_id)
-            .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
-        Ok(job.state_count())
     }
 
     fn ack(&mut self, ds_id: JobId) {
@@ -3773,12 +3760,12 @@ impl Downstairs {
         /*
          * TODO: this doesn't tell the Guest what the error(s) were?
          */
-        let wc = self.state_count(ds_id).unwrap();
 
         let job = self
             .ds_active
             .get(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
+        let wc = job.state_count();
 
         let bad_job = match &job.work {
             IOop::Read { .. } => wc.error == 3,
@@ -4127,20 +4114,12 @@ impl Downstairs {
         let mut notify_guest = false;
         let deactivate = up_state == UpState::Deactivating;
 
-        /*
-         * Get the completed count now,
-         * because the job self ref won't let us call state_count once we are
-         * using that ref, and the number won't change while we are in
-         * this method (you did get the lock first, right??).
-         */
-        let wc = self.state_count(ds_id)?;
-        let mut jobs_completed_ok = wc.completed_ok();
-
         let mut handle = self
             .ds_active
             .get_mut(&ds_id)
             .ok_or_else(|| anyhow!("reqid {} is not active", ds_id))?;
         let job = handle.job();
+        let mut jobs_completed_ok = job.state_count().completed_ok();
 
         if job.state[client_id] == IOState::Skipped {
             // This job was already marked as skipped, and at that time
@@ -4688,7 +4667,7 @@ impl Downstairs {
 
         // Only a completed flush will remove jobs from the active queue -
         // currently we have to keep everything around for use during replay
-        let wc = self.state_count(ds_id).unwrap();
+        let wc = self.ds_active.get(&ds_id).unwrap().state_count();
         if (wc.error + wc.skipped + wc.done) == 3 {
             assert!(!self.completed.contains(&ds_id));
             assert_eq!(wc.active, 0);
@@ -4709,7 +4688,7 @@ impl Downstairs {
                 // there is nothing to prevent a flush ACK from getting
                 // ahead of the ACK from something that flush depends on.
                 // The downstairs does handle the dependency.
-                let wc = self.state_count(id).unwrap();
+                let wc = job.state_count();
                 if wc.active != 0 || job.ack_status != AckStatus::Acked {
                     warn!(
                         self.log,
@@ -6536,7 +6515,7 @@ impl Upstairs {
     async fn ds_repair_done_notify(
         &self,
         client_id: ClientId,
-        rep_id: u64,
+        rep_id: ReconciliationId,
         ds_reconcile_done_tx: &mpsc::Sender<Repair>,
     ) -> Result<()> {
         debug!(
@@ -7982,13 +7961,13 @@ struct WorkSummary {
 
 #[derive(Debug)]
 struct ReconcileIO {
-    id: u64,
+    id: ReconciliationId,
     op: Message,
     state: ClientData<IOState>,
 }
 
 impl ReconcileIO {
-    fn new(id: u64, op: Message) -> ReconcileIO {
+    fn new(id: ReconciliationId, op: Message) -> ReconcileIO {
         ReconcileIO {
             id,
             op,
@@ -8344,25 +8323,25 @@ impl fmt::Display for IOState {
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub struct IOStateCount {
-    pub new: [u32; 3],
-    pub in_progress: [u32; 3],
-    pub done: [u32; 3],
-    pub skipped: [u32; 3],
-    pub error: [u32; 3],
+    pub new: ClientData<u32>,
+    pub in_progress: ClientData<u32>,
+    pub done: ClientData<u32>,
+    pub skipped: ClientData<u32>,
+    pub error: ClientData<u32>,
 }
 
 impl IOStateCount {
     fn new() -> IOStateCount {
         IOStateCount {
-            new: [0; 3],
-            in_progress: [0; 3],
-            done: [0; 3],
-            skipped: [0; 3],
-            error: [0; 3],
+            new: ClientData::new(0),
+            in_progress: ClientData::new(0),
+            done: ClientData::new(0),
+            skipped: ClientData::new(0),
+            error: ClientData::new(0),
         }
     }
 
-    fn show_all(&mut self) {
+    fn show_all(&self) {
         println!("   STATES      DS:0   DS:1   DS:2   TOTAL");
         self.show(IOState::New);
         self.show(IOState::InProgress);
@@ -8372,78 +8351,59 @@ impl IOStateCount {
         self.show(IOState::Error(e));
     }
 
-    fn show(&mut self, state: IOState) {
-        let state_stat;
+    fn get_mut(&mut self, state: &IOState) -> &mut ClientData<u32> {
+        match state {
+            IOState::New => &mut self.new,
+            IOState::InProgress => &mut self.in_progress,
+            IOState::Done => &mut self.done,
+            IOState::Skipped => &mut self.skipped,
+            IOState::Error(_) => &mut self.error,
+        }
+    }
+
+    fn get(&self, state: &IOState) -> &ClientData<u32> {
+        match state {
+            IOState::New => &self.new,
+            IOState::InProgress => &self.in_progress,
+            IOState::Done => &self.done,
+            IOState::Skipped => &self.skipped,
+            IOState::Error(_) => &self.error,
+        }
+    }
+
+    fn show(&self, state: IOState) {
+        let state_stat = self.get(&state);
         match state {
             IOState::New => {
-                state_stat = self.new;
                 print!("    New        ");
             }
             IOState::InProgress => {
-                state_stat = self.in_progress;
                 print!("    Sent       ");
             }
             IOState::Done => {
-                state_stat = self.done;
                 print!("    Done       ");
             }
             IOState::Skipped => {
-                state_stat = self.skipped;
                 print!("    Skipped    ");
             }
             IOState::Error(_) => {
-                state_stat = self.error;
                 print!("    Error      ");
             }
         }
         let mut sum = 0;
-        for ds_stat in &state_stat {
-            print!("{:4}   ", ds_stat);
-            sum += ds_stat;
+        for cid in ClientId::iter() {
+            print!("{:4}   ", state_stat[cid]);
+            sum += state_stat[cid];
         }
         println!("{:4}", sum);
     }
 
     pub fn incr(&mut self, state: &IOState, cid: ClientId) {
-        let cid = cid.get() as usize;
-        match state {
-            IOState::New => {
-                self.new[cid] += 1;
-            }
-            IOState::InProgress => {
-                self.in_progress[cid] += 1;
-            }
-            IOState::Done => {
-                self.done[cid] += 1;
-            }
-            IOState::Skipped => {
-                self.skipped[cid] += 1;
-            }
-            IOState::Error(_) => {
-                self.error[cid] += 1;
-            }
-        }
+        self.get_mut(state)[cid] += 1;
     }
 
     pub fn decr(&mut self, state: &IOState, cid: ClientId) {
-        let cid = cid.get() as usize;
-        match state {
-            IOState::New => {
-                self.new[cid] -= 1;
-            }
-            IOState::InProgress => {
-                self.in_progress[cid] -= 1;
-            }
-            IOState::Done => {
-                self.done[cid] -= 1;
-            }
-            IOState::Skipped => {
-                self.skipped[cid] -= 1;
-            }
-            IOState::Error(_) => {
-                self.error[cid] -= 1;
-            }
-        }
+        self.get_mut(state)[cid] -= 1;
     }
 }
 
@@ -9354,6 +9314,9 @@ impl BlockIO for Guest {
             crucible_bail!(BlockSizeMismatch);
         }
 
+        if data.is_empty() {
+            return Ok(());
+        }
         let rio = BlockOp::Read { offset, data };
         Ok(self.send(rio).await.wait().await?)
     }
@@ -9373,6 +9336,9 @@ impl BlockIO for Guest {
             crucible_bail!(BlockSizeMismatch);
         }
 
+        if data.is_empty() {
+            return Ok(());
+        }
         let wio = BlockOp::Write { offset, data };
         Ok(self.send(wio).await.wait().await?)
     }
@@ -9392,6 +9358,9 @@ impl BlockIO for Guest {
             crucible_bail!(BlockSizeMismatch);
         }
 
+        if data.is_empty() {
+            return Ok(());
+        }
         let wio = BlockOp::WriteUnwritten { offset, data };
         Ok(self.send(wio).await.wait().await?)
     }
@@ -9464,7 +9433,7 @@ impl Default for Guest {
 struct Repair {
     repair: bool,
     client_id: ClientId,
-    rep_id: u64,
+    rep_id: ReconciliationId,
 }
 
 /**
@@ -9570,14 +9539,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<()>) {
          * process the set of things we know are done now, then the
          * ds_done_rx.recv() should trigger when we loop.
          */
-        let mut ack_list = up.downstairs.lock().await.ackable_work();
-        /*
-         * This needs some sort order.  If we are not acking things in job
-         * ID order, then we must use a queue or something that will allow
-         * the jobs to be acked in the order they were completed on the
-         * downstairs.
-         */
-        ack_list.sort_unstable();
+        let ack_list = up.downstairs.lock().await.ackable_work();
 
         let jobs_checked = ack_list.len();
         let mut gw = up.guest.guest_work.lock().await;
@@ -10437,7 +10399,7 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
     let gior = up.guest_io_ready().await;
     let up_count = up.guest.guest_work.lock().await.active.len();
 
-    let mut ds = up.downstairs.lock().await;
+    let ds = up.downstairs.lock().await;
     let ds_count = ds.ds_active.len();
 
     println!(

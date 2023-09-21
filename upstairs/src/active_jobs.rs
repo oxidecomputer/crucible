@@ -275,8 +275,8 @@ impl ActiveJobs {
         deps
     }
 
-    pub fn ackable_work(&self) -> Vec<JobId> {
-        self.ackable.iter().cloned().collect()
+    pub fn ackable_work(&self) -> BTreeSet<JobId> {
+        self.ackable.clone()
     }
 }
 
