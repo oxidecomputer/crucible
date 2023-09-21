@@ -47,6 +47,8 @@ pub async fn dynamometer(
 
         let hash = integrity_hash(&[&nonce, &tag, &block]);
 
+        let block_bytes = bytes::Bytes::from(block.clone());
+
         for eid in 0..ddef.extent_count() {
             let mut block_offset = 0;
             loop {
@@ -54,7 +56,6 @@ pub async fn dynamometer(
                     break;
                 }
 
-                let block = block.clone();
                 let nonce = nonce.clone();
                 let tag = tag.clone();
 
@@ -65,13 +66,13 @@ pub async fn dynamometer(
                             i as u64 + block_offset,
                             &ddef,
                         ),
-                        data: bytes::Bytes::from(block.clone()),
+                        data: block_bytes.clone(),
                         block_context: BlockContext {
                             hash,
                             encryption_context: Some(
                                 crucible_protocol::EncryptionContext {
-                                    nonce: nonce.clone(),
-                                    tag: tag.clone(),
+                                    nonce: nonce.as_slice().try_into().unwrap(),
+                                    tag: tag.as_slice().try_into().unwrap(),
                                 },
                             ),
                         },
@@ -82,8 +83,8 @@ pub async fn dynamometer(
                 region.region_write(&writes, JobId(1000), false).await?;
 
                 total_io_time += io_operation_time.elapsed();
-                io_operations_sent += 1;
-                iops_since_last_flush += 1;
+                io_operations_sent += num_writes;
+                iops_since_last_flush += num_writes;
                 blocks_since_last_flush += num_writes;
                 bw_consumed += num_writes * ddef.block_size() as usize;
 
