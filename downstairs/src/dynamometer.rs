@@ -182,7 +182,5 @@ pub async fn dynamometer(
         bws.last().unwrap(),
     );
 
-    // Random write test
-
     Ok(())
 }
