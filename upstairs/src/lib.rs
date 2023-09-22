@@ -731,7 +731,10 @@ where
      * This XXX is for coming back here and making a better job of
      * flow control.
      */
-    let mut new_work = u.downstairs.lock().await.new_work(client_id);
+    let (mut new_work, mut active_count) = {
+        let mut ds = u.downstairs.lock().await;
+        (ds.new_work(client_id), ds.submitted_work(client_id))
+    };
 
     /*
      * Now we have a list of all the job IDs that are new for our client id.
@@ -741,7 +744,6 @@ where
      * to do work, we would have to start over and look at all jobs in the
      * map to see if they are new.
      */
-    let mut active_count = u.downstairs.lock().await.submitted_work(client_id);
     while let Some(new_id) = new_work.pop_first() {
         if active_count >= MAX_ACTIVE_COUNT {
             // Flow control enacted, stop sending work -- and requeue all of
