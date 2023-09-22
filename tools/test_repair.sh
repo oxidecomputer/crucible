@@ -79,7 +79,9 @@ fi
 # are the same as what DSC uses by default.  If either side changes, then
 # the other will need to be update manually.
 target_args="-t 127.0.0.1:8810 -t 127.0.0.1:8820 -t 127.0.0.1:8830"
-dump_args+=" -d ${testdir}/8810 -d ${testdir}/8820 -d ${testdir}/8830"
+dump_args+=("-d ${testdir}/8810")
+dump_args+=("-d ${testdir}/8820")
+dump_args+=("-d ${testdir}/8830")
 
 if pgrep -fl -U "$(id -u)" "$cds"; then
     echo "Downstairs already running" >&2
@@ -104,7 +106,8 @@ fi
 
 # Do initial volume population.
 generation=1
-echo "$ct with $target_args $dump_args $ds0_pid $ds1_pid $ds2_pid"
+echo "$ct with $target_args $ds0_pid $ds1_pid $ds2_pid"
+echo "Dump args: " "${dump_args[@]}"
 if ! ${ct} fill ${target_args} --verify-out "$verify_file" -q -g "$generation"
 then
     echo "ERROR: Exit on initial fill"
@@ -164,8 +167,9 @@ while [[ $count -lt $loops ]]; do
     # Did we get any mismatches?
     # We || true because dump will return non-zero when it finds
     # a mismatch
-    echo "Current downstairs dump: da:${dump_args}"
-    ${cds} dump ${dump_args} || true
+    echo "Current downstairs dump with dump args: " "${dump_args[@]}"
+    ${cds} dump ${dump_args[@]} || true
+    echo "A Difference in extent metadata is expected here"
     echo "On loop $count"
 
     echo ""

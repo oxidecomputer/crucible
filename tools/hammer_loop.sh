@@ -36,7 +36,6 @@ usage () {
     echo " -l loops   Number of test loops to perform (default 20)" >&2
 }
 
-dump_args=()
 while getopts 'l:' opt; do
 	case "$opt" in
         l)  loops=$OPTARG

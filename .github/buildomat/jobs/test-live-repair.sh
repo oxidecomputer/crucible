@@ -6,6 +6,7 @@
 #: output_rules = [
 #:	"/tmp/*.txt",
 #:	"/tmp/*.log",
+#:	"/tmp/core.*",
 #:	"/tmp/dsc/*.txt",
 #:	"/tmp/dsc.tar",
 #: ]
@@ -50,6 +51,14 @@ input="/input/build/work"
 set -o errexit
 set -o pipefail
 set -o xtrace
+
+banner cores
+pfexec coreadm -i /tmp/core.%f.%p \
+ -g /tmp/core.%f.%p \
+ -e global \
+ -e log \
+ -e proc-setid \
+ -e global-setid
 
 pfexec chmod +x "$input"/scripts/* || true
 
