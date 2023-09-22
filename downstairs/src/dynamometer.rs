@@ -8,6 +8,12 @@ pub enum DynoFlushConfig {
     None,
 }
 
+macro_rules! ceiling_div {
+    ($a: expr, $b: expr) => {
+        ($a + ($b - 1)) / $b
+    };
+}
+
 pub async fn dynamometer(
     mut region: Region,
     num_writes: usize,
@@ -84,7 +90,10 @@ pub async fn dynamometer(
                 region.region_write(&writes, JobId(1000), false).await?;
 
                 total_io_time += io_operation_time.elapsed();
-                io_operations_sent += num_writes;
+                io_operations_sent += ceiling_div!(
+                    num_writes * ddef.block_size() as usize,
+                    16 * 1024 * 1024
+                );
                 iops_since_last_flush += num_writes;
                 blocks_since_last_flush += num_writes;
                 bw_consumed += num_writes * ddef.block_size() as usize;
