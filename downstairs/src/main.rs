@@ -185,27 +185,27 @@ enum Args {
     Version,
     /// Measure an isolated downstairs
     Dynamometer {
-        #[clap(long, default_value_t = 512, action)]
+        #[clap(long, default_value_t = 512)]
         block_size: u64,
 
-        #[clap(short, long, name = "DIRECTORY", action)]
+        #[clap(short, long, name = "DIRECTORY")]
         data: PathBuf,
 
-        #[clap(long, default_value_t = 100, action)]
+        #[clap(long, default_value_t = 100)]
         extent_size: u64,
 
-        #[clap(long, default_value_t = 15, action)]
+        #[clap(long, default_value_t = 15)]
         extent_count: u64,
 
-        #[clap(long, action)]
+        #[clap(long)]
         encrypted: bool,
 
         /// Number of writes to submit at one time to region_write
-        #[clap(short, long, action, default_value_t = 1)]
+        #[clap(short, long, default_value_t = 1)]
         num_writes: usize,
 
         /// Number of samples to exit for
-        #[clap(short, long, action, default_value_t = 10)]
+        #[clap(short, long, default_value_t = 10)]
         samples: usize,
 
         /// Flush per iops
