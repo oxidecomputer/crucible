@@ -72,6 +72,8 @@ while getopts 'N' opt; do
             dump_args+=("--no-color")
             shift
             ;;
+        *) usage
+            ;;
     esac
 done
 

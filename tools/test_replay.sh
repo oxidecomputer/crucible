@@ -5,8 +5,6 @@
 # Start the downstairs using dsc, connect to dsc from within
 # crutest and use that interface to stop a downstairs.
 result=0
-total=0
-pass_total=0
 SECONDS=0
 
 # Control-C to cleanup.

@@ -2,9 +2,6 @@
 
 Various scripts used for Crucible
 
-## create-generic-sd.sh
-A simple script to create three downstairs regions at var/88[1-3]0
-
 ## dtrace
 A collection of dtrace scripts for use on Crucible.  A README.md in that
 directory contains more information.

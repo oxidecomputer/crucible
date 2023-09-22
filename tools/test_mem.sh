@@ -57,16 +57,16 @@ function show_mem_summary() {
         "PID" "RSS" "RSS/EC" "VSZ" "VSZ/EC" "HEAP" "HEAP/EC" \
         "TOTAL" "TOTAL/EC" "EC"
     for ds_pid in "$ds1" "$ds2" "$ds3"; do
-        ds_rss=$(pmap -x $ds_pid | grep "total" | awk '{print $4}')
+        ds_rss=$(pmap -x "$ds_pid" | grep "total" | awk '{print $4}')
         ds_rss_per_ec=$(echo "$ds_rss / $ec" | bc)
 
         ds_vsz=$(ps -o vsz= -p "$ds_pid")
         ds_vsz_per_ec=$(echo "$ds_vsz / $ec" | bc)
 
-        ds_heap=$(pmap -x $ds_pid | grep " heap " | awk '{print $2}')
+        ds_heap=$(pmap -x "$ds_pid" | grep " heap " | awk '{print $2}')
         ds_heap_per_ec=$(echo "$ds_heap / $ec" | bc)
 
-        ds_total=$(pmap -x $ds_pid | grep "total" | awk '{print $3}')
+        ds_total=$(pmap -x "$ds_pid" | grep "total" | awk '{print $3}')
         ds_total_per_ec=$(echo "$ds_total / $ec" | bc)
 
         printf "%6d %7d %6d %7d %6d %7d %7d %7d %8d %6d\n" \
@@ -140,7 +140,7 @@ function mem_test() {
     echo "$ct" fill $args --skip-verify -g 1 >> "$test_mem_log" 2>&1
     "$ct" fill $args --skip-verify -g 1 >> "$test_mem_log" 2>&1
 
-    show_mem_summary $ec
+    show_mem_summary "$ec"
     echo -n "Region:$reported_size  Extent:$reported_extent_size  "
     total_downstairs_mib=$(echo "$total_downstairs / 1024" | bc)
     if [[ "$total_downstairs_mib" -gt 0 ]]; then
@@ -150,8 +150,8 @@ function mem_test() {
     fi
     echo "Total downstairs (pmap -x): $reported_downstairs"
 
-    region_summary=$(du -sAh $region_dir | awk '{print $1}')
-    region_size=$(du -sA $region_dir | awk '{print $1}')
+    region_summary=$(du -sAh "$region_dir" | awk '{print $1}')
+    region_size=$(du -sA "$region_dir" | awk '{print $1}')
     echo "Size on disk of all region dirs: $region_summary or $region_size"
 
     set +o errexit

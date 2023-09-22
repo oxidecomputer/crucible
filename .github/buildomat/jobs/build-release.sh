@@ -51,12 +51,12 @@ cargo --version
 rustc --version
 
 banner cores
-pfexec coreadm -i /tmp/core.%f.%p
-pfexec coreadm -g /tmp/core.%f.%p
-pfexec coreadm -e global
-pfexec coreadm -e log
-pfexec coreadm -e proc-setid
-pfexec coreadm -e global-setid
+pfexec coreadm -i /tmp/core.%f.%p \
+ -g /tmp/core.%f.%p \
+ -e global \
+ -e log \
+ -e proc-setid \
+ -e global-setid
 
 banner rbuild
 ptime -m cargo build --verbose --release --all-features
