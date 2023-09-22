@@ -4,6 +4,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{bail, Result};
 use clap::Parser;
@@ -182,6 +183,48 @@ enum Args {
         bind_addr: SocketAddr,
     },
     Version,
+    /// Measure an isolated downstairs
+    Dynamometer {
+        #[clap(long, default_value_t = 512)]
+        block_size: u64,
+
+        #[clap(short, long, name = "DIRECTORY")]
+        data: PathBuf,
+
+        #[clap(long, default_value_t = 100)]
+        extent_size: u64,
+
+        #[clap(long, default_value_t = 15)]
+        extent_count: u64,
+
+        #[clap(long)]
+        encrypted: bool,
+
+        /// Number of writes to submit at one time to region_write
+        #[clap(short, long, default_value_t = 1)]
+        num_writes: usize,
+
+        /// Number of samples to exit for
+        #[clap(short, long, default_value_t = 10)]
+        samples: usize,
+
+        /// Flush per iops
+        #[clap(long, conflicts_with_all = ["flush_per_blocks", "flush_per_ms"])]
+        flush_per_iops: Option<usize>,
+
+        /// Flush per blocks written
+        #[clap(long, conflicts_with_all = ["flush_per_iops", "flush_per_ms"])]
+        flush_per_blocks: Option<usize>,
+
+        /// Flush per ms
+        #[clap(long, value_parser = parse_duration, conflicts_with_all = ["flush_per_iops", "flush_per_blocks"])]
+        flush_per_ms: Option<Duration>,
+    },
+}
+
+fn parse_duration(arg: &str) -> Result<Duration, std::num::ParseIntError> {
+    let ms = arg.parse()?;
+    Ok(Duration::from_millis(ms))
 }
 
 #[tokio::main]
@@ -384,6 +427,45 @@ async fn main() -> Result<()> {
                 "Upstairs <-> Downstairs Message Version: {}",
                 CRUCIBLE_MESSAGE_VERSION
             );
+            Ok(())
+        }
+        Args::Dynamometer {
+            block_size,
+            data,
+            extent_size,
+            extent_count,
+            encrypted,
+            num_writes,
+            samples,
+            flush_per_iops,
+            flush_per_blocks,
+            flush_per_ms,
+        } => {
+            let uuid = Uuid::new_v4();
+
+            let region = create_region(
+                block_size,
+                data,
+                extent_size,
+                extent_count,
+                uuid,
+                encrypted,
+                log.clone(),
+            )
+            .await?;
+
+            let flush_config = if flush_per_iops.is_some() {
+                DynoFlushConfig::FlushPerIops(flush_per_iops.unwrap())
+            } else if flush_per_blocks.is_some() {
+                DynoFlushConfig::FlushPerBlocks(flush_per_iops.unwrap())
+            } else if flush_per_ms.is_some() {
+                DynoFlushConfig::FlushPerMs(flush_per_ms.unwrap())
+            } else {
+                DynoFlushConfig::None
+            };
+
+            dynamometer(region, num_writes, samples, flush_config).await?;
+
             Ok(())
         }
     }

@@ -43,6 +43,7 @@ slog-async.workspace = true
 slog-dtrace.workspace = true
 slog-term.workspace = true
 slog.workspace = true
+statistical.workspace = true
 tokio-rustls.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true

@@ -31,6 +31,7 @@ use uuid::Uuid;
 
 pub mod admin;
 mod dump;
+mod dynamometer;
 pub mod region;
 pub mod repair;
 mod stats;
@@ -39,6 +40,7 @@ use region::Region;
 
 pub use admin::run_dropshot;
 pub use dump::dump_region;
+pub use dynamometer::*;
 pub use stats::*;
 
 fn deadline_secs(secs: u64) -> Instant {
