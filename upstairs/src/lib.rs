@@ -11,6 +11,7 @@ use std::fmt::{Debug, Formatter};
 use std::io::{Read, Result as IOResult, Seek, SeekFrom, Write};
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1091,7 +1092,7 @@ where
         version: CRUCIBLE_MESSAGE_VERSION,
         upstairs_id: up.uuid,
         session_id: up.session_id,
-        gen: up.get_generation().await,
+        gen: up.get_generation(),
         read_only: up.read_only,
         encrypted: up.encrypted(),
         alternate_versions: alternate_message_versions.clone(),
@@ -1236,7 +1237,7 @@ where
                 fw.send(Message::PromoteToActive {
                     upstairs_id: up.uuid,
                     session_id: up.session_id,
-                    gen: up.get_generation().await,
+                    gen: up.get_generation(),
                 }).await?;
             }
             f = fr.next() => {
@@ -1330,7 +1331,7 @@ where
                             fw.send(Message::PromoteToActive {
                                 upstairs_id: up.uuid,
                                 session_id: up.session_id,
-                                gen: up.get_generation().await,
+                                gen: up.get_generation(),
                             }).await?;
                         } else {
                             /*
@@ -1367,7 +1368,7 @@ where
                                 fw.send(Message::PromoteToActive {
                                     upstairs_id: up.uuid,
                                     session_id: up.session_id,
-                                    gen: up.get_generation().await,
+                                    gen: up.get_generation(),
                                 }).await?;
                             }
                         }
@@ -1379,7 +1380,7 @@ where
                     }) => {
                         let match_uuid = up.uuid == upstairs_id;
                         let match_session = up.session_id == session_id;
-                        let match_gen = up.get_generation().await == gen;
+                        let match_gen = up.get_generation() == gen;
                         let matches_self =
                             match_uuid && match_session && match_gen;
 
@@ -1407,7 +1408,7 @@ where
                                 if !match_gen {
                                     format!(
                                         "gen {:?} != {:?}",
-                                        up.get_generation().await,
+                                        up.get_generation(),
                                         gen
                                     )
                                 } else {
@@ -1420,7 +1421,7 @@ where
                             if !match_gen {
                                 let gen_error = format!(
                                     "Generation requested:{} found:{}",
-                                    gen, up.get_generation().await
+                                    gen, up.get_generation()
                                 );
                                 up.set_inactive(
                                     CrucibleError::GenerationNumberTooLow(
@@ -1474,7 +1475,7 @@ where
 
                         // What if the newly active upstairs has the same UUID?
                         if up.uuid == new_upstairs_id {
-                            if new_gen > up.get_generation().await {
+                            if new_gen > up.get_generation() {
                                 // The next generation of this Upstairs
                                 // connected, bail - this generation won't be
                                 // able to connect again.
@@ -1482,7 +1483,7 @@ where
                                     CrucibleError::GenerationNumberTooLow(
                                         format!("saw YouAreNoLongerActive with \
                                             larger gen {} than ours {}",
-                                            new_gen, up.get_generation().await)
+                                            new_gen, up.get_generation())
                                     )
                                 );
                             }
@@ -1496,19 +1497,19 @@ where
                                 upstairs uuid and our gen {} >= new gen {}!",
                                 up_coms.client_id,
                                 up.uuid,
-                                up.get_generation().await,
+                                up.get_generation(),
                                 new_gen,
                             );
                         } else {
                             // A new upstairs connected
-                            if new_gen > up.get_generation().await {
+                            if new_gen > up.get_generation() {
                                 // The next generation of another Upstairs
                                 // connected.
                                 bail!(
                                     CrucibleError::GenerationNumberTooLow(
                                         format!("saw YouAreNoLongerActive with \
                                             larger gen {} than ours {}",
-                                            new_gen, up.get_generation().await)
+                                            new_gen, up.get_generation())
                                     )
                                 );
                             }
@@ -1524,7 +1525,7 @@ where
                                 up_coms.client_id,
                                 up.uuid,
                                 new_upstairs_id,
-                                up.get_generation().await,
+                                up.get_generation(),
                                 new_gen,
                             );
                         }
@@ -2057,7 +2058,7 @@ where
 
                         // What if the newly active upstairs has the same UUID?
                         if up.uuid == new_upstairs_id {
-                            if new_gen > up.get_generation().await {
+                            if new_gen > up.get_generation() {
                                 // The next generation of this Upstairs
                                 // connected, bail - this generation won't be
                                 // able to connect again.
@@ -2065,7 +2066,7 @@ where
                                     CrucibleError::GenerationNumberTooLow(
                                         format!("saw YouAreNoLongerActive with \
                                             larger gen {} than ours {}",
-                                            new_gen, up.get_generation().await)
+                                            new_gen, up.get_generation())
                                     )
                                 );
                             }
@@ -2079,19 +2080,19 @@ where
                                 upstairs uuid and our gen {} >= new gen {}!",
                                 up_coms.client_id,
                                 up.uuid,
-                                up.get_generation().await,
+                                up.get_generation(),
                                 new_gen,
                             );
                         } else {
                             // A new upstairs connected
-                            if new_gen > up.get_generation().await {
+                            if new_gen > up.get_generation() {
                                 // The next generation of another Upstairs
                                 // connected.
                                 bail!(
                                     CrucibleError::GenerationNumberTooLow(
                                         format!("saw YouAreNoLongerActive with \
                                             larger gen {} than ours {}",
-                                            new_gen, up.get_generation().await)
+                                            new_gen, up.get_generation())
                                     )
                                 );
                             }
@@ -2107,7 +2108,7 @@ where
                                 up_coms.client_id,
                                 up.uuid,
                                 new_upstairs_id,
-                                up.get_generation().await,
+                                up.get_generation(),
                                 new_gen,
                             );
                         }
@@ -2282,7 +2283,7 @@ where
 
                         // What if the newly active upstairs has the same UUID?
                         if up.uuid == new_upstairs_id {
-                            if new_gen > up.get_generation().await {
+                            if new_gen > up.get_generation() {
                                 // The next generation of this Upstairs
                                 // connected, bail - this generation won't be
                                 // able to connect again.
@@ -2290,7 +2291,7 @@ where
                                     CrucibleError::GenerationNumberTooLow(
                                         format!("saw YouAreNoLongerActive with \
                                             larger gen {} than ours {}",
-                                            new_gen, up.get_generation().await)
+                                            new_gen, up.get_generation())
                                     )
                                 );
                             }
@@ -2304,19 +2305,19 @@ where
                                 upstairs uuid and our gen {} >= new gen {}!",
                                 up_coms.client_id,
                                 up.uuid,
-                                up.get_generation().await,
+                                up.get_generation(),
                                 new_gen,
                             );
                         } else {
                             // A new upstairs connected
-                            if new_gen > up.get_generation().await {
+                            if new_gen > up.get_generation() {
                                 // The next generation of another Upstairs
                                 // connected.
                                 bail!(
                                     CrucibleError::GenerationNumberTooLow(
                                         format!("saw YouAreNoLongerActive with \
                                             larger gen {} than ours {}",
-                                            new_gen, up.get_generation().await)
+                                            new_gen, up.get_generation())
                                     )
                                 );
                             }
@@ -2332,7 +2333,7 @@ where
                                 up_coms.client_id,
                                 up.uuid,
                                 new_upstairs_id,
-                                up.get_generation().await,
+                                up.get_generation(),
                                 new_gen,
                             );
                         }
@@ -5096,7 +5097,7 @@ pub struct Upstairs {
      * Upstairs Generation number.
      * Will always increase each time an Upstairs starts.
      */
-    generation: Mutex<u64>,
+    generation: AtomicU64,
 
     /*
      * The guest struct keeps track of jobs accepted from the Guest as they
@@ -5153,7 +5154,7 @@ pub struct Upstairs {
      * an ACK'd flush, just that the last IO command we put on the work
      * queue was not a flush.
      */
-    need_flush: Mutex<bool>,
+    need_flush: AtomicBool,
 
     /*
      * Upstairs stats.
@@ -5250,13 +5251,13 @@ impl Upstairs {
             active: Mutex::new(UpstairsState::default()),
             uuid,
             session_id: Uuid::new_v4(),
-            generation: Mutex::new(gen),
+            generation: AtomicU64::new(gen),
             guest,
             downstairs: Mutex::new(Downstairs::new(log.clone(), ds_target)),
             flush_info: Mutex::new(FlushInfo::new()),
             ddef: Mutex::new(rd_status),
             encryption_context,
-            need_flush: Mutex::new(false),
+            need_flush: AtomicBool::new(false),
             stats,
             lossy: opt.lossy,
             read_only: opt.read_only,
@@ -5311,14 +5312,13 @@ impl Upstairs {
         });
     }
 
-    async fn set_generation(&self, new_gen: u64) {
-        let mut gen = self.generation.lock().await;
-        *gen = new_gen;
-        info!(self.log, "Set desired generation to :{}", *gen);
+    fn set_generation(&self, new_gen: u64) {
+        self.generation.store(new_gen, Ordering::SeqCst);
+        info!(self.log, "Set desired generation to :{}", new_gen);
     }
 
-    async fn get_generation(&self) -> u64 {
-        *self.generation.lock().await
+    fn get_generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
     }
 
     /*
@@ -5692,21 +5692,19 @@ impl Upstairs {
         ds.ds_last_flush[client_id]
     }
 
-    async fn set_flush_clear(&self) {
-        let mut flush = self.need_flush.lock().await;
-        *flush = false;
+    fn set_flush_clear(&self) {
+        self.need_flush.store(false, Ordering::SeqCst);
     }
 
-    async fn set_flush_need(&self) {
-        let mut flush = self.need_flush.lock().await;
-        *flush = true;
+    fn set_flush_need(&self) {
+        self.need_flush.store(true, Ordering::SeqCst);
     }
 
     async fn flush_needed(&self) -> bool {
         if !self.guest_io_ready().await {
             return false;
         }
-        *self.need_flush.lock().await
+        self.need_flush.load(Ordering::SeqCst)
     }
 
     /*
@@ -5749,7 +5747,7 @@ impl Upstairs {
         snapshot_details: Option<SnapshotDetails>,
         ds_done_tx: mpsc::Sender<()>,
     ) -> Result<(), ()> {
-        self.set_flush_clear().await;
+        self.set_flush_clear();
 
         /*
          * Get the next ID for our new guest work job. Note that the flush
@@ -5796,7 +5794,7 @@ impl Upstairs {
             dep,
             next_flush,
             gw_id,
-            self.get_generation().await,
+            self.get_generation(),
             snapshot_details,
             ImpactedBlocks::Empty,
             extent_under_repair,
@@ -5870,7 +5868,7 @@ impl Upstairs {
             }
         }
 
-        self.set_flush_need().await;
+        self.set_flush_need();
 
         /*
          * Given the offset and buffer size, figure out what extent and
@@ -6112,7 +6110,7 @@ impl Upstairs {
             }
         }
 
-        self.set_flush_need().await;
+        self.set_flush_need();
 
         /*
          * Given the offset and buffer size, figure out what extent and
@@ -6653,7 +6651,7 @@ impl Upstairs {
          * Verify that the generation number that the guest has requested
          * is higher than what we have from the three downstairs.
          */
-        let requested_gen = self.get_generation().await;
+        let requested_gen = self.get_generation();
         if requested_gen == 0 {
             error!(self.log, "generation number should be at least 1");
             crucible_bail!(GenerationNumberTooLow, "Generation 0 illegal");
@@ -9696,8 +9694,7 @@ async fn process_new_io(
             // Put the req waiter into the upstairs so we have a hook on
             // who to notify when the answer comes back.
             // We must do this before we tell all the tasks for downstairs.
-            let gen: u64 = *up.generation.lock().await;
-            send_active(dst, gen);
+            send_active(dst, up.get_generation());
         }
         BlockOp::GoActiveWithGen { gen } => {
             /*
@@ -9707,7 +9704,7 @@ async fn process_new_io(
             if let Err(_e) = up.set_active_request(req).await {
                 return;
             }
-            up.set_generation(gen).await;
+            up.set_generation(gen);
             send_active(dst, gen);
         }
         BlockOp::QueryGuestIOReady { data } => {
@@ -10417,7 +10414,7 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
     println!(
         " Crucible gen:{} GIO:{} \
         work queues:  Upstairs:{}  downstairs:{}",
-        up.get_generation().await,
+        up.get_generation(),
         gior,
         up_count,
         ds_count,

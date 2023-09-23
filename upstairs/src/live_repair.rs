@@ -1097,7 +1097,7 @@ impl Upstairs {
 
         // Next we create and insert the close job on the work queue.
         let next_flush = self.next_flush_id().await;
-        let gen = self.get_generation().await;
+        let gen = self.get_generation();
 
         let close_brw = create_and_enqueue_close_io(
             &mut ds,
@@ -1319,7 +1319,7 @@ impl Upstairs {
             }
         }
 
-        self.set_flush_need().await;
+        self.set_flush_need();
         // This repair is done.  All we have left to do is return the
         // result to our caller.
         if abort_repair {
@@ -6031,7 +6031,7 @@ pub mod repair_test {
         // Simulate what happens when we first start repair
         // on extent 0
         let next_flush = up.next_flush_id().await;
-        let gen = up.get_generation().await;
+        let gen = up.get_generation();
 
         let mut gw = up.guest.guest_work.lock().await;
         let mut ds = up.downstairs.lock().await;
