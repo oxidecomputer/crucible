@@ -1,4 +1,5 @@
 // Copyright 2023 Oxide Computer Company
+#![warn(clippy::unused_async)]
 
 #[cfg(test)]
 mod test {
@@ -3395,13 +3396,12 @@ mod test {
 
         // Start a new pantry
 
-        let (log, pantry) = crucible_pantry::initialize_pantry().await.unwrap();
+        let (log, pantry) = crucible_pantry::initialize_pantry().unwrap();
         let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
             &log,
             "127.0.0.1:0".parse().unwrap(),
             &pantry,
         )
-        .await
         .unwrap();
 
         // Create a Volume out of it, and attach a CruciblePantryClient
@@ -3929,13 +3929,12 @@ mod test {
 
         // Start the pantry, then use it to scrub
 
-        let (log, pantry) = crucible_pantry::initialize_pantry().await.unwrap();
+        let (log, pantry) = crucible_pantry::initialize_pantry().unwrap();
         let (pantry_addr, _join_handle) = crucible_pantry::server::run_server(
             &log,
             "127.0.0.1:0".parse().unwrap(),
             &pantry,
         )
-        .await
         .unwrap();
 
         let client =

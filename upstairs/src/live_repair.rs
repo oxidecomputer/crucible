@@ -76,7 +76,7 @@ use tokio::sync::{mpsc, oneshot};
 
 // When determining if an extent needs repair, we collect its current
 // information from a downstairs and store the results in this struct.
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct ExtentInfo {
     pub generation: u64,
     pub flush_number: u64,
@@ -254,14 +254,14 @@ async fn live_repair_main(
     // rejoins.
     if source_downstairs.is_none() {
         error!(log, "Failed to find source downstairs for repair");
-        up.abort_repair_ds(&mut ds, up_state, &ds_done_tx).await;
+        up.abort_repair_ds(&mut ds, up_state, &ds_done_tx);
         ds.end_live_repair();
         bail!("Failed to find a valid source downstairs for repair");
     }
 
     if repair_downstairs.is_empty() {
         error!(log, "Failed to find a downstairs needing repair");
-        up.abort_repair_ds(&mut ds, up_state, &ds_done_tx).await;
+        up.abort_repair_ds(&mut ds, up_state, &ds_done_tx);
         ds.end_live_repair();
         bail!("Failed to find a downstairs needing repair");
     }
@@ -590,7 +590,7 @@ fn repair_or_noop(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn create_and_enqueue_reopen_io(
+fn create_and_enqueue_reopen_io(
     ds: &mut Downstairs,
     gw: &mut GuestWork,
     eid: u32,
@@ -620,13 +620,13 @@ async fn create_and_enqueue_reopen_io(
     {
         gw.active.insert(gw_reopen_id, new_gtos);
     }
-    ds.enqueue_repair(reopen_io).await;
+    ds.enqueue_repair(reopen_io);
     reopen_brw
 }
 
 // This creates and enqueues an ExtentFlushClose operation onto the work queue.
 #[allow(clippy::too_many_arguments)]
-async fn create_and_enqueue_close_io(
+fn create_and_enqueue_close_io(
     ds: &mut Downstairs,
     gw: &mut GuestWork,
     eid: u32,
@@ -648,7 +648,7 @@ async fn create_and_enqueue_close_io(
         next_flush,
         gen,
         source,
-        repair.clone(),
+        repair,
     );
 
     let mut sub = HashMap::new();
@@ -664,12 +664,12 @@ async fn create_and_enqueue_close_io(
     {
         gw.active.insert(gw_close_id, new_gtos);
     }
-    ds.enqueue_repair(close_io).await;
+    ds.enqueue_repair(close_io);
     close_brw
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn create_and_enqueue_repair_io(
+fn create_and_enqueue_repair_io(
     ds: &mut Downstairs,
     gw: &mut GuestWork,
     eid: u32,
@@ -704,11 +704,11 @@ async fn create_and_enqueue_repair_io(
     {
         gw.active.insert(gw_repair_id, new_gtos);
     }
-    ds.enqueue_repair(repair_io).await;
+    ds.enqueue_repair(repair_io);
     repair_brw
 }
 
-async fn create_and_enqueue_noop_io(
+fn create_and_enqueue_noop_io(
     ds: &mut Downstairs,
     gw: &mut GuestWork,
     deps: Vec<JobId>,
@@ -731,7 +731,7 @@ async fn create_and_enqueue_noop_io(
     {
         gw.active.insert(gw_noop_id, new_gtos);
     }
-    ds.enqueue_repair(nio).await;
+    ds.enqueue_repair(nio);
     noop_brw
 }
 
@@ -755,7 +755,7 @@ impl Upstairs {
     // Abort a repair in progress on all downstairs and clear out any
     // repair state.  If our setting faulted on an IO will complete that
     // IO, then we must indicate that to the ds_done_tx channel.
-    async fn abort_repair_ds(
+    fn abort_repair_ds(
         &self,
         ds: &mut Downstairs,
         up_state: UpState,
@@ -863,8 +863,7 @@ impl Upstairs {
                     JobId(id),
                     gw_id,
                     impacted_blocks,
-                )
-                .await;
+                );
                 noops.push(noop_brw);
             }
         }
@@ -902,7 +901,7 @@ impl Upstairs {
                     let up_state = active.up_state;
                     let mut ds = self.downstairs.lock().await;
                     drop(active);
-                    self.abort_repair_ds(&mut ds, up_state, ds_done_tx).await;
+                    self.abort_repair_ds(&mut ds, up_state, ds_done_tx);
                     abort_repair = true;
                 }
             }
@@ -1000,7 +999,7 @@ impl Upstairs {
 
             // Since we have done nothing yet, we can call abort here and
             // not have to issue jobs if none have been reserved.
-            self.abort_repair_ds(&mut ds, up_state, ds_done_tx).await;
+            self.abort_repair_ds(&mut ds, up_state, ds_done_tx);
             self.abort_repair_extent(&mut gw, &mut ds, eid).await;
 
             drop(ds);
@@ -1092,8 +1091,7 @@ impl Upstairs {
             reopen_id,
             gw_reopen_id,
             impacted_blocks,
-        )
-        .await;
+        );
 
         // Next we create and insert the close job on the work queue.
         let next_flush = self.next_flush_id();
@@ -1111,8 +1109,7 @@ impl Upstairs {
             impacted_blocks,
             source,
             repair.clone(),
-        )
-        .await;
+        );
 
         // Now that we have enqueued both the close and the reopen, we
         // can release all the locks and wait for the result from our close.
@@ -1161,7 +1158,7 @@ impl Upstairs {
         // Verify none of the downstairs changed state
         if !abort_repair && repair_ds_state_change(&mut ds, source, &repair) {
             warn!(self.log, "RE: downstairs state change, aborting repair now");
-            self.abort_repair_ds(&mut ds, up_state, ds_done_tx).await;
+            self.abort_repair_ds(&mut ds, up_state, ds_done_tx);
             abort_repair = true;
         }
 
@@ -1176,7 +1173,6 @@ impl Upstairs {
                 gw_repair_id,
                 impacted_blocks,
             )
-            .await
         } else {
             create_and_enqueue_repair_io(
                 &mut ds,
@@ -1189,7 +1185,6 @@ impl Upstairs {
                 source,
                 &repair,
             )
-            .await
         };
         drop(gw);
         drop(ds);
@@ -1230,7 +1225,7 @@ impl Upstairs {
         drop(active);
         if !abort_repair && repair_ds_state_change(&mut ds, source, &repair) {
             warn!(self.log, "RE: downstairs state change, aborting repair now");
-            self.abort_repair_ds(&mut ds, up_state, ds_done_tx).await;
+            self.abort_repair_ds(&mut ds, up_state, ds_done_tx);
             abort_repair = true;
         }
 
@@ -1242,8 +1237,7 @@ impl Upstairs {
             noop_id,
             gw_noop_id,
             impacted_blocks,
-        )
-        .await;
+        );
 
         drop(gw);
         drop(ds);
@@ -1315,7 +1309,7 @@ impl Upstairs {
                     self.log,
                     "RE: downstairs state change, aborting repair now"
                 );
-                self.abort_repair_ds(&mut ds, up_state, ds_done_tx).await;
+                self.abort_repair_ds(&mut ds, up_state, ds_done_tx);
             }
         }
 
@@ -1726,7 +1720,7 @@ pub mod repair_test {
                 Ok(vec![]),
                 &None,
                 UpState::Active,
-                Some(ei.clone()),
+                Some(ei),
             )
             .unwrap();
         }
@@ -1887,19 +1881,14 @@ pub mod repair_test {
                     ds_close_id,
                     cid,
                     Ok(vec![]),
-                    Some(bad_ei.clone()),
+                    Some(bad_ei),
                 )
                 .await
                 .unwrap();
             } else {
-                up.process_ds_operation(
-                    ds_close_id,
-                    cid,
-                    Ok(vec![]),
-                    Some(ei.clone()),
-                )
-                .await
-                .unwrap();
+                up.process_ds_operation(ds_close_id, cid, Ok(vec![]), Some(ei))
+                    .await
+                    .unwrap();
             }
         }
 
@@ -2049,14 +2038,9 @@ pub mod repair_test {
                 .await
                 .unwrap();
             } else {
-                up.process_ds_operation(
-                    ds_close_id,
-                    cid,
-                    Ok(vec![]),
-                    Some(ei.clone()),
-                )
-                .await
-                .unwrap();
+                up.process_ds_operation(ds_close_id, cid, Ok(vec![]), Some(ei))
+                    .await
+                    .unwrap();
             }
         }
 
@@ -2238,7 +2222,7 @@ pub mod repair_test {
                 Ok(vec![]),
                 &None,
                 UpState::Active,
-                Some(ei.clone()),
+                Some(ei),
             )
             .unwrap();
         }
@@ -2275,7 +2259,7 @@ pub mod repair_test {
                     ds_repair_id,
                     cid,
                     Ok(vec![]),
-                    Some(ei.clone()),
+                    Some(ei),
                 )
                 .await
                 .unwrap();
@@ -2422,7 +2406,7 @@ pub mod repair_test {
                 Ok(vec![]),
                 &None,
                 UpState::Active,
-                Some(ei.clone()),
+                Some(ei),
             )
             .unwrap();
         }
@@ -2576,7 +2560,7 @@ pub mod repair_test {
                 Ok(vec![]),
                 &None,
                 UpState::Active,
-                Some(ei.clone()),
+                Some(ei),
             )
             .unwrap();
         }
@@ -3260,7 +3244,7 @@ pub mod repair_test {
             gw.active.insert(gw_close_id, new_gtos);
         }
 
-        ds.enqueue_repair(close_io).await;
+        ds.enqueue_repair(close_io);
 
         ds.in_progress(close_id, ClientId::new(0));
         ds.in_progress(close_id, ClientId::new(1));
@@ -3362,18 +3346,9 @@ pub mod repair_test {
                 flush_number: 3,
                 dirty: false,
             };
-            assert!(ds
-                .repair_info
-                .insert(ClientId::new(0), ei.clone())
-                .is_none());
-            assert!(ds
-                .repair_info
-                .insert(ClientId::new(1), ei.clone())
-                .is_none());
-            assert!(ds
-                .repair_info
-                .insert(ClientId::new(2), ei.clone())
-                .is_none());
+            assert!(ds.repair_info.insert(ClientId::new(0), ei).is_none());
+            assert!(ds.repair_info.insert(ClientId::new(1), ei).is_none());
+            assert!(ds.repair_info.insert(ClientId::new(2), ei).is_none());
 
             let repair_extent = if source == ClientId::new(0) {
                 vec![ClientId::new(1), ClientId::new(2)]
@@ -3473,29 +3448,29 @@ pub mod repair_test {
             let repair = if source == ClientId::new(0) {
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(0), good_ei.clone())
+                    .insert(ClientId::new(0), good_ei)
                     .is_none());
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(1), bad_ei.clone())
+                    .insert(ClientId::new(1), bad_ei)
                     .is_none());
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(2), good_ei.clone())
+                    .insert(ClientId::new(2), good_ei)
                     .is_none());
                 vec![ClientId::new(1)]
             } else {
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(0), bad_ei.clone())
+                    .insert(ClientId::new(0), bad_ei)
                     .is_none());
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(1), good_ei.clone())
+                    .insert(ClientId::new(1), good_ei)
                     .is_none());
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(2), good_ei.clone())
+                    .insert(ClientId::new(2), good_ei)
                     .is_none());
                 vec![ClientId::new(0)]
             };
@@ -3507,29 +3482,29 @@ pub mod repair_test {
             let repair = if source == ClientId::new(2) {
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(0), good_ei.clone())
+                    .insert(ClientId::new(0), good_ei)
                     .is_none());
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(1), bad_ei.clone())
+                    .insert(ClientId::new(1), bad_ei)
                     .is_none());
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(2), good_ei.clone())
+                    .insert(ClientId::new(2), good_ei)
                     .is_none());
                 vec![ClientId::new(1)]
             } else {
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(0), good_ei.clone())
+                    .insert(ClientId::new(0), good_ei)
                     .is_none());
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(1), good_ei.clone())
+                    .insert(ClientId::new(1), good_ei)
                     .is_none());
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(2), bad_ei.clone())
+                    .insert(ClientId::new(2), bad_ei)
                     .is_none());
                 vec![ClientId::new(2)]
             };
@@ -3559,43 +3534,43 @@ pub mod repair_test {
             let repair = if source == ClientId::new(0) {
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(0), good_ei.clone())
+                    .insert(ClientId::new(0), good_ei)
                     .is_none());
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(1), bad_ei.clone())
+                    .insert(ClientId::new(1), bad_ei)
                     .is_none());
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(2), bad_ei.clone())
+                    .insert(ClientId::new(2), bad_ei)
                     .is_none());
                 vec![ClientId::new(1), ClientId::new(2)]
             } else if source == ClientId::new(1) {
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(0), bad_ei.clone())
+                    .insert(ClientId::new(0), bad_ei)
                     .is_none());
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(1), good_ei.clone())
+                    .insert(ClientId::new(1), good_ei)
                     .is_none());
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(2), bad_ei.clone())
+                    .insert(ClientId::new(2), bad_ei)
                     .is_none());
                 vec![ClientId::new(0), ClientId::new(2)]
             } else {
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(0), bad_ei.clone())
+                    .insert(ClientId::new(0), bad_ei)
                     .is_none());
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(1), bad_ei.clone())
+                    .insert(ClientId::new(1), bad_ei)
                     .is_none());
                 assert!(ds
                     .repair_info
-                    .insert(ClientId::new(2), good_ei.clone())
+                    .insert(ClientId::new(2), good_ei)
                     .is_none());
                 vec![ClientId::new(0), ClientId::new(1)]
             };
@@ -3848,8 +3823,7 @@ pub mod repair_test {
             r_id,
             gw_r_id,
             impacted_blocks,
-        )
-        .await;
+        );
 
         let job = ds.ds_active.get(&r_id).unwrap();
 
@@ -3916,8 +3890,7 @@ pub mod repair_test {
             impacted_blocks,
             source,
             repair.clone(),
-        )
-        .await;
+        );
 
         let job = ds.ds_active.get(&close_id).unwrap();
 
@@ -3986,7 +3959,7 @@ pub mod repair_test {
             dirty: false,
         };
         for cid in ClientId::iter() {
-            ds.repair_info.insert(cid, ei.clone());
+            ds.repair_info.insert(cid, ei);
         }
 
         let _repair_brw = create_and_enqueue_repair_io(
@@ -3999,8 +3972,7 @@ pub mod repair_test {
             impacted_blocks,
             source,
             &repair,
-        )
-        .await;
+        );
 
         let job = ds.ds_active.get(&repair_id).unwrap();
 
@@ -4054,14 +4026,14 @@ pub mod repair_test {
             flush_number: 3,
             dirty: false,
         };
-        ds.repair_info.insert(ClientId::new(0), ei.clone());
-        ds.repair_info.insert(ClientId::new(1), ei.clone());
+        ds.repair_info.insert(ClientId::new(0), ei);
+        ds.repair_info.insert(ClientId::new(1), ei);
         let bad_ei = ExtentInfo {
             generation: 5,
             flush_number: 2,
             dirty: false,
         };
-        ds.repair_info.insert(ClientId::new(2), bad_ei.clone());
+        ds.repair_info.insert(ClientId::new(2), bad_ei);
         // We also need a fake repair address
         for cid in ClientId::iter() {
             ds.ds_repair.insert(cid, "127.0.0.1:1234".parse().unwrap());
@@ -4077,8 +4049,7 @@ pub mod repair_test {
             impacted_blocks,
             source,
             &repair,
-        )
-        .await;
+        );
 
         let job = ds.ds_active.get(&repair_id).unwrap();
 
@@ -4153,8 +4124,7 @@ pub mod repair_test {
             impacted_blocks,
             ClientId::new(0),       // source downstairs
             vec![ClientId::new(1)], // repair downstairs
-        )
-        .await;
+        );
         drop(gw);
         drop(ds);
     }
@@ -4189,8 +4159,7 @@ pub mod repair_test {
             repair_id,
             gw_repair_id,
             impacted_blocks,
-        )
-        .await;
+        );
         drop(gw);
         drop(ds);
     }
@@ -5416,8 +5385,7 @@ pub mod repair_test {
         let mut gw = up.guest.guest_work.lock().await;
         let mut ds = up.downstairs.lock().await;
 
-        up.abort_repair_ds(&mut ds, UpState::Active, &ds_done_tx)
-            .await;
+        up.abort_repair_ds(&mut ds, UpState::Active, &ds_done_tx);
         up.abort_repair_extent(&mut gw, &mut ds, eid as u32).await;
 
         assert_eq!(ds.ds_state[ClientId::new(0)], DsState::Active);
@@ -5457,8 +5425,7 @@ pub mod repair_test {
         // Reserve some repair IDs
         let reserved_ids = ds.reserve_repair_ids(eid as u32);
 
-        up.abort_repair_ds(&mut ds, UpState::Active, &ds_done_tx)
-            .await;
+        up.abort_repair_ds(&mut ds, UpState::Active, &ds_done_tx);
         up.abort_repair_extent(&mut gw, &mut ds, eid as u32).await;
 
         // Check all three IOs again, downstairs 1 will be skipped..
@@ -5506,8 +5473,7 @@ pub mod repair_test {
         // Reserve some repair IDs
         let _reserved_ids = ds.reserve_repair_ids(eid as u32);
 
-        up.abort_repair_ds(&mut ds, UpState::Active, &ds_done_tx)
-            .await;
+        up.abort_repair_ds(&mut ds, UpState::Active, &ds_done_tx);
         up.abort_repair_extent(&mut gw, &mut ds, eid as u32).await;
 
         // Check all three IOs again, all downstairs will be skipped..
@@ -6069,8 +6035,7 @@ pub mod repair_test {
             reopen_id,
             gw_reopen_id,
             impacted_blocks,
-        )
-        .await;
+        );
 
         // Next we create and insert the close job on the work queue.
 
@@ -6086,8 +6051,7 @@ pub mod repair_test {
             impacted_blocks,
             ClientId::new(0),
             vec![ClientId::new(1)],
-        )
-        .await;
+        );
 
         drop(ds);
         drop(gw);

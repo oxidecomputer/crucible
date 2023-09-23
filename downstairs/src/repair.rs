@@ -211,7 +211,7 @@ async fn get_files_for_extent(
             format!("Expected {:?} to be a directory", extent_dir),
         ))
     } else {
-        let files = extent_file_list(extent_dir, eid).await?;
+        let files = extent_file_list(extent_dir, eid)?;
         Ok(HttpResponseOk(files))
     }
 }
@@ -221,7 +221,7 @@ async fn get_files_for_extent(
  * that correspond to the given extent.  Return an error if any
  * of the required files are missing.
  */
-async fn extent_file_list(
+fn extent_file_list(
     extent_dir: PathBuf,
     eid: u32,
 ) -> Result<Vec<String>, HttpError> {
@@ -281,7 +281,7 @@ mod test {
 
         // Determine the directory and name for expected extent files.
         let ed = extent_dir(&dir, 1);
-        let mut ex_files = extent_file_list(ed, 1).await.unwrap();
+        let mut ex_files = extent_file_list(ed, 1).unwrap();
         ex_files.sort();
         let expected = vec!["001", "001.db", "001.db-shm", "001.db-wal"];
         println!("files: {:?}", ex_files);
@@ -311,7 +311,7 @@ mod test {
         rm_file.set_extension("db-shm");
         std::fs::remove_file(rm_file).unwrap();
 
-        let mut ex_files = extent_file_list(extent_dir, 1).await.unwrap();
+        let mut ex_files = extent_file_list(extent_dir, 1).unwrap();
         ex_files.sort();
         let expected = vec!["001", "001.db"];
         println!("files: {:?}", ex_files);
@@ -346,7 +346,7 @@ mod test {
         rm_file.set_extension("db-shm");
         let _ = std::fs::remove_file(rm_file);
 
-        let mut ex_files = extent_file_list(extent_dir, 1).await.unwrap();
+        let mut ex_files = extent_file_list(extent_dir, 1).unwrap();
         ex_files.sort();
         let expected = vec!["001", "001.db"];
         println!("files: {:?}", ex_files);
@@ -373,7 +373,7 @@ mod test {
         rm_file.set_extension("db");
         std::fs::remove_file(&rm_file).unwrap();
 
-        assert!(extent_file_list(extent_dir, 2).await.is_err());
+        assert!(extent_file_list(extent_dir, 2).is_err());
 
         Ok(())
     }
@@ -395,7 +395,7 @@ mod test {
         rm_file.push(extent_file_name(1, ExtentType::Data));
         std::fs::remove_file(&rm_file).unwrap();
 
-        assert!(extent_file_list(extent_dir, 1).await.is_err());
+        assert!(extent_file_list(extent_dir, 1).is_err());
 
         Ok(())
     }

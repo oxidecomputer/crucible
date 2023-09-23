@@ -2,6 +2,7 @@
 #![cfg_attr(usdt_need_asm, feature(asm))]
 #![cfg_attr(all(target_os = "macos", usdt_need_asm_sym), feature(asm_sym))]
 #![allow(clippy::mutex_atomic)]
+#![warn(clippy::unused_async)]
 
 use std::clone::Clone;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -3716,7 +3717,7 @@ impl Downstairs {
     /**
      * Enqueue a new downstairs live repair request.
      */
-    async fn enqueue_repair(&mut self, mut io: DownstairsIO) {
+    fn enqueue_repair(&mut self, mut io: DownstairsIO) {
         // Puts the repair IO onto the downstairs work queue.
         for cid in ClientId::iter() {
             assert_eq!(io.state[cid], IOState::New);
@@ -9503,7 +9504,7 @@ struct Condition {
  * Send work to all the targets.
  * If a send fails, report an error.
  */
-async fn send_work(t: &[Target], val: u64, log: &Logger) {
+fn send_work(t: &[Target], val: u64, log: &Logger) {
     for (client_id, d_client) in t.iter().enumerate() {
         let res = d_client.ds_work_tx.try_send(val);
         if let Err(e) = res {
@@ -9754,7 +9755,7 @@ async fn process_new_io(
                 return;
             }
 
-            send_work(dst, *lastcast, &up.log).await;
+            send_work(dst, *lastcast, &up.log);
             *lastcast += 1;
         }
         BlockOp::Read { offset, data } => {
@@ -9765,7 +9766,7 @@ async fn process_new_io(
             {
                 return;
             }
-            send_work(dst, *lastcast, &up.log).await;
+            send_work(dst, *lastcast, &up.log);
             *lastcast += 1;
         }
         BlockOp::Write { offset, data } => {
@@ -9776,7 +9777,7 @@ async fn process_new_io(
             {
                 return;
             }
-            send_work(dst, *lastcast, &up.log).await;
+            send_work(dst, *lastcast, &up.log);
             *lastcast += 1;
         }
         BlockOp::WriteUnwritten { offset, data } => {
@@ -9787,7 +9788,7 @@ async fn process_new_io(
             {
                 return;
             }
-            send_work(dst, *lastcast, &up.log).await;
+            send_work(dst, *lastcast, &up.log);
             *lastcast += 1;
         }
         BlockOp::Flush { snapshot_details } => {
@@ -9811,7 +9812,7 @@ async fn process_new_io(
                 return;
             }
 
-            send_work(dst, *lastcast, &up.log).await;
+            send_work(dst, *lastcast, &up.log);
             *lastcast += 1;
         }
         BlockOp::RepairOp => {
@@ -9915,7 +9916,7 @@ async fn process_new_io(
                 req.send_err(CrucibleError::UpstairsInactive);
                 return;
             }
-            send_work(dst, *lastcast, &up.log).await;
+            send_work(dst, *lastcast, &up.log);
             *lastcast += 1;
         }
     }
@@ -10133,7 +10134,7 @@ async fn up_listen(
                         error!(up.log, "flush send failed:{:?}", e);
                         // XXX What to do here?
                     } else {
-                        send_work(&dst, 1, &up.log).await;
+                        send_work(&dst, 1, &up.log);
                     }
                 }
 
