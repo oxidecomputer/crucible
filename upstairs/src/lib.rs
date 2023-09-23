@@ -5313,12 +5313,12 @@ impl Upstairs {
     }
 
     fn set_generation(&self, new_gen: u64) {
-        self.generation.store(new_gen, Ordering::Release);
+        self.generation.store(new_gen, Ordering::SeqCst);
         info!(self.log, "Set desired generation to :{}", new_gen);
     }
 
     fn get_generation(&self) -> u64 {
-        self.generation.load(Ordering::Acquire)
+        self.generation.load(Ordering::SeqCst)
     }
 
     /*
@@ -5693,18 +5693,18 @@ impl Upstairs {
     }
 
     fn set_flush_clear(&self) {
-        self.need_flush.store(false, Ordering::Release);
+        self.need_flush.store(false, Ordering::SeqCst);
     }
 
     fn set_flush_need(&self) {
-        self.need_flush.store(true, Ordering::Release);
+        self.need_flush.store(true, Ordering::SeqCst);
     }
 
     async fn flush_needed(&self) -> bool {
         if !self.guest_io_ready().await {
             return false;
         }
-        self.need_flush.load(Ordering::Acquire)
+        self.need_flush.load(Ordering::SeqCst)
     }
 
     /*
