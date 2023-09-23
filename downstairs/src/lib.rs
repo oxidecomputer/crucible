@@ -3773,11 +3773,14 @@ mod test {
             block_context: BlockContext {
                 encryption_context: Some(
                     crucible_protocol::EncryptionContext {
-                        nonce: vec![1, 2, 3],
-                        tag: vec![4, 5, 6],
+                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                        tag: [
+                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                            18, 19,
+                        ],
                     },
                 ),
-                hash: 4798852240582462654, // Hash for all 9s
+                hash: 14137680576404864188, // Hash for all 9s
             },
         }]
     }
