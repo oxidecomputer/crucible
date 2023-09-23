@@ -1162,7 +1162,9 @@ where
      * At this point the upstairs looks to see what state the downstairs is
      * currently in.  It will be WaitActive, Faulted, or Offline.
      *
-     * Depending on which state, we will either choose 3 or 4 next.
+     * Depending on which state, we will either choose
+     * NegotiationState::GetLastFlush or NegotiationState::GetExtentVersions
+     * next.
      *
      * For the Offline state, the downstairs was connected and verified
      * and some point after that, the connection was lost.  To handle this
@@ -1172,11 +1174,12 @@ where
      * For WaitActive, it means this downstairs never was "Active" and we
      * have to go through the full compare of this downstairs with other
      * downstairs and make sure they are consistent.  To do that, we will
-     * request extent versions and skip over step 3
+     * request extent versions and skip over NegotiationState::GetLastFlush.
+     *
      * For Faulted, we don't know the condition of the data on the
      * Downstairs, so we transition this downstairs to LiveRepairReady.  We
      * also request extent versions and will have to repair this
-     * downstairs, skipping over step 3 as well.
+     * downstairs, skipping over NegotiationState::GetLastFlush as well.
      *
      * NegotiationState::GetLastFlush (offline only)
      * ------------------------------
@@ -1185,7 +1188,7 @@ where
      *                         <---  LastFlushAck(lf)
      *
      * After receiving our last flush, we now move this downstairs state to
-     * Replay and skip ahead to step 5.
+     * Replay and skip ahead to NegotiationState::Done
      *
      * NegotiationState::GetExtentVersions
      * (WaitActive and LiveRepairReady come here from WaitForRegionInfo)
