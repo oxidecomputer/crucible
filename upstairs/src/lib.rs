@@ -1102,7 +1102,17 @@ where
     /*
      * Used to track where we are in the current negotiation.
      */
-    let mut negotiated = 0;
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    enum NegotiationState {
+        Start,
+        WaitForPromote,
+        WaitForRegionInfo,
+        GetLastFlush,
+        GetExtentVersions,
+        Done,
+    }
+
+    let mut negotiated = NegotiationState::Start;
 
     // XXX figure out what deadlines make sense here
     let mut ping_interval = deadline_secs(5.0);
@@ -1119,8 +1129,10 @@ where
      * The negotiation flow starts as follows, with the value of the
      * negotiated variable on the left:
      *
+     * NegotiationState::Start
+     * -----------------------
      *          Upstairs             Downstairs
-     * 0:        HereIAm(...)  --->
+     *           HereIAm(...)  --->
      *                         <---  YesItsMe(...)
      *
      * At this point, a downstairs will wait for a PromoteToActive message
@@ -1133,7 +1145,9 @@ where
      * For downstairs currently in Disconnected or New states, we move to
      * WaitActive, for Faulted or Offline states, we stay in that state..
      *
-     * 1: PromoteToActive(uuid)--->
+     * NegotiationState::WaitForPromote
+     * --------------------------------
+     *    PromoteToActive(uuid)--->
      *                         <---  YouAreNowActive(uuid)
      *
      * YouAreNowActive includes information about the upstairs and session
@@ -1141,13 +1155,17 @@ where
      * matches with what we expect.  We next request RegionInfo from the
      * downstairs.
      *
-     * 2:    RegionInfoPlease  --->
+     * NegotiationState::WaitForRegionInfo
+     * -----------------------------------
+     *       RegionInfoPlease  --->
      *                         <---  RegionInfo(r)
      *
      * At this point the upstairs looks to see what state the downstairs is
      * currently in.  It will be WaitActive, Faulted, or Offline.
      *
-     * Depending on which state, we will either choose 3 or 4 next.
+     * Depending on which state, we will either choose
+     * NegotiationState::GetLastFlush or NegotiationState::GetExtentVersions
+     * next.
      *
      * For the Offline state, the downstairs was connected and verified
      * and some point after that, the connection was lost.  To handle this
@@ -1157,25 +1175,27 @@ where
      * For WaitActive, it means this downstairs never was "Active" and we
      * have to go through the full compare of this downstairs with other
      * downstairs and make sure they are consistent.  To do that, we will
-     * request extent versions and skip over step 3
+     * request extent versions and skip over NegotiationState::GetLastFlush.
+     *
      * For Faulted, we don't know the condition of the data on the
      * Downstairs, so we transition this downstairs to LiveRepairReady.  We
      * also request extent versions and will have to repair this
-     * downstairs, skipping over step 3 as well.
+     * downstairs, skipping over NegotiationState::GetLastFlush as well.
      *
-     * (Offline only):
-     *
+     * NegotiationState::GetLastFlush (offline only)
+     * ------------------------------
      *          Upstairs             Downstairs
-     * 3:       LastFlush(lf)) --->
+     *          LastFlush(lf)) --->
      *                         <---  LastFlushAck(lf)
      *
      * After receiving our last flush, we now move this downstairs state to
-     * Replay and skip ahead to step 5.
+     * Replay and skip ahead to NegotiationState::Done
      *
-     * (WaitActive and LiveRepairReady come here from 2):
-     *
+     * NegotiationState::GetExtentVersions
+     * (WaitActive and LiveRepairReady come here from WaitForRegionInfo)
+     * -----------------------------------
      *          Upstairs             Downstairs
-     * 4: ExtentVersionsPlease --->
+     *    ExtentVersionsPlease --->
      *                         <---  ExtentVersions(g, v, d)
      *
      * Now with the extent info, Upstairs calls process_downstairs() and
@@ -1183,8 +1203,9 @@ where
      * we set the downstairs to DsState::WaitQuorum and we exit the
      * while loop.
      *
-     *
-     * 5: Now the downstairs is ready to receive replay IOs from the
+     * NegotiationState::Done
+     * ----------------------
+     *    Now the downstairs is ready to receive replay IOs from the
      *    upstairs. We set the downstairs to DsState::Replay and the while
      *    loop is exited.
      */
@@ -1204,7 +1225,8 @@ where
                 ping_interval = deadline_secs(5.0);
             }
             r = up_coms.ds_active_rx.changed(),
-                if negotiated == 1 && !self_promotion =>
+                if negotiated == NegotiationState::WaitForPromote
+                    && !self_promotion =>
             {
                 match r {
                     Ok(_) => {
@@ -1281,7 +1303,7 @@ where
                         );
                     }
                     Some(Message::YesItsMe { version, repair_addr }) => {
-                        if negotiated != 0 {
+                        if negotiated != NegotiationState::Start {
                             bail!("Got version already!");
                         }
 
@@ -1303,7 +1325,7 @@ where
                             );
                         }
 
-                        negotiated = 1;
+                        negotiated = NegotiationState::WaitForPromote;
 
                         up.ds_set_repair_address(
                             up_coms.client_id, repair_addr,
@@ -1444,13 +1466,13 @@ where
                             }
                         }
 
-                        if negotiated != 1 {
+                        if negotiated != NegotiationState::WaitForPromote {
                             bail!(
-                                "Received YouAreNowActive out of order! {}",
+                                "Received YouAreNowActive out of order! {:?}",
                                 negotiated
                             );
                         }
-                        negotiated = 2;
+                        negotiated = NegotiationState::WaitForRegionInfo;
                         fw.send(Message::RegionInfoPlease).await?;
 
                     }
@@ -1532,7 +1554,7 @@ where
 
                     }
                     Some(Message::RegionInfo { region_def }) => {
-                        if negotiated != 2 {
+                        if negotiated != NegotiationState::WaitForRegionInfo {
                             bail!("Received RegionInfo out of order!");
                         }
                         info!(up.log,
@@ -1569,7 +1591,7 @@ where
                                     up.log,
                                     "[{}] send last flush ID to this DS: {}",
                                     up_coms.client_id, lf);
-                                negotiated = 3;
+                                negotiated = NegotiationState::GetLastFlush;
                                 fw.send(
                                     Message::LastFlush { last_flush_number: lf }
                                 ).await?;
@@ -1581,7 +1603,8 @@ where
                                 /*
                                  * Ask for the current version of all extents.
                                  */
-                                negotiated = 4;
+                                negotiated =
+                                    NegotiationState::GetExtentVersions;
                                 fw.send(Message::ExtentVersionsPlease).await?;
                             }
                             DsState::Replacing => {
@@ -1595,7 +1618,7 @@ where
                             }
                             bad_state => {
                                 panic!(
-                                    "[{}] join from invalid state {} {} {}",
+                                    "[{}] join from invalid state {} {} {:?}",
                                     up_coms.client_id,
                                     bad_state,
                                     up.uuid,
@@ -1606,7 +1629,7 @@ where
                         up.ds_state_show().await;
                     }
                     Some(Message::LastFlushAck { last_flush_number }) => {
-                        if negotiated != 3 {
+                        if negotiated != NegotiationState::GetLastFlush {
                             bail!("Received LastFlushAck out of order!");
                         }
                         let active = up.active.lock().await;
@@ -1642,7 +1665,7 @@ where
                             DsState::Replay
                         );
 
-                        negotiated = 5;
+                        negotiated = NegotiationState::Done;
                         drop(ds);
 
                         *connected = true;
@@ -1650,7 +1673,7 @@ where
                     Some(Message::ExtentVersions {
                             gen_numbers, flush_numbers, dirty_bits
                     }) => {
-                        if negotiated != 4 {
+                        if negotiated != NegotiationState::GetExtentVersions {
                             bail!("Received ExtentVersions out of order!");
                         }
                         let active = up.active.lock().await;
@@ -1716,7 +1739,7 @@ where
                             up_coms.client_id,
                             old_rm,
                         );
-                        negotiated = 5;
+                        negotiated = NegotiationState::Done;
                         drop(ds);
 
                         /*
@@ -1802,7 +1825,7 @@ where
      * But, XXX, this will go away when we redo the state transition code
      * for a downstairs connection.
      */
-    assert_eq!(negotiated, 5);
+    assert_eq!(negotiated, NegotiationState::Done);
     cmd_loop(up, fr, fw, up_coms).await
 }
 
