@@ -1,6 +1,5 @@
 // Copyright 2022 Oxide Computer Company
 
-#![warn(clippy::unused_async)]
 use std::sync::Arc;
 
 use anyhow::Result;

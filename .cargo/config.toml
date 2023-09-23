@@ -1,0 +1,6 @@
+[build]
+# Workaround to enable this lint for all packages in the workspace
+#
+# Once https://github.com/rust-lang/cargo/issues/12115 makes it to our
+# toolchain, we'll be able to put this in the `Cargo.toml` manifest instead.
+rustflags = ["-Wclippy::unused-async"]

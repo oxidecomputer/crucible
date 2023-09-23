@@ -2,7 +2,6 @@
 #![cfg_attr(usdt_need_asm, feature(asm))]
 #![cfg_attr(all(target_os = "macos", usdt_need_asm_sym), feature(asm_sym))]
 #![allow(clippy::mutex_atomic)]
-#![warn(clippy::unused_async)]
 
 use std::clone::Clone;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};

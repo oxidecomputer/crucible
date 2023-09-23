@@ -1,5 +1,4 @@
 // Copyright 2023 Oxide Computer Company
-#![warn(clippy::unused_async)]
 
 #[cfg(test)]
 mod test {
