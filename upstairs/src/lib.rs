@@ -5042,7 +5042,7 @@ impl UpstairsState {
      * that happens on initial startup. This is because the running
      * upstairs has some state it can use to re-verify a downstairs.
      */
-    async fn set_active(&mut self) -> Result<(), CrucibleError> {
+    fn set_active(&mut self) -> Result<(), CrucibleError> {
         if self.up_state == UpState::Active {
             crucible_bail!(UpstairsAlreadyActive);
         } else if self.up_state == UpState::Deactivating {
@@ -5359,7 +5359,7 @@ impl Upstairs {
     async fn set_active(&self) -> Result<(), CrucibleError> {
         let mut active = self.active.lock().await;
         self.stats.add_activation().await;
-        active.set_active().await?;
+        active.set_active()?;
         info!(
             self.log,
             "{} is now active with session: {}", self.uuid, self.session_id
@@ -6614,7 +6614,7 @@ impl Upstairs {
      * Verify the guest given gen number is highest.
      * Decide if we need repair, and if so create the repair list
      */
-    async fn collate_downstairs(
+    fn collate_downstairs(
         &self,
         ds: &mut Downstairs,
     ) -> Result<bool, CrucibleError> {
@@ -6939,7 +6939,7 @@ impl Upstairs {
              * downstairs out, forget any activation requests, and the
              * upstairs goes back to waiting for another activation request.
              */
-            self.collate_downstairs(&mut ds).await
+            self.collate_downstairs(&mut ds)
         };
 
         match collate_status {
@@ -7048,7 +7048,7 @@ impl Upstairs {
                     for s in ds.ds_state.iter_mut() {
                         *s = DsState::Active;
                     }
-                    active.set_active().await?;
+                    active.set_active()?;
                     info!(
                         self.log,
                         "{} is now active with session: {}",
@@ -7084,7 +7084,7 @@ impl Upstairs {
                     for s in ds.ds_state.iter_mut() {
                         *s = DsState::Active;
                     }
-                    active.set_active().await?;
+                    active.set_active()?;
                     info!(
                         self.log,
                         "{} is now active with session: {}",
@@ -8822,7 +8822,7 @@ impl GtoS {
     /*
      * Notify corresponding BlockReqWaiter
      */
-    pub async fn notify(self, result: Result<(), CrucibleError>) {
+    pub fn notify(self, result: Result<(), CrucibleError>) {
         /*
          * If present, send the result to the guest.  If this is a flush
          * issued on behalf of crucible, then there is no place to send
@@ -8943,7 +8943,7 @@ impl GuestWork {
                 gtos_job.transfer().await;
             }
 
-            gtos_job.notify(result).await;
+            gtos_job.notify(result);
 
             self.completed.push(gw_id);
         } else {
