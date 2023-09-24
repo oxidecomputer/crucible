@@ -5153,7 +5153,7 @@ pub struct Upstairs {
      * downstairs. We add one to that and it becomes the next flush
      * number. Flush numbers increment by one each time.
      */
-    flush_info: Mutex<FlushInfo>,
+    flush_info: Arc<FlushInfo>,
 
     /*
      * The global description of the downstairs region we are using.
@@ -5277,7 +5277,7 @@ impl Upstairs {
             generation: AtomicU64::new(gen),
             guest,
             downstairs: Mutex::new(Downstairs::new(log.clone(), ds_target)),
-            flush_info: Mutex::new(FlushInfo::new()),
+            flush_info: Arc::new(FlushInfo::new()),
             ddef: Mutex::new(rd_status),
             encryption_context,
             need_flush: AtomicBool::new(false),
@@ -5705,9 +5705,8 @@ impl Upstairs {
      * during the submit_flush method so we know the downstairs and
      * guest_work locks are both held.
      */
-    async fn next_flush_id(&self) -> u64 {
-        let mut fi = self.flush_info.lock().await;
-        fi.get_next_flush()
+    fn next_flush_id(&self) -> u64 {
+        self.flush_info.get_next_flush()
     }
 
     async fn last_flush_id(&self, client_id: ClientId) -> JobId {
@@ -5779,7 +5778,7 @@ impl Upstairs {
          */
         let gw_id: u64 = gw.next_gw_id();
         let next_id = downstairs.next_id();
-        let next_flush = self.next_flush_id().await;
+        let next_flush = self.next_flush_id();
         cdt::gw__flush__start!(|| (gw_id));
 
         if snapshot_details.is_some() {
@@ -6704,10 +6703,7 @@ impl Upstairs {
         /*
          * Set the next flush ID so we have if we need to repair.
          */
-        {
-            let mut fi = self.flush_info.lock().await;
-            fi.next_flush = max_flush;
-        }
+        self.flush_info.set_next_flush(max_flush);
         info!(self.log, "Next flush: {}", max_flush);
 
         /*
@@ -7580,24 +7576,28 @@ struct FlushInfo {
     /*
      * The next flush number to use when a Flush is issued.
      */
-    next_flush: u64,
+    next_flush: AtomicU64,
 }
 
 impl FlushInfo {
     pub fn new() -> FlushInfo {
-        FlushInfo { next_flush: 0 }
+        FlushInfo {
+            next_flush: AtomicU64::new(0),
+        }
     }
     /*
-     * Upstairs flush_info mutex must be held when calling this.
+     * Atomically get the next flush number
+     *
      * In addition, a downstairs request ID should be obtained at the
      * same time the next flush number is obtained, such that any IO that
      * is given a downstairs request number higher than the request number
      * for the flush will happen after this flush, never before.
      */
-    fn get_next_flush(&mut self) -> u64 {
-        let id = self.next_flush;
-        self.next_flush += 1;
-        id
+    fn get_next_flush(&self) -> u64 {
+        self.next_flush.fetch_add(1, Ordering::SeqCst)
+    }
+    fn set_next_flush(&self, i: u64) {
+        self.next_flush.store(i, Ordering::SeqCst)
     }
 }
 
