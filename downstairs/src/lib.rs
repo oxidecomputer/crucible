@@ -1981,7 +1981,7 @@ impl Downstairs {
     ) -> Result<Option<Message>> {
         let job = {
             let mut work = self.work_lock(upstairs_connection).await?;
-            let job = work.get_ready_job(job_id).await;
+            let job = work.get_ready_job(job_id);
 
             // `promote_to_active` can clear out the Work struct for this
             // UpstairsConnection, but the tasks can still be working on
@@ -2913,7 +2913,7 @@ impl Work {
     }
 
     // Return a job that's ready to have the work done
-    async fn get_ready_job(&mut self, job_id: JobId) -> Option<DownstairsWork> {
+    fn get_ready_job(&mut self, job_id: JobId) -> Option<DownstairsWork> {
         match self.active.get(&job_id) {
             Some(job) => {
                 assert_eq!(job.state, WorkState::InProgress);

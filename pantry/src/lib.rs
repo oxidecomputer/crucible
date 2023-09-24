@@ -11,7 +11,7 @@ pub const PROG: &str = "crucible-pantry";
 pub mod pantry;
 pub mod server;
 
-pub async fn initialize_pantry() -> Result<(Logger, Arc<pantry::Pantry>)> {
+pub fn initialize_pantry() -> Result<(Logger, Arc<pantry::Pantry>)> {
     let log = ConfigLogging::File {
         level: ConfigLoggingLevel::Info,
         path: "/dev/stdout".into(),

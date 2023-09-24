@@ -349,7 +349,7 @@ pub fn make_api() -> Result<dropshot::ApiDescription<Arc<Pantry>>, String> {
     Ok(api)
 }
 
-pub async fn run_server(
+pub fn run_server(
     log: &Logger,
     bind_address: SocketAddr,
     df: &Arc<Pantry>,

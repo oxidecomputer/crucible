@@ -1139,12 +1139,12 @@ impl Volume {
     // 3B, and 3C are all met.  This would mean that the VCRs are valid for
     // a downstairs replacement.
 
-    pub async fn compare_vcr_for_migration(
+    pub fn compare_vcr_for_migration(
         original: VolumeConstructionRequest,
         replacement: VolumeConstructionRequest,
         log: &Logger,
     ) -> Result<(), CrucibleError> {
-        match Self::compare_vcr_for_update(original, replacement, log).await? {
+        match Self::compare_vcr_for_update(original, replacement, log)? {
             Some((_o, _n)) => crucible_bail!(
                 ReplaceRequestInvalid,
                 "VCR targets are different"
@@ -1153,12 +1153,12 @@ impl Volume {
         }
     }
 
-    pub async fn compare_vcr_for_target_replacement(
+    pub fn compare_vcr_for_target_replacement(
         original: VolumeConstructionRequest,
         replacement: VolumeConstructionRequest,
         log: &Logger,
     ) -> Result<(SocketAddr, SocketAddr), CrucibleError> {
-        match Self::compare_vcr_for_update(original, replacement, log).await? {
+        match Self::compare_vcr_for_update(original, replacement, log)? {
             Some((o, n)) => Ok((o, n)),
             None => crucible_bail!(
                 ReplaceRequestInvalid,
@@ -1167,7 +1167,7 @@ impl Volume {
         }
     }
 
-    pub async fn compare_vcr_for_update(
+    pub fn compare_vcr_for_update(
         original: VolumeConstructionRequest,
         replacement: VolumeConstructionRequest,
         log: &Logger,
@@ -1484,8 +1484,7 @@ impl Volume {
                 original,
                 replacement,
                 &self.log,
-            )
-            .await?;
+            )?;
 
         info!(
             self.log,
@@ -3107,17 +3106,17 @@ mod test {
         }
     }
 
-    #[tokio::test]
-    async fn volume_replace_basic() {
+    #[test]
+    fn volume_replace_basic() {
         // A valid replacement VCR is provided with only one target being
         // different.
         // Test all three targets for replacement.
         for cid in 0..3 {
-            test_volume_replace_cid(cid).await.unwrap();
+            test_volume_replace_cid(cid).unwrap();
         }
     }
 
-    async fn test_volume_replace_cid(cid: usize) -> Result<()> {
+    fn test_volume_replace_cid(cid: usize) -> Result<()> {
         // A valid replacement VCR is provided with a larger generation
         // number and only one target being different.
         let block_size = 512;
@@ -3167,8 +3166,7 @@ mod test {
             original,
             replacement,
             &log,
-        )
-        .await?;
+        )?;
 
         info!(log, "replace {old_t} with {new_t}");
         assert_eq!(original_target, old_t);
@@ -3176,8 +3174,8 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn volume_replace_rop() {
+    #[test]
+    fn volume_replace_rop() {
         // A replacement VCR is provided with one target being
         // different, both new and old have a read_only_parent
         let block_size = 512;
@@ -3234,7 +3232,6 @@ mod test {
             replacement,
             &log,
         )
-        .await
         .unwrap();
 
         assert_eq!(original_target, old_t);
@@ -3300,7 +3297,6 @@ mod test {
             replacement,
             &log,
         )
-        .await
         .unwrap();
 
         assert_eq!(original_target, old_t);
@@ -3326,7 +3322,7 @@ mod test {
                     block_size,
                     blocks_per_extent,
                     extent_count,
-                    opts: opts.clone(),
+                    opts,
                     gen: 2,
                 }],
                 read_only_parent: None,
@@ -3339,7 +3335,6 @@ mod test {
             original,
             &log
         )
-        .await
         .is_err());
     }
 
@@ -3377,7 +3372,7 @@ mod test {
                     block_size,
                     blocks_per_extent,
                     extent_count,
-                    opts: opts.clone(),
+                    opts,
                     gen: 3,
                 }],
                 read_only_parent: None,
@@ -3391,13 +3386,10 @@ mod test {
             replacement.clone(),
             &log,
         )
-        .await
         .is_err());
 
         // Migration is valid with these VCRs
-        Volume::compare_vcr_for_migration(original.clone(), replacement, &log)
-            .await
-            .unwrap();
+        Volume::compare_vcr_for_migration(original, replacement, &log).unwrap();
     }
 
     #[tokio::test]
@@ -3447,7 +3439,6 @@ mod test {
             replacement,
             &log
         )
-        .await
         .is_err());
     }
 
@@ -3496,7 +3487,6 @@ mod test {
             replacement,
             &log
         )
-        .await
         .is_err());
     }
 
@@ -3555,7 +3545,6 @@ mod test {
             replacement,
             &log
         )
-        .await
         .is_err());
     }
 
@@ -3605,7 +3594,6 @@ mod test {
             replacement,
             &log
         )
-        .await
         .is_err());
     }
 
@@ -3656,7 +3644,6 @@ mod test {
             replacement,
             &log
         )
-        .await
         .is_err());
     }
 
@@ -3702,7 +3689,6 @@ mod test {
 
         let log = csl();
         assert!(Volume::compare_vcr_for_update(original, replacement, &log)
-            .await
             .is_err());
     }
 
@@ -3710,7 +3696,7 @@ mod test {
     // We create two Volumes with the provided information, and use o_opts
     // for one Volume and n_opts for the other.  We return the result of
     // the compare_vcr_for_target_replacement function.
-    async fn test_volume_replace_opts(
+    fn test_volume_replace_opts(
         id: Uuid,
         block_size: u64,
         blocks_per_extent: u64,
@@ -3748,7 +3734,6 @@ mod test {
 
         let log = csl();
         Volume::compare_vcr_for_target_replacement(original, replacement, &log)
-            .await
     }
 
     #[tokio::test]
@@ -3774,7 +3759,6 @@ mod test {
             o_opts,
             n_opts
         )
-        .await
         .is_err());
     }
 
@@ -3801,7 +3785,6 @@ mod test {
             o_opts,
             n_opts
         )
-        .await
         .is_err());
     }
 
@@ -3828,7 +3811,6 @@ mod test {
             o_opts,
             n_opts
         )
-        .await
         .is_err());
     }
 
@@ -3857,7 +3839,6 @@ mod test {
             o_opts,
             n_opts
         )
-        .await
         .is_err());
     }
 
@@ -3884,7 +3865,6 @@ mod test {
             o_opts,
             n_opts
         )
-        .await
         .is_err());
     }
 
@@ -3911,7 +3891,6 @@ mod test {
             o_opts,
             n_opts
         )
-        .await
         .is_err());
     }
 
@@ -3938,7 +3917,6 @@ mod test {
             o_opts,
             n_opts
         )
-        .await
         .is_err());
     }
 
@@ -3965,7 +3943,6 @@ mod test {
             o_opts,
             n_opts
         )
-        .await
         .is_err());
     }
 
@@ -3992,7 +3969,6 @@ mod test {
             o_opts,
             n_opts
         )
-        .await
         .is_err());
     }
 }

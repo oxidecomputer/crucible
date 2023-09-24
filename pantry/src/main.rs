@@ -45,10 +45,9 @@ async fn main() -> Result<()> {
             write_openapi(&mut f)
         }
         Args::Run { listen } => {
-            let (log, pantry) = initialize_pantry().await?;
+            let (log, pantry) = initialize_pantry()?;
 
-            let (_, join_handle) =
-                server::run_server(&log, listen, &pantry).await?;
+            let (_, join_handle) = server::run_server(&log, listen, &pantry)?;
 
             join_handle.await?.map_err(|e| anyhow!(e))
         }
