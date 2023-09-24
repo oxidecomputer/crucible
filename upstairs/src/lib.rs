@@ -9018,7 +9018,7 @@ pub struct Guest {
      * pulled off will be limited. No setting means they are sent right
      * away.
      */
-    iop_tokens: Mutex<usize>,
+    iop_tokens: std::sync::Mutex<usize>,
     bytes_per_iop: Option<usize>,
     iop_limit: Option<usize>,
 
@@ -9026,8 +9026,8 @@ pub struct Guest {
      * Setting a bandwidth limit will also limit the rate at which block
      * reqs are pulled off the queue.
      */
-    bw_tokens: Mutex<usize>, // bytes
-    bw_limit: Option<usize>, // bytes per second
+    bw_tokens: std::sync::Mutex<usize>, // bytes
+    bw_limit: Option<usize>,            // bytes per second
 }
 
 /*
@@ -9054,11 +9054,11 @@ impl Guest {
                 completed: AllocRingBuffer::new(2048),
             }),
 
-            iop_tokens: Mutex::new(0),
+            iop_tokens: std::sync::Mutex::new(0),
             bytes_per_iop: None,
             iop_limit: None,
 
-            bw_tokens: Mutex::new(0),
+            bw_tokens: std::sync::Mutex::new(0),
             bw_limit: None,
         }
     }
@@ -9117,8 +9117,8 @@ impl Guest {
      */
     async fn consume_req(&self) -> Option<BlockReq> {
         let mut reqs = self.reqs.lock().await;
-        let mut bw_tokens = self.bw_tokens.lock().await;
-        let mut iop_tokens = self.iop_tokens.lock().await;
+        let mut bw_tokens = self.bw_tokens.lock().unwrap();
+        let mut iop_tokens = self.iop_tokens.lock().unwrap();
 
         self.consume_req_locked(&mut reqs, &mut bw_tokens, &mut iop_tokens)
 
@@ -9207,8 +9207,8 @@ impl Guest {
      * IOPs are IO operations per second, so leak tokens to allow that
      * through.
      */
-    pub async fn leak_iop_tokens(&self, tokens: usize) {
-        let mut iop_tokens = self.iop_tokens.lock().await;
+    pub fn leak_iop_tokens(&self, tokens: usize) {
+        let mut iop_tokens = self.iop_tokens.lock().unwrap();
 
         if tokens > *iop_tokens {
             *iop_tokens = 0;
@@ -9221,8 +9221,8 @@ impl Guest {
     }
 
     // Leak bytes from bandwidth tokens
-    pub async fn leak_bw_tokens(&self, bytes: usize) {
-        let mut bw_tokens = self.bw_tokens.lock().await;
+    pub fn leak_bw_tokens(&self, bytes: usize) {
+        let mut bw_tokens = self.bw_tokens.lock().unwrap();
 
         if bytes > *bw_tokens {
             *bw_tokens = 0;
@@ -10108,12 +10108,12 @@ async fn up_listen(
             _ = sleep_until(leak_deadline) => {
                 if let Some(iop_limit) = up.guest.get_iop_limit() {
                     let tokens = iop_limit / (1000 / LEAK_MS);
-                    up.guest.leak_iop_tokens(tokens).await;
+                    up.guest.leak_iop_tokens(tokens);
                 }
 
                 if let Some(bw_limit) = up.guest.get_bw_limit() {
                     let tokens = bw_limit / (1000 / LEAK_MS);
-                    up.guest.leak_bw_tokens(tokens).await;
+                    up.guest.leak_bw_tokens(tokens);
                 }
 
                 leak_deadline = Instant::now().checked_add(leak_tick).unwrap();

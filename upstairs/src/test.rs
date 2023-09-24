@@ -5406,7 +5406,7 @@ pub(crate) mod up_test {
         assert!(guest.consume_req().await.is_none());
 
         // If no IOP limit set, don't track it
-        assert_eq!(*guest.iop_tokens.lock().await, 0);
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
 
         Ok(())
     }
@@ -5447,21 +5447,21 @@ pub(crate) mod up_test {
         // remains in the queue.
         assert!(guest.consume_req().await.is_none());
         assert!(!guest.reqs.lock().await.is_empty());
-        assert_eq!(*guest.iop_tokens.lock().await, 2);
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 2);
 
         // Replenish one token, meaning next read can be consumed
-        guest.leak_iop_tokens(1).await;
-        assert_eq!(*guest.iop_tokens.lock().await, 1);
+        guest.leak_iop_tokens(1);
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 1);
 
         assert!(guest.consume_req().await.is_some());
         assert!(guest.reqs.lock().await.is_empty());
-        assert_eq!(*guest.iop_tokens.lock().await, 2);
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 2);
 
-        guest.leak_iop_tokens(2).await;
-        assert_eq!(*guest.iop_tokens.lock().await, 0);
+        guest.leak_iop_tokens(2);
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
 
-        guest.leak_iop_tokens(16000).await;
-        assert_eq!(*guest.iop_tokens.lock().await, 0);
+        guest.leak_iop_tokens(16000);
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
 
         Ok(())
     }
@@ -5535,21 +5535,21 @@ pub(crate) mod up_test {
         // remains in the queue.
         assert!(guest.consume_req().await.is_none());
         assert!(!guest.reqs.lock().await.is_empty());
-        assert_eq!(*guest.bw_tokens.lock().await, 1024 * 1024);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 1024 * 1024);
 
         // Replenish enough tokens, meaning next read can be consumed
-        guest.leak_bw_tokens(1024 * 1024 / 2).await;
-        assert_eq!(*guest.bw_tokens.lock().await, 1024 * 1024 / 2);
+        guest.leak_bw_tokens(1024 * 1024 / 2);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 1024 * 1024 / 2);
 
         assert!(guest.consume_req().await.is_some());
         assert!(guest.reqs.lock().await.is_empty());
-        assert_eq!(*guest.bw_tokens.lock().await, 1024 * 1024);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 1024 * 1024);
 
-        guest.leak_bw_tokens(1024 * 1024).await;
-        assert_eq!(*guest.bw_tokens.lock().await, 0);
+        guest.leak_bw_tokens(1024 * 1024);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 0);
 
-        guest.leak_bw_tokens(1024 * 1024 * 1024).await;
-        assert_eq!(*guest.bw_tokens.lock().await, 0);
+        guest.leak_bw_tokens(1024 * 1024 * 1024);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 0);
 
         Ok(())
     }
@@ -5618,21 +5618,21 @@ pub(crate) mod up_test {
         assert!(guest.consume_req().await.is_none());
 
         // Assert we've hit the BW limit before IOPS
-        assert_eq!(*guest.iop_tokens.lock().await, 438); // 437.5 rounded up
-        assert_eq!(*guest.bw_tokens.lock().await, 7000 * 1024);
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 438); // 437.5 rounded up
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 7000 * 1024);
 
-        guest.leak_iop_tokens(438).await;
-        guest.leak_bw_tokens(7000 * 1024).await;
+        guest.leak_iop_tokens(438);
+        guest.leak_bw_tokens(7000 * 1024);
 
         assert!(guest.consume_req().await.is_some());
         assert!(guest.reqs.lock().await.is_empty());
 
         // Back to zero
-        guest.leak_iop_tokens(438).await;
-        guest.leak_bw_tokens(7000 * 1024).await;
+        guest.leak_iop_tokens(438);
+        guest.leak_bw_tokens(7000 * 1024);
 
-        assert_eq!(*guest.iop_tokens.lock().await, 0);
-        assert_eq!(*guest.bw_tokens.lock().await, 0);
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 0);
 
         // Validate that IOP limit activates by sending 501 1024b IOs
         for _ in 0..500 {
@@ -5654,17 +5654,17 @@ pub(crate) mod up_test {
         assert!(guest.consume_req().await.is_none());
 
         // Assert we've hit the IOPS limit
-        assert_eq!(*guest.iop_tokens.lock().await, 500);
-        assert_eq!(*guest.bw_tokens.lock().await, 500 * 1024);
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 500);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 500 * 1024);
 
         // Back to zero
-        guest.leak_iop_tokens(500).await;
-        guest.leak_bw_tokens(500 * 1024).await;
+        guest.leak_iop_tokens(500);
+        guest.leak_bw_tokens(500 * 1024);
         guest.reqs.lock().await.clear();
 
         assert!(guest.reqs.lock().await.is_empty());
-        assert_eq!(*guest.iop_tokens.lock().await, 0);
-        assert_eq!(*guest.bw_tokens.lock().await, 0);
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 0);
 
         // From
         // https://aws.amazon.com/premiumsupport/knowledge-center/ebs-calculate-optimal-io-size/:
@@ -5680,8 +5680,8 @@ pub(crate) mod up_test {
         // I mean, it makes sense: now we submit 500 of those to reach both
         // limits at the same time.
         for i in 0..500 {
-            assert_eq!(*guest.iop_tokens.lock().await, i);
-            assert_eq!(*guest.bw_tokens.lock().await, i * optimal_io_size);
+            assert_eq!(*guest.iop_tokens.lock().unwrap(), i);
+            assert_eq!(*guest.bw_tokens.lock().unwrap(), i * optimal_io_size);
 
             let _ = guest
                 .send(BlockOp::Read {
@@ -5693,8 +5693,8 @@ pub(crate) mod up_test {
             assert!(guest.consume_req().await.is_some());
         }
 
-        assert_eq!(*guest.iop_tokens.lock().await, 500);
-        assert_eq!(*guest.bw_tokens.lock().await, 500 * optimal_io_size);
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 500);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 500 * optimal_io_size);
 
         Ok(())
     }
@@ -5723,8 +5723,8 @@ pub(crate) mod up_test {
             })
             .await;
 
-        assert_eq!(*guest.iop_tokens.lock().await, 0);
-        assert_eq!(*guest.bw_tokens.lock().await, 0);
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 0);
 
         // Even though the first IO is larger than the bandwidth and IOP limit,
         // it should still succeed. The next IO should not, even if it consumes
@@ -5734,25 +5734,25 @@ pub(crate) mod up_test {
         assert!(guest.consume_req().await.is_some());
         assert!(guest.consume_req().await.is_none());
 
-        assert_eq!(*guest.iop_tokens.lock().await, 20);
-        assert_eq!(*guest.bw_tokens.lock().await, 10 * 1024 * 1024);
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 20);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 10 * 1024 * 1024);
 
         // Bandwidth trigger is going to be larger and need more leaking to get
         // down to a point where the zero sized IO can fire.
         for _ in 0..9 {
-            guest.leak_iop_tokens(10).await;
-            guest.leak_bw_tokens(1024 * 1024).await;
+            guest.leak_iop_tokens(10);
+            guest.leak_bw_tokens(1024 * 1024);
 
             assert!(guest.consume_req().await.is_none());
         }
 
-        assert_eq!(*guest.iop_tokens.lock().await, 0);
-        assert_eq!(*guest.bw_tokens.lock().await, 1024 * 1024);
+        assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
+        assert_eq!(*guest.bw_tokens.lock().unwrap(), 1024 * 1024);
 
         assert!(guest.consume_req().await.is_none());
 
-        guest.leak_iop_tokens(10).await;
-        guest.leak_bw_tokens(1024 * 1024).await;
+        guest.leak_iop_tokens(10);
+        guest.leak_bw_tokens(1024 * 1024);
 
         // We've leaked 10 KiB worth, it should fire now!
         assert!(guest.consume_req().await.is_some());
