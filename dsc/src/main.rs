@@ -293,7 +293,7 @@ pub struct DscInfo {
     /// The directory location where output files are
     output_dir: PathBuf,
     /// The region set that make our downstairs
-    rs: Mutex<RegionSet>,
+    rs: Arc<Mutex<RegionSet>>,
     /// Work for the dsc to do, what downstairs to start/stop/etc
     work: Mutex<DscWork>,
 }
@@ -415,7 +415,7 @@ impl DscInfo {
             extent_count: None,
         };
 
-        let mrs = Mutex::new(rs);
+        let mrs = Arc::new(Mutex::new(rs));
 
         let dsc_work = DscWork::new(notify_tx);
         let work = Mutex::new(dsc_work);
@@ -680,7 +680,7 @@ async fn do_dsc_work(
             }
         }
         DscCmd::Stop(cid) => {
-            println!("stop {}", cid);
+            println!("do_dsc_work received stop {}", cid);
             action_tx_list[cid]
                 .send(DownstairsAction::Stop)
                 .await
@@ -738,6 +738,44 @@ async fn do_dsc_work(
         }
     }
 }
+/// Stop a downstairs, don't return until the downstairs is stopped.
+///
+/// It is okay if the downstairs is already stopped, but if it's not stopped,
+/// then send the stop request and keep checking till it's stopped.
+async fn stop_if_running(
+    dsci: &DscInfo,
+    action_tx_list: &Vec<tokio::sync::mpsc::Sender<DownstairsAction>>,
+    cid: usize
+) {
+    println!("Stop {cid} if not running");
+    loop {
+        {
+            let rs = dsci.rs.lock().await;
+            let st = rs.ds_state[cid];
+            match st {
+                DownstairsState::Starting |
+                DownstairsState::Running => {
+                    println!("Stop it!");
+
+                    // loop here
+                    println!("First stop {} in state {:?}", cid, st);
+                    let res = action_tx_list[cid]
+                        .send(DownstairsAction::Stop)
+                        .await;
+
+                    println!("Stop returns {:?}", res);
+                    // Wait for stopped?
+                }
+                x => {
+                    println!("Current state {:?}, stop not required", x);
+                    break;
+                }
+            }
+        }
+        tokio::time::sleep_until(deadline_secs(10)).await;
+        println!("after stop request loop");
+    }
+}
 
 /// Start the DownStairs Controller (dsc).
 ///
@@ -783,7 +821,7 @@ async fn do_dsc_work(
 /// arrived.  When the main task receives a notification, it walks
 /// the queue and performs all jobs it finds.
 async fn start_dsc(
-    dsci: &DscInfo,
+    dsci: Arc<DscInfo>,
     mut notify_rx: watch::Receiver<u64>,
 ) -> Result<()> {
     let (tx, mut rx) = mpsc::channel::<MonitorInfo>(10);
@@ -793,7 +831,7 @@ async fn start_dsc(
     // Spawn a task to start and monitor each of our downstairs.
     let rs = dsci.rs.lock().await;
     for ds in rs.ds.iter() {
-        println!("start ds: {:?}", ds.port);
+        println!("Start ds: {:?}", ds.port);
         let txc = tx.clone();
         let dsc = ds.clone();
         let (action_tx, action_rx) = mpsc::channel(100);
@@ -805,6 +843,20 @@ async fn start_dsc(
     }
     drop(tx);
     drop(rs);
+
+    // Spawn a task to receive status from downstairs.
+    let notify_rs = dsci.rs.clone();
+    let _notify_handle = tokio::spawn(async move {
+        while let Some(mi) = rx.recv().await {
+            println!("[{}][{}] reports {:?}",
+                mi.port, mi.client_id,
+                mi.state);
+            let mut rs = notify_rs.lock().await;
+            rs.ds_state[mi.client_id] = mi.state;
+            rs.ds_pid[mi.client_id] = mi.pid;
+        }
+        println!("rx.recv returned None");
+    });
 
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
     let mut timeout_deadline = deadline_secs(5);
@@ -845,7 +897,10 @@ async fn start_dsc(
                     println!("Random restart");
                     let cid = rng.gen_range(0..3) as usize;
                     println!("stop rand {}", cid);
-                    action_tx_list[cid].send(DownstairsAction::Stop).await.unwrap();
+                    action_tx_list[cid]
+                        .send(DownstairsAction::Stop)
+                        .await
+                        .unwrap();
                     let timeout = rng.gen_range(restart_min..restart_max);
                     timeout_deadline = deadline_secs(timeout);
                 } else {
@@ -856,13 +911,12 @@ async fn start_dsc(
                 }
             },
             _ = notify_rx.changed() => {
-                println!("Main task has work to do, go find it");
                 // We have to walk our job list here, as there are some
                 // jobs that require local changes.
 
                 let mut dsc_work = dsci.work.lock().await;
                 while let Some(work) = dsc_work.get_cmd() {
-                    println!("got dsc {:?}", work);
+                    println!("DSC Main received command {:?}", work);
 
                     match work {
                         // Commands we handle here
@@ -880,26 +934,9 @@ async fn start_dsc(
                         },
                         DscCmd::Reset(cid) => {
                             println!("Reset region for {cid}");
-                            tokio::time::sleep_until(deadline_secs(2)).await;
-                            println!("{:?}", dsci);
-                            tokio::time::sleep_until(deadline_secs(2)).await;
-                            let rs = dsci.rs.lock().await;
-                            println!("rs: {:?}", rs);
-                            tokio::time::sleep_until(deadline_secs(2)).await;
-                            let ds = &rs.ds[0];
-                            println!("ds: {:?}", ds);
-                            tokio::time::sleep_until(deadline_secs(2)).await;
-                            drop(rs);
-                            // What if it is running???
-                            tokio::time::sleep_until(deadline_secs(2)).await;
-                            println!("First stop {}", cid);
-                            action_tx_list[cid]
-                                .send(DownstairsAction::Stop)
-                                .await
-                                .unwrap();
+                            // Protect the lock through this change.
+                            stop_if_running(&dsci, &action_tx_list, cid).await;
 
-                            // Wait for stopped?
-                            tokio::time::sleep_until(deadline_secs(2)).await;
                             println!("Now delete {}", cid);
                             dsci.delete_ds_region(cid).await.unwrap();
                             tokio::time::sleep_until(deadline_secs(2)).await;
@@ -922,10 +959,14 @@ async fn start_dsc(
                         DscCmd::Shutdown => {
                             println!("Shutdown");
                             for action_tx in action_tx_list.clone() {
-                                action_tx.send(
-                                    DownstairsAction::DisableRestart
-                                ).await.unwrap();
-                                action_tx.send(DownstairsAction::Stop).await.unwrap();
+                                action_tx
+                                    .send(DownstairsAction::DisableRestart)
+                                    .await
+                                    .unwrap();
+                                action_tx
+                                    .send(DownstairsAction::Stop)
+                                    .await
+                                    .unwrap();
                             }
                             println!("Shut it down");
                             timeout_deadline = deadline_secs(1);
@@ -938,22 +979,7 @@ async fn start_dsc(
                         }
                     }
                 }
-
-
-
             },
-            res = rx.recv() => {
-                if let Some(mi) = res {
-                    println!("[{}][{}] reports {:?}",
-                        mi.port, mi.client_id,
-                        mi.state);
-                    let mut rs = dsci.rs.lock().await;
-                    rs.ds_state[mi.client_id] = mi.state;
-                    rs.ds_pid[mi.client_id] = mi.pid;
-                } else {
-                    println!("rx.recv got None");
-                }
-            }
         }
     }
     Ok(())
@@ -1520,7 +1546,7 @@ fn main() -> Result<()> {
             // Start the dropshot control endpoint
             runtime.spawn(control::begin(dsci_c, control));
 
-            runtime.block_on(start_dsc(&dsci, notify_rx))
+            runtime.block_on(start_dsc(dsci, notify_rx))
         }
     }
 }
