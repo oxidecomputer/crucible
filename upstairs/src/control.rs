@@ -4,13 +4,9 @@ use dropshot::ApiDescription;
 use dropshot::ConfigDropshot;
 use dropshot::HandlerTaskMode;
 use dropshot::HttpError;
-use dropshot::HttpResponseCreated;
 use dropshot::HttpResponseOk;
-use dropshot::HttpResponseUpdatedNoContent;
 use dropshot::HttpServerStarter;
-use dropshot::Path;
 use dropshot::RequestContext;
-use dropshot::TypedBody;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -22,22 +18,15 @@ pub(crate) fn build_api() -> ApiDescription<Arc<UpstairsInfo>> {
     let mut api = ApiDescription::new();
     api.register(upstairs_fill_info).unwrap();
     api.register(downstairs_work_queue).unwrap();
-    api.register(fault_downstairs).unwrap();
-    api.register(take_snapshot).unwrap();
 
     api
 }
 
 /**
- * Start up a dropshot server along side the Upstairs. This offers a way for
- * Nexus or Propolis to send Snapshot commands. Also, publish some stats on
- * a `/info` from the Upstairs internal struct.
+ * Start up a dropshot server along side the Upstairs.  This interface
+ * provides access to upstairs information and downstairs work queues.
  */
-pub async fn start(
-    up: &Arc<Upstairs>,
-    addr: SocketAddr,
-    ds_done_tx: mpsc::Sender<()>,
-) -> Result<(), String> {
+pub async fn start(up: &Arc<Upstairs>, addr: SocketAddr) -> Result<(), String> {
     /*
      * Setup dropshot
      */
@@ -58,7 +47,7 @@ pub async fn start(
      * The functions that implement our API endpoints will share this
      * context.
      */
-    let api_context = Arc::new(UpstairsInfo::new(up, ds_done_tx));
+    let api_context = Arc::new(UpstairsInfo::new(up));
 
     /*
      * Set up the server.
@@ -83,24 +72,14 @@ pub struct UpstairsInfo {
      * Upstairs structure that is used to gather all the info stats
      */
     up: Arc<Upstairs>,
-    /**
-     * Notify channel for work completed by the downstairs.
-     */
-    ds_done_tx: mpsc::Sender<()>,
 }
 
 impl UpstairsInfo {
     /**
      * Return a new UpstairsInfo.
      */
-    pub fn new(
-        up: &Arc<Upstairs>,
-        ds_done_tx: mpsc::Sender<()>,
-    ) -> UpstairsInfo {
-        UpstairsInfo {
-            up: up.clone(),
-            ds_done_tx,
-        }
+    pub fn new(up: &Arc<Upstairs>) -> UpstairsInfo {
+        UpstairsInfo { up: up.clone() }
     }
 }
 
@@ -211,121 +190,6 @@ async fn downstairs_work_queue(
     let completed = ds.completed_jobs.to_vec();
 
     Ok(HttpResponseOk(DownstairsWork { jobs, completed }))
-}
-
-#[derive(Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct Cid {
-    cid: u8,
-}
-
-#[endpoint {
-    method = POST,
-    path = "/downstairs/fault/{cid}",
-    unpublished = false,
-}]
-async fn fault_downstairs(
-    rqctx: RequestContext<Arc<UpstairsInfo>>,
-    path: Path<Cid>,
-) -> Result<HttpResponseUpdatedNoContent, HttpError> {
-    let api_context = rqctx.context();
-    let path = path.into_inner();
-    let cid = path.cid;
-
-    if cid > 2 {
-        return Err(HttpError::for_bad_request(
-            Some(String::from("BadInput")),
-            format!("Invalid downstairs client id: {}", cid),
-        ));
-    }
-    let cid = ClientId::new(cid);
-
-    /*
-     * Verify the downstairs is currently in a state where we can
-     * transition it to faulted without causing a panic in the
-     * upstairs.
-     */
-    let active = api_context.up.active.lock().await;
-    let up_state = active.up_state;
-    if up_state != UpState::Active {
-        return Err(HttpError::for_bad_request(
-            Some(String::from("InvalidState")),
-            format!("Upstairs not active: {:?}", up_state),
-        ));
-    }
-    let mut ds = api_context.up.downstairs.lock().await;
-    match ds.ds_state[cid] {
-        DsState::Active
-        | DsState::Offline
-        | DsState::LiveRepair
-        | DsState::LiveRepairReady => {}
-        x => {
-            return Err(HttpError::for_bad_request(
-                Some(String::from("InvalidState")),
-                format!("downstairs {} in invalid state {:?}", cid, x),
-            ));
-        }
-    }
-    drop(active);
-
-    /*
-     * Mark the downstairs client as faulted
-     */
-    api_context.up.ds_transition_with_lock(
-        &mut ds,
-        up_state,
-        cid,
-        DsState::Faulted,
-    );
-
-    /*
-     * Move all jobs to skipped for this downstairs.
-     * If this returns true, then we have to notify tasks that
-     * a job was "completed" (aka, skipped).
-     */
-    if ds.ds_set_faulted(cid) {
-        let _ = api_context.ds_done_tx.send(()).await;
-    }
-
-    Ok(HttpResponseUpdatedNoContent())
-}
-
-/**
- * Signal to the Upstairs to take a snapshot
- */
-#[derive(Deserialize, JsonSchema)]
-pub struct TakeSnapshotParams {
-    snapshot_name: String,
-}
-
-#[derive(Serialize, JsonSchema)]
-pub struct TakeSnapshotResponse {
-    snapshot_name: String,
-}
-
-#[endpoint {
-    method = POST,
-    path = "/snapshot"
-}]
-async fn take_snapshot(
-    rqctx: RequestContext<Arc<UpstairsInfo>>,
-    take_snapshot_params: TypedBody<TakeSnapshotParams>,
-) -> Result<HttpResponseCreated<TakeSnapshotResponse>, HttpError> {
-    let apictx = rqctx.context();
-    let take_snapshot_params = take_snapshot_params.into_inner();
-
-    apictx
-        .up
-        .guest
-        .flush(Some(SnapshotDetails {
-            snapshot_name: take_snapshot_params.snapshot_name.clone(),
-        }))
-        .await
-        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
-
-    Ok(HttpResponseCreated(TakeSnapshotResponse {
-        snapshot_name: take_snapshot_params.snapshot_name,
-    }))
 }
 
 #[cfg(test)]

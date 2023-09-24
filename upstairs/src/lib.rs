@@ -10284,9 +10284,8 @@ pub async fn up_main(
     // If requested, start the control http server on the given address:port
     if let Some(control) = opt.control {
         let upi = Arc::clone(&up);
-        let ds_done_tx_c = ds_done_tx.clone();
         tokio::spawn(async move {
-            let r = control::start(&upi, control, ds_done_tx_c).await;
+            let r = control::start(&upi, control).await;
             info!(upi.log, "Control HTTP task finished with {:?}", r);
         });
     }
