@@ -4021,7 +4021,7 @@ mod test {
                 .as_ref()
                 .unwrap()
                 .tag,
-            [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,]
+            [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
         );
         assert_eq!(ctxs[0].block_context.hash, 123);
         assert_eq!(ctxs[0].on_disk_hash, 456);
@@ -4048,7 +4048,7 @@ mod test {
                 .as_ref()
                 .unwrap()
                 .tag,
-            [8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,]
+            [8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
         );
         assert_eq!(ctxs[0].block_context.hash, 9999);
         assert_eq!(ctxs[0].on_disk_hash, 1234567890);
@@ -4074,7 +4074,7 @@ mod test {
                 .as_ref()
                 .unwrap()
                 .tag,
-            [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,]
+            [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
         );
         assert_eq!(ctxs[0][0].block_context.hash, 123);
         assert_eq!(ctxs[0][0].on_disk_hash, 456);
@@ -4096,7 +4096,7 @@ mod test {
                 .as_ref()
                 .unwrap()
                 .tag,
-            [8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,]
+            [8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
         );
         assert_eq!(ctxs[1][0].block_context.hash, 9999);
         assert_eq!(ctxs[1][0].on_disk_hash, 1234567890);

@@ -686,8 +686,8 @@ impl CrucibleEncoder {
             block_context: BlockContext {
                 hash: 0,
                 encryption_context: Some(EncryptionContext {
-                    nonce: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                    tag: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    nonce: [0; 12],
+                    tag: [0; 16],
                 }),
             },
         }
