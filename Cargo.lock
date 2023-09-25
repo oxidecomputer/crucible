@@ -332,6 +332,9 @@ name = "bitflags"
 version = "2.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "630be753d4e58660abd17930c71b647fe46c27ea6b63cc59e1e3851406972e42"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "blake2"
@@ -663,23 +666,6 @@ dependencies = [
 
 [[package]]
 name = "crossterm"
-version = "0.26.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a84cda67535339806297f1b331d6dd6320470d2a0fe65381e79ee9e156dd3d13"
-dependencies = [
- "bitflags 1.3.2",
- "crossterm_winapi",
- "libc",
- "mio",
- "parking_lot",
- "serde",
- "signal-hook",
- "signal-hook-mio",
- "winapi",
-]
-
-[[package]]
-name = "crossterm"
 version = "0.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f476fe445d41c9e991fd07515a6f463074b782242ccf4a5b7b1d1012e70824df"
@@ -689,6 +675,7 @@ dependencies = [
  "libc",
  "mio",
  "parking_lot",
+ "serde",
  "signal-hook",
  "signal-hook-mio",
  "winapi",
@@ -1082,7 +1069,7 @@ dependencies = [
  "bincode",
  "bytes",
  "clap",
- "crossterm 0.27.0",
+ "crossterm",
  "crucible",
  "crucible-common",
  "crucible-protocol",
@@ -3494,12 +3481,12 @@ dependencies = [
 
 [[package]]
 name = "reedline"
-version = "0.23.0"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3defc4467a8909614bcb02cb304a3e8472c31f7a44e6c6c287eb9575b212bc4d"
+checksum = "971ac45071721aae18927f3feb7e4c2b95cce387d96af185c5103166d332e55c"
 dependencies = [
  "chrono",
- "crossterm 0.26.1",
+ "crossterm",
  "fd-lock",
  "itertools 0.10.5",
  "nu-ansi-term 0.49.0",
