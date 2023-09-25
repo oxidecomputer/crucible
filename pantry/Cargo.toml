@@ -26,6 +26,7 @@ uuid.workspace = true
 reqwest.workspace = true
 hex.workspace = true
 sha2.workspace = true
+workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
 expectorate.workspace = true
