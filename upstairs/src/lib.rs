@@ -8996,7 +8996,7 @@ pub struct Guest {
      * the submission task tells the listening task that new work has been
      * added.
      */
-    reqs: Mutex<VecDeque<BlockReq>>,
+    reqs: std::sync::Mutex<VecDeque<BlockReq>>,
     notify: Notify,
 
     /*
@@ -9039,7 +9039,7 @@ impl Guest {
             /*
              * Incoming I/O requests are added to this queue.
              */
-            reqs: Mutex::new(VecDeque::new()),
+            reqs: std::sync::Mutex::new(VecDeque::new()),
             notify: Notify::new(),
             /*
              * The active hashmap is for in-flight I/O operations
@@ -9086,10 +9086,10 @@ impl Guest {
     /*
      * This is used to submit a new BlockOp IO request to Crucible.
      */
-    async fn send(&self, op: BlockOp) -> BlockReqWaiter {
+    fn send(&self, op: BlockOp) -> BlockReqWaiter {
         let (send, recv) = oneshot::channel();
 
-        self.reqs.lock().await.push_back(BlockReq::new(op, send));
+        self.reqs.lock().unwrap().push_back(BlockReq::new(op, send));
         self.notify.notify_one();
 
         BlockReqWaiter::new(recv)
@@ -9100,7 +9100,7 @@ impl Guest {
      */
     async fn recv(&self) -> BlockReq {
         loop {
-            if let Some(req) = self.consume_req().await {
+            if let Some(req) = self.consume_req() {
                 return req;
             }
 
@@ -9115,32 +9115,16 @@ impl Guest {
      * grabs all the necessary tokio Mutexes, and the second sync part does the
      * actual work with the mutex guards.
      */
-    async fn consume_req(&self) -> Option<BlockReq> {
-        let mut reqs = self.reqs.lock().await;
-        let mut bw_tokens = self.bw_tokens.lock().unwrap();
-        let mut iop_tokens = self.iop_tokens.lock().unwrap();
-
-        self.consume_req_locked(&mut reqs, &mut bw_tokens, &mut iop_tokens)
-
-        // IMPORTANT: there must be no await points after `consume_req_locked`
-        // has popped a BlockReq off the VecDeque! The function could be
-        // cancelled and would **drop** that BlockReq as a result.
-    }
-
-    fn consume_req_locked(
-        &self,
-        reqs: &mut VecDeque<BlockReq>,
-        bw_tokens: &mut usize,
-        iop_tokens: &mut usize,
-    ) -> Option<BlockReq> {
-        // TODO exposing queue depth here would be a good metric for disk
-        // contention
+    fn consume_req(&self) -> Option<BlockReq> {
+        let mut reqs = self.reqs.lock().unwrap();
 
         // Check if no requests are queued
         if reqs.is_empty() {
             return None;
         }
 
+        // TODO exposing queue depth here would be a good metric for disk
+        // contention
         let req_ref: &BlockReq = reqs.front().unwrap();
 
         // Check if we can consume right away
@@ -9152,6 +9136,9 @@ impl Guest {
         if !iop_limit_applies && !bw_limit_applies {
             return Some(reqs.pop_front().unwrap());
         }
+
+        let mut bw_tokens = self.bw_tokens.lock().unwrap();
+        let mut iop_tokens = self.iop_tokens.lock().unwrap();
 
         // Check bandwidth limit before IOP limit, but make sure only to consume
         // tokens if both checks pass!
@@ -9237,7 +9224,7 @@ impl Guest {
     pub async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
         let data = Arc::new(Mutex::new(Block::new(0, 9)));
         let extent_query = BlockOp::QueryExtentSize { data: data.clone() };
-        self.send(extent_query).await.wait().await?;
+        self.send(extent_query).wait().await?;
 
         let result = *data.lock().await;
         Ok(result)
@@ -9252,14 +9239,14 @@ impl Guest {
 
         let data = Arc::new(Mutex::new(wc));
         let qwq = BlockOp::QueryWorkQueue { data: data.clone() };
-        self.send(qwq).await.wait().await.unwrap();
+        self.send(qwq).wait().await.unwrap();
 
         let wc = data.lock().await;
         Ok(*wc)
     }
 
     pub async fn commit(&self) -> Result<(), CrucibleError> {
-        self.send(BlockOp::Commit).await.wait().await.unwrap();
+        self.send(BlockOp::Commit).wait().await.unwrap();
         Ok(())
     }
     // Maybe this can just be a guest specific thing, not a BlockIO
@@ -9267,7 +9254,7 @@ impl Guest {
         &self,
         gen: u64,
     ) -> Result<(), CrucibleError> {
-        let waiter = self.send(BlockOp::GoActiveWithGen { gen }).await;
+        let waiter = self.send(BlockOp::GoActiveWithGen { gen });
         println!("The guest has requested activation with gen:{}", gen);
         waiter.wait().await?;
         println!("The guest has finished waiting for activation with:{}", gen);
@@ -9278,7 +9265,7 @@ impl Guest {
 #[async_trait]
 impl BlockIO for Guest {
     async fn activate(&self) -> Result<(), CrucibleError> {
-        let waiter = self.send(BlockOp::GoActive).await;
+        let waiter = self.send(BlockOp::GoActive);
         println!("The guest has requested activation");
         waiter.wait().await?;
         println!("The guest has finished waiting for activation");
@@ -9287,7 +9274,7 @@ impl BlockIO for Guest {
 
     /// Disable any more IO from this guest and deactivate the downstairs.
     async fn deactivate(&self) -> Result<(), CrucibleError> {
-        let waiter = self.send(BlockOp::Deactivate).await;
+        let waiter = self.send(BlockOp::Deactivate);
         waiter.wait().await?;
         Ok(())
     }
@@ -9295,7 +9282,7 @@ impl BlockIO for Guest {
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
         let data = Arc::new(Mutex::new(false));
         let active_query = BlockOp::QueryGuestIOReady { data: data.clone() };
-        self.send(active_query).await.wait().await?;
+        self.send(active_query).wait().await?;
 
         let result = *data.lock().await;
         Ok(result)
@@ -9304,7 +9291,7 @@ impl BlockIO for Guest {
     async fn total_size(&self) -> Result<u64, CrucibleError> {
         let data = Arc::new(Mutex::new(0));
         let size_query = BlockOp::QueryTotalSize { data: data.clone() };
-        self.send(size_query).await.wait().await?;
+        self.send(size_query).wait().await?;
 
         let result = *data.lock().await;
         Ok(result)
@@ -9313,7 +9300,7 @@ impl BlockIO for Guest {
     async fn get_block_size(&self) -> Result<u64, CrucibleError> {
         let data = Arc::new(Mutex::new(0));
         let size_query = BlockOp::QueryBlockSize { data: data.clone() };
-        self.send(size_query).await.wait().await?;
+        self.send(size_query).wait().await?;
 
         let result = *data.lock().await;
         Ok(result)
@@ -9322,7 +9309,7 @@ impl BlockIO for Guest {
     async fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
         let data = Arc::new(Mutex::new(Uuid::default()));
         let uuid_query = BlockOp::QueryUpstairsUuid { data: data.clone() };
-        self.send(uuid_query).await.wait().await?;
+        self.send(uuid_query).wait().await?;
 
         let result = *data.lock().await;
         Ok(result)
@@ -9347,7 +9334,7 @@ impl BlockIO for Guest {
             return Ok(());
         }
         let rio = BlockOp::Read { offset, data };
-        Ok(self.send(rio).await.wait().await?)
+        Ok(self.send(rio).wait().await?)
     }
 
     async fn write(
@@ -9369,7 +9356,7 @@ impl BlockIO for Guest {
             return Ok(());
         }
         let wio = BlockOp::Write { offset, data };
-        Ok(self.send(wio).await.wait().await?)
+        Ok(self.send(wio).wait().await?)
     }
 
     async fn write_unwritten(
@@ -9391,7 +9378,7 @@ impl BlockIO for Guest {
             return Ok(());
         }
         let wio = BlockOp::WriteUnwritten { offset, data };
-        Ok(self.send(wio).await.wait().await?)
+        Ok(self.send(wio).wait().await?)
     }
 
     async fn flush(
@@ -9400,7 +9387,6 @@ impl BlockIO for Guest {
     ) -> Result<(), CrucibleError> {
         Ok(self
             .send(BlockOp::Flush { snapshot_details })
-            .await
             .wait()
             .await?)
     }
@@ -9416,7 +9402,7 @@ impl BlockIO for Guest {
 
         let data = Arc::new(Mutex::new(wc));
         let sw = BlockOp::ShowWork { data: data.clone() };
-        self.send(sw).await.wait().await.unwrap();
+        self.send(sw).wait().await.unwrap();
 
         let wc = data.lock().await;
         Ok(*wc)
@@ -9436,7 +9422,7 @@ impl BlockIO for Guest {
             result: data.clone(),
         };
 
-        self.send(sw).await.wait().await?;
+        self.send(sw).wait().await?;
         let result = data.lock().await;
         Ok(*result)
     }
