@@ -8944,6 +8944,9 @@ pub struct Guest {
     /// saves a round-trip through the `reqs` queue, and using an atomic means
     /// it can be read from a `&self` reference.
     block_size: AtomicU64,
+
+    /// Backpressure is implemented as a delay on host operations
+    backpressure_us: AtomicU64,
 }
 
 /*
@@ -8978,6 +8981,7 @@ impl Guest {
             bw_limit: None,
 
             block_size: AtomicU64::new(0),
+            backpressure_us: AtomicU64::new(0),
         }
     }
 
@@ -9007,6 +9011,12 @@ impl Guest {
     async fn send(&self, op: BlockOp) -> BlockReqWaiter {
         let (send, recv) = oneshot::channel();
 
+        let bp =
+            Duration::from_micros(self.backpressure_us.load(Ordering::SeqCst));
+        if bp > Duration::ZERO {
+            tokio::time::sleep(bp).await;
+        }
+
         self.reqs.lock().await.push_back(BlockReq::new(op, send));
         self.notify.notify_one();
 
@@ -9024,6 +9034,10 @@ impl Guest {
 
             self.notify.notified().await;
         }
+    }
+
+    fn set_backpressure(&self, bp_usec: u64) {
+        self.backpressure_us.store(bp_usec, Ordering::SeqCst);
     }
 
     /*
@@ -9541,20 +9555,28 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<()>) {
     warn!(up.log, "up_ds_listen loop done");
 }
 
-async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<()>) {
-    // Check outstanding IOops for each downstairs.
-    // If the number is too high, then mark that downstairs as failed, scrub
-    // any outstanding jobs.
+/// Check outstanding IOops for each downstairs.
+///
+/// If the number is too high, then mark that downstairs as failed, scrub
+/// any outstanding jobs.
+///
+/// Returns a ratio indicating how close the worst downstairs is to exceeding
+/// the IOP limit; 1.0 means the worst downstairs is at the limit.
+async fn gone_too_long(
+    up: &Arc<Upstairs>,
+    ds_done_tx: mpsc::Sender<()>,
+) -> f32 {
     let active = up.active.lock().await;
     let up_state = active.up_state;
     // If we are not active, then just exit.
     if up_state != UpState::Active {
-        return;
+        return 0.0;
     }
     let mut ds = up.downstairs.lock().await;
     drop(active);
 
     let mut notify_guest = false;
+    let mut dsw_max = 0;
     for cid in ClientId::iter() {
         // Only downstairs in these states are checked.
         match ds.ds_state[cid] {
@@ -9563,6 +9585,7 @@ async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<()>) {
             | DsState::Offline
             | DsState::Replay => {
                 let work_count = ds.total_live_work(cid);
+                dsw_max = dsw_max.max(work_count);
                 if work_count > IO_OUTSTANDING_MAX {
                     warn!(
                         up.log,
@@ -9600,6 +9623,7 @@ async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<()>) {
             }
         }
     }
+    dsw_max as f32 / IO_OUTSTANDING_MAX as f32
 }
 
 /**
@@ -10009,7 +10033,13 @@ async fn up_listen(
 
                 // Check to see if the number of outstanding IOs (between
                 // the upstairs and downstairs) is too many.
-                gone_too_long(up, dst[0].ds_done_tx.clone()).await;
+                let ratio = gone_too_long(up, dst[0].ds_done_tx.clone()).await;
+                let bp_usec = if ratio > 0.5 {
+                    (((ratio - 0.5) * 2.0).powf(2.0) * 100_000.0) as u64
+                } else {
+                    0
+                };
+                up.guest.set_backpressure(bp_usec);
             }
             _ = sleep_until(repair_check_interval), if repair_check => {
                 match check_for_repair(up, &dst).await {
