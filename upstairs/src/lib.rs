@@ -10032,7 +10032,11 @@ async fn up_listen(
                 process_new_io(up, &dst, req, &mut lastcast).await;
 
                 // Check to see if the number of outstanding IOs (between
-                // the upstairs and downstairs) is too many.
+                // the upstairs and downstairs) is particularly high.  If so,
+                // apply some backpressure by delaying host operations, with a
+                // quadratically-increasing delay.
+                //
+                // TODO: make these parameters tuneable
                 let ratio = gone_too_long(up, dst[0].ds_done_tx.clone()).await;
                 let bp_usec = if ratio > 0.5 {
                     (((ratio - 0.5) * 2.0).powf(2.0) * 100_000.0) as u64
