@@ -22,7 +22,9 @@ members = [
     "repair-client",
     "smf",
     "upstairs",
+    "workspace-hack",
 ]
+resolver = "2"
 
 [workspace.dependencies]
 

@@ -25,6 +25,7 @@ tokio-rustls.workspace = true
 toml.workspace = true
 twox-hash.workspace = true
 uuid.workspace = true
+workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [build-dependencies]
 vergen = { version = "8.2", features = ["cargo", "git", "git2", "rustc" ] }

@@ -12,3 +12,4 @@ crucible-control-client.workspace = true
 crucible-protocol.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+workspace-hack = { version = "0.1", path = "../workspace-hack" }

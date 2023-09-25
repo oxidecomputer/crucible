@@ -208,6 +208,21 @@ LAST_FLUSH=$(cargo run --bin oxdb -- query crucible_downstairs:flush downstairs_
 cargo run --bin oxdb -- query crucible_downstairs:flush downstairs_uuid==12345678-3810-3810-3810-000000003810 | jq ".[].measurements[] | select(.timestamp == $LAST_FLUSH) | .datum.CumulativeI64.value"
 ```
 
+# Workspace management #
+Crucible uses [`cargo-hakari`](https://crates.io/crates/cargo-hakari) to ensure
+that all workspace dependencies enable the same set of features.  This
+dramatically improves compilation time when switching between different subsets
+of packages (e.g. `-pcrucible`), because the sets of enabled features remain
+consistent.
+
+`cargo hakari`'s status is checked in CI; if the CI check fails, then update the
+configuration locally with
+```bash
+cargo install cargo-hakari --locked # only needed on the first run
+cargo hakari generate
+cargo hakari manage-deps
+```
+
 ## License
 
 Unless otherwise noted, all components are licensed under the [Mozilla Public License Version 2.0](LICENSE).
