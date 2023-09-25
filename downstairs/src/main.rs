@@ -454,12 +454,12 @@ async fn main() -> Result<()> {
             )
             .await?;
 
-            let flush_config = if flush_per_iops.is_some() {
-                DynoFlushConfig::FlushPerIops(flush_per_iops.unwrap())
-            } else if flush_per_blocks.is_some() {
-                DynoFlushConfig::FlushPerBlocks(flush_per_iops.unwrap())
-            } else if flush_per_ms.is_some() {
-                DynoFlushConfig::FlushPerMs(flush_per_ms.unwrap())
+            let flush_config = if let Some(flush_per_iops) = flush_per_iops {
+                DynoFlushConfig::FlushPerIops(flush_per_iops)
+            } else if let Some(flush_per_blocks) = flush_per_blocks {
+                DynoFlushConfig::FlushPerBlocks(flush_per_blocks)
+            } else if let Some(flush_per_ms) = flush_per_ms {
+                DynoFlushConfig::FlushPerMs(flush_per_ms)
             } else {
                 DynoFlushConfig::None
             };
