@@ -997,6 +997,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cruplay"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "parse_int",
+ "serde",
+ "serde-aux",
+ "serde_json",
+]
+
+[[package]]
 name = "crutest"
 version = "0.1.0"
 dependencies = [
@@ -2797,6 +2809,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "parse_int"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "82db48cac18f0963b10ddad303fa88447b95bbe0e6dbe3385f98402b63d0cc48"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3747,6 +3768,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bb7d1f0d3021d347a83e556fc4683dea2ea09d87bccdf88ff5c12545d89d5efb"
 dependencies = [
  "serde_derive",
+]
+
+[[package]]
+name = "serde-aux"
+version = "4.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3dfe1b7eb6f9dcf011bd6fad169cdeaae75eda0d61b1a99a3f015b41b0cae39"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
