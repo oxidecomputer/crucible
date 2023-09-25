@@ -812,10 +812,10 @@ pub(crate) mod up_test {
         let mut ds = upstairs.downstairs.lock().await;
 
         let next_id = ds.next_id();
-
+        let dep = ds.ds_active.deps_for_flush(next_id);
         let op = create_flush(
             next_id,
-            vec![],
+            dep,
             10,
             0,
             0,
