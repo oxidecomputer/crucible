@@ -111,54 +111,54 @@ impl UpCountStat {
 // share it with the producer trait.
 #[derive(Clone, Debug)]
 pub struct UpStatOuter {
-    pub up_stat_wrap: Arc<Mutex<UpCountStat>>,
+    pub up_stat_wrap: Arc<std::sync::Mutex<UpCountStat>>,
 }
 
 impl UpStatOuter {
     // When an operation happens that we wish to record in Oximeter,
     // one of these methods will be called.  Each method will get the
     // correct field of UpCountStat to record the update.
-    pub async fn add_activation(&self) {
-        let mut ups = self.up_stat_wrap.lock().await;
+    pub fn add_activation(&self) {
+        let mut ups = self.up_stat_wrap.lock().unwrap();
         let datum = ups.activated_count.datum_mut();
         *datum += 1;
     }
-    pub async fn add_write(&self, bytes: i64) {
-        let mut ups = self.up_stat_wrap.lock().await;
+    pub fn add_write(&self, bytes: i64) {
+        let mut ups = self.up_stat_wrap.lock().unwrap();
         let datum = ups.write_bytes.datum_mut();
         *datum += bytes;
         let datum = ups.write_count.datum_mut();
         *datum += 1;
     }
-    pub async fn add_read(&self, bytes: i64) {
-        let mut ups = self.up_stat_wrap.lock().await;
+    pub fn add_read(&self, bytes: i64) {
+        let mut ups = self.up_stat_wrap.lock().unwrap();
         let datum = ups.read_bytes.datum_mut();
         *datum += bytes;
         let datum = ups.read_count.datum_mut();
         *datum += 1;
     }
-    pub async fn add_flush(&self) {
-        let mut ups = self.up_stat_wrap.lock().await;
+    pub fn add_flush(&self) {
+        let mut ups = self.up_stat_wrap.lock().unwrap();
         let datum = ups.flush_count.datum_mut();
         *datum += 1;
     }
-    pub async fn add_flush_close(&self) {
-        let mut ups = self.up_stat_wrap.lock().await;
+    pub fn add_flush_close(&self) {
+        let mut ups = self.up_stat_wrap.lock().unwrap();
         let datum = ups.flush_close_count.datum_mut();
         *datum += 1;
     }
-    pub async fn add_extent_repair(&self) {
-        let mut ups = self.up_stat_wrap.lock().await;
+    pub fn add_extent_repair(&self) {
+        let mut ups = self.up_stat_wrap.lock().unwrap();
         let datum = ups.extent_repair_count.datum_mut();
         *datum += 1;
     }
-    pub async fn add_extent_noop(&self) {
-        let mut ups = self.up_stat_wrap.lock().await;
+    pub fn add_extent_noop(&self) {
+        let mut ups = self.up_stat_wrap.lock().unwrap();
         let datum = ups.extent_noop_count.datum_mut();
         *datum += 1;
     }
-    pub async fn add_extent_reopen(&self) {
-        let mut ups = self.up_stat_wrap.lock().await;
+    pub fn add_extent_reopen(&self) {
+        let mut ups = self.up_stat_wrap.lock().unwrap();
         let datum = ups.extent_reopen_count.datum_mut();
         *datum += 1;
     }
@@ -173,9 +173,7 @@ impl Producer for UpStatOuter {
     fn produce(
         &mut self,
     ) -> Result<Box<dyn Iterator<Item = Sample> + 'static>, MetricsError> {
-        let ups = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.up_stat_wrap.lock())
-        });
+        let ups = self.up_stat_wrap.lock().unwrap();
 
         let name = &ups.stat_name;
         let data = vec![

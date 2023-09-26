@@ -3840,7 +3840,7 @@ impl Downstairs {
      * This function does a match on IOop type and updates the oximeter
      * stat and dtrace probe for that operation.
      */
-    async fn cdt_gw_work_done(
+    fn cdt_gw_work_done(
         &self,
         ds_id: JobId,
         gw_id: u64,
@@ -3859,14 +3859,14 @@ impl Downstairs {
                 requests: _,
             } => {
                 cdt::gw__read__done!(|| (gw_id));
-                stats.add_read(io_size as i64).await;
+                stats.add_read(io_size as i64);
             }
             IOop::Write {
                 dependencies: _,
                 writes: _,
             } => {
                 cdt::gw__write__done!(|| (gw_id));
-                stats.add_write(io_size as i64).await;
+                stats.add_write(io_size as i64);
             }
             IOop::WriteUnwritten {
                 dependencies: _,
@@ -3884,7 +3884,7 @@ impl Downstairs {
                 extent_limit: _,
             } => {
                 cdt::gw__flush__done!(|| (gw_id));
-                stats.add_flush().await;
+                stats.add_flush();
             }
             IOop::ExtentClose {
                 dependencies: _,
@@ -3909,7 +3909,7 @@ impl Downstairs {
                 repair_downstairs: _,
             } => {
                 cdt::gw__close__done!(|| (gw_id, extent));
-                stats.add_flush_close().await;
+                stats.add_flush_close();
             }
             IOop::ExtentLiveRepair {
                 dependencies: _,
@@ -3919,18 +3919,18 @@ impl Downstairs {
                 repair_downstairs: _,
             } => {
                 cdt::gw__repair__done!(|| (gw_id, extent));
-                stats.add_extent_repair().await;
+                stats.add_extent_repair();
             }
             IOop::ExtentLiveNoOp { dependencies: _ } => {
                 cdt::gw__noop__done!(|| (gw_id));
-                stats.add_extent_noop().await;
+                stats.add_extent_noop();
             }
             IOop::ExtentLiveReopen {
                 dependencies: _,
                 extent,
             } => {
                 cdt::gw__reopen__done!(|| (gw_id, extent));
-                stats.add_extent_reopen().await;
+                stats.add_extent_reopen();
             }
         }
     }
@@ -5311,7 +5311,9 @@ impl Upstairs {
         let uuid = opt.id;
         info!(log, "Crucible stats registered with UUID: {}", uuid);
         let stats = UpStatOuter {
-            up_stat_wrap: Arc::new(Mutex::new(UpCountStat::new(uuid))),
+            up_stat_wrap: Arc::new(std::sync::Mutex::new(UpCountStat::new(
+                uuid,
+            ))),
         };
 
         let rd_status = match expected_region_def {
@@ -5409,7 +5411,7 @@ impl Upstairs {
     #[cfg(test)]
     async fn set_active(&self) -> Result<(), CrucibleError> {
         let mut active = self.active.lock().await;
-        self.stats.add_activation().await;
+        self.stats.add_activation();
         active.set_active()?;
         info!(
             self.log,
@@ -6983,7 +6985,7 @@ impl Upstairs {
                         self.uuid,
                         self.session_id
                     );
-                    self.stats.add_activation().await;
+                    self.stats.add_activation();
                 }
             }
             Ok(false) => {
@@ -7019,7 +7021,7 @@ impl Upstairs {
                         self.uuid,
                         self.session_id
                     );
-                    self.stats.add_activation().await;
+                    self.stats.add_activation();
                     info!(self.log, "{} Set Active after no repair", self.uuid);
                 }
             }
@@ -9579,7 +9581,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<()>) {
             gw.gw_ds_complete(gw_id, ds_id, data, ds.result(ds_id), &up.log)
                 .await;
 
-            ds.cdt_gw_work_done(ds_id, gw_id, io_size, &up.stats).await;
+            ds.cdt_gw_work_done(ds_id, gw_id, io_size, &up.stats);
 
             ds.retire_check(ds_id);
         }
