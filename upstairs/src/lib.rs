@@ -732,9 +732,15 @@ where
      * This XXX is for coming back here and making a better job of
      * flow control.
      */
-    let (mut new_work, mut active_count) = {
+    let (new_work, flow_control) = {
         let mut ds = u.downstairs.lock().await;
-        (ds.new_work(client_id), ds.submitted_work(client_id))
+        let active_count = ds.submitted_work(client_id);
+        if active_count > MAX_ACTIVE_COUNT {
+            ds.flow_control[client_id] += 1;
+            return Ok(true);
+        }
+        let n = MAX_ACTIVE_COUNT - active_count;
+        ds.new_work(client_id, n)
     };
 
     /*
@@ -745,17 +751,7 @@ where
      * to do work, we would have to start over and look at all jobs in the
      * map to see if they are new.
      */
-    while let Some(new_id) = new_work.pop_first() {
-        if active_count >= MAX_ACTIVE_COUNT {
-            // Flow control enacted, stop sending work -- and requeue all of
-            // our remaining work to assure it isn't dropped
-            new_work.insert(new_id);
-            let mut ds = u.downstairs.lock().await;
-            ds.requeue_work(client_id, new_work);
-            ds.flow_control[client_id] += 1;
-            return Ok(true);
-        }
-
+    for new_id in new_work {
         /*
          * Walk the list of work to do, update its status as in progress
          * and send the details to our downstairs.
@@ -777,7 +773,6 @@ where
             continue;
         }
 
-        active_count += 1;
         match job.unwrap() {
             IOop::Write {
                 dependencies,
@@ -974,7 +969,7 @@ where
             }
         }
     }
-    Ok(false)
+    Ok(flow_control)
 }
 
 async fn proc_stream(
@@ -3583,20 +3578,27 @@ impl Downstairs {
         notify_guest
     }
 
-    /**
-     * Return a list of downstairs request IDs that represent unissued
-     * requests for this client.
-     */
-    fn new_work(&mut self, client_id: ClientId) -> BTreeSet<JobId> {
-        std::mem::take(&mut self.ds_new[client_id])
-    }
-
-    /**
-     * Called to requeue work that was previously found by calling
-     * [`new_work`], presumably due to flow control.
-     */
-    fn requeue_work(&mut self, client_id: ClientId, mut work: BTreeSet<JobId>) {
-        self.ds_new[client_id].append(&mut work);
+    /// Return a list of downstairs request IDs that represent unissued
+    /// requests for this client.
+    ///
+    /// Returns a tuple of `(jobs, flow control)` where flow control is true if
+    /// the jobs list has been clamped to `max_count`.
+    fn new_work(
+        &mut self,
+        client_id: ClientId,
+        max_count: usize,
+    ) -> (BTreeSet<JobId>, bool) {
+        if max_count >= self.ds_new[client_id].len() {
+            // Happy path: we can grab everything
+            (std::mem::take(&mut self.ds_new[client_id]), false)
+        } else {
+            // Otherwise, pop elements from the queue
+            let mut out = BTreeSet::new();
+            for _ in 0..max_count {
+                out.insert(self.ds_new[client_id].pop_first().unwrap());
+            }
+            (out, true)
+        }
     }
 
     /**
