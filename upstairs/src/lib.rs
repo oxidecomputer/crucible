@@ -740,7 +740,7 @@ where
             return Ok(true);
         } else {
             let n = MAX_ACTIVE_COUNT - active_count;
-            let (new_work, flow_control) = ds.new_work(client_id, n)
+            let (new_work, flow_control) = ds.new_work(client_id, n);
             if flow_control {
                 ds.flow_control[client_id] += 1;
             }
