@@ -6,6 +6,7 @@
 #: output_rules = [
 #:	"/tmp/*.txt",
 #:	"/tmp/*.log",
+#:	"%/tmp/debug/*.txt",
 #:	"/tmp/dsc/*.txt",
 #:	"/tmp/core.*",
 #: ]
@@ -42,6 +43,21 @@ for t in "$input/bins/"*.gz; do
 done
 
 export BINDIR=/var/tmp/bins
+banner setup
+
+echo "Setup self timeout"
+# First, test that, after 3 minutes a timeout fires and collects data.
+jobpid=$$; (sleep $(( 3 * 60 )); ps -ef; zfs list;kill $jobpid) &
+
+echo "Setup debug logging"
+mkdir /tmp/debug
+psrinfo -v > /tmp/debug/psrinfo.txt
+df -h > /tmp/debug/df.txt
+prstat -d d -mLc 1 > /tmp/debug/prstat.txt 2>&1 &
+iostat -T d -xn 1 > /tmp/debug/iostat.txt 2>&1 &
+mpstat -T d 1 > /tmp/debug/mpstat.txt 2>&1 &
+vmstat -T d -p 1 < /dev/null > /tmp/debug/paging.txt 2>&1 &
+pfexec dtrace -Z -s $input/scripts/perf-downstairs-tick.d > /tmp/debug/dtrace.txt 2>&1 &
 
 banner replay
 ptime -m bash "$input/scripts/test_replay.sh"
