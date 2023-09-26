@@ -738,9 +738,14 @@ where
         if active_count > MAX_ACTIVE_COUNT {
             ds.flow_control[client_id] += 1;
             return Ok(true);
+        } else {
+            let n = MAX_ACTIVE_COUNT - active_count;
+            let (new_work, flow_control) = ds.new_work(client_id, n)
+            if flow_control {
+                ds.flow_control[client_id] += 1;
+            }
+            (new_work, flow_control)
         }
-        let n = MAX_ACTIVE_COUNT - active_count;
-        ds.new_work(client_id, n)
     };
 
     /*
