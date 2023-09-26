@@ -8947,6 +8947,19 @@ pub struct Guest {
 
     /// Backpressure is implemented as a delay on host operations
     backpressure_us: AtomicU64,
+
+    /// Backpressure configuration, as a starting point and max delay
+    backpressure_config: BackpressureConfig,
+}
+
+/// Configuration for host-side backpressure
+///
+/// Backpressure adds an artificial delay to host messages to maintain the
+/// downstairs queue at a particular length.
+#[derive(Copy, Clone, Debug)]
+struct BackpressureConfig {
+    start: f32,
+    max_delay: Duration,
 }
 
 /*
@@ -8982,6 +8995,11 @@ impl Guest {
 
             block_size: AtomicU64::new(0),
             backpressure_us: AtomicU64::new(0),
+
+            backpressure_config: BackpressureConfig {
+                start: 0.5,
+                max_delay: Duration::from_millis(5),
+            },
         }
     }
 
@@ -9036,8 +9054,19 @@ impl Guest {
         }
     }
 
-    fn set_backpressure(&self, bp_usec: u64) {
-        self.backpressure_us.store(bp_usec, Ordering::SeqCst);
+    /// Set `self.backpressure_us` based on outstanding IO ratio
+    fn set_backpressure(&self, ratio: f32) {
+        // Check to see if the number of outstanding IOs (between
+        // the upstairs and downstairs) is particularly high.  If so,
+        // apply some backpressure by delaying host operations, with a
+        // quadratically-increasing delay.
+        let d = self.backpressure_config.max_delay.mul_f32(
+            ((ratio - self.backpressure_config.start).max(0.0)
+                / (1.0 - self.backpressure_config.start))
+                .powf(2.0),
+        );
+        self.backpressure_us
+            .store(d.as_micros() as u64, Ordering::SeqCst);
     }
 
     /*
@@ -10031,19 +10060,10 @@ async fn up_listen(
             req = up.guest.recv() => {
                 process_new_io(up, &dst, req, &mut lastcast).await;
 
-                // Check to see if the number of outstanding IOs (between
-                // the upstairs and downstairs) is particularly high.  If so,
-                // apply some backpressure by delaying host operations, with a
-                // quadratically-increasing delay.
-                //
-                // TODO: make these parameters tuneable
+                // Check how many outstanding downstairs jobs remain in the
+                // queue, and adjust guest backpressure accordingly.
                 let ratio = gone_too_long(up, dst[0].ds_done_tx.clone()).await;
-                let bp_usec = if ratio > 0.5 {
-                    (((ratio - 0.5) * 2.0).powf(2.0) * 100_000.0) as u64
-                } else {
-                    0
-                };
-                up.guest.set_backpressure(bp_usec);
+                up.guest.set_backpressure(ratio);
             }
             _ = sleep_until(repair_check_interval), if repair_check => {
                 match check_for_repair(up, &dst).await {

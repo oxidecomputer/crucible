@@ -454,7 +454,11 @@ pub(crate) mod protocol_test {
             let ds2 = Downstairs::new(log.new(o!("downstairs" => 2))).await;
             let ds3 = Downstairs::new(log.new(o!("downstairs" => 3))).await;
 
-            let guest = Arc::new(Guest::new());
+            // Configure our guest without backpressure, to speed up tests which
+            // require triggering a timeout
+            let mut g = Guest::new();
+            g.backpressure_config.max_delay = Duration::ZERO;
+            let guest = Arc::new(g);
 
             let crucible_opts = CrucibleOpts {
                 id: Uuid::new_v4(),
