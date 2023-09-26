@@ -5,34 +5,6 @@
     "version": "0.0.0"
   },
   "paths": {
-    "/downstairs/fault/{cid}": {
-      "post": {
-        "operationId": "fault_downstairs",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "cid",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "uint8",
-              "minimum": 0
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "resource updated"
-          },
-          "4XX": {
-            "$ref": "#/components/responses/Error"
-          },
-          "5XX": {
-            "$ref": "#/components/responses/Error"
-          }
-        }
-      }
-    },
     "/info": {
       "get": {
         "summary": "Fetch the current value for all the stats in the UpstairsStats struct",
@@ -44,39 +16,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/UpstairsStats"
-                }
-              }
-            }
-          },
-          "4XX": {
-            "$ref": "#/components/responses/Error"
-          },
-          "5XX": {
-            "$ref": "#/components/responses/Error"
-          }
-        }
-      }
-    },
-    "/snapshot": {
-      "post": {
-        "operationId": "take_snapshot",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/TakeSnapshotParams"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "successful creation",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TakeSnapshotResponse"
                 }
               }
             }
@@ -201,29 +140,6 @@
         "required": [
           "message",
           "request_id"
-        ]
-      },
-      "TakeSnapshotParams": {
-        "description": "Signal to the Upstairs to take a snapshot",
-        "type": "object",
-        "properties": {
-          "snapshot_name": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "snapshot_name"
-        ]
-      },
-      "TakeSnapshotResponse": {
-        "type": "object",
-        "properties": {
-          "snapshot_name": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "snapshot_name"
         ]
       },
       "UpState": {
