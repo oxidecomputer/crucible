@@ -38,7 +38,9 @@ for t in crucible-downstairs crucible-hammer crutest dsc; do
 done
 
 mkdir -p /work/scripts
-for s in tools/test_live_repair.sh tools/test_repair.sh tools/test_up.sh tools/test_ds.sh tools/test_replay.sh ; do
+for s in tools/test_live_repair.sh tools/test_repair.sh tools/test_up.sh \
+  tools/test_ds.sh tools/test_replay.sh tools/dtrace/upstairs_info.d \
+  tools/dtrace/perf-downstairs-tick.d; do
 	cp "$s" /work/scripts/
 done
 

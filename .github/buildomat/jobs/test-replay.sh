@@ -7,7 +7,7 @@
 #:	"/tmp/*.txt",
 #:	"/tmp/*.log",
 #:	"%/tmp/debug/*.txt",
-#:	"/tmp/dsc/*.txt",
+#:	"%/tmp/dsc/*.txt",
 #:	"/tmp/core.*",
 #: ]
 #: skip_clone = true
@@ -57,7 +57,8 @@ prstat -d d -mLc 1 > /tmp/debug/prstat.txt 2>&1 &
 iostat -T d -xn 1 > /tmp/debug/iostat.txt 2>&1 &
 mpstat -T d 1 > /tmp/debug/mpstat.txt 2>&1 &
 vmstat -T d -p 1 < /dev/null > /tmp/debug/paging.txt 2>&1 &
-pfexec dtrace -Z -s $input/scripts/perf-downstairs-tick.d > /tmp/debug/dtrace.txt 2>&1 &
+pfexec dtrace -Z -s $input/scripts/perf-downstairs-tick.d > /tmp/debug/perf.txt 2>&1 &
+pfexec dtrace -Z -s $input/scripts/upstairs-info.d > /tmp/debug/upinfo.txt 2>&1 &
 
 banner replay
 ptime -m bash "$input/scripts/test_replay.sh"
