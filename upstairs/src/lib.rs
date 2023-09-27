@@ -815,16 +815,6 @@ where
                 snapshot_details,
                 extent_limit,
             } => {
-                // If our downstairs is under repair, then include any extent
-                // limit sent in the IOop.
-                let my_extent_limit = if u.downstairs.lock().await.ds_state
-                    [client_id]
-                    == DsState::LiveRepair
-                {
-                    extent_limit
-                } else {
-                    None
-                };
                 cdt::ds__flush__io__start!(|| (new_id.0, client_id.get()));
                 fw.send(Message::Flush {
                     upstairs_id: u.uuid,
@@ -834,7 +824,7 @@ where
                     flush_number,
                     gen_number,
                     snapshot_details,
-                    extent_limit: my_extent_limit,
+                    extent_limit,
                 })
                 .await?
             }
@@ -3115,6 +3105,13 @@ impl Downstairs {
                         ds_id,
                     );
                 }
+            }
+        }
+        // If our downstairs is under repair, then include any extent limit sent
+        // in the IOop; otherwise, clear it out
+        if let IOop::Flush { extent_limit, .. } = &mut out {
+            if self.ds_state[client_id] != DsState::LiveRepair {
+                *extent_limit = None;
             }
         }
         Some(out)
