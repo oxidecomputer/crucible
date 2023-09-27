@@ -46,8 +46,8 @@ export BINDIR=/var/tmp/bins
 banner setup
 
 echo "Setup self timeout"
-# First, test that, after 3 minutes a timeout fires and collects data.
-jobpid=$$; (sleep $(( 3 * 60 )); ps -ef; zfs list;kill $jobpid) &
+# Three hours should be enough
+jobpid=$$; (sleep 10800; ps -ef; zfs list;kill $jobpid) &
 
 echo "Setup debug logging"
 mkdir /tmp/debug
