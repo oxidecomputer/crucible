@@ -17,6 +17,22 @@ struct PlotOpts {
     /// title for plot
     #[clap(short, long)]
     title: Option<String>,
+
+    /// start time offset of plot (in seconds)
+    #[clap(short, long)]
+    start: Option<f32>,
+
+    /// end time offset of plot (in seconds)
+    #[clap(short, long)]
+    end: Option<f32>,
+
+    /// point size
+    #[clap(short, long, default_value = "0.3")]
+    pointsize: f32,
+
+    /// alternate point size
+    #[clap(short, long, default_value = "0.1")]
+    altpointsize: f32,
 }
 
 #[derive(Debug, Clone, clap::Subcommand)]
@@ -335,6 +351,7 @@ fn plot(opts: &Opts, plot_opts: &PlotOpts) -> Result<()> {
 
         let mut reads = File::create(format!("{}.reads", filename))?;
         let mut writes = File::create(format!("{}.writes", filename))?;
+        let mut nfw = File::create(format!("{}.nonflushingwrites", filename))?;
         let mut flushes = File::create(format!("{}.flushes", filename))?;
 
         for (req, response, inflight) in operations.values() {
@@ -344,6 +361,10 @@ fn plot(opts: &Opts, plot_opts: &PlotOpts) -> Result<()> {
 
             if req.flags.is_write() {
                 emit(&mut writes, req, response, inflight)?;
+
+                if !req.flags.is_flush() {
+                    emit(&mut nfw, req, response, inflight)?;
+                }
             }
 
             if req.flags.is_flush() {
@@ -359,17 +380,39 @@ fn plot(opts: &Opts, plot_opts: &PlotOpts) -> Result<()> {
             None => &filename,
         };
 
+        let xrange = format!(
+            "{}:{}",
+            match plot_opts.start {
+                Some(start) => format!("{start}"),
+                None => "".to_string(),
+            },
+            match plot_opts.end {
+                Some(end) => format!("{end}"),
+                None => "".to_string(),
+            },
+        );
+
         writeln!(
             gpl,
             include_str!("./plot.gpl"),
             filename = filename,
-            title = title
+            title = title,
+            xrange = xrange,
+            pointsize = plot_opts.pointsize,
+            altpointsize = plot_opts.altpointsize,
         )?;
 
-        std::process::Command::new("gnuplot")
+        let out = std::process::Command::new("gnuplot")
             .arg(gpl_filename)
             .output()
             .with_context(|| format!("failed to execute gnuplot"))?;
+
+        if !out.status.success() {
+            bail!(
+                "gnuplot failed: stderr: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
 
         Ok(())
     })?;

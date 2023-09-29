@@ -1,0 +1,50 @@
+
+set terminal pdf fontscale 0.8 size 11in,8.5in enhanced
+set output "{filename}.pdf"
+
+set datafile separator " ="
+set xlabel "Seconds"
+set ylabel "Milliseconds latency"
+set y2label "Queue depth"
+set y2tics
+set title "{title}\n{{/*0.8 Data from instrumenting blk\\\_account\\\_io\\\_start()/blk\\\_account\\\_io\\\_done() with bpftrace from within Ubuntu 22.04 guest }}"
+
+set xrange [{xrange}]
+
+#
+# Disable extending the X range to the next tic
+#
+set autoscale xfixmax
+
+plot \
+1/0 with points pt 7 ps 1 lc 1 title "Write queue length", \
+"{filename}.writes" using ($4/1000000000):14 \
+with points pt 7 ps {altpointsize} lc 1 axes x1y2 notitle, \
+1/0 with points pt 7 ps 1 lc 2 title "Write operation latency", \
+"{filename}.writes" using ($4/1000000000):($10/1000000) \
+with points pt 7 ps {pointsize} lc 2 notitle, \
+1/0 with points pt 7 ps 1 lc 3 title "Flush operation latency", \
+"{filename}.flushes" using ($4/1000000000):($10/1000000) \
+with points pt 7 ps {pointsize} lc 3 notitle
+
+unset y2label
+unset y2tics
+
+set title "{title}: Write latency (including flushing writes)\n{{/*0.8 Data from instrumenting blk\\\_account\\\_io\\\_start()/blk\\\_account\\\_io\\\_done() with bpftrace from within Ubuntu 22.04 guest }}"
+
+plot \
+"{filename}.writes" using ($4/1000000000):($10/1000000) \
+with points pt 7 ps {pointsize} lc 2 notitle
+
+set title "{title}: Flush latency\n{{/*0.8 Data from instrumenting blk\\\_account\\\_io\\\_start()/blk\\\_account\\\_io\\\_done() with bpftrace from within Ubuntu 22.04 guest }}"
+
+plot \
+"{filename}.flushes" using ($4/1000000000):($10/1000000) \
+with points pt 7 ps {pointsize} lc 3 notitle
+
+set title "{title}: Non-flushing write latency\n{{/*0.8 Data from instrumenting blk\\\_account\\\_io\\\_start()/blk\\\_account\\\_io\\\_done() with bpftrace from within Ubuntu 22.04 guest }}"
+
+plot \
+"{filename}.nonflushingwrites" using ($4/1000000000):($10/1000000) \
+with points pt 7 ps {pointsize} lc 2 notitle
+
