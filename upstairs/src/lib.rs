@@ -3128,10 +3128,16 @@ impl Downstairs {
             && !self.ds_skipped_jobs[client_id].is_empty()
     }
 
-    // Given a client ID that is undergoing LiveRepair, go through the list
-    // of dependencies and remove any jobs that this downstairs has already
-    // skipped, as the downstairs on the other side will not have received
-    // these IOs.
+    /// Given a client ID that is undergoing LiveRepair, go through the list
+    /// of dependencies and remove any jobs that this downstairs has already
+    /// skipped, as the downstairs on the other side will not have received
+    /// these IOs.
+    ///
+    /// First off, any job that was "skipped" should not be a dependency for
+    /// this specific downstairs.  In addition, any job that happened before
+    /// the skipped jobs that was marked as "Done" should also be removed, as
+    /// there will be no replay here and we are basically rebuilding this
+    /// downstairs from other downstairs.
     fn remove_dep_if_live_repair(
         &mut self,
         client_id: ClientId,
