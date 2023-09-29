@@ -86,6 +86,12 @@ pub struct Inner {
     file: File,
     metadb: Connection,
 
+    /// Flag indicating whether the `dirty` bit is set
+    ///
+    /// This is cached locally to avoid an expensive SQLite operation when it is
+    /// already true, and is a `Cell` for interior mutability.
+    dirty: std::cell::Cell<bool>,
+
     /// Set of blocks that have been written since last flush.
     ///
     /// If the hash is known, then it's also recorded here.  It _should_ always
@@ -148,26 +154,25 @@ impl Inner {
             .metadb
             .prepare_cached("UPDATE metadata SET value=0 WHERE name='dirty'")?;
         let _rows_affected = stmt.execute([])?;
+        self.dirty.set(false);
 
         Ok(())
     }
 
     pub fn dirty(&self) -> Result<bool> {
-        let mut stmt = self
-            .metadb
-            .prepare_cached("SELECT value FROM metadata where name='dirty'")?;
-        let mut dirty_iter = stmt.query_map([], |row| row.get(0))?;
-        let dirty = dirty_iter.next().unwrap()?;
-        assert!(dirty_iter.next().is_none());
-
-        Ok(dirty)
+        Ok(self.dirty.get())
     }
 
     fn set_dirty(&self) -> Result<()> {
-        let _ = self
-            .metadb
-            .prepare_cached("UPDATE metadata SET value=1 WHERE name='dirty'")?
-            .execute([])?;
+        if !self.dirty.get() {
+            let _ = self
+                .metadb
+                .prepare_cached(
+                    "UPDATE metadata SET value=1 WHERE name='dirty'",
+                )?
+                .execute([])?;
+            self.dirty.set(true);
+        }
         Ok(())
     }
 
@@ -696,6 +701,8 @@ impl Extent {
                 Ok(m) => m,
             };
 
+        let dirty = Self::get_dirty_from_metadb(&metadb)?;
+
         // XXX: schema updates?
 
         let extent = Extent {
@@ -707,6 +714,7 @@ impl Extent {
             inner: Mutex::new(Inner {
                 file,
                 metadb,
+                dirty: dirty.into(),
                 dirty_blocks: BTreeMap::new(),
             }),
         };
@@ -888,6 +896,8 @@ impl Extent {
             open_sqlite_connection(&path)?
         };
 
+        let dirty = Self::get_dirty_from_metadb(&metadb)?;
+
         /*
          * Complete the construction of our new extent
          */
@@ -899,10 +909,20 @@ impl Extent {
             iov_max: Extent::get_iov_max()?,
             inner: Mutex::new(Inner {
                 file,
+                dirty: dirty.into(),
                 metadb,
                 dirty_blocks: BTreeMap::new(),
             }),
         })
+    }
+
+    fn get_dirty_from_metadb(metadb: &Connection) -> Result<bool> {
+        let mut stmt = metadb
+            .prepare_cached("SELECT value FROM metadata where name='dirty'")?;
+        let mut dirty_iter = stmt.query_map([], |row| row.get(0))?;
+        let dirty = dirty_iter.next().unwrap()?;
+        assert!(dirty_iter.next().is_none());
+        Ok(dirty)
     }
 
     /**
@@ -2811,6 +2831,7 @@ mod test {
 
         let inn = Inner {
             file: ff,
+            dirty: false.into(),
             metadb: Connection::open_in_memory().unwrap(),
             dirty_blocks: BTreeMap::new(),
         };
