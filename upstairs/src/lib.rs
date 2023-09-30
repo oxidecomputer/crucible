@@ -10134,6 +10134,11 @@ pub async fn up_main(
         "Upstairs <-> Downstairs Message Version: {}", CRUCIBLE_MESSAGE_VERSION
     );
 
+    info!(log, "Upstairs opts: {}", opt);
+    if let Some(rd) = region_def {
+        info!(log, "Using region definition {:?}", rd);
+    }
+
     /*
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
