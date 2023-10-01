@@ -81,15 +81,16 @@ impl std::fmt::Display for CrucibleOpts {
         write!(f, " Targets: {:?},", self.target)?;
         write!(f, " lossy: {:?},", self.lossy)?;
         write!(f, " flush_timeout: {:?},", self.flush_timeout)?;
-        write!(f, " read_only: {:?},", self.read_only)?;
         write!(f, " key populated: {}, ", self.key.is_some())?;
         write!(f, " cert_pem populated: {}, ", self.cert_pem.is_some())?;
         write!(f, " key_pem populated: {}, ", self.key_pem.is_some())?;
         write!(
             f,
-            " root_cert_pem populated: {}",
+            " root_cert_pem populated: {}, ",
             self.root_cert_pem.is_some()
         )?;
+        write!(f, " Control: {:?}, ", self.control)?;
+        write!(f, " read_only: {:?}", self.read_only)?;
         Ok(())
     }
 }
