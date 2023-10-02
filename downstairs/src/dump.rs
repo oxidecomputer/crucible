@@ -1,6 +1,6 @@
 // Copyright 2021 Oxide Computer Company
 use super::*;
-use crate::region::ExtentMeta;
+use crate::extent::ExtentMeta;
 use std::convert::TryInto;
 
 use sha2::{Digest, Sha256};
@@ -61,8 +61,8 @@ pub async fn dump_region(
         for e in &region.extents {
             let e = e.lock().await;
             let e = match &*e {
-                region::ExtentState::Opened(extent) => extent,
-                region::ExtentState::Closed => panic!("dump on closed extent!"),
+                extent::ExtentState::Opened(extent) => extent,
+                extent::ExtentState::Closed => panic!("dump on closed extent!"),
             };
             let en = e.number();
 

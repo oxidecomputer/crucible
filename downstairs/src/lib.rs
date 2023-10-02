@@ -32,6 +32,7 @@ use uuid::Uuid;
 pub mod admin;
 mod dump;
 mod dynamometer;
+mod extent;
 pub mod region;
 pub mod repair;
 mod stats;

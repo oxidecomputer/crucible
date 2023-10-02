@@ -1,11 +1,13 @@
 // Copyright 2023 Oxide Computer Company
-use crate::region::{
-    check_input, extent_path, BatchedPwritev, DownstairsBlockContext,
-    ExtentInner, ExtentMeta, JobOrReconciliationId,
-};
 use crate::{
-    cdt, crucible_bail, integrity_hash, mkdir_for_file, Block, BlockContext,
-    CrucibleError, JobId, ReadResponse, RegionDefinition,
+    cdt, crucible_bail,
+    extent::{
+        extent_path, DownstairsBlockContext, ExtentInner, ExtentMeta,
+        JobOrReconciliationId,
+    },
+    integrity_hash, mkdir_for_file,
+    region::{check_input, BatchedPwritev},
+    Block, BlockContext, CrucibleError, JobId, ReadResponse, RegionDefinition,
 };
 use crucible_protocol::EncryptionContext;
 

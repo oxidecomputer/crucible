@@ -16,7 +16,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::*;
-use crate::region::{extent_dir, extent_file_name, extent_path, ExtentType};
+use crate::extent::{extent_dir, extent_file_name, extent_path, ExtentType};
 
 /**
  * Our context is the root of the region we want to serve.
@@ -249,7 +249,6 @@ fn extent_file_list(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::region::{extent_dir, extent_file_name};
     use openapiv3::OpenAPI;
     use tempfile::tempdir;
 
