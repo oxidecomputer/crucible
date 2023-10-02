@@ -23,9 +23,61 @@ use repair_client::Client;
 use super::*;
 use crate::extent::{
     extent_dir, extent_file_name, move_replacement_extent, replace_dir,
-    sync_path, validate_repair_files, Extent, ExtentState, ExtentType,
-    JobOrReconciliationId,
+    sync_path, Extent, ExtentMeta, ExtentState, ExtentType,
 };
+
+/**
+ * Validate a list of sorted repair files.
+ * There are either two or four files we expect to find, any more or less
+ * and we have a bad list.  No duplicates.
+ */
+pub fn validate_repair_files(eid: usize, files: &[String]) -> bool {
+    let eid = eid as u32;
+
+    let some = vec![
+        extent_file_name(eid, ExtentType::Data),
+        extent_file_name(eid, ExtentType::Db),
+    ];
+
+    let mut all = some.clone();
+    all.extend(vec![
+        extent_file_name(eid, ExtentType::DbShm),
+        extent_file_name(eid, ExtentType::DbWal),
+    ]);
+
+    // Either we have some or all.
+    files == some || files == all
+}
+
+/// Wrapper type for either a job or reconciliation ID
+///
+/// This is useful for debug logging / DTrace probes, and not much else
+#[derive(Copy, Clone, Debug)]
+pub(crate) enum JobOrReconciliationId {
+    JobId(JobId),
+    ReconciliationId(ReconciliationId),
+}
+
+impl JobOrReconciliationId {
+    pub fn get(self) -> u64 {
+        match self {
+            Self::JobId(i) => i.0,
+            Self::ReconciliationId(i) => i.0,
+        }
+    }
+}
+
+impl From<JobId> for JobOrReconciliationId {
+    fn from(i: JobId) -> Self {
+        Self::JobId(i)
+    }
+}
+
+impl From<ReconciliationId> for JobOrReconciliationId {
+    fn from(i: ReconciliationId) -> Self {
+        Self::ReconciliationId(i)
+    }
+}
 
 /**
  * The main structure describing a region.
@@ -641,40 +693,11 @@ impl Region {
         self.def
     }
 
-    pub async fn flush_numbers(&self) -> Result<Vec<u64>> {
+    pub async fn meta_info(&self) -> Result<Vec<ExtentMeta>> {
         let mut result = Vec::with_capacity(self.extents.len());
         for eid in 0..self.extents.len() {
             let extent = self.get_opened_extent(eid).await;
-            result.push(extent.lock().await.flush_number()?);
-        }
-
-        if result.len() > 12 {
-            info!(
-                self.log,
-                "Current flush_numbers [0..12]: {:?}",
-                &result[0..12]
-            );
-        } else {
-            info!(self.log, "Current flush_numbers [0..12]: {:?}", result);
-        }
-
-        Ok(result)
-    }
-
-    pub async fn gen_numbers(&self) -> Result<Vec<u64>> {
-        let mut result = Vec::with_capacity(self.extents.len());
-        for eid in 0..self.extents.len() {
-            let extent = self.get_opened_extent(eid).await;
-            result.push(extent.lock().await.gen_number()?);
-        }
-        Ok(result)
-    }
-
-    pub async fn dirty(&self) -> Result<Vec<bool>> {
-        let mut result = Vec::with_capacity(self.extents.len());
-        for eid in 0..self.extents.len() {
-            let extent = self.get_opened_extent(eid).await;
-            result.push(extent.lock().await.dirty()?);
+            result.push(extent.get_meta_info().await)
         }
         Ok(result)
     }
@@ -1182,7 +1205,7 @@ mod test {
     use crate::dump::dump_region;
     use crate::extent::{
         completed_dir, copy_dir, extent_path, remove_copy_cleanup_dir,
-        DownstairsBlockContext,
+        DownstairsBlockContext, ExtentInner,
     };
     use crucible_protocol::EncryptionContext;
 
@@ -1196,6 +1219,19 @@ mod test {
 
     fn test_uuid() -> Uuid {
         TEST_UUID_STR.parse().unwrap()
+    }
+
+    fn set_dirty_and_block_contexts(
+        inner: &dyn ExtentInner,
+        block_contexts: &[&DownstairsBlockContext],
+    ) -> Result<()> {
+        inner.set_dirty()?;
+
+        for block_context in block_contexts {
+            inner.set_block_context(block_context)?;
+        }
+
+        Ok(())
     }
 
     // Create a simple logger
@@ -2117,21 +2153,23 @@ mod test {
         assert!(inner.get_block_contexts(1, 1)?[0].is_empty());
 
         // Set and verify block 0's context
-        inner.set_dirty().unwrap();
-        inner.set_block_context(&DownstairsBlockContext {
-            block_context: BlockContext {
-                encryption_context: Some(EncryptionContext {
-                    nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                    tag: [
-                        4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
-                        19,
-                    ],
-                }),
-                hash: 123,
-            },
-            block: 0,
-            on_disk_hash: 456,
-        })?;
+        set_dirty_and_block_contexts(
+            inner.as_ref(),
+            &[&DownstairsBlockContext {
+                block_context: BlockContext {
+                    encryption_context: Some(EncryptionContext {
+                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                        tag: [
+                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                            18, 19,
+                        ],
+                    }),
+                    hash: 123,
+                },
+                block: 0,
+                on_disk_hash: 456,
+            }],
+        )?;
 
         let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
 
@@ -2167,18 +2205,21 @@ mod test {
         let blob1 = rand::thread_rng().gen::<[u8; 12]>();
         let blob2 = rand::thread_rng().gen::<[u8; 16]>();
 
-        inner.set_dirty().unwrap();
-        inner.set_block_context(&DownstairsBlockContext {
-            block_context: BlockContext {
-                encryption_context: Some(EncryptionContext {
-                    nonce: blob1,
-                    tag: blob2,
-                }),
-                hash: 1024,
-            },
-            block: 0,
-            on_disk_hash: 65536,
-        })?;
+        // Set and verify block 0's context
+        set_dirty_and_block_contexts(
+            inner.as_ref(),
+            &[&DownstairsBlockContext {
+                block_context: BlockContext {
+                    encryption_context: Some(EncryptionContext {
+                        nonce: blob1,
+                        tag: blob2,
+                    }),
+                    hash: 1024,
+                },
+                block: 0,
+                on_disk_hash: 65536,
+            }],
+        )?;
 
         let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
 
@@ -2275,15 +2316,17 @@ mod test {
         // writing the same unencrypted contents to the same offset.
 
         for _ in 0..10 {
-            inner.set_dirty().unwrap();
-            inner.set_block_context(&DownstairsBlockContext {
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash: 123,
-                },
-                block: 0,
-                on_disk_hash: 123,
-            })?;
+            set_dirty_and_block_contexts(
+                inner.as_ref(),
+                &[&DownstairsBlockContext {
+                    block_context: BlockContext {
+                        encryption_context: None,
+                        hash: 123,
+                    },
+                    block: 0,
+                    on_disk_hash: 123,
+                }],
+            )?;
         }
 
         // Duplicate rows should not be inserted
@@ -2317,38 +2360,39 @@ mod test {
         assert!(inner.get_block_contexts(1, 1)?[0].is_empty());
 
         // Set block 0's and 1's context
-        inner.set_dirty().unwrap();
-        for ctx in &[
-            &DownstairsBlockContext {
-                block_context: BlockContext {
-                    encryption_context: Some(EncryptionContext {
-                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                        tag: [
-                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
-                            18, 19,
-                        ],
-                    }),
-                    hash: 123,
+        set_dirty_and_block_contexts(
+            inner.as_ref(),
+            &[
+                &DownstairsBlockContext {
+                    block_context: BlockContext {
+                        encryption_context: Some(EncryptionContext {
+                            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                            tag: [
+                                4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+                                17, 18, 19,
+                            ],
+                        }),
+                        hash: 123,
+                    },
+                    block: 0,
+                    on_disk_hash: 456,
                 },
-                block: 0,
-                on_disk_hash: 456,
-            },
-            &DownstairsBlockContext {
-                block_context: BlockContext {
-                    encryption_context: Some(EncryptionContext {
-                        nonce: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
-                        tag: [
-                            8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
-                        ],
-                    }),
-                    hash: 9999,
+                &DownstairsBlockContext {
+                    block_context: BlockContext {
+                        encryption_context: Some(EncryptionContext {
+                            nonce: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+                            tag: [
+                                8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+                                13,
+                            ],
+                        }),
+                        hash: 9999,
+                    },
+                    block: 1,
+                    on_disk_hash: 1234567890,
                 },
-                block: 1,
-                on_disk_hash: 1234567890,
-            },
-        ] {
-            inner.set_block_context(ctx)?;
-        }
+            ],
+        )?;
 
         // Verify block 0's context
 
@@ -2453,34 +2497,34 @@ mod test {
         assert_eq!(ctxs[1][0].on_disk_hash, 1234567890);
 
         // Append a whole bunch of block context rows
-        inner.set_dirty().unwrap();
         for i in 0..10 {
-            for ctx in &[
-                &DownstairsBlockContext {
-                    block_context: BlockContext {
-                        encryption_context: Some(EncryptionContext {
-                            nonce: rand::thread_rng().gen::<[u8; 12]>(),
-                            tag: rand::thread_rng().gen::<[u8; 16]>(),
-                        }),
-                        hash: rand::thread_rng().gen::<u64>(),
+            set_dirty_and_block_contexts(
+                inner.as_ref(),
+                &[
+                    &DownstairsBlockContext {
+                        block_context: BlockContext {
+                            encryption_context: Some(EncryptionContext {
+                                nonce: rand::thread_rng().gen::<[u8; 12]>(),
+                                tag: rand::thread_rng().gen::<[u8; 16]>(),
+                            }),
+                            hash: rand::thread_rng().gen::<u64>(),
+                        },
+                        block: 0,
+                        on_disk_hash: i,
                     },
-                    block: 0,
-                    on_disk_hash: i,
-                },
-                &DownstairsBlockContext {
-                    block_context: BlockContext {
-                        encryption_context: Some(EncryptionContext {
-                            nonce: rand::thread_rng().gen::<[u8; 12]>(),
-                            tag: rand::thread_rng().gen::<[u8; 16]>(),
-                        }),
-                        hash: rand::thread_rng().gen::<u64>(),
+                    &DownstairsBlockContext {
+                        block_context: BlockContext {
+                            encryption_context: Some(EncryptionContext {
+                                nonce: rand::thread_rng().gen::<[u8; 12]>(),
+                                tag: rand::thread_rng().gen::<[u8; 16]>(),
+                            }),
+                            hash: rand::thread_rng().gen::<u64>(),
+                        },
+                        block: 1,
+                        on_disk_hash: i,
                     },
-                    block: 1,
-                    on_disk_hash: i,
-                },
-            ] {
-                inner.set_block_context(ctx)?;
-            }
+                ],
+            )?;
         }
 
         let ctxs = inner.get_block_contexts(0, 2)?;
@@ -2609,15 +2653,17 @@ mod test {
         {
             let ext = region.get_opened_extent(0).await;
             let inner = ext.lock().await;
-            inner.set_dirty().unwrap();
-            inner.set_block_context(&DownstairsBlockContext {
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash: 1024,
-                },
-                block: 0,
-                on_disk_hash: 65536,
-            })?;
+            set_dirty_and_block_contexts(
+                inner.as_ref(),
+                &[&DownstairsBlockContext {
+                    block_context: BlockContext {
+                        encryption_context: None,
+                        hash: 1024,
+                    },
+                    block: 0,
+                    on_disk_hash: 65536,
+                }],
+            )?;
         }
 
         // This should clear out the invalid contexts
@@ -2800,15 +2846,17 @@ mod test {
         // in the DB
         {
             let inner = ext.lock().await;
-            inner.set_dirty().unwrap();
-            inner.set_block_context(&DownstairsBlockContext {
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash: 1024,
-                },
-                block: 0,
-                on_disk_hash: 65536,
-            })?;
+            set_dirty_and_block_contexts(
+                inner.as_ref(),
+                &[&DownstairsBlockContext {
+                    block_context: BlockContext {
+                        encryption_context: None,
+                        hash: 1024,
+                    },
+                    block: 0,
+                    on_disk_hash: 65536,
+                }],
+            )?;
         }
 
         // Run a full rehash, which should clear out that partial write.

@@ -1518,10 +1518,33 @@ where
                         }
                         negotiated = NegotiationState::Ready;
                         let ds = ads.lock().await;
-                        let flush_numbers = ds.region.flush_numbers().await?;
-                        let gen_numbers = ds.region.gen_numbers().await?;
-                        let dirty_bits = ds.region.dirty().await?;
+                        let meta_info = ds.region.meta_info().await?;
                         drop(ds);
+
+                        let flush_numbers: Vec<_> = meta_info
+                            .iter()
+                            .map(|m| m.flush_number)
+                            .collect();
+                        let gen_numbers: Vec<_> = meta_info
+                            .iter()
+                            .map(|m| m.gen_number)
+                            .collect();
+                        let dirty_bits: Vec<_> = meta_info
+                            .iter()
+                            .map(|m| m.dirty)
+                            .collect();
+                        if flush_numbers.len() > 12 {
+                            info!(
+                                log,
+                                "Current flush_numbers [0..12]: {:?}",
+                                &flush_numbers[0..12]
+                            );
+                        } else {
+                            info!(
+                                log,
+                                "Current flush_numbers [0..12]: {:?}",
+                                flush_numbers);
+                        }
 
                         let mut fw = fw.lock().await;
                         if let Err(e) = fw.send(Message::ExtentVersions {

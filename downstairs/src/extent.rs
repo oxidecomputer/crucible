@@ -11,6 +11,7 @@ use nix::unistd::{sysconf, SysconfVar};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
+use crate::region::JobOrReconciliationId;
 use crucible_common::*;
 use repair_client::types::FileType;
 
@@ -108,36 +109,6 @@ pub struct DownstairsBlockContext {
 
     pub block: u64,
     pub on_disk_hash: u64,
-}
-
-/// Wrapper type for either a job or reconciliation ID
-///
-/// This is useful for debug logging / DTrace probes, and not much else
-#[derive(Copy, Clone, Debug)]
-pub(crate) enum JobOrReconciliationId {
-    JobId(JobId),
-    ReconciliationId(ReconciliationId),
-}
-
-impl JobOrReconciliationId {
-    pub fn get(self) -> u64 {
-        match self {
-            Self::JobId(i) => i.0,
-            Self::ReconciliationId(i) => i.0,
-        }
-    }
-}
-
-impl From<JobId> for JobOrReconciliationId {
-    fn from(i: JobId) -> Self {
-        Self::JobId(i)
-    }
-}
-
-impl From<ReconciliationId> for JobOrReconciliationId {
-    fn from(i: ReconciliationId) -> Self {
-        Self::ReconciliationId(i)
-    }
 }
 
 /// An extent can be Opened or Closed. If Closed, it is probably being updated
@@ -313,31 +284,8 @@ pub fn remove_copy_cleanup_dir<P: AsRef<Path>>(dir: P, eid: u32) -> Result<()> {
     Ok(())
 }
 
-/**
- * Validate a list of sorted repair files.
- * There are either two or four files we expect to find, any more or less
- * and we have a bad list.  No duplicates.
- */
-pub fn validate_repair_files(eid: usize, files: &[String]) -> bool {
-    let eid = eid as u32;
-
-    let some = vec![
-        extent_file_name(eid, ExtentType::Data),
-        extent_file_name(eid, ExtentType::Db),
-    ];
-
-    let mut all = some.clone();
-    all.extend(vec![
-        extent_file_name(eid, ExtentType::DbShm),
-        extent_file_name(eid, ExtentType::DbWal),
-    ]);
-
-    // Either we have some or all.
-    files == some || files == all
-}
-
 impl Extent {
-    pub(crate) fn get_iov_max() -> Result<usize> {
+    fn get_iov_max() -> Result<usize> {
         let i: i64 = sysconf(SysconfVar::IOV_MAX)?
             .ok_or_else(|| anyhow!("IOV_MAX returned None!"))?;
         Ok(i.try_into()?)
@@ -563,6 +511,7 @@ impl Extent {
         // us to later disjointly borrow fields. Basically, we're helping the
         // borrow-checker do its job.
         let inner = &mut *inner_guard;
+        println!("calling inner write");
         inner.write(job_id, writes, only_write_unwritten, self.iov_max)?;
 
         cdt::extent__write__file__done!(|| {
@@ -638,6 +587,7 @@ impl Extent {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn lock(
         &self,
     ) -> tokio::sync::MutexGuard<Box<dyn ExtentInner>> {

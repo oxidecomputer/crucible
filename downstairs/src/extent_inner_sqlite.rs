@@ -1,12 +1,9 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
     cdt, crucible_bail,
-    extent::{
-        extent_path, DownstairsBlockContext, ExtentInner, ExtentMeta,
-        JobOrReconciliationId,
-    },
+    extent::{extent_path, DownstairsBlockContext, ExtentInner, ExtentMeta},
     integrity_hash, mkdir_for_file,
-    region::{check_input, BatchedPwritev},
+    region::{check_input, BatchedPwritev, JobOrReconciliationId},
     Block, BlockContext, CrucibleError, JobId, ReadResponse, RegionDefinition,
 };
 use crucible_protocol::EncryptionContext;
@@ -604,6 +601,7 @@ impl ExtentInner for SqliteInner {
         only_write_unwritten: bool,
         iov_max: usize,
     ) -> Result<()> {
+        println!("innerwrite called");
         for write in writes {
             check_input(
                 self.block_size,
@@ -690,6 +688,7 @@ impl ExtentInner for SqliteInner {
 
                 for (i, block_contexts) in block_contexts.iter().enumerate() {
                     if !block_contexts.is_empty() {
+                        println!("skipping write {i}");
                         let _ = writes_to_skip
                             .insert(i as u64 + first_write.offset.value);
                     }
@@ -702,6 +701,7 @@ impl ExtentInner for SqliteInner {
             });
 
             if writes_to_skip.len() == writes.len() {
+                println!("skippling all writes");
                 // Nothing to do
                 cdt::extent__write__done!(|| {
                     (job_id.0, self.extent_number, writes.len() as u64)
@@ -717,6 +717,7 @@ impl ExtentInner for SqliteInner {
         // if we are.)
         let tx = self.metadb.unchecked_transaction()?;
 
+        println!("setting dirty");
         self.set_dirty()?;
 
         // Write all the metadata to the DB
