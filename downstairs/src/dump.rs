@@ -96,18 +96,7 @@ pub async fn dump_region(
                 }
             }
 
-            let inner = e.inner.lock().await;
-
-            /*
-             * Create the ExtentMeta struct for this directory's extent
-             * number
-             */
-            let extent_info = ExtentMeta {
-                ext_version: 0,
-                gen_number: inner.gen_number().unwrap(),
-                flush_number: inner.flush_number().unwrap(),
-                dirty: inner.dirty().unwrap(),
-            };
+            let extent_info = e.get_meta_info().await;
 
             /*
              * If we have an entry already, then add this at our directory

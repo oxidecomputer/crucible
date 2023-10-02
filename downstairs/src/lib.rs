@@ -36,6 +36,8 @@ pub mod region;
 pub mod repair;
 mod stats;
 
+mod extent_inner_sqlite;
+
 use region::Region;
 
 pub use admin::run_dropshot;
