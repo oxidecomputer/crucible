@@ -2498,6 +2498,12 @@ async fn looper(
         let deadline = tokio::time::sleep_until(deadline_secs(10.0));
         tokio::pin!(deadline);
         let tcp = sock.connect(target);
+
+        /*
+         * Nagle, be gone!
+         */
+        tcp.set_nodelay(true).unwrap();
+
         tokio::pin!(tcp);
 
         let tcp: TcpStream = loop {
