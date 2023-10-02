@@ -391,7 +391,7 @@ impl Extent {
                 inner.fully_rehash_and_clean_all_stale_contexts(false)?;
                 Box::new(inner)
             } else {
-                panic!("no SQLite file present");
+                panic!("no SQLite file present at {sqlite_path:?}");
             }
         };
 
@@ -438,18 +438,19 @@ impl Extent {
          * Store extent data in files within a directory hierarchy so that
          * there are not too many files in any level of that hierarchy.
          */
-        let path = extent_path(dir, number);
+        {
+            let path = extent_path(dir, number);
 
-        /*
-         * Verify there are not existing extent files.
-         */
-        if Path::new(&path).exists() {
-            bail!("Extent file already exists {:?}", path);
+            /*
+             * Verify there are not existing extent files.
+             */
+            if Path::new(&path).exists() {
+                bail!("Extent file already exists {:?}", path);
+            }
         }
         remove_copy_cleanup_dir(dir, number)?;
 
-        let inner =
-            extent_inner_sqlite::SqliteInner::create(&path, def, number)?;
+        let inner = extent_inner_sqlite::SqliteInner::create(dir, def, number)?;
 
         /*
          * Complete the construction of our new extent
