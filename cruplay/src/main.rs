@@ -353,8 +353,21 @@ fn plot(opts: &Opts, plot_opts: &PlotOpts) -> Result<()> {
         let mut writes = File::create(format!("{}.writes", filename))?;
         let mut nfw = File::create(format!("{}.nonflushingwrites", filename))?;
         let mut flushes = File::create(format!("{}.flushes", filename))?;
+        let mut datapoints = 0;
 
         for (req, response, inflight) in operations.values() {
+            if let Some(s) = plot_opts.start {
+                if (req.ts - start) < (s * 1_000_000_000.0) as u64 {
+                    continue;
+                }
+            }
+
+            if let Some(e) = plot_opts.end {
+                if (req.ts - start) > (e * 1_000_000_000.0) as u64 {
+                    continue;
+                }
+            }
+
             if req.flags.is_read() {
                 emit(&mut reads, req, response, inflight)?;
             }
@@ -370,6 +383,12 @@ fn plot(opts: &Opts, plot_opts: &PlotOpts) -> Result<()> {
             if req.flags.is_flush() {
                 emit(&mut flushes, req, response, inflight)?;
             }
+
+            datapoints += 1;
+        }
+
+        if datapoints == 0 {
+            bail!("no datapoints within specified range");
         }
 
         let gpl_filename = format!("{}.gpl", filename);
