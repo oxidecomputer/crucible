@@ -2117,7 +2117,7 @@ mod test {
         assert!(inner.get_block_contexts(1, 1)?[0].is_empty());
 
         // Set and verify block 0's context
-
+        inner.set_dirty().unwrap();
         inner.set_block_context(&DownstairsBlockContext {
             block_context: BlockContext {
                 encryption_context: Some(EncryptionContext {
@@ -2167,6 +2167,7 @@ mod test {
         let blob1 = rand::thread_rng().gen::<[u8; 12]>();
         let blob2 = rand::thread_rng().gen::<[u8; 16]>();
 
+        inner.set_dirty().unwrap();
         inner.set_block_context(&DownstairsBlockContext {
             block_context: BlockContext {
                 encryption_context: Some(EncryptionContext {
@@ -2274,6 +2275,7 @@ mod test {
         // writing the same unencrypted contents to the same offset.
 
         for _ in 0..10 {
+            inner.set_dirty().unwrap();
             inner.set_block_context(&DownstairsBlockContext {
                 block_context: BlockContext {
                     encryption_context: None,
@@ -2315,7 +2317,7 @@ mod test {
         assert!(inner.get_block_contexts(1, 1)?[0].is_empty());
 
         // Set block 0's and 1's context
-
+        inner.set_dirty().unwrap();
         for ctx in &[
             &DownstairsBlockContext {
                 block_context: BlockContext {
@@ -2451,7 +2453,7 @@ mod test {
         assert_eq!(ctxs[1][0].on_disk_hash, 1234567890);
 
         // Append a whole bunch of block context rows
-
+        inner.set_dirty().unwrap();
         for i in 0..10 {
             for ctx in &[
                 &DownstairsBlockContext {
@@ -2607,7 +2609,7 @@ mod test {
         {
             let ext = region.get_opened_extent(0).await;
             let inner = ext.lock().await;
-
+            inner.set_dirty().unwrap();
             inner.set_block_context(&DownstairsBlockContext {
                 block_context: BlockContext {
                     encryption_context: None,
@@ -2798,6 +2800,7 @@ mod test {
         // in the DB
         {
             let inner = ext.lock().await;
+            inner.set_dirty().unwrap();
             inner.set_block_context(&DownstairsBlockContext {
                 block_context: BlockContext {
                     encryption_context: None,
