@@ -335,25 +335,20 @@ impl ExtentInner for SqliteInner {
                 Err(e) => {
                     error!(
                         log,
-                        "Open of {:?} for extent#{} returned: {}",
-                        path,
-                        extent_number,
-                        e,
+                        "Open of {path:?} for extent#{extent_number} \
+                         returned: {e}",
                     );
                     bail!(
-                        "Open of {:?} for extent#{} returned: {}",
-                        path,
-                        extent_number,
-                        e,
+                        "Open of {path:?} for extent#{extent_number} \
+                         returned: {e}",
                     );
                 }
                 Ok(f) => {
                     let cur_size = f.metadata().unwrap().len();
                     if size != cur_size {
                         bail!(
-                            "File size {:?} does not match expected {:?}",
-                            size,
-                            cur_size
+                            "File size {size:?} does not match \
+                             expected {cur_size:?}",
                         );
                     }
                     f
@@ -373,10 +368,8 @@ impl ExtentInner for SqliteInner {
                      extent#{extent_number} returned: {e}",
                 );
                 bail!(
-                    "Open of db file {:?} for extent#{} returned: {}",
-                    path,
-                    extent_number,
-                    e,
+                    "Open of db file {path:?} for extent#{extent_number} \
+                     returned: {e}",
                 );
             }
             Ok(m) => m,
@@ -420,9 +413,8 @@ impl ExtentInner for SqliteInner {
              */
             crucible_bail!(
                 IoError,
-                "extent {}: fsync 1 failure: {:?}",
+                "extent {}: fsync 1 failure: {e:?}",
                 self.extent_number,
-                e
             );
         }
         cdt::extent__flush__file__done!(|| {
@@ -848,9 +840,8 @@ impl ExtentInner for SqliteInner {
         if let Err(e) = self.file.sync_all() {
             crucible_bail!(
                 IoError,
-                "extent {}: fsync 1 failure during full rehash: {:?}",
+                "extent {}: fsync 1 failure during full rehash: {e:?}",
                 self.extent_number,
-                e
             );
         }
 
