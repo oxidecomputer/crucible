@@ -91,11 +91,6 @@ pub(crate) trait ExtentInner: Send + Debug {
         only_write_unwritten: bool,
         iov_max: usize,
     ) -> Result<()>;
-
-    fn truncate_encryption_contexts_and_hashes(
-        &self,
-        extent_block_indexes_and_hashes: &[(usize, u64)],
-    ) -> Result<()>;
 }
 
 /// BlockContext, with the addition of block index and on_disk_hash

@@ -803,7 +803,9 @@ impl ExtentInner for SqliteInner {
         }
         Ok(())
     }
+}
 
+impl SqliteInner {
     /// A wrapper around ['truncate_encryption_contexts_and_hashes_with_tx']
     /// that calls it from within a transaction.
     fn truncate_encryption_contexts_and_hashes(
@@ -821,9 +823,6 @@ impl ExtentInner for SqliteInner {
 
         Ok(())
     }
-}
-
-impl SqliteInner {
     /// Get rid of all block context rows except those that match the on-disk
     /// hash that is computed after a flush. For best performance, make sure
     /// `extent_block_indexes_and_hashes` is sorted by block number before
