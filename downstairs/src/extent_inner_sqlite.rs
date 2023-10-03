@@ -267,7 +267,10 @@ impl ExtentInner for SqliteInner {
             open_sqlite_connection(&path)?
         };
 
+        // The seed DB or default metadata should not have dirty set, but we'll
+        // check here for completeness.
         let dirty = Self::get_dirty_from_metadb(&metadb)?;
+        assert!(!dirty);
 
         /*
          * Complete the construction of our new extent
