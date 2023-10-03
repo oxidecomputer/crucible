@@ -2,7 +2,7 @@
 use std::convert::TryInto;
 use std::fmt;
 use std::fmt::Debug;
-use std::fs::{rename, File, OpenOptions};
+use std::fs::{rename, File};
 use tokio::sync::Mutex;
 
 use anyhow::{anyhow, bail, Result};
@@ -409,56 +409,6 @@ impl Extent {
             iov_max: Extent::get_iov_max()?,
             inner: Mutex::new(Box::new(inner)),
         })
-    }
-
-    /**
-     * Create the copy directory for this extent.
-     */
-    pub fn create_copy_dir<P: AsRef<Path>>(
-        dir: P,
-        eid: usize,
-    ) -> Result<PathBuf, CrucibleError> {
-        let cp = copy_dir(dir, eid as u32);
-
-        /*
-         * Verify the copy directory does not exist
-         */
-        if Path::new(&cp).exists() {
-            crucible_bail!(IoError, "Copy directory:{:?} already exists", cp);
-        }
-
-        std::fs::create_dir_all(&cp)?;
-        Ok(cp)
-    }
-
-    /**
-     * Create the file that will hold a copy of an extent from a
-     * remote downstairs.
-     */
-    pub fn create_copy_file(
-        mut copy_dir: PathBuf,
-        eid: usize,
-        extension: Option<ExtentType>,
-    ) -> Result<File> {
-        // Get the base extent name before we consider the actual Type
-        let name = extent_file_name(eid as u32, ExtentType::Data);
-        copy_dir.push(name);
-        if let Some(extension) = extension {
-            let ext = format!("{}", extension);
-            copy_dir.set_extension(ext);
-        }
-        let copy_path = copy_dir;
-
-        if Path::new(&copy_path).exists() {
-            bail!("Copy file:{:?} already exists", copy_path);
-        }
-
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&copy_path)?;
-        Ok(file)
     }
 
     pub fn number(&self) -> u32 {

@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::fmt::Debug;
-use std::fs::{rename, File};
+use std::fs::{rename, File, OpenOptions};
 use std::io::{IoSlice, Write};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -22,8 +22,8 @@ use repair_client::Client;
 
 use super::*;
 use crate::extent::{
-    extent_dir, extent_file_name, move_replacement_extent, replace_dir,
-    sync_path, Extent, ExtentMeta, ExtentState, ExtentType,
+    copy_dir, extent_dir, extent_file_name, move_replacement_extent,
+    replace_dir, sync_path, Extent, ExtentMeta, ExtentState, ExtentType,
 };
 
 /**
@@ -529,7 +529,7 @@ impl Region {
             );
         }
 
-        let copy_dir = Extent::create_copy_dir(&self.dir, eid)?;
+        let copy_dir = Self::create_copy_dir(&self.dir, eid)?;
         info!(self.log, "Created copy dir {:?}", copy_dir);
 
         // XXX TLS someday?  Authentication?
@@ -567,8 +567,7 @@ impl Region {
         }
 
         // First, copy the main extent data file.
-        let extent_copy =
-            Extent::create_copy_file(copy_dir.clone(), eid, None)?;
+        let extent_copy = Self::create_copy_file(copy_dir.clone(), eid, None)?;
         let repair_stream = match repair_server
             .get_extent_file(eid as u32, FileType::Data)
             .await
@@ -586,7 +585,7 @@ impl Region {
         save_stream_to_file(extent_copy, repair_stream.into_inner()).await?;
 
         // The .db file is also required to exist for any valid extent.
-        let extent_db = Extent::create_copy_file(
+        let extent_db = Self::create_copy_file(
             copy_dir.clone(),
             eid,
             Some(ExtentType::Db),
@@ -612,7 +611,7 @@ impl Region {
             let filename = extent_file_name(eid as u32, opt_file.clone());
 
             if repair_files.contains(&filename) {
-                let extent_shm = Extent::create_copy_file(
+                let extent_shm = Self::create_copy_file(
                     copy_dir.clone(),
                     eid,
                     Some(opt_file.clone()),
@@ -1016,6 +1015,56 @@ impl Region {
         }
         Ok(())
     }
+
+    /**
+     * Create the copy directory for this extent.
+     */
+    pub fn create_copy_dir<P: AsRef<Path>>(
+        dir: P,
+        eid: usize,
+    ) -> Result<PathBuf, CrucibleError> {
+        let cp = copy_dir(dir, eid as u32);
+
+        /*
+         * Verify the copy directory does not exist
+         */
+        if Path::new(&cp).exists() {
+            crucible_bail!(IoError, "Copy directory:{:?} already exists", cp);
+        }
+
+        std::fs::create_dir_all(&cp)?;
+        Ok(cp)
+    }
+
+    /**
+     * Create the file that will hold a copy of an extent from a
+     * remote downstairs.
+     */
+    pub fn create_copy_file(
+        mut copy_dir: PathBuf,
+        eid: usize,
+        extension: Option<ExtentType>,
+    ) -> Result<File> {
+        // Get the base extent name before we consider the actual Type
+        let name = extent_file_name(eid as u32, ExtentType::Data);
+        copy_dir.push(name);
+        if let Some(extension) = extension {
+            let ext = format!("{}", extension);
+            copy_dir.set_extension(ext);
+        }
+        let copy_path = copy_dir;
+
+        if Path::new(&copy_path).exists() {
+            bail!("Copy file:{:?} already exists", copy_path);
+        }
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&copy_path)?;
+        Ok(file)
+    }
 }
 
 /**
@@ -1364,7 +1413,7 @@ mod test {
 
         let cp = copy_dir(&dir, 1);
 
-        assert!(Extent::create_copy_dir(&dir, 1).is_ok());
+        assert!(Region::create_copy_dir(&dir, 1).is_ok());
         assert!(Path::new(&cp).exists());
         assert!(remove_copy_cleanup_dir(&dir, 1).is_ok());
         assert!(!Path::new(&cp).exists());
@@ -1382,8 +1431,8 @@ mod test {
             .unwrap();
         region.extend(3).await.unwrap();
 
-        Extent::create_copy_dir(&dir, 1).unwrap();
-        let res = Extent::create_copy_dir(&dir, 1);
+        Region::create_copy_dir(&dir, 1).unwrap();
+        let res = Region::create_copy_dir(&dir, 1);
         assert!(res.is_err());
         Ok(())
     }
@@ -1410,7 +1459,7 @@ mod test {
         assert!(!dirty);
 
         // Make copy directory for this extent
-        let cp = Extent::create_copy_dir(&dir, 1)?;
+        let cp = Region::create_copy_dir(&dir, 1)?;
         // Reopen extent 1
         region.reopen_extent(1).await?;
 
@@ -1444,7 +1493,7 @@ mod test {
         ));
 
         // Make copy directory for this extent
-        let cp = Extent::create_copy_dir(&dir, 1)?;
+        let cp = Region::create_copy_dir(&dir, 1)?;
 
         // Reopen extent 1
         region.reopen_extent(1).await?;
@@ -1479,7 +1528,7 @@ mod test {
         ));
 
         // Make copy directory for this extent
-        let cp = Extent::create_copy_dir(&dir, 1)?;
+        let cp = Region::create_copy_dir(&dir, 1)?;
 
         // Step through the replacement dir, but don't do any work.
         let rd = replace_dir(&dir, 1);
@@ -1522,7 +1571,7 @@ mod test {
         ));
 
         // Make copy directory for this extent
-        let cp = Extent::create_copy_dir(&dir, 1)?;
+        let cp = Region::create_copy_dir(&dir, 1)?;
 
         // We are simulating the copy of files from the "source" repair
         // extent by copying the files from extent zero into the copy
@@ -1589,7 +1638,7 @@ mod test {
         ));
 
         // Make copy directory for this extent
-        let cp = Extent::create_copy_dir(&dir, 1)?;
+        let cp = Region::create_copy_dir(&dir, 1)?;
 
         // We are simulating the copy of files from the "source" repair
         // extent by copying the files from extent zero into the copy
@@ -1665,7 +1714,7 @@ mod test {
 
         // Make copy directory for this extent
         let _ext_one = region.get_opened_extent(1).await;
-        let cp = Extent::create_copy_dir(&dir, 1)?;
+        let cp = Region::create_copy_dir(&dir, 1)?;
 
         // We are simulating the copy of files from the "source" repair
         // extent by copying the files from extent zero into the copy
