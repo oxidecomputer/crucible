@@ -124,26 +124,37 @@ enum Workload {
 #[clap(name = "client", term_width = 80)]
 #[clap(about = "A Crucible upstairs test client", long_about = None)]
 pub struct Opt {
+    // TLS options
+    #[clap(long, action)]
+    cert_pem: Option<String>,
+
     /// For tests that support it, run until a SIGUSR1 signal is received.
     #[clap(long, global = true, action, conflicts_with = "count")]
     continuous: bool,
+
+    /// IP:Port for the upstairs control http server
+    #[clap(long, global = true, action)]
+    control: Option<SocketAddr>,
 
     /// For tests that support it, pass this count value for the number
     /// of loops the test should do.
     #[clap(short, long, global = true, action)]
     count: Option<usize>,
 
-    #[clap(
-        short,
-        long,
-        global = true,
-        default_value = "127.0.0.1:9000",
-        action
-    )]
-    target: Vec<SocketAddr>,
+    /// How long to wait before the auto flush check fires
+    #[clap(long, global = true, action)]
+    flush_timeout: Option<f32>,
 
-    #[clap(subcommand)]
-    workload: Workload,
+    #[clap(short, global = true, long, default_value = "0", action)]
+    gen: u64,
+
+    /// The key for an encrypted downstairs.
+    #[clap(short, global = true, long, action)]
+    key: Option<String>,
+
+    /// TLS option
+    #[clap(long, action)]
+    key_pem: Option<String>,
 
     /// This allows the Upstairs to run in a mode where it will not
     /// always submit new work to downstairs when it first receives
@@ -154,6 +165,19 @@ pub struct Opt {
     #[clap(long, global = true, action)]
     lossy: bool,
 
+    /// Spin up a dropshot endpoint and serve metrics from it.
+    /// This will use the values in metric-register and metric-collect
+    #[clap(long, global = true, action)]
+    metrics: bool,
+
+    /// IP:Port for the Oximeter register address, which is Nexus.
+    #[clap(long, global = true, default_value = "127.0.0.1:12221", action)]
+    metric_register: SocketAddr,
+
+    /// IP:Port for the Oximeter listen address
+    #[clap(long, global = true, default_value = "127.0.0.1:55443", action)]
+    metric_collect: SocketAddr,
+
     /// Don't print out IOs as we do them.
     #[clap(long, global = true, action)]
     quiet: bool,
@@ -162,26 +186,44 @@ pub struct Opt {
     #[clap(short, global = true, long, action, conflicts_with = "stable")]
     quit: bool,
 
-    /// Quit only after all crucible work queues are empty and all downstairs
-    /// are reporting active.
-    #[clap(global = true, long, action, conflicts_with = "quit")]
-    stable: bool,
-
-    #[clap(short, global = true, long, action)]
-    key: Option<String>,
-
-    #[clap(short, global = true, long, default_value = "0", action)]
-    gen: u64,
-
     /// For the verify test, if this option is included we will allow
     /// the write log range of data to pass the verify_volume check.
     #[clap(long, global = true, action)]
     range: bool,
 
+    /// Set the read_only option when starting the upstairs.
+    /// Note that setting this won't prevent you from sending writes to the
+    /// downstairs.  You are responsible for dealing with the fallout.
+    #[clap(long, global = true, action)]
+    read_only: bool,
+
     /// Retry for activate, as long as it takes.  If we pass this arg, the
     /// test will retry the initial activate command as long as it takes.
     #[clap(long, global = true, action)]
     retry_activate: bool,
+
+    /// TLS option
+    #[clap(long, action)]
+    root_cert_pem: Option<String>,
+
+    /// Quit only after all crucible work queues are empty and all downstairs
+    /// are reporting active.
+    #[clap(global = true, long, action, conflicts_with = "quit")]
+    stable: bool,
+
+    /// The IP:Port where each downstairs is listening.
+    #[clap(
+        short,
+        long,
+        global = true,
+        default_value = "127.0.0.1:9000",
+        action
+    )]
+    target: Vec<SocketAddr>,
+
+    /// A UUID to use for the upstairs.
+    #[clap(long, global = true, action)]
+    uuid: Option<Uuid>,
 
     /// In addition to any tests, verify the volume on startup.
     /// This only has value if verify_in is also set.
@@ -205,38 +247,9 @@ pub struct Opt {
     #[clap(long, global = true, value_name = "FILE", action)]
     verify_out: Option<PathBuf>,
 
-    // TLS options
-    #[clap(long, action)]
-    cert_pem: Option<String>,
-    #[clap(long, action)]
-    key_pem: Option<String>,
-    #[clap(long, action)]
-    root_cert_pem: Option<String>,
-
-    /// IP:Port for the upstairs control http server
-    #[clap(long, global = true, action)]
-    control: Option<SocketAddr>,
-
-    /// How long to wait before the auto flush check fires
-    #[clap(long, global = true, action)]
-    flush_timeout: Option<f32>,
-
-    /// IP:Port for the Oximeter register address, which is Nexus.
-    #[clap(long, global = true, default_value = "127.0.0.1:12221", action)]
-    metric_register: SocketAddr,
-
-    /// IP:Port for the Oximeter listen address
-    #[clap(long, global = true, default_value = "127.0.0.1:55443", action)]
-    metric_collect: SocketAddr,
-
-    /// Spin up a dropshot endpoint and serve metrics from it.
-    /// This will use the values in metric-register and metric-collect
-    #[clap(long, global = true, action)]
-    metrics: bool,
-
-    /// A UUID to use for the upstairs.
-    #[clap(long, global = true, action)]
-    uuid: Option<Uuid>,
+    /// A test workload that crutest will execute.
+    #[clap(subcommand)]
+    workload: Workload,
 }
 
 pub fn opts() -> Result<Opt> {
@@ -636,7 +649,7 @@ async fn main() -> Result<()> {
         key_pem: opt.key_pem,
         root_cert_pem: opt.root_cert_pem,
         control: opt.control,
-        read_only: false,
+        read_only: opt.read_only,
     };
 
     /*

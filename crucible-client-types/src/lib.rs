@@ -3,6 +3,7 @@
 use base64::{engine, Engine};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
@@ -69,5 +70,27 @@ impl CrucibleOpts {
         } else {
             None
         }
+    }
+}
+
+/// Display the contents of CrucibleOpts, Only print if keys are populated,
+/// not what the actual contents are.
+impl std::fmt::Display for CrucibleOpts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Upstairs UUID: {},", self.id)?;
+        write!(f, " Targets: {:?},", self.target)?;
+        write!(f, " lossy: {:?},", self.lossy)?;
+        write!(f, " flush_timeout: {:?},", self.flush_timeout)?;
+        write!(f, " key populated: {}, ", self.key.is_some())?;
+        write!(f, " cert_pem populated: {}, ", self.cert_pem.is_some())?;
+        write!(f, " key_pem populated: {}, ", self.key_pem.is_some())?;
+        write!(
+            f,
+            " root_cert_pem populated: {}, ",
+            self.root_cert_pem.is_some()
+        )?;
+        write!(f, " Control: {:?}, ", self.control)?;
+        write!(f, " read_only: {:?}", self.read_only)?;
+        Ok(())
     }
 }

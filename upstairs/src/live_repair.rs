@@ -5595,39 +5595,39 @@ pub mod repair_test {
         // updated for our downstairs under repair.
         // Make the empty dep list for comparison
         let job = ds.ds_active.get(&JobId(1003)).unwrap();
-        let current_deps = job.work.deps().clone();
+        let mut current_deps = job.work.deps().clone();
 
         assert_eq!(current_deps, &[JobId(1002)]);
         // No dependencies are valid for live repair
-        let new_deps = ds.remove_dep_if_live_repair(
+        ds.remove_dep_if_live_repair(
             ClientId::new(1),
-            current_deps,
+            &mut current_deps,
             JobId(1003),
         );
-        assert!(new_deps.is_empty());
+        assert!(current_deps.is_empty());
 
         let job = ds.ds_active.get(&JobId(1004)).unwrap();
-        let current_deps = job.work.deps().clone();
+        let mut current_deps = job.work.deps().clone();
 
         // Job 1001 is not a dep for 1004
         assert_eq!(current_deps, &[JobId(1003)]);
-        let new_deps = ds.remove_dep_if_live_repair(
+        ds.remove_dep_if_live_repair(
             ClientId::new(1),
-            current_deps,
+            &mut current_deps,
             JobId(1004),
         );
-        assert!(new_deps.is_empty());
+        assert!(current_deps.is_empty());
 
         let job = ds.ds_active.get(&JobId(1005)).unwrap();
-        let current_deps = job.work.deps().clone();
+        let mut current_deps = job.work.deps().clone();
 
         assert_eq!(current_deps, &[JobId(1004)]);
-        let new_deps = ds.remove_dep_if_live_repair(
+        ds.remove_dep_if_live_repair(
             ClientId::new(1),
-            current_deps,
+            &mut current_deps,
             JobId(1005),
         );
-        assert!(new_deps.is_empty());
+        assert!(current_deps.is_empty());
     }
 
     #[tokio::test]
@@ -5699,37 +5699,37 @@ pub mod repair_test {
         // updated for our downstairs under repair, but will still include
         // the jobs that came after the repair.
         let job = ds.ds_active.get(&JobId(1006)).unwrap();
-        let current_deps = job.work.deps().clone();
+        let mut current_deps = job.work.deps().clone();
 
         assert_eq!(current_deps, &[JobId(1005)]);
-        let new_deps = ds.remove_dep_if_live_repair(
+        ds.remove_dep_if_live_repair(
             ClientId::new(1),
-            current_deps,
+            &mut current_deps,
             JobId(1006),
         );
-        assert!(new_deps.is_empty());
+        assert!(current_deps.is_empty());
 
         let job = ds.ds_active.get(&JobId(1007)).unwrap();
-        let current_deps = job.work.deps().clone();
+        let mut current_deps = job.work.deps().clone();
 
         assert_eq!(current_deps, &[JobId(1006)]);
-        let new_deps = ds.remove_dep_if_live_repair(
+        ds.remove_dep_if_live_repair(
             ClientId::new(1),
-            current_deps,
+            &mut current_deps,
             JobId(1007),
         );
-        assert_eq!(new_deps, &[JobId(1006)]);
+        assert_eq!(current_deps, &[JobId(1006)]);
 
         let job = ds.ds_active.get(&JobId(1008)).unwrap();
-        let current_deps = job.work.deps().clone();
+        let mut current_deps = job.work.deps().clone();
 
         assert_eq!(current_deps, &[JobId(1007)]);
-        let new_deps = ds.remove_dep_if_live_repair(
+        ds.remove_dep_if_live_repair(
             ClientId::new(1),
-            current_deps,
+            &mut current_deps,
             JobId(1008),
         );
-        assert_eq!(new_deps, &[JobId(1007)]);
+        assert_eq!(current_deps, &[JobId(1007)]);
     }
 
     #[tokio::test]
@@ -5847,19 +5847,19 @@ pub mod repair_test {
         assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
         assert_eq!(job.state[ClientId::new(2)], IOState::New);
 
-        let current_deps = job.work.deps().clone();
+        let mut current_deps = job.work.deps().clone();
         assert_eq!(current_deps, &[JobId(1002)]);
 
         // Verify that the Skipped job on the LiveRepair downstairs do not
         // have any dependencies, as, technically, this IO is the first IO to
         // happen after we started repair, and we should not look for any
         // dependencies before starting repair.
-        let new_deps = ds.remove_dep_if_live_repair(
+        ds.remove_dep_if_live_repair(
             ClientId::new(1),
-            current_deps,
+            &mut current_deps,
             JobId(1007),
         );
-        assert!(new_deps.is_empty());
+        assert!(current_deps.is_empty());
 
         // This second write after starting a repair should require job 6 (i.e.
         // the final job of the repair) on both the Active and LiveRepair
@@ -5869,16 +5869,16 @@ pub mod repair_test {
         assert_eq!(job.state[ClientId::new(1)], IOState::New);
         assert_eq!(job.state[ClientId::new(2)], IOState::New);
 
-        let current_deps = job.work.deps().clone();
+        let mut current_deps = job.work.deps().clone();
         assert_eq!(current_deps, &[JobId(1006)]);
 
-        let new_deps = ds.remove_dep_if_live_repair(
+        ds.remove_dep_if_live_repair(
             ClientId::new(1),
-            current_deps,
+            &mut current_deps,
             JobId(1008),
         );
         // LiveRepair downstairs won't see past the repair.
-        assert_eq!(new_deps, &[JobId(1006)]);
+        assert_eq!(current_deps, &[JobId(1006)]);
 
         // This final job depends on everything on Active downstairs, but
         // a smaller subset for the LiveRepair downstairs
@@ -5891,15 +5891,15 @@ pub mod repair_test {
         // 1) the final operation on the repair of extent 0
         // 2) the write operation (8) on extent 0
         // 3) a new repair operation on extent 1
-        let current_deps = job.work.deps().clone();
+        let mut current_deps = job.work.deps().clone();
         assert_eq!(current_deps, &[JobId(1006), JobId(1008), JobId(1012)]);
 
-        let new_deps = ds.remove_dep_if_live_repair(
+        ds.remove_dep_if_live_repair(
             ClientId::new(1),
-            current_deps,
+            &mut current_deps,
             JobId(1013),
         );
-        assert_eq!(new_deps, &[JobId(1006), JobId(1008), JobId(1012)]);
+        assert_eq!(current_deps, &[JobId(1006), JobId(1008), JobId(1012)]);
     }
 
     #[tokio::test]
@@ -6025,7 +6025,7 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
         let job = ds.ds_active.get(&JobId(1004)).unwrap();
 
-        let current_deps = job.work.deps().clone();
+        let mut current_deps = job.work.deps().clone();
         // We start with repair jobs, plus the original jobs.
         assert_eq!(
             &current_deps,
@@ -6035,12 +6035,12 @@ pub mod repair_test {
         // The downstairs in LiveRepair should not see the first write, but
         // should see all the repair IDs, including ones that don't actually
         // exist yet.
-        let new_deps = ds.remove_dep_if_live_repair(
+        ds.remove_dep_if_live_repair(
             ClientId::new(1),
-            current_deps,
+            &mut current_deps,
             JobId(1004),
         );
-        assert_eq!(new_deps, &[JobId(1001), JobId(1002), JobId(1003)]);
+        assert_eq!(current_deps, &[JobId(1001), JobId(1002), JobId(1003)]);
 
         // This second write after starting a repair should only require the
         // repair job on all downstairs
@@ -6049,16 +6049,16 @@ pub mod repair_test {
         assert_eq!(job.state[ClientId::new(1)], IOState::New);
         assert_eq!(job.state[ClientId::new(2)], IOState::New);
 
-        let current_deps = job.work.deps().clone();
+        let mut current_deps = job.work.deps().clone();
         assert_eq!(&current_deps, &[JobId(1004)]);
 
-        let new_deps = ds.remove_dep_if_live_repair(
+        ds.remove_dep_if_live_repair(
             ClientId::new(1),
-            current_deps,
+            &mut current_deps,
             JobId(1005),
         );
         // LiveRepair downstairs won't see past the repair.
-        assert_eq!(new_deps, &[JobId(1004)]);
+        assert_eq!(current_deps, &[JobId(1004)]);
     }
     //       block   block
     // op# | 0 1 2 | 3 4 5 |
