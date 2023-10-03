@@ -95,11 +95,6 @@ pub(crate) trait ExtentInner: Send + Debug {
         &self,
         extent_block_indexes_and_hashes: &[(usize, u64)],
     ) -> Result<()>;
-
-    fn fully_rehash_and_clean_all_stale_contexts(
-        &mut self,
-        force_override_dirty: bool,
-    ) -> Result<(), CrucibleError>;
 }
 
 /// BlockContext, with the addition of block index and on_disk_hash
@@ -331,12 +326,9 @@ impl Extent {
             let mut sqlite_path = path.clone();
             sqlite_path.set_extension("db");
             if sqlite_path.exists() {
-                let mut inner = extent_inner_sqlite::SqliteInner::open(
+                let inner = extent_inner_sqlite::SqliteInner::open(
                     &path, def, number, read_only, log,
                 )?;
-                // Clean out any irrelevant block contexts, which may be present
-                // if downstairs crashed between a write() and a flush().
-                inner.fully_rehash_and_clean_all_stale_contexts(false)?;
                 Box::new(inner)
             } else {
                 panic!("no SQLite file present at {sqlite_path:?}");
@@ -455,13 +447,7 @@ impl Extent {
             (job_id.0, self.number, writes.len() as u64)
         });
 
-        let mut inner_guard = self.inner.lock().await;
-        // I realize this looks like some nonsense but what this is doing is
-        // borrowing the inner up-front from the MutexGuard, which will allow
-        // us to later disjointly borrow fields. Basically, we're helping the
-        // borrow-checker do its job.
-        let inner = &mut *inner_guard;
-        println!("calling inner write");
+        let mut inner = self.inner.lock().await;
         inner.write(job_id, writes, only_write_unwritten, self.iov_max)?;
 
         cdt::extent__write__file__done!(|| {
@@ -503,28 +489,6 @@ impl Extent {
         }
 
         inner.flush(new_flush, new_gen, job_id)
-    }
-
-    /// Rehash the entire file. Remove any stored hash/encryption contexts
-    /// that do not correlate to data currently stored on disk. This is
-    /// primarily when opening an extent after recovering from a crash, since
-    /// irrelevant hashes will normally be cleared out during a flush().
-    ///
-    /// By default this function will only do work if the extent is marked
-    /// dirty. Set `force_override_dirty` to `true` to override this behavior.
-    /// This override should generally not be necessary, as the dirty flag
-    /// is set before any contexts are written.
-    #[instrument]
-    pub async fn fully_rehash_and_clean_all_stale_contexts(
-        &self,
-        force_override_dirty: bool,
-    ) -> Result<(), CrucibleError> {
-        let mut inner = self.inner.lock().await;
-
-        if !force_override_dirty && !inner.dirty()? {
-            return Ok(());
-        }
-        inner.fully_rehash_and_clean_all_stale_contexts(force_override_dirty)
     }
 
     pub async fn get_meta_info(&self) -> ExtentMeta {
@@ -683,4 +647,207 @@ pub fn sync_path<P: AsRef<Path> + std::fmt::Debug>(
     debug!(log, "fsync completed for: {:?}", path);
 
     Ok(())
+}
+
+/// Verify that the requested block offset and size of the buffer
+/// will fit within the extent.
+pub(crate) fn check_input(
+    extent_size: Block,
+    offset: Block,
+    data: &[u8],
+) -> Result<(), CrucibleError> {
+    let block_size = extent_size.block_size_in_bytes() as u64;
+    /*
+     * Only accept block sized operations
+     */
+    if data.len() != block_size as usize {
+        crucible_bail!(DataLenUnaligned);
+    }
+
+    if offset.block_size_in_bytes() != block_size as u32 {
+        crucible_bail!(BlockSizeMismatch);
+    }
+
+    if offset.shift != extent_size.shift {
+        crucible_bail!(BlockSizeMismatch);
+    }
+
+    let total_size = block_size * extent_size.value;
+    let byte_offset = offset.value * block_size;
+
+    if (byte_offset + data.len() as u64) > total_size {
+        crucible_bail!(OffsetInvalid);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use bytes::{BufMut, BytesMut};
+
+    #[test]
+    fn extent_io_valid() {
+        let extent_size = Block::new_512(100);
+        let mut data = BytesMut::with_capacity(512);
+        data.put(&[1; 512][..]);
+
+        check_input(extent_size, Block::new_512(0), &data).unwrap();
+        check_input(extent_size, Block::new_512(99), &data).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn extent_io_non_aligned_large() {
+        let extent_size = Block::new_512(100);
+        let mut data = BytesMut::with_capacity(513);
+        data.put(&[1; 513][..]);
+
+        check_input(extent_size, Block::new_512(0), &data).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn extent_io_non_aligned_small() {
+        let extent_size = Block::new_512(100);
+        let mut data = BytesMut::with_capacity(511);
+        data.put(&[1; 511][..]);
+
+        check_input(extent_size, Block::new_512(0), &data).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn extent_io_bad_block() {
+        let extent_size = Block::new_512(100);
+        let mut data = BytesMut::with_capacity(512);
+        data.put(&[1; 512][..]);
+
+        check_input(extent_size, Block::new_512(100), &data).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn extent_io_invalid_block_buf() {
+        let extent_size = Block::new_512(100);
+        let mut data = BytesMut::with_capacity(1024);
+        data.put(&[1; 1024][..]);
+
+        check_input(extent_size, Block::new_512(99), &data).unwrap();
+    }
+
+    #[test]
+    #[should_panic]
+    fn extent_io_invalid_large() {
+        let extent_size = Block::new_512(100);
+        let mut data = BytesMut::with_capacity(512 * 100);
+        data.put(&[1; 512 * 100][..]);
+
+        check_input(extent_size, Block::new_512(1), &data).unwrap();
+    }
+
+    #[test]
+    fn extent_name_basic() {
+        assert_eq!(extent_file_name(4, ExtentType::Data), "004");
+    }
+
+    #[test]
+    fn extent_name_basic_ext() {
+        assert_eq!(extent_file_name(4, ExtentType::Db), "004.db");
+    }
+
+    #[test]
+    fn extent_name_basic_ext_shm() {
+        assert_eq!(extent_file_name(4, ExtentType::DbShm), "004.db-shm");
+    }
+
+    #[test]
+    fn extent_name_basic_ext_wal() {
+        assert_eq!(extent_file_name(4, ExtentType::DbWal), "004.db-wal");
+    }
+
+    #[test]
+    fn extent_name_basic_two() {
+        assert_eq!(extent_file_name(10, ExtentType::Data), "00A");
+    }
+
+    #[test]
+    fn extent_name_basic_three() {
+        assert_eq!(extent_file_name(59, ExtentType::Data), "03B");
+    }
+
+    #[test]
+    fn extent_name_max() {
+        assert_eq!(extent_file_name(u32::MAX, ExtentType::Data), "FFF");
+    }
+
+    #[test]
+    fn extent_name_min() {
+        assert_eq!(extent_file_name(u32::MIN, ExtentType::Data), "000");
+    }
+
+    #[test]
+    fn extent_dir_basic() {
+        assert_eq!(
+            extent_dir("/var/region", 4),
+            PathBuf::from("/var/region/00/000/")
+        );
+    }
+
+    #[test]
+    fn extent_dir_max() {
+        assert_eq!(
+            extent_dir("/var/region", u32::MAX),
+            PathBuf::from("/var/region/FF/FFF")
+        );
+    }
+
+    #[test]
+    fn extent_dir_min() {
+        assert_eq!(
+            extent_dir("/var/region", u32::MIN),
+            PathBuf::from("/var/region/00/000/")
+        );
+    }
+
+    #[test]
+    fn extent_path_min() {
+        assert_eq!(
+            extent_path("/var/region", u32::MIN),
+            PathBuf::from("/var/region/00/000/000")
+        );
+    }
+
+    #[test]
+    fn extent_path_three() {
+        assert_eq!(
+            extent_path("/var/region", 3),
+            PathBuf::from("/var/region/00/000/003")
+        );
+    }
+
+    #[test]
+    fn extent_path_mid_hi() {
+        assert_eq!(
+            extent_path("/var/region", 65536),
+            PathBuf::from("/var/region/00/010/000")
+        );
+    }
+
+    #[test]
+    fn extent_path_mid_lo() {
+        assert_eq!(
+            extent_path("/var/region", 65535),
+            PathBuf::from("/var/region/00/00F/FFF")
+        );
+    }
+
+    #[test]
+    fn extent_path_max() {
+        assert_eq!(
+            extent_path("/var/region", u32::MAX),
+            PathBuf::from("/var/region/FF/FFF/FFF")
+        );
+    }
 }

@@ -1,9 +1,12 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
     cdt, crucible_bail,
-    extent::{extent_path, DownstairsBlockContext, ExtentInner, ExtentMeta},
+    extent::{
+        check_input, extent_path, DownstairsBlockContext, ExtentInner,
+        ExtentMeta,
+    },
     integrity_hash, mkdir_for_file,
-    region::{check_input, BatchedPwritev, JobOrReconciliationId},
+    region::{BatchedPwritev, JobOrReconciliationId},
     Block, BlockContext, CrucibleError, JobId, ReadResponse, RegionDefinition,
 };
 use crucible_protocol::EncryptionContext;
@@ -100,8 +103,8 @@ impl ExtentInner for SqliteInner {
             stmt.query_map(params![block, block + count - 1], |row| {
                 let block_index: u64 = row.get(0)?;
                 let hash: i64 = row.get(1)?;
-                let nonce: Option<Vec<u8>> = row.get(2)?;
-                let tag: Option<Vec<u8>> = row.get(3)?;
+                let nonce: Option<[u8; 12]> = row.get(2)?;
+                let tag: Option<[u8; 16]> = row.get(3)?;
                 let on_disk_hash: i64 = row.get(4)?;
 
                 Ok((block_index, hash, nonce, tag, on_disk_hash))
@@ -377,14 +380,18 @@ impl ExtentInner for SqliteInner {
 
         let dirty = Self::get_dirty_from_metadb(&metadb)?;
 
-        Ok(Self {
+        let mut out = Self {
             file,
             metadb,
             extent_size: def.extent_size(),
             dirty: dirty.into(),
             extent_number,
             dirty_blocks: BTreeMap::new(),
-        })
+        };
+        // Clean out any irrelevant block contexts, which may be present
+        // if downstairs crashed between a write() and a flush().
+        out.fully_rehash_and_clean_all_stale_contexts(false)?;
+        Ok(out)
     }
 
     fn flush(
@@ -583,7 +590,6 @@ impl ExtentInner for SqliteInner {
         only_write_unwritten: bool,
         iov_max: usize,
     ) -> Result<()> {
-        println!("innerwrite called");
         for write in writes {
             check_input(self.extent_size, write.offset, &write.data)?;
         }
@@ -665,7 +671,6 @@ impl ExtentInner for SqliteInner {
 
                 for (i, block_contexts) in block_contexts.iter().enumerate() {
                     if !block_contexts.is_empty() {
-                        println!("skipping write {i}");
                         let _ = writes_to_skip
                             .insert(i as u64 + first_write.offset.value);
                     }
@@ -678,7 +683,6 @@ impl ExtentInner for SqliteInner {
             });
 
             if writes_to_skip.len() == writes.len() {
-                println!("skippling all writes");
                 // Nothing to do
                 cdt::extent__write__done!(|| {
                     (job_id.0, self.extent_number, writes.len() as u64)
@@ -694,7 +698,6 @@ impl ExtentInner for SqliteInner {
         // if we are.)
         let tx = self.metadb.unchecked_transaction()?;
 
-        println!("setting dirty");
         self.set_dirty()?;
 
         // Write all the metadata to the DB
@@ -818,77 +821,6 @@ impl ExtentInner for SqliteInner {
 
         Ok(())
     }
-
-    /// Rehash the entire file. Remove any stored hash/encryption contexts
-    /// that do not correlate to data currently stored on disk. This is
-    /// primarily when opening an extent after recovering from a crash, since
-    /// irrelevant hashes will normally be cleared out during a flush().
-    ///
-    /// By default this function will only do work if the extent is marked
-    /// dirty. Set `force_override_dirty` to `true` to override this behavior.
-    /// This override should generally not be necessary, as the dirty flag
-    /// is set before any contexts are written.
-    fn fully_rehash_and_clean_all_stale_contexts(
-        &mut self,
-        force_override_dirty: bool,
-    ) -> Result<(), CrucibleError> {
-        if !force_override_dirty && !self.dirty()? {
-            return Ok(());
-        }
-
-        // Just in case, let's be very sure that the file on disk is what it should be
-        if let Err(e) = self.file.sync_all() {
-            crucible_bail!(
-                IoError,
-                "extent {}: fsync 1 failure during full rehash: {e:?}",
-                self.extent_number,
-            );
-        }
-
-        self.file.seek(SeekFrom::Start(0))?;
-
-        // Buffer the file so we dont spend all day waiting on syscalls
-        let mut self_file_buffered =
-            BufReader::with_capacity(64 * 1024, &self.file);
-
-        // This gets filled one block at a time for hashing
-        let mut block =
-            vec![0; self.extent_size.block_size_in_bytes() as usize];
-
-        // The vec of hashes that we'll pass off to truncate...()
-        let mut extent_block_indexes_and_hashes =
-            Vec::with_capacity(self.extent_size.value as usize);
-
-        // Stream the contents of the file and rehash them.
-        for i in 0..self.extent_size.value as usize {
-            self_file_buffered.read_exact(&mut block)?;
-            extent_block_indexes_and_hashes
-                .push((i, integrity_hash(&[&block])));
-        }
-
-        // NOTE on safety: Unlike BufWriter, BufReader drop() does not have
-        // side-effects. There are no unhandled errors here.
-        drop(self_file_buffered);
-
-        self.truncate_encryption_contexts_and_hashes(
-            &extent_block_indexes_and_hashes,
-        )?;
-
-        // Intentionally not clearing the dirty flag - we want to know that the
-        // extent is still considered dirty.
-
-        // Let's also clear out the internal map of hashes, in case it has any.
-        // This shouldn't be necessary, for two reasons
-        // 1. aside from tests, this function is only called before any writes
-        //    are issued.
-        // 2. this function should always produce results that match the state
-        //    of that map _anyway_.
-        // But, I never trust a cache, and may as well avoid keeping memory
-        // around at least right?
-        self.dirty_blocks.clear();
-
-        Ok(())
-    }
 }
 
 impl SqliteInner {
@@ -985,6 +917,77 @@ impl SqliteInner {
 
         Ok(())
     }
+
+    /// Rehash the entire file. Remove any stored hash/encryption contexts
+    /// that do not correlate to data currently stored on disk. This is
+    /// primarily when opening an extent after recovering from a crash, since
+    /// irrelevant hashes will normally be cleared out during a flush().
+    ///
+    /// By default this function will only do work if the extent is marked
+    /// dirty. Set `force_override_dirty` to `true` to override this behavior.
+    /// This override should generally not be necessary, as the dirty flag
+    /// is set before any contexts are written.
+    fn fully_rehash_and_clean_all_stale_contexts(
+        &mut self,
+        force_override_dirty: bool,
+    ) -> Result<(), CrucibleError> {
+        if !force_override_dirty && !self.dirty()? {
+            return Ok(());
+        }
+
+        // Just in case, let's be very sure that the file on disk is what it should be
+        if let Err(e) = self.file.sync_all() {
+            crucible_bail!(
+                IoError,
+                "extent {}: fsync 1 failure during full rehash: {e:?}",
+                self.extent_number,
+            );
+        }
+
+        self.file.seek(SeekFrom::Start(0))?;
+
+        // Buffer the file so we dont spend all day waiting on syscalls
+        let mut self_file_buffered =
+            BufReader::with_capacity(64 * 1024, &self.file);
+
+        // This gets filled one block at a time for hashing
+        let mut block =
+            vec![0; self.extent_size.block_size_in_bytes() as usize];
+
+        // The vec of hashes that we'll pass off to truncate...()
+        let mut extent_block_indexes_and_hashes =
+            Vec::with_capacity(self.extent_size.value as usize);
+
+        // Stream the contents of the file and rehash them.
+        for i in 0..self.extent_size.value as usize {
+            self_file_buffered.read_exact(&mut block)?;
+            extent_block_indexes_and_hashes
+                .push((i, integrity_hash(&[&block])));
+        }
+
+        // NOTE on safety: Unlike BufWriter, BufReader drop() does not have
+        // side-effects. There are no unhandled errors here.
+        drop(self_file_buffered);
+
+        self.truncate_encryption_contexts_and_hashes(
+            &extent_block_indexes_and_hashes,
+        )?;
+
+        // Intentionally not clearing the dirty flag - we want to know that the
+        // extent is still considered dirty.
+
+        // Let's also clear out the internal map of hashes, in case it has any.
+        // This shouldn't be necessary, for two reasons
+        // 1. aside from tests, this function is only called before any writes
+        //    are issued.
+        // 2. this function should always produce results that match the state
+        //    of that map _anyway_.
+        // But, I never trust a cache, and may as well avoid keeping memory
+        // around at least right?
+        self.dirty_blocks.clear();
+
+        Ok(())
+    }
 }
 
 /// Always open sqlite with journaling, and synchronous.
@@ -1036,4 +1039,572 @@ fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
     metadb.set_prepared_statement_cache_capacity(64);
 
     Ok(metadb)
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use bytes::{Bytes, BytesMut};
+    use crucible_protocol::ReadRequest;
+    use rand::Rng;
+    use tempfile::tempdir;
+
+    const IOV_MAX_TEST: usize = 1000;
+
+    fn new_region_definition() -> RegionDefinition {
+        let opt = crate::region::test::new_region_options();
+        RegionDefinition::from_options(&opt).unwrap()
+    }
+
+    #[tokio::test]
+    async fn encryption_context() -> Result<()> {
+        let dir = tempdir()?;
+        let inner =
+            SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
+                .unwrap();
+
+        // Encryption context for blocks 0 and 1 should start blank
+
+        assert!(inner.get_block_contexts(0, 1)?[0].is_empty());
+        assert!(inner.get_block_contexts(1, 1)?[0].is_empty());
+
+        // Set and verify block 0's context
+        inner.set_dirty()?;
+        inner.set_block_context(&DownstairsBlockContext {
+            block_context: BlockContext {
+                encryption_context: Some(EncryptionContext {
+                    nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                    tag: [
+                        4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+                        19,
+                    ],
+                }),
+                hash: 123,
+            },
+            block: 0,
+            on_disk_hash: 456,
+        })?;
+
+        let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
+
+        assert_eq!(ctxs.len(), 1);
+
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .nonce,
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        );
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .tag,
+            [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        );
+        assert_eq!(ctxs[0].block_context.hash, 123);
+        assert_eq!(ctxs[0].on_disk_hash, 456);
+
+        // Block 1 should still be blank
+
+        assert!(inner.get_block_contexts(1, 1)?[0].is_empty());
+
+        // Set and verify a new context for block 0
+
+        let blob1 = rand::thread_rng().gen::<[u8; 12]>();
+        let blob2 = rand::thread_rng().gen::<[u8; 16]>();
+
+        // Set and verify block 0's context
+        inner.set_dirty()?;
+        inner.set_block_context(&DownstairsBlockContext {
+            block_context: BlockContext {
+                encryption_context: Some(EncryptionContext {
+                    nonce: blob1,
+                    tag: blob2,
+                }),
+                hash: 1024,
+            },
+            block: 0,
+            on_disk_hash: 65536,
+        })?;
+
+        let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
+
+        assert_eq!(ctxs.len(), 2);
+
+        // First context didn't change
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .nonce,
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        );
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .tag,
+            [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        );
+        assert_eq!(ctxs[0].block_context.hash, 123);
+        assert_eq!(ctxs[0].on_disk_hash, 456);
+
+        // Second context was appended
+        assert_eq!(
+            ctxs[1]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .nonce,
+            blob1
+        );
+        assert_eq!(
+            ctxs[1]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .tag,
+            blob2
+        );
+        assert_eq!(ctxs[1].block_context.hash, 1024);
+        assert_eq!(ctxs[1].on_disk_hash, 65536);
+
+        // "Flush", so only the rows that match should remain.
+        inner.truncate_encryption_contexts_and_hashes(&[(0, 65536)])?;
+
+        let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
+
+        assert_eq!(ctxs.len(), 1);
+
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .nonce,
+            blob1
+        );
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .tag,
+            blob2
+        );
+        assert_eq!(ctxs[0].block_context.hash, 1024);
+        assert_eq!(ctxs[0].on_disk_hash, 65536);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn duplicate_context_insert() -> Result<()> {
+        let dir = tempdir()?;
+        let inner =
+            SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
+                .unwrap();
+
+        assert!(inner.get_block_contexts(0, 1)?[0].is_empty());
+
+        // Submit the same contents for block 0 over and over, simulating a user
+        // writing the same unencrypted contents to the same offset.
+        inner.set_dirty()?;
+        for _ in 0..10 {
+            inner.set_block_context(&DownstairsBlockContext {
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 123,
+                },
+                block: 0,
+                on_disk_hash: 123,
+            })?;
+        }
+
+        // Duplicate rows should not be inserted
+
+        let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
+        assert_eq!(ctxs.len(), 1);
+
+        // Truncation should still work
+
+        inner.truncate_encryption_contexts_and_hashes(&[(0, 123)])?;
+
+        let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
+        assert_eq!(ctxs.len(), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn multiple_context() -> Result<()> {
+        let dir = tempdir()?;
+        let inner =
+            SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
+                .unwrap();
+
+        // Encryption context for blocks 0 and 1 should start blank
+
+        assert!(inner.get_block_contexts(0, 1)?[0].is_empty());
+        assert!(inner.get_block_contexts(1, 1)?[0].is_empty());
+
+        // Set block 0's and 1's context and dirty flag
+        inner.set_dirty()?;
+        inner.set_block_context(&DownstairsBlockContext {
+            block_context: BlockContext {
+                encryption_context: Some(EncryptionContext {
+                    nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                    tag: [
+                        4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+                        19,
+                    ],
+                }),
+                hash: 123,
+            },
+            block: 0,
+            on_disk_hash: 456,
+        })?;
+        inner.set_block_context(&DownstairsBlockContext {
+            block_context: BlockContext {
+                encryption_context: Some(EncryptionContext {
+                    nonce: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+                    tag: [8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+                }),
+                hash: 9999,
+            },
+            block: 1,
+            on_disk_hash: 1234567890,
+        })?;
+
+        // Verify block 0's context
+
+        let ctxs = inner.get_block_contexts(0, 1)?[0].clone();
+
+        assert_eq!(ctxs.len(), 1);
+
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .nonce,
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        );
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .tag,
+            [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        );
+        assert_eq!(ctxs[0].block_context.hash, 123);
+        assert_eq!(ctxs[0].on_disk_hash, 456);
+
+        // Verify block 1's context
+
+        let ctxs = inner.get_block_contexts(1, 1)?[0].clone();
+
+        assert_eq!(ctxs.len(), 1);
+
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .nonce,
+            [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        );
+        assert_eq!(
+            ctxs[0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .tag,
+            [8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+        );
+        assert_eq!(ctxs[0].block_context.hash, 9999);
+        assert_eq!(ctxs[0].on_disk_hash, 1234567890);
+
+        // Return both block 0's and block 1's context, and verify
+
+        let ctxs = inner.get_block_contexts(0, 2)?;
+
+        assert_eq!(ctxs[0].len(), 1);
+        assert_eq!(
+            ctxs[0][0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .nonce,
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        );
+        assert_eq!(
+            ctxs[0][0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .tag,
+            [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+        );
+        assert_eq!(ctxs[0][0].block_context.hash, 123);
+        assert_eq!(ctxs[0][0].on_disk_hash, 456);
+
+        assert_eq!(ctxs[1].len(), 1);
+        assert_eq!(
+            ctxs[1][0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .nonce,
+            [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        );
+        assert_eq!(
+            ctxs[1][0]
+                .block_context
+                .encryption_context
+                .as_ref()
+                .unwrap()
+                .tag,
+            [8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+        );
+        assert_eq!(ctxs[1][0].block_context.hash, 9999);
+        assert_eq!(ctxs[1][0].on_disk_hash, 1234567890);
+
+        // Append a whole bunch of block context rows
+        inner.set_dirty()?;
+        for i in 0..10 {
+            inner.set_block_context(&DownstairsBlockContext {
+                block_context: BlockContext {
+                    encryption_context: Some(EncryptionContext {
+                        nonce: rand::thread_rng().gen::<[u8; 12]>(),
+                        tag: rand::thread_rng().gen::<[u8; 16]>(),
+                    }),
+                    hash: rand::thread_rng().gen::<u64>(),
+                },
+                block: 0,
+                on_disk_hash: i,
+            })?;
+            inner.set_block_context(&DownstairsBlockContext {
+                block_context: BlockContext {
+                    encryption_context: Some(EncryptionContext {
+                        nonce: rand::thread_rng().gen::<[u8; 12]>(),
+                        tag: rand::thread_rng().gen::<[u8; 16]>(),
+                    }),
+                    hash: rand::thread_rng().gen::<u64>(),
+                },
+                block: 1,
+                on_disk_hash: i,
+            })?;
+        }
+
+        let ctxs = inner.get_block_contexts(0, 2)?;
+        assert_eq!(ctxs[0].len(), 11);
+        assert_eq!(ctxs[1].len(), 11);
+
+        // "Flush", so only the rows that match the on-disk hash should remain.
+
+        inner.truncate_encryption_contexts_and_hashes(&[(0, 6), (1, 7)])?;
+
+        let ctxs = inner.get_block_contexts(0, 2)?;
+
+        assert_eq!(ctxs[0].len(), 1);
+        assert_eq!(ctxs[0][0].on_disk_hash, 6);
+
+        assert_eq!(ctxs[1].len(), 1);
+        assert_eq!(ctxs[1][0].on_disk_hash, 7);
+
+        Ok(())
+    }
+
+    /// It's very important that only_write_unwritten always works correctly.
+    /// We should never add contexts for blocks that haven't been written by
+    /// an upstairs.
+    #[test]
+    fn test_fully_rehash_and_clean_does_not_mark_blocks_as_written(
+    ) -> Result<()> {
+        let dir = tempdir()?;
+        let mut inner =
+            SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
+                .unwrap();
+
+        // Write a block, but don't flush.
+        let data = Bytes::from(vec![0x55; 512]);
+        let hash = integrity_hash(&[&data[..]]);
+        let write = crucible_protocol::Write {
+            eid: 0,
+            offset: Block::new_512(0),
+            data,
+            block_context: BlockContext {
+                encryption_context: None,
+                hash,
+            },
+        };
+        inner.write(JobId(10), &[&write], false, IOV_MAX_TEST)?;
+
+        // We haven't flushed, but this should leave our context in place.
+        inner.fully_rehash_and_clean_all_stale_contexts(false)?;
+
+        // Therefore, we expect that write_unwritten to the first block won't
+        // do anything.
+        {
+            let data = Bytes::from(vec![0x66; 512]);
+            let hash = integrity_hash(&[&data[..]]);
+            let block_context = BlockContext {
+                encryption_context: None,
+                hash,
+            };
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(0),
+                data: data.clone(),
+                block_context: block_context.clone(),
+            };
+            inner.write(JobId(20), &[&write], true, IOV_MAX_TEST)?;
+
+            let mut resp = Vec::new();
+            let read = ReadRequest {
+                eid: 0,
+                offset: Block::new_512(0),
+            };
+            inner.read(JobId(21), &[&read], &mut resp, IOV_MAX_TEST)?;
+
+            // We should not get back our data, because block 0 was written.
+            assert_ne!(
+                resp,
+                vec![ReadResponse {
+                    eid: 0,
+                    offset: Block::new_512(0),
+                    data: BytesMut::from(data.as_ref()),
+                    block_contexts: vec![block_context]
+                }]
+            );
+        }
+
+        // But, writing to the second block still should!
+        {
+            let data = Bytes::from(vec![0x66; 512]);
+            let hash = integrity_hash(&[&data[..]]);
+            let block_context = BlockContext {
+                encryption_context: None,
+                hash,
+            };
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(1),
+                data: data.clone(),
+                block_context: block_context.clone(),
+            };
+            inner.write(JobId(30), &[&write], true, IOV_MAX_TEST)?;
+
+            let mut resp = Vec::new();
+            let read = ReadRequest {
+                eid: 0,
+                offset: Block::new_512(1),
+            };
+            inner.read(JobId(31), &[&read], &mut resp, IOV_MAX_TEST)?;
+
+            // We should get back our data! Block 1 was never written.
+            assert_eq!(
+                resp,
+                vec![ReadResponse {
+                    eid: 0,
+                    offset: Block::new_512(1),
+                    data: BytesMut::from(data.as_ref()),
+                    block_contexts: vec![block_context]
+                }]
+            );
+        }
+
+        Ok(())
+    }
+
+    /// If a write successfully put a context into the database, but it never
+    /// actually got the data onto the disk, that block should revert back to
+    /// being "unwritten". After all, the data never was truly written.
+    ///
+    /// This test is very similar to test_region_open_removes_partial_writes,
+    /// but is distinct in that it call fully_rehash directly, without closing
+    /// and re-opening the extent.
+    #[test]
+    fn test_fully_rehash_marks_blocks_unwritten_if_data_never_hit_disk(
+    ) -> Result<()> {
+        let dir = tempdir()?;
+        let mut inner =
+            SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
+                .unwrap();
+
+        // Partial write, the data never hits disk, but there's a context
+        // in the DB and the dirty flag is set.
+        inner.set_dirty()?;
+        inner.set_block_context(&DownstairsBlockContext {
+            block_context: BlockContext {
+                encryption_context: None,
+                hash: 1024,
+            },
+            block: 0,
+            on_disk_hash: 65536,
+        })?;
+
+        // Run a full rehash, which should clear out that partial write.
+        inner.fully_rehash_and_clean_all_stale_contexts(false)?;
+
+        // Writing to block 0 should succeed with only_write_unwritten
+        {
+            let data = Bytes::from(vec![0x66; 512]);
+            let hash = integrity_hash(&[&data[..]]);
+            let block_context = BlockContext {
+                encryption_context: None,
+                hash,
+            };
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(0),
+                data: data.clone(),
+                block_context: block_context.clone(),
+            };
+            inner.write(JobId(30), &[&write], true, IOV_MAX_TEST)?;
+
+            let mut resp = Vec::new();
+            let read = ReadRequest {
+                eid: 0,
+                offset: Block::new_512(0),
+            };
+            inner.read(JobId(31), &[&read], &mut resp, IOV_MAX_TEST)?;
+
+            // We should get back our data! Block 1 was never written.
+            assert_eq!(
+                resp,
+                vec![ReadResponse {
+                    eid: 0,
+                    offset: Block::new_512(0),
+                    data: BytesMut::from(data.as_ref()),
+                    block_contexts: vec![block_context]
+                }]
+            );
+        }
+
+        Ok(())
+    }
 }
