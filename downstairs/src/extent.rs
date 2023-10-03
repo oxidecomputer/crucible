@@ -24,8 +24,9 @@ pub struct Extent {
     iov_max: usize,
 
     /// Inner contains information about the actual extent file that holds the
-    /// data, the metadata (stored in the database) about that extent, and the
-    /// set of dirty blocks that have been written to since last flush.
+    /// data, the metadata about that extent, and the set of dirty blocks that
+    /// have been written to since last flush.  We use dynamic dispatch here to
+    /// support multiple extent implementations.
     inner: Mutex<Box<dyn ExtentInner>>,
 }
 
