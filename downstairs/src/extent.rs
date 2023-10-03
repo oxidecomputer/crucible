@@ -67,9 +67,9 @@ pub(crate) trait ExtentInner: Send + Debug {
     ///
     /// This should only be called from test functions
     fn set_dirty_and_block_context(
-        &self,
+        &mut self,
         block_context: &DownstairsBlockContext,
-    ) -> Result<()>;
+    ) -> Result<(), CrucibleError>;
 
     fn flush(
         &mut self,
@@ -92,7 +92,7 @@ pub(crate) trait ExtentInner: Send + Debug {
         writes: &[&crucible_protocol::Write],
         only_write_unwritten: bool,
         iov_max: usize,
-    ) -> Result<()>;
+    ) -> Result<(), CrucibleError>;
 }
 
 /// BlockContext, with the addition of block index and on_disk_hash

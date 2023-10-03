@@ -73,9 +73,9 @@ impl ExtentInner for SqliteInner {
     }
 
     fn set_dirty_and_block_context(
-        &self,
+        &mut self,
         block_context: &DownstairsBlockContext,
-    ) -> Result<()> {
+    ) -> Result<(), CrucibleError> {
         self.set_dirty()?;
         self.set_block_context(block_context)?;
         Ok(())
@@ -551,7 +551,7 @@ impl ExtentInner for SqliteInner {
         writes: &[&crucible_protocol::Write],
         only_write_unwritten: bool,
         iov_max: usize,
-    ) -> Result<()> {
+    ) -> Result<(), CrucibleError> {
         for write in writes {
             check_input(self.extent_size, write.offset, &write.data)?;
         }
@@ -784,7 +784,7 @@ impl SqliteInner {
     fn set_block_context(
         &self,
         block_context: &DownstairsBlockContext,
-    ) -> Result<()> {
+    ) -> Result<(), CrucibleError> {
         let stmt =
             "INSERT OR IGNORE INTO block_context (block, hash, nonce, tag, on_disk_hash) \
              VALUES (?1, ?2, ?3, ?4, ?5)";
