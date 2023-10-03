@@ -1067,7 +1067,7 @@ mod test {
     #[tokio::test]
     async fn encryption_context() -> Result<()> {
         let dir = tempdir()?;
-        let inner =
+        let mut inner =
             SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
                 .unwrap();
 
@@ -1221,7 +1221,7 @@ mod test {
     #[tokio::test]
     async fn duplicate_context_insert() -> Result<()> {
         let dir = tempdir()?;
-        let inner =
+        let mut inner =
             SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
                 .unwrap();
 
@@ -1258,7 +1258,7 @@ mod test {
     #[tokio::test]
     async fn multiple_context() -> Result<()> {
         let dir = tempdir()?;
-        let inner =
+        let mut inner =
             SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
                 .unwrap();
 

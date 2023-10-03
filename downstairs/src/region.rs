@@ -2077,7 +2077,7 @@ pub(crate) mod test {
         // A write of some sort only wrote a block context row and dirty flag
         {
             let ext = region.get_opened_extent(0).await;
-            let inner = ext.lock().await;
+            let mut inner = ext.lock().await;
             inner.set_dirty_and_block_context(&DownstairsBlockContext {
                 block_context: BlockContext {
                     encryption_context: None,
