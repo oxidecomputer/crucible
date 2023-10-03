@@ -57,14 +57,16 @@ pub(crate) trait ExtentInner: Send + Debug {
     fn flush_number(&self) -> Result<u64>;
     fn dirty(&self) -> Result<bool>;
 
-    fn set_dirty(&self) -> Result<()>;
     fn get_block_contexts(
         &self,
         block: u64,
         count: u64,
     ) -> Result<Vec<Vec<DownstairsBlockContext>>>;
 
-    fn set_block_context(
+    /// Sets the dirty flag and updates a block context
+    ///
+    /// This should only be called from test functions
+    fn set_dirty_and_block_context(
         &self,
         block_context: &DownstairsBlockContext,
     ) -> Result<()>;

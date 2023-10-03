@@ -72,16 +72,12 @@ impl ExtentInner for SqliteInner {
         Ok(self.dirty.get())
     }
 
-    fn set_dirty(&self) -> Result<()> {
-        if !self.dirty.get() {
-            let _ = self
-                .metadb
-                .prepare_cached(
-                    "UPDATE metadata SET value=1 WHERE name='dirty'",
-                )?
-                .execute([])?;
-            self.dirty.set(true);
-        }
+    fn set_dirty_and_block_context(
+        &self,
+        block_context: &DownstairsBlockContext,
+    ) -> Result<()> {
+        self.set_dirty()?;
+        self.set_block_context(block_context)?;
         Ok(())
     }
 
@@ -137,40 +133,6 @@ impl ExtentInner for SqliteInner {
         }
 
         Ok(results)
-    }
-
-    fn set_block_context(
-        &self,
-        block_context: &DownstairsBlockContext,
-    ) -> Result<()> {
-        let stmt =
-            "INSERT OR IGNORE INTO block_context (block, hash, nonce, tag, on_disk_hash) \
-             VALUES (?1, ?2, ?3, ?4, ?5)";
-
-        let (nonce, tag) = if let Some(encryption_context) =
-            &block_context.block_context.encryption_context
-        {
-            (
-                Some(&encryption_context.nonce),
-                Some(&encryption_context.tag),
-            )
-        } else {
-            (None, None)
-        };
-
-        let rows_affected =
-            self.metadb.prepare_cached(stmt)?.execute(params![
-                block_context.block,
-                block_context.block_context.hash as i64,
-                nonce,
-                tag,
-                block_context.on_disk_hash as i64,
-            ])?;
-
-        // We avoid INSERTing duplicate rows, so this should always be 0 or 1.
-        assert!(rows_affected <= 1);
-
-        Ok(())
     }
 
     fn create(
@@ -806,6 +768,53 @@ impl ExtentInner for SqliteInner {
 }
 
 impl SqliteInner {
+    fn set_dirty(&self) -> Result<()> {
+        if !self.dirty.get() {
+            let _ = self
+                .metadb
+                .prepare_cached(
+                    "UPDATE metadata SET value=1 WHERE name='dirty'",
+                )?
+                .execute([])?;
+            self.dirty.set(true);
+        }
+        Ok(())
+    }
+
+    fn set_block_context(
+        &self,
+        block_context: &DownstairsBlockContext,
+    ) -> Result<()> {
+        let stmt =
+            "INSERT OR IGNORE INTO block_context (block, hash, nonce, tag, on_disk_hash) \
+             VALUES (?1, ?2, ?3, ?4, ?5)";
+
+        let (nonce, tag) = if let Some(encryption_context) =
+            &block_context.block_context.encryption_context
+        {
+            (
+                Some(&encryption_context.nonce),
+                Some(&encryption_context.tag),
+            )
+        } else {
+            (None, None)
+        };
+
+        let rows_affected =
+            self.metadb.prepare_cached(stmt)?.execute(params![
+                block_context.block,
+                block_context.block_context.hash as i64,
+                nonce,
+                tag,
+                block_context.on_disk_hash as i64,
+            ])?;
+
+        // We avoid INSERTing duplicate rows, so this should always be 0 or 1.
+        assert!(rows_affected <= 1);
+
+        Ok(())
+    }
+
     /// A wrapper around ['truncate_encryption_contexts_and_hashes_with_tx']
     /// that calls it from within a transaction.
     fn truncate_encryption_contexts_and_hashes(
@@ -1068,8 +1077,7 @@ mod test {
         assert!(inner.get_block_contexts(1, 1)?[0].is_empty());
 
         // Set and verify block 0's context
-        inner.set_dirty()?;
-        inner.set_block_context(&DownstairsBlockContext {
+        inner.set_dirty_and_block_context(&DownstairsBlockContext {
             block_context: BlockContext {
                 encryption_context: Some(EncryptionContext {
                     nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
@@ -1119,8 +1127,7 @@ mod test {
         let blob2 = rand::thread_rng().gen::<[u8; 16]>();
 
         // Set and verify block 0's context
-        inner.set_dirty()?;
-        inner.set_block_context(&DownstairsBlockContext {
+        inner.set_dirty_and_block_context(&DownstairsBlockContext {
             block_context: BlockContext {
                 encryption_context: Some(EncryptionContext {
                     nonce: blob1,
@@ -1222,9 +1229,8 @@ mod test {
 
         // Submit the same contents for block 0 over and over, simulating a user
         // writing the same unencrypted contents to the same offset.
-        inner.set_dirty()?;
         for _ in 0..10 {
-            inner.set_block_context(&DownstairsBlockContext {
+            inner.set_dirty_and_block_context(&DownstairsBlockContext {
                 block_context: BlockContext {
                     encryption_context: None,
                     hash: 123,
@@ -1262,8 +1268,7 @@ mod test {
         assert!(inner.get_block_contexts(1, 1)?[0].is_empty());
 
         // Set block 0's and 1's context and dirty flag
-        inner.set_dirty()?;
-        inner.set_block_context(&DownstairsBlockContext {
+        inner.set_dirty_and_block_context(&DownstairsBlockContext {
             block_context: BlockContext {
                 encryption_context: Some(EncryptionContext {
                     nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
@@ -1277,7 +1282,7 @@ mod test {
             block: 0,
             on_disk_hash: 456,
         })?;
-        inner.set_block_context(&DownstairsBlockContext {
+        inner.set_dirty_and_block_context(&DownstairsBlockContext {
             block_context: BlockContext {
                 encryption_context: Some(EncryptionContext {
                     nonce: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
@@ -1392,9 +1397,8 @@ mod test {
         assert_eq!(ctxs[1][0].on_disk_hash, 1234567890);
 
         // Append a whole bunch of block context rows
-        inner.set_dirty()?;
         for i in 0..10 {
-            inner.set_block_context(&DownstairsBlockContext {
+            inner.set_dirty_and_block_context(&DownstairsBlockContext {
                 block_context: BlockContext {
                     encryption_context: Some(EncryptionContext {
                         nonce: rand::thread_rng().gen::<[u8; 12]>(),
@@ -1405,7 +1409,7 @@ mod test {
                 block: 0,
                 on_disk_hash: i,
             })?;
-            inner.set_block_context(&DownstairsBlockContext {
+            inner.set_dirty_and_block_context(&DownstairsBlockContext {
                 block_context: BlockContext {
                     encryption_context: Some(EncryptionContext {
                         nonce: rand::thread_rng().gen::<[u8; 12]>(),
@@ -1556,8 +1560,7 @@ mod test {
 
         // Partial write, the data never hits disk, but there's a context
         // in the DB and the dirty flag is set.
-        inner.set_dirty()?;
-        inner.set_block_context(&DownstairsBlockContext {
+        inner.set_dirty_and_block_context(&DownstairsBlockContext {
             block_context: BlockContext {
                 encryption_context: None,
                 hash: 1024,
