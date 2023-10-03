@@ -44,7 +44,7 @@ pub(crate) trait ExtentInner: Send + Debug {
 
     /// Opens an existing extent at the given path
     fn open(
-        dir: &Path,
+        path: &Path,
         def: &RegionDefinition,
         extent_number: u32,
         read_only: bool,
