@@ -3174,6 +3174,12 @@ pub async fn start_downstairs(
         loop {
             let (sock, raddr) = listener.accept().await?;
 
+            /*
+             * We have a new connection; before we wrap it, set TCP_NODELAY
+             * to assure that we don't get Nagle'd.
+             */
+            sock.set_nodelay(true).expect("could not set TCP_NODELAY");
+
             let stream: WrappedStream = if let Some(ssl_acceptor) =
                 &ssl_acceptor
             {
