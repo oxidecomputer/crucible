@@ -1211,11 +1211,11 @@ fn config_path<P: AsRef<Path>>(dir: P) -> PathBuf {
 /// Verify that the requested block offset and size of the buffer
 /// will fit within the extent.
 pub(crate) fn check_input(
-    block_size: u64,
     extent_size: Block,
     offset: Block,
     data: &[u8],
 ) -> Result<(), CrucibleError> {
+    let block_size = extent_size.block_size_in_bytes() as u64;
     /*
      * Only accept block sized operations
      */
@@ -1916,71 +1916,62 @@ mod test {
 
     #[test]
     fn extent_io_valid() {
-        let block_size = 512;
         let extent_size = Block::new_512(100);
         let mut data = BytesMut::with_capacity(512);
         data.put(&[1; 512][..]);
 
-        check_input(block_size, extent_size, Block::new_512(0), &data).unwrap();
-        check_input(block_size, extent_size, Block::new_512(99), &data)
-            .unwrap();
+        check_input(extent_size, Block::new_512(0), &data).unwrap();
+        check_input(extent_size, Block::new_512(99), &data).unwrap();
     }
 
     #[test]
     #[should_panic]
     fn extent_io_non_aligned_large() {
-        let block_size = 512;
         let extent_size = Block::new_512(100);
         let mut data = BytesMut::with_capacity(513);
         data.put(&[1; 513][..]);
 
-        check_input(block_size, extent_size, Block::new_512(0), &data).unwrap();
+        check_input(extent_size, Block::new_512(0), &data).unwrap();
     }
 
     #[test]
     #[should_panic]
     fn extent_io_non_aligned_small() {
-        let block_size = 512;
         let extent_size = Block::new_512(100);
         let mut data = BytesMut::with_capacity(511);
         data.put(&[1; 511][..]);
 
-        check_input(block_size, extent_size, Block::new_512(0), &data).unwrap();
+        check_input(extent_size, Block::new_512(0), &data).unwrap();
     }
 
     #[test]
     #[should_panic]
     fn extent_io_bad_block() {
-        let block_size = 512;
         let extent_size = Block::new_512(100);
         let mut data = BytesMut::with_capacity(512);
         data.put(&[1; 512][..]);
 
-        check_input(block_size, extent_size, Block::new_512(100), &data)
-            .unwrap();
+        check_input(extent_size, Block::new_512(100), &data).unwrap();
     }
 
     #[test]
     #[should_panic]
     fn extent_io_invalid_block_buf() {
-        let block_size = 512;
         let extent_size = Block::new_512(100);
         let mut data = BytesMut::with_capacity(1024);
         data.put(&[1; 1024][..]);
 
-        check_input(block_size, extent_size, Block::new_512(99), &data)
-            .unwrap();
+        check_input(extent_size, Block::new_512(99), &data).unwrap();
     }
 
     #[test]
     #[should_panic]
     fn extent_io_invalid_large() {
-        let block_size = 512;
         let extent_size = Block::new_512(100);
         let mut data = BytesMut::with_capacity(512 * 100);
         data.put(&[1; 512 * 100][..]);
 
-        check_input(block_size, extent_size, Block::new_512(1), &data).unwrap();
+        check_input(extent_size, Block::new_512(1), &data).unwrap();
     }
 
     #[test]

@@ -26,9 +26,6 @@ pub struct SqliteInner {
     /// Our extent number
     extent_number: u32,
 
-    /// Block size, in bytes
-    block_size: u64,
-
     /// Extent size, in blocks
     extent_size: Block,
 
@@ -313,7 +310,6 @@ impl ExtentInner for SqliteInner {
         Ok(Self {
             file,
             dirty: dirty.into(),
-            block_size: def.block_size(),
             extent_size: def.extent_size(),
             metadb,
             extent_number,
@@ -391,7 +387,6 @@ impl ExtentInner for SqliteInner {
         Ok(Self {
             file,
             metadb,
-            block_size: def.block_size(),
             extent_size: def.extent_size(),
             dirty: dirty.into(),
             extent_number,
@@ -449,7 +444,7 @@ impl ExtentInner for SqliteInner {
         // Rehash any parts of the file that we *may have written* data to since
         // the last flush.  (If we know that we wrote the data, then we don't
         // bother rehashing)
-        let n_rehashed = self.rehash_dirty_blocks(self.block_size)?;
+        let n_rehashed = self.rehash_dirty_blocks()?;
 
         cdt::extent__flush__collect__hashes__done!(|| {
             (job_id.get(), self.extent_number, n_rehashed as u64)
@@ -527,16 +522,11 @@ impl ExtentInner for SqliteInner {
             // at it, check for overflows.
             let resp_run_start = responses.len();
             let mut iovecs = Vec::with_capacity(n_contiguous_requests);
+            let block_size = self.extent_size.block_size_in_bytes() as u64;
             for req in requests[req_run_start..][..n_contiguous_requests].iter()
             {
-                let resp =
-                    ReadResponse::from_request(req, self.block_size as usize);
-                check_input(
-                    self.block_size,
-                    self.extent_size,
-                    req.offset,
-                    &resp.data,
-                )?;
+                let resp = ReadResponse::from_request(req, block_size as usize);
+                check_input(self.extent_size, req.offset, &resp.data)?;
                 responses.push(resp);
             }
 
@@ -555,7 +545,7 @@ impl ExtentInner for SqliteInner {
             nix::sys::uio::preadv(
                 self.file.as_raw_fd(),
                 &mut iovecs,
-                first_req.offset.value as i64 * self.block_size as i64,
+                first_req.offset.value as i64 * block_size as i64,
             )
             .map_err(|e| CrucibleError::IoError(e.to_string()))?;
 
@@ -603,12 +593,7 @@ impl ExtentInner for SqliteInner {
     ) -> Result<()> {
         println!("innerwrite called");
         for write in writes {
-            check_input(
-                self.block_size,
-                self.extent_size,
-                write.offset,
-                &write.data,
-            )?;
+            check_input(self.extent_size, write.offset, &write.data)?;
         }
 
         /*
@@ -787,7 +772,7 @@ impl ExtentInner for SqliteInner {
         let mut batched_pwritev = BatchedPwritev::new(
             self.file.as_raw_fd(),
             writes.len(),
-            self.block_size,
+            self.extent_size.block_size_in_bytes() as u64,
             iov_max,
         );
 
@@ -876,7 +861,8 @@ impl ExtentInner for SqliteInner {
             BufReader::with_capacity(64 * 1024, &self.file);
 
         // This gets filled one block at a time for hashing
-        let mut block = vec![0; self.block_size as usize];
+        let mut block =
+            vec![0; self.extent_size.block_size_in_bytes() as usize];
 
         // The vec of hashes that we'll pass off to truncate...()
         let mut extent_block_indexes_and_hashes =
@@ -954,9 +940,10 @@ impl SqliteInner {
     ///
     /// Returns the number of blocks that needed to be rehashed.
     #[allow(clippy::read_zero_byte_vec)] // see rust-clippy#9274
-    fn rehash_dirty_blocks(&mut self, block_size: u64) -> Result<usize> {
+    fn rehash_dirty_blocks(&mut self) -> Result<usize> {
         let mut buffer = vec![]; // resized lazily if needed
         let mut out = 0;
+        let block_size = self.extent_size.block_size_in_bytes() as u64;
         for (block, hash) in self.dirty_blocks.iter_mut() {
             if hash.is_none() {
                 buffer.resize(block_size as usize, 0u8);
