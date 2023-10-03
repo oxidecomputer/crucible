@@ -1,11 +1,8 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
     cdt, crucible_bail,
-    extent::{
-        check_input, extent_path, DownstairsBlockContext, ExtentInner,
-        ExtentMeta, EXTENT_META_SQLITE,
-    },
-    integrity_hash, mkdir_for_file,
+    extent::{check_input, DownstairsBlockContext, ExtentInner},
+    integrity_hash,
     region::{BatchedPwritev, JobOrReconciliationId},
     Block, BlockContext, CrucibleError, JobId, ReadResponse, RegionDefinition,
 };
@@ -160,7 +157,7 @@ impl ExtentInner for SqliteInner {
     }
 
     fn read(
-        &self,
+        &mut self,
         job_id: JobId,
         requests: &[&crucible_protocol::ReadRequest],
         responses: &mut Vec<crucible_protocol::ReadResponse>,
@@ -394,7 +391,7 @@ impl ExtentInner for SqliteInner {
             let on_disk_hash = integrity_hash(&[&write.data[..]]);
 
             self.set_block_context(&DownstairsBlockContext {
-                block_context: write.block_context.clone(),
+                block_context: write.block_context,
                 block: write.offset.value,
                 on_disk_hash,
             })?;
@@ -489,7 +486,7 @@ impl ExtentInner for SqliteInner {
     /// parent Vec contains all contexts for a single block.
     #[cfg(test)]
     fn get_block_contexts(
-        &self,
+        &mut self,
         block: u64,
         count: u64,
     ) -> Result<Vec<Vec<DownstairsBlockContext>>, CrucibleError> {
@@ -508,6 +505,68 @@ impl ExtentInner for SqliteInner {
 }
 
 impl SqliteInner {
+    /// Converts to a raw file for use with `RawInner`
+    pub fn export(&mut self) -> Result<Vec<u8>, CrucibleError> {
+        // Clean up stale hashes.  After this is done, each block should have
+        // either 0 or 1 contexts.
+        self.fully_rehash_and_clean_all_stale_contexts(true)?;
+
+        let block_size = self.extent_size.block_size_in_bytes() as usize;
+        let ctxs = self.get_block_contexts(0, self.extent_size.value)?;
+
+        // Read file contents, which are the beginning of the raw file
+        self.file.seek(SeekFrom::Start(0))?;
+        let mut buf = vec![0u8; self.extent_size.value as usize * block_size];
+        self.file.read_exact(&mut buf)?;
+
+        use crate::{
+            extent::EXTENT_META_RAW,
+            extent_inner_raw::{
+                OnDiskDownstairsBlockContext, OnDiskMeta,
+                BLOCK_CONTEXT_SLOT_SIZE_BYTES, BLOCK_META_SIZE_BYTES,
+            },
+        };
+
+        // Record the metadata region after the raw block data
+        let dirty = self.dirty()?;
+        let flush_number = self.flush_number()?;
+        let gen_number = self.gen_number()?;
+        let meta = OnDiskMeta {
+            dirty,
+            flush_number,
+            gen_number,
+            ext_version: EXTENT_META_RAW,
+        };
+        let mut meta_buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
+        bincode::serialize_into(meta_buf.as_mut_slice(), &meta)
+            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+        buf.extend(meta_buf);
+
+        // Put the context data after the metadata
+        for c in ctxs {
+            let ctx = match c.len() {
+                0 => None,
+                1 => Some(OnDiskDownstairsBlockContext {
+                    block_context: c[0].block_context,
+                    on_disk_hash: c[0].on_disk_hash,
+                }),
+                i => panic!("invalid context count: {i}"),
+            };
+            // Put the context into the first slot, if present
+            let mut ctx_buf = [0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
+            bincode::serialize_into(ctx_buf.as_mut_slice(), &ctx)
+                .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+            buf.extend(ctx_buf);
+
+            // The second slot is empty
+            buf.extend([0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize]);
+        }
+
+        // Reset the file read position, just in case
+        self.file.seek(SeekFrom::Start(0))?;
+        Ok(buf)
+    }
+
     fn get_block_contexts(
         &self,
         block: u64,
@@ -558,11 +617,19 @@ impl SqliteInner {
         Ok(results)
     }
 
+    // We should never create a new SQLite-backed extent in production code,
+    // because we should be using raw extents everywhere.  However, we'll create
+    // them during tests to check that our automatic migration system works.
+    #[cfg(test)]
     pub fn create(
         dir: &Path,
         def: &RegionDefinition,
         extent_number: u32,
     ) -> Result<Self> {
+        use crate::{
+            extent::{extent_path, ExtentMeta, EXTENT_META_SQLITE},
+            mkdir_for_file,
+        };
         let mut path = extent_path(dir, extent_number);
         let bcount = def.extent_size().value;
         let size = def.block_size().checked_mul(bcount).unwrap();
@@ -1496,7 +1563,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(0),
                 data: data.clone(),
-                block_context: block_context.clone(),
+                block_context,
             };
             inner.write(JobId(20), &[&write], true, IOV_MAX_TEST)?;
 
@@ -1531,7 +1598,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(1),
                 data: data.clone(),
-                block_context: block_context.clone(),
+                block_context,
             };
             inner.write(JobId(30), &[&write], true, IOV_MAX_TEST)?;
 
@@ -1598,7 +1665,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(0),
                 data: data.clone(),
-                block_context: block_context.clone(),
+                block_context,
             };
             inner.write(JobId(30), &[&write], true, IOV_MAX_TEST)?;
 

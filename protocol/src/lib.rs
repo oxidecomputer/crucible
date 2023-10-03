@@ -157,7 +157,7 @@ impl ReadResponse {
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BlockContext {
     /// If this is a non-encrypted write, then the integrity hasher has the
     /// data as an input:
@@ -183,7 +183,7 @@ pub struct BlockContext {
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EncryptionContext {
     pub nonce: [u8; 12],
     pub tag: [u8; 16],

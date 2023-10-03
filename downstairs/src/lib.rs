@@ -37,6 +37,7 @@ pub mod region;
 pub mod repair;
 mod stats;
 
+mod extent_inner_raw;
 mod extent_inner_sqlite;
 
 use region::Region;
@@ -443,6 +444,18 @@ pub mod cdt {
         job_id: u64,
         extent_id: u32,
         n_blocks: u64,
+    ) {
+    }
+    fn extent__write__raw__context__insert__start(
+        job_id: u64,
+        extent_id: u32,
+        extent_size: u64,
+    ) {
+    }
+    fn extent__write__raw__context__insert__done(
+        _job_id: u64,
+        _extent_id: u32,
+        extent_size: u64,
     ) {
     }
     fn extent__read__start(job_id: u64, extent_id: u32, n_blocks: u64) {}

@@ -43,7 +43,7 @@ pub(crate) trait ExtentInner: Send + Debug {
     ) -> Result<(), CrucibleError>;
 
     fn read(
-        &self,
+        &mut self,
         job_id: JobId,
         requests: &[&crucible_protocol::ReadRequest],
         responses: &mut Vec<crucible_protocol::ReadResponse>,
@@ -60,14 +60,15 @@ pub(crate) trait ExtentInner: Send + Debug {
 
     #[cfg(test)]
     fn get_block_contexts(
-        &self,
+        &mut self,
         block: u64,
         count: u64,
     ) -> Result<Vec<Vec<DownstairsBlockContext>>, CrucibleError>;
 
     /// Sets the dirty flag and updates a block context
     ///
-    /// This should only be called from test functions
+    /// This should only be called from test functions, where we want to
+    /// manually modify block contexts and test associated behavior
     #[cfg(test)]
     fn set_dirty_and_block_context(
         &mut self,
@@ -120,7 +121,17 @@ pub struct ExtentMeta {
 /// Extent version for SQLite-backed metadata
 ///
 /// See [`extent_inner_sqlite::SqliteInner`] for the implementation.
+///
+/// This is no longer used when creating new extents, but we support opening
+/// existing SQLite-based extents because snapshot images are on read-only
+/// volumes, so we can't migrate them.
+#[allow(dead_code)] // used in unit test
 pub const EXTENT_META_SQLITE: u32 = 1;
+
+/// Extent version for raw-file-backed metadata
+///
+/// See [`extent_inner_raw::RawInner`] for the implementation.
+pub const EXTENT_META_RAW: u32 = 2;
 
 impl ExtentMeta {
     pub fn new(ext_version: u32) -> ExtentMeta {
@@ -241,9 +252,16 @@ pub fn completed_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
         .with_extension("completed")
 }
 
+pub fn migrate_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
+    extent_dir(dir, number)
+        .join(extent_file_name(number, ExtentType::Data))
+        .with_extension("migrate")
+}
+
 /**
- * Remove directories associated with repair except for the replace
- * directory. Replace is handled specifically during extent open.
+ * Remove temporary directories associated with repair and migration, except for
+ * the final .replace or .migrate directory. Replace and migration are handled
+ * specifically during extent open.
  */
 pub fn remove_copy_cleanup_dir<P: AsRef<Path>>(dir: P, eid: u32) -> Result<()> {
     for f in [copy_dir, completed_dir] {
@@ -282,38 +300,91 @@ impl Extent {
         // If there was an unfinished copy, then clean it up here (??)
         remove_copy_cleanup_dir(dir, number)?;
 
-        // If the replace directory exists for this extent, then it means
-        // a repair was interrupted before it could finish.  We will continue
-        // the repair before we open the extent.
-        let replace_dir = replace_dir(dir, number);
-        if !read_only && Path::new(&replace_dir).exists() {
-            info!(
-                log,
-                "Extent {} found replacement dir, finishing replacement",
-                number
-            );
-            move_replacement_extent(dir, number as usize, log)?;
+        // There are two possible migrations that could be in progress:
+        //
+        // - Extent replacement, which is done from a `.replace` directory and
+        //   calls `move_replacement_extent`; this is part of live repair.
+        // - Extent migration (from SQLite to raw files), which is done from a
+        //   `.migrate` directory and `move_migrate_extent`
+        //
+        // Both of these are supposed to complete fully, but it's possible that
+        // a repair / migration was interrupted before it could finish.  If the
+        // above directories are present, then we are **ready** for repair /
+        // migration, so we will continue it before opening the extent.
+        //
+        // It is not possible for a repair and migration to both be staged;
+        // migration happens later in this function, so the repair will be
+        // completed (right here).
+        if !read_only {
+            let has_replace = replace_dir(dir, number).exists();
+            let has_migrate = migrate_dir(dir, number).exists();
+            if has_replace && has_migrate {
+                bail!(
+                    "cannot have both .replace and .migrate dirs simultaneously"
+                );
+            } else if has_replace {
+                info!(
+                    log,
+                    "Extent {} found replacement dir, finishing replacement",
+                    number
+                );
+                move_replacement_extent(dir, number as usize, log)?;
+            } else if has_migrate {
+                info!(
+                    log,
+                    "Extent {} found migrate dir, finishing migration", number
+                );
+                move_migrate_extent(dir, number as usize, log)?;
+            }
+        }
+
+        // Speaking of migration, it's happening now!  We will migrate
+        // every read-write extent with a SQLite file present.
+        let mut has_sqlite = path.with_extension("db").exists();
+        if has_sqlite && !read_only {
+            let mut inner = extent_inner_sqlite::SqliteInner::open(
+                &path, def, number, read_only, log,
+            )?;
+            let data = inner.export()?;
+
+            // We'll put the new file into copy_dir first, then rename it to
+            // migrate_dir once it's ready.  The logic here matches the
+            // docstring in `Region::repair_extent`
+            let copy_dir = copy_dir(dir, number);
+            let extent_file_name = extent_file_name(number, ExtentType::Data);
+            let new_file = copy_dir.join(extent_file_name);
+            mkdir_for_file(&new_file)?;
+
+            info!(log, "Extent {number} writing migration to {new_file:?}");
+            std::fs::write(&new_file, data)?;
+            sync_path(&new_file, log)?;
+
+            // Rename from .copy to .migrate, then sync the parent directory
+            info!(log, "Extent {number} renaming migration dir");
+            std::fs::rename(copy_dir, migrate_dir(dir, number))?;
+            sync_path(extent_dir(dir, number), log)?;
+
+            info!(log, "Extent {number} copying the migration over");
+            move_migrate_extent(dir, number as usize, log)?;
+            has_sqlite = false;
         }
 
         // Pick the format for the downstairs files
         //
         // Right now, this only supports SQLite-flavored Downstairs
-        let inner = {
-            let mut sqlite_path = path.clone();
-            sqlite_path.set_extension("db");
-            if sqlite_path.exists() {
+        let inner: Box<dyn ExtentInner> = {
+            if has_sqlite {
                 let inner = extent_inner_sqlite::SqliteInner::open(
                     &path, def, number, read_only, log,
                 )?;
                 Box::new(inner)
             } else {
-                bail!(
-                    "db file {sqlite_path:?} for extent#{number} is not present"
-                );
+                let inner = extent_inner_raw::RawInner::open(
+                    &path, def, number, read_only, log,
+                )?;
+                Box::new(inner)
             }
         };
-
-        // XXX: schema updates?
 
         let extent = Extent {
             number,
@@ -368,11 +439,37 @@ impl Extent {
         }
         remove_copy_cleanup_dir(dir, number)?;
 
-        let inner = extent_inner_sqlite::SqliteInner::create(dir, def, number)?;
+        // All new extents are created using the raw backend
+        let inner = extent_inner_raw::RawInner::create(dir, def, number)?;
 
         /*
          * Complete the construction of our new extent
          */
+        Ok(Extent {
+            number,
+            read_only: false,
+            iov_max: Extent::get_iov_max()?,
+            inner: Mutex::new(Box::new(inner)),
+        })
+    }
+
+    /// Identical to `create`, but using the SQLite backend
+    ///
+    /// This is only allowed in unit tests
+    #[cfg(test)]
+    pub fn create_sqlite(
+        dir: &Path,
+        def: &RegionDefinition,
+        number: u32,
+    ) -> Result<Extent> {
+        {
+            let path = extent_path(dir, number);
+            if Path::new(&path).exists() {
+                bail!("Extent file already exists {:?}", path);
+            }
+        }
+        remove_copy_cleanup_dir(dir, number)?;
+        let inner = extent_inner_sqlite::SqliteInner::create(dir, def, number)?;
         Ok(Extent {
             number,
             read_only: false,
@@ -399,7 +496,7 @@ impl Extent {
             (job_id.0, self.number, requests.len() as u64)
         });
 
-        let inner = self.inner.lock().await;
+        let mut inner = self.inner.lock().await;
 
         inner.read(job_id, requests, responses, self.iov_max)?;
 
@@ -483,6 +580,72 @@ impl Extent {
     }
 }
 
+/// Apply a staged migration directory to the extent file
+///
+/// Migration is only supported from the SQLite extent backend to the raw extent
+/// backend.  It consists of copying the new (raw) extent file, then deleting
+/// the SQLite files.
+pub(crate) fn move_migrate_extent<P: AsRef<Path>>(
+    region_dir: P,
+    eid: usize,
+    log: &Logger,
+) -> Result<(), CrucibleError> {
+    let destination_dir = extent_dir(&region_dir, eid as u32);
+    let extent_file_name = extent_file_name(eid as u32, ExtentType::Data);
+    let migrate_dir = migrate_dir(&region_dir, eid as u32);
+    let completed_dir = completed_dir(&region_dir, eid as u32);
+
+    assert!(Path::new(&migrate_dir).exists());
+    assert!(!Path::new(&completed_dir).exists());
+
+    info!(
+        log,
+        "Copy files from {migrate_dir:?} in {destination_dir:?}"
+    );
+
+    // Setup the original and replacement file names.
+    let new_file = migrate_dir.join(&extent_file_name);
+    let original_file = destination_dir.join(&extent_file_name);
+
+    // Copy the new file on top of the original file.
+    if let Err(e) = std::fs::copy(new_file.clone(), original_file.clone()) {
+        crucible_bail!(
+            IoError,
+            "copy of {new_file:?} to {original_file:?} got: {e:?}",
+        );
+    }
+    sync_path(&original_file, log)?;
+
+    // Remove all of the old files.  It is always valid for an old file to _not_
+    // be present, for two reasons:
+    // - the .db-shm and .db-wal files are always optional
+    // - the .db file may have already been removed by a previous call to
+    //   `move_migrate_extent`, if a later step failed
+    for ext in ["db", "db-shm", "db-wal"] {
+        let original_file = original_file.with_extension(ext);
+        if original_file.exists() {
+            info!(
+                log,
+                "Remove old file {original_file:?} as there is no replacement",
+            );
+            std::fs::remove_file(&original_file)?;
+        }
+    }
+    sync_path(&destination_dir, log)?;
+
+    // After we have all files: rename the migrate dir to indicate that
+    // migration is complete.
+    info!(log, "Move directory  {migrate_dir:?} to {completed_dir:?}");
+    std::fs::rename(migrate_dir, &completed_dir)?;
+
+    sync_path(&destination_dir, log)?;
+
+    std::fs::remove_dir_all(&completed_dir)?;
+
+    sync_path(&destination_dir, log)?;
+    Ok(())
+}
+
 /**
  * Copy the contents of the replacement directory on to the extent
  * files in the extent directory.
@@ -525,25 +688,14 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
     }
     sync_path(&original_file, log)?;
 
+    // We distinguish between SQLite-backend and raw-file extents based on the
+    // presence of the `000.db` file.  We should never do live migration across
+    // different extent formats; in fact, we should never live-migrate
+    // SQLite-backed extents at all, but must still handle the case of
+    // unfinished migrations.
     new_file.set_extension("db");
     original_file.set_extension("db");
-    if let Err(e) = std::fs::copy(new_file.clone(), original_file.clone()) {
-        crucible_bail!(
-            IoError,
-            "copy {:?} to {:?} got: {:?}",
-            new_file,
-            original_file,
-            e
-        );
-    }
-    sync_path(&original_file, log)?;
-
-    // The .db-shm and .db-wal files may or may not exist.  If they don't
-    // exist on the source side, then be sure to remove them locally to
-    // avoid database corruption from a mismatch between old and new.
-    new_file.set_extension("db-shm");
-    original_file.set_extension("db-shm");
-    if new_file.exists() {
+    if original_file.exists() {
         if let Err(e) = std::fs::copy(new_file.clone(), original_file.clone()) {
             crucible_bail!(
                 IoError,
@@ -554,35 +706,57 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
             );
         }
         sync_path(&original_file, log)?;
-    } else if original_file.exists() {
-        info!(
-            log,
-            "Remove old file {:?} as there is no replacement",
-            original_file.clone()
-        );
-        std::fs::remove_file(&original_file)?;
-    }
 
-    new_file.set_extension("db-wal");
-    original_file.set_extension("db-wal");
-    if new_file.exists() {
-        if let Err(e) = std::fs::copy(new_file.clone(), original_file.clone()) {
-            crucible_bail!(
-                IoError,
-                "copy {:?} to {:?} got: {:?}",
-                new_file,
-                original_file,
-                e
+        // The .db-shm and .db-wal files may or may not exist.  If they don't
+        // exist on the source side, then be sure to remove them locally to
+        // avoid database corruption from a mismatch between old and new.
+        new_file.set_extension("db-shm");
+        original_file.set_extension("db-shm");
+        if new_file.exists() {
+            if let Err(e) =
+                std::fs::copy(new_file.clone(), original_file.clone())
+            {
+                crucible_bail!(
+                    IoError,
+                    "copy {:?} to {:?} got: {:?}",
+                    new_file,
+                    original_file,
+                    e
+                );
+            }
+            sync_path(&original_file, log)?;
+        } else if original_file.exists() {
+            info!(
+                log,
+                "Remove old file {:?} as there is no replacement",
+                original_file.clone()
             );
+            std::fs::remove_file(&original_file)?;
         }
-        sync_path(&original_file, log)?;
-    } else if original_file.exists() {
-        info!(
-            log,
-            "Remove old file {:?} as there is no replacement",
-            original_file.clone()
-        );
-        std::fs::remove_file(&original_file)?;
+
+        new_file.set_extension("db-wal");
+        original_file.set_extension("db-wal");
+        if new_file.exists() {
+            if let Err(e) =
+                std::fs::copy(new_file.clone(), original_file.clone())
+            {
+                crucible_bail!(
+                    IoError,
+                    "copy {:?} to {:?} got: {:?}",
+                    new_file,
+                    original_file,
+                    e
+                );
+            }
+            sync_path(&original_file, log)?;
+        } else if original_file.exists() {
+            info!(
+                log,
+                "Remove old file {:?} as there is no replacement",
+                original_file.clone()
+            );
+            std::fs::remove_file(&original_file)?;
+        }
     }
     sync_path(&destination_dir, log)?;
 
