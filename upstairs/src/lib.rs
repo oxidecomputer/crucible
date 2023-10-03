@@ -2662,6 +2662,7 @@ async fn looper(
         let deadline = tokio::time::sleep_until(deadline_secs(10.0));
         tokio::pin!(deadline);
         let tcp = sock.connect(target);
+
         tokio::pin!(tcp);
 
         let tcp: TcpStream = loop {
@@ -2694,6 +2695,12 @@ async fn looper(
                 }
             }
         };
+
+        /*
+         * We're connected; before we wrap it, set TCP_NODELAY to assure
+         * that we don't get Nagle'd.
+         */
+        tcp.set_nodelay(true).expect("could not set TCP_NODELAY");
 
         let tcp = {
             let tls_context = tls_context.lock().await;
