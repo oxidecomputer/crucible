@@ -466,6 +466,10 @@ impl ExtentInner for SqliteInner {
         // Write any remaining data
         batched_pwritev.perform_writes()?;
 
+        cdt::extent__write__file__done!(|| {
+            (job_id.0, self.extent_number, writes.len() as u64)
+        });
+
         // At this point, we know that the written data for the target blocks
         // must match the integrity hashes calculated above (and stored to
         // SQLite).  We can therefore store pre-computed hash values for these

@@ -426,10 +426,6 @@ impl Extent {
         let mut inner = self.inner.lock().await;
         inner.write(job_id, writes, only_write_unwritten, self.iov_max)?;
 
-        cdt::extent__write__file__done!(|| {
-            (job_id.0, self.number, writes.len() as u64)
-        });
-
         cdt::extent__write__done!(|| {
             (job_id.0, self.number, writes.len() as u64)
         });
