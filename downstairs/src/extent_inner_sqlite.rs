@@ -362,9 +362,6 @@ impl ExtentInner for SqliteInner {
 
             if writes_to_skip.len() == writes.len() {
                 // Nothing to do
-                cdt::extent__write__done!(|| {
-                    (job_id.0, self.extent_number, writes.len() as u64)
-                });
                 return Ok(());
             }
         }
