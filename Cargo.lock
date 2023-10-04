@@ -1095,7 +1095,6 @@ dependencies = [
  "semver 1.0.18",
  "serde",
  "slog",
- "syn 1.0.107",
  "syn 2.0.23",
  "time 0.3.23",
  "time-macros",
