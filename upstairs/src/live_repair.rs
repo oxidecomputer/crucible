@@ -111,6 +111,26 @@ pub async fn check_for_repair(
     }
     let mut ds = up.downstairs.lock().await;
     drop(active);
+
+    if up.read_only {
+        // Repair can't happen on a read-only downstairs, so short circuit here.
+        // There's no state drift to repair anyway, this read-only Upstairs
+        // wouldn't have caused any modifications.
+        for cid in ClientId::iter() {
+            if ds.ds_state[cid] == DsState::LiveRepairReady {
+                up.ds_transition_with_lock(
+                    &mut ds,
+                    up_state,
+                    cid,
+                    DsState::Active,
+                );
+                ds.rop_lr_skipped[cid] += 1;
+            }
+        }
+
+        return RepairCheck::NoRepairNeeded;
+    }
+
     // Verify that all downstairs and the upstairs are in the proper state
     // before we begin a live repair.
     let repair = ds
