@@ -42,6 +42,7 @@ chrono = { version = "0.4", features = [ "serde" ] }
 clap = { version = "4.4", features = ["derive", "env", "wrap_help"] }
 clearscreen = "2.0.1"
 crossterm = { version = "0.27.0" }
+crucible-workspace-hack = "0.1.0"  # see [patch.crates-io.crucible-workspace-hack] for more
 csv = "1.2.2"
 expectorate = "1.0.7"
 futures = "0.3"
@@ -126,3 +127,10 @@ repair-client = { path = "./repair-client" }
 
 [profile.dev]
 panic = 'abort'
+
+# Using the workspace-hack via this patch directive means that it only applies
+# while building within this workspace. If another workspace imports a crate
+# from here via a git dependency, it will not have the workspace-hack applied
+# to it.
+[patch.crates-io.crucible-workspace-hack]
+path = "workspace-hack"

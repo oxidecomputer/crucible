@@ -21,4 +21,4 @@ serde_json.workspace = true
 tokio-util.workspace = true
 tokio.workspace = true
 toml.workspace = true
-workspace-hack = { version = "0.1", path = "../workspace-hack" }
+crucible-workspace-hack.workspace = true

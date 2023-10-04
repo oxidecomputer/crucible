@@ -556,9 +556,9 @@ dependencies = [
  "crucible",
  "crucible-control-client",
  "crucible-protocol",
+ "crucible-workspace-hack",
  "serde_json",
  "tokio",
- "workspace-hack",
 ]
 
 [[package]]
@@ -705,6 +705,7 @@ dependencies = [
  "crucible-client-types",
  "crucible-common",
  "crucible-protocol",
+ "crucible-workspace-hack",
  "dropshot",
  "expectorate",
  "futures",
@@ -739,7 +740,6 @@ dependencies = [
  "usdt",
  "uuid",
  "version_check",
- "workspace-hack",
 ]
 
 [[package]]
@@ -751,6 +751,7 @@ dependencies = [
  "clap",
  "crucible-common",
  "crucible-smf",
+ "crucible-workspace-hack",
  "dropshot",
  "expectorate",
  "futures",
@@ -768,7 +769,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
- "workspace-hack",
 ]
 
 [[package]]
@@ -777,13 +777,13 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "chrono",
+ "crucible-workspace-hack",
  "percent-encoding",
  "progenitor",
  "reqwest",
  "schemars",
  "serde",
  "serde_json",
- "workspace-hack",
 ]
 
 [[package]]
@@ -791,11 +791,11 @@ name = "crucible-client-types"
 version = "0.1.0"
 dependencies = [
  "base64 0.21.4",
+ "crucible-workspace-hack",
  "schemars",
  "serde",
  "serde_json",
  "uuid",
- "workspace-hack",
 ]
 
 [[package]]
@@ -804,6 +804,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "atty",
+ "crucible-workspace-hack",
  "nix",
  "rusqlite",
  "rustls-pemfile",
@@ -822,7 +823,6 @@ dependencies = [
  "twox-hash",
  "uuid",
  "vergen",
- "workspace-hack",
 ]
 
 [[package]]
@@ -830,13 +830,13 @@ name = "crucible-control-client"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "crucible-workspace-hack",
  "percent-encoding",
  "progenitor",
  "reqwest",
  "schemars",
  "serde",
  "serde_json",
- "workspace-hack",
 ]
 
 [[package]]
@@ -851,6 +851,7 @@ dependencies = [
  "crucible",
  "crucible-common",
  "crucible-protocol",
+ "crucible-workspace-hack",
  "dropshot",
  "expectorate",
  "futures",
@@ -895,7 +896,6 @@ dependencies = [
  "usdt",
  "uuid",
  "version_check",
- "workspace-hack",
 ]
 
 [[package]]
@@ -907,6 +907,7 @@ dependencies = [
  "clap",
  "crucible",
  "crucible-common",
+ "crucible-workspace-hack",
  "opentelemetry 0.20.0",
  "opentelemetry-jaeger",
  "rand 0.8.5",
@@ -914,7 +915,6 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
- "workspace-hack",
 ]
 
 [[package]]
@@ -929,6 +929,7 @@ dependencies = [
  "crucible-downstairs",
  "crucible-pantry",
  "crucible-pantry-client",
+ "crucible-workspace-hack",
  "futures",
  "futures-core",
  "hex",
@@ -945,7 +946,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
- "workspace-hack",
 ]
 
 [[package]]
@@ -958,6 +958,7 @@ dependencies = [
  "crucible",
  "crucible-common",
  "crucible-protocol",
+ "crucible-workspace-hack",
  "futures",
  "futures-core",
  "nbd",
@@ -967,7 +968,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.8.0",
- "workspace-hack",
 ]
 
 [[package]]
@@ -975,9 +975,9 @@ name = "crucible-package"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "crucible-workspace-hack",
  "omicron-zone-package",
  "tokio",
- "workspace-hack",
 ]
 
 [[package]]
@@ -991,6 +991,7 @@ dependencies = [
  "crucible",
  "crucible-common",
  "crucible-smf",
+ "crucible-workspace-hack",
  "dropshot",
  "expectorate",
  "futures",
@@ -1009,7 +1010,6 @@ dependencies = [
  "subprocess",
  "tokio",
  "uuid",
- "workspace-hack",
 ]
 
 [[package]]
@@ -1018,6 +1018,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "chrono",
+ "crucible-workspace-hack",
  "percent-encoding",
  "progenitor",
  "reqwest",
@@ -1025,7 +1026,6 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
- "workspace-hack",
 ]
 
 [[package]]
@@ -1036,23 +1036,77 @@ dependencies = [
  "bincode",
  "bytes",
  "crucible-common",
+ "crucible-workspace-hack",
  "num_enum",
  "schemars",
  "serde",
  "tokio-util",
  "uuid",
- "workspace-hack",
 ]
 
 [[package]]
 name = "crucible-smf"
 version = "0.0.0"
 dependencies = [
+ "crucible-workspace-hack",
  "libc",
  "num-derive",
  "num-traits",
  "thiserror",
- "workspace-hack",
+]
+
+[[package]]
+name = "crucible-workspace-hack"
+version = "0.1.0"
+dependencies = [
+ "bitflags 2.3.3",
+ "bytes",
+ "cc",
+ "chrono",
+ "console",
+ "crossbeam-utils",
+ "crypto-common",
+ "digest 0.10.6",
+ "either",
+ "futures-channel",
+ "futures-core",
+ "futures-executor",
+ "futures-sink",
+ "futures-util",
+ "getrandom",
+ "hashbrown 0.12.3",
+ "hex",
+ "hyper",
+ "indexmap 1.9.3",
+ "libc",
+ "log",
+ "mio",
+ "num-traits",
+ "once_cell",
+ "openapiv3",
+ "parking_lot",
+ "phf_shared 0.11.1",
+ "rand 0.8.5",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+ "reqwest",
+ "rustls",
+ "schemars",
+ "semver 1.0.18",
+ "serde",
+ "slog",
+ "syn 1.0.107",
+ "syn 2.0.23",
+ "time 0.3.23",
+ "time-macros",
+ "tokio",
+ "tokio-util",
+ "toml_datetime",
+ "toml_edit 0.19.12",
+ "tracing",
+ "tracing-core",
+ "usdt",
+ "uuid",
 ]
 
 [[package]]
@@ -1065,6 +1119,7 @@ dependencies = [
  "crucible",
  "crucible-common",
  "crucible-protocol",
+ "crucible-workspace-hack",
  "futures",
  "futures-core",
  "ringbuffer",
@@ -1075,7 +1130,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.8.0",
- "workspace-hack",
 ]
 
 [[package]]
@@ -1090,6 +1144,7 @@ dependencies = [
  "crucible",
  "crucible-common",
  "crucible-protocol",
+ "crucible-workspace-hack",
  "csv",
  "dropshot",
  "dsc-client",
@@ -1113,7 +1168,6 @@ dependencies = [
  "tokio-util",
  "toml 0.8.0",
  "uuid",
- "workspace-hack",
 ]
 
 [[package]]
@@ -1344,6 +1398,7 @@ dependencies = [
  "anyhow",
  "byte-unit",
  "clap",
+ "crucible-workspace-hack",
  "csv",
  "dropshot",
  "dsc-client",
@@ -1358,7 +1413,6 @@ dependencies = [
  "statistical",
  "tempfile",
  "tokio",
- "workspace-hack",
 ]
 
 [[package]]
@@ -1366,13 +1420,13 @@ name = "dsc-client"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "crucible-workspace-hack",
  "percent-encoding",
  "progenitor",
  "reqwest",
  "schemars",
  "serde",
  "serde_json",
- "workspace-hack",
 ]
 
 [[package]]
@@ -2235,11 +2289,11 @@ dependencies = [
  "clap",
  "crucible",
  "crucible-common",
+ "crucible-workspace-hack",
  "rand 0.8.5",
  "statistical",
  "tokio",
  "uuid",
- "workspace-hack",
 ]
 
 [[package]]
@@ -3565,13 +3619,13 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "chrono",
+ "crucible-workspace-hack",
  "percent-encoding",
  "progenitor",
  "reqwest",
  "schemars",
  "serde",
  "serde_json",
- "workspace-hack",
 ]
 
 [[package]]
@@ -5634,60 +5688,6 @@ checksum = "524e57b2c537c0f9b1e69f1965311ec12182b4122e45035b1508cd24d2adadb1"
 dependencies = [
  "cfg-if",
  "windows-sys 0.48.0",
-]
-
-[[package]]
-name = "workspace-hack"
-version = "0.1.0"
-dependencies = [
- "bitflags 2.3.3",
- "bytes",
- "cc",
- "chrono",
- "console",
- "crossbeam-utils",
- "crypto-common",
- "digest 0.10.6",
- "either",
- "futures-channel",
- "futures-core",
- "futures-executor",
- "futures-sink",
- "futures-util",
- "getrandom",
- "hashbrown 0.12.3",
- "hex",
- "hyper",
- "indexmap 1.9.3",
- "libc",
- "log",
- "mio",
- "num-traits",
- "once_cell",
- "openapiv3",
- "parking_lot",
- "phf_shared 0.11.1",
- "rand 0.8.5",
- "rand_chacha 0.3.1",
- "rand_core 0.6.4",
- "reqwest",
- "rustls",
- "schemars",
- "semver 1.0.18",
- "serde",
- "slog",
- "syn 1.0.107",
- "syn 2.0.23",
- "time 0.3.23",
- "time-macros",
- "tokio",
- "tokio-util",
- "toml_datetime",
- "toml_edit 0.19.12",
- "tracing",
- "tracing-core",
- "usdt",
- "uuid",
 ]
 
 [[package]]
