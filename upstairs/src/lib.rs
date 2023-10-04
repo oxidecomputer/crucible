@@ -8716,7 +8716,7 @@ impl GtoS {
     /*
      * Notify corresponding BlockReqWaiter
      */
-    pub fn notify(self, result: Result<(), CrucibleError>) {
+    fn notify(self, result: Result<(), CrucibleError>) {
         /*
          * If present, send the result to the guest.  If this is a flush
          * issued on behalf of crucible, then there is no place to send
@@ -8730,6 +8730,14 @@ impl GtoS {
         if let Some(req) = self.req {
             req.send_result(result);
         }
+    }
+
+    pub async fn finalize(mut self, result: Result<(), CrucibleError>) {
+        if result.is_ok() {
+            self.transfer().await;
+        }
+
+        self.notify(result);
     }
 }
 
@@ -8788,8 +8796,8 @@ impl GuestWork {
          * A gw_id that already finished and results were sent back to
          * the guest could still have an outstanding ds_id.
          */
-        let mut gtos_job_done = false;
-        if let Some(gtos_job) = self.active.get_mut(&gw_id) {
+        let gtos_job_done = if let Some(gtos_job) = self.active.get_mut(&gw_id)
+        {
             /*
              * If the ds_id is on the submitted list, then we will take it
              * off and, if it is a read, add the read result
@@ -8832,38 +8840,28 @@ impl GuestWork {
                 );
             }
 
-            if gtos_job.submitted.is_empty() {
-                gtos_job_done = true;
-            }
+            gtos_job.submitted.is_empty()
         } else {
             /*
              * XXX This is just so I can see if ever does happen.
              */
             panic!("gw_id {} for job {} not on active list", gw_id, ds_id);
-        }
+        };
 
         if gtos_job_done {
-            if let Some(mut gtos_job) = self.active.remove(&gw_id) {
+            if let Some(gtos_job) = self.active.remove(&gw_id) {
                 /*
                  * Copy (if present) read data back to the guest buffer they
                  * provided to us, and notify any waiters.
                  */
-
-                if result.is_ok() && !gtos_job.guest_buffers.is_empty() {
-                    gtos_job.transfer().await;
-                }
-
-                gtos_job.notify(result);
+                gtos_job.finalize(result).await;
 
                 self.completed.push(gw_id);
             } else {
                 /*
                  * XXX This is just so I can see if ever does happen.
                  */
-                panic!(
-                    "gw_id {} remove for job {} not on active list",
-                    gw_id, ds_id
-                );
+                panic!("gw_id {} for remove not on active list", gw_id);
             }
         }
     }
@@ -9548,6 +9546,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<()>) {
 
             let mut handle = ds.ds_active.get_mut(ds_id_done).unwrap();
             let done = handle.job();
+
             /*
              * Make sure the job state has not changed since we made the
              * list.
