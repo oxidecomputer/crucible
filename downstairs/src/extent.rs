@@ -307,7 +307,9 @@ impl Extent {
                 )?;
                 Box::new(inner)
             } else {
-                panic!("no SQLite file present at {sqlite_path:?}");
+                bail!(
+                    "db file {sqlite_path:?} for extent#{number} is not present"
+                );
             }
         };
 
