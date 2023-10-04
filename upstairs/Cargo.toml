@@ -49,7 +49,7 @@ uuid.workspace = true
 aes-gcm-siv.workspace = true
 rand_chacha.workspace = true
 reqwest.workspace = true
-workspace-hack = { version = "0.1", path = "../workspace-hack" }
+crucible-workspace-hack = { version = "0.1", path = "../workspace-hack" }
 
 [dev-dependencies]
 expectorate.workspace = true
