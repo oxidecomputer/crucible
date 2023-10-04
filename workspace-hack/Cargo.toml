@@ -28,7 +28,7 @@ futures-executor = { version = "0.3" }
 futures-sink = { version = "0.3" }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
-hashbrown = { version = "0.12", features = ["raw"] }
+hashbrown = { version = "0.14", features = ["raw"] }
 hex = { version = "0.4", features = ["serde"] }
 indexmap = { version = "1", default-features = false, features = ["serde-1", "std"] }
 libc = { version = "0.2", features = ["extra_traits"] }
@@ -62,7 +62,7 @@ bytes = { version = "1", features = ["serde"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
 chrono = { version = "0.4", features = ["serde"] }
 getrandom = { version = "0.2", default-features = false, features = ["std"] }
-hashbrown = { version = "0.12", features = ["raw"] }
+hashbrown = { version = "0.14", features = ["raw"] }
 indexmap = { version = "1", default-features = false, features = ["serde-1", "std"] }
 libc = { version = "0.2", features = ["extra_traits"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
