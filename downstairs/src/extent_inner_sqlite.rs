@@ -491,7 +491,7 @@ impl ExtentInner for SqliteInner {
         &self,
         block: u64,
         count: u64,
-    ) -> Result<Vec<Vec<DownstairsBlockContext>>> {
+    ) -> Result<Vec<Vec<DownstairsBlockContext>>, CrucibleError> {
         SqliteInner::get_block_contexts(self, block, count)
     }
 
@@ -511,7 +511,7 @@ impl SqliteInner {
         &self,
         block: u64,
         count: u64,
-    ) -> Result<Vec<Vec<DownstairsBlockContext>>> {
+    ) -> Result<Vec<Vec<DownstairsBlockContext>>, CrucibleError> {
         let stmt =
             "SELECT block, hash, nonce, tag, on_disk_hash FROM block_context \
              WHERE block BETWEEN ?1 AND ?2";

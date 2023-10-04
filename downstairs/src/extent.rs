@@ -63,7 +63,7 @@ pub(crate) trait ExtentInner: Send + Debug {
         &self,
         block: u64,
         count: u64,
-    ) -> Result<Vec<Vec<DownstairsBlockContext>>>;
+    ) -> Result<Vec<Vec<DownstairsBlockContext>>, CrucibleError>;
 
     /// Sets the dirty flag and updates a block context
     ///
