@@ -51,7 +51,7 @@ syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-trai
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
-toml_edit = { version = "0.19", features = ["serde"] }
+toml_edit = { version = "0.20", features = ["serde"] }
 tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
 usdt = { version = "0.3" }
@@ -80,7 +80,7 @@ syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-trai
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
 time-macros = { version = "0.2", default-features = false, features = ["formatting", "parsing"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
-toml_edit = { version = "0.19", features = ["serde"] }
+toml_edit = { version = "0.20", features = ["serde"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]

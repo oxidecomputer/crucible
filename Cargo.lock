@@ -1102,7 +1102,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml_datetime",
- "toml_edit 0.19.12",
+ "toml_edit 0.20.0",
  "tracing",
  "tracing-core",
  "usdt",
