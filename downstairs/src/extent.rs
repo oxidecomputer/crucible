@@ -2,7 +2,7 @@
 use std::convert::TryInto;
 use std::fmt;
 use std::fmt::Debug;
-use std::fs::{rename, File};
+use std::fs::File;
 use tokio::sync::Mutex;
 
 use anyhow::{anyhow, bail, Result};
@@ -31,45 +31,9 @@ pub struct Extent {
 }
 
 pub(crate) trait ExtentInner: Send + Debug {
-    /// Create an extent at the location requested.
-    /// Start off with the default meta data.
-    /// Note that this function is not safe to run concurrently.
-    fn create(
-        dir: &Path,
-        def: &RegionDefinition,
-        extent_number: u32,
-    ) -> Result<Self>
-    where
-        Self: Sized;
-
-    /// Opens an existing extent at the given path
-    fn open(
-        path: &Path,
-        def: &RegionDefinition,
-        extent_number: u32,
-        read_only: bool,
-        log: &Logger,
-    ) -> Result<Self>
-    where
-        Self: Sized;
-
-    fn gen_number(&self) -> Result<u64>;
-    fn flush_number(&self) -> Result<u64>;
-    fn dirty(&self) -> Result<bool>;
-
-    fn get_block_contexts(
-        &self,
-        block: u64,
-        count: u64,
-    ) -> Result<Vec<Vec<DownstairsBlockContext>>>;
-
-    /// Sets the dirty flag and updates a block context
-    ///
-    /// This should only be called from test functions
-    fn set_dirty_and_block_context(
-        &mut self,
-        block_context: &DownstairsBlockContext,
-    ) -> Result<(), CrucibleError>;
+    fn gen_number(&self) -> Result<u64, CrucibleError>;
+    fn flush_number(&self) -> Result<u64, CrucibleError>;
+    fn dirty(&self) -> Result<bool, CrucibleError>;
 
     fn flush(
         &mut self,
@@ -92,6 +56,22 @@ pub(crate) trait ExtentInner: Send + Debug {
         writes: &[&crucible_protocol::Write],
         only_write_unwritten: bool,
         iov_max: usize,
+    ) -> Result<(), CrucibleError>;
+
+    #[cfg(test)]
+    fn get_block_contexts(
+        &self,
+        block: u64,
+        count: u64,
+    ) -> Result<Vec<Vec<DownstairsBlockContext>>>;
+
+    /// Sets the dirty flag and updates a block context
+    ///
+    /// This should only be called from test functions
+    #[cfg(test)]
+    fn set_dirty_and_block_context(
+        &mut self,
+        block_context: &DownstairsBlockContext,
     ) -> Result<(), CrucibleError>;
 }
 
@@ -137,10 +117,15 @@ pub struct ExtentMeta {
     pub dirty: bool,
 }
 
-impl Default for ExtentMeta {
-    fn default() -> ExtentMeta {
+/// Extent version for SQLite-backed metadata
+///
+/// See [`extent_inner_sqlite::SqliteInner`] for the implementation.
+pub const EXTENT_META_SQLITE: u32 = 1;
+
+impl ExtentMeta {
+    pub fn new(ext_version: u32) -> ExtentMeta {
         ExtentMeta {
-            ext_version: 1,
+            ext_version,
             gen_number: 0,
             flush_number: 0,
             dirty: false,
@@ -213,9 +198,7 @@ pub fn extent_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
  * anchored under "dir".
  */
 pub fn extent_path<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
-    let mut out = extent_dir(dir, number);
-    out.push(extent_file_name(number, ExtentType::Data));
-    out
+    extent_dir(dir, number).join(extent_file_name(number, ExtentType::Data))
 }
 
 /**
@@ -225,10 +208,9 @@ pub fn extent_path<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
  * anchored under "dir".
  */
 pub fn copy_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
-    let mut out = extent_dir(dir, number);
-    out.push(extent_file_name(number, ExtentType::Data));
-    out.set_extension("copy");
-    out
+    extent_dir(dir, number)
+        .join(extent_file_name(number, ExtentType::Data))
+        .with_extension("copy")
 }
 
 /**
@@ -240,10 +222,9 @@ pub fn copy_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
  * be done by renaming the copy directory.
  */
 pub fn replace_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
-    let mut out = extent_dir(dir, number);
-    out.push(extent_file_name(number, ExtentType::Data));
-    out.set_extension("replace");
-    out
+    extent_dir(dir, number)
+        .join(extent_file_name(number, ExtentType::Data))
+        .with_extension("replace")
 }
 
 /**
@@ -255,10 +236,9 @@ pub fn replace_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
  * replace directory.
  */
 pub fn completed_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
-    let mut out = extent_dir(dir, number);
-    out.push(extent_file_name(number, ExtentType::Data));
-    out.set_extension("completed");
-    out
+    extent_dir(dir, number)
+        .join(extent_file_name(number, ExtentType::Data))
+        .with_extension("completed")
 }
 
 /**
@@ -266,10 +246,8 @@ pub fn completed_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
  * directory. Replace is handled specifically during extent open.
  */
 pub fn remove_copy_cleanup_dir<P: AsRef<Path>>(dir: P, eid: u32) -> Result<()> {
-    let mut remove_dirs = vec![copy_dir(&dir, eid)];
-    remove_dirs.push(completed_dir(&dir, eid));
-
-    for d in remove_dirs {
+    for f in [copy_dir, completed_dir] {
+        let d = f(&dir, eid);
         if Path::new(&d).exists() {
             std::fs::remove_dir_all(&d)?;
         }
@@ -615,7 +593,7 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
         log,
         "Move directory  {:?} to {:?}", replace_dir, completed_dir
     );
-    rename(replace_dir, &completed_dir)?;
+    std::fs::rename(replace_dir, &completed_dir)?;
 
     sync_path(&destination_dir, log)?;
 

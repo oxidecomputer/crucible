@@ -3,7 +3,7 @@ use crate::{
     cdt, crucible_bail,
     extent::{
         check_input, extent_path, DownstairsBlockContext, ExtentInner,
-        ExtentMeta,
+        ExtentMeta, EXTENT_META_SQLITE,
     },
     integrity_hash, mkdir_for_file,
     region::{BatchedPwritev, JobOrReconciliationId},
@@ -46,7 +46,7 @@ pub struct SqliteInner {
 }
 
 impl ExtentInner for SqliteInner {
-    fn gen_number(&self) -> Result<u64> {
+    fn gen_number(&self) -> Result<u64, CrucibleError> {
         let mut stmt = self.metadb.prepare_cached(
             "SELECT value FROM metadata where name='gen_number'",
         )?;
@@ -57,7 +57,7 @@ impl ExtentInner for SqliteInner {
         Ok(gen_number)
     }
 
-    fn flush_number(&self) -> Result<u64> {
+    fn flush_number(&self) -> Result<u64, CrucibleError> {
         let mut stmt = self.metadb.prepare_cached(
             "SELECT value FROM metadata where name='flush_number'",
         )?;
@@ -68,295 +68,8 @@ impl ExtentInner for SqliteInner {
         Ok(flush_number)
     }
 
-    fn dirty(&self) -> Result<bool> {
+    fn dirty(&self) -> Result<bool, CrucibleError> {
         Ok(self.dirty.get())
-    }
-
-    fn set_dirty_and_block_context(
-        &mut self,
-        block_context: &DownstairsBlockContext,
-    ) -> Result<(), CrucibleError> {
-        self.set_dirty()?;
-        self.set_block_context(block_context)?;
-        Ok(())
-    }
-
-    /// For a given block range, return all context rows since the last flush.
-    /// `get_block_contexts` returns a `Vec<Vec<DownstairsBlockContext>>` of
-    /// length equal to `count`. Each `Vec<DownstairsBlockContext>` inside this
-    /// parent Vec contains all contexts for a single block.
-    fn get_block_contexts(
-        &self,
-        block: u64,
-        count: u64,
-    ) -> Result<Vec<Vec<DownstairsBlockContext>>> {
-        let stmt =
-            "SELECT block, hash, nonce, tag, on_disk_hash FROM block_context \
-             WHERE block BETWEEN ?1 AND ?2";
-        let mut stmt = self.metadb.prepare_cached(stmt)?;
-
-        let stmt_iter =
-            stmt.query_map(params![block, block + count - 1], |row| {
-                let block_index: u64 = row.get(0)?;
-                let hash: i64 = row.get(1)?;
-                let nonce: Option<[u8; 12]> = row.get(2)?;
-                let tag: Option<[u8; 16]> = row.get(3)?;
-                let on_disk_hash: i64 = row.get(4)?;
-
-                Ok((block_index, hash, nonce, tag, on_disk_hash))
-            })?;
-
-        let mut results = Vec::with_capacity(count as usize);
-        for _i in 0..count {
-            results.push(Vec::new());
-        }
-
-        for row in stmt_iter {
-            let (block_index, hash, nonce, tag, on_disk_hash) = row?;
-
-            let encryption_context = if let Some(nonce) = nonce {
-                tag.map(|tag| EncryptionContext { nonce, tag })
-            } else {
-                None
-            };
-
-            let ctx = DownstairsBlockContext {
-                block_context: BlockContext {
-                    hash: hash as u64,
-                    encryption_context,
-                },
-                block: block_index,
-                on_disk_hash: on_disk_hash as u64,
-            };
-
-            results[(ctx.block - block) as usize].push(ctx);
-        }
-
-        Ok(results)
-    }
-
-    fn create(
-        dir: &Path,
-        def: &RegionDefinition,
-        extent_number: u32,
-    ) -> Result<Self> {
-        let mut path = extent_path(dir, extent_number);
-        let bcount = def.extent_size().value;
-        let size = def.block_size().checked_mul(bcount).unwrap();
-
-        mkdir_for_file(&path)?;
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&path)?;
-
-        file.set_len(size)?;
-        file.seek(SeekFrom::Start(0))?;
-
-        let mut seed = dir.to_path_buf();
-        seed.push("seed");
-        seed.set_extension("db");
-        path.set_extension("db");
-
-        // Instead of creating the sqlite db for every extent, create it only
-        // once, and copy from a seed db when creating other extents. This
-        // minimizes Region create time.
-        let metadb = if Path::new(&seed).exists() {
-            std::fs::copy(&seed, &path)?;
-
-            open_sqlite_connection(&path)?
-        } else {
-            /*
-             * Create the metadata db
-             */
-            let metadb = open_sqlite_connection(&path)?;
-
-            /*
-             * Create tables and insert base data
-             */
-            metadb.execute(
-                "CREATE TABLE metadata (
-                    name TEXT PRIMARY KEY,
-                    value INTEGER NOT NULL
-                )",
-                [],
-            )?;
-
-            let meta = ExtentMeta::default();
-
-            metadb.execute(
-                "INSERT INTO metadata
-                (name, value) VALUES (?1, ?2)",
-                params!["ext_version", meta.ext_version],
-            )?;
-            metadb.execute(
-                "INSERT INTO metadata
-                (name, value) VALUES (?1, ?2)",
-                params!["gen_number", meta.gen_number],
-            )?;
-            metadb.execute(
-                "INSERT INTO metadata (name, value) VALUES (?1, ?2)",
-                params!["flush_number", meta.flush_number],
-            )?;
-            metadb.execute(
-                "INSERT INTO metadata (name, value) VALUES (?1, ?2)",
-                params!["dirty", meta.dirty],
-            )?;
-
-            // Within an extent, store a context row for each block.
-            //
-            // The Upstairs will send either an integrity hash, or an integrity
-            // hash along with some encryption context (a nonce and tag).
-            //
-            // The Downstairs will have to record multiple context rows for each
-            // block, because while what is committed to sqlite is durable (due
-            // to the write-ahead logging and the fact that we set PRAGMA
-            // SYNCHRONOUS), what is written to the extent file is not durable
-            // until a flush of that file is performed.
-            //
-            // Any of the context rows written between flushes could be valid
-            // until we call flush and remove context rows where the integrity
-            // hash does not match what was actually flushed to disk.
-
-            // in WITHOUT ROWID mode, SQLite arranges the tables on-disk ordered
-            // by the primary key. since we're always doing operations on
-            // contiguous ranges of blocks, this is great for us. The only catch
-            // is that you can actually see worse performance with large rows
-            // (not a problem for us).
-            //
-            // From https://www.sqlite.org/withoutrowid.html:
-            // > WITHOUT ROWID tables work best when individual rows are not too
-            // > large. A good rule-of-thumb is that the average size of a
-            // > single row in a WITHOUT ROWID table should be less than about
-            // > 1/20th the size of a database page. That means that rows should
-            // > not contain more than about 50 bytes each for a 1KiB page size
-            // > or about 200 bytes each for 4KiB page size.
-            //
-            // The default SQLite page size is 4KiB, per
-            // https://sqlite.org/pgszchng2016.html
-            //
-            // The primary key is also a uniqueness constraint. Because the
-            // on_disk_hash is a hash of the data AFTER encryption, we only need
-            // (block, on_disk_hash). A duplicate write with a different
-            // encryption context necessarily results in a different on disk
-            // hash.
-            metadb.execute(
-                "CREATE TABLE block_context (
-                    block INTEGER,
-                    hash INTEGER,
-                    nonce BLOB,
-                    tag BLOB,
-                    on_disk_hash INTEGER,
-                    PRIMARY KEY (block, on_disk_hash)
-                ) WITHOUT ROWID",
-                [],
-            )?;
-
-            // write out
-            metadb.close().map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("metadb.close() failed! {}", e.1),
-                )
-            })?;
-
-            // Save it as DB seed
-            std::fs::copy(&path, &seed)?;
-
-            open_sqlite_connection(&path)?
-        };
-
-        // The seed DB or default metadata should not have dirty set, but we'll
-        // check here for completeness.
-        let dirty = Self::get_dirty_from_metadb(&metadb)?;
-        assert!(!dirty);
-
-        /*
-         * Complete the construction of our new extent
-         */
-        Ok(Self {
-            file,
-            dirty: dirty.into(),
-            extent_size: def.extent_size(),
-            metadb,
-            extent_number,
-            dirty_blocks: BTreeMap::new(),
-        })
-    }
-
-    fn open(
-        path: &Path,
-        def: &RegionDefinition,
-        extent_number: u32,
-        read_only: bool,
-        log: &Logger,
-    ) -> Result<Self> {
-        let bcount = def.extent_size().value;
-        let size = def.block_size().checked_mul(bcount).unwrap();
-
-        /*
-         * Open the extent file and verify the size is as we expect.
-         */
-        let file =
-            match OpenOptions::new().read(true).write(!read_only).open(path) {
-                Err(e) => {
-                    error!(
-                        log,
-                        "Open of {path:?} for extent#{extent_number} \
-                         returned: {e}",
-                    );
-                    bail!(
-                        "Open of {path:?} for extent#{extent_number} \
-                         returned: {e}",
-                    );
-                }
-                Ok(f) => {
-                    let cur_size = f.metadata().unwrap().len();
-                    if size != cur_size {
-                        bail!(
-                            "File size {size:?} does not match \
-                             expected {cur_size:?}",
-                        );
-                    }
-                    f
-                }
-            };
-
-        /*
-         * Open a connection to the metadata db
-         */
-        let mut path = path.to_path_buf();
-        path.set_extension("db");
-        let metadb = match open_sqlite_connection(&path) {
-            Err(e) => {
-                error!(
-                    log,
-                    "Error: Open of db file {path:?} for \
-                     extent#{extent_number} returned: {e}",
-                );
-                bail!(
-                    "Open of db file {path:?} for extent#{extent_number} \
-                     returned: {e}",
-                );
-            }
-            Ok(m) => m,
-        };
-
-        let dirty = Self::get_dirty_from_metadb(&metadb)?;
-
-        let mut out = Self {
-            file,
-            metadb,
-            extent_size: def.extent_size(),
-            dirty: dirty.into(),
-            extent_number,
-            dirty_blocks: BTreeMap::new(),
-        };
-        // Clean out any irrelevant block contexts, which may be present
-        // if downstairs crashed between a write() and a flush().
-        out.fully_rehash_and_clean_all_stale_contexts(false)?;
-        Ok(out)
     }
 
     fn flush(
@@ -768,9 +481,306 @@ impl ExtentInner for SqliteInner {
         }
         Ok(())
     }
+
+    /// For a given block range, return all context rows since the last flush.
+    /// `get_block_contexts` returns a `Vec<Vec<DownstairsBlockContext>>` of
+    /// length equal to `count`. Each `Vec<DownstairsBlockContext>` inside this
+    /// parent Vec contains all contexts for a single block.
+    #[cfg(test)]
+    fn get_block_contexts(
+        &self,
+        block: u64,
+        count: u64,
+    ) -> Result<Vec<Vec<DownstairsBlockContext>>> {
+        SqliteInner::get_block_contexts(self, block, count)
+    }
+
+    #[cfg(test)]
+    fn set_dirty_and_block_context(
+        &mut self,
+        block_context: &DownstairsBlockContext,
+    ) -> Result<(), CrucibleError> {
+        self.set_dirty()?;
+        self.set_block_context(block_context)?;
+        Ok(())
+    }
 }
 
 impl SqliteInner {
+    fn get_block_contexts(
+        &self,
+        block: u64,
+        count: u64,
+    ) -> Result<Vec<Vec<DownstairsBlockContext>>> {
+        let stmt =
+            "SELECT block, hash, nonce, tag, on_disk_hash FROM block_context \
+             WHERE block BETWEEN ?1 AND ?2";
+        let mut stmt = self.metadb.prepare_cached(stmt)?;
+
+        let stmt_iter =
+            stmt.query_map(params![block, block + count - 1], |row| {
+                let block_index: u64 = row.get(0)?;
+                let hash: i64 = row.get(1)?;
+                let nonce: Option<[u8; 12]> = row.get(2)?;
+                let tag: Option<[u8; 16]> = row.get(3)?;
+                let on_disk_hash: i64 = row.get(4)?;
+
+                Ok((block_index, hash, nonce, tag, on_disk_hash))
+            })?;
+
+        let mut results = Vec::with_capacity(count as usize);
+        for _i in 0..count {
+            results.push(Vec::new());
+        }
+
+        for row in stmt_iter {
+            let (block_index, hash, nonce, tag, on_disk_hash) = row?;
+
+            let encryption_context = if let Some(nonce) = nonce {
+                tag.map(|tag| EncryptionContext { nonce, tag })
+            } else {
+                None
+            };
+
+            let ctx = DownstairsBlockContext {
+                block_context: BlockContext {
+                    hash: hash as u64,
+                    encryption_context,
+                },
+                block: block_index,
+                on_disk_hash: on_disk_hash as u64,
+            };
+
+            results[(ctx.block - block) as usize].push(ctx);
+        }
+
+        Ok(results)
+    }
+
+    pub fn create(
+        dir: &Path,
+        def: &RegionDefinition,
+        extent_number: u32,
+    ) -> Result<Self> {
+        let mut path = extent_path(dir, extent_number);
+        let bcount = def.extent_size().value;
+        let size = def.block_size().checked_mul(bcount).unwrap();
+
+        mkdir_for_file(&path)?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path)?;
+
+        file.set_len(size)?;
+        file.seek(SeekFrom::Start(0))?;
+
+        let mut seed = dir.to_path_buf();
+        seed.push("seed");
+        seed.set_extension("db");
+        path.set_extension("db");
+
+        // Instead of creating the sqlite db for every extent, create it only
+        // once, and copy from a seed db when creating other extents. This
+        // minimizes Region create time.
+        let metadb = if Path::new(&seed).exists() {
+            std::fs::copy(&seed, &path)?;
+
+            open_sqlite_connection(&path)?
+        } else {
+            /*
+             * Create the metadata db
+             */
+            let metadb = open_sqlite_connection(&path)?;
+
+            /*
+             * Create tables and insert base data
+             */
+            metadb.execute(
+                "CREATE TABLE metadata (
+                    name TEXT PRIMARY KEY,
+                    value INTEGER NOT NULL
+                )",
+                [],
+            )?;
+
+            let meta = ExtentMeta::new(EXTENT_META_SQLITE);
+
+            metadb.execute(
+                "INSERT INTO metadata
+                (name, value) VALUES (?1, ?2)",
+                params!["ext_version", meta.ext_version],
+            )?;
+            metadb.execute(
+                "INSERT INTO metadata
+                (name, value) VALUES (?1, ?2)",
+                params!["gen_number", meta.gen_number],
+            )?;
+            metadb.execute(
+                "INSERT INTO metadata (name, value) VALUES (?1, ?2)",
+                params!["flush_number", meta.flush_number],
+            )?;
+            metadb.execute(
+                "INSERT INTO metadata (name, value) VALUES (?1, ?2)",
+                params!["dirty", meta.dirty],
+            )?;
+
+            // Within an extent, store a context row for each block.
+            //
+            // The Upstairs will send either an integrity hash, or an integrity
+            // hash along with some encryption context (a nonce and tag).
+            //
+            // The Downstairs will have to record multiple context rows for each
+            // block, because while what is committed to sqlite is durable (due
+            // to the write-ahead logging and the fact that we set PRAGMA
+            // SYNCHRONOUS), what is written to the extent file is not durable
+            // until a flush of that file is performed.
+            //
+            // Any of the context rows written between flushes could be valid
+            // until we call flush and remove context rows where the integrity
+            // hash does not match what was actually flushed to disk.
+
+            // in WITHOUT ROWID mode, SQLite arranges the tables on-disk ordered
+            // by the primary key. since we're always doing operations on
+            // contiguous ranges of blocks, this is great for us. The only catch
+            // is that you can actually see worse performance with large rows
+            // (not a problem for us).
+            //
+            // From https://www.sqlite.org/withoutrowid.html:
+            // > WITHOUT ROWID tables work best when individual rows are not too
+            // > large. A good rule-of-thumb is that the average size of a
+            // > single row in a WITHOUT ROWID table should be less than about
+            // > 1/20th the size of a database page. That means that rows should
+            // > not contain more than about 50 bytes each for a 1KiB page size
+            // > or about 200 bytes each for 4KiB page size.
+            //
+            // The default SQLite page size is 4KiB, per
+            // https://sqlite.org/pgszchng2016.html
+            //
+            // The primary key is also a uniqueness constraint. Because the
+            // on_disk_hash is a hash of the data AFTER encryption, we only need
+            // (block, on_disk_hash). A duplicate write with a different
+            // encryption context necessarily results in a different on disk
+            // hash.
+            metadb.execute(
+                "CREATE TABLE block_context (
+                    block INTEGER,
+                    hash INTEGER,
+                    nonce BLOB,
+                    tag BLOB,
+                    on_disk_hash INTEGER,
+                    PRIMARY KEY (block, on_disk_hash)
+                ) WITHOUT ROWID",
+                [],
+            )?;
+
+            // write out
+            metadb.close().map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("metadb.close() failed! {}", e.1),
+                )
+            })?;
+
+            // Save it as DB seed
+            std::fs::copy(&path, &seed)?;
+
+            open_sqlite_connection(&path)?
+        };
+
+        // The seed DB or default metadata should not have dirty set, but we'll
+        // check here for completeness.
+        let dirty = Self::get_dirty_from_metadb(&metadb)?;
+        assert!(!dirty);
+
+        /*
+         * Complete the construction of our new extent
+         */
+        Ok(Self {
+            file,
+            dirty: dirty.into(),
+            extent_size: def.extent_size(),
+            metadb,
+            extent_number,
+            dirty_blocks: BTreeMap::new(),
+        })
+    }
+
+    pub fn open(
+        path: &Path,
+        def: &RegionDefinition,
+        extent_number: u32,
+        read_only: bool,
+        log: &Logger,
+    ) -> Result<Self> {
+        let bcount = def.extent_size().value;
+        let size = def.block_size().checked_mul(bcount).unwrap();
+
+        /*
+         * Open the extent file and verify the size is as we expect.
+         */
+        let file =
+            match OpenOptions::new().read(true).write(!read_only).open(path) {
+                Err(e) => {
+                    error!(
+                        log,
+                        "Open of {path:?} for extent#{extent_number} \
+                         returned: {e}",
+                    );
+                    bail!(
+                        "Open of {path:?} for extent#{extent_number} \
+                         returned: {e}",
+                    );
+                }
+                Ok(f) => {
+                    let cur_size = f.metadata().unwrap().len();
+                    if size != cur_size {
+                        bail!(
+                            "File size {size:?} does not match \
+                             expected {cur_size:?}",
+                        );
+                    }
+                    f
+                }
+            };
+
+        /*
+         * Open a connection to the metadata db
+         */
+        let mut path = path.to_path_buf();
+        path.set_extension("db");
+        let metadb = match open_sqlite_connection(&path) {
+            Err(e) => {
+                error!(
+                    log,
+                    "Error: Open of db file {path:?} for \
+                     extent#{extent_number} returned: {e}",
+                );
+                bail!(
+                    "Open of db file {path:?} for extent#{extent_number} \
+                     returned: {e}",
+                );
+            }
+            Ok(m) => m,
+        };
+
+        let dirty = Self::get_dirty_from_metadb(&metadb)?;
+
+        let mut out = Self {
+            file,
+            metadb,
+            extent_size: def.extent_size(),
+            dirty: dirty.into(),
+            extent_number,
+            dirty_blocks: BTreeMap::new(),
+        };
+        // Clean out any irrelevant block contexts, which may be present
+        // if downstairs crashed between a write() and a flush().
+        out.fully_rehash_and_clean_all_stale_contexts(false)?;
+        Ok(out)
+    }
+
     fn set_dirty(&self) -> Result<()> {
         if !self.dirty.get() {
             let _ = self
