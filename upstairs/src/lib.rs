@@ -5370,10 +5370,12 @@ impl Upstairs {
         let ds_flow_control = ds.flow_control;
         let ds_extents_repaired = ds.extents_repaired;
         let ds_extents_confirmed = ds.extents_confirmed;
+        let up_backpressure = self.guest.backpressure_us.load(Ordering::SeqCst);
 
         cdt::up__status!(|| {
             let arg = Arg {
                 up_count,
+                up_backpressure,
                 ds_count,
                 ds_state: ds_state.0,
                 ds_io_count,
@@ -9892,6 +9894,7 @@ async fn process_new_io(
 pub struct Arg {
     pub up_count: u32,
     pub ds_count: u32,
+    pub up_backpressure: u64,
     pub ds_state: [DsState; 3],
     pub ds_io_count: IOStateCount,
     pub ds_reconciled: usize,
