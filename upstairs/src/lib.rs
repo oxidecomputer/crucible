@@ -8952,6 +8952,14 @@ pub struct Guest {
 
     /// Backpressure configuration, as a starting point and max delay
     backpressure_config: BackpressureConfig,
+
+    /// Lock held during backpressure delay
+    ///
+    /// Without this lock, multiple tasks could submit jobs to the upstairs and
+    /// wait in parallel, which defeats the purpose of backpressure (since you
+    /// could send arbitrarily many jobs at high speed by sending them from
+    /// different tasks).
+    backpressure_lock: Mutex<()>,
 }
 
 /// Configuration for host-side backpressure
@@ -8996,12 +9004,13 @@ impl Guest {
             bw_limit: None,
 
             block_size: AtomicU64::new(0),
-            backpressure_us: AtomicU64::new(0),
 
+            backpressure_us: AtomicU64::new(0),
             backpressure_config: BackpressureConfig {
                 start: 0.5,
                 max_delay: Duration::from_millis(5),
             },
+            backpressure_lock: Mutex::new(()),
         }
     }
 
@@ -9034,7 +9043,9 @@ impl Guest {
         let bp =
             Duration::from_micros(self.backpressure_us.load(Ordering::SeqCst));
         if bp > Duration::ZERO {
+            let _guard = self.backpressure_lock.lock().await;
             tokio::time::sleep(bp).await;
+            drop(_guard);
         }
 
         self.reqs.lock().await.push_back(BlockReq::new(op, send));
