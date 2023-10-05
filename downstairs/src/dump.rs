@@ -756,7 +756,7 @@ async fn show_extent_block(
                     if depth < ctxs.len() {
                         if let Some(ec) = ctxs[depth] {
                             nonces.push(&ec.nonce);
-                            hex::encode(&ec.nonce)
+                            hex::encode(ec.nonce)
                         } else {
                             all_same_len = false;
                             "".to_string()
@@ -815,7 +815,7 @@ async fn show_extent_block(
                     if depth < ctxs.len() {
                         if let Some(ec) = ctxs[depth] {
                             tags.push(&ec.tag);
-                            hex::encode(&ec.tag)
+                            hex::encode(ec.tag)
                         } else {
                             all_same_len = false;
                             "".to_string()
