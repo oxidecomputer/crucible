@@ -6316,6 +6316,9 @@ impl Upstairs {
                     | DsState::Replay
                     | DsState::Repair
                     | DsState::LiveRepair => {} // Okay
+
+                    DsState::LiveRepairReady if self.read_only => {} // Okay
+
                     _ => {
                         panic!(
                             "[{}] {} Invalid transition: {:?} -> {:?}",
