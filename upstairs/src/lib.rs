@@ -3729,8 +3729,8 @@ impl Downstairs {
             IOop::Write { writes, .. }
             | IOop::WriteUnwritten { writes, .. } => {
                 if let Some(f) = writes.get(0) {
-                    self.write_bytes_outstanding += writes.len() as u64
-                        * f.offset.block_size_in_bytes() as u64;
+                    self.write_bytes_outstanding +=
+                        writes.iter().map(|w| w.data.len() as u64).sum::<u64>();
                 }
             }
             _ => (),
@@ -4806,14 +4806,14 @@ impl Downstairs {
                 match &job.work {
                     IOop::Write { writes, .. }
                     | IOop::WriteUnwritten { writes, .. } => {
-                        if let Some(f) = writes.get(0) {
-                            self.write_bytes_outstanding
-                                .checked_sub(
-                                    writes.len() as u64
-                                        * f.offset.block_size_in_bytes() as u64,
-                                )
-                                .unwrap();
-                        }
+                        self.write_bytes_outstanding
+                            .checked_sub(
+                                writes
+                                    .iter()
+                                    .map(|w| w.data.len() as u64)
+                                    .sum::<u64>(),
+                            )
+                            .unwrap();
                     }
                     _ => (),
                 }
@@ -5419,11 +5419,13 @@ impl Upstairs {
         let ds_extents_confirmed = ds.extents_confirmed;
         let ds_ro_lr_skipped = ds.ro_lr_skipped;
         let up_backpressure = self.guest.backpressure_us.load(Ordering::SeqCst);
+        let write_bytes_out = ds.write_bytes_outstanding;
 
         cdt::up__status!(|| {
             let arg = Arg {
                 up_count,
                 up_backpressure,
+                write_bytes_out,
                 ds_count,
                 ds_state: ds_state.0,
                 ds_io_count,
@@ -9077,7 +9079,7 @@ impl Guest {
             backpressure_us: AtomicU64::new(0),
             backpressure_config: BackpressureConfig {
                 start: 1024u64.pow(3), // 1 GiB
-                scale: 9.3e-11,        // Delay for 10ms at 1 GB of extra bytes
+                scale: 9.3e-8,         // Delay of 10ms at 1 GB of extra bytes
             },
             backpressure_lock: Mutex::new(()),
         }
@@ -9990,6 +9992,8 @@ pub struct Arg {
     pub up_backpressure: u64,
     /// Jobs on the downstairs work queue.
     pub ds_count: u32,
+    /// Number of write bytes in flight
+    pub write_bytes_out: u64,
     /// State of a downstairs
     pub ds_state: [DsState; 3],
     /// Counters for each state of a downstairs job.
