@@ -211,7 +211,12 @@ pub(crate) mod protocol_test {
                     encrypted: _,
                     alternate_versions: _,
                 } => {
-                    info!(self.inner.log, "negotiate packet {:?} (upstairs read-only {})", packet, read_only);
+                    info!(
+                        self.inner.log,
+                        "negotiate packet {:?} (upstairs read-only {})",
+                        packet,
+                        read_only
+                    );
 
                     if *read_only != self.inner.read_only {
                         bail!("read only mismatch!");
@@ -2886,42 +2891,41 @@ pub(crate) mod protocol_test {
 
         let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver().await;
 
-        // The read should be served as normal
-        {
-            error!(harness.log, "submitting final read!");
-
-            {
-                let harness = harness.clone();
-
-                // We must tokio::spawn here because `read` will wait for the
-                // response to come back before returning
-                tokio::spawn(async move {
-                    let buffer = Buffer::new(512);
-                    harness
-                        .guest
-                        .read(Block::new_512(0), buffer)
-                        .await
-                        .unwrap();
-                });
+        // Wait for all three downstairs to be online before we send
+        // our final read.
+        loop {
+            let qwq = harness.guest.query_work_queue().await.unwrap();
+            if qwq.active_count == 3 {
+                break;
             }
-
-            // All downstairs should see it
-
-            bail_assert!(matches!(
-                ds1_messages.recv().await.unwrap(),
-                Message::ReadRequest { .. },
-            ));
-
-            bail_assert!(matches!(
-                ds2_messages.recv().await.unwrap(),
-                Message::ReadRequest { .. },
-            ));
-
-            bail_assert!(matches!(
-                ds3_messages.recv().await.unwrap(),
-                Message::ReadRequest { .. },
-            ));
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
+        info!(harness.log, "submitting final read!");
+
+        // The read should be served as normal
+        let harness = harness.clone();
+
+        // We must tokio::spawn here because `read` will wait for the
+        // response to come back before returning
+        tokio::spawn(async move {
+            let buffer = Buffer::new(512);
+            harness.guest.read(Block::new_512(0), buffer).await.unwrap();
+        });
+
+        // All downstairs should see it
+        bail_assert!(matches!(
+            ds1_messages.recv().await.unwrap(),
+            Message::ReadRequest { .. },
+        ));
+        bail_assert!(matches!(
+            ds2_messages.recv().await.unwrap(),
+            Message::ReadRequest { .. },
+        ));
+
+        bail_assert!(matches!(
+            ds3_messages.recv().await.unwrap(),
+            Message::ReadRequest { .. },
+        ));
 
         Ok(())
     }
