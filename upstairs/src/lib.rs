@@ -3728,10 +3728,8 @@ impl Downstairs {
         match &io.work {
             IOop::Write { writes, .. }
             | IOop::WriteUnwritten { writes, .. } => {
-                if let Some(f) = writes.get(0) {
-                    self.write_bytes_outstanding +=
-                        writes.iter().map(|w| w.data.len() as u64).sum::<u64>();
-                }
+                self.write_bytes_outstanding +=
+                    writes.iter().map(|w| w.data.len() as u64).sum::<u64>();
             }
             _ => (),
         };
