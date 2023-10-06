@@ -4804,7 +4804,8 @@ impl Downstairs {
                 match &job.work {
                     IOop::Write { writes, .. }
                     | IOop::WriteUnwritten { writes, .. } => {
-                        self.write_bytes_outstanding
+                        self.write_bytes_outstanding = self
+                            .write_bytes_outstanding
                             .checked_sub(
                                 writes
                                     .iter()
