@@ -5900,10 +5900,19 @@ impl Upstairs {
         downstairs.enqueue(fl, ds_done_tx).await;
 
         // While we've got the lock, update our current backpressure
-        self.guest
-            .set_backpressure(downstairs.write_bytes_outstanding);
+        self.set_backpressure_with_downstairs(downstairs);
 
         Ok(())
+    }
+
+    fn set_backpressure_with_downstairs(&self, ds: &Downstairs) {
+        let dsw_max = ClientId::iter()
+            .map(|cid| ds.total_live_work(cid))
+            .max()
+            .unwrap_or(0);
+        let ratio = dsw_max as f64 / IO_OUTSTANDING_MAX as f64;
+        self.guest
+            .set_backpressure(ds.write_bytes_outstanding, ratio);
     }
 
     /*
@@ -5949,8 +5958,7 @@ impl Upstairs {
         let ddef = self.ddef.lock().await.get_def().unwrap();
 
         // While we've got the lock, update our current backpressure
-        self.guest
-            .set_backpressure(downstairs.write_bytes_outstanding);
+        self.set_backpressure_with_downstairs(&downstairs);
 
         /*
          * Verify IO is in range for our region.  If not give up now and
@@ -9037,9 +9045,14 @@ pub struct Guest {
 #[derive(Copy, Clone, Debug)]
 struct BackpressureConfig {
     /// When should backpressure start (in bytes)?
-    start: u64,
-    /// Scale for quadratic backpressure
-    scale: f64,
+    bytes_start: u64,
+    /// Scale for byte-based quadratic backpressure
+    bytes_scale: f64,
+
+    /// When should queue-based backpressure start?
+    queue_start: f64,
+    /// Maximum queue-based delay
+    queue_max_delay: Duration,
 }
 
 /*
@@ -9077,8 +9090,10 @@ impl Guest {
 
             backpressure_us: AtomicU64::new(0),
             backpressure_config: BackpressureConfig {
-                start: 1024u64.pow(3), // 1 GiB
-                scale: 9.3e-8,         // Delay of 10ms at 1 GB of extra bytes
+                bytes_start: 1024u64.pow(3), // Start at 1 GiB
+                bytes_scale: 9.3e-8,         // Delay of 10ms at 2 GiB in-flight
+                queue_start: 0.5,
+                queue_max_delay: Duration::from_millis(5),
             },
             backpressure_lock: Mutex::new(()),
         }
@@ -9130,15 +9145,27 @@ impl Guest {
     }
 
     /// Set `self.backpressure_us` based on outstanding IO ratio
-    fn set_backpressure(&self, bytes: u64) {
+    fn set_backpressure(&self, bytes: u64, ratio: f64) {
         // Check to see if the number of outstanding write bytes (between
         // the upstairs and downstairs) is particularly high.  If so,
         // apply some backpressure by delaying host operations, with a
         // quadratically-increasing delay.
-        let d = (bytes.saturating_sub(self.backpressure_config.start) as f64
-            * self.backpressure_config.scale)
-            .powf(2.0);
-        self.backpressure_us.store(d as u64, Ordering::SeqCst);
+        let d1 = (bytes.saturating_sub(self.backpressure_config.bytes_start)
+            as f64
+            * self.backpressure_config.bytes_scale)
+            .powf(2.0) as u64;
+
+        // Compute an alternate delay based on queue length
+        let d2 = self
+            .backpressure_config
+            .queue_max_delay
+            .mul_f64(
+                ((ratio - self.backpressure_config.queue_start).max(0.0)
+                    / (1.0 - self.backpressure_config.queue_start))
+                    .powf(2.0),
+            )
+            .as_micros() as u64;
+        self.backpressure_us.store(d1.max(d2), Ordering::SeqCst);
     }
 
     /*
@@ -9676,8 +9703,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<()>) {
 /// If the number is too high, then mark that downstairs as failed, scrub
 /// any outstanding jobs.
 ///
-/// Returns a ratio indicating how close the worst downstairs is to exceeding
-/// the IOP limit; 1.0 means the worst downstairs is at the limit.
+/// Updates downstairs backpressure to help keep the system stable
 async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<()>) {
     let active = up.active.lock().await;
     let up_state = active.up_state;
@@ -9687,6 +9713,8 @@ async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<()>) {
     }
     let mut ds = up.downstairs.lock().await;
     drop(active);
+
+    up.set_backpressure_with_downstairs(&ds);
 
     let mut notify_guest = false;
     for cid in ClientId::iter() {

@@ -483,9 +483,11 @@ pub(crate) mod protocol_test {
                 ds3.set_read_only();
             }
 
-            // Configure our guest without backpressure, to speed up tests which
-            // require triggering a timeout
-            let guest = Arc::new(Guest::new());
+            // Configure our guest without queue backpressure, to speed up tests
+            // which require triggering a timeout
+            let mut g = Guest::new();
+            g.backpressure_config.queue_max_delay = Duration::ZERO;
+            let guest = Arc::new(g);
 
             let crucible_opts = CrucibleOpts {
                 id: Uuid::new_v4(),
