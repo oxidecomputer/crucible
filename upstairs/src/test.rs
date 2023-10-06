@@ -426,8 +426,8 @@ pub(crate) mod up_test {
                 hash: read_response_hash,
                 encryption_context: Some(
                     crucible_protocol::EncryptionContext {
-                        nonce: nonce.to_vec(),
-                        tag: tag.to_vec(),
+                        nonce: nonce.into(),
+                        tag: tag.into(),
                     },
                 ),
             }],
@@ -485,8 +485,8 @@ pub(crate) mod up_test {
                     hash: thread_rng().gen(),
                     encryption_context: Some(
                         crucible_protocol::EncryptionContext {
-                            nonce: thread_rng().gen::<[u8; 12]>().to_vec(),
-                            tag: thread_rng().gen::<[u8; 16]>().to_vec(),
+                            nonce: thread_rng().gen::<[u8; 12]>(),
+                            tag: thread_rng().gen::<[u8; 16]>(),
                         },
                     ),
                 },
@@ -495,8 +495,8 @@ pub(crate) mod up_test {
                     hash: read_response_hash,
                     encryption_context: Some(
                         crucible_protocol::EncryptionContext {
-                            nonce: nonce.to_vec(),
-                            tag: tag.to_vec(),
+                            nonce: nonce.into(),
+                            tag: tag.into(),
                         },
                     ),
                 },
@@ -505,8 +505,8 @@ pub(crate) mod up_test {
                     hash: thread_rng().gen(),
                     encryption_context: Some(
                         crucible_protocol::EncryptionContext {
-                            nonce: thread_rng().gen::<[u8; 12]>().to_vec(),
-                            tag: thread_rng().gen::<[u8; 16]>().to_vec(),
+                            nonce: thread_rng().gen::<[u8; 12]>(),
+                            tag: thread_rng().gen::<[u8; 16]>(),
                         },
                     ),
                 },
@@ -1865,9 +1865,7 @@ pub(crate) mod up_test {
             is_write_unwritten,
         );
 
-        let mut sub = HashMap::new();
-        sub.insert(next_id, 0);
-        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), None);
+        let new_gtos = GtoS::new(next_id, None, None);
         {
             gw.active.insert(gw_id, new_gtos);
         }
@@ -1960,9 +1958,7 @@ pub(crate) mod up_test {
             is_write_unwritten,
         );
 
-        let mut sub = HashMap::new();
-        sub.insert(next_id, 0);
-        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), None);
+        let new_gtos = GtoS::new(next_id, None, None);
         {
             gw.active.insert(gw_id, new_gtos);
         }
@@ -2042,9 +2038,7 @@ pub(crate) mod up_test {
             is_write_unwritten,
         );
 
-        let mut sub = HashMap::new();
-        sub.insert(next_id, 0);
-        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), None);
+        let new_gtos = GtoS::new(next_id, None, None);
         {
             gw.active.insert(gw_id, new_gtos);
         }
@@ -2129,9 +2123,7 @@ pub(crate) mod up_test {
             None, None,
         );
 
-        let mut sub = HashMap::new();
-        sub.insert(next_id, 0);
-        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), None);
+        let new_gtos = GtoS::new(next_id, None, None);
         {
             gw.active.insert(gw_id, new_gtos);
         }
@@ -2210,9 +2202,7 @@ pub(crate) mod up_test {
             None, None,
         );
 
-        let mut sub = HashMap::new();
-        sub.insert(next_id, 0);
-        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), None);
+        let new_gtos = GtoS::new(next_id, None, None);
         {
             gw.active.insert(gw_id, new_gtos);
         }
@@ -2278,9 +2268,7 @@ pub(crate) mod up_test {
             None, None,
         );
 
-        let mut sub = HashMap::new();
-        sub.insert(next_id, 0);
-        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), None);
+        let new_gtos = GtoS::new(next_id, None, None);
         {
             gw.active.insert(gw_id, new_gtos);
         }
@@ -5136,8 +5124,8 @@ pub(crate) mod up_test {
 
         let (nonce, tag, _) = context.encrypt_in_place(&mut data).unwrap();
 
-        let nonce = nonce.to_vec();
-        let mut tag = tag.to_vec();
+        let nonce: [u8; 12] = nonce.into();
+        let mut tag: [u8; 16] = tag.into();
 
         // alter tag
         if tag[3] == 0xFF {
@@ -5250,8 +5238,8 @@ pub(crate) mod up_test {
 
         let (nonce, tag, _) = context.encrypt_in_place(&mut data).unwrap();
 
-        let nonce = nonce.to_vec();
-        let tag = tag.to_vec();
+        let nonce = nonce.into();
+        let tag = tag.into();
 
         let response = Ok(vec![ReadResponse {
             eid: request.eid,
@@ -9000,5 +8988,86 @@ pub(crate) mod up_test {
 
         // assert write depends on just the flush
         assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
+    }
+
+    // Test that multiple GtoS downstairs jobs work
+    #[tokio::test]
+    async fn test_multiple_gtos_bulk_read_read() {
+        let up = Upstairs::test_default(None);
+        up.set_active().await.unwrap();
+        for cid in ClientId::iter() {
+            up.ds_transition(cid, DsState::WaitActive).await;
+            up.ds_transition(cid, DsState::WaitQuorum).await;
+            up.ds_transition(cid, DsState::Active).await;
+        }
+
+        let mut gw = up.guest.guest_work.lock().await;
+
+        let gw_id = 12345;
+
+        // Create two reads
+        let first_id = JobId(1010);
+        let second_id = JobId(1011);
+
+        let mut data_buffers = HashMap::new();
+        data_buffers.insert(first_id, Buffer::new(512));
+        data_buffers.insert(second_id, Buffer::new(512));
+
+        let mut sub = HashSet::new();
+        sub.insert(first_id);
+        sub.insert(second_id);
+
+        let guest_job = GtoS::new_bulk(sub, data_buffers.clone(), None);
+
+        gw.active.insert(gw_id, guest_job);
+
+        let mut first_response_data = BytesMut::with_capacity(512);
+        first_response_data.resize(512, 0u8);
+        thread_rng().fill(&mut first_response_data[..]);
+        let first_read_response_hash =
+            integrity_hash(&[&first_response_data[..]]);
+
+        let mut second_response_data = BytesMut::with_capacity(512);
+        second_response_data.resize(512, 0u8);
+        thread_rng().fill(&mut second_response_data[..]);
+        let second_read_response_hash =
+            integrity_hash(&[&second_response_data[..]]);
+
+        let first_response = Some(vec![ReadResponse {
+            eid: 0,
+            offset: Block::new_512(0),
+            data: first_response_data.clone(),
+            block_contexts: vec![BlockContext {
+                hash: first_read_response_hash,
+                encryption_context: None,
+            }],
+        }]);
+
+        let second_response = Some(vec![ReadResponse {
+            eid: 0,
+            offset: Block::new_512(0),
+            data: second_response_data.clone(),
+            block_contexts: vec![BlockContext {
+                hash: second_read_response_hash,
+                encryption_context: None,
+            }],
+        }]);
+
+        gw.gw_ds_complete(gw_id, first_id, first_response, Ok(()), &up.log)
+            .await;
+        assert!(!gw.completed.contains(&gw_id));
+
+        gw.gw_ds_complete(gw_id, second_id, second_response, Ok(()), &up.log)
+            .await;
+        assert!(gw.completed.contains(&gw_id));
+
+        assert_eq!(
+            *data_buffers.get(&first_id).unwrap().as_vec().await,
+            first_response_data.to_vec()
+        );
+        assert_eq!(
+            *data_buffers.get(&second_id).unwrap().as_vec().await,
+            second_response_data.to_vec()
+        );
     }
 }

@@ -611,16 +611,12 @@ fn create_and_enqueue_reopen_io(
     let reopen_io =
         create_reopen_io(eid as usize, reopen_id, deps, gw_reopen_id);
 
-    let mut sub = HashMap::new();
-    sub.insert(reopen_id, 0);
-
     cdt::gw__reopen__start!(|| (gw_reopen_id, eid));
     let (send, recv) = oneshot::channel();
     let op = BlockOp::RepairOp;
     let reopen_br = BlockReq::new(op, send);
     let reopen_brw = BlockReqWaiter::new(recv);
-    let new_gtos =
-        GtoS::new(sub, Vec::new(), None, HashMap::new(), Some(reopen_br));
+    let new_gtos = GtoS::new(reopen_id, None, Some(reopen_br));
     {
         gw.active.insert(gw_reopen_id, new_gtos);
     }
@@ -653,16 +649,12 @@ fn create_and_enqueue_close_io(
         repair.to_vec(),
     );
 
-    let mut sub = HashMap::new();
-    sub.insert(close_id, 0);
-
     cdt::gw__close__start!(|| (gw_close_id, eid));
     let (send, recv) = oneshot::channel();
     let op = BlockOp::RepairOp;
     let close_br = BlockReq::new(op, send);
     let close_brw = BlockReqWaiter::new(recv);
-    let new_gtos =
-        GtoS::new(sub, Vec::new(), None, HashMap::new(), Some(close_br));
+    let new_gtos = GtoS::new(close_id, None, Some(close_br));
     {
         gw.active.insert(gw_close_id, new_gtos);
     }
@@ -691,16 +683,12 @@ fn create_and_enqueue_repair_io(
         repair,
     );
 
-    let mut sub = HashMap::new();
-    sub.insert(repair_id, 0);
-
     cdt::gw__repair__start!(|| (gw_repair_id, eid));
     let (send, recv) = oneshot::channel();
     let op = BlockOp::RepairOp;
     let repair_br = BlockReq::new(op, send);
     let repair_brw = BlockReqWaiter::new(recv);
-    let new_gtos =
-        GtoS::new(sub, Vec::new(), None, HashMap::new(), Some(repair_br));
+    let new_gtos = GtoS::new(repair_id, None, Some(repair_br));
     {
         gw.active.insert(gw_repair_id, new_gtos);
     }
@@ -717,16 +705,12 @@ fn create_and_enqueue_noop_io(
 ) -> block_req::BlockReqWaiter {
     let nio = create_noop_io(noop_id, deps, gw_noop_id);
 
-    let mut sub = HashMap::new();
-    sub.insert(noop_id, 0);
-
     cdt::gw__noop__start!(|| (gw_noop_id));
     let (send, recv) = oneshot::channel();
     let op = BlockOp::RepairOp;
     let noop_br = BlockReq::new(op, send);
     let noop_brw = BlockReqWaiter::new(recv);
-    let new_gtos =
-        GtoS::new(sub, Vec::new(), None, HashMap::new(), Some(noop_br));
+    let new_gtos = GtoS::new(noop_id, None, Some(noop_br));
     {
         gw.active.insert(gw_noop_id, new_gtos);
     }
@@ -3191,15 +3175,11 @@ pub mod repair_test {
             vec![ClientId::new(1)], // repair
         );
 
-        let mut sub = HashMap::new();
-        sub.insert(repair_ids.close_id, 0);
-
         let (send, recv) = oneshot::channel();
         let op = BlockOp::RepairOp;
         let close_br = BlockReq::new(op, send);
         let _close_brw = BlockReqWaiter::new(recv);
-        let new_gtos =
-            GtoS::new(sub, Vec::new(), None, HashMap::new(), Some(close_br));
+        let new_gtos = GtoS::new(repair_ids.close_id, None, Some(close_br));
         {
             gw.active.insert(gw_close_id, new_gtos);
         }

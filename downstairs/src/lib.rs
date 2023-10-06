@@ -32,9 +32,12 @@ use uuid::Uuid;
 pub mod admin;
 mod dump;
 mod dynamometer;
+mod extent;
 pub mod region;
 pub mod repair;
 mod stats;
+
+mod extent_inner_sqlite;
 
 use region::Region;
 
@@ -1515,10 +1518,33 @@ where
                         }
                         negotiated = NegotiationState::Ready;
                         let ds = ads.lock().await;
-                        let flush_numbers = ds.region.flush_numbers().await?;
-                        let gen_numbers = ds.region.gen_numbers().await?;
-                        let dirty_bits = ds.region.dirty().await?;
+                        let meta_info = ds.region.meta_info().await?;
                         drop(ds);
+
+                        let flush_numbers: Vec<_> = meta_info
+                            .iter()
+                            .map(|m| m.flush_number)
+                            .collect();
+                        let gen_numbers: Vec<_> = meta_info
+                            .iter()
+                            .map(|m| m.gen_number)
+                            .collect();
+                        let dirty_bits: Vec<_> = meta_info
+                            .iter()
+                            .map(|m| m.dirty)
+                            .collect();
+                        if flush_numbers.len() > 12 {
+                            info!(
+                                log,
+                                "Current flush_numbers [0..12]: {:?}",
+                                &flush_numbers[0..12]
+                            );
+                        } else {
+                            info!(
+                                log,
+                                "Current flush_numbers [0..12]: {:?}",
+                                flush_numbers);
+                        }
 
                         let mut fw = fw.lock().await;
                         if let Err(e) = fw.send(Message::ExtentVersions {
@@ -3174,6 +3200,12 @@ pub async fn start_downstairs(
         loop {
             let (sock, raddr) = listener.accept().await?;
 
+            /*
+             * We have a new connection; before we wrap it, set TCP_NODELAY
+             * to assure that we don't get Nagle'd.
+             */
+            sock.set_nodelay(true).expect("could not set TCP_NODELAY");
+
             let stream: WrappedStream = if let Some(ssl_acceptor) =
                 &ssl_acceptor
             {
@@ -3773,11 +3805,14 @@ mod test {
             block_context: BlockContext {
                 encryption_context: Some(
                     crucible_protocol::EncryptionContext {
-                        nonce: vec![1, 2, 3],
-                        tag: vec![4, 5, 6],
+                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                        tag: [
+                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                            18, 19,
+                        ],
                     },
                 ),
-                hash: 4798852240582462654, // Hash for all 9s
+                hash: 14137680576404864188, // Hash for all 9s
             },
         }]
     }

@@ -38,4 +38,4 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dependencies]
-workspace-hack = { version = "0.1", path = "../workspace-hack" }
+crucible-workspace-hack.workspace = true

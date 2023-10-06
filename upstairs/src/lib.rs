@@ -2662,6 +2662,7 @@ async fn looper(
         let deadline = tokio::time::sleep_until(deadline_secs(10.0));
         tokio::pin!(deadline);
         let tcp = sock.connect(target);
+
         tokio::pin!(tcp);
 
         let tcp: TcpStream = loop {
@@ -2694,6 +2695,12 @@ async fn looper(
                 }
             }
         };
+
+        /*
+         * We're connected; before we wrap it, set TCP_NODELAY to assure
+         * that we don't get Nagle'd.
+         */
+        tcp.set_nodelay(true).expect("could not set TCP_NODELAY");
 
         let tcp = {
             let tls_context = tls_context.lock().await;
@@ -5371,10 +5378,12 @@ impl Upstairs {
         let ds_extents_repaired = ds.extents_repaired;
         let ds_extents_confirmed = ds.extents_confirmed;
         let ds_ro_lr_skipped = ds.ro_lr_skipped;
+        let up_backpressure = self.guest.backpressure_us.load(Ordering::SeqCst);
 
         cdt::up__status!(|| {
             let arg = Arg {
                 up_count,
+                up_backpressure,
                 ds_count,
                 ds_state: ds_state.0,
                 ds_io_count,
@@ -5843,10 +5852,7 @@ impl Upstairs {
             extent_under_repair,
         );
 
-        let mut sub = HashMap::new();
-        sub.insert(next_id, 0);
-
-        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), req);
+        let new_gtos = GtoS::new(next_id, None, req);
         gw.active.insert(gw_id, new_gtos);
 
         cdt::up__to__ds__flush__start!(|| (gw_id));
@@ -5975,8 +5981,8 @@ impl Upstairs {
                 (
                     Bytes::copy_from_slice(&mut_data),
                     Some(crucible_protocol::EncryptionContext {
-                        nonce: Vec::from(nonce.as_slice()),
-                        tag: Vec::from(tag.as_slice()),
+                        nonce: nonce.into(),
+                        tag: tag.into(),
                     }),
                     hash,
                 )
@@ -6010,13 +6016,10 @@ impl Upstairs {
             is_write_unwritten,
         );
 
-        let mut sub = HashMap::new();
-        sub.insert(next_id, 0); // XXX does value here matter?
-
         /*
          * New work created, add to the guest_work HM
          */
-        let new_gtos = GtoS::new(sub, Vec::new(), None, HashMap::new(), req);
+        let new_gtos = GtoS::new(next_id, None, req);
         {
             gw.active.insert(gw_id, new_gtos);
         }
@@ -6113,10 +6116,6 @@ impl Upstairs {
             requests.push(ReadRequest { eid, offset });
         }
 
-        let mut sub = HashMap::new();
-
-        sub.insert(next_id, 0); // XXX does this value matter?
-
         let wr = create_read_eob(
             &mut downstairs,
             next_id,
@@ -6131,9 +6130,7 @@ impl Upstairs {
          * downstairs lists. We don't want to miss a completion from
          * downstairs.
          */
-        assert!(!sub.is_empty());
-        let new_gtos =
-            GtoS::new(sub, Vec::new(), Some(data), HashMap::new(), req);
+        let new_gtos = GtoS::new(next_id, Some(data), req);
         {
             gw.active.insert(gw_id, new_gtos);
         }
@@ -8619,31 +8616,26 @@ async fn test_return_iops() {
 #[derive(Debug)]
 struct GtoS {
     /*
-     * Jobs we have submitted (or will soon submit) to the storage side
-     * of the upstairs process to send on to the downstairs.
-     * The key for the hashmap is the ds_id number in the hashmap for
-     * downstairs work. The value is the buffer size of the operation in
-     * blocks.
+     * Jobs we have submitted to the storage side of the upstairs process to
+     * send on to the downstairs.  The key is the ds_id number in the hashmap
+     * for downstairs work.
      */
-    submitted: HashMap<JobId, u64>,
+    submitted: HashSet<JobId>,
     completed: Vec<JobId>,
 
     /*
-     * This buffer is provided by the guest request. If this is a read,
+     * These buffers are provided by the guest request. If this is a read,
      * data will be written here.
      */
-    guest_buffer: Option<Buffer>,
+    guest_buffers: HashMap<JobId, Buffer>,
 
     /*
      * When we have an IO between the guest and crucible, it's possible
      * it will be broken into two smaller requests if the range happens
      * to cross an extent boundary. This hashmap is a list of those
      * buffers with the key being the downstairs request ID.
-     *
-     * Data moving in/out of this buffer will be encrypted or decrypted
-     * depending on the operation.
      */
-    downstairs_buffer: HashMap<JobId, Vec<ReadResponse>>,
+    downstairs_responses: HashMap<JobId, Vec<ReadResponse>>,
 
     /*
      * Notify the caller waiting on the job to finish.
@@ -8658,18 +8650,36 @@ struct GtoS {
 }
 
 impl GtoS {
+    /// Create a new GtoS object where one Guest IO request maps to one
+    /// downstairs operation.
     pub fn new(
-        submitted: HashMap<JobId, u64>,
-        completed: Vec<JobId>,
+        ds_id: JobId,
         guest_buffer: Option<Buffer>,
-        downstairs_buffer: HashMap<JobId, Vec<ReadResponse>>,
+        req: Option<BlockReq>,
+    ) -> GtoS {
+        let mut submitted = HashSet::new();
+        submitted.insert(ds_id);
+
+        let mut guest_buffers = HashMap::new();
+        if let Some(guest_buffer) = guest_buffer {
+            guest_buffers.insert(ds_id, guest_buffer);
+        }
+
+        GtoS::new_bulk(submitted, guest_buffers, req)
+    }
+
+    /// Create a new GtoS object where one Guest IO request maps to many
+    /// downstairs operations.
+    pub fn new_bulk(
+        submitted: HashSet<JobId>,
+        guest_buffers: HashMap<JobId, Buffer>,
         req: Option<BlockReq>,
     ) -> GtoS {
         GtoS {
             submitted,
-            completed,
-            guest_buffer,
-            downstairs_buffer,
+            completed: Vec::new(),
+            guest_buffers,
+            downstairs_responses: HashMap::new(),
             req,
         }
     }
@@ -8681,16 +8691,22 @@ impl GtoS {
      */
     #[instrument]
     async fn transfer(&mut self) {
-        if let Some(guest_buffer) = &mut self.guest_buffer {
-            self.completed.sort_unstable();
-            assert!(!self.completed.is_empty());
+        assert!(!self.completed.is_empty());
 
-            let mut offset = 0;
-            let mut vec = guest_buffer.as_vec().await;
-            let mut owned_vec = guest_buffer.owned_vec().await;
+        for ds_id in &self.completed {
+            if let Some(guest_buffer) = self.guest_buffers.get_mut(ds_id) {
+                let mut offset = 0;
+                let mut vec = guest_buffer.as_vec().await;
+                let mut owned_vec = guest_buffer.owned_vec().await;
 
-            for ds_id in self.completed.iter() {
-                let responses = self.downstairs_buffer.remove(ds_id).unwrap();
+                /*
+                 * Should this panic?  If the caller is requesting a transfer,
+                 * the guest_buffer should exist. If it does not exist, then
+                 * either there is a real problem, or the operation was a write
+                 * or flush and why are we requesting a transfer for those.
+                 */
+                let responses =
+                    self.downstairs_responses.remove(ds_id).unwrap();
 
                 for response in responses {
                     // Copy over into guest memory.
@@ -8708,21 +8724,13 @@ impl GtoS {
                     }
                 }
             }
-        } else {
-            /*
-             * Should this panic?  If the caller is requesting a transfer,
-             * the guest_buffer should exist. If it does not exist, then
-             * either there is a real problem, or the operation was a write
-             * or flush and why are we requesting a transfer for those.
-             */
-            panic!("No guest buffer, no copy");
         }
     }
 
     /*
      * Notify corresponding BlockReqWaiter
      */
-    pub fn notify(self, result: Result<(), CrucibleError>) {
+    fn notify(self, result: Result<(), CrucibleError>) {
         /*
          * If present, send the result to the guest.  If this is a flush
          * issued on behalf of crucible, then there is no place to send
@@ -8736,6 +8744,14 @@ impl GtoS {
         if let Some(req) = self.req {
             req.send_result(result);
         }
+    }
+
+    pub async fn finalize(mut self, result: Result<(), CrucibleError>) {
+        if result.is_ok() {
+            self.transfer().await;
+        }
+
+        self.notify(result);
     }
 }
 
@@ -8779,7 +8795,7 @@ impl GuestWork {
      * we may not be done yet. When the required number of completions have
      * arrived from all the downstairs jobs we created, then we
      * can move forward with finishing up the guest work operation.
-     * This may include moving/decrypting data buffers from completed reads.
+     * This may include moving data buffers from completed reads.
      */
     #[instrument]
     async fn gw_ds_complete(
@@ -8794,14 +8810,15 @@ impl GuestWork {
          * A gw_id that already finished and results were sent back to
          * the guest could still have an outstanding ds_id.
          */
-        if let Some(mut gtos_job) = self.active.remove(&gw_id) {
+        let gtos_job_done = if let Some(gtos_job) = self.active.get_mut(&gw_id)
+        {
             /*
              * If the ds_id is on the submitted list, then we will take it
              * off and, if it is a read, add the read result
              * buffer to the gtos job structure for later
              * copying.
              */
-            if gtos_job.submitted.remove(&ds_id).is_some() {
+            if gtos_job.submitted.remove(&ds_id) {
                 if let Some(data) = data {
                     /*
                      * The first read buffer will become the source for the
@@ -8809,7 +8826,10 @@ impl GuestWork {
                      * combined with other buffers if the upstairs request
                      * required multiple jobs.
                      */
-                    if gtos_job.downstairs_buffer.insert(ds_id, data).is_some()
+                    if gtos_job
+                        .downstairs_responses
+                        .insert(ds_id, data)
+                        .is_some()
                     {
                         /*
                          * Only the first successful read should fill the
@@ -8834,26 +8854,29 @@ impl GuestWork {
                 );
             }
 
-            /*
-             * Copy (if present) read data back to the guest buffer they
-             * provided to us, and notify any waiters.
-             */
-            assert!(gtos_job.submitted.is_empty());
-            if result.is_ok() && gtos_job.guest_buffer.is_some() {
-                gtos_job.transfer().await;
-            }
-
-            gtos_job.notify(result);
-
-            self.completed.push(gw_id);
+            gtos_job.submitted.is_empty()
         } else {
             /*
              * XXX This is just so I can see if ever does happen.
              */
-            panic!(
-                "gw_id {} from removed job {} not on active list",
-                gw_id, ds_id
-            );
+            panic!("gw_id {} for job {} not on active list", gw_id, ds_id);
+        };
+
+        if gtos_job_done {
+            if let Some(gtos_job) = self.active.remove(&gw_id) {
+                /*
+                 * Copy (if present) read data back to the guest buffer they
+                 * provided to us, and notify any waiters.
+                 */
+                gtos_job.finalize(result).await;
+
+                self.completed.push(gw_id);
+            } else {
+                /*
+                 * XXX This is just so I can see if ever does happen.
+                 */
+                panic!("gw_id {} for remove not on active list", gw_id);
+            }
         }
     }
 }
@@ -9537,6 +9560,7 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<()>) {
 
             let mut handle = ds.ds_active.get_mut(ds_id_done).unwrap();
             let done = handle.job();
+
             /*
              * Make sure the job state has not changed since we made the
              * list.
@@ -9897,6 +9921,8 @@ async fn process_new_io(
 pub struct Arg {
     /// Jobs on the upstairs guest work queue.
     pub up_count: u32,
+    /// Backpressure value
+    pub up_backpressure: u64,
     /// Jobs on the downstairs work queue.
     pub ds_count: u32,
     /// State of a downstairs
