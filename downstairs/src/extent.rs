@@ -252,6 +252,7 @@ pub fn completed_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
         .with_extension("completed")
 }
 
+/// Produce a `PathBuf` for the SQLite-to-raw migration directory
 pub fn migrate_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
     extent_dir(dir, number)
         .join(extent_file_name(number, ExtentType::Data))
@@ -369,9 +370,9 @@ impl Extent {
             has_sqlite = false;
         }
 
-        // Pick the format for the downstairs files
-        //
-        // Right now, this only supports SQLite-flavored Downstairs
+        // Pick the format for the downstairs files.  In most cases, we will be
+        // using the raw extent format, but for read-only snapshots, we're stuck
+        // with the SQLite backend.
         let inner: Box<dyn ExtentInner> = {
             if has_sqlite {
                 let inner = extent_inner_sqlite::SqliteInner::open(
