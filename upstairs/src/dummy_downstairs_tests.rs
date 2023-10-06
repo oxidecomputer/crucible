@@ -485,9 +485,7 @@ pub(crate) mod protocol_test {
 
             // Configure our guest without backpressure, to speed up tests which
             // require triggering a timeout
-            let mut g = Guest::new();
-            g.backpressure_config.max_delay = Duration::ZERO;
-            let guest = Arc::new(g);
+            let guest = Arc::new(Guest::new());
 
             let crucible_opts = CrucibleOpts {
                 id: Uuid::new_v4(),
