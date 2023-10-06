@@ -1553,7 +1553,7 @@ fn worker(
                  * then we finish up destroying the region.
                  */
                 match &r.state {
-                    State::Requested => {
+                    State::Requested => 'requested: {
                         /*
                          * Compute the actual size required for a full region,
                          * then add our metadata overhead to that.
@@ -1574,14 +1574,25 @@ fn worker(
                         );
 
                         // if regions need to be created, do that before apply_smf.
-                        let region_dataset = regions_dataset
+                        let region_dataset = match regions_dataset
                             .ensure_child_dataset(
                                 &r.id.0,
                                 Some(reservation),
                                 Some(quota),
                                 &log,
-                            )
-                            .unwrap();
+                            ) {
+                            Ok(region_dataset) => region_dataset,
+                            Err(e) => {
+                                error!(
+                                    log,
+                                    "Dataset {} creation failed: {}",
+                                    &r.id.0,
+                                    e,
+                                );
+                                df.fail(&r.id);
+                                break 'requested;
+                            }
+                        };
 
                         // It's important that a region transition to "Created"
                         // only after it has been created as a dataset:
