@@ -9035,13 +9035,13 @@ pub struct Guest {
 ///
 /// Backpressure adds an artificial delay to host write messages (which are
 /// otherwise acked immediately, before actually being complete).  The delay is
-/// varied based on "number of write bytes outstanding", using a quadratic
-/// weight parameterized here.
+/// varied based on two metrics:
 ///
-/// To be precise, backpressure delay in usec is given by
-/// ```
-/// ((bytes - start) * scale)**2
-/// ```
+/// - number of write bytes outstanding
+/// - queue length as a fraction (where 1.0 is full)
+///
+/// These two metrics are used for quadratic backpressure, picking the larger of
+/// the two delays.
 #[derive(Copy, Clone, Debug)]
 struct BackpressureConfig {
     /// When should backpressure start (in bytes)?
