@@ -2939,7 +2939,7 @@ struct Downstairs {
      * Times we skipped repairing a downstairs because we are running
      * as read_only.
      */
-    rop_lr_skipped: ClientData<usize>,
+    ro_lr_skipped: ClientData<usize>,
 
     /**
      * Extent limit, if set, indicates the extent where LiveRepair has already
@@ -3025,7 +3025,7 @@ impl Downstairs {
             extents_confirmed: ClientData::new(0),
             live_repair_completed: ClientData::new(0),
             live_repair_aborted: ClientData::new(0),
-            rop_lr_skipped: ClientData::new(0),
+            ro_lr_skipped: ClientData::new(0),
             extent_limit: ClientMap::new(),
             repair_job_ids: BTreeMap::new(),
             repair_min_id: None,
@@ -5370,7 +5370,7 @@ impl Upstairs {
         let ds_flow_control = ds.flow_control;
         let ds_extents_repaired = ds.extents_repaired;
         let ds_extents_confirmed = ds.extents_confirmed;
-        let ds_rop_lr_skipped = ds.rop_lr_skipped;
+        let ds_ro_lr_skipped = ds.ro_lr_skipped;
 
         cdt::up__status!(|| {
             let arg = Arg {
@@ -5387,7 +5387,7 @@ impl Upstairs {
                 ds_flow_control: ds_flow_control.0,
                 ds_extents_repaired: ds_extents_repaired.0,
                 ds_extents_confirmed: ds_extents_confirmed.0,
-                ds_rop_lr_skipped: ds_rop_lr_skipped.0,
+                ds_ro_lr_skipped: ds_ro_lr_skipped.0,
             };
             (msg, arg)
         });
@@ -9922,7 +9922,7 @@ pub struct Arg {
     /// Times we have live confirmed  an extent on this downstairs.
     pub ds_extents_confirmed: [usize; 3],
     /// Times we skipped repairing a downstairs because we are read_only.
-    pub ds_rop_lr_skipped: [usize; 3],
+    pub ds_ro_lr_skipped: [usize; 3],
 }
 
 /**

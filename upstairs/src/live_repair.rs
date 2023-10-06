@@ -124,7 +124,7 @@ pub async fn check_for_repair(
                     cid,
                     DsState::Active,
                 );
-                ds.rop_lr_skipped[cid] += 1;
+                ds.ro_lr_skipped[cid] += 1;
             }
         }
 
