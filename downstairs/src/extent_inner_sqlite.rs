@@ -548,7 +548,10 @@ impl SqliteInner {
         bincode::serialize_into(meta_buf.as_mut_slice(), &meta)
             .map_err(|e| CrucibleError::IoError(e.to_string()))?;
 
-        let mut buf = vec![];
+        let mut buf = Vec::with_capacity(
+            BLOCK_META_SIZE_BYTES as usize
+                + ctxs.len() * 2 * BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize,
+        );
         buf.extend(meta_buf);
 
         // Put the context data after the metadata
