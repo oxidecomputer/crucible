@@ -125,7 +125,7 @@ pub struct ExtentMeta {
 /// This is no longer used when creating new extents, but we support opening
 /// existing SQLite-based extents because snapshot images are on read-only
 /// volumes, so we can't migrate them.
-#[allow(dead_code)] // used in unit test
+#[cfg(test)] // This constant is only actually used in unit tests
 pub const EXTENT_META_SQLITE: u32 = 1;
 
 /// Extent version for raw-file-backed metadata
