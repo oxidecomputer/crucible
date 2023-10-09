@@ -1573,7 +1573,8 @@ fn worker(
                             quota,
                         );
 
-                        // if regions need to be created, do that before apply_smf.
+                        // If regions need to be created, do that before
+                        // apply_smf.
                         let region_dataset = match regions_dataset
                             .ensure_child_dataset(
                                 &r.id.0,
@@ -1586,6 +1587,20 @@ fn worker(
                                 error!(
                                     log,
                                     "Dataset {} creation failed: {}",
+                                    &r.id.0,
+                                    e,
+                                );
+                                df.fail(&r.id);
+                                break 'requested;
+                            }
+                        };
+
+                        let dataset_path = match region_dataset.path() {
+                            Ok(dataset_path) => dataset_path,
+                            Err(e) => {
+                                error!(
+                                    log,
+                                    "Failed to find path for dataset {}: {}",
                                     &r.id.0,
                                     e,
                                 );
@@ -1607,7 +1622,7 @@ fn worker(
                             &log,
                             &downstairs_program,
                             &r,
-                            &region_dataset.path().unwrap(),
+                            &dataset_path,
                         )
                         .and_then(|_| df.created(&r.id));
 
@@ -1623,7 +1638,7 @@ fn worker(
                         let result = apply_smf(
                             &log,
                             &df,
-                            regions_dataset.path().unwrap(),
+                            dataset_path,
                             &downstairs_prefix,
                             &snapshot_prefix,
                         );
@@ -1635,12 +1650,25 @@ fn worker(
                         }
                     }
 
-                    State::Tombstoned => {
+                    State::Tombstoned => 'tombstoned: {
+                        let dataset_path = match regions_dataset.path() {
+                            Ok(dataset_path) => dataset_path,
+                            Err(e) => {
+                                error!(
+                                   log,
+                                   "Cannot get path on tombstoned dataset {}: {}",
+                                   &r.id.0,
+                                   e,
+                                );
+                                df.fail(&r.id);
+                                break 'tombstoned;
+                            }
+                        };
                         info!(log, "applying SMF actions before removal...");
                         let result = apply_smf(
                             &log,
                             &df,
-                            regions_dataset.path().unwrap(),
+                            dataset_path,
                             &downstairs_prefix,
                             &snapshot_prefix,
                         );
@@ -1651,11 +1679,22 @@ fn worker(
                             info!(log, "SMF ok!");
                         }
 
-                        // After SMF successfully shuts off downstairs, remove zfs
-                        // dataset.
-                        let region_dataset = regions_dataset
-                            .from_child_dataset(&r.id.0)
-                            .unwrap();
+                        // After SMF successfully shuts off downstairs, remove
+                        // zfs dataset.
+                        let region_dataset =
+                            match regions_dataset.from_child_dataset(&r.id.0) {
+                                Ok(region_dataset) => region_dataset,
+                                Err(e) => {
+                                    error!(
+                                        log,
+                                        "Cannot find region {:?} to remove: {}",
+                                        r.id.0,
+                                        e,
+                                    );
+                                    df.fail(&r.id);
+                                    break 'tombstoned;
+                                }
+                            };
 
                         let res =
                             worker_region_destroy(&log, &r, region_dataset)
