@@ -2628,7 +2628,10 @@ mod test {
         }
 
         // Old volume is no longer active
-        assert!(!volume.query_is_active().await?);
+        while volume.query_is_active().await? {
+            println!("Waiting for old volume to deactivate");
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+        }
 
         // Read back what we wrote.
         let buffer = Buffer::new(new_volume.total_size().await? as usize);

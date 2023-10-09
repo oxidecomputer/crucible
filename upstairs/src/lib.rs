@@ -2943,6 +2943,12 @@ struct Downstairs {
     live_repair_aborted: ClientData<usize>,
 
     /**
+     * Times we skipped repairing a downstairs because we are running
+     * as read_only.
+     */
+    ro_lr_skipped: ClientData<usize>,
+
+    /**
      * Extent limit, if set, indicates the extent where LiveRepair has already
      * submitted, or possibly even already finished the LiveRepair of this
      * extent. If you are changing this value, it must happen at the same
@@ -3026,6 +3032,7 @@ impl Downstairs {
             extents_confirmed: ClientData::new(0),
             live_repair_completed: ClientData::new(0),
             live_repair_aborted: ClientData::new(0),
+            ro_lr_skipped: ClientData::new(0),
             extent_limit: ClientMap::new(),
             repair_job_ids: BTreeMap::new(),
             repair_min_id: None,
@@ -5370,6 +5377,7 @@ impl Upstairs {
         let ds_flow_control = ds.flow_control;
         let ds_extents_repaired = ds.extents_repaired;
         let ds_extents_confirmed = ds.extents_confirmed;
+        let ds_ro_lr_skipped = ds.ro_lr_skipped;
         let up_backpressure = self.guest.backpressure_us.load(Ordering::SeqCst);
 
         cdt::up__status!(|| {
@@ -5388,6 +5396,7 @@ impl Upstairs {
                 ds_flow_control: ds_flow_control.0,
                 ds_extents_repaired: ds_extents_repaired.0,
                 ds_extents_confirmed: ds_extents_confirmed.0,
+                ds_ro_lr_skipped: ds_ro_lr_skipped.0,
             };
             (msg, arg)
         });
@@ -6304,6 +6313,9 @@ impl Upstairs {
                     | DsState::Replay
                     | DsState::Repair
                     | DsState::LiveRepair => {} // Okay
+
+                    DsState::LiveRepairReady if self.read_only => {} // Okay
+
                     _ => {
                         panic!(
                             "[{}] {} Invalid transition: {:?} -> {:?}",
@@ -9907,20 +9919,36 @@ async fn process_new_io(
  */
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Arg {
+    /// Jobs on the upstairs guest work queue.
     pub up_count: u32,
-    pub ds_count: u32,
+    /// Backpressure value
     pub up_backpressure: u64,
+    /// Jobs on the downstairs work queue.
+    pub ds_count: u32,
+    /// State of a downstairs
     pub ds_state: [DsState; 3],
+    /// Counters for each state of a downstairs job.
     pub ds_io_count: IOStateCount,
+    /// Extents repaired during initial reconciliation.
     pub ds_reconciled: usize,
+    /// Extents still needing repair during initial reconciliation.
     pub ds_reconcile_needed: usize,
+    /// Times we have completed a LiveRepair on a downstairs.
     pub ds_live_repair_completed: [usize; 3],
+    /// Times we aborted a LiveRepair on a downstairs.
     pub ds_live_repair_aborted: [usize; 3],
+    /// Times the upstairs has connected to a downstairs.
     pub ds_connected: [usize; 3],
+    /// Times this downstairs has been replaced.
     pub ds_replaced: [usize; 3],
+    /// Times flow control has been enabled on this downstairs.
     pub ds_flow_control: [usize; 3],
+    /// Times we have live repaired an extent on this downstairs.
     pub ds_extents_repaired: [usize; 3],
+    /// Times we have live confirmed  an extent on this downstairs.
     pub ds_extents_confirmed: [usize; 3],
+    /// Times we skipped repairing a downstairs because we are read_only.
+    pub ds_ro_lr_skipped: [usize; 3],
 }
 
 /**
