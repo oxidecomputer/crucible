@@ -1193,8 +1193,8 @@ pub(crate) mod test {
 
     use crate::dump::dump_region;
     use crate::extent::{
-        completed_dir, copy_dir, extent_path, migrate_dir,
-        remove_copy_cleanup_dir, DownstairsBlockContext,
+        completed_dir, copy_dir, extent_path, remove_copy_cleanup_dir,
+        DownstairsBlockContext,
     };
 
     use super::*;
@@ -1839,20 +1839,6 @@ pub(crate) mod test {
         region.extend(3).await?;
         let ddef = region.def();
 
-        // Make a copy dir for extent 1, then manually export to a raw file
-        let copy_dir = Region::create_copy_dir(&dir, 1)?;
-        let extent_file = extent_file_name(1, ExtentType::Data);
-        let mut inner = extent_inner_sqlite::SqliteInner::open(
-            &extent_dir(&dir, 1).join(&extent_file),
-            &ddef,
-            1,
-            false,
-            &log,
-        )?;
-        std::fs::write(copy_dir.join(&extent_file), inner.export()?)?;
-        let migrate_dir = migrate_dir(&dir, 1);
-        std::fs::rename(copy_dir, migrate_dir)?;
-
         // Now, we're going to mess with the file on disk a little, to make sure
         // that the migration happens from the old file (which we just exported)
         // and not from the modified database.
@@ -1882,11 +1868,29 @@ pub(crate) mod test {
                 false,
             )
             .await?;
+        drop(region);
 
-        // Now, we reopen the region.  Because there is a migration folder on
-        // disk for extent 1, we expect that migration to take priority over the
-        // current state of the database, so the write we just did should not be
-        // present in extent 1 (but should be present for extent 2)
+        // Calculate the migration from extent 1
+        let extent_file = extent_path(&dir, 1);
+        let exported = {
+            let mut inner = extent_inner_sqlite::SqliteInner::open(
+                &extent_file,
+                &ddef,
+                1,
+                false,
+                &log,
+            )?;
+            inner.export_meta_and_context()?
+        };
+
+        {
+            let mut f = OpenOptions::new()
+                .write(true)
+                .append(true)
+                .open(&extent_file)?;
+            f.write_all(&exported)?;
+        }
+
         let region =
             Region::open(&dir, new_region_options(), true, false, &log).await?;
         let out = region
@@ -1904,7 +1908,7 @@ pub(crate) mod test {
                 JobId(0),
             )
             .await?;
-        assert_eq!(out[0].data.as_ref(), [0; 512]);
+        assert_eq!(out[0].data.as_ref(), [1; 512]);
         assert_eq!(out[1].data.as_ref(), [2; 512]);
 
         Ok(())

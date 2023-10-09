@@ -2,10 +2,10 @@
 use std::convert::TryInto;
 use std::fmt;
 use std::fmt::Debug;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use tokio::sync::Mutex;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use nix::unistd::{sysconf, SysconfVar};
 
 use serde::{Deserialize, Serialize};
@@ -252,17 +252,9 @@ pub fn completed_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
         .with_extension("completed")
 }
 
-/// Produce a `PathBuf` for the SQLite-to-raw migration directory
-pub fn migrate_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
-    extent_dir(dir, number)
-        .join(extent_file_name(number, ExtentType::Data))
-        .with_extension("migrate")
-}
-
 /**
- * Remove temporary directories associated with repair and migration, except for
- * the final .replace or .migrate directory. Replace and migration are handled
- * specifically during extent open.
+ * Remove directories associated with repair except for the replace
+ * directory. Replace is handled specifically during extent open.
  */
 pub fn remove_copy_cleanup_dir<P: AsRef<Path>>(dir: P, eid: u32) -> Result<()> {
     for f in [copy_dir, completed_dir] {
@@ -301,73 +293,112 @@ impl Extent {
         // If there was an unfinished copy, then clean it up here (??)
         remove_copy_cleanup_dir(dir, number)?;
 
-        // There are two possible migrations that could be in progress:
+        // If the replace directory exists for this extent, then it means
+        // a repair was interrupted before it could finish.  We will continue
+        // the repair before we open the extent.
         //
-        // - Extent replacement, which is done from a `.replace` directory and
-        //   calls `move_replacement_extent`; this is part of live repair.
-        // - Extent migration (from SQLite to raw files), which is done from a
-        //   `.migrate` directory and `move_migrate_extent`
-        //
-        // Both of these are supposed to complete fully, but it's possible that
-        // a repair / migration was interrupted before it could finish.  If the
-        // above directories are present, then we are **ready** for repair /
-        // migration, so we will continue it before opening the extent.
-        //
-        // It is not possible for a repair and migration to both be staged;
-        // migration happens later in this function, so the repair will be
-        // completed (right here).
-        if !read_only {
-            let has_replace = replace_dir(dir, number).exists();
-            let has_migrate = migrate_dir(dir, number).exists();
-            if has_replace && has_migrate {
-                bail!(
-                    "cannot have both .replace and .migrate dirs simultaneously"
-                );
-            } else if has_replace {
-                info!(
-                    log,
-                    "Extent {} found replacement dir, finishing replacement",
-                    number
-                );
-                move_replacement_extent(dir, number as usize, log)?;
-            } else if has_migrate {
-                info!(
-                    log,
-                    "Extent {} found migrate dir, finishing migration", number
-                );
-                move_migrate_extent(dir, number as usize, log)?;
-            }
+        // Note that `move_replacement_extent` must support migrating old
+        // (SQLite-based) extents and new (raw file) extents, because it's
+        // possible that an old extent replacement crashed right before we
+        // updated Crucible.
+        let replace_dir = replace_dir(dir, number);
+        if !read_only && Path::new(&replace_dir).exists() {
+            info!(
+                log,
+                "Extent {} found replacement dir, finishing replacement",
+                number
+            );
+            move_replacement_extent(dir, number as usize, log)?;
         }
 
-        // Speaking of migration, it's happening now!  We will migrate
-        // every read-write extent with a SQLite file present.
+        // We will migrate every read-write extent with a SQLite file present.
+        //
+        // We use the presence of the .db file as a marker to whether the extent
+        // data file has been migrated.
+        //
+        // Remember, the goal is to turn 2-4 files (extent data, .db, .db-wal,
+        // db-shm) into a single file containing
+        //
+        //  - The extent data (same as before, at the beginning of the file)
+        //  - Metadata and encryption context slots (after extent data in the
+        //  - same file)
+        //
+        // Here's the procedure:
+        //
+        //  - If the .db file is present
+        //      - Truncate it to the length of the extent data. This is a no-op
+        //        normally, but lets us recover from a partial migration (e.g.
+        //        if we wrote the raw context but crashed before deleting the
+        //        .db file)
+        //      - Open the extent using our existing SQLite extent code
+        //      - Using standard extent APIs, find the metadata and encryption
+        //        context for each block. Encode this in the new raw file format
+        //        (as a Vec<u8>)
+        //      - Close the (SQLite) extent
+        //      - Open the extent data file in append mode, and append the new
+        //        raw metadata + block contexts to the end of the file.
+        //      - Close the extent data file and fsync it to disk
+        //      - Delete the .db file
+        //      - fsync the containing directory (to make the deletion durable;
+        //        not sure if this is necessary)
+        //  - At this point, the .db file is not present and the extent data
+        //    file represents a raw extent that has been persisted to disk
+        //      - If the .db-wal file is present, remove it
+        //      - If the .db-shm file is present, remove it
+        //
+        //  It's safe to fail at any point in this procedure; the next time
+        //  `Extent::open` is called, we will restart the migration (if we
+        //  haven't gotten to deleting the `.db` file).
         let mut has_sqlite = path.with_extension("db").exists();
         if has_sqlite && !read_only {
-            let mut inner = extent_inner_sqlite::SqliteInner::open(
-                &path, def, number, read_only, log,
-            )?;
-            let data = inner.export()?;
+            info!(log, "Migrating extent {number}");
+            // Truncate the file to the length of the extent data
+            {
+                let f =
+                    OpenOptions::new().read(true).write(true).open(&path)?;
+                f.set_len(def.extent_size().value * def.block_size())?;
+            }
+            // Compute metadata and context slots
+            let meta_and_context = {
+                let mut inner = extent_inner_sqlite::SqliteInner::open(
+                    &path, def, number, read_only, log,
+                )?;
+                inner.export_meta_and_context()?
+            };
+            // Append the new raw data, then sync the file to disk
+            {
+                let mut f = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .append(true)
+                    .open(&path)?;
+                f.write_all(&meta_and_context)?;
+                f.sync_all()
+                    .with_context(|| format!("{path:?}: fsync failure"))?;
+            }
 
-            // We'll put the new file into copy_dir first, then rename it to
-            // migrate_dir once it's ready.  The logic here matches the
-            // docstring in `Region::repair_extent`
-            let copy_dir = copy_dir(dir, number);
-            let extent_file_name = extent_file_name(number, ExtentType::Data);
-            let new_file = copy_dir.join(extent_file_name);
-            mkdir_for_file(&new_file)?;
+            // Remove the .db file, because our extent is now a raw extent and
+            // has been persisted to disk.
+            std::fs::remove_file(path.with_extension("db"))?;
 
-            info!(log, "Extent {number} writing migration to {new_file:?}");
-            std::fs::write(&new_file, data)?;
-            sync_path(&new_file, log)?;
-
-            // Rename from .copy to .migrate, then sync the parent directory
-            info!(log, "Extent {number} renaming migration dir");
-            std::fs::rename(copy_dir, migrate_dir(dir, number))?;
+            // Make that removal persistent by synching the parent directory
             sync_path(extent_dir(dir, number), log)?;
 
-            info!(log, "Extent {number} copying the migration over");
-            move_migrate_extent(dir, number as usize, log)?;
+            // We have now migrated from SQLite to raw file extents!
             has_sqlite = false;
+            info!(log, "Done migrating extent {number}");
+        }
+
+        // Clean up spare SQLite files if this is a raw file extent.  These
+        // deletions don't need to be durable, because we're not using their
+        // presence / absence for anything meaningful.
+        if !has_sqlite && !read_only {
+            for ext in ["db-shm", "db-wal"] {
+                let f = path.with_extension(ext);
+                if f.exists() {
+                    std::fs::remove_file(f)?;
+                }
+            }
         }
 
         // Pick the format for the downstairs files.  In most cases, we will be
@@ -579,72 +610,6 @@ impl Extent {
     ) -> tokio::sync::MutexGuard<Box<dyn ExtentInner>> {
         self.inner.lock().await
     }
-}
-
-/// Apply a staged migration directory to the extent file
-///
-/// Migration is only supported from the SQLite extent backend to the raw extent
-/// backend.  It consists of copying the new (raw) extent file, then deleting
-/// the SQLite files.
-pub(crate) fn move_migrate_extent<P: AsRef<Path>>(
-    region_dir: P,
-    eid: usize,
-    log: &Logger,
-) -> Result<(), CrucibleError> {
-    let destination_dir = extent_dir(&region_dir, eid as u32);
-    let extent_file_name = extent_file_name(eid as u32, ExtentType::Data);
-    let migrate_dir = migrate_dir(&region_dir, eid as u32);
-    let completed_dir = completed_dir(&region_dir, eid as u32);
-
-    assert!(Path::new(&migrate_dir).exists());
-    assert!(!Path::new(&completed_dir).exists());
-
-    info!(
-        log,
-        "Copy files from {migrate_dir:?} in {destination_dir:?}"
-    );
-
-    // Setup the original and replacement file names.
-    let new_file = migrate_dir.join(&extent_file_name);
-    let original_file = destination_dir.join(&extent_file_name);
-
-    // Copy the new file on top of the original file.
-    if let Err(e) = std::fs::copy(new_file.clone(), original_file.clone()) {
-        crucible_bail!(
-            IoError,
-            "copy of {new_file:?} to {original_file:?} got: {e:?}",
-        );
-    }
-    sync_path(&original_file, log)?;
-
-    // Remove all of the old files.  It is always valid for an old file to _not_
-    // be present, for two reasons:
-    // - the .db-shm and .db-wal files are always optional
-    // - the .db file may have already been removed by a previous call to
-    //   `move_migrate_extent`, if a later step failed
-    for ext in ["db", "db-shm", "db-wal"] {
-        let original_file = original_file.with_extension(ext);
-        if original_file.exists() {
-            info!(
-                log,
-                "Remove old file {original_file:?} as there is no replacement",
-            );
-            std::fs::remove_file(&original_file)?;
-        }
-    }
-    sync_path(&destination_dir, log)?;
-
-    // After we have all files: rename the migrate dir to indicate that
-    // migration is complete.
-    info!(log, "Move directory  {migrate_dir:?} to {completed_dir:?}");
-    std::fs::rename(migrate_dir, &completed_dir)?;
-
-    sync_path(&destination_dir, log)?;
-
-    std::fs::remove_dir_all(&completed_dir)?;
-
-    sync_path(&destination_dir, log)?;
-    Ok(())
 }
 
 /**

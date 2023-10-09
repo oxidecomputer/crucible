@@ -506,18 +506,17 @@ impl ExtentInner for SqliteInner {
 
 impl SqliteInner {
     /// Converts to a raw file for use with `RawInner`
-    pub fn export(&mut self) -> Result<Vec<u8>, CrucibleError> {
+    ///
+    /// Returns the metadata and context slots, which should be positioned
+    /// directly after the raw block data in memory.
+    pub fn export_meta_and_context(
+        &mut self,
+    ) -> Result<Vec<u8>, CrucibleError> {
         // Clean up stale hashes.  After this is done, each block should have
         // either 0 or 1 contexts.
         self.fully_rehash_and_clean_all_stale_contexts(true)?;
 
-        let block_size = self.extent_size.block_size_in_bytes() as usize;
         let ctxs = self.get_block_contexts(0, self.extent_size.value)?;
-
-        // Read file contents, which are the beginning of the raw file
-        self.file.seek(SeekFrom::Start(0))?;
-        let mut buf = vec![0u8; self.extent_size.value as usize * block_size];
-        self.file.read_exact(&mut buf)?;
 
         use crate::{
             extent::EXTENT_META_RAW,
@@ -527,7 +526,7 @@ impl SqliteInner {
             },
         };
 
-        // Record the metadata region after the raw block data
+        // Record the metadata region, which will be right after raw block data
         let dirty = self.dirty()?;
         let flush_number = self.flush_number()?;
         let gen_number = self.gen_number()?;
@@ -535,11 +534,13 @@ impl SqliteInner {
             dirty,
             flush_number,
             gen_number,
-            ext_version: EXTENT_META_RAW,
+            ext_version: EXTENT_META_RAW, // new extent version for raw files
         };
         let mut meta_buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
         bincode::serialize_into(meta_buf.as_mut_slice(), &meta)
             .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+
+        let mut buf = vec![];
         buf.extend(meta_buf);
 
         // Put the context data after the metadata
