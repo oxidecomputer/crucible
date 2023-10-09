@@ -55,12 +55,12 @@ pub const BLOCK_META_SIZE_BYTES: u64 = 64;
 ///
 /// The file is structured as follows:
 /// - Block data, structured as `block_size` × `extent_size`
-/// - Block contexts (for encryption).  Each block index (in the range
-///   `0..extent_size`) has two context slots; we use a ping-pong strategy when
-///   writing to ensure that one slot is always valid.  Each slot is
 /// - [`BLOCK_META_SIZE_BYTES`], which contains an [`OnDiskMeta`] serialized
 ///   using `bincode`.  The first byte of this range is `dirty`, serialized as a
 ///   `u8` (where `1` is dirty and `0` is clean).
+/// - Block contexts (for encryption).  Each block index (in the range
+///   `0..extent_size`) has two context slots; we use a ping-pong strategy when
+///   writing to ensure that one slot is always valid.  Each slot is
 ///   [`BLOCK_CONTEXT_SLOT_SIZE_BYTES`] in size, so this region is
 ///   `BLOCK_CONTEXT_SLOT_SIZE_BYTES * extent_size * 2` bytes in total.  The
 ///   slots contain an `Option<OnDiskDownstairsBlockContext>`, serialized using
@@ -510,8 +510,8 @@ impl RawInner {
         let path = extent_path(dir, extent_number);
         let bcount = def.extent_size().value;
         let size = def.block_size().checked_mul(bcount).unwrap()
-            + BLOCK_CONTEXT_SLOT_SIZE_BYTES * bcount * 2
-            + BLOCK_META_SIZE_BYTES;
+            + BLOCK_META_SIZE_BYTES
+            + BLOCK_CONTEXT_SLOT_SIZE_BYTES * bcount * 2;
 
         mkdir_for_file(&path)?;
         let mut file = OpenOptions::new()
