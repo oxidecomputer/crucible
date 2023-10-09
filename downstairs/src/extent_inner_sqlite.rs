@@ -512,9 +512,17 @@ impl SqliteInner {
     pub fn export_meta_and_context(
         &mut self,
     ) -> Result<Vec<u8>, CrucibleError> {
-        // Clean up stale hashes.  After this is done, each block should have
-        // either 0 or 1 contexts.
-        self.fully_rehash_and_clean_all_stale_contexts(true)?;
+        // Check whether we need to rehash.  This is theoretically represented
+        // by the `dirty` bit, but we're being _somewhat_ paranoid and manually
+        // forcing a rehash if any blocks have multiple contexts stored.
+        let ctxs = self.get_block_contexts(0, self.extent_size.value)?;
+        let needs_rehash = ctxs.iter().any(|c| c.len() > 1);
+
+        if needs_rehash {
+            // Clean up stale hashes.  After this is done, each block should
+            // have either 0 or 1 contexts.
+            self.fully_rehash_and_clean_all_stale_contexts(true)?;
+        }
 
         let ctxs = self.get_block_contexts(0, self.extent_size.value)?;
 
