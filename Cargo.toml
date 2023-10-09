@@ -44,7 +44,7 @@ clearscreen = "2.0.1"
 crossterm = { version = "0.27.0" }
 crucible-workspace-hack = "0.1.0"  # see [patch.crates-io.crucible-workspace-hack] for more
 csv = "1.2.2"
-expectorate = "1.0.7"
+expectorate = "1.1.0"
 futures = "0.3"
 futures-core = "0.3"
 hex = "0.4"
