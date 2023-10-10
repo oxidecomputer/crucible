@@ -140,7 +140,7 @@ function repair_round() {
             "$ct" one "${args[@]}" \
                     -q -g "$gen" --verify-out alan \
                     --verify-in alan \
-                    --verify \
+                    --verify-at-start \
                     --retry-activate >> "$test_log" 2>&1
             result=$?
 
