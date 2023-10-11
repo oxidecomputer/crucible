@@ -1128,7 +1128,7 @@ mod test {
         })?;
 
         // Pretend creating the region failed
-        harness.df.fail(&region_id);
+        harness.df.fail(&region_id, State::Failed);
 
         // Now call apply_smf
         harness.apply_smf()?;
@@ -1590,7 +1590,7 @@ fn worker(
                                     &r.id.0,
                                     e,
                                 );
-                                df.fail(&r.id);
+                                df.fail(&r.id, State::Tombstoned);
                                 break 'requested;
                             }
                         };
@@ -1604,7 +1604,7 @@ fn worker(
                                     &r.id.0,
                                     e,
                                 );
-                                df.fail(&r.id);
+                                df.fail(&r.id, State::Failed);
                                 break 'requested;
                             }
                         };
@@ -1631,7 +1631,7 @@ fn worker(
                                 log,
                                 "region {:?} create failed: {:?}", r.id.0, e
                             );
-                            df.fail(&r.id);
+                            df.fail(&r.id, State::Failed);
                         }
 
                         info!(log, "applying SMF actions post create...");
@@ -1660,7 +1660,7 @@ fn worker(
                                    &r.id.0,
                                    e,
                                 );
-                                df.fail(&r.id);
+                                df.fail(&r.id, State::Failed);
                                 break 'tombstoned;
                             }
                         };
@@ -1691,7 +1691,7 @@ fn worker(
                                         r.id.0,
                                         e,
                                     );
-                                    df.fail(&r.id);
+                                    df.fail(&r.id, State::Failed);
                                     break 'tombstoned;
                                 }
                             };
@@ -1705,7 +1705,7 @@ fn worker(
                                 log,
                                 "region {:?} destroy failed: {:?}", r.id.0, e
                             );
-                            df.fail(&r.id);
+                            df.fail(&r.id, State::Failed);
                         }
                     }
                     _ => {

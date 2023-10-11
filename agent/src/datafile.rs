@@ -453,11 +453,10 @@ impl DataFile {
     /**
      * Mark a particular region as failed to provision.
      */
-    pub fn fail(&self, id: &RegionId) {
+    pub fn fail(&self, id: &RegionId, nstate: State) {
         let mut inner = self.inner.lock().unwrap();
 
         let r = inner.regions.get_mut(id).unwrap();
-        let nstate = State::Failed;
         if r.state == nstate {
             return;
         }
