@@ -1128,7 +1128,7 @@ mod test {
         })?;
 
         // Pretend creating the region failed
-        harness.df.fail(&region_id, State::Failed);
+        harness.df.fail(&region_id);
 
         // Now call apply_smf
         harness.apply_smf()?;
@@ -1527,7 +1527,6 @@ fn worker(
     downstairs_prefix: String,
     snapshot_prefix: String,
 ) {
-    // XXX unwraps here ok?
     loop {
         /*
          * This loop fires whenever there's work to do. This work may be:
@@ -1590,7 +1589,15 @@ fn worker(
                                     &r.id.0,
                                     e,
                                 );
-                                df.fail(&r.id, State::Tombstoned);
+                                if let Err(e) = df.destroyed(&r.id) {
+                                    error!(
+                                        log,
+                                        "Dataset {} destruction failed: {}",
+                                        &r.id.0,
+                                        e,
+                                    );
+                                    df.fail(&r.id);
+                                }
                                 break 'requested;
                             }
                         };
@@ -1604,7 +1611,7 @@ fn worker(
                                     &r.id.0,
                                     e,
                                 );
-                                df.fail(&r.id, State::Failed);
+                                df.fail(&r.id);
                                 break 'requested;
                             }
                         };
@@ -1631,7 +1638,8 @@ fn worker(
                                 log,
                                 "region {:?} create failed: {:?}", r.id.0, e
                             );
-                            df.fail(&r.id, State::Failed);
+                            df.fail(&r.id);
+                            break 'requested;
                         }
 
                         info!(log, "applying SMF actions post create...");
@@ -1660,7 +1668,7 @@ fn worker(
                                    &r.id.0,
                                    e,
                                 );
-                                df.fail(&r.id, State::Failed);
+                                df.fail(&r.id);
                                 break 'tombstoned;
                             }
                         };
@@ -1691,11 +1699,10 @@ fn worker(
                                         r.id.0,
                                         e,
                                     );
-                                    df.fail(&r.id, State::Failed);
+                                    df.fail(&r.id);
                                     break 'tombstoned;
                                 }
                             };
-
                         let res =
                             worker_region_destroy(&log, &r, region_dataset)
                                 .and_then(|_| df.destroyed(&r.id));
@@ -1705,7 +1712,7 @@ fn worker(
                                 log,
                                 "region {:?} destroy failed: {:?}", r.id.0, e
                             );
-                            df.fail(&r.id, State::Failed);
+                            df.fail(&r.id);
                         }
                     }
                     _ => {

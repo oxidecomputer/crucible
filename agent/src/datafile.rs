@@ -453,10 +453,11 @@ impl DataFile {
     /**
      * Mark a particular region as failed to provision.
      */
-    pub fn fail(&self, id: &RegionId, nstate: State) {
+    pub fn fail(&self, id: &RegionId) {
         let mut inner = self.inner.lock().unwrap();
 
         let r = inner.regions.get_mut(id).unwrap();
+        let nstate = State::Failed;
         if r.state == nstate {
             return;
         }
@@ -612,6 +613,7 @@ impl DataFile {
         let r = inner.regions.get_mut(id).unwrap();
         let nstate = State::Destroyed;
         match &r.state {
+            State::Requested => (),
             State::Tombstoned => (),
             x => bail!("region to destroy in weird state {:?}", x),
         }
