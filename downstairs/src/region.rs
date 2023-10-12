@@ -1600,9 +1600,8 @@ pub(crate) mod test {
     async fn reopen_extent_cleanup_replay_short() -> Result<()> {
         // test move_replacement_extent(), create a copy dir, populate it
         // and let the reopen do the work.  This time we make sure our
-        // copy dir only has extent data and .db files, and not .db-shm
-        // nor .db-wal.  Verify these files are delete from the original
-        // extent after the reopen has cleaned them up.
+        // copy dir only has the extent data file.
+
         // Create the region, make three extents
         let dir = tempdir()?;
         let mut region =
@@ -1942,6 +1941,15 @@ pub(crate) mod test {
         let good_files: Vec<String> = vec!["001".to_string()];
 
         assert!(!validate_repair_files(2, &good_files));
+    }
+
+    #[test]
+    fn validate_repair_files_old() {
+        // Old extent files
+        let good_files: Vec<String> =
+            vec!["001".to_string(), "001.db".to_string()];
+
+        assert!(!validate_repair_files(1, &good_files));
     }
 
     #[tokio::test]

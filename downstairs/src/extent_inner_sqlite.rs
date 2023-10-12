@@ -534,7 +534,7 @@ impl SqliteInner {
             },
         };
 
-        // Record the metadata region, which will be right after raw block data
+        // Record the metadata section, which will be right after raw block data
         let dirty = self.dirty()?;
         let flush_number = self.flush_number()?;
         let gen_number = self.gen_number()?;
