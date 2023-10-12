@@ -655,7 +655,7 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
     sync_path(&original_file, log)?;
 
     // We distinguish between SQLite-backend and raw-file extents based on the
-    // presence of the `000.db` file.  We should never do live migration across
+    // presence of the `.db` file.  We should never do live migration across
     // different extent formats; in fact, we should never live-migrate
     // SQLite-backed extents at all, but must still handle the case of
     // unfinished migrations.
