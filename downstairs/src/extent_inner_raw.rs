@@ -424,10 +424,6 @@ impl ExtentInner for RawInner {
             req_run_start += n_contiguous_requests;
         }
 
-        cdt::extent__read__done!(|| {
-            (job_id.0, self.extent_number, requests.len() as u64)
-        });
-
         Ok(())
     }
 
