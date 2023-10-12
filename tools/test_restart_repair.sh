@@ -97,6 +97,7 @@ export region_dir="./var"
 
 echo "" > ${loop_log}
 echo "starting $(date)" | tee ${loop_log}
+echo "" > ${test_log}
 echo "Tail $test_log for test output"
 echo "Tail $loop_log for summary output"
 echo "Tail $dsc_log for dsc outout"
@@ -210,8 +211,11 @@ while [[ $count -le $loops ]]; do
         rm -rf "$region_dir"/8830
         cp -R  "$region_dir"/8830.old "$region_dir"/8830
     fi
-    echo "$(date) regions moved, current dump output:" >> "$test_log"
-    cdump.sh >> "$test_log" 2>&1
+    echo "$(date) regions moved, current dump outputs:" >> "$test_log"
+    $cds dump --no-color -d "$region_dir"/8810 \
+        -d "$region_dir"/8820 \
+        -d "$region_dir"/8830 >> "$test_log" 2>&1
+
     echo "$(date) resume downstairs" >> "$test_log"
     bring_all_downstairs_online
 
@@ -225,7 +229,7 @@ while [[ $count -le $loops ]]; do
     "$ct" one "${args[@]}" \
             -q -g "$gen" --verify-out alan \
             --verify-in alan \
-            --verify \
+            --verify-at-start \
             --retry-activate >> "$test_log" 2>&1
     result=$?
     if [[ $result -ne 0 ]]; then

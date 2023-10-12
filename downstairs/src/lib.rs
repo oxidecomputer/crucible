@@ -3140,8 +3140,6 @@ pub async fn start_downstairs(
         "Upstairs <-> Downstairs Message Version: {}", CRUCIBLE_MESSAGE_VERSION
     );
 
-    info!(log, "Using address: {:?}", local_addr);
-
     let repair_address = match address {
         IpAddr::V4(ipv4) => SocketAddr::new(std::net::IpAddr::V4(ipv4), rport),
         IpAddr::V6(ipv6) => SocketAddr::new(std::net::IpAddr::V6(ipv6), rport),
