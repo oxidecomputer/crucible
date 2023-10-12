@@ -275,7 +275,6 @@ impl Extent {
 
     /**
      * Open an existing extent file at the location requested.
-     * Read in the metadata from the first block of the file.
      */
     pub fn open(
         dir: &Path,
