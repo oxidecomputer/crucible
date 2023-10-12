@@ -401,10 +401,12 @@ impl Extent {
         }
 
         // Pick the format for the downstairs files.  In most cases, we will be
-        // using the raw extent format, but for read-only snapshots, we're stuck
-        // with the SQLite backend.
+        // using the raw extent format, but for older read-only snapshots that
+        // were constructed using the SQLite backend, we have to keep them
+        // as-is.
         let inner: Box<dyn ExtentInner> = {
             if has_sqlite {
+                assert!(read_only);
                 let inner = extent_inner_sqlite::SqliteInner::open(
                     &path, def, number, read_only, log,
                 )?;
