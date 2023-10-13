@@ -6,7 +6,8 @@
 #: output_rules = [
 #:	"/tmp/*.txt",
 #:	"/tmp/*.log",
-#:	"/tmp/dsc/*.txt",
+#:	"%/tmp/debug/*.txt",
+#:	"%/tmp/dsc/*.txt",
 #:	"/tmp/core.*",
 #: ]
 #: skip_clone = true
@@ -42,6 +43,22 @@ for t in "$input/bins/"*.gz; do
 done
 
 export BINDIR=/var/tmp/bins
+banner setup
+
+echo "Setup self timeout"
+# Three hours should be enough
+jobpid=$$; (sleep 10800; ps -ef; zfs list;kill $jobpid) &
+
+echo "Setup debug logging"
+mkdir /tmp/debug
+psrinfo -v > /tmp/debug/psrinfo.txt
+df -h > /tmp/debug/df.txt
+prstat -d d -mLc 1 > /tmp/debug/prstat.txt 2>&1 &
+iostat -T d -xn 1 > /tmp/debug/iostat.txt 2>&1 &
+mpstat -T d 1 > /tmp/debug/mpstat.txt 2>&1 &
+vmstat -T d -p 1 < /dev/null > /tmp/debug/paging.txt 2>&1 &
+pfexec dtrace -Z -s $input/scripts/perf-downstairs-tick.d > /tmp/debug/perf.txt 2>&1 &
+pfexec dtrace -Z -s $input/scripts/upstairs-info.d > /tmp/debug/upinfo.txt 2>&1 &
 
 banner replay
 ptime -m bash "$input/scripts/test_replay.sh"
