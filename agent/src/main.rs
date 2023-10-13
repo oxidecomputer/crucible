@@ -77,6 +77,7 @@ enum Args {
     },
 }
 
+#[derive(Debug)]
 pub struct ZFSDataset {
     dataset: String,
 }
@@ -1527,6 +1528,16 @@ fn worker(
     downstairs_prefix: String,
     snapshot_prefix: String,
 ) {
+    let regions_dataset_path = match regions_dataset.path() {
+        Ok(regions_dataset_path) => regions_dataset_path,
+        Err(e) => {
+            panic!(
+               "Cannot get regions_dataset_path for {:?}: {}",
+               regions_dataset, e,
+            );
+        }
+    };
+
     loop {
         /*
          * This loop fires whenever there's work to do. This work may be:
@@ -1638,7 +1649,7 @@ fn worker(
                         let result = apply_smf(
                             &log,
                             &df,
-                            dataset_path,
+                            regions_dataset_path.clone(),
                             &downstairs_prefix,
                             &snapshot_prefix,
                         );
@@ -1651,24 +1662,11 @@ fn worker(
                     }
 
                     State::Tombstoned => 'tombstoned: {
-                        let dataset_path = match regions_dataset.path() {
-                            Ok(dataset_path) => dataset_path,
-                            Err(e) => {
-                                error!(
-                                   log,
-                                   "Cannot get path on tombstoned dataset {}: {}",
-                                   &r.id.0,
-                                   e,
-                                );
-                                df.fail(&r.id);
-                                break 'tombstoned;
-                            }
-                        };
                         info!(log, "applying SMF actions before removal...");
                         let result = apply_smf(
                             &log,
                             &df,
-                            dataset_path,
+                            regions_dataset_path.clone(),
                             &downstairs_prefix,
                             &snapshot_prefix,
                         );
@@ -1741,7 +1739,7 @@ fn worker(
                 let result = apply_smf(
                     &log,
                     &df,
-                    regions_dataset.path().unwrap(),
+                    regions_dataset_path.clone(),
                     &downstairs_prefix,
                     &snapshot_prefix,
                 );
