@@ -206,7 +206,7 @@ impl ZFSDataset {
 
                 if i == 4 {
                     bail!(
-                        "zfs list mountpoint failed! out:{} err:{}",
+                        "zfs destroy dataset failed! out:{} err:{}",
                         out,
                         err
                     );
@@ -1589,15 +1589,7 @@ fn worker(
                                     &r.id.0,
                                     e,
                                 );
-                                if let Err(e) = df.destroyed(&r.id) {
-                                    error!(
-                                        log,
-                                        "Dataset {} destruction failed: {}",
-                                        &r.id.0,
-                                        e,
-                                    );
-                                    df.fail(&r.id);
-                                }
+                                df.fail(&r.id);
                                 break 'requested;
                             }
                         };
@@ -1699,7 +1691,7 @@ fn worker(
                                         r.id.0,
                                         e,
                                     );
-                                    df.fail(&r.id);
+                                    let _ = df.destroyed(&r.id);
                                     break 'tombstoned;
                                 }
                             };

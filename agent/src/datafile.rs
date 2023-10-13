@@ -682,7 +682,7 @@ impl DataFile {
                  * - Already destroyed; no more work to do.
                  */
             }
-            State::Requested | State::Created => {
+            State::Requested | State::Created | State::Failed => {
                 /*
                  * Schedule the destruction of this region.
                  */
@@ -696,17 +696,6 @@ impl DataFile {
                 r.state = State::Tombstoned;
                 self.bell.notify_all();
                 self.store(inner);
-            }
-            State::Failed => {
-                /*
-                 * For now, this terminal state will preserve evidence for
-                 * investigation.
-                 */
-                bail!(
-                    "region {} failed to provision and cannot be \
-                    destroyed",
-                    r.id.0
-                );
             }
         }
 
@@ -773,7 +762,10 @@ impl DataFile {
         let region = region.unwrap();
 
         match region.state {
-            State::Requested | State::Destroyed | State::Tombstoned => {
+            State::Requested
+            | State::Destroyed
+            | State::Tombstoned
+            | State::Failed => {
                 // Either the region hasn't been created yet, or it has been
                 // destroyed or marked to be destroyed (both of which require
                 // that no snapshots exist). Return an empty list.
@@ -782,10 +774,6 @@ impl DataFile {
 
             State::Created => {
                 // proceed to next section
-            }
-
-            State::Failed => {
-                bail!("region.state is failed!");
             }
         }
 
