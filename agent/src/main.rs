@@ -1532,8 +1532,8 @@ fn worker(
         Ok(regions_dataset_path) => regions_dataset_path,
         Err(e) => {
             panic!(
-               "Cannot get regions_dataset_path for {:?}: {}",
-               regions_dataset, e,
+                "Cannot get regions_dataset_path for {:?}: {}",
+                regions_dataset, e,
             );
         }
     };
