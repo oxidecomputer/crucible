@@ -155,8 +155,8 @@ for tt in ${test_list}; do
     echo "" >> "${log_prefix}_out.txt"
     echo "Running test: $tt" | tee -a "${log_prefix}_out.txt"
     echo "Running test: $tt" >> "${log_prefix}_out.txt"
-    echo "$ct" "$tt" -g "$gen" --verify-at-end -q "${args[@]}" >> "${log_prefix}_out.txt"
-    if ! "$ct" "$tt" -g "$gen" --verify-at-end -q "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
+    echo "$ct" "$tt" -g "$gen" --verify-at-end --stable "${args[@]}" >> "${log_prefix}_out.txt"
+    if ! "$ct" "$tt" -g "$gen" --verify-at-end --stable "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
         (( res += 1 ))
         echo ""
         echo "Failed crutest $tt test"
@@ -166,7 +166,10 @@ for tt in ${test_list}; do
     else
         echo "Completed test: $tt"
     fi
-    (( gen += 1 ))
+    (( gen += 2 ))
+    # Yes, this is bad.  Sometimes we just need a little time for the test
+    # to finish everything before the next one starts.
+    sleep 5
 done
 (( gen += 10 ))
 

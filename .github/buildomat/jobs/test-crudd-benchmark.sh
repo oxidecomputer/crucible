@@ -5,6 +5,8 @@
 #: target = "helios-2.0"
 #: output_rules = [
 #:  "/tmp/crudd-speed-battery-results.json",
+#:  "%/tmp/debug/*.txt",
+#:  "/tmp/dsc/*.txt",
 #:  "/tmp/core.*",
 #: ]
 #: skip_clone = true
@@ -41,6 +43,22 @@ for t in "$input/rbins/"*.gz; do
 done
 
 export BINDIR=/var/tmp/bins
+
+banner setup
+pfexec plimit -n 9123456 $$
+
+echo "Setup self timeout"
+jobpid=$$; (sleep $(( 2 * 60 * 60 )); ps -ef; zfs list;kill $jobpid) &
+
+echo "Setup debug logging"
+mkdir /tmp/debug
+psrinfo -v > /tmp/debug/psrinfo.txt
+df -h > /tmp/debug/df.txt
+prstat -d d -mLc 1 > /tmp/debug/prstat.txt 2>&1 &
+iostat -T d -xn 1 > /tmp/debug/iostat.txt 2>&1 &
+mpstat -T d 1 > /tmp/debug/mpstat.txt 2>&1 &
+vmstat -T d -p 1 < /dev/null > /tmp/debug/paging.txt 2>&1 &
+pfexec dtrace -Z -s $input/scripts/perf-downstairs-tick.d > /tmp/debug/dtrace.txt 2>&1 &
 
 banner "crudd bench"
 pfexec plimit -n 9123456 $$
