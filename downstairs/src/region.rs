@@ -123,7 +123,7 @@ impl Region {
 
         let number_of_files_limit = match rlim.rlim_cur.cmp(&rlim.rlim_max) {
             std::cmp::Ordering::Less => {
-                info!(
+                debug!(
                     log,
                     "raising number of open files limit to from {} to {}",
                     rlim.rlim_cur,
@@ -143,7 +143,7 @@ impl Region {
             }
 
             Ordering::Equal => {
-                info!(
+                debug!(
                     log,
                     "current number of open files limit {} is already the maximum",
                     rlim.rlim_cur,
@@ -268,7 +268,9 @@ impl Region {
                 def.database_read_version(),
             );
         }
-        info!(log, "Database read version {}", def.database_read_version());
+        if verbose {
+            info!(log, "Database read version {}", def.database_read_version());
+        }
 
         if def.database_write_version()
             != crucible_common::DATABASE_WRITE_VERSION
@@ -279,11 +281,13 @@ impl Region {
                 def.database_write_version(),
             );
         }
-        info!(
-            log,
-            "Database write version {}",
-            def.database_write_version()
-        );
+        if verbose {
+            info!(
+                log,
+                "Database write version {}",
+                def.database_write_version()
+            );
+        }
 
         /*
          * Open every extent that presently exists.

@@ -77,6 +77,7 @@ pub(crate) mod protocol_test {
         _repair_listener: TcpListener,
         repair_addr: SocketAddr,
         uuid: Uuid,
+        read_only: bool,
 
         extent_count: u32,
         extent_size: Block,
@@ -124,6 +125,7 @@ pub(crate) mod protocol_test {
                 _repair_listener: repair_listener,
                 repair_addr,
                 uuid: Uuid::new_v4(),
+                read_only: false,
 
                 extent_count: 10,
                 extent_size: Block::new_512(10),
@@ -132,6 +134,10 @@ pub(crate) mod protocol_test {
                 flush_numbers: vec![0u64; 10],
                 dirty_bits: vec![false; 10],
             }
+        }
+
+        pub fn set_read_only(&mut self) {
+            self.read_only = true;
         }
 
         pub async fn into_connected_downstairs(self) -> ConnectedDownstairs {
@@ -201,11 +207,20 @@ pub(crate) mod protocol_test {
                     upstairs_id: _,
                     session_id: _,
                     gen: _,
-                    read_only: _,
+                    read_only,
                     encrypted: _,
                     alternate_versions: _,
                 } => {
-                    info!(self.inner.log, "negotiate packet {:?}", packet);
+                    info!(
+                        self.inner.log,
+                        "negotiate packet {:?} (upstairs read-only {})",
+                        packet,
+                        read_only
+                    );
+
+                    if *read_only != self.inner.read_only {
+                        bail!("read only mismatch!");
+                    }
 
                     self.fw
                         .lock()
@@ -448,22 +463,37 @@ pub(crate) mod protocol_test {
 
     impl TestHarness {
         pub async fn new() -> Result<TestHarness> {
+            Self::new_(false).await
+        }
+
+        pub async fn new_ro() -> Result<TestHarness> {
+            Self::new_(true).await
+        }
+
+        async fn new_(read_only: bool) -> Result<TestHarness> {
             let log = csl();
 
-            let ds1 = Downstairs::new(log.new(o!("downstairs" => 1))).await;
-            let ds2 = Downstairs::new(log.new(o!("downstairs" => 2))).await;
-            let ds3 = Downstairs::new(log.new(o!("downstairs" => 3))).await;
+            let mut ds1 = Downstairs::new(log.new(o!("downstairs" => 1))).await;
+            let mut ds2 = Downstairs::new(log.new(o!("downstairs" => 2))).await;
+            let mut ds3 = Downstairs::new(log.new(o!("downstairs" => 3))).await;
 
-            // Configure our guest without backpressure, to speed up tests which
-            // require triggering a timeout
+            if read_only {
+                ds1.set_read_only();
+                ds2.set_read_only();
+                ds3.set_read_only();
+            }
+
+            // Configure our guest without queue backpressure, to speed up tests
+            // which require triggering a timeout
             let mut g = Guest::new();
-            g.backpressure_config.max_delay = Duration::ZERO;
+            g.backpressure_config.queue_max_delay = Duration::ZERO;
             let guest = Arc::new(g);
 
             let crucible_opts = CrucibleOpts {
                 id: Uuid::new_v4(),
                 target: vec![ds1.local_addr, ds2.local_addr, ds3.local_addr],
                 flush_timeout: Some(86400.0),
+                read_only,
 
                 ..Default::default()
             };
@@ -2596,6 +2626,305 @@ pub(crate) mod protocol_test {
         bail_assert!(matches!(
             ds1_messages.recv().await.unwrap(),
             Message::ExtentLiveReopen { extent_id: 0, .. },
+        ));
+
+        Ok(())
+    }
+
+    /// Test that after giving up on a downstairs, setting it to faulted, and
+    /// letting it reconnect, live repair does *not* occur if the upstairs is
+    /// configured read-only.
+    #[tokio::test]
+    async fn test_no_read_only_live_repair() -> Result<()> {
+        let harness = Arc::new(TestHarness::new_ro().await?);
+
+        let (jh1, mut ds1_messages) =
+            harness.ds1().await.spawn_message_receiver().await;
+        let (_jh2, mut ds2_messages) =
+            harness.ds2.spawn_message_receiver().await;
+        let (_jh3, mut ds3_messages) =
+            harness.ds3.spawn_message_receiver().await;
+
+        // Send 200 more than IO_OUTSTANDING_MAX jobs. Flow control will kick in
+        // at MAX_ACTIVE_COUNT messages, so we need to be sending read responses
+        // while reads are being sent. After IO_OUTSTANDING_MAX jobs, the
+        // Upstairs will set ds1 to faulted, and send it no more work.
+        const NUM_JOBS: usize = IO_OUTSTANDING_MAX + 200;
+        let mut job_ids = Vec::with_capacity(NUM_JOBS);
+
+        for i in 0..NUM_JOBS {
+            {
+                let harness = harness.clone();
+
+                // We must tokio::spawn here because `read` will wait for the
+                // response to come back before returning
+                tokio::spawn(async move {
+                    let buffer = Buffer::new(512);
+                    harness
+                        .guest
+                        .read(Block::new_512(0), buffer)
+                        .await
+                        .unwrap();
+                });
+            }
+
+            if i < MAX_ACTIVE_COUNT {
+                // Before flow control kicks in, assert we're seeing the read
+                // requests
+                bail_assert!(matches!(
+                    ds1_messages.recv().await.unwrap(),
+                    Message::ReadRequest { .. },
+                ));
+            } else {
+                // After flow control kicks in, we shouldn't see any more
+                // messages
+                match ds1_messages.try_recv() {
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {}
+                    x => {
+                        info!(
+                            harness.log,
+                            "Read {i} should return EMPTY, but we got:{:?}", x
+                        );
+
+                        bail!(
+                            "Read {i} should return EMPTY, but we got:{:?}",
+                            x
+                        );
+                    }
+                }
+            }
+
+            match ds2_messages.recv().await.unwrap() {
+                Message::ReadRequest { job_id, .. } => {
+                    // Record the job ids of the read requests
+                    job_ids.push(job_id);
+                }
+
+                _ => bail!("saw non read request!"),
+            }
+
+            bail_assert!(matches!(
+                ds3_messages.recv().await.unwrap(),
+                Message::ReadRequest { .. },
+            ));
+
+            // Respond with read responses for downstairs 2 and 3
+            harness
+                .ds2
+                .fw
+                .lock()
+                .await
+                .send(Message::ReadResponse {
+                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                    session_id: harness
+                        .ds2
+                        .upstairs_session_id
+                        .lock()
+                        .await
+                        .unwrap(),
+                    job_id: job_ids[i],
+                    responses: Ok(vec![make_blank_read_response()]),
+                })
+                .await
+                .unwrap();
+
+            harness
+                .ds3
+                .fw
+                .lock()
+                .await
+                .send(Message::ReadResponse {
+                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                    session_id: harness
+                        .ds3
+                        .upstairs_session_id
+                        .lock()
+                        .await
+                        .unwrap(),
+                    job_id: job_ids[i],
+                    responses: Ok(vec![make_blank_read_response()]),
+                })
+                .await
+                .unwrap();
+        }
+
+        // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
+        // flush_timeout set to 24 hours, we shouldn't see anything else
+        bail_assert!(matches!(
+            ds2_messages.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        bail_assert!(matches!(
+            ds3_messages.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+
+        // Flush to clean out skipped jobs
+        {
+            let jh = {
+                let harness = harness.clone();
+
+                // We must tokio::spawn here because `flush` will wait for the
+                // response to come back before returning
+                tokio::spawn(async move {
+                    harness.guest.flush(None).await.unwrap();
+                })
+            };
+
+            let flush_job_id = match ds2_messages.recv().await.unwrap() {
+                Message::Flush { job_id, .. } => job_id,
+
+                _ => bail!("saw non flush ack!"),
+            };
+
+            bail_assert!(matches!(
+                ds3_messages.recv().await.unwrap(),
+                Message::Flush { .. },
+            ));
+
+            harness
+                .ds2
+                .fw
+                .lock()
+                .await
+                .send(Message::FlushAck {
+                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                    session_id: harness
+                        .ds2
+                        .upstairs_session_id
+                        .lock()
+                        .await
+                        .unwrap(),
+                    job_id: flush_job_id,
+                    result: Ok(()),
+                })
+                .await
+                .unwrap();
+
+            harness
+                .ds3
+                .fw
+                .lock()
+                .await
+                .send(Message::FlushAck {
+                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                    session_id: harness
+                        .ds3
+                        .upstairs_session_id
+                        .lock()
+                        .await
+                        .unwrap(),
+                    job_id: flush_job_id,
+                    result: Ok(()),
+                })
+                .await
+                .unwrap();
+
+            // Wait for the flush to come back
+            jh.await.unwrap();
+        }
+
+        // Send ds1 responses for the jobs it saw
+        for (i, job_id) in job_ids.iter().enumerate().take(MAX_ACTIVE_COUNT) {
+            match harness
+                .ds1()
+                .await
+                .fw
+                .lock()
+                .await
+                .send(Message::ReadResponse {
+                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                    session_id: harness
+                        .ds1()
+                        .await
+                        .upstairs_session_id
+                        .lock()
+                        .await
+                        .unwrap(),
+                    job_id: *job_id,
+                    responses: Ok(vec![make_blank_read_response()]),
+                })
+                .await
+            {
+                Ok(()) => {}
+                Err(e) => {
+                    // We should be able to send a few, but at some point
+                    // the Upstairs will disconnect us.
+                    error!(
+                        harness.log,
+                        "could not send read response for job {} = {}: {}",
+                        i,
+                        job_id,
+                        e
+                    );
+                    break;
+                }
+            }
+        }
+
+        // Assert the Upstairs isn't sending ds1 more work, because it is
+        // Faulted
+        let v = ds1_messages.try_recv();
+        match v {
+            // We're either disconnected, or the queue is empty.
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {
+                // This is expected, continue on
+            }
+
+            _ => {
+                // Any other error (or success!) is unexpected
+                bail!("try_recv returned {:?}", v);
+            }
+        }
+
+        // Reconnect ds1
+        drop(ds1_messages);
+        jh1.abort();
+
+        let ds1 = harness.take_ds1().await;
+        let ds1 = ds1.close();
+        let ds1 = ds1.into_connected_downstairs().await;
+
+        ds1.negotiate_start().await?;
+        ds1.negotiate_step_extent_versions_please().await?;
+
+        let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver().await;
+
+        // Wait for all three downstairs to be online before we send
+        // our final read.
+        loop {
+            let qwq = harness.guest.query_work_queue().await.unwrap();
+            if qwq.active_count == 3 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        info!(harness.log, "submitting final read!");
+
+        // The read should be served as normal
+        let harness = harness.clone();
+
+        // We must tokio::spawn here because `read` will wait for the
+        // response to come back before returning
+        tokio::spawn(async move {
+            let buffer = Buffer::new(512);
+            harness.guest.read(Block::new_512(0), buffer).await.unwrap();
+        });
+
+        // All downstairs should see it
+        bail_assert!(matches!(
+            ds1_messages.recv().await.unwrap(),
+            Message::ReadRequest { .. },
+        ));
+        bail_assert!(matches!(
+            ds2_messages.recv().await.unwrap(),
+            Message::ReadRequest { .. },
+        ));
+
+        bail_assert!(matches!(
+            ds3_messages.recv().await.unwrap(),
+            Message::ReadRequest { .. },
         ));
 
         Ok(())

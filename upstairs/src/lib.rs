@@ -2858,6 +2858,17 @@ struct Downstairs {
      */
     ds_skipped_jobs: ClientData<HashSet<JobId>>,
 
+    /// The number of write bytes that haven't finished yet
+    ///
+    /// This is used to configure backpressure to the host, because writes
+    /// (uniquely) will return before actually being completed by a Downstairs
+    /// and can clog up the queues.
+    ///
+    /// It is stored in the Downstairs because from the perspective of the
+    /// Upstairs, writes complete immediately; only the Downstairs is actually
+    /// tracking the pending jobs.
+    write_bytes_outstanding: u64,
+
     /**
      * The next Job ID this Upstairs should use for downstairs work.
      */
@@ -2943,6 +2954,12 @@ struct Downstairs {
     live_repair_aborted: ClientData<usize>,
 
     /**
+     * Times we skipped repairing a downstairs because we are running
+     * as read_only.
+     */
+    ro_lr_skipped: ClientData<usize>,
+
+    /**
      * Extent limit, if set, indicates the extent where LiveRepair has already
      * submitted, or possibly even already finished the LiveRepair of this
      * extent. If you are changing this value, it must happen at the same
@@ -3011,6 +3028,7 @@ impl Downstairs {
             ds_active: ActiveJobs::new(),
             ds_new: ClientData::new(BTreeSet::new()),
             ds_skipped_jobs: ClientData::new(HashSet::new()),
+            write_bytes_outstanding: 0,
             completed: AllocRingBuffer::new(2048),
             completed_jobs: AllocRingBuffer::new(8),
             next_id: JobId(1000),
@@ -3026,6 +3044,7 @@ impl Downstairs {
             extents_confirmed: ClientData::new(0),
             live_repair_completed: ClientData::new(0),
             live_repair_aborted: ClientData::new(0),
+            ro_lr_skipped: ClientData::new(0),
             extent_limit: ClientMap::new(),
             repair_job_ids: BTreeMap::new(),
             repair_min_id: None,
@@ -3703,6 +3722,17 @@ impl Downstairs {
                 }
             }
         }
+
+        // If this is a write (which will be fast-acked), increment our byte
+        // counter for backpressure calculations.
+        match &io.work {
+            IOop::Write { writes, .. }
+            | IOop::WriteUnwritten { writes, .. } => {
+                self.write_bytes_outstanding +=
+                    writes.iter().map(|w| w.data.len() as u64).sum::<u64>();
+            }
+            _ => (),
+        };
 
         // Puts the IO onto the downstairs work queue.
         let ds_id = io.ds_id;
@@ -4769,7 +4799,23 @@ impl Downstairs {
             }
             // Now that we've collected jobs to retire, remove them from the map
             for &id in &retired {
-                let _ = self.ds_active.remove(&id);
+                let job = self.ds_active.remove(&id);
+                // Update pending bytes when this job is retired
+                match &job.work {
+                    IOop::Write { writes, .. }
+                    | IOop::WriteUnwritten { writes, .. } => {
+                        self.write_bytes_outstanding = self
+                            .write_bytes_outstanding
+                            .checked_sub(
+                                writes
+                                    .iter()
+                                    .map(|w| w.data.len() as u64)
+                                    .sum::<u64>(),
+                            )
+                            .unwrap();
+                    }
+                    _ => (),
+                }
             }
 
             debug!(self.log, "[rc] retire {} clears {:?}", ds_id, retired);
@@ -5370,12 +5416,15 @@ impl Upstairs {
         let ds_flow_control = ds.flow_control;
         let ds_extents_repaired = ds.extents_repaired;
         let ds_extents_confirmed = ds.extents_confirmed;
+        let ds_ro_lr_skipped = ds.ro_lr_skipped;
         let up_backpressure = self.guest.backpressure_us.load(Ordering::SeqCst);
+        let write_bytes_out = ds.write_bytes_outstanding;
 
         cdt::up__status!(|| {
             let arg = Arg {
                 up_count,
                 up_backpressure,
+                write_bytes_out,
                 ds_count,
                 ds_state: ds_state.0,
                 ds_io_count,
@@ -5388,6 +5437,7 @@ impl Upstairs {
                 ds_flow_control: ds_flow_control.0,
                 ds_extents_repaired: ds_extents_repaired.0,
                 ds_extents_confirmed: ds_extents_confirmed.0,
+                ds_ro_lr_skipped: ds_ro_lr_skipped.0,
             };
             (msg, arg)
         });
@@ -5849,7 +5899,20 @@ impl Upstairs {
         cdt::up__to__ds__flush__start!(|| (gw_id));
         downstairs.enqueue(fl, ds_done_tx).await;
 
+        // While we've got the lock, update our current backpressure
+        self.set_backpressure_with_downstairs(downstairs);
+
         Ok(())
+    }
+
+    fn set_backpressure_with_downstairs(&self, ds: &Downstairs) {
+        let dsw_max = ClientId::iter()
+            .map(|cid| ds.total_live_work(cid))
+            .max()
+            .unwrap_or(0);
+        let ratio = dsw_max as f64 / IO_OUTSTANDING_MAX as f64;
+        self.guest
+            .set_backpressure(ds.write_bytes_outstanding, ratio);
     }
 
     /*
@@ -5893,6 +5956,9 @@ impl Upstairs {
         let mut gw = self.guest.guest_work.lock().await;
         let mut downstairs = self.downstairs.lock().await;
         let ddef = self.ddef.lock().await.get_def().unwrap();
+
+        // While we've got the lock, update our current backpressure
+        self.set_backpressure_with_downstairs(&downstairs);
 
         /*
          * Verify IO is in range for our region.  If not give up now and
@@ -6304,6 +6370,9 @@ impl Upstairs {
                     | DsState::Replay
                     | DsState::Repair
                     | DsState::LiveRepair => {} // Okay
+
+                    DsState::LiveRepairReady if self.read_only => {} // Okay
+
                     _ => {
                         panic!(
                             "[{}] {} Invalid transition: {:?} -> {:?}",
@@ -8947,21 +9016,43 @@ pub struct Guest {
     /// it can be read from a `&self` reference.
     block_size: AtomicU64,
 
-    /// Backpressure is implemented as a delay on host operations
+    /// Backpressure is implemented as a delay on host write operations
     backpressure_us: AtomicU64,
 
     /// Backpressure configuration, as a starting point and max delay
     backpressure_config: BackpressureConfig,
+
+    /// Lock held during backpressure delay
+    ///
+    /// Without this lock, multiple tasks could submit jobs to the upstairs and
+    /// wait in parallel, which defeats the purpose of backpressure (since you
+    /// could send arbitrarily many jobs at high speed by sending them from
+    /// different tasks).
+    backpressure_lock: Mutex<()>,
 }
 
 /// Configuration for host-side backpressure
 ///
-/// Backpressure adds an artificial delay to host messages to maintain the
-/// downstairs queue at a particular length.
+/// Backpressure adds an artificial delay to host write messages (which are
+/// otherwise acked immediately, before actually being complete).  The delay is
+/// varied based on two metrics:
+///
+/// - number of write bytes outstanding
+/// - queue length as a fraction (where 1.0 is full)
+///
+/// These two metrics are used for quadratic backpressure, picking the larger of
+/// the two delays.
 #[derive(Copy, Clone, Debug)]
 struct BackpressureConfig {
-    start: f32,
-    max_delay: Duration,
+    /// When should backpressure start (in bytes)?
+    bytes_start: u64,
+    /// Scale for byte-based quadratic backpressure
+    bytes_scale: f64,
+
+    /// When should queue-based backpressure start?
+    queue_start: f64,
+    /// Maximum queue-based delay
+    queue_max_delay: Duration,
 }
 
 /*
@@ -8996,12 +9087,15 @@ impl Guest {
             bw_limit: None,
 
             block_size: AtomicU64::new(0),
-            backpressure_us: AtomicU64::new(0),
 
+            backpressure_us: AtomicU64::new(0),
             backpressure_config: BackpressureConfig {
-                start: 0.5,
-                max_delay: Duration::from_millis(5),
+                bytes_start: 1024u64.pow(3), // Start at 1 GiB
+                bytes_scale: 9.3e-8,         // Delay of 10ms at 2 GiB in-flight
+                queue_start: 0.5,
+                queue_max_delay: Duration::from_millis(5),
             },
+            backpressure_lock: Mutex::new(()),
         }
     }
 
@@ -9031,12 +9125,6 @@ impl Guest {
     async fn send(&self, op: BlockOp) -> BlockReqWaiter {
         let (send, recv) = oneshot::channel();
 
-        let bp =
-            Duration::from_micros(self.backpressure_us.load(Ordering::SeqCst));
-        if bp > Duration::ZERO {
-            tokio::time::sleep(bp).await;
-        }
-
         self.reqs.lock().await.push_back(BlockReq::new(op, send));
         self.notify.notify_one();
 
@@ -9057,18 +9145,27 @@ impl Guest {
     }
 
     /// Set `self.backpressure_us` based on outstanding IO ratio
-    fn set_backpressure(&self, ratio: f32) {
-        // Check to see if the number of outstanding IOs (between
+    fn set_backpressure(&self, bytes: u64, ratio: f64) {
+        // Check to see if the number of outstanding write bytes (between
         // the upstairs and downstairs) is particularly high.  If so,
         // apply some backpressure by delaying host operations, with a
         // quadratically-increasing delay.
-        let d = self.backpressure_config.max_delay.mul_f32(
-            ((ratio - self.backpressure_config.start).max(0.0)
-                / (1.0 - self.backpressure_config.start))
-                .powf(2.0),
-        );
-        self.backpressure_us
-            .store(d.as_micros() as u64, Ordering::SeqCst);
+        let d1 = (bytes.saturating_sub(self.backpressure_config.bytes_start)
+            as f64
+            * self.backpressure_config.bytes_scale)
+            .powf(2.0) as u64;
+
+        // Compute an alternate delay based on queue length
+        let d2 = self
+            .backpressure_config
+            .queue_max_delay
+            .mul_f64(
+                ((ratio - self.backpressure_config.queue_start).max(0.0)
+                    / (1.0 - self.backpressure_config.queue_start))
+                    .powf(2.0),
+            )
+            .as_micros() as u64;
+        self.backpressure_us.store(d1.max(d2), Ordering::SeqCst);
     }
 
     /*
@@ -9236,6 +9333,16 @@ impl Guest {
         println!("The guest has finished waiting for activation with:{}", gen);
         Ok(())
     }
+
+    async fn backpressure_sleep(&self) {
+        let bp =
+            Duration::from_micros(self.backpressure_us.load(Ordering::SeqCst));
+        if bp > Duration::ZERO {
+            let _guard = self.backpressure_lock.lock().await;
+            tokio::time::sleep(bp).await;
+            drop(_guard);
+        }
+    }
 }
 
 #[async_trait]
@@ -9339,6 +9446,8 @@ impl BlockIO for Guest {
             return Ok(());
         }
         let wio = BlockOp::Write { offset, data };
+
+        self.backpressure_sleep().await;
         Ok(self.send(wio).await.wait().await?)
     }
 
@@ -9361,6 +9470,8 @@ impl BlockIO for Guest {
             return Ok(());
         }
         let wio = BlockOp::WriteUnwritten { offset, data };
+
+        self.backpressure_sleep().await;
         Ok(self.send(wio).await.wait().await?)
     }
 
@@ -9592,23 +9703,20 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<()>) {
 /// If the number is too high, then mark that downstairs as failed, scrub
 /// any outstanding jobs.
 ///
-/// Returns a ratio indicating how close the worst downstairs is to exceeding
-/// the IOP limit; 1.0 means the worst downstairs is at the limit.
-async fn gone_too_long(
-    up: &Arc<Upstairs>,
-    ds_done_tx: mpsc::Sender<()>,
-) -> f32 {
+/// Updates downstairs backpressure to help keep the system stable
+async fn gone_too_long(up: &Arc<Upstairs>, ds_done_tx: mpsc::Sender<()>) {
     let active = up.active.lock().await;
     let up_state = active.up_state;
     // If we are not active, then just exit.
     if up_state != UpState::Active {
-        return 0.0;
+        return;
     }
     let mut ds = up.downstairs.lock().await;
     drop(active);
 
+    up.set_backpressure_with_downstairs(&ds);
+
     let mut notify_guest = false;
-    let mut dsw_max = 0;
     for cid in ClientId::iter() {
         // Only downstairs in these states are checked.
         match ds.ds_state[cid] {
@@ -9617,7 +9725,6 @@ async fn gone_too_long(
             | DsState::Offline
             | DsState::Replay => {
                 let work_count = ds.total_live_work(cid);
-                dsw_max = dsw_max.max(work_count);
                 if work_count > IO_OUTSTANDING_MAX {
                     warn!(
                         up.log,
@@ -9655,7 +9762,6 @@ async fn gone_too_long(
             }
         }
     }
-    dsw_max as f32 / IO_OUTSTANDING_MAX as f32
 }
 
 /**
@@ -9907,20 +10013,38 @@ async fn process_new_io(
  */
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Arg {
+    /// Jobs on the upstairs guest work queue.
     pub up_count: u32,
-    pub ds_count: u32,
+    /// Backpressure value
     pub up_backpressure: u64,
+    /// Jobs on the downstairs work queue.
+    pub ds_count: u32,
+    /// Number of write bytes in flight
+    pub write_bytes_out: u64,
+    /// State of a downstairs
     pub ds_state: [DsState; 3],
+    /// Counters for each state of a downstairs job.
     pub ds_io_count: IOStateCount,
+    /// Extents repaired during initial reconciliation.
     pub ds_reconciled: usize,
+    /// Extents still needing repair during initial reconciliation.
     pub ds_reconcile_needed: usize,
+    /// Times we have completed a LiveRepair on a downstairs.
     pub ds_live_repair_completed: [usize; 3],
+    /// Times we aborted a LiveRepair on a downstairs.
     pub ds_live_repair_aborted: [usize; 3],
+    /// Times the upstairs has connected to a downstairs.
     pub ds_connected: [usize; 3],
+    /// Times this downstairs has been replaced.
     pub ds_replaced: [usize; 3],
+    /// Times flow control has been enabled on this downstairs.
     pub ds_flow_control: [usize; 3],
+    /// Times we have live repaired an extent on this downstairs.
     pub ds_extents_repaired: [usize; 3],
+    /// Times we have live confirmed  an extent on this downstairs.
     pub ds_extents_confirmed: [usize; 3],
+    /// Times we skipped repairing a downstairs because we are read_only.
+    pub ds_ro_lr_skipped: [usize; 3],
 }
 
 /**
@@ -10065,9 +10189,8 @@ async fn up_listen(
                 process_new_io(up, &dst, req, &mut lastcast).await;
 
                 // Check how many outstanding downstairs jobs remain in the
-                // queue, and adjust guest backpressure accordingly.
-                let ratio = gone_too_long(up, dst[0].ds_done_tx.clone()).await;
-                up.guest.set_backpressure(ratio);
+                // queue, and adjust fail any downstairs that's not responding
+                gone_too_long(up, dst[0].ds_done_tx.clone()).await;
             }
             _ = sleep_until(repair_check_interval), if repair_check => {
                 match check_for_repair(up, &dst).await {
