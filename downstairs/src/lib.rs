@@ -477,6 +477,11 @@ pub mod cdt {
 
     fn extent__context__truncate__start(n_deletions: u64) {}
     fn extent__context__truncate__done() {}
+    fn extent__set__block__contexts__write__count(
+        extent_id: u32,
+        n_blocks: u64,
+    ) {
+    }
     fn submit__el__close__done(_: u64) {}
     fn submit__el__flush__close__done(_: u64) {}
     fn submit__el__repair__done(_: u64) {}

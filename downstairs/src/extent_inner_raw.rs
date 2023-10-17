@@ -776,30 +776,40 @@ impl RawInner {
         }
 
         let mut start = 0;
+        let mut write_count = 0;
         for i in 0..block_contexts.len() {
             if i + 1 == block_contexts.len()
                 || block_contexts[i].block + 1 != block_contexts[i + 1].block
             {
-                self.set_block_contexts_contiguous(&block_contexts[start..=i])?;
+                write_count += self.set_block_contexts_contiguous(
+                    &block_contexts[start..=i],
+                )?;
                 start = i + 1;
             }
         }
+        cdt::extent__set__block__contexts__write__count!(|| (
+            self.extent_number,
+            write_count as u64,
+        ));
         Ok(())
     }
 
     /// Efficiently sets block contexts in bulk
+    ///
+    /// Returns the number of writes, for profiling
     ///
     /// # Panics
     /// `block_contexts` must represent a contiguous set of blocks
     fn set_block_contexts_contiguous(
         &mut self,
         block_contexts: &[DownstairsBlockContext],
-    ) -> Result<()> {
+    ) -> Result<usize> {
         for (a, b) in block_contexts.iter().zip(block_contexts.iter().skip(1)) {
             assert_eq!(a.block + 1, b.block, "blocks must be contiguous");
         }
 
         let mut buf = vec![];
+        let mut writes = 0;
         for (slot, group) in block_contexts
             .iter()
             .group_by(|block_context|
@@ -822,9 +832,10 @@ impl RawInner {
             let offset = self.context_slot_offset(block_start, slot);
             nix::sys::uio::pwrite(self.file.as_raw_fd(), &buf, offset as i64)
                 .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+            writes += 1;
         }
 
-        Ok(())
+        Ok(writes)
     }
 
     fn get_metadata(&self) -> Result<OnDiskMeta, CrucibleError> {
