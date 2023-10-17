@@ -11,6 +11,7 @@ use crate::{
 };
 
 use anyhow::{bail, Result};
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use slog::{error, Logger};
 
@@ -97,7 +98,7 @@ pub struct RawInner {
     context_slot_synched_at: Vec<[u64; 2]>,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum ContextSlot {
     A,
     B,
@@ -465,8 +466,9 @@ impl ExtentInner for RawInner {
         block_context: &DownstairsBlockContext,
     ) -> Result<(), CrucibleError> {
         self.set_dirty()?;
-        let new_slot = self.set_block_context(block_context)?;
-        self.active_context[block_context.block as usize] = new_slot;
+        self.set_block_contexts(&[block_context.clone()])?;
+        self.active_context[block_context.block as usize] =
+            !self.active_context[block_context.block as usize];
         Ok(())
     }
 
@@ -737,57 +739,42 @@ impl RawInner {
         Ok(())
     }
 
-    /// Writes the inactive block context slot
-    ///
-    /// Returns the new slot which should be marked as active after the write
-    fn set_block_context(
-        &mut self,
-        block_context: &DownstairsBlockContext,
-    ) -> Result<ContextSlot> {
-        let block = block_context.block as usize;
-        // Select the inactive slot
-        let slot = !self.active_context[block];
-
-        // If the context slot that we're about to write into hasn't been
-        // synched to disk yet, we must sync it first.  This prevents subtle
-        // ordering issues!
-        let last_sync = &mut self.context_slot_synched_at[block][slot as usize];
-        if *last_sync > self.sync_index {
-            assert_eq!(*last_sync, self.sync_index + 1);
-            if let Err(e) = self.file.sync_all() {
-                return Err(CrucibleError::IoError(format!(
-                    "extent {}: fsync 1 failure: {:?}",
-                    self.extent_number, e
-                ))
-                .into());
-            }
-            self.sync_index += 1;
-        }
-        // The given slot is about to be newly unsynched, because we're going to
-        // write to it below.
-        *last_sync = self.sync_index + 1;
-
-        let offset = self.context_slot_offset(block_context.block, slot);
-
-        // Serialize into a local buffer, then write into the inactive slot
-        let mut buf = [0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
-        let d = OnDiskDownstairsBlockContext {
-            block_context: block_context.block_context,
-            on_disk_hash: block_context.on_disk_hash,
-        };
-        bincode::serialize_into(buf.as_mut_slice(), &Some(d))?;
-        nix::sys::uio::pwrite(self.file.as_raw_fd(), &buf, offset as i64)
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
-
-        // Return the just-written slot; it's the caller's responsibility to
-        // select it as active once data is written.
-        Ok(slot)
-    }
-
     fn set_block_contexts(
         &mut self,
         block_contexts: &[DownstairsBlockContext],
     ) -> Result<()> {
+        // If any of these block contexts will be overwriting an unsyched
+        // context slot, then we insert a sync here.
+        let needs_sync = block_contexts.iter().any(|block_context| {
+            let block = block_context.block as usize;
+            // We'll be writing to the inactive slot
+            let slot = !self.active_context[block];
+            let last_sync = self.context_slot_synched_at[block][slot as usize];
+            // We should never be > 1 sync ahead!
+            assert!(last_sync <= self.sync_index + 1);
+            last_sync > self.sync_index
+        });
+        if needs_sync {
+            self.file.sync_all().map_err(|e| {
+                CrucibleError::IoError(format!(
+                    "extent {}: fsync 1 failure: {e:?}",
+                    self.extent_number,
+                ))
+            })?;
+            self.sync_index += 1;
+        }
+        // Mark the to-be-written slots as unsynched on disk
+        //
+        // It's harmless if we bail out before writing the actual context slot
+        // here, because all it will do is force a sync next time this is called
+        // (that sync is right above here!)
+        for block_context in block_contexts {
+            let block = block_context.block as usize;
+            let slot = !self.active_context[block];
+            self.context_slot_synched_at[block][slot as usize] =
+                self.sync_index + 1;
+        }
+
         let mut start = 0;
         for i in 0..block_contexts.len() {
             if i + 1 == block_contexts.len()
@@ -812,9 +799,31 @@ impl RawInner {
             assert_eq!(a.block + 1, b.block, "blocks must be contiguous");
         }
 
-        for b in block_contexts {
-            self.set_block_context(b)?;
+        let mut buf = vec![];
+        for (slot, group) in block_contexts
+            .iter()
+            .group_by(|block_context|
+            // We'll be writing to the inactive slot
+            !self.active_context[block_context.block as usize])
+            .into_iter()
+        {
+            let mut group = group.peekable();
+            let block_start = group.peek().unwrap().block;
+            buf.clear();
+            for block_context in group {
+                let n = buf.len();
+                buf.extend([0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize]);
+                let d = OnDiskDownstairsBlockContext {
+                    block_context: block_context.block_context,
+                    on_disk_hash: block_context.on_disk_hash,
+                };
+                bincode::serialize_into(&mut buf[n..], &Some(d))?;
+            }
+            let offset = self.context_slot_offset(block_start, slot);
+            nix::sys::uio::pwrite(self.file.as_raw_fd(), &buf, offset as i64)
+                .map_err(|e| CrucibleError::IoError(e.to_string()))?;
         }
+
         Ok(())
     }
 
@@ -1304,18 +1313,19 @@ mod test {
                 hash,
             },
         };
-        // The context should be written to slot 0
+        // The context should be written to slot B
         inner.write(JobId(10), &[&write], false, IOV_MAX_TEST)?;
         assert_eq!(inner.sync_index, 0);
 
-        // Flush, which should bump the sync number (marking slot 0 as synched)
+        // Flush, which should bump the sync number (marking slot B as synched)
         inner.flush(12, 12, JobId(11).into())?;
+        assert_eq!(inner.sync_index, 1);
 
-        // The context should be written to slot 1
+        // The context should be written to slot A
         inner.write(JobId(11), &[&write], false, IOV_MAX_TEST)?;
         assert_eq!(inner.sync_index, 1);
 
-        // The context should be written to slot 0
+        // The context should be written to slot B, forcing a sync
         inner.write(JobId(12), &[&write], false, IOV_MAX_TEST)?;
         assert_eq!(inner.sync_index, 1);
 

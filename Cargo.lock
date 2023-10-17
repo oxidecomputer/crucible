@@ -861,6 +861,7 @@ dependencies = [
  "http",
  "hyper",
  "hyper-staticfile",
+ "itertools 0.11.0",
  "libc",
  "mime_guess",
  "nix",

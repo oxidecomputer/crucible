@@ -22,6 +22,7 @@ hex.workspace = true
 http.workspace = true
 hyper-staticfile.workspace = true
 hyper.workspace = true
+itertools.workspace = true
 libc.workspace = true
 mime_guess.workspace = true
 nix.workspace = true
