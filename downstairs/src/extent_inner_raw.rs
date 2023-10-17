@@ -234,25 +234,24 @@ impl ExtentInner for RawInner {
             (job_id.0, self.extent_number, writes.len() as u64)
         });
 
-        let mut pending_slots = vec![];
-        for write in writes {
-            if writes_to_skip.contains(&write.offset.value) {
-                pending_slots.push(None);
-                continue;
-            }
+        // Compute block contexts, then write them to disk
+        let block_ctx: Vec<_> = writes
+            .iter()
+            .filter(|write| !writes_to_skip.contains(&write.offset.value))
+            .map(|write| {
+                // TODO it would be nice if we could profile what % of time we're
+                // spending on hashes locally vs writing to disk
+                let on_disk_hash = integrity_hash(&[&write.data[..]]);
 
-            // TODO it would be nice if we could profile what % of time we're
-            // spending on hashes locally vs writing to disk
-            let on_disk_hash = integrity_hash(&[&write.data[..]]);
-
-            let next_slot =
-                self.set_block_context(&DownstairsBlockContext {
+                DownstairsBlockContext {
                     block_context: write.block_context,
                     block: write.offset.value,
                     on_disk_hash,
-                })?;
-            pending_slots.push(Some(next_slot));
-        }
+                }
+            })
+            .collect();
+
+        self.set_block_contexts(&block_ctx)?;
 
         cdt::extent__write__raw__context__insert__done!(|| {
             (job_id.0, self.extent_number, writes.len() as u64)
@@ -293,9 +292,12 @@ impl ExtentInner for RawInner {
             }
         } else {
             // Now that writes have gone through, update active context slots
-            for (write, new_slot) in writes.iter().zip(pending_slots) {
-                if let Some(slot) = new_slot {
-                    self.active_context[write.offset.value as usize] = slot;
+            for write in writes.iter() {
+                let block = write.offset.value;
+                if !writes_to_skip.contains(&block) {
+                    // We always write to the inactive slot, so just swap it
+                    self.active_context[block as usize] =
+                        !self.active_context[block as usize];
                 }
             }
         }
@@ -780,6 +782,40 @@ impl RawInner {
         // Return the just-written slot; it's the caller's responsibility to
         // select it as active once data is written.
         Ok(slot)
+    }
+
+    fn set_block_contexts(
+        &mut self,
+        block_contexts: &[DownstairsBlockContext],
+    ) -> Result<()> {
+        let mut start = 0;
+        for i in 0..block_contexts.len() {
+            if i + 1 == block_contexts.len()
+                || block_contexts[i].block + 1 != block_contexts[i + 1].block
+            {
+                self.set_block_contexts_contiguous(&block_contexts[start..=i])?;
+                start = i + 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Efficiently sets block contexts in bulk
+    ///
+    /// # Panics
+    /// `block_contexts` must represent a contiguous set of blocks
+    fn set_block_contexts_contiguous(
+        &mut self,
+        block_contexts: &[DownstairsBlockContext],
+    ) -> Result<()> {
+        for (a, b) in block_contexts.iter().zip(block_contexts.iter().skip(1)) {
+            assert_eq!(a.block + 1, b.block, "blocks must be contiguous");
+        }
+
+        for b in block_contexts {
+            self.set_block_context(b)?;
+        }
+        Ok(())
     }
 
     fn get_metadata(&self) -> Result<OnDiskMeta, CrucibleError> {
