@@ -544,17 +544,11 @@ impl SqliteInner {
             gen_number,
             ext_version: EXTENT_META_RAW, // new extent version for raw files
         };
-        let mut meta_buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
-        bincode::serialize_into(meta_buf.as_mut_slice(), &meta)
+        let mut buf = vec![0u8; BLOCK_META_SIZE_BYTES as usize];
+        bincode::serialize_into(buf.as_mut_slice(), &meta)
             .map_err(|e| CrucibleError::IoError(e.to_string()))?;
 
-        let mut buf = Vec::with_capacity(
-            BLOCK_META_SIZE_BYTES as usize
-                + ctxs.len() * 2 * BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize,
-        );
-        buf.extend(meta_buf);
-
-        // Put the context data after the metadata
+        // Put the context data after the metadata, all in slot A
         for c in ctxs {
             let ctx = match c.len() {
                 0 => None,
@@ -569,10 +563,11 @@ impl SqliteInner {
             bincode::serialize_into(ctx_buf.as_mut_slice(), &ctx)
                 .map_err(|e| CrucibleError::IoError(e.to_string()))?;
             buf.extend(ctx_buf);
-
-            // The second slot is empty
-            buf.extend([0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize]);
         }
+        // Slot B is entirely empty
+        buf.extend(std::iter::repeat(0).take(
+            (BLOCK_CONTEXT_SLOT_SIZE_BYTES * self.extent_size.value) as usize,
+        ));
 
         // Reset the file read position, just in case
         self.file.seek(SeekFrom::Start(0))?;
