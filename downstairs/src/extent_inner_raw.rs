@@ -619,15 +619,28 @@ impl RawInner {
 
         // Now, read context data from the file and assign slots
         let active_context = {
-            let mut buf = vec![0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
             let mut active_context = vec![];
+            let context_array_size =
+                BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize * block_hashes.len();
+            let mut a_data = vec![0u8; context_array_size];
+            let mut b_data = vec![0u8; context_array_size];
+            file_buffered.read_exact(&mut a_data)?;
+            file_buffered.read_exact(&mut b_data)?;
+            let mut a_iter =
+                a_data.chunks_exact(BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize);
+            let mut b_iter =
+                b_data.chunks_exact(BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize);
             for (block, hash) in block_hashes.into_iter().enumerate() {
                 let mut matching_slot = None;
                 let mut empty_slot = None;
                 for slot in [ContextSlot::A, ContextSlot::B] {
-                    file_buffered.read_exact(&mut buf)?;
+                    let buf = match slot {
+                        ContextSlot::A => a_iter.next(),
+                        ContextSlot::B => b_iter.next(),
+                    }
+                    .unwrap();
                     let context: Option<OnDiskDownstairsBlockContext> =
-                        bincode::deserialize(&buf)?;
+                        bincode::deserialize(buf)?;
                     if let Some(context) = context {
                         if context.on_disk_hash == hash {
                             matching_slot = Some(slot);
@@ -638,7 +651,7 @@ impl RawInner {
                 }
                 let value = matching_slot.or(empty_slot).ok_or(
                     CrucibleError::IoError(format!(
-                        "no slot found for {block}"
+                        "open: no slot found for {block}"
                     )),
                 )?;
                 active_context.push(value);
