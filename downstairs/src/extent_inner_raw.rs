@@ -781,13 +781,15 @@ impl RawInner {
 
     /// Returns the byte offset of the given context slot
     ///
-    /// Contexts slots are located after block data in the extent file.  There
-    /// are two context slots per block.  We use a ping-pong strategy to ensure
-    /// that one of them is always valid (i.e. matching the data in the file).
+    /// Contexts slots are located after block and meta data in the extent file.
+    /// There are two context slots arrays, each of which contains one context
+    /// slot per block.  We use a ping-pong strategy to ensure that one of them
+    /// is always valid (i.e. matching the data in the file).
     fn context_slot_offset(&self, block: u64, slot: ContextSlot) -> u64 {
         self.extent_size.block_size_in_bytes() as u64 * self.extent_size.value
             + BLOCK_META_SIZE_BYTES
-            + (block * 2 + slot as u64) * BLOCK_CONTEXT_SLOT_SIZE_BYTES
+            + (self.extent_size.value * slot as u64 + block)
+                * BLOCK_CONTEXT_SLOT_SIZE_BYTES
     }
 
     /// Returns the byte offset of the metadata region
