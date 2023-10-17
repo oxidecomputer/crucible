@@ -16,7 +16,7 @@ use slog::{error, Logger};
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{IoSliceMut, Read, Seek, SeekFrom};
+use std::io::{BufReader, IoSliceMut, Read, Seek, SeekFrom};
 use std::os::fd::AsRawFd;
 use std::path::Path;
 
@@ -75,8 +75,8 @@ pub struct RawInner {
     /// Extent size, in blocks
     extent_size: Block,
 
-    /// Is the `ping` or `pong` context slot active?
-    active_context: Vec<ActiveContext>,
+    /// Is the `A` or `B` context slot active, on a per-block basis?
+    active_context: Vec<ContextSlot>,
 
     /// Local cache for the `dirty` value
     ///
@@ -98,18 +98,19 @@ pub struct RawInner {
 }
 
 #[derive(Copy, Clone, Debug)]
-enum ActiveContext {
-    /// There is no active context for the given block
-    Empty,
+enum ContextSlot {
+    A,
+    B,
+}
 
-    /// The active context for the given block is unknown
-    ///
-    /// We set the context to this state before a write, so that if the write
-    /// fails, we rehash the file contents to get back to a known state.
-    Unknown,
-
-    /// The active context is stored in the given slot
-    Slot(bool),
+impl std::ops::Not for ContextSlot {
+    type Output = Self;
+    fn not(self) -> Self {
+        match self {
+            ContextSlot::A => ContextSlot::B,
+            ContextSlot::B => ContextSlot::A,
+        }
+    }
 }
 
 impl ExtentInner for RawInner {
@@ -251,12 +252,6 @@ impl ExtentInner for RawInner {
                     on_disk_hash,
                 })?;
             pending_slots.push(Some(next_slot));
-
-            // Until the write lands, we can't trust the context slot and must
-            // rehash it if requested.  This assignment is overwritten after the
-            // write finishes.
-            self.active_context[write.offset.value as usize] =
-                ActiveContext::Unknown;
         }
 
         cdt::extent__write__raw__context__insert__done!(|| {
@@ -284,36 +279,24 @@ impl ExtentInner for RawInner {
             (job_id.0, self.extent_number, writes.len() as u64)
         });
 
-        // Now, batch writes into iovecs and use pwritev to write them all out.
-        let mut batched_pwritev = BatchedPwritev::new(
-            self.file.as_raw_fd(),
-            writes.len(),
-            self.extent_size.block_size_in_bytes().into(),
-            iov_max,
-        );
+        let r = self.write_inner(writes, &writes_to_skip, iov_max);
 
-        for write in writes {
-            let block = write.offset.value;
-
-            // TODO, can this be `only_write_unwritten &&
-            // write_to_skip.contains()`?
-            if writes_to_skip.contains(&block) {
-                debug_assert!(only_write_unwritten);
-                batched_pwritev.perform_writes()?;
-                continue;
+        if r.is_err() {
+            for write in writes.iter() {
+                let block = write.offset.value;
+                if !writes_to_skip.contains(&block) {
+                    // Try to recompute the context slot from the file.  If this
+                    // fails, then we _really_ can't recover, so bail out
+                    // unceremoniously.
+                    self.recompute_slot_from_file(block).unwrap();
+                }
             }
-
-            batched_pwritev.add_write(write)?;
-        }
-
-        // Write any remaining data
-        batched_pwritev.perform_writes()?;
-
-        // Now that writes have gone through, update our active context slots
-        for (write, new_slot) in writes.iter().zip(pending_slots) {
-            if let Some(slot) = new_slot {
-                self.active_context[write.offset.value as usize] =
-                    ActiveContext::Slot(slot);
+        } else {
+            // Now that writes have gone through, update active context slots
+            for (write, new_slot) in writes.iter().zip(pending_slots) {
+                if let Some(slot) = new_slot {
+                    self.active_context[write.offset.value as usize] = slot;
+                }
             }
         }
 
@@ -481,8 +464,7 @@ impl ExtentInner for RawInner {
     ) -> Result<(), CrucibleError> {
         self.set_dirty()?;
         let new_slot = self.set_block_context(block_context)?;
-        self.active_context[block_context.block as usize] =
-            ActiveContext::Slot(new_slot);
+        self.active_context[block_context.block as usize] = new_slot;
         Ok(())
     }
 
@@ -525,7 +507,7 @@ impl RawInner {
             extent_size: def.extent_size(),
             extent_number,
             active_context: vec![
-                ActiveContext::Empty;
+                ContextSlot::A; // both slots are empty, so this is fine
                 def.extent_size().value as usize
             ],
             context_slot_synched_at: vec![
@@ -557,7 +539,8 @@ impl RawInner {
         read_only: bool,
         log: &Logger,
     ) -> Result<Self> {
-        let bcount = def.extent_size().value;
+        let extent_size = def.extent_size();
+        let bcount = extent_size.value;
         let size = def.block_size().checked_mul(bcount).unwrap()
             + BLOCK_CONTEXT_SLOT_SIZE_BYTES * bcount * 2
             + BLOCK_META_SIZE_BYTES;
@@ -565,7 +548,7 @@ impl RawInner {
         /*
          * Open the extent file and verify the size is as we expect.
          */
-        let mut file =
+        let file =
             match OpenOptions::new().read(true).write(!read_only).open(path) {
                 Err(e) => {
                     error!(
@@ -592,32 +575,81 @@ impl RawInner {
 
         // Just in case, let's be very sure that the file on disk is what it
         // should be
-        if let Err(e) = file.sync_all() {
-            return Err(CrucibleError::IoError(format!(
-                "extent {extent_number}:
+        if !read_only {
+            if let Err(e) = file.sync_all() {
+                return Err(CrucibleError::IoError(format!(
+                    "extent {extent_number}:
                  fsync 1 failure during initial rehash: {e:?}",
-            ))
-            .into());
+                ))
+                .into());
+            }
         }
 
-        file.seek(SeekFrom::Start(Self::meta_offset_from_extent_size(
-            def.extent_size(),
-        )))?;
-        let mut dirty = [0u8];
-        file.read_exact(&mut dirty)?;
-        let dirty = match dirty[0] {
-            0 => false,
-            1 => true,
-            i => bail!("invalid dirty value: {i}"),
+        // Now, we'll compute which context slots are active in the file!  We
+        // start by reading + hashing the file, then compare those hashes
+        // against values in the context slots.  This is equivalent to
+        // `recompute_slot_from_file`, but reads the file in bulk for
+        // efficiency.
+
+        // Buffer the file so we don't spend all day waiting on syscalls
+        let mut file_buffered = BufReader::with_capacity(64 * 1024, &file);
+
+        let block_hashes = {
+            let mut block_hashes =
+                Vec::with_capacity(extent_size.value as usize);
+
+            // Stream the contents of the file and rehash them.
+            let mut buf = vec![0; extent_size.block_size_in_bytes() as usize];
+            for _block in 0..extent_size.value as usize {
+                file_buffered.read_exact(&mut buf)?;
+                block_hashes.push(integrity_hash(&[&buf]));
+            }
+            block_hashes
+        };
+
+        let dirty = {
+            let mut meta_buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
+            file_buffered.read_exact(&mut meta_buf)?;
+            match meta_buf[0] {
+                0 => false,
+                1 => true,
+                i => bail!("invalid dirty value: {i}"),
+            }
+        };
+
+        // Now, read context data from the file and assign slots
+        let active_context = {
+            let mut buf = vec![0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
+            let mut active_context = vec![];
+            for (block, hash) in block_hashes.into_iter().enumerate() {
+                let mut matching_slot = None;
+                let mut empty_slot = None;
+                for slot in [ContextSlot::A, ContextSlot::B] {
+                    file_buffered.read_exact(&mut buf)?;
+                    let context: Option<OnDiskDownstairsBlockContext> =
+                        bincode::deserialize(&buf)?;
+                    if let Some(context) = context {
+                        if context.on_disk_hash == hash {
+                            matching_slot = Some(slot);
+                        }
+                    } else if empty_slot.is_none() {
+                        empty_slot = Some(slot);
+                    }
+                }
+                let value = matching_slot.or(empty_slot).ok_or(
+                    CrucibleError::IoError(format!(
+                        "no slot found for {block}"
+                    )),
+                )?;
+                active_context.push(value);
+            }
+            active_context
         };
 
         Ok(Self {
             file,
             // Lazy initialization of which context slot is active
-            active_context: vec![
-                ActiveContext::Unknown;
-                def.extent_size().value as usize
-            ],
+            active_context,
             dirty,
             extent_number,
             extent_size: def.extent_size(),
@@ -639,45 +671,55 @@ impl RawInner {
         Ok(())
     }
 
-    /// Looks up the current context slot for the given block
+    /// Updates `self.active_context[block]` based on data read from the file
     ///
-    /// If the slot is currently unknown, rehashes the block and picks one of
-    /// the two slots, storing it locally.
-    fn get_block_context_slot(&mut self, block: usize) -> Result<Option<bool>> {
-        match self.active_context[block] {
-            ActiveContext::Empty => Ok(None),
-            ActiveContext::Slot(b) => Ok(Some(b)),
-            ActiveContext::Unknown => {
-                let block_size = self.extent_size.block_size_in_bytes();
-                let mut buf = vec![0; block_size as usize];
-                self.file
-                    .seek(SeekFrom::Start(block_size as u64 * block as u64))?;
-                self.file.read_exact(&mut buf)?;
-                let hash = integrity_hash(&[&buf]);
+    /// This returns an error if neither context slot matches the block data,
+    /// which should never happen (even during error conditions or after a
+    /// crash).
+    ///
+    /// We expect to call this function rarely, so it does not attempt to
+    /// minimize the number of syscalls it executes.
+    fn recompute_slot_from_file(
+        &mut self,
+        block: u64,
+    ) -> Result<(), CrucibleError> {
+        // Read the block data itself:
+        let block_size = self.extent_size.block_size_in_bytes();
+        let mut buf = vec![0; block_size as usize];
+        self.file.seek(SeekFrom::Start(block_size as u64 * block))?;
+        self.file.read_exact(&mut buf)?;
+        let hash = integrity_hash(&[&buf]);
 
-                self.file.seek(SeekFrom::Start(
-                    self.context_slot_offset(block as u64, false),
-                ))?;
-                let mut buf = vec![0; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
-                let mut found = None;
-                for slot in 0..2 {
-                    self.file.read_exact(&mut buf)?;
-                    let context: Option<OnDiskDownstairsBlockContext> =
-                        bincode::deserialize(&buf)?;
-                    if let Some(context) = context {
-                        if context.on_disk_hash == hash {
-                            self.active_context[block] =
-                                ActiveContext::Slot(slot != 0);
-                            found = Some(slot != 0);
-                        }
-                    }
+        // Then, read the slot data and decide if either slot
+        // (1) is present and
+        // (2) has a matching hash
+        let mut buf = [0; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
+        let mut matching_slot = None;
+        let mut empty_slot = None;
+        for slot in [ContextSlot::A, ContextSlot::B] {
+            // TODO: is `pread` faster than seek + read_exact?
+            self.file
+                .seek(SeekFrom::Start(self.context_slot_offset(block, slot)))?;
+            self.file.read_exact(&mut buf)?;
+            let context: Option<OnDiskDownstairsBlockContext> =
+                bincode::deserialize(&buf).map_err(|e| {
+                    CrucibleError::IoError(format!(
+                        "context deserialization failed: {e:?}"
+                    ))
+                })?;
+            if let Some(context) = context {
+                if context.on_disk_hash == hash {
+                    matching_slot = Some(slot);
                 }
-                if found.is_none() {
-                    self.active_context[block] = ActiveContext::Empty;
-                }
-                Ok(found)
+            } else if empty_slot.is_none() {
+                empty_slot = Some(slot);
             }
         }
+        let value = matching_slot.or(empty_slot).ok_or(
+            CrucibleError::IoError(format!("no slot found for {block}")),
+        )?;
+        self.active_context[block as usize] = value;
+        Ok(())
     }
 
     /// Writes the inactive block context slot
@@ -686,10 +728,10 @@ impl RawInner {
     fn set_block_context(
         &mut self,
         block_context: &DownstairsBlockContext,
-    ) -> Result<bool> {
+    ) -> Result<ContextSlot> {
         let block = block_context.block as usize;
         // Select the inactive slot
-        let slot = !self.get_block_context_slot(block)?.unwrap_or(true);
+        let slot = !self.active_context[block];
 
         // If the context slot that we're about to write into hasn't been
         // synched to disk yet, we must sync it first.  This prevents subtle
@@ -742,7 +784,7 @@ impl RawInner {
     /// Contexts slots are located after block data in the extent file.  There
     /// are two context slots per block.  We use a ping-pong strategy to ensure
     /// that one of them is always valid (i.e. matching the data in the file).
-    fn context_slot_offset(&self, block: u64, slot: bool) -> u64 {
+    fn context_slot_offset(&self, block: u64, slot: ContextSlot) -> u64 {
         self.extent_size.block_size_in_bytes() as u64 * self.extent_size.value
             + BLOCK_META_SIZE_BYTES
             + (block * 2 + slot as u64) * BLOCK_CONTEXT_SLOT_SIZE_BYTES
@@ -763,9 +805,7 @@ impl RawInner {
         &mut self,
         block: u64,
     ) -> Result<Option<DownstairsBlockContext>> {
-        let Some(slot) = self.get_block_context_slot(block as usize)? else {
-            return Ok(None);
-        };
+        let slot = self.active_context[block as usize];
         let offset = self.context_slot_offset(block, slot);
         let mut buf = [0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
         nix::sys::uio::pread(self.file.as_raw_fd(), &mut buf, offset as i64)
@@ -813,6 +853,32 @@ impl RawInner {
             out.push(ctx);
         }
         Ok(out)
+    }
+
+    fn write_inner(
+        &self,
+        writes: &[&crucible_protocol::Write],
+        writes_to_skip: &HashSet<u64>,
+        iov_max: usize,
+    ) -> Result<(), CrucibleError> {
+        // Now, batch writes into iovecs and use pwritev to write them all out.
+        let mut batched_pwritev = BatchedPwritev::new(
+            self.file.as_raw_fd(),
+            writes.len(),
+            self.extent_size.block_size_in_bytes().into(),
+            iov_max,
+        );
+
+        for write in writes {
+            if !writes_to_skip.contains(&write.offset.value) {
+                batched_pwritev.add_write(write)?;
+            }
+        }
+
+        // Write any remaining data
+        batched_pwritev.perform_writes()?;
+
+        Ok(())
     }
 }
 
