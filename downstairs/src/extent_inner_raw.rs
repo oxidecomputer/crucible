@@ -17,7 +17,7 @@ use slog::{error, Logger};
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, IoSliceMut, Read, Seek, SeekFrom};
+use std::io::{BufReader, IoSliceMut, Read};
 use std::os::fd::AsRawFd;
 use std::path::Path;
 
@@ -452,9 +452,6 @@ impl ExtentInner for RawInner {
             (job_id.get(), self.extent_number, 0)
         });
 
-        // Finally, reset the file's seek offset to 0
-        self.file.seek(SeekFrom::Start(0))?;
-
         cdt::extent__flush__done!(|| { (job_id.get(), self.extent_number, 0) });
 
         Ok(())
@@ -496,7 +493,7 @@ impl RawInner {
             + BLOCK_CONTEXT_SLOT_SIZE_BYTES * bcount * 2;
 
         mkdir_for_file(&path)?;
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -504,7 +501,6 @@ impl RawInner {
 
         // All 0s are fine for everything except extent version in the metadata
         file.set_len(size)?;
-        file.seek(SeekFrom::Start(0))?;
         let mut out = Self {
             file,
             dirty: false,
@@ -703,8 +699,12 @@ impl RawInner {
         // Read the block data itself:
         let block_size = self.extent_size.block_size_in_bytes();
         let mut buf = vec![0; block_size as usize];
-        self.file.seek(SeekFrom::Start(block_size as u64 * block))?;
-        self.file.read_exact(&mut buf)?;
+        nix::sys::uio::pread(
+            self.file.as_raw_fd(),
+            &mut buf,
+            (block_size as u64 * block) as i64,
+        )
+        .map_err(|e| CrucibleError::IoError(e.to_string()))?;
         let hash = integrity_hash(&[&buf]);
 
         // Then, read the slot data and decide if either slot
@@ -714,10 +714,12 @@ impl RawInner {
         let mut matching_slot = None;
         let mut empty_slot = None;
         for slot in [ContextSlot::A, ContextSlot::B] {
-            // TODO: is `pread` faster than seek + read_exact?
-            self.file
-                .seek(SeekFrom::Start(self.context_slot_offset(block, slot)))?;
-            self.file.read_exact(&mut buf)?;
+            nix::sys::uio::pread(
+                self.file.as_raw_fd(),
+                &mut buf,
+                self.context_slot_offset(block, slot) as i64,
+            )
+            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
             let context: Option<OnDiskDownstairsBlockContext> =
                 bincode::deserialize(&buf).map_err(|e| {
                     CrucibleError::IoError(format!(
