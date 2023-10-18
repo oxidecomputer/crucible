@@ -427,6 +427,10 @@ impl ExtentInner for RawInner {
             return Ok(());
         }
 
+        cdt::extent__flush__start!(|| {
+            (job_id.get(), self.extent_number, 0)
+        });
+
         // We put all of our metadata updates into a single write to make this
         // operation atomic.
         self.set_flush_number(new_flush, new_gen)?;
@@ -452,9 +456,131 @@ impl ExtentInner for RawInner {
             (job_id.get(), self.extent_number, 0)
         });
 
+        // At this point, the active context slots (on a per-block basis)
+        // may be scattered across the two arrays:
+        //
+        // block   | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | ... |
+        // context | A | A |   |   |   |   | A | A | A | ... | [A array]
+        //         |   |   | B | B | B | B |   |   |   | ... | [B array]
+        //
+        // This can be inefficient, because it means that a write would have to
+        // be split into updating multiple regions (instead of a single
+        // contiguous write).  As such, if the context slots disagree, we
+        // "defragment" them:
+        //
+        // - Figure out whether A or B is more popular
+        // - Copy context data from the less-popular slot to the more-popular
+        //
+        // In the example above, `A` is more popular so we would perform the
+        // following copy:
+        //
+        // block   | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | ... |
+        // context | A | A | ^ | ^ | ^ | ^ | A | A | A | ... | [A array]
+        //         |   |   | B | B | B | B |   |   |   | ... | [B array]
+        //
+        // This is safe because it occurs immediately after a flush, so we are
+        // dead certain that the active context matches file contents.  This
+        // means that we can safely overwrite the old (inactive) context.
+        //
+        // We track the number of A vs B slots, as well as the range covered by
+        // the slots.  It's that range that we'll need to read + write, so we
+        // want to pick whichever slot does less work.
+        #[derive(Copy, Clone)]
+        struct Counter {
+            count: usize,
+            min_block: usize,
+            max_block: usize,
+        }
+        let mut a_count = Counter {
+            count: 0,
+            min_block: usize::MAX,
+            max_block: 0,
+        };
+        let mut b_count = a_count;
+        for (i, s) in self.active_context.iter().enumerate() {
+            let count = match s {
+                ContextSlot::A => &mut a_count,
+                ContextSlot::B => &mut b_count,
+            };
+            count.count += 1;
+            count.min_block = count.min_block.min(i);
+            count.max_block = count.max_block.max(i);
+        }
+        let r = if a_count.count != 0 && b_count.count != 0 {
+            // We want to do as little copying as possible
+            let (copy_from, counter) = if a_count.count < b_count.count {
+                (ContextSlot::A, a_count)
+            } else {
+                (ContextSlot::B, b_count)
+            };
+            assert!(counter.count > 0);
+            assert!(counter.max_block >= counter.min_block);
+            let num_slots = counter.max_block + 1 - counter.min_block;
+
+            // Read the source context slots from the file
+            let mut source_buf =
+                vec![0u8; num_slots * BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
+            nix::sys::uio::pread(
+                self.file.as_raw_fd(),
+                &mut source_buf,
+                self.context_slot_offset(counter.min_block as u64, copy_from)
+                    as i64,
+            )
+            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+
+            // Read the destination context slots from the file
+            let mut dest_buf =
+                vec![0u8; num_slots * BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
+            nix::sys::uio::pread(
+                self.file.as_raw_fd(),
+                &mut dest_buf,
+                self.context_slot_offset(counter.min_block as u64, !copy_from)
+                    as i64,
+            )
+            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+
+            // Selectively overwrite dest with source context slots
+            for (i, block) in
+                (counter.min_block..=counter.max_block).enumerate()
+            {
+                if self.active_context[block] == copy_from {
+                    let chunk = (i * BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize)
+                        ..((i + 1) * BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize);
+                    dest_buf[chunk.clone()].copy_from_slice(&source_buf[chunk]);
+
+                    // Mark this slot as unsynched, so that we don't overwrite
+                    // it later on.
+                    self.context_slot_synched_at[block][!copy_from as usize] =
+                        self.sync_index + 1;
+                }
+            }
+            let r = nix::sys::uio::pwrite(
+                self.file.as_raw_fd(),
+                &dest_buf,
+                self.context_slot_offset(counter.min_block as u64, !copy_from)
+                    as i64,
+            )
+            .map_err(|e| CrucibleError::IoError(e.to_string()));
+
+            // If this write failed, then try recomputing every context slot
+            // within the unknown range
+            if r.is_err() {
+                for block in counter.min_block..=counter.max_block {
+                    self.recompute_slot_from_file(block as u64).unwrap();
+                }
+            } else {
+                for block in counter.min_block..=counter.max_block {
+                    self.active_context[block] = !copy_from;
+                }
+            }
+            r.map(|_| ())
+        } else {
+            Ok(())
+        };
+
         cdt::extent__flush__done!(|| { (job_id.get(), self.extent_number, 0) });
 
-        Ok(())
+        r
     }
 
     #[cfg(test)]
@@ -1342,22 +1468,29 @@ mod test {
         };
         // The context should be written to slot B
         inner.write(JobId(10), &[&write], false, IOV_MAX_TEST)?;
+        assert_eq!(inner.active_context[0], ContextSlot::B);
         assert_eq!(inner.sync_index, 0);
 
-        // Flush, which should bump the sync number (marking slot B as synched)
+        // Flush!  This will (1) bump the sync number (marking slot B as
+        // synched), then (2) defragment by copying slot B to slot A.
         inner.flush(12, 12, JobId(11).into())?;
+        assert_eq!(inner.active_context[0], ContextSlot::A);
         assert_eq!(inner.sync_index, 1);
 
-        // The context should be written to slot A
+        // The context should be written to slot B
         inner.write(JobId(11), &[&write], false, IOV_MAX_TEST)?;
+        assert_eq!(inner.active_context[0], ContextSlot::B);
         assert_eq!(inner.sync_index, 1);
 
-        // The context should be written to slot B, forcing a sync
+        // The context should be written to slot A, forcing a sync (because slot
+        // A was left unsynched after being defragmented)
         inner.write(JobId(12), &[&write], false, IOV_MAX_TEST)?;
-        assert_eq!(inner.sync_index, 1);
+        assert_eq!(inner.active_context[0], ContextSlot::A);
+        assert_eq!(inner.sync_index, 2);
 
-        // The context should be written to slot 1, forcing a sync
+        // The context should be written to slot B, which is fine
         inner.write(JobId(12), &[&write], false, IOV_MAX_TEST)?;
+        assert_eq!(inner.active_context[0], ContextSlot::B);
         assert_eq!(inner.sync_index, 2);
 
         Ok(())
