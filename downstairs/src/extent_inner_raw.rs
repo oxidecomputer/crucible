@@ -872,26 +872,6 @@ impl RawInner {
         extent_size.block_size_in_bytes() as u64 * extent_size.value
     }
 
-    fn get_block_context(
-        &mut self,
-        block: u64,
-    ) -> Result<Option<DownstairsBlockContext>> {
-        let slot = self.active_context[block as usize];
-        let offset = self.context_slot_offset(block, slot);
-        let mut buf = [0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
-        nix::sys::uio::pread(self.file.as_raw_fd(), &mut buf, offset as i64)
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
-        let out: Option<OnDiskDownstairsBlockContext> =
-            bincode::deserialize(&buf)?;
-        let out = out.map(|c| DownstairsBlockContext {
-            block,
-            block_context: c.block_context,
-            on_disk_hash: c.on_disk_hash,
-        });
-
-        Ok(out)
-    }
-
     /// Update the flush number, generation number, and clear the dirty bit
     fn set_flush_number(&mut self, new_flush: u64, new_gen: u64) -> Result<()> {
         let d = OnDiskMeta {
@@ -919,10 +899,35 @@ impl RawInner {
         count: u64,
     ) -> Result<Vec<Option<DownstairsBlockContext>>> {
         let mut out = vec![];
-        for i in block..block + count {
-            let ctx = self.get_block_context(i)?;
-            out.push(ctx);
+        let mut buf = vec![];
+        for (slot, mut group) in (block..block + count)
+            .group_by(|block| self.active_context[*block as usize])
+            .into_iter()
+        {
+            let group_start = group.next().unwrap();
+            let group_count = group.count() + 1;
+            buf.resize(group_count * BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize, 0);
+            let offset = self.context_slot_offset(group_start, slot);
+            nix::sys::uio::pread(
+                self.file.as_raw_fd(),
+                &mut buf,
+                offset as i64,
+            )
+            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+            for (i, chunk) in buf
+                .chunks_exact(BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize)
+                .enumerate()
+            {
+                let ctx: Option<OnDiskDownstairsBlockContext> =
+                    bincode::deserialize(chunk)?;
+                out.push(ctx.map(|c| DownstairsBlockContext {
+                    block: group_start + i as u64,
+                    block_context: c.block_context,
+                    on_disk_hash: c.on_disk_hash,
+                }));
+            }
         }
+
         Ok(out)
     }
 
@@ -951,6 +956,19 @@ impl RawInner {
 
         Ok(())
     }
+
+    /// Helper function to get a single block context
+    ///
+    /// This is inefficient and should only be used in unit tests
+    #[cfg(test)]
+    fn get_block_context(
+        &mut self,
+        block: u64,
+    ) -> Result<Option<DownstairsBlockContext>> {
+        let mut out = self.get_block_contexts(block, 1)?;
+        assert_eq!(out.len(), 1);
+        Ok(out.pop().unwrap())
+    }
 }
 
 #[cfg(test)]
@@ -978,8 +996,8 @@ mod test {
 
         // Encryption context for blocks 0 and 1 should start blank
 
-        assert!(inner.get_block_contexts(0, 1)?[0].is_none());
-        assert!(inner.get_block_contexts(1, 1)?[0].is_none());
+        assert!(inner.get_block_context(0)?.is_none());
+        assert!(inner.get_block_context(1)?.is_none());
 
         // Set and verify block 0's context
         inner.set_dirty_and_block_context(&DownstairsBlockContext {
@@ -997,8 +1015,7 @@ mod test {
             on_disk_hash: 456,
         })?;
 
-        let ctxs = inner.get_block_contexts(0, 1)?;
-        let ctx = ctxs[0].as_ref().unwrap();
+        let ctx = inner.get_block_context(0)?.unwrap();
         assert_eq!(
             ctx.block_context.encryption_context.unwrap().nonce,
             [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
@@ -1011,7 +1028,7 @@ mod test {
         assert_eq!(ctx.on_disk_hash, 456);
 
         // Block 1 should still be blank
-        assert!(inner.get_block_contexts(1, 1)?[0].is_none());
+        assert!(inner.get_block_context(1)?.is_none());
 
         // Set and verify a new context for block 0
         let blob1 = rand::thread_rng().gen::<[u8; 12]>();
@@ -1030,8 +1047,7 @@ mod test {
             on_disk_hash: 65536,
         })?;
 
-        let ctxs = inner.get_block_contexts(0, 1)?;
-        let ctx = ctxs[0].as_ref().unwrap();
+        let ctx = inner.get_block_context(0)?.unwrap();
 
         // Second context was appended
         assert_eq!(ctx.block_context.encryption_context.unwrap().nonce, blob1);
@@ -1051,8 +1067,8 @@ mod test {
 
         // Encryption context for blocks 0 and 1 should start blank
 
-        assert!(inner.get_block_contexts(0, 1)?[0].is_none());
-        assert!(inner.get_block_contexts(1, 1)?[0].is_none());
+        assert!(inner.get_block_context(0)?.is_none());
+        assert!(inner.get_block_context(1)?.is_none());
 
         // Set block 0's and 1's context and dirty flag
         inner.set_dirty_and_block_context(&DownstairsBlockContext {
@@ -1082,8 +1098,7 @@ mod test {
         })?;
 
         // Verify block 0's context
-        let ctxs = inner.get_block_contexts(0, 1)?;
-        let ctx = ctxs[0].as_ref().unwrap();
+        let ctx = inner.get_block_context(0)?.unwrap();
         assert_eq!(
             ctx.block_context.encryption_context.unwrap().nonce,
             [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
@@ -1096,8 +1111,7 @@ mod test {
         assert_eq!(ctx.on_disk_hash, 456);
 
         // Verify block 1's context
-        let ctxs = inner.get_block_contexts(1, 1)?;
-        let ctx = ctxs[0].as_ref().unwrap();
+        let ctx = inner.get_block_context(1)?.unwrap();
 
         assert_eq!(
             ctx.block_context.encryption_context.unwrap().nonce,
