@@ -44,13 +44,13 @@ pub struct OnDiskMeta {
 ///
 /// This must be large enough to fit an `Option<OnDiskDownstairsBlockContext>`
 /// serialized using `bincode`.
-pub const BLOCK_CONTEXT_SLOT_SIZE_BYTES: u64 = 64;
+pub const BLOCK_CONTEXT_SLOT_SIZE_BYTES: u64 = 48;
 
 /// Size of metadata region
 ///
 /// This must be large enough to contain an `OnDiskMeta` serialized using
 /// `bincode`.
-pub const BLOCK_META_SIZE_BYTES: u64 = 64;
+pub const BLOCK_META_SIZE_BYTES: u64 = 32;
 
 /// `RawInner` is a wrapper around a [`std::fs::File`] representing an extent
 ///
