@@ -339,9 +339,11 @@ impl DataFile {
 
         match running_snapshots.get_mut(&request.name) {
             None => {
+                // A read-only downstairs never existed for this snapshot,
+                // return OK.
                 info!(
                     self.log,
-                    "not running for region {} snapshot {}, returning Ok",
+                    "running snapshot never existed for region {} snapshot {}, returning Ok",
                     request.id.0,
                     request.name
                 );
@@ -350,6 +352,24 @@ impl DataFile {
             }
 
             Some(existing) => {
+                // It's important *not* to check if the underlying snapshot
+                // exists here: it could have been deleted already, and yet the
+                // request to delete the running snapshot may have been resent.
+                //
+                // What's important is that:
+                //
+                // 1) the running snapshot could not have been created without
+                //    an underlying snapshot.
+                //
+                // 2) the snapshot could not have been deleted unless the
+                //    running snapshot was first Destroyed.
+                //
+                // Because we're in the Some branch, this running snapshot
+                // existed at some point. If the underlying snapshot was
+                // deleted, then the running snapshot state must be in
+                // Destroyed. If the snapshot was not deleted, then the running
+                // snapshot state could be anything.
+
                 match existing.state {
                     State::Tombstoned | State::Destroyed => {
                         /*

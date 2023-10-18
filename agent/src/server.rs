@@ -320,23 +320,6 @@ async fn region_delete_running_snapshot(
         }
     }
 
-    let snapshots = match rc.context().get_snapshots_for_region(&p.id) {
-        Ok(results) => results,
-        Err(e) => {
-            return Err(HttpError::for_internal_error(e.to_string()));
-        }
-    };
-
-    let snapshot_names: Vec<String> =
-        snapshots.iter().map(|s| s.name.clone()).collect();
-
-    if !snapshot_names.contains(&p.name) {
-        return Err(HttpError::for_not_found(
-            None,
-            format!("snapshot {:?} not found", p.name),
-        ));
-    }
-
     let request = model::DeleteRunningSnapshotRequest {
         id: p.id,
         name: p.name,
