@@ -42,7 +42,7 @@ pub struct OnDiskMeta {
 
 /// Size of backup data
 ///
-/// This must be large enough to contain an `Option<DownstairsBlockContext>`
+/// This must be large enough to fit an `Option<OnDiskDownstairsBlockContext>`
 /// serialized using `bincode`.
 pub const BLOCK_CONTEXT_SLOT_SIZE_BYTES: u64 = 64;
 
@@ -1459,5 +1459,30 @@ mod test {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn test_serialized_sizes() {
+        let c = OnDiskDownstairsBlockContext {
+            block_context: BlockContext {
+                hash: u64::MAX,
+                encryption_context: Some(EncryptionContext {
+                    nonce: [0xFF; 12],
+                    tag: [0xFF; 16],
+                }),
+            },
+            on_disk_hash: u64::MAX,
+        };
+        let mut ctx_buf = [0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
+        bincode::serialize_into(ctx_buf.as_mut_slice(), &Some(c)).unwrap();
+
+        let m = OnDiskMeta {
+            dirty: true,
+            gen_number: u64::MAX,
+            flush_number: u64::MAX,
+            ext_version: u32::MAX,
+        };
+        let mut meta_buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
+        bincode::serialize_into(meta_buf.as_mut_slice(), &Some(m)).unwrap();
     }
 }
