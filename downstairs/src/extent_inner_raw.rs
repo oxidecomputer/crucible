@@ -17,12 +17,12 @@ use slog::{error, Logger};
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, IoSliceMut, Read};
+use std::io::{BufReader, IoSliceMut, Read, Seek, SeekFrom};
 use std::os::fd::AsRawFd;
 use std::path::Path;
 
 /// Equivalent to `DownstairsBlockContext`, but without one's own block number
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OnDiskDownstairsBlockContext {
     pub block_context: BlockContext,
     pub on_disk_hash: u64,
@@ -577,7 +577,7 @@ impl RawInner {
         /*
          * Open the extent file and verify the size is as we expect.
          */
-        let file =
+        let mut file =
             match OpenOptions::new().read(true).write(!read_only).open(path) {
                 Err(e) => {
                     error!(
@@ -614,28 +614,13 @@ impl RawInner {
             }
         }
 
-        // Now, we'll compute which context slots are active in the file!  We
-        // start by reading + hashing the file, then compare those hashes
-        // against values in the context slots.  This is equivalent to
-        // `recompute_slot_from_file`, but reads the file in bulk for
-        // efficiency.
+        // Position ourselves at the end of file data
+        file.seek(SeekFrom::Start(bcount * def.block_size()))?;
 
         // Buffer the file so we don't spend all day waiting on syscalls
         let mut file_buffered = BufReader::with_capacity(64 * 1024, &file);
 
-        let block_hashes = {
-            let mut block_hashes =
-                Vec::with_capacity(extent_size.value as usize);
-
-            // Stream the contents of the file and rehash them.
-            let mut buf = vec![0; extent_size.block_size_in_bytes() as usize];
-            for _block in 0..extent_size.value as usize {
-                file_buffered.read_exact(&mut buf)?;
-                block_hashes.push(integrity_hash(&[&buf]));
-            }
-            block_hashes
-        };
-
+        // Read the metadata block
         let dirty = {
             let mut meta_buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
             file_buffered.read_exact(&mut meta_buf)?;
@@ -646,30 +631,56 @@ impl RawInner {
             }
         };
 
-        // Now, read context data from the file and assign slots
-        let active_context = {
-            let mut active_context = vec![];
-            let context_array_size =
-                BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize * block_hashes.len();
-            let mut a_data = vec![0u8; context_array_size];
-            let mut b_data = vec![0u8; context_array_size];
-            file_buffered.read_exact(&mut a_data)?;
-            file_buffered.read_exact(&mut b_data)?;
-            let mut a_iter =
-                a_data.chunks_exact(BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize);
-            let mut b_iter =
-                b_data.chunks_exact(BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize);
-            for (block, hash) in block_hashes.into_iter().enumerate() {
+        // Read the two context slot arrays
+        let mut context_arrays = vec![];
+        for _slot in [ContextSlot::A, ContextSlot::B] {
+            let mut contexts = Vec::with_capacity(bcount as usize);
+            let mut buf = vec![0; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
+            for _block in 0..bcount as usize {
+                file_buffered.read_exact(&mut buf)?;
+                let context: Option<OnDiskDownstairsBlockContext> =
+                    bincode::deserialize(&buf).map_err(|e| {
+                        CrucibleError::IoError(format!(
+                            "context deserialization failed: {e}"
+                        ))
+                    })?;
+                contexts.push(context);
+            }
+            context_arrays.push(contexts);
+        }
+
+        file.seek(SeekFrom::Start(0))?;
+        let mut file_buffered = BufReader::with_capacity(64 * 1024, &file);
+        let mut active_context = vec![];
+        let mut buf = vec![0; extent_size.block_size_in_bytes() as usize];
+        let mut last_seek_block = 0;
+        for (block, (context_a, context_b)) in context_arrays[0]
+            .iter()
+            .zip(context_arrays[1].iter())
+            .enumerate()
+        {
+            let slot = if context_a == context_b {
+                // If both slots are identical, then either they're both None or
+                // we have defragmented recently (which copies the active slot
+                // to the inactive one).  That makes life easy!
+                ContextSlot::A
+            } else {
+                // Otherwise, we have to compute hashes from the file.
+                if block != last_seek_block {
+                    file_buffered.seek_relative(
+                        (block - last_seek_block) as i64
+                            * extent_size.block_size_in_bytes() as i64,
+                    )?;
+                }
+                file_buffered.read_exact(&mut buf)?;
+                last_seek_block = block + 1; // since we just read a block
+                let hash = integrity_hash(&[&buf]);
+
                 let mut matching_slot = None;
                 let mut empty_slot = None;
+
                 for slot in [ContextSlot::A, ContextSlot::B] {
-                    let buf = match slot {
-                        ContextSlot::A => a_iter.next(),
-                        ContextSlot::B => b_iter.next(),
-                    }
-                    .unwrap();
-                    let context: Option<OnDiskDownstairsBlockContext> =
-                        bincode::deserialize(buf)?;
+                    let context = [context_a, context_b][slot as usize];
                     if let Some(context) = context {
                         if context.on_disk_hash == hash {
                             matching_slot = Some(slot);
@@ -678,19 +689,16 @@ impl RawInner {
                         empty_slot = Some(slot);
                     }
                 }
-                let value = matching_slot.or(empty_slot).ok_or(
-                    CrucibleError::IoError(format!(
-                        "open: no slot found for {block}"
-                    )),
-                )?;
-                active_context.push(value);
-            }
-            active_context
-        };
+
+                matching_slot.or(empty_slot).ok_or(CrucibleError::IoError(
+                    format!("open: no slot found for {block}"),
+                ))?
+            };
+            active_context.push(slot);
+        }
 
         let mut out = Self {
             file,
-            // Lazy initialization of which context slot is active
             active_context,
             dirty,
             extent_number,
