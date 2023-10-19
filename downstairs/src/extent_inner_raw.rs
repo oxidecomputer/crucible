@@ -857,9 +857,10 @@ impl RawInner {
         let mut writes = 0u64;
         for (slot, group) in block_contexts
             .iter()
-            .group_by(|block_context|
-            // We'll be writing to the inactive slot
-            !self.active_context[block_context.block as usize])
+            .group_by(|block_context| {
+                // We'll be writing to the inactive slot
+                !self.active_context[block_context.block as usize]
+            })
             .into_iter()
         {
             let mut group = group.peekable();
