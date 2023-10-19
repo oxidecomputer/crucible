@@ -5358,7 +5358,6 @@ impl Upstairs {
         });
 
         let uuid = opt.id;
-        info!(log, "Crucible stats registered with UUID: {}", uuid);
         let stats = UpStatOuter {
             up_stat_wrap: Arc::new(std::sync::Mutex::new(UpCountStat::new(
                 uuid,
@@ -5371,11 +5370,15 @@ impl Upstairs {
         };
 
         let session_id = Uuid::new_v4();
+        let log = log.new(o!("session_id" => session_id.to_string()));
         info!(log, "Crucible {} has session id: {}", uuid, session_id);
+        info!(log, "Upstairs opts: {}", opt);
+
+        info!(log, "Crucible stats registered with UUID: {}", uuid);
         Arc::new(Upstairs {
             active: Mutex::new(UpstairsState::default()),
             uuid,
-            session_id: Uuid::new_v4(),
+            session_id,
             generation: AtomicU64::new(gen),
             guest,
             downstairs: Mutex::new(Downstairs::new(log.clone(), ds_target)),
@@ -10282,7 +10285,6 @@ pub async fn up_main(
         "Upstairs <-> Downstairs Message Version: {}", CRUCIBLE_MESSAGE_VERSION
     );
 
-    info!(log, "Upstairs opts: {}", opt);
     if let Some(rd) = region_def {
         info!(log, "Using region definition {:?}", rd);
     }
