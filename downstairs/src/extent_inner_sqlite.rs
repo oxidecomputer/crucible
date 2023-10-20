@@ -548,6 +548,12 @@ impl SqliteInner {
         bincode::serialize_into(buf.as_mut_slice(), &meta)
             .map_err(|e| CrucibleError::IoError(e.to_string()))?;
 
+        // Add bitpacked data indicating which slot is active; this is always A
+        buf.extend(
+            std::iter::repeat(0)
+                .take((self.extent_size.value as usize + 7) / 8),
+        );
+
         // Put the context data after the metadata, all in slot A
         for c in ctxs {
             let ctx = match c.len() {

@@ -62,13 +62,18 @@ const DEFRAGMENT_THRESHOLD: u64 = 3;
 /// - [`BLOCK_META_SIZE_BYTES`], which contains an [`OnDiskMeta`] serialized
 ///   using `bincode`.  The first byte of this range is `dirty`, serialized as a
 ///   `u8` (where `1` is dirty and `0` is clean).
-/// - Block contexts (for encryption).  Each block index (in the range
-///   `0..extent_size`) has two context slots; we use a ping-pong strategy when
-///   writing to ensure that one slot is always valid.  Each slot is
-///   [`BLOCK_CONTEXT_SLOT_SIZE_BYTES`] in size, so this region is
-///   `BLOCK_CONTEXT_SLOT_SIZE_BYTES * extent_size * 2` bytes in total.  The
-///   slots contain an `Option<OnDiskDownstairsBlockContext>`, serialized using
-///   `bincode`.
+/// - Active context slots, stored as a bit-packed array (where 0 is
+///   [`ContextSlot::A`] and 1 is [`ContextSlot::B`]).  This array contains
+///   `(extent_size + 7) / 8` bytes.  It is only valid when the `dirty` bit is
+///   cleared.  This is an optimization that speeds up opening a clean extent
+///   file; otherwise, we would have to rehash every block to find the active
+///   context slot.
+/// - Block contexts (for encryption).  There are two arrays of context slots,
+///   each containing `extent_size` elements (i.e. one slot for each block).
+///   Each slot is [`BLOCK_CONTEXT_SLOT_SIZE_BYTES`] in size, so this section of
+///   the file is `BLOCK_CONTEXT_SLOT_SIZE_BYTES * extent_size * 2` bytes in
+///   total.  The slots contain an `Option<OnDiskDownstairsBlockContext>`,
+///   serialized using `bincode`.
 #[derive(Debug)]
 pub struct RawInner {
     file: File,
@@ -517,6 +522,7 @@ impl RawInner {
         let bcount = def.extent_size().value;
         let size = def.block_size().checked_mul(bcount).unwrap()
             + BLOCK_META_SIZE_BYTES
+            + (bcount + 7) / 8
             + BLOCK_CONTEXT_SLOT_SIZE_BYTES * bcount * 2;
 
         mkdir_for_file(&path)?;
@@ -571,8 +577,9 @@ impl RawInner {
         let extent_size = def.extent_size();
         let bcount = extent_size.value;
         let size = def.block_size().checked_mul(bcount).unwrap()
-            + BLOCK_CONTEXT_SLOT_SIZE_BYTES * bcount * 2
-            + BLOCK_META_SIZE_BYTES;
+            + BLOCK_META_SIZE_BYTES
+            + (bcount + 7) / 8
+            + BLOCK_CONTEXT_SLOT_SIZE_BYTES * bcount * 2;
 
         /*
          * Open the extent file and verify the size is as we expect.
@@ -620,84 +627,112 @@ impl RawInner {
         // Buffer the file so we don't spend all day waiting on syscalls
         let mut file_buffered = BufReader::with_capacity(64 * 1024, &file);
 
-        // Read the metadata block
-        let dirty = {
-            let mut meta_buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
-            file_buffered.read_exact(&mut meta_buf)?;
-            match meta_buf[0] {
-                0 => false,
-                1 => true,
-                i => bail!("invalid dirty value: {i}"),
-            }
+        // Read the metadata block and active slots
+        let mut meta_buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
+        file_buffered.read_exact(&mut meta_buf)?;
+        let dirty = match meta_buf[0] {
+            0 => false,
+            1 => true,
+            i => bail!("invalid dirty value: {i}"),
         };
 
-        // Read the two context slot arrays
-        let mut context_arrays = vec![];
-        for _slot in [ContextSlot::A, ContextSlot::B] {
-            let mut contexts = Vec::with_capacity(bcount as usize);
-            let mut buf = vec![0; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
-            for _block in 0..bcount as usize {
-                file_buffered.read_exact(&mut buf)?;
-                let context: Option<OnDiskDownstairsBlockContext> =
-                    bincode::deserialize(&buf).map_err(|e| {
-                        CrucibleError::IoError(format!(
-                            "context deserialization failed: {e}"
-                        ))
-                    })?;
-                contexts.push(context);
+        // If the file is dirty, then we have to recompute which context slot is
+        // active for every block.  This is slow, but can't be avoided; we
+        // closed the file without a flush so we can't be confident about the
+        // data that was on disk.
+        let active_context = if !dirty {
+            // Easy case first: if it's **not** dirty, then just assign active
+            // slots based on trailing bytes in the metadata section of the file
+            let mut active_context = vec![];
+            let mut buf = vec![0u8; (bcount as usize + 7) / 8];
+            file_buffered.read_exact(&mut buf)?;
+            for b in buf[BLOCK_META_SIZE_BYTES as usize..].iter() {
+                // Unpack bits from each byte
+                for i in 0..8 {
+                    active_context.push(if b & (1 << i) == 0 {
+                        ContextSlot::A
+                    } else {
+                        ContextSlot::B
+                    });
+                }
             }
-            context_arrays.push(contexts);
-        }
-
-        file.seek(SeekFrom::Start(0))?;
-        let mut file_buffered = BufReader::with_capacity(64 * 1024, &file);
-        let mut active_context = vec![];
-        let mut buf = vec![0; extent_size.block_size_in_bytes() as usize];
-        let mut last_seek_block = 0;
-        for (block, (context_a, context_b)) in context_arrays[0]
-            .iter()
-            .zip(context_arrays[1].iter())
-            .enumerate()
-        {
-            let slot = if context_a == context_b {
-                // If both slots are identical, then either they're both None or
-                // we have defragmented recently (which copies the active slot
-                // to the inactive one).  That makes life easy!
-                ContextSlot::A
-            } else {
-                // Otherwise, we have to compute hashes from the file.
-                if block != last_seek_block {
-                    file_buffered.seek_relative(
-                        (block - last_seek_block) as i64
-                            * extent_size.block_size_in_bytes() as i64,
-                    )?;
+            // It's possible that block count isn't a multiple of 8; in that
+            // case, shrink down the active context array.
+            assert!(bcount as usize <= active_context.len());
+            active_context.resize(bcount as usize, ContextSlot::A);
+            active_context
+        } else {
+            // Read the two context slot arrays
+            let mut context_arrays = vec![];
+            for _slot in [ContextSlot::A, ContextSlot::B] {
+                let mut contexts = Vec::with_capacity(bcount as usize);
+                let mut buf = vec![0; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
+                for _block in 0..bcount as usize {
+                    file_buffered.read_exact(&mut buf)?;
+                    let context: Option<OnDiskDownstairsBlockContext> =
+                        bincode::deserialize(&buf).map_err(|e| {
+                            CrucibleError::IoError(format!(
+                                "context deserialization failed: {e}"
+                            ))
+                        })?;
+                    contexts.push(context);
                 }
-                file_buffered.read_exact(&mut buf)?;
-                last_seek_block = block + 1; // since we just read a block
-                let hash = integrity_hash(&[&buf]);
+                context_arrays.push(contexts);
+            }
 
-                let mut matching_slot = None;
-                let mut empty_slot = None;
-
-                for slot in [ContextSlot::A, ContextSlot::B] {
-                    let context = [context_a, context_b][slot as usize];
-                    if let Some(context) = context {
-                        if context.on_disk_hash == hash {
-                            matching_slot = Some(slot);
-                        }
-                    } else if empty_slot.is_none() {
-                        empty_slot = Some(slot);
+            file.seek(SeekFrom::Start(0))?;
+            let mut file_buffered = BufReader::with_capacity(64 * 1024, &file);
+            let mut active_context = vec![];
+            let mut buf = vec![0; extent_size.block_size_in_bytes() as usize];
+            let mut last_seek_block = 0;
+            for (block, (context_a, context_b)) in context_arrays[0]
+                .iter()
+                .zip(context_arrays[1].iter())
+                .enumerate()
+            {
+                let slot = if context_a == context_b {
+                    // If both slots are identical, then either they're both None or
+                    // we have defragmented recently (which copies the active slot
+                    // to the inactive one).  That makes life easy!
+                    ContextSlot::A
+                } else {
+                    // Otherwise, we have to compute hashes from the file.
+                    if block != last_seek_block {
+                        file_buffered.seek_relative(
+                            (block - last_seek_block) as i64
+                                * extent_size.block_size_in_bytes() as i64,
+                        )?;
                     }
-                }
+                    file_buffered.read_exact(&mut buf)?;
+                    last_seek_block = block + 1; // since we just read a block
+                    let hash = integrity_hash(&[&buf]);
 
-                matching_slot.or(empty_slot).ok_or(CrucibleError::IoError(
-                    format!("open: no slot found for {block}"),
-                ))?
-            };
-            active_context.push(slot);
-        }
+                    let mut matching_slot = None;
+                    let mut empty_slot = None;
 
-        let mut out = Self {
+                    for slot in [ContextSlot::A, ContextSlot::B] {
+                        let context = [context_a, context_b][slot as usize];
+                        if let Some(context) = context {
+                            if context.on_disk_hash == hash {
+                                matching_slot = Some(slot);
+                            }
+                        } else if empty_slot.is_none() {
+                            empty_slot = Some(slot);
+                        }
+                    }
+
+                    matching_slot.or(empty_slot).ok_or(
+                        CrucibleError::IoError(format!(
+                            "open: no slot found for {block}"
+                        )),
+                    )?
+                };
+                active_context.push(slot);
+            }
+            active_context
+        };
+
+        Ok(Self {
             file,
             active_context,
             dirty,
@@ -710,11 +745,7 @@ impl RawInner {
             extra_syscall_count: 0,
             extra_syscall_denominator: 0,
             sync_index: 0,
-        };
-        if !read_only {
-            out.defragment()?;
-        }
-        Ok(out)
+        })
     }
 
     fn set_dirty(&mut self) -> Result<(), CrucibleError> {
@@ -907,6 +938,7 @@ impl RawInner {
     fn context_slot_offset(&self, block: u64, slot: ContextSlot) -> u64 {
         self.extent_size.block_size_in_bytes() as u64 * self.extent_size.value
             + BLOCK_META_SIZE_BYTES
+            + (self.extent_size.value + 7) / 8
             + (self.extent_size.value * slot as u64 + block)
                 * BLOCK_CONTEXT_SLOT_SIZE_BYTES
     }
@@ -930,11 +962,20 @@ impl RawInner {
             gen_number: new_gen,
             ext_version: EXTENT_META_RAW,
         };
-        // Byte 0 is the dirty byte
-        let mut buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
+        let mut buf = vec![0u8; BLOCK_META_SIZE_BYTES as usize];
 
         bincode::serialize_into(buf.as_mut_slice(), &d)?;
+
+        // Serialize bitpacked active slot values
         let offset = self.meta_offset();
+        for c in self.active_context.chunks(8) {
+            let mut v = 0;
+            for (i, slot) in c.iter().enumerate() {
+                v |= (*slot as u8) << i;
+            }
+            buf.push(v);
+        }
+
         nix::sys::uio::pwrite(self.file.as_raw_fd(), &buf, offset as i64)
             .map_err(|e| CrucibleError::IoError(e.to_string()))?;
         self.dirty = false;
