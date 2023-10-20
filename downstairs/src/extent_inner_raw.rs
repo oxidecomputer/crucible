@@ -646,7 +646,7 @@ impl RawInner {
             let mut active_context = vec![];
             let mut buf = vec![0u8; (bcount as usize + 7) / 8];
             file_buffered.read_exact(&mut buf)?;
-            for b in buf[BLOCK_META_SIZE_BYTES as usize..].iter() {
+            for b in buf {
                 // Unpack bits from each byte
                 for i in 0..8 {
                     active_context.push(if b & (1 << i) == 0 {
@@ -662,6 +662,10 @@ impl RawInner {
             active_context.resize(bcount as usize, ContextSlot::A);
             active_context
         } else {
+            // Skip over the active slot array, since the extent is dirty and we
+            // have to reload from disk.
+            file_buffered.seek_relative((bcount as i64 + 7) / 8)?;
+
             // Read the two context slot arrays
             let mut context_arrays = vec![];
             for _slot in [ContextSlot::A, ContextSlot::B] {
@@ -680,6 +684,8 @@ impl RawInner {
                 context_arrays.push(contexts);
             }
 
+            // Now that we've read the context slot arrays, read file data and
+            // figure out which context slot is active.
             file.seek(SeekFrom::Start(0))?;
             let mut file_buffered = BufReader::with_capacity(64 * 1024, &file);
             let mut active_context = vec![];
@@ -690,10 +696,15 @@ impl RawInner {
                 .zip(context_arrays[1].iter())
                 .enumerate()
             {
-                let slot = if context_a == context_b {
-                    // If both slots are identical, then either they're both None or
-                    // we have defragmented recently (which copies the active slot
-                    // to the inactive one).  That makes life easy!
+                let slot = if context_a.is_none() && context_b.is_none() {
+                    // Small optimization: if both context slots are empty, the
+                    // block must also be empty (and we don't need to read +
+                    // hash it, saving a little time)
+                    //
+                    // Note that if `context_a == context_b` but they are both
+                    // `Some(..)`, we still want to read + hash the block to
+                    // make sure that it matches. Otherwise, someone has managed
+                    // to corrupt our extent file on disk, which is Bad News.
                     ContextSlot::A
                 } else {
                     // Otherwise, we have to compute hashes from the file.
