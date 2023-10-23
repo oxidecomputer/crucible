@@ -518,13 +518,14 @@ impl SqliteInner {
         let ctxs = self.get_block_contexts(0, self.extent_size.value)?;
         let needs_rehash = ctxs.iter().any(|c| c.len() > 1);
 
-        if needs_rehash {
+        let ctxs = if needs_rehash {
             // Clean up stale hashes.  After this is done, each block should
             // have either 0 or 1 contexts.
             self.fully_rehash_and_clean_all_stale_contexts(true)?;
-        }
-
-        let ctxs = self.get_block_contexts(0, self.extent_size.value)?;
+            self.get_block_contexts(0, self.extent_size.value)?
+        } else {
+            ctxs
+        };
 
         use crate::{
             extent::EXTENT_META_RAW,
