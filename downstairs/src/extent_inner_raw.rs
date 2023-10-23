@@ -59,21 +59,30 @@ const DEFRAGMENT_THRESHOLD: u64 = 3;
 ///
 /// The file is structured as follows:
 /// - Block data, structured as `block_size` × `extent_size`
-/// - [`BLOCK_META_SIZE_BYTES`], which contains an [`OnDiskMeta`] serialized
-///   using `bincode`.  The first byte of this range is `dirty`, serialized as a
-///   `u8` (where `1` is dirty and `0` is clean).
-/// - Active context slots, stored as a bit-packed array (where 0 is
-///   [`ContextSlot::A`] and 1 is [`ContextSlot::B`]).  This array contains
-///   `(extent_size + 7) / 8` bytes.  It is only valid when the `dirty` bit is
-///   cleared.  This is an optimization that speeds up opening a clean extent
-///   file; otherwise, we would have to rehash every block to find the active
-///   context slot.
 /// - Block contexts (for encryption).  There are two arrays of context slots,
 ///   each containing `extent_size` elements (i.e. one slot for each block).
 ///   Each slot is [`BLOCK_CONTEXT_SLOT_SIZE_BYTES`] in size, so this section of
 ///   the file is `BLOCK_CONTEXT_SLOT_SIZE_BYTES * extent_size * 2` bytes in
 ///   total.  The slots contain an `Option<OnDiskDownstairsBlockContext>`,
 ///   serialized using `bincode`.
+/// - Active context slots, stored as a bit-packed array (where 0 is
+///   [`ContextSlot::A`] and 1 is [`ContextSlot::B`]).  This array contains
+///   `(extent_size + 7) / 8` bytes.  It is only valid when the `dirty` bit is
+///   cleared.  This is an optimization that speeds up opening a clean extent
+///   file; otherwise, we would have to rehash every block to find the active
+///   context slot.
+/// - [`BLOCK_META_SIZE_BYTES`], which contains an [`OnDiskMeta`] serialized
+///   using `bincode`.  The first byte of this range is `dirty`, serialized as a
+///   `u8` (where `1` is dirty and `0` is clean).
+///
+/// There are a few considerations that led to this particular ordering:
+/// - Active context slots and metadata must be contiguous, because we want to
+///   write them atomically when clearing the `dirty` flag
+/// - The metadata contains an extent version (currently [`EXTENT_META_RAW`]).
+///   We will eventually have multiple raw file formats, so it's convenient to
+///   always place the metadata at the end; this lets us deserialize it without
+///   knowing anything else about the file, then dispatch based on extent
+///   version.
 #[derive(Debug)]
 pub struct RawInner {
     file: File,
@@ -241,7 +250,7 @@ impl ExtentInner for RawInner {
 
         self.set_dirty()?;
 
-        // Write all the metadata to the raw file, at the end
+        // Write all the context data to the raw file
         //
         // TODO right now we're including the integrity_hash() time in the
         // measured time.  Is it small enough to be ignored?
@@ -621,15 +630,23 @@ impl RawInner {
             }
         }
 
-        // Position ourselves at the end of file data
-        file.seek(SeekFrom::Start(bcount * def.block_size()))?;
-
-        // Buffer the file so we don't spend all day waiting on syscalls
-        let mut file_buffered = BufReader::with_capacity(64 * 1024, &file);
-
-        // Read the metadata block and active slots
+        // Read the active context bitpacked array and metadata.  The former is
+        // only valid if `dirty` is false in the metadata, but that's the most
+        // common case, so we'll optimize for it.
+        let mut active_context_buf = vec![0u8; (bcount as usize + 7) / 8];
         let mut meta_buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
-        file_buffered.read_exact(&mut meta_buf)?;
+        let mut iovecs = [
+            IoSliceMut::new(&mut active_context_buf),
+            IoSliceMut::new(&mut meta_buf),
+        ];
+        nix::sys::uio::preadv(
+            file.as_raw_fd(),
+            &mut iovecs,
+            (bcount * (def.block_size() + BLOCK_CONTEXT_SLOT_SIZE_BYTES * 2))
+                as i64,
+        )
+        .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+
         let dirty = match meta_buf[0] {
             0 => false,
             1 => true,
@@ -642,11 +659,9 @@ impl RawInner {
         // data that was on disk.
         let active_context = if !dirty {
             // Easy case first: if it's **not** dirty, then just assign active
-            // slots based on trailing bytes in the metadata section of the file
+            // slots based on the bitpacked active context buffer from the file.
             let mut active_context = vec![];
-            let mut buf = vec![0u8; (bcount as usize + 7) / 8];
-            file_buffered.read_exact(&mut buf)?;
-            for b in buf {
+            for b in active_context_buf {
                 // Unpack bits from each byte
                 for i in 0..8 {
                     active_context.push(if b & (1 << i) == 0 {
@@ -662,11 +677,9 @@ impl RawInner {
             active_context.resize(bcount as usize, ContextSlot::A);
             active_context
         } else {
-            // Skip over the active slot array, since the extent is dirty and we
-            // have to reload from disk.
-            file_buffered.seek_relative((bcount as i64 + 7) / 8)?;
-
             // Read the two context slot arrays
+            file.seek(SeekFrom::Start(bcount * def.block_size()))?;
+            let mut file_buffered = BufReader::with_capacity(64 * 1024, &file);
             let mut context_arrays = vec![];
             for _slot in [ContextSlot::A, ContextSlot::B] {
                 let mut contexts = Vec::with_capacity(bcount as usize);
@@ -948,8 +961,6 @@ impl RawInner {
     /// is always valid (i.e. matching the data in the file).
     fn context_slot_offset(&self, block: u64, slot: ContextSlot) -> u64 {
         self.extent_size.block_size_in_bytes() as u64 * self.extent_size.value
-            + BLOCK_META_SIZE_BYTES
-            + (self.extent_size.value + 7) / 8
             + (self.extent_size.value * slot as u64 + block)
                 * BLOCK_CONTEXT_SLOT_SIZE_BYTES
     }
@@ -962,23 +973,16 @@ impl RawInner {
     }
 
     fn meta_offset_from_extent_size(extent_size: Block) -> u64 {
-        extent_size.block_size_in_bytes() as u64 * extent_size.value
+        (extent_size.block_size_in_bytes() as u64
+            + BLOCK_CONTEXT_SLOT_SIZE_BYTES * 2)
+            * extent_size.value
+            + (extent_size.value + 7) / 8
     }
 
     /// Update the flush number, generation number, and clear the dirty bit
     fn set_flush_number(&mut self, new_flush: u64, new_gen: u64) -> Result<()> {
-        let d = OnDiskMeta {
-            dirty: false,
-            flush_number: new_flush,
-            gen_number: new_gen,
-            ext_version: EXTENT_META_RAW,
-        };
-        let mut buf = vec![0u8; BLOCK_META_SIZE_BYTES as usize];
-
-        bincode::serialize_into(buf.as_mut_slice(), &d)?;
-
         // Serialize bitpacked active slot values
-        let offset = self.meta_offset();
+        let mut buf = vec![];
         for c in self.active_context.chunks(8) {
             let mut v = 0;
             for (i, slot) in c.iter().enumerate() {
@@ -986,6 +990,20 @@ impl RawInner {
             }
             buf.push(v);
         }
+
+        let d = OnDiskMeta {
+            dirty: false,
+            flush_number: new_flush,
+            gen_number: new_gen,
+            ext_version: EXTENT_META_RAW,
+        };
+        let mut meta = [0u8; BLOCK_META_SIZE_BYTES as usize];
+        bincode::serialize_into(meta.as_mut_slice(), &d)?;
+        buf.extend(meta);
+
+        let offset = (self.extent_size.block_size_in_bytes() as u64
+            + BLOCK_CONTEXT_SLOT_SIZE_BYTES * 2)
+            * self.extent_size.value;
 
         nix::sys::uio::pwrite(self.file.as_raw_fd(), &buf, offset as i64)
             .map_err(|e| CrucibleError::IoError(e.to_string()))?;

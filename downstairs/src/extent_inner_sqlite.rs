@@ -534,24 +534,11 @@ impl SqliteInner {
             },
         };
 
-        // Record the metadata section, which will be right after raw block data
-        let dirty = self.dirty()?;
-        let flush_number = self.flush_number()?;
-        let gen_number = self.gen_number()?;
-        let meta = OnDiskMeta {
-            dirty,
-            flush_number,
-            gen_number,
-            ext_version: EXTENT_META_RAW, // new extent version for raw files
-        };
-        let mut buf = vec![0u8; BLOCK_META_SIZE_BYTES as usize];
-        bincode::serialize_into(buf.as_mut_slice(), &meta)
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
-
-        // Add bitpacked data indicating which slot is active; this is always A
-        buf.extend(
-            std::iter::repeat(0)
-                .take((self.extent_size.value as usize + 7) / 8),
+        let block_count = ctxs.len();
+        let mut buf = Vec::with_capacity(
+            (BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize * block_count * 2)
+                + (block_count + 7) / 8
+                + BLOCK_META_SIZE_BYTES as usize,
         );
 
         // Put the context data after the metadata, all in slot A
@@ -570,10 +557,32 @@ impl SqliteInner {
                 .map_err(|e| CrucibleError::IoError(e.to_string()))?;
             buf.extend(ctx_buf);
         }
+
         // Slot B is entirely empty
         buf.extend(std::iter::repeat(0).take(
             (BLOCK_CONTEXT_SLOT_SIZE_BYTES * self.extent_size.value) as usize,
         ));
+
+        // Add bitpacked data indicating which slot is active; this is always A
+        buf.extend(
+            std::iter::repeat(0)
+                .take((self.extent_size.value as usize + 7) / 8),
+        );
+
+        // Record the metadata section, which will be right after raw block data
+        let dirty = self.dirty()?;
+        let flush_number = self.flush_number()?;
+        let gen_number = self.gen_number()?;
+        let meta = OnDiskMeta {
+            dirty,
+            flush_number,
+            gen_number,
+            ext_version: EXTENT_META_RAW, // new extent version for raw files
+        };
+        let mut meta_buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
+        bincode::serialize_into(meta_buf.as_mut(), &meta)
+            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+        buf.extend(meta_buf);
 
         // Reset the file read position, just in case
         self.file.seek(SeekFrom::Start(0))?;
