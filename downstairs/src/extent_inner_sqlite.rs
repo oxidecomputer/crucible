@@ -868,7 +868,9 @@ impl SqliteInner {
         };
         // Clean out any irrelevant block contexts, which may be present
         // if downstairs crashed between a write() and a flush().
-        out.fully_rehash_and_clean_all_stale_contexts(false)?;
+        if !read_only {
+            out.fully_rehash_and_clean_all_stale_contexts(false)?;
+        }
         Ok(out)
     }
 
