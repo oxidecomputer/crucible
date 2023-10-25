@@ -23,6 +23,7 @@ members = [
     "smf",
     "upstairs",
     "workspace-hack",
+    "agent-antagonist",
 ]
 resolver = "2"
 
@@ -113,6 +114,7 @@ progenitor = { git = "https://github.com/oxidecomputer/progenitor", branch = "ma
 # local path
 crucible = { path = "./upstairs" }
 crucible-client-types = { path = "./crucible-client-types" }
+crucible-agent-client = { path = "./agent-client" }
 crucible-common = { path = "./common" }
 crucible-control-client = { path = "./control-client" }
 # importantly, don't use features = ["zfs_snapshot"] here, this will cause

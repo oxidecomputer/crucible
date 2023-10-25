@@ -54,6 +54,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-antagonist"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crucible-agent-client",
+ "crucible-common",
+ "crucible-workspace-hack",
+ "rand 0.8.5",
+ "reqwest",
+ "serde",
+ "slog",
+ "slog-bunyan",
+ "slog-term",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "ahash"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
