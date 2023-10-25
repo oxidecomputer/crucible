@@ -22,7 +22,7 @@ use crucible_agent_client::{
 )]
 enum Args {
     /// Run a number of antagonist loop tasks that will do the following:
-    /// 
+    ///
     /// - create a 1GB region
     ///
     /// - randomly take a snapshot of that region
@@ -30,9 +30,9 @@ enum Args {
     /// - delete that snapshot if it was made
     ///
     /// - delete the region
-    /// 
+    ///
     /// Additionally, one task is spawned that will:
-    /// 
+    ///
     /// - get a list of regions
     ///
     /// - for each region, get a list of snapshots for that region
