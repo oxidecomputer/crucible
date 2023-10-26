@@ -528,11 +528,7 @@ impl RawInner {
         extent_number: u32,
     ) -> Result<Self> {
         let path = extent_path(dir, extent_number);
-        let bcount = def.extent_size().value;
-        let size = def.block_size().checked_mul(bcount).unwrap()
-            + BLOCK_META_SIZE_BYTES
-            + (bcount + 7) / 8
-            + BLOCK_CONTEXT_SLOT_SIZE_BYTES * bcount * 2;
+        let size = Self::file_size(def);
 
         mkdir_for_file(&path)?;
         let file = OpenOptions::new()
@@ -575,6 +571,17 @@ impl RawInner {
         Ok(out)
     }
 
+    /// Returns the total size of the raw data file
+    ///
+    /// This includes block data, context slots, active slot array, and metadata
+    fn file_size(def: &RegionDefinition) -> u64 {
+        let block_count = def.extent_size().value;
+        def.block_size().checked_mul(block_count).unwrap()
+            + BLOCK_META_SIZE_BYTES
+            + (block_count + 7) / 8
+            + BLOCK_CONTEXT_SLOT_SIZE_BYTES * block_count * 2
+    }
+
     /// Constructs a new `Inner` object from files that already exist on disk
     pub fn open(
         path: &Path,
@@ -585,10 +592,7 @@ impl RawInner {
     ) -> Result<Self> {
         let extent_size = def.extent_size();
         let bcount = extent_size.value;
-        let size = def.block_size().checked_mul(bcount).unwrap()
-            + BLOCK_META_SIZE_BYTES
-            + (bcount + 7) / 8
-            + BLOCK_CONTEXT_SLOT_SIZE_BYTES * bcount * 2;
+        let size = Self::file_size(def);
 
         /*
          * Open the extent file and verify the size is as we expect.
