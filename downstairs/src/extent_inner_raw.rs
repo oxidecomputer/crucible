@@ -522,6 +522,60 @@ impl ExtentInner for RawInner {
 }
 
 impl RawInner {
+    /// Imports context and metadata
+    ///
+    /// Returns a buffer that must be appended to raw block data to form the
+    /// full raw extent file.
+    pub fn import(
+        ctxs: Vec<Option<DownstairsBlockContext>>,
+        dirty: bool,
+        flush_number: u64,
+        gen_number: u64,
+    ) -> Result<Vec<u8>, CrucibleError> {
+        let block_count = ctxs.len();
+        let mut buf = Vec::with_capacity(
+            (BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize * block_count * 2)
+                + (block_count + 7) / 8
+                + BLOCK_META_SIZE_BYTES as usize,
+        );
+
+        // Contexts are stored immediately after block data in the file, so
+        // they're at the beginning of the supplemental data section.
+        for c in ctxs {
+            let ctx = c.map(|c| OnDiskDownstairsBlockContext {
+                block_context: c.block_context,
+                on_disk_hash: c.on_disk_hash,
+            });
+            let mut ctx_buf = [0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
+            bincode::serialize_into(ctx_buf.as_mut_slice(), &ctx)
+                .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+            buf.extend(ctx_buf);
+        }
+
+        // Slot B is entirely empty
+        buf.extend(
+            std::iter::repeat(0)
+                .take(BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize * block_count),
+        );
+
+        // Add bitpacked data indicating which slot is active; this is always A
+        buf.extend(std::iter::repeat(0).take((block_count + 7) / 8));
+
+        // Record the metadata section, which will be right after raw block data
+        let meta = OnDiskMeta {
+            dirty,
+            flush_number,
+            gen_number,
+            ext_version: EXTENT_META_RAW, // new extent version for raw files
+        };
+        let mut meta_buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
+        bincode::serialize_into(meta_buf.as_mut(), &meta)
+            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+        buf.extend(meta_buf);
+
+        Ok(buf)
+    }
+
     pub fn create(
         dir: &Path,
         def: &RegionDefinition,

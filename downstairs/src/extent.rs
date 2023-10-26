@@ -362,7 +362,16 @@ impl Extent {
                 let mut inner = extent_inner_sqlite::SqliteInner::open(
                     &path, def, number, read_only, log,
                 )?;
-                inner.export_meta_and_context()?
+                let ctxs = inner.export_contexts()?;
+                let dirty = inner.dirty()?;
+                let flush_number = inner.flush_number()?;
+                let gen_number = inner.gen_number()?;
+                extent_inner_raw::RawInner::import(
+                    ctxs,
+                    dirty,
+                    flush_number,
+                    gen_number,
+                )?
             };
             // Append the new raw data, then sync the file to disk
             {

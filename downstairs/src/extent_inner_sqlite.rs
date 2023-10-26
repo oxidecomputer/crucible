@@ -505,20 +505,20 @@ impl ExtentInner for SqliteInner {
 }
 
 impl SqliteInner {
-    /// Converts to a raw file for use with `RawInner`
+    /// Exports context slots for every block in the file
     ///
-    /// Returns the metadata and context slots, which should be positioned
-    /// directly after the raw block data in memory.
-    pub fn export_meta_and_context(
+    /// Unlike `get_block_contexts`, this function ensures that only a single
+    /// context per block is present (or `None`, if the block is unwritten).
+    pub fn export_contexts(
         &mut self,
-    ) -> Result<Vec<u8>, CrucibleError> {
+    ) -> Result<Vec<Option<DownstairsBlockContext>>> {
         // Check whether we need to rehash.  This is theoretically represented
         // by the `dirty` bit, but we're being _somewhat_ paranoid and manually
         // forcing a rehash if any blocks have multiple contexts stored.
         let ctxs = self.get_block_contexts(0, self.extent_size.value)?;
         let needs_rehash = ctxs.iter().any(|c| c.len() > 1);
 
-        let ctxs = if needs_rehash {
+        let mut ctxs = if needs_rehash {
             // Clean up stale hashes.  After this is done, each block should
             // have either 0 or 1 contexts.
             self.fully_rehash_and_clean_all_stale_contexts(true)?;
@@ -527,67 +527,17 @@ impl SqliteInner {
             ctxs
         };
 
-        use crate::{
-            extent::EXTENT_META_RAW,
-            extent_inner_raw::{
-                OnDiskDownstairsBlockContext, OnDiskMeta,
-                BLOCK_CONTEXT_SLOT_SIZE_BYTES, BLOCK_META_SIZE_BYTES,
-            },
-        };
-
-        let block_count = ctxs.len();
-        let mut buf = Vec::with_capacity(
-            (BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize * block_count * 2)
-                + (block_count + 7) / 8
-                + BLOCK_META_SIZE_BYTES as usize,
-        );
-
-        // Put the context data after the metadata, all in slot A
-        for c in ctxs {
+        let mut out = vec![];
+        for c in ctxs.iter_mut() {
             let ctx = match c.len() {
                 0 => None,
-                1 => Some(OnDiskDownstairsBlockContext {
-                    block_context: c[0].block_context,
-                    on_disk_hash: c[0].on_disk_hash,
-                }),
+                1 => c.pop(),
                 i => panic!("invalid context count: {i}"),
             };
-            // Put the context into the first slot, if present
-            let mut ctx_buf = [0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
-            bincode::serialize_into(ctx_buf.as_mut_slice(), &ctx)
-                .map_err(|e| CrucibleError::IoError(e.to_string()))?;
-            buf.extend(ctx_buf);
+            out.push(ctx);
         }
 
-        // Slot B is entirely empty
-        buf.extend(std::iter::repeat(0).take(
-            (BLOCK_CONTEXT_SLOT_SIZE_BYTES * self.extent_size.value) as usize,
-        ));
-
-        // Add bitpacked data indicating which slot is active; this is always A
-        buf.extend(
-            std::iter::repeat(0)
-                .take((self.extent_size.value as usize + 7) / 8),
-        );
-
-        // Record the metadata section, which will be right after raw block data
-        let dirty = self.dirty()?;
-        let flush_number = self.flush_number()?;
-        let gen_number = self.gen_number()?;
-        let meta = OnDiskMeta {
-            dirty,
-            flush_number,
-            gen_number,
-            ext_version: EXTENT_META_RAW, // new extent version for raw files
-        };
-        let mut meta_buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
-        bincode::serialize_into(meta_buf.as_mut(), &meta)
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
-        buf.extend(meta_buf);
-
-        // Reset the file read position, just in case
-        self.file.seek(SeekFrom::Start(0))?;
-        Ok(buf)
+        Ok(out)
     }
 
     fn get_block_contexts(

@@ -1869,7 +1869,7 @@ pub(crate) mod test {
             .await?;
         drop(region);
 
-        // Calculate the migration from extent 1
+        // Manually calculate the migration from extent 1
         let extent_file = extent_path(&dir, 1);
         let exported = {
             let mut inner = extent_inner_sqlite::SqliteInner::open(
@@ -1879,7 +1879,17 @@ pub(crate) mod test {
                 false,
                 &log,
             )?;
-            inner.export_meta_and_context()?
+            use crate::extent::ExtentInner;
+            let ctxs = inner.export_contexts()?;
+            let dirty = inner.dirty()?;
+            let flush_number = inner.flush_number()?;
+            let gen_number = inner.gen_number()?;
+            extent_inner_raw::RawInner::import(
+                ctxs,
+                dirty,
+                flush_number,
+                gen_number,
+            )?
         };
 
         {
