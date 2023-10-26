@@ -17,7 +17,7 @@ use slog::{error, Logger};
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, IoSliceMut, Read, Seek, SeekFrom};
+use std::io::{BufReader, IoSliceMut, Read};
 use std::os::fd::AsRawFd;
 use std::path::Path;
 
@@ -92,6 +92,9 @@ pub struct RawInner {
 
     /// Extent size, in blocks
     extent_size: Block,
+
+    /// Helper `struct` controlling layout within the file
+    layout: RawLayout,
 
     /// Is the `A` or `B` context slot active, on a per-block basis?
     active_context: Vec<ContextSlot>,
@@ -504,7 +507,7 @@ impl ExtentInner for RawInner {
         block_context: &DownstairsBlockContext,
     ) -> Result<(), CrucibleError> {
         self.set_dirty()?;
-        self.set_block_contexts(&[block_context.clone()])?;
+        self.set_block_contexts(&[*block_context])?;
         self.active_context[block_context.block as usize] =
             !self.active_context[block_context.block as usize];
         Ok(())
@@ -527,53 +530,39 @@ impl RawInner {
     /// Returns a buffer that must be appended to raw block data to form the
     /// full raw extent file.
     pub fn import(
+        file: &mut File,
+        def: &RegionDefinition,
         ctxs: Vec<Option<DownstairsBlockContext>>,
         dirty: bool,
         flush_number: u64,
         gen_number: u64,
-    ) -> Result<Vec<u8>, CrucibleError> {
-        let block_count = ctxs.len();
-        let mut buf = Vec::with_capacity(
-            (BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize * block_count * 2)
-                + (block_count + 7) / 8
-                + BLOCK_META_SIZE_BYTES as usize,
-        );
+    ) -> Result<(), CrucibleError> {
+        let layout = RawLayout::new(def.extent_size());
+        let block_count = layout.block_count() as usize;
 
-        // Contexts are stored immediately after block data in the file, so
-        // they're at the beginning of the supplemental data section.
-        for c in ctxs {
-            let ctx = c.map(|c| OnDiskDownstairsBlockContext {
-                block_context: c.block_context,
-                on_disk_hash: c.on_disk_hash,
-            });
-            let mut ctx_buf = [0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
-            bincode::serialize_into(ctx_buf.as_mut_slice(), &ctx)
-                .map_err(|e| CrucibleError::IoError(e.to_string()))?;
-            buf.extend(ctx_buf);
-        }
+        file.set_len(layout.file_size())?;
+        layout.write_context_slots_contiguous(
+            file,
+            0,
+            ctxs.iter().map(Option::as_ref),
+            ContextSlot::A,
+        )?;
+        layout.write_context_slots_contiguous(
+            file,
+            0,
+            std::iter::repeat(None).take(block_count),
+            ContextSlot::B,
+        )?;
 
-        // Slot B is entirely empty
-        buf.extend(
-            std::iter::repeat(0)
-                .take(BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize * block_count),
-        );
-
-        // Add bitpacked data indicating which slot is active; this is always A
-        buf.extend(std::iter::repeat(0).take((block_count + 7) / 8));
-
-        // Record the metadata section, which will be right after raw block data
-        let meta = OnDiskMeta {
+        layout.write_active_context_and_metadata(
+            file,
+            vec![ContextSlot::A; block_count].as_slice(),
             dirty,
             flush_number,
             gen_number,
-            ext_version: EXTENT_META_RAW, // new extent version for raw files
-        };
-        let mut meta_buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
-        bincode::serialize_into(meta_buf.as_mut(), &meta)
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
-        buf.extend(meta_buf);
+        )?;
 
-        Ok(buf)
+        Ok(())
     }
 
     pub fn create(
@@ -582,7 +571,9 @@ impl RawInner {
         extent_number: u32,
     ) -> Result<Self> {
         let path = extent_path(dir, extent_number);
-        let size = Self::file_size(def);
+        let extent_size = def.extent_size();
+        let layout = RawLayout::new(extent_size);
+        let size = layout.file_size();
 
         mkdir_for_file(&path)?;
         let file = OpenOptions::new()
@@ -596,7 +587,8 @@ impl RawInner {
         let mut out = Self {
             file,
             dirty: false,
-            extent_size: def.extent_size(),
+            extent_size,
+            layout,
             extent_number,
             active_context: vec![
                 ContextSlot::A; // both slots are empty, so this is fine
@@ -625,17 +617,6 @@ impl RawInner {
         Ok(out)
     }
 
-    /// Returns the total size of the raw data file
-    ///
-    /// This includes block data, context slots, active slot array, and metadata
-    fn file_size(def: &RegionDefinition) -> u64 {
-        let block_count = def.extent_size().value;
-        def.block_size().checked_mul(block_count).unwrap()
-            + BLOCK_META_SIZE_BYTES
-            + (block_count + 7) / 8
-            + BLOCK_CONTEXT_SLOT_SIZE_BYTES * block_count * 2
-    }
-
     /// Constructs a new `Inner` object from files that already exist on disk
     pub fn open(
         path: &Path,
@@ -645,13 +626,13 @@ impl RawInner {
         log: &Logger,
     ) -> Result<Self> {
         let extent_size = def.extent_size();
-        let bcount = extent_size.value;
-        let size = Self::file_size(def);
+        let layout = RawLayout::new(extent_size);
+        let size = layout.file_size();
 
         /*
          * Open the extent file and verify the size is as we expect.
          */
-        let mut file =
+        let file =
             match OpenOptions::new().read(true).write(!read_only).open(path) {
                 Err(e) => {
                     error!(
@@ -688,84 +669,41 @@ impl RawInner {
             }
         }
 
-        // Read the active context bitpacked array and metadata.  The former is
-        // only valid if `dirty` is false in the metadata, but that's the most
-        // common case, so we'll optimize for it.
-        let mut active_context_buf = vec![0u8; (bcount as usize + 7) / 8];
-        let mut meta_buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
-        let mut iovecs = [
-            IoSliceMut::new(&mut active_context_buf),
-            IoSliceMut::new(&mut meta_buf),
-        ];
-        nix::sys::uio::preadv(
-            file.as_raw_fd(),
-            &mut iovecs,
-            (bcount * (def.block_size() + BLOCK_CONTEXT_SLOT_SIZE_BYTES * 2))
-                as i64,
-        )
-        .map_err(|e| CrucibleError::IoError(e.to_string()))?;
-
-        let dirty = match meta_buf[0] {
-            0 => false,
-            1 => true,
-            i => bail!("invalid dirty value: {i}"),
-        };
+        let layout = RawLayout::new(def.extent_size());
+        let meta = layout.get_metadata(&file)?;
 
         // If the file is dirty, then we have to recompute which context slot is
         // active for every block.  This is slow, but can't be avoided; we
         // closed the file without a flush so we can't be confident about the
         // data that was on disk.
-        let active_context = if !dirty {
+        let active_context = if !meta.dirty {
             // Easy case first: if it's **not** dirty, then just assign active
             // slots based on the bitpacked active context buffer from the file.
-            let mut active_context = vec![];
-            for b in active_context_buf {
-                // Unpack bits from each byte
-                for i in 0..8 {
-                    active_context.push(if b & (1 << i) == 0 {
-                        ContextSlot::A
-                    } else {
-                        ContextSlot::B
-                    });
-                }
-            }
-            // It's possible that block count isn't a multiple of 8; in that
-            // case, shrink down the active context array.
-            assert!(bcount as usize <= active_context.len());
-            active_context.resize(bcount as usize, ContextSlot::A);
-            active_context
+            layout.get_active_contexts(&file)?
         } else {
-            // Read the two context slot arrays
-            file.seek(SeekFrom::Start(bcount * def.block_size()))?;
-            let mut file_buffered = BufReader::with_capacity(64 * 1024, &file);
-            let mut context_arrays = vec![];
-            for _slot in [ContextSlot::A, ContextSlot::B] {
-                let mut contexts = Vec::with_capacity(bcount as usize);
-                let mut buf = vec![0; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
-                for _block in 0..bcount as usize {
-                    file_buffered.read_exact(&mut buf)?;
-                    let context: Option<OnDiskDownstairsBlockContext> =
-                        bincode::deserialize(&buf).map_err(|e| {
-                            CrucibleError::IoError(format!(
-                                "context deserialization failed: {e}"
-                            ))
-                        })?;
-                    contexts.push(context);
-                }
-                context_arrays.push(contexts);
-            }
+            // Otherwise, read block-size chunks and check hashes against
+            // both context slots, looking for a match.
+            let ctx_a = layout.read_context_slots_contiguous(
+                &file,
+                0,
+                layout.block_count(),
+                ContextSlot::A,
+            )?;
+            let ctx_b = layout.read_context_slots_contiguous(
+                &file,
+                0,
+                layout.block_count(),
+                ContextSlot::B,
+            )?;
 
             // Now that we've read the context slot arrays, read file data and
             // figure out which context slot is active.
-            file.seek(SeekFrom::Start(0))?;
             let mut file_buffered = BufReader::with_capacity(64 * 1024, &file);
             let mut active_context = vec![];
             let mut buf = vec![0; extent_size.block_size_in_bytes() as usize];
             let mut last_seek_block = 0;
-            for (block, (context_a, context_b)) in context_arrays[0]
-                .iter()
-                .zip(context_arrays[1].iter())
-                .enumerate()
+            for (block, (context_a, context_b)) in
+                ctx_a.into_iter().zip(ctx_b).enumerate()
             {
                 let slot = if context_a.is_none() && context_b.is_none() {
                     // Small optimization: if both context slots are empty, the
@@ -817,9 +755,10 @@ impl RawInner {
         Ok(Self {
             file,
             active_context,
-            dirty,
+            dirty: meta.dirty,
             extent_number,
             extent_size: def.extent_size(),
+            layout: RawLayout::new(def.extent_size()),
             context_slot_synched_at: vec![
                 [0, 0];
                 def.extent_size().value as usize
@@ -832,9 +771,7 @@ impl RawInner {
 
     fn set_dirty(&mut self) -> Result<(), CrucibleError> {
         if !self.dirty {
-            let offset = self.meta_offset();
-            nix::sys::uio::pwrite(self.file.as_raw_fd(), &[1u8], offset as i64)
-                .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+            self.layout.set_dirty(&self.file)?;
             self.dirty = true;
         }
         Ok(())
@@ -866,22 +803,16 @@ impl RawInner {
         // Then, read the slot data and decide if either slot
         // (1) is present and
         // (2) has a matching hash
-        let mut buf = [0; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
         let mut matching_slot = None;
         let mut empty_slot = None;
         for slot in [ContextSlot::A, ContextSlot::B] {
-            nix::sys::uio::pread(
-                self.file.as_raw_fd(),
-                &mut buf,
-                self.context_slot_offset(block, slot) as i64,
-            )
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
-            let context: Option<OnDiskDownstairsBlockContext> =
-                bincode::deserialize(&buf).map_err(|e| {
-                    CrucibleError::IoError(format!(
-                        "context deserialization failed: {e:?}"
-                    ))
-                })?;
+            // Read a single context slot, which is by definition contiguous
+            let mut context = self
+                .layout
+                .read_context_slots_contiguous(&self.file, block, 1, slot)?;
+            assert_eq!(context.len(), 1);
+            let context = context.pop().unwrap();
+
             if let Some(context) = context {
                 if context.on_disk_hash == hash {
                     matching_slot = Some(slot);
@@ -966,7 +897,6 @@ impl RawInner {
             assert_eq!(a.block + 1, b.block, "blocks must be contiguous");
         }
 
-        let mut buf = vec![];
         let mut writes = 0u64;
         for (slot, group) in block_contexts
             .iter()
@@ -977,20 +907,13 @@ impl RawInner {
             .into_iter()
         {
             let mut group = group.peekable();
-            let block_start = group.peek().unwrap().block;
-            buf.clear();
-            for block_context in group {
-                let n = buf.len();
-                buf.extend([0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize]);
-                let d = OnDiskDownstairsBlockContext {
-                    block_context: block_context.block_context,
-                    on_disk_hash: block_context.on_disk_hash,
-                };
-                bincode::serialize_into(&mut buf[n..], &Some(d))?;
-            }
-            let offset = self.context_slot_offset(block_start, slot);
-            nix::sys::uio::pwrite(self.file.as_raw_fd(), &buf, offset as i64)
-                .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+            let start = group.peek().unwrap().block;
+            self.layout.write_context_slots_contiguous(
+                &self.file,
+                start,
+                group.map(Option::Some),
+                slot,
+            )?;
             writes += 1;
         }
         if let Some(writes) = writes.checked_sub(1) {
@@ -1002,71 +925,19 @@ impl RawInner {
     }
 
     fn get_metadata(&self) -> Result<OnDiskMeta, CrucibleError> {
-        let mut buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
-        let offset = self.meta_offset();
-        nix::sys::uio::pread(self.file.as_raw_fd(), &mut buf, offset as i64)
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
-        let out: OnDiskMeta = bincode::deserialize(&buf)
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
-        Ok(out)
-    }
-
-    /// Returns the byte offset of the given context slot
-    ///
-    /// Contexts slots are located after block and meta data in the extent file.
-    /// There are two context slots arrays, each of which contains one context
-    /// slot per block.  We use a ping-pong strategy to ensure that one of them
-    /// is always valid (i.e. matching the data in the file).
-    fn context_slot_offset(&self, block: u64, slot: ContextSlot) -> u64 {
-        self.extent_size.block_size_in_bytes() as u64 * self.extent_size.value
-            + (self.extent_size.value * slot as u64 + block)
-                * BLOCK_CONTEXT_SLOT_SIZE_BYTES
-    }
-
-    /// Returns the byte offset of the metadata region
-    ///
-    /// The resulting offset points to serialized [`OnDiskMeta`] data.
-    fn meta_offset(&self) -> u64 {
-        Self::meta_offset_from_extent_size(self.extent_size)
-    }
-
-    fn meta_offset_from_extent_size(extent_size: Block) -> u64 {
-        (extent_size.block_size_in_bytes() as u64
-            + BLOCK_CONTEXT_SLOT_SIZE_BYTES * 2)
-            * extent_size.value
-            + (extent_size.value + 7) / 8
+        self.layout.get_metadata(&self.file)
     }
 
     /// Update the flush number, generation number, and clear the dirty bit
     fn set_flush_number(&mut self, new_flush: u64, new_gen: u64) -> Result<()> {
-        // Serialize bitpacked active slot values
-        let mut buf = vec![];
-        for c in self.active_context.chunks(8) {
-            let mut v = 0;
-            for (i, slot) in c.iter().enumerate() {
-                v |= (*slot as u8) << i;
-            }
-            buf.push(v);
-        }
-
-        let d = OnDiskMeta {
-            dirty: false,
-            flush_number: new_flush,
-            gen_number: new_gen,
-            ext_version: EXTENT_META_RAW,
-        };
-        let mut meta = [0u8; BLOCK_META_SIZE_BYTES as usize];
-        bincode::serialize_into(meta.as_mut_slice(), &d)?;
-        buf.extend(meta);
-
-        let offset = (self.extent_size.block_size_in_bytes() as u64
-            + BLOCK_CONTEXT_SLOT_SIZE_BYTES * 2)
-            * self.extent_size.value;
-
-        nix::sys::uio::pwrite(self.file.as_raw_fd(), &buf, offset as i64)
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+        self.layout.write_active_context_and_metadata(
+            &self.file,
+            &self.active_context,
+            false, // dirty
+            new_flush,
+            new_gen,
+        )?;
         self.dirty = false;
-
         Ok(())
     }
 
@@ -1077,34 +948,20 @@ impl RawInner {
         count: u64,
     ) -> Result<Vec<Option<DownstairsBlockContext>>> {
         let mut out = vec![];
-        let mut buf = vec![];
         let mut reads = 0u64;
-        for (slot, mut group) in (block..block + count)
+        for (slot, group) in (block..block + count)
             .group_by(|block| self.active_context[*block as usize])
             .into_iter()
         {
-            let group_start = group.next().unwrap();
-            let group_count = group.count() + 1;
-            buf.resize(group_count * BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize, 0);
-            let offset = self.context_slot_offset(group_start, slot);
-            nix::sys::uio::pread(
-                self.file.as_raw_fd(),
-                &mut buf,
-                offset as i64,
-            )
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
-            for (i, chunk) in buf
-                .chunks_exact(BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize)
-                .enumerate()
-            {
-                let ctx: Option<OnDiskDownstairsBlockContext> =
-                    bincode::deserialize(chunk)?;
-                out.push(ctx.map(|c| DownstairsBlockContext {
-                    block: group_start + i as u64,
-                    block_context: c.block_context,
-                    on_disk_hash: c.on_disk_hash,
-                }));
-            }
+            let mut group = group.peekable();
+            let start = *group.peek().unwrap();
+            let count = group.count();
+            out.extend(self.layout.read_context_slots_contiguous(
+                &self.file,
+                start,
+                count as u64,
+                slot,
+            )?);
             reads += 1;
         }
         if let Some(reads) = reads.checked_sub(1) {
@@ -1190,12 +1047,12 @@ impl RawInner {
         #[derive(Copy, Clone)]
         struct Counter {
             count: usize,
-            min_block: usize,
-            max_block: usize,
+            min_block: u64,
+            max_block: u64,
         }
         let mut a_count = Counter {
             count: 0,
-            min_block: usize::MAX,
+            min_block: u64::MAX,
             max_block: 0,
         };
         let mut b_count = a_count;
@@ -1205,8 +1062,8 @@ impl RawInner {
                 ContextSlot::B => &mut b_count,
             };
             count.count += 1;
-            count.min_block = count.min_block.min(i);
-            count.max_block = count.max_block.max(i);
+            count.min_block = count.min_block.min(i as u64);
+            count.max_block = count.max_block.max(i as u64);
         }
         if a_count.count == 0 || b_count.count == 0 {
             return Ok(());
@@ -1222,33 +1079,24 @@ impl RawInner {
         let num_slots = counter.max_block + 1 - counter.min_block;
 
         // Read the source context slots from the file
-        let mut source_buf =
-            vec![0u8; num_slots * BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
-        nix::sys::uio::pread(
-            self.file.as_raw_fd(),
-            &mut source_buf,
-            self.context_slot_offset(counter.min_block as u64, copy_from)
-                as i64,
-        )
-        .map_err(|e| CrucibleError::IoError(e.to_string()))?;
-
-        // Read the destination context slots from the file
-        let mut dest_buf =
-            vec![0u8; num_slots * BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
-        nix::sys::uio::pread(
-            self.file.as_raw_fd(),
-            &mut dest_buf,
-            self.context_slot_offset(counter.min_block as u64, !copy_from)
-                as i64,
-        )
-        .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+        let source_slots = self.layout.read_context_slots_contiguous(
+            &self.file,
+            counter.min_block,
+            num_slots,
+            copy_from,
+        )?;
+        let mut dest_slots = self.layout.read_context_slots_contiguous(
+            &self.file,
+            counter.min_block,
+            num_slots,
+            !copy_from,
+        )?;
 
         // Selectively overwrite dest with source context slots
         for (i, block) in (counter.min_block..=counter.max_block).enumerate() {
+            let block = block as usize;
             if self.active_context[block] == copy_from {
-                let chunk = (i * BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize)
-                    ..((i + 1) * BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize);
-                dest_buf[chunk.clone()].copy_from_slice(&source_buf[chunk]);
+                dest_slots[i] = source_slots[i];
 
                 // Mark this slot as unsynched, so that we don't overwrite
                 // it later on without a sync
@@ -1256,26 +1104,254 @@ impl RawInner {
                     self.sync_index + 1;
             }
         }
-        let r = nix::sys::uio::pwrite(
-            self.file.as_raw_fd(),
-            &dest_buf,
-            self.context_slot_offset(counter.min_block as u64, !copy_from)
-                as i64,
-        )
-        .map_err(|e| CrucibleError::IoError(e.to_string()));
+        let r = self.layout.write_context_slots_contiguous(
+            &self.file,
+            counter.min_block,
+            dest_slots.iter().map(|v| v.as_ref()),
+            !copy_from,
+        );
 
         // If this write failed, then try recomputing every context slot
         // within the unknown range
         if r.is_err() {
             for block in counter.min_block..=counter.max_block {
-                self.recompute_slot_from_file(block as u64).unwrap();
+                self.recompute_slot_from_file(block).unwrap();
             }
         } else {
             for block in counter.min_block..=counter.max_block {
-                self.active_context[block] = !copy_from;
+                self.active_context[block as usize] = !copy_from;
             }
         }
         r.map(|_| ())
+    }
+}
+
+/// Data structure that implements the on-disk layout of a raw extent file
+struct RawLayout {
+    extent_size: Block,
+
+    /// Miscellaneous buffer for reading and writing
+    ///
+    /// This is simply to avoid churning through memory allocations.  It is the
+    /// user's responsibility to take `buf` out of the cell when it's in use,
+    /// and return it when they're done with it.
+    buf: std::cell::Cell<Vec<u8>>,
+}
+
+impl std::fmt::Debug for RawLayout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawLayout")
+            .field("extent_size", &self.extent_size)
+            .finish()
+    }
+}
+
+impl RawLayout {
+    fn new(extent_size: Block) -> Self {
+        RawLayout {
+            extent_size,
+            buf: std::cell::Cell::default(),
+        }
+    }
+
+    fn set_dirty(&self, file: &File) -> Result<(), CrucibleError> {
+        let offset = self.metadata_offset();
+        nix::sys::uio::pwrite(file.as_raw_fd(), &[1u8], offset as i64)
+            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Returns the total size of the raw data file
+    ///
+    /// This includes block data, context slots, active slot array, and metadata
+    fn file_size(&self) -> u64 {
+        let block_count = self.block_count();
+        self.block_size().checked_mul(block_count).unwrap()
+            + BLOCK_META_SIZE_BYTES
+            + (block_count + 7) / 8
+            + BLOCK_CONTEXT_SLOT_SIZE_BYTES * block_count * 2
+    }
+
+    /// Returns the beginning of supplementary data in the file
+    fn supplementary_data_offset(&self) -> u64 {
+        self.block_count() * self.block_size()
+    }
+
+    /// Returns the byte offset of the given context slot in the file
+    ///
+    /// Contexts slots are located after block data in the extent file. There
+    /// are two context slots arrays, each of which contains one context slot
+    /// per block.  We use a ping-pong strategy to ensure that one of them is
+    /// always valid (i.e. matching the data in the file).
+    fn context_slot_offset(&self, block: u64, slot: ContextSlot) -> u64 {
+        self.supplementary_data_offset()
+            + (self.block_count() * slot as u64 + block)
+                * BLOCK_CONTEXT_SLOT_SIZE_BYTES
+    }
+
+    /// Number of blocks in the extent file
+    fn block_count(&self) -> u64 {
+        self.extent_size.value
+    }
+
+    /// Returns the byte offset of the `active_context` bitpacked array
+    fn active_context_offset(&self) -> u64 {
+        self.supplementary_data_offset()
+            + self.block_count() * 2 * BLOCK_CONTEXT_SLOT_SIZE_BYTES
+    }
+
+    fn active_context_size(&self) -> u64 {
+        (self.block_count() + 7) / 8
+    }
+
+    fn metadata_offset(&self) -> u64 {
+        self.active_context_offset() + self.active_context_size()
+    }
+
+    /// Number of bytes in each block
+    fn block_size(&self) -> u64 {
+        self.extent_size.block_size_in_bytes() as u64
+    }
+
+    fn get_metadata(&self, file: &File) -> Result<OnDiskMeta, CrucibleError> {
+        let mut buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
+        let offset = self.metadata_offset();
+        nix::sys::uio::pread(file.as_raw_fd(), &mut buf, offset as i64)
+            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+        let out: OnDiskMeta = bincode::deserialize(&buf)
+            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+        Ok(out)
+    }
+
+    fn write_context_slots_contiguous<'a, I>(
+        &self,
+        file: &File,
+        block_start: u64,
+        iter: I,
+        slot: ContextSlot,
+    ) -> Result<(), CrucibleError>
+    where
+        I: Iterator<Item = Option<&'a DownstairsBlockContext>>,
+    {
+        let mut buf = self.buf.take();
+        buf.clear();
+
+        for block_context in iter {
+            let n = buf.len();
+            buf.extend([0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize]);
+            let d = block_context.map(|b| OnDiskDownstairsBlockContext {
+                block_context: b.block_context,
+                on_disk_hash: b.on_disk_hash,
+            });
+            bincode::serialize_into(&mut buf[n..], &d).map_err(|e| {
+                CrucibleError::IoError(format!(
+                    "could not serialize context: {e}"
+                ))
+            })?;
+        }
+        let offset = self.context_slot_offset(block_start, slot);
+        nix::sys::uio::pwrite(file.as_raw_fd(), &buf, offset as i64)
+            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+        self.buf.set(buf);
+        Ok(())
+    }
+
+    fn read_context_slots_contiguous(
+        &self,
+        file: &File,
+        block_start: u64,
+        block_count: u64,
+        slot: ContextSlot,
+    ) -> Result<Vec<Option<DownstairsBlockContext>>> {
+        let mut buf = self.buf.take();
+        buf.resize((BLOCK_CONTEXT_SLOT_SIZE_BYTES * block_count) as usize, 0u8);
+
+        let offset = self.context_slot_offset(block_start, slot);
+        nix::sys::uio::pread(file.as_raw_fd(), &mut buf, offset as i64)
+            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+
+        let mut out = vec![];
+        for (i, chunk) in buf
+            .chunks_exact(BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize)
+            .enumerate()
+        {
+            let ctx: Option<OnDiskDownstairsBlockContext> =
+                bincode::deserialize(chunk)?;
+            out.push(ctx.map(|c| DownstairsBlockContext {
+                block: block_start + i as u64,
+                block_context: c.block_context,
+                on_disk_hash: c.on_disk_hash,
+            }));
+        }
+        self.buf.set(buf);
+        Ok(out)
+    }
+
+    /// Write out the active context array and metadata section of the file
+    ///
+    /// This is done in a single write, so it should be atomic.
+    fn write_active_context_and_metadata(
+        &self,
+        file: &File,
+        active_context: &[ContextSlot],
+        dirty: bool,
+        flush_number: u64,
+        gen_number: u64,
+    ) -> Result<()> {
+        // Serialize bitpacked active slot values
+        let mut buf = self.buf.take();
+        buf.clear();
+        for c in active_context.chunks(8) {
+            let mut v = 0;
+            for (i, slot) in c.iter().enumerate() {
+                v |= (*slot as u8) << i;
+            }
+            buf.push(v);
+        }
+
+        let d = OnDiskMeta {
+            dirty,
+            flush_number,
+            gen_number,
+            ext_version: EXTENT_META_RAW,
+        };
+        let mut meta = [0u8; BLOCK_META_SIZE_BYTES as usize];
+        bincode::serialize_into(meta.as_mut_slice(), &d)?;
+        buf.extend(meta);
+
+        let offset = self.active_context_offset();
+
+        nix::sys::uio::pwrite(file.as_raw_fd(), &buf, offset as i64)
+            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+        self.buf.set(buf);
+
+        Ok(())
+    }
+
+    /// Decodes the active contexts from the given file
+    ///
+    /// The file descriptor offset is not changed by this function
+    fn get_active_contexts(&self, file: &File) -> Result<Vec<ContextSlot>> {
+        let mut buf = self.buf.take();
+        buf.resize(self.active_context_size() as usize, 0u8);
+        let offset = self.active_context_offset();
+        nix::sys::uio::pread(file.as_raw_fd(), &mut buf, offset as i64)?;
+
+        let mut active_context = vec![];
+        for bit in buf
+            .iter()
+            .flat_map(|b| (0..8).map(move |i| b & (1 << i) == 0))
+            .take(self.block_count() as usize)
+        {
+            // Unpack bits from each byte
+            active_context.push(if bit {
+                ContextSlot::A
+            } else {
+                ContextSlot::B
+            });
+        }
+        assert_eq!(active_context.len(), self.block_count() as usize);
+        Ok(active_context)
     }
 }
 

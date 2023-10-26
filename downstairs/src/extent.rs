@@ -77,7 +77,7 @@ pub(crate) trait ExtentInner: Send + Debug {
 }
 
 /// BlockContext, with the addition of block index and on_disk_hash
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 pub struct DownstairsBlockContext {
     pub block_context: BlockContext,
 
@@ -357,30 +357,29 @@ impl Extent {
                     OpenOptions::new().read(true).write(true).open(&path)?;
                 f.set_len(def.extent_size().value * def.block_size())?;
             }
-            // Compute metadata and context slots
-            let meta_and_context = {
-                let mut inner = extent_inner_sqlite::SqliteInner::open(
-                    &path, def, number, read_only, log,
-                )?;
-                let ctxs = inner.export_contexts()?;
-                let dirty = inner.dirty()?;
-                let flush_number = inner.flush_number()?;
-                let gen_number = inner.gen_number()?;
+
+            // Compute supplemental data from the SQLite extent
+            let mut inner = extent_inner_sqlite::SqliteInner::open(
+                &path, def, number, read_only, log,
+            )?;
+            let ctxs = inner.export_contexts()?;
+            let dirty = inner.dirty()?;
+            let flush_number = inner.flush_number()?;
+            let gen_number = inner.gen_number()?;
+            drop(inner);
+
+            // Reopen the file and import those changes
+            {
+                let mut f =
+                    OpenOptions::new().read(true).write(true).open(&path)?;
                 extent_inner_raw::RawInner::import(
+                    &mut f,
+                    def,
                     ctxs,
                     dirty,
                     flush_number,
                     gen_number,
-                )?
-            };
-            // Append the new raw data, then sync the file to disk
-            {
-                let mut f = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .append(true)
-                    .open(&path)?;
-                f.write_all(&meta_and_context)?;
+                )?;
                 f.sync_all()
                     .with_context(|| format!("{path:?}: fsync failure"))?;
             }

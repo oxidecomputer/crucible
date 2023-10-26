@@ -1838,9 +1838,6 @@ pub(crate) mod test {
         region.extend(3).await?;
         let ddef = region.def();
 
-        // Now, we're going to mess with the file on disk a little, to make sure
-        // that the migration happens from the old file (which we just exported)
-        // and not from the modified database.
         region
             .region_write(
                 &[
@@ -1871,34 +1868,134 @@ pub(crate) mod test {
 
         // Manually calculate the migration from extent 1
         let extent_file = extent_path(&dir, 1);
-        let exported = {
-            let mut inner = extent_inner_sqlite::SqliteInner::open(
-                &extent_file,
-                &ddef,
-                1,
-                false,
-                &log,
-            )?;
-            use crate::extent::ExtentInner;
-            let ctxs = inner.export_contexts()?;
-            let dirty = inner.dirty()?;
-            let flush_number = inner.flush_number()?;
-            let gen_number = inner.gen_number()?;
-            extent_inner_raw::RawInner::import(
-                ctxs,
-                dirty,
-                flush_number,
-                gen_number,
-            )?
-        };
+        let mut inner = extent_inner_sqlite::SqliteInner::open(
+            &extent_file,
+            &ddef,
+            1,
+            false,
+            &log,
+        )?;
+        use crate::extent::ExtentInner;
+        let ctxs = inner.export_contexts()?;
+        let dirty = inner.dirty()?;
+        let flush_number = inner.flush_number()?;
+        let gen_number = inner.gen_number()?;
+        drop(inner);
 
-        {
-            let mut f = OpenOptions::new()
-                .write(true)
-                .append(true)
-                .open(&extent_file)?;
-            f.write_all(&exported)?;
-        }
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&extent_file)?;
+        println!("about to call `import` on {:?}", extent_file);
+        extent_inner_raw::RawInner::import(
+            &mut file,
+            &ddef,
+            ctxs,
+            dirty,
+            flush_number,
+            gen_number,
+        )?;
+        println!("dooone");
+        // At this point, we have manually written the file, but have not
+        // deleted the `.db` on disk.  As such, migration should restart when
+        // the extent is reopened.
+
+        let region =
+            Region::open(&dir, new_region_options(), true, false, &log).await?;
+        let out = region
+            .region_read(
+                &[
+                    ReadRequest {
+                        eid: 1,
+                        offset: Block::new_512(0),
+                    },
+                    ReadRequest {
+                        eid: 2,
+                        offset: Block::new_512(0),
+                    },
+                ],
+                JobId(0),
+            )
+            .await?;
+        assert_eq!(out[0].data.as_ref(), [1; 512]);
+        assert_eq!(out[1].data.as_ref(), [2; 512]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reopen_extent_partial_migration_corrupt() -> Result<()> {
+        let log = csl();
+        let dir = tempdir()?;
+        let mut region =
+            Region::create_sqlite(&dir, new_region_options(), log.clone())
+                .await?;
+        region.extend(3).await?;
+        let ddef = region.def();
+
+        // Make some writes, which we'll check after migration
+        region
+            .region_write(
+                &[
+                    crucible_protocol::Write {
+                        eid: 1,
+                        offset: Block::new_512(0),
+                        data: Bytes::from(vec![1u8; 512]),
+                        block_context: BlockContext {
+                            encryption_context: None,
+                            hash: 8717892996238908351, // hash for all 1s
+                        },
+                    },
+                    crucible_protocol::Write {
+                        eid: 2,
+                        offset: Block::new_512(0),
+                        data: Bytes::from(vec![2u8; 512]),
+                        block_context: BlockContext {
+                            encryption_context: None,
+                            hash: 2192425179333611943, // hash for all 2s
+                        },
+                    },
+                ],
+                JobId(0),
+                false,
+            )
+            .await?;
+        drop(region);
+
+        // Manually calculate the migration from extent 1, but deliberately mess
+        // with the context values (simulating a migration that didn't manage to
+        // write everything to disk).
+        let extent_file = extent_path(&dir, 1);
+        let mut inner = extent_inner_sqlite::SqliteInner::open(
+            &extent_file,
+            &ddef,
+            1,
+            false,
+            &log,
+        )?;
+        use crate::extent::ExtentInner;
+        let ctxs = inner.export_contexts()?.into_iter().map(|_| None).collect();
+        let dirty = inner.dirty()?;
+        let flush_number = inner.flush_number()?;
+        let gen_number = inner.gen_number()?;
+        drop(inner);
+
+        // Stage the corrupted migration
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&extent_file)?;
+        extent_inner_raw::RawInner::import(
+            &mut file,
+            &ddef,
+            ctxs,
+            dirty,
+            flush_number,
+            gen_number,
+        )?;
+        // At this point, we have manually written the file, but have not
+        // deleted the `.db` on disk.  As such, migration should restart when
+        // the extent is reopened, and we should recover from corruption.
 
         let region =
             Region::open(&dir, new_region_options(), true, false, &log).await?;
