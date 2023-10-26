@@ -1735,6 +1735,108 @@ mod test {
     }
 
     #[test]
+    fn test_defragment() -> Result<()> {
+        let dir = tempdir()?;
+        let mut inner =
+            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
+                .unwrap();
+
+        // Write every other block, so that the active context slot alternates
+        let data = Bytes::from(vec![0x55; 512]);
+        let hash = integrity_hash(&[&data[..]]);
+        for i in 0..5 {
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(i * 2),
+                data: data.clone(),
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
+            };
+            inner.write(JobId(30), &[&write], false, IOV_MAX_TEST)?;
+        }
+
+        for i in 0..10 {
+            assert_eq!(
+                inner.active_context[i],
+                if i % 2 == 0 {
+                    ContextSlot::B
+                } else {
+                    ContextSlot::A
+                }
+            );
+        }
+        assert_eq!(inner.extra_syscall_count, 0);
+        assert_eq!(inner.extra_syscall_denominator, 5);
+        inner.flush(10, 10, JobId(10).into())?;
+        assert_eq!(inner.sync_index, 1);
+
+        // This should not have changed active context slots!
+        for i in 0..10 {
+            assert_eq!(
+                inner.active_context[i],
+                if i % 2 == 0 {
+                    ContextSlot::B
+                } else {
+                    ContextSlot::A
+                }
+            );
+        }
+
+        // Now, do one big write, which will be forced to bounce between the
+        // context slots.
+        let mut writes = vec![];
+        let data = Bytes::from(vec![0x33; 512]);
+        let hash = integrity_hash(&[&data[..]]);
+        for i in 0..10 {
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(i),
+                data: data.clone(),
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
+            };
+            writes.push(write);
+        }
+        // This write has toggled every single context slot
+        let writes_ref: Vec<&_> = writes.iter().collect();
+        inner.write(JobId(30), &writes_ref, false, IOV_MAX_TEST)?;
+        for i in 0..10 {
+            assert_eq!(
+                inner.active_context[i],
+                if i % 2 == 0 {
+                    ContextSlot::A
+                } else {
+                    ContextSlot::B
+                },
+                "invalid context slot at {i}",
+            );
+        }
+        assert!(inner.extra_syscall_count > 0);
+        assert_eq!(inner.extra_syscall_denominator, 1);
+
+        // Do a flush!  Because we had a bunch of extra syscalls, this should
+        // trigger defragmentation; after the flush, every context slot should
+        // be in array A.
+        assert_eq!(inner.sync_index, 1);
+        inner.flush(11, 11, JobId(11).into())?;
+        assert_eq!(inner.sync_index, 2);
+
+        for i in 0..10 {
+            assert_eq!(
+                inner.active_context[i],
+                ContextSlot::A,
+                "invalid context slot at {i}",
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_serialized_sizes() {
         let c = OnDiskDownstairsBlockContext {
             block_context: BlockContext {
