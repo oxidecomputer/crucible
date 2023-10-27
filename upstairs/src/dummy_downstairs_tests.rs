@@ -164,7 +164,6 @@ pub(crate) mod protocol_test {
 
         pub fn get_region_options(&self) -> RegionOptions {
             let mut region_options = RegionOptions::default();
-            region_options.set_block_size(512);
             region_options.set_extent_size(self.extent_size);
             region_options.set_uuid(self.uuid);
             region_options.set_encrypted(false);

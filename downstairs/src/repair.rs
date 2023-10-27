@@ -255,8 +255,7 @@ mod test {
     fn new_region_options() -> crucible_common::RegionOptions {
         let mut region_options: crucible_common::RegionOptions =
             Default::default();
-        let block_size = 512;
-        region_options.set_block_size(block_size);
+        let block_size: u64 = 512;
         region_options
             .set_extent_size(Block::new(10, block_size.trailing_zeros()));
         region_options

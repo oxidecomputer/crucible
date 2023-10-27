@@ -121,12 +121,7 @@ impl Block {
 #[derive(Deserialize, Serialize, Copy, Clone, Debug, PartialEq)]
 pub struct RegionDefinition {
     /**
-     * The size of each block in bytes. Must be a power of 2, minimum 512.
-     */
-    block_size: u64,
-
-    /**
-     * How many blocks should appear in each extent?
+     * Blocks per extent (in `value`) and block size (`shift`)
      */
     extent_size: Block,
 
@@ -160,7 +155,6 @@ impl RegionDefinition {
     pub fn from_options(opts: &RegionOptions) -> Result<Self> {
         opts.validate()?;
         Ok(RegionDefinition {
-            block_size: opts.block_size,
             extent_size: opts.extent_size,
             extent_count: 0,
             uuid: opts.uuid,
@@ -179,11 +173,12 @@ impl RegionDefinition {
     }
 
     pub fn block_size(&self) -> u64 {
-        self.block_size
+        self.extent_size.block_size_in_bytes().into()
     }
 
     pub fn set_block_size(&mut self, bs: u64) {
-        self.block_size = bs;
+        assert!(bs.is_power_of_two());
+        self.extent_size.shift = bs.ilog2();
     }
 
     pub fn extent_size(&self) -> Block {
@@ -203,7 +198,7 @@ impl RegionDefinition {
     }
 
     pub fn total_size(&self) -> u64 {
-        self.block_size * self.extent_size.value * (self.extent_count as u64)
+        self.block_size() * self.extent_size.value * (self.extent_count as u64)
     }
 
     pub fn uuid(&self) -> Uuid {
@@ -246,7 +241,6 @@ impl RegionDefinition {
 impl Default for RegionDefinition {
     fn default() -> RegionDefinition {
         RegionDefinition {
-            block_size: 0,
             extent_size: Block::new(0, 9),
             extent_count: 0,
             uuid: Uuid::nil(),
@@ -263,7 +257,6 @@ impl RegionDefinition {
         database_write_version: usize,
     ) -> RegionDefinition {
         RegionDefinition {
-            block_size: 0,
             extent_size: Block::new(0, 9),
             extent_count: 0,
             uuid: Uuid::nil(),
@@ -277,12 +270,7 @@ impl RegionDefinition {
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct RegionOptions {
     /**
-     * The size of each block in bytes.  Must be a power of 2, minimum 512.
-     */
-    block_size: u64,
-
-    /**
-     * How many blocks should appear in each extent?
+     * Blocks per extent and block size
      */
     extent_size: Block,
 
@@ -299,23 +287,14 @@ pub struct RegionOptions {
 
 impl RegionOptions {
     pub fn validate(&self) -> Result<()> {
-        if !self.block_size.is_power_of_two() {
-            bail!("block size must be a power of two, not {}", self.block_size);
-        }
-
-        if self.block_size < (MIN_BLOCK_SIZE as u64) {
-            bail!(
-                "minimum block size is {} bytes, not {}",
-                MIN_BLOCK_SIZE,
-                self.block_size
-            );
-        }
-
         if self.extent_size.value < 1 {
             bail!("extent size must be at least 1 block");
         }
 
-        let es = self.extent_size.value.saturating_mul(self.block_size);
+        let es = self
+            .extent_size
+            .value
+            .saturating_mul(self.extent_size.block_size_in_bytes().into());
         if es > MAX_EXTENT_FILE_SIZE {
             /*
              * Limit the maximum size of an extent file.
@@ -323,17 +302,13 @@ impl RegionOptions {
             bail!(
                 "extent size {} x {} bytes = {}, bigger than {}",
                 self.extent_size.value,
-                self.block_size,
+                self.extent_size.block_size_in_bytes(),
                 es,
                 MAX_EXTENT_FILE_SIZE,
             );
         }
 
         Ok(())
-    }
-
-    pub fn set_block_size(&mut self, bs: u64) {
-        self.block_size = bs;
     }
 
     pub fn set_extent_size(&mut self, es: Block) {
@@ -352,10 +327,9 @@ impl RegionOptions {
 impl Default for RegionOptions {
     fn default() -> Self {
         /* XXX bigger? */
-        assert_eq!(MIN_BLOCK_SIZE, 512);
+        assert_eq!(MIN_BLOCK_SIZE, 1 << MIN_SHIFT);
         RegionOptions {
-            block_size: MIN_BLOCK_SIZE as u64,
-            extent_size: Block::new(100, 9),
+            extent_size: Block::new(100, MIN_SHIFT),
             uuid: Uuid::nil(),
             encrypted: false,
         }

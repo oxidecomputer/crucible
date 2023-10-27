@@ -3025,7 +3025,6 @@ pub async fn create_region(
      * Create the region options, then the region.
      */
     let mut region_options: crucible_common::RegionOptions = Default::default();
-    region_options.set_block_size(block_size);
     region_options
         .set_extent_size(Block::new(extent_size, block_size.trailing_zeros()));
     region_options.set_uuid(uuid);
@@ -3427,7 +3426,6 @@ mod test {
         // create region
         let mut region_options: crucible_common::RegionOptions =
             Default::default();
-        region_options.set_block_size(block_size);
         region_options.set_extent_size(Block::new(
             extent_size,
             block_size.trailing_zeros(),
@@ -3517,7 +3515,6 @@ mod test {
         // create region
         let mut region_options: crucible_common::RegionOptions =
             Default::default();
-        region_options.set_block_size(block_size);
         region_options.set_extent_size(Block::new(
             extent_size,
             block_size.trailing_zeros(),
@@ -5116,7 +5113,6 @@ mod test {
 
         let mut region_options: crucible_common::RegionOptions =
             Default::default();
-        region_options.set_block_size(block_size);
         region_options.set_extent_size(Block::new(
             extent_size,
             block_size.trailing_zeros(),
@@ -5185,7 +5181,6 @@ mod test {
 
         let mut region_options: crucible_common::RegionOptions =
             Default::default();
-        region_options.set_block_size(block_size);
         region_options.set_extent_size(Block::new(
             extent_size,
             block_size.trailing_zeros(),
@@ -5268,7 +5263,6 @@ mod test {
 
         let mut region_options: crucible_common::RegionOptions =
             Default::default();
-        region_options.set_block_size(block_size);
         region_options.set_extent_size(Block::new(
             extent_size,
             block_size.trailing_zeros(),
@@ -5352,7 +5346,6 @@ mod test {
 
         let mut region_options: crucible_common::RegionOptions =
             Default::default();
-        region_options.set_block_size(block_size);
         region_options.set_extent_size(Block::new(
             extent_size,
             block_size.trailing_zeros(),
@@ -5428,7 +5421,6 @@ mod test {
 
         let mut region_options: crucible_common::RegionOptions =
             Default::default();
-        region_options.set_block_size(block_size);
         region_options.set_extent_size(Block::new(
             extent_size,
             block_size.trailing_zeros(),
@@ -5872,7 +5864,6 @@ mod test {
         // create region
         let mut region_options: crucible_common::RegionOptions =
             Default::default();
-        region_options.set_block_size(block_size);
         region_options.set_extent_size(Block::new(
             extent_size,
             block_size.trailing_zeros(),
@@ -5975,7 +5966,6 @@ mod test {
         // create region
         let mut region_options: crucible_common::RegionOptions =
             Default::default();
-        region_options.set_block_size(block_size);
         region_options.set_extent_size(Block::new(
             extent_size,
             block_size.trailing_zeros(),
@@ -6078,7 +6068,6 @@ mod test {
         // create region
         let mut region_options: crucible_common::RegionOptions =
             Default::default();
-        region_options.set_block_size(block_size);
         region_options.set_extent_size(Block::new(
             extent_size,
             block_size.trailing_zeros(),

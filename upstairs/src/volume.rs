@@ -26,7 +26,6 @@ fn build_region_definition(
     opts: &CrucibleOpts,
 ) -> Result<RegionDefinition> {
     let mut region_options = RegionOptions::default();
-    region_options.set_block_size(extent_info.block_size);
     region_options.set_extent_size(Block {
         value: extent_info.blocks_per_extent,
         shift: extent_info.block_size.trailing_zeros(),
