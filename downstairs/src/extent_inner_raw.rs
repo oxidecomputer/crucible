@@ -1,6 +1,6 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
-    cdt, crucible_bail,
+    cdt,
     extent::{
         check_input, extent_path, DownstairsBlockContext, ExtentInner,
         EXTENT_META_RAW,
@@ -10,7 +10,6 @@ use crate::{
     Block, BlockContext, CrucibleError, JobId, ReadResponse, RegionDefinition,
 };
 
-use anyhow::{bail, Result};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use slog::{error, Logger};
@@ -401,7 +400,12 @@ impl ExtentInner for RawInner {
                 &mut iovecs,
                 first_req.offset.value as i64 * block_size as i64,
             )
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+            .map_err(|e| {
+                CrucibleError::IoError(format!(
+                    "extent {}: read failed: {e}",
+                    self.extent_number
+                ))
+            })?;
 
             cdt::extent__read__file__done!(|| {
                 (job_id.0, self.extent_number, n_contiguous_requests as u64)
@@ -470,12 +474,10 @@ impl ExtentInner for RawInner {
             /*
              * XXX Retry?  Mark extent as broken?
              */
-            crucible_bail!(
-                IoError,
-                "extent {}: fsync 1 failure: {:?}",
+            return Err(CrucibleError::IoError(format!(
+                "extent {}: fsync 1 failure: {e:?}",
                 self.extent_number,
-                e
-            );
+            )));
         }
         self.sync_index += 1;
         cdt::extent__flush__file__done!(|| {
@@ -569,7 +571,7 @@ impl RawInner {
         dir: &Path,
         def: &RegionDefinition,
         extent_number: u32,
-    ) -> Result<Self> {
+    ) -> Result<Self, CrucibleError> {
         let path = extent_path(dir, extent_number);
         let extent_size = def.extent_size();
         let layout = RawLayout::new(extent_size);
@@ -609,10 +611,9 @@ impl RawInner {
         // Sync the file to disk, to avoid any questions
         if let Err(e) = out.file.sync_all() {
             return Err(CrucibleError::IoError(format!(
-                "extent {}: fsync 1 failure during initial sync: {e:?}",
+                "extent {}: fsync 1 failure during initial sync: {e}",
                 out.extent_number,
-            ))
-            .into());
+            )));
         }
         Ok(out)
     }
@@ -624,7 +625,7 @@ impl RawInner {
         extent_number: u32,
         read_only: bool,
         log: &Logger,
-    ) -> Result<Self> {
+    ) -> Result<Self, CrucibleError> {
         let path = extent_path(dir, extent_number);
         let extent_size = def.extent_size();
         let layout = RawLayout::new(extent_size);
@@ -641,18 +642,17 @@ impl RawInner {
                         "Open of {path:?} for extent#{extent_number} \
                          returned: {e}",
                     );
-                    bail!(
-                        "Open of {path:?} for extent#{extent_number} \
-                         returned: {e}",
-                    );
+                    return Err(CrucibleError::IoError(format!(
+                        "extent {extent_number}: open of {path:?} failed: {e}",
+                    )));
                 }
                 Ok(f) => {
                     let cur_size = f.metadata().unwrap().len();
                     if size != cur_size {
-                        bail!(
-                            "File size {size:?} does not match \
-                             expected {cur_size:?}",
-                        );
+                        return Err(CrucibleError::IoError(format!(
+                            "extent {extent_number}: file size {cur_size:?} \
+                             does not match expected {size:?}",
+                        )));
                     }
                     f
                 }
@@ -663,10 +663,9 @@ impl RawInner {
         if !read_only {
             if let Err(e) = file.sync_all() {
                 return Err(CrucibleError::IoError(format!(
-                    "extent {extent_number}:
-                 fsync 1 failure during initial rehash: {e:?}",
-                ))
-                .into());
+                    "extent {extent_number}: \
+                     fsync 1 failure during initial rehash: {e}",
+                )));
             }
         }
 
@@ -743,9 +742,7 @@ impl RawInner {
                     }
 
                     matching_slot.or(empty_slot).ok_or(
-                        CrucibleError::IoError(format!(
-                            "open: no slot found for {block}"
-                        )),
+                        CrucibleError::MissingContextSlot(block as u64),
                     )?
                 };
                 active_context.push(slot);
@@ -798,7 +795,12 @@ impl RawInner {
             &mut buf,
             (block_size as u64 * block) as i64,
         )
-        .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+        .map_err(|e| {
+            CrucibleError::IoError(format!(
+                "extent {}: reading block {block} data failed: {e}",
+                self.extent_number
+            ))
+        })?;
         let hash = integrity_hash(&[&buf]);
 
         // Then, read the slot data and decide if either slot
@@ -822,9 +824,9 @@ impl RawInner {
                 empty_slot = Some(slot);
             }
         }
-        let value = matching_slot.or(empty_slot).ok_or(
-            CrucibleError::IoError(format!("no slot found for {block}")),
-        )?;
+        let value = matching_slot
+            .or(empty_slot)
+            .ok_or(CrucibleError::MissingContextSlot(block))?;
         self.active_context[block as usize] = value;
         Ok(())
     }
@@ -832,7 +834,7 @@ impl RawInner {
     fn set_block_contexts(
         &mut self,
         block_contexts: &[DownstairsBlockContext],
-    ) -> Result<()> {
+    ) -> Result<(), CrucibleError> {
         // If any of these block contexts will be overwriting an unsyched
         // context slot, then we insert a sync here.
         let needs_sync = block_contexts.iter().any(|block_context| {
@@ -847,7 +849,7 @@ impl RawInner {
         if needs_sync {
             self.file.sync_all().map_err(|e| {
                 CrucibleError::IoError(format!(
-                    "extent {}: fsync 1 failure: {e:?}",
+                    "extent {}: fsync 1 failure: {e}",
                     self.extent_number,
                 ))
             })?;
@@ -893,7 +895,7 @@ impl RawInner {
     fn set_block_contexts_contiguous(
         &mut self,
         block_contexts: &[DownstairsBlockContext],
-    ) -> Result<u64> {
+    ) -> Result<u64, CrucibleError> {
         for (a, b) in block_contexts.iter().zip(block_contexts.iter().skip(1)) {
             assert_eq!(a.block + 1, b.block, "blocks must be contiguous");
         }
@@ -930,7 +932,11 @@ impl RawInner {
     }
 
     /// Update the flush number, generation number, and clear the dirty bit
-    fn set_flush_number(&mut self, new_flush: u64, new_gen: u64) -> Result<()> {
+    fn set_flush_number(
+        &mut self,
+        new_flush: u64,
+        new_gen: u64,
+    ) -> Result<(), CrucibleError> {
         self.layout.write_active_context_and_metadata(
             &self.file,
             &self.active_context,
@@ -947,7 +953,7 @@ impl RawInner {
         &mut self,
         block: u64,
         count: u64,
-    ) -> Result<Vec<Option<DownstairsBlockContext>>> {
+    ) -> Result<Vec<Option<DownstairsBlockContext>>, CrucibleError> {
         let mut out = vec![];
         let mut reads = 0u64;
         for (slot, group) in (block..block + count)
@@ -1006,7 +1012,7 @@ impl RawInner {
     fn get_block_context(
         &mut self,
         block: u64,
-    ) -> Result<Option<DownstairsBlockContext>> {
+    ) -> Result<Option<DownstairsBlockContext>, CrucibleError> {
         let mut out = self.get_block_contexts(block, 1)?;
         assert_eq!(out.len(), 1);
         Ok(out.pop().unwrap())
@@ -1163,7 +1169,11 @@ impl RawLayout {
     fn set_dirty(&self, file: &File) -> Result<(), CrucibleError> {
         let offset = self.metadata_offset();
         nix::sys::uio::pwrite(file.as_raw_fd(), &[1u8], offset as i64)
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+            .map_err(|e| {
+                CrucibleError::IoError(format!(
+                    "writing dirty byte failed: {e}",
+                ))
+            })?;
         Ok(())
     }
 
@@ -1223,9 +1233,11 @@ impl RawLayout {
         let mut buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
         let offset = self.metadata_offset();
         nix::sys::uio::pread(file.as_raw_fd(), &mut buf, offset as i64)
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+            .map_err(|e| {
+                CrucibleError::IoError(format!("reading metadata failed: {e}"))
+            })?;
         let out: OnDiskMeta = bincode::deserialize(&buf)
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+            .map_err(|e| CrucibleError::BadMetadata(e.to_string()))?;
         Ok(out)
     }
 
@@ -1252,8 +1264,13 @@ impl RawLayout {
             bincode::serialize_into(&mut buf[n..], &d).unwrap();
         }
         let offset = self.context_slot_offset(block_start, slot);
-        nix::sys::uio::pwrite(file.as_raw_fd(), &buf, offset as i64)
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+        nix::sys::uio::pwrite(file.as_raw_fd(), &buf, offset as i64).map_err(
+            |e| {
+                CrucibleError::IoError(format!(
+                    "writing context slots failed: {e}"
+                ))
+            },
+        )?;
         self.buf.set(buf);
         Ok(())
     }
@@ -1264,13 +1281,17 @@ impl RawLayout {
         block_start: u64,
         block_count: u64,
         slot: ContextSlot,
-    ) -> Result<Vec<Option<DownstairsBlockContext>>> {
+    ) -> Result<Vec<Option<DownstairsBlockContext>>, CrucibleError> {
         let mut buf = self.buf.take();
         buf.resize((BLOCK_CONTEXT_SLOT_SIZE_BYTES * block_count) as usize, 0u8);
 
         let offset = self.context_slot_offset(block_start, slot);
         nix::sys::uio::pread(file.as_raw_fd(), &mut buf, offset as i64)
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+            .map_err(|e| {
+                CrucibleError::IoError(format!(
+                    "reading context slots failed: {e}"
+                ))
+            })?;
 
         let mut out = vec![];
         for (i, chunk) in buf
@@ -1278,7 +1299,9 @@ impl RawLayout {
             .enumerate()
         {
             let ctx: Option<OnDiskDownstairsBlockContext> =
-                bincode::deserialize(chunk)?;
+                bincode::deserialize(chunk).map_err(|e| {
+                    CrucibleError::BadContextSlot(e.to_string())
+                })?;
             out.push(ctx.map(|c| DownstairsBlockContext {
                 block: block_start + i as u64,
                 block_context: c.block_context,
@@ -1299,7 +1322,7 @@ impl RawLayout {
         dirty: bool,
         flush_number: u64,
         gen_number: u64,
-    ) -> Result<()> {
+    ) -> Result<(), CrucibleError> {
         // Serialize bitpacked active slot values
         let mut buf = self.buf.take();
         buf.clear();
@@ -1323,8 +1346,9 @@ impl RawLayout {
 
         let offset = self.active_context_offset();
 
-        nix::sys::uio::pwrite(file.as_raw_fd(), &buf, offset as i64)
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+        nix::sys::uio::pwrite(file.as_raw_fd(), &buf, offset as i64).map_err(
+            |e| CrucibleError::IoError(format!("writing metadata failed: {e}")),
+        )?;
         self.buf.set(buf);
 
         Ok(())
@@ -1333,11 +1357,19 @@ impl RawLayout {
     /// Decodes the active contexts from the given file
     ///
     /// The file descriptor offset is not changed by this function
-    fn get_active_contexts(&self, file: &File) -> Result<Vec<ContextSlot>> {
+    fn get_active_contexts(
+        &self,
+        file: &File,
+    ) -> Result<Vec<ContextSlot>, CrucibleError> {
         let mut buf = self.buf.take();
         buf.resize(self.active_context_size() as usize, 0u8);
         let offset = self.active_context_offset();
-        nix::sys::uio::pread(file.as_raw_fd(), &mut buf, offset as i64)?;
+        nix::sys::uio::pread(file.as_raw_fd(), &mut buf, offset as i64)
+            .map_err(|e| {
+                CrucibleError::IoError(format!(
+                    "could not read active contexts: {e}"
+                ))
+            })?;
 
         let mut active_context = vec![];
         for bit in buf
@@ -1360,6 +1392,7 @@ impl RawLayout {
 #[cfg(test)]
 mod test {
     use super::*;
+    use anyhow::Result;
     use bytes::{Bytes, BytesMut};
     use crucible_protocol::EncryptionContext;
     use crucible_protocol::ReadRequest;
