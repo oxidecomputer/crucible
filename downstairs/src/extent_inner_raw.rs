@@ -619,12 +619,13 @@ impl RawInner {
 
     /// Constructs a new `Inner` object from files that already exist on disk
     pub fn open(
-        path: &Path,
+        dir: &Path,
         def: &RegionDefinition,
         extent_number: u32,
         read_only: bool,
         log: &Logger,
     ) -> Result<Self> {
+        let path = extent_path(dir, extent_number);
         let extent_size = def.extent_size();
         let layout = RawLayout::new(extent_size);
         let size = layout.file_size();
@@ -633,7 +634,7 @@ impl RawInner {
          * Open the extent file and verify the size is as we expect.
          */
         let file =
-            match OpenOptions::new().read(true).write(!read_only).open(path) {
+            match OpenOptions::new().read(true).write(!read_only).open(&path) {
                 Err(e) => {
                     error!(
                         log,

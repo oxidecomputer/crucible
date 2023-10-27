@@ -1,7 +1,7 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
     cdt, crucible_bail,
-    extent::{check_input, DownstairsBlockContext, ExtentInner},
+    extent::{check_input, extent_path, DownstairsBlockContext, ExtentInner},
     integrity_hash,
     region::{BatchedPwritev, JobOrReconciliationId},
     Block, BlockContext, CrucibleError, JobId, ReadResponse, RegionDefinition,
@@ -600,7 +600,7 @@ impl SqliteInner {
         extent_number: u32,
     ) -> Result<Self> {
         use crate::{
-            extent::{extent_path, ExtentMeta, EXTENT_META_SQLITE},
+            extent::{ExtentMeta, EXTENT_META_SQLITE},
             mkdir_for_file,
         };
         let mut path = extent_path(dir, extent_number);
@@ -749,12 +749,13 @@ impl SqliteInner {
     }
 
     pub fn open(
-        path: &Path,
+        dir: &Path,
         def: &RegionDefinition,
         extent_number: u32,
         read_only: bool,
         log: &Logger,
     ) -> Result<Self> {
+        let mut path = extent_path(dir, extent_number);
         let bcount = def.extent_size().value;
         let size = def.block_size().checked_mul(bcount).unwrap();
 
@@ -762,7 +763,7 @@ impl SqliteInner {
          * Open the extent file and verify the size is as we expect.
          */
         let file =
-            match OpenOptions::new().read(true).write(!read_only).open(path) {
+            match OpenOptions::new().read(true).write(!read_only).open(&path) {
                 Err(e) => {
                     error!(
                         log,
@@ -789,7 +790,6 @@ impl SqliteInner {
         /*
          * Open a connection to the metadata db
          */
-        let mut path = path.to_path_buf();
         path.set_extension("db");
         let metadb = match open_sqlite_connection(&path) {
             Err(e) => {

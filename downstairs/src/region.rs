@@ -1986,7 +1986,7 @@ pub(crate) mod test {
         // write everything to disk).
         let extent_file = extent_path(&dir, 1);
         let mut inner = extent_inner_sqlite::SqliteInner::open(
-            &extent_file,
+            dir.path(),
             &ddef,
             1,
             false,

@@ -367,7 +367,7 @@ impl Extent {
 
             // Compute supplemental data from the SQLite extent
             let mut inner = extent_inner_sqlite::SqliteInner::open(
-                &path, def, number, read_only, log,
+                dir, def, number, read_only, log,
             )?;
             let ctxs = inner.export_contexts()?;
             let dirty = inner.dirty()?;
@@ -423,12 +423,12 @@ impl Extent {
             if has_sqlite {
                 assert!(read_only || force_sqlite_backend);
                 let inner = extent_inner_sqlite::SqliteInner::open(
-                    &path, def, number, read_only, log,
+                    dir, def, number, read_only, log,
                 )?;
                 Box::new(inner)
             } else {
                 let inner = extent_inner_raw::RawInner::open(
-                    &path, def, number, read_only, log,
+                    dir, def, number, read_only, log,
                 )?;
                 Box::new(inner)
             }
