@@ -281,6 +281,7 @@ impl Extent {
         def: &RegionDefinition,
         number: u32,
         read_only: bool,
+        backend: Backend,
         log: &Logger,
     ) -> Result<Extent> {
         /*
@@ -349,7 +350,13 @@ impl Extent {
         //  `Extent::open` is called, we will restart the migration (if we
         //  haven't gotten to deleting the `.db` file).
         let mut has_sqlite = path.with_extension("db").exists();
-        if has_sqlite && !read_only {
+        let force_sqlite_backend = match backend {
+            Backend::RawFile => false,
+            #[cfg(any(test, feature = "integration-tests"))]
+            Backend::SQLite => true,
+        };
+        let should_migrate = has_sqlite && !read_only && !force_sqlite_backend;
+        if should_migrate {
             info!(log, "Migrating extent {number}");
             // Truncate the file to the length of the extent data
             {
@@ -414,7 +421,7 @@ impl Extent {
         // as-is.
         let inner: Box<dyn ExtentInner> = {
             if has_sqlite {
-                assert!(read_only);
+                assert!(read_only || force_sqlite_backend);
                 let inner = extent_inner_sqlite::SqliteInner::open(
                     &path, def, number, read_only, log,
                 )?;
@@ -463,6 +470,7 @@ impl Extent {
         dir: &Path,
         def: &RegionDefinition,
         number: u32,
+        backend: Backend,
     ) -> Result<Extent> {
         /*
          * Store extent data in files within a directory hierarchy so that
@@ -480,8 +488,15 @@ impl Extent {
         }
         remove_copy_cleanup_dir(dir, number)?;
 
-        // All new extents are created using the raw backend
-        let inner = extent_inner_raw::RawInner::create(dir, def, number)?;
+        let inner: Box<dyn ExtentInner> = match backend {
+            Backend::RawFile => {
+                Box::new(extent_inner_raw::RawInner::create(dir, def, number)?)
+            }
+            #[cfg(any(test, feature = "integration-tests"))]
+            Backend::SQLite => Box::new(
+                extent_inner_sqlite::SqliteInner::create(dir, def, number)?,
+            ),
+        };
 
         /*
          * Complete the construction of our new extent
@@ -490,32 +505,7 @@ impl Extent {
             number,
             read_only: false,
             iov_max: Extent::get_iov_max()?,
-            inner: Mutex::new(Box::new(inner)),
-        })
-    }
-
-    /// Identical to `create`, but using the SQLite backend
-    ///
-    /// This is only allowed in unit tests
-    #[cfg(any(test, feature = "integration-tests"))]
-    pub fn create_sqlite(
-        dir: &Path,
-        def: &RegionDefinition,
-        number: u32,
-    ) -> Result<Extent> {
-        {
-            let path = extent_path(dir, number);
-            if Path::new(&path).exists() {
-                bail!("Extent file already exists {:?}", path);
-            }
-        }
-        remove_copy_cleanup_dir(dir, number)?;
-        let inner = extent_inner_sqlite::SqliteInner::create(dir, def, number)?;
-        Ok(Extent {
-            number,
-            read_only: false,
-            iov_max: Extent::get_iov_max()?,
-            inner: Mutex::new(Box::new(inner)),
+            inner: Mutex::new(inner),
         })
     }
 

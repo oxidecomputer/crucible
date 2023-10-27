@@ -87,11 +87,11 @@ pub struct Region {
     read_only: bool,
     log: Logger,
 
-    /// Use the SQLite extent backend when creating new extents
+    /// Select the backend to use when creating and opening extents
     ///
-    /// This is only allowed in tests; all new extents must be raw files
-    #[cfg(any(test, feature = "integration-tests"))]
-    prefer_sqlite_backend: bool,
+    /// The SQLite backend is only allowed in tests; all new extents must be raw
+    /// files
+    backend: Backend,
 }
 
 impl Region {
@@ -223,8 +223,7 @@ impl Region {
             dirty_extents: HashSet::new(),
             read_only: false,
             log,
-            #[cfg(any(test, feature = "integration-tests"))]
-            prefer_sqlite_backend: backend == Backend::SQLite,
+            backend,
         };
         region.open_extents(true).await?;
         Ok(region)
@@ -317,9 +316,7 @@ impl Region {
             dirty_extents: HashSet::new(),
             read_only,
             log: log.clone(),
-
-            #[cfg(any(test, feature = "integration-tests"))]
-            prefer_sqlite_backend: backend == Backend::SQLite,
+            backend,
         };
 
         region.open_extents(false).await?;
@@ -359,20 +356,14 @@ impl Region {
 
         for eid in eid_range {
             let extent = if create {
-                #[cfg(any(test, feature = "integration-tests"))]
-                if self.prefer_sqlite_backend {
-                    Extent::create_sqlite(&self.dir, &self.def, eid)?
-                } else {
-                    Extent::create(&self.dir, &self.def, eid)?
-                }
-                #[cfg(not(any(test, feature = "integration-tests")))]
-                Extent::create(&self.dir, &self.def, eid)?
+                Extent::create(&self.dir, &self.def, eid, self.backend)?
             } else {
                 let extent = Extent::open(
                     &self.dir,
                     &self.def,
                     eid,
                     self.read_only,
+                    self.backend,
                     &self.log,
                 )?;
 
@@ -441,6 +432,7 @@ impl Region {
             &self.def,
             eid as u32,
             self.read_only,
+            Backend::RawFile,
             &self.log,
         )?;
 
