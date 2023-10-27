@@ -1884,7 +1884,7 @@ pub(crate) mod test {
         // Manually calculate the migration from extent 1
         let extent_file = extent_path(&dir, 1);
         let mut inner = extent_inner_sqlite::SqliteInner::open(
-            &extent_file,
+            dir.path(),
             &ddef,
             1,
             false,
