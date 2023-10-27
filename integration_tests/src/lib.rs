@@ -123,6 +123,33 @@ mod test {
             Ok(())
         }
 
+        pub async fn reboot_read_write(&mut self) -> Result<()> {
+            self.downstairs = build_downstairs_for_region(
+                self.tempdir.path(),
+                false, /* lossy */
+                false, /* read errors */
+                false, /* write errors */
+                false, /* flush errors */
+                false,
+                Some(csl()),
+            )
+            .await?;
+
+            let _join_handle = start_downstairs(
+                self.downstairs.clone(),
+                self.address,
+                None, /* oximeter */
+                0,    /* any port */
+                0,    /* any rport */
+                None, /* cert_pem */
+                None, /* key_pem */
+                None, /* root_cert_pem */
+            )
+            .await?;
+
+            Ok(())
+        }
+
         pub async fn address(&self) -> SocketAddr {
             // If start_downstairs returned Ok, then address will be populated
             self.downstairs.lock().await.address.unwrap()
@@ -293,6 +320,21 @@ mod test {
             self.downstairs3.reboot_read_only().await?;
 
             self.crucible_opts.read_only = true;
+            self.crucible_opts.target = vec![
+                self.downstairs1.address().await,
+                self.downstairs2.address().await,
+                self.downstairs3.address().await,
+            ];
+
+            Ok(())
+        }
+
+        pub async fn reboot_read_write(&mut self) -> Result<()> {
+            assert!(!self.crucible_opts.read_only);
+            self.downstairs1.reboot_read_write().await?;
+            self.downstairs2.reboot_read_write().await?;
+            self.downstairs3.reboot_read_write().await?;
+
             self.crucible_opts.target = vec![
                 self.downstairs1.address().await,
                 self.downstairs2.address().await,
@@ -2467,6 +2509,107 @@ mod test {
 
         // Validate a flush still works
         volume.flush(None).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_sqlite_migration() -> Result<()> {
+        // Test using an old SQLite backend as a read-only parent.
+
+        const BLOCK_SIZE: usize = 512;
+
+        // boot three downstairs, write some data to them, then change to
+        // read-only.
+        let mut test_downstairs_set =
+            TestDownstairsSet::small_sqlite(false).await?;
+        // This must be a SQLite extent!
+        println!(
+            "{:?}",
+            test_downstairs_set
+                .downstairs1
+                .tempdir
+                .path()
+                .join("00/000/000.db")
+        );
+        let out = std::process::Command::new("tree")
+            .arg(test_downstairs_set.downstairs1.tempdir.path())
+            .output()
+            .expect("failed to execute process");
+        println!("{}", std::str::from_utf8(&out.stdout).unwrap());
+
+        assert!(test_downstairs_set
+            .downstairs1
+            .tempdir
+            .path()
+            .join("00/000/000.db")
+            .exists());
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        let random_buffer = {
+            let mut random_buffer =
+                vec![0u8; volume.total_size().await? as usize];
+            rand::thread_rng().fill(&mut random_buffer[..]);
+            random_buffer
+        };
+
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(random_buffer.clone()),
+            )
+            .await?;
+
+        volume.deactivate().await?;
+
+        drop(volume);
+
+        test_downstairs_set.reboot_read_write().await?;
+        // This should now be migrated, and the DB file should be deleted
+        assert!(!test_downstairs_set
+            .downstairs1
+            .tempdir
+            .path()
+            .join("00/000/000.db")
+            .exists());
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                2,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+        // Validate that source blocks are the same
+        let buffer = Buffer::new(volume.total_size().await? as usize);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .await?;
+
+        assert_eq!(*buffer.as_vec().await, random_buffer);
 
         Ok(())
     }
