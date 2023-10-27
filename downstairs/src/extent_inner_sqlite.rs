@@ -593,7 +593,7 @@ impl SqliteInner {
     // We should never create a new SQLite-backed extent in production code,
     // because we should be using raw extents everywhere.  However, we'll create
     // them during tests to check that our automatic migration system works.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "integration-tests"))]
     pub fn create(
         dir: &Path,
         def: &RegionDefinition,

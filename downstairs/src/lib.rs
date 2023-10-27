@@ -3030,6 +3030,18 @@ enum WrappedStream {
     Https(tokio_rustls::server::TlsStream<tokio::net::TcpStream>),
 }
 
+/// On-disk backend for downstairs storage
+///
+/// Normally, we only allow the most recent backend.  However, for integration
+/// tests, it can be useful to create volumes using older backends.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum Backend {
+    RawFile,
+
+    #[cfg(any(test, feature = "integration-tests"))]
+    SQLite,
+}
+
 pub async fn create_region(
     block_size: u64,
     data: PathBuf,
@@ -3039,25 +3051,46 @@ pub async fn create_region(
     encrypted: bool,
     log: Logger,
 ) -> Result<Region> {
+    create_region_with_backend(
+        data,
+        Block {
+            value: extent_size,
+            shift: block_size.trailing_zeros(),
+        },
+        extent_count,
+        uuid,
+        encrypted,
+        Backend::RawFile,
+        log,
+    )
+    .await
+}
+
+pub async fn create_region_with_backend(
+    data: PathBuf,
+    extent_size: Block,
+    extent_count: u64,
+    uuid: Uuid,
+    encrypted: bool,
+    backend: Backend,
+    log: Logger,
+) -> Result<Region> {
     /*
      * Create the region options, then the region.
      */
     let mut region_options: crucible_common::RegionOptions = Default::default();
-    region_options.set_block_size(block_size);
-    region_options
-        .set_extent_size(Block::new(extent_size, block_size.trailing_zeros()));
+    region_options.set_block_size(extent_size.block_size_in_bytes().into());
+    region_options.set_extent_size(extent_size);
     region_options.set_uuid(uuid);
     region_options.set_encrypted(encrypted);
 
-    let mut region = Region::create(data, region_options, log).await?;
+    let mut region =
+        Region::create_with_backend(data, region_options, backend, log).await?;
     region.extend(extent_count as u32).await?;
 
     Ok(region)
 }
 
-// Build the downstairs struct given a region directory and some additional
-// needed information.  If a logger is passed in, we will use that, otherwise
-// a logger will be created.
 pub async fn build_downstairs_for_region(
     data: &Path,
     lossy: bool,
@@ -3067,12 +3100,46 @@ pub async fn build_downstairs_for_region(
     read_only: bool,
     log_request: Option<Logger>,
 ) -> Result<Arc<Mutex<Downstairs>>> {
+    build_downstairs_for_region_with_backend(
+        data,
+        lossy,
+        read_errors,
+        write_errors,
+        flush_errors,
+        read_only,
+        Backend::RawFile,
+        log_request,
+    )
+    .await
+}
+
+// Build the downstairs struct given a region directory and some additional
+// needed information.  If a logger is passed in, we will use that, otherwise
+// a logger will be created.
+#[allow(clippy::too_many_arguments)]
+pub async fn build_downstairs_for_region_with_backend(
+    data: &Path,
+    lossy: bool,
+    read_errors: bool,
+    write_errors: bool,
+    flush_errors: bool,
+    read_only: bool,
+    backend: Backend,
+    log_request: Option<Logger>,
+) -> Result<Arc<Mutex<Downstairs>>> {
     let log = match log_request {
         Some(log) => log,
         None => build_logger(),
     };
-    let region =
-        Region::open(data, Default::default(), true, read_only, &log).await?;
+    let region = Region::open_with_backend(
+        data,
+        Default::default(),
+        true,
+        read_only,
+        backend,
+        &log,
+    )
+    .await?;
 
     info!(log, "UUID: {:?}", region.def().uuid());
     info!(

@@ -125,7 +125,7 @@ pub struct ExtentMeta {
 /// This is no longer used when creating new extents, but we support opening
 /// existing SQLite-based extents because snapshot images are on read-only
 /// volumes, so we can't migrate them.
-#[cfg(test)] // This constant is only actually used in unit tests
+#[cfg(any(test, feature = "integration-tests"))]
 pub const EXTENT_META_SQLITE: u32 = 1;
 
 /// Extent version for raw-file-backed metadata
@@ -497,7 +497,7 @@ impl Extent {
     /// Identical to `create`, but using the SQLite backend
     ///
     /// This is only allowed in unit tests
-    #[cfg(test)]
+    #[cfg(any(test, feature = "integration-tests"))]
     pub fn create_sqlite(
         dir: &Path,
         def: &RegionDefinition,

@@ -44,30 +44,35 @@ mod test {
             blocks_per_extent: u64,
             extent_count: u32,
             problematic: bool,
+            backend: Backend,
         ) -> Result<Self> {
             let tempdir = tempfile::Builder::new()
                 .prefix(&"downstairs-")
                 .rand_bytes(8)
                 .tempdir()?;
 
-            let _region = create_region(
-                512, /* block_size */
+            let _region = create_region_with_backend(
                 tempdir.path().to_path_buf(),
-                blocks_per_extent,
+                Block {
+                    value: blocks_per_extent,
+                    shift: 9,
+                },
                 extent_count.into(),
                 Uuid::new_v4(),
                 encrypted,
+                backend,
                 csl(),
             )
             .await?;
 
-            let downstairs = build_downstairs_for_region(
+            let downstairs = build_downstairs_for_region_with_backend(
                 tempdir.path(),
                 problematic, /* lossy */
                 problematic, /* read errors */
                 problematic, /* write errors */
                 problematic, /* flush errors */
                 read_only,
+                backend,
                 Some(csl()),
             )
             .await?;
@@ -191,6 +196,7 @@ mod test {
                 blocks_per_extent,
                 extent_count,
                 problematic,
+                Backend::RawFile,
             )
             .await?;
             let downstairs2 = TestDownstairs::new(
@@ -200,6 +206,7 @@ mod test {
                 blocks_per_extent,
                 extent_count,
                 problematic,
+                Backend::RawFile,
             )
             .await?;
             let downstairs3 = TestDownstairs::new(
@@ -209,6 +216,7 @@ mod test {
                 blocks_per_extent,
                 extent_count,
                 problematic,
+                Backend::RawFile,
             )
             .await?;
 
@@ -281,6 +289,7 @@ mod test {
                 self.blocks_per_extent,
                 self.extent_count,
                 false,
+                Backend::RawFile,
             )
             .await
         }

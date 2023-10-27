@@ -90,7 +90,7 @@ pub struct Region {
     /// Use the SQLite extent backend when creating new extents
     ///
     /// This is only allowed in tests; all new extents must be raw files
-    #[cfg(test)]
+    #[cfg(any(test, feature = "integration-tests"))]
     prefer_sqlite_backend: bool,
 }
 
@@ -188,14 +188,13 @@ impl Region {
         options: RegionOptions,
         log: Logger,
     ) -> Result<Region> {
-        let mut region = Self::create_inner(dir, options, log)?;
-        region.open_extents(true).await?;
-        Ok(region)
+        Self::create_with_backend(dir, options, Backend::RawFile, log).await
     }
 
-    pub fn create_inner<P: AsRef<Path>>(
+    pub async fn create_with_backend<P: AsRef<Path>>(
         dir: P,
         options: RegionOptions,
+        backend: Backend,
         log: Logger,
     ) -> Result<Region> {
         options.validate()?;
@@ -217,31 +216,17 @@ impl Region {
         write_json(&cp, &def, false)?;
         info!(log, "Created new region file {:?}", cp);
 
-        Ok(Region {
+        let mut region = Region {
             dir: dir.as_ref().to_path_buf(),
             def,
             extents: Vec::new(),
             dirty_extents: HashSet::new(),
             read_only: false,
             log,
-            #[cfg(test)]
-            prefer_sqlite_backend: false,
-        })
-    }
-
-    /**
-     * Create a new SQLite-backed region based on the given RegionOptions
-     */
-    #[cfg(test)]
-    pub async fn create_sqlite<P: AsRef<Path>>(
-        dir: P,
-        options: RegionOptions,
-        log: Logger,
-    ) -> Result<Region> {
-        let mut region = Self::create_inner(dir, options, log)?;
-        region.prefer_sqlite_backend = true;
+            #[cfg(any(test, feature = "integration-tests"))]
+            prefer_sqlite_backend: backend == Backend::SQLite,
+        };
         region.open_extents(true).await?;
-
         Ok(region)
     }
 
@@ -253,6 +238,25 @@ impl Region {
         options: RegionOptions,
         verbose: bool,
         read_only: bool,
+        log: &Logger,
+    ) -> Result<Region> {
+        Self::open_with_backend(
+            dir,
+            options,
+            verbose,
+            read_only,
+            Backend::RawFile,
+            log,
+        )
+        .await
+    }
+
+    pub async fn open_with_backend<P: AsRef<Path>>(
+        dir: P,
+        options: RegionOptions,
+        verbose: bool,
+        read_only: bool,
+        backend: Backend,
         log: &Logger,
     ) -> Result<Region> {
         options.validate()?;
@@ -314,8 +318,8 @@ impl Region {
             read_only,
             log: log.clone(),
 
-            #[cfg(test)]
-            prefer_sqlite_backend: false,
+            #[cfg(any(test, feature = "integration-tests"))]
+            prefer_sqlite_backend: backend == Backend::SQLite,
         };
 
         region.open_extents(false).await?;
@@ -355,13 +359,13 @@ impl Region {
 
         for eid in eid_range {
             let extent = if create {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "integration-tests"))]
                 if self.prefer_sqlite_backend {
                     Extent::create_sqlite(&self.dir, &self.def, eid)?
                 } else {
                     Extent::create(&self.dir, &self.def, eid)?
                 }
-                #[cfg(not(test))]
+                #[cfg(not(any(test, feature = "integration-tests")))]
                 Extent::create(&self.dir, &self.def, eid)?
             } else {
                 let extent = Extent::open(
@@ -1538,8 +1542,13 @@ pub(crate) mod test {
         // metadata files.
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region =
-            Region::create_sqlite(&dir, new_region_options(), csl()).await?;
+        let mut region = Region::create_with_backend(
+            &dir,
+            new_region_options(),
+            Backend::SQLite,
+            csl(),
+        )
+        .await?;
         region.extend(3).await?;
 
         // Close extent 1
@@ -1661,8 +1670,13 @@ pub(crate) mod test {
         // extent after the reopen has cleaned them up.
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region =
-            Region::create_sqlite(&dir, new_region_options(), csl()).await?;
+        let mut region = Region::create_with_backend(
+            &dir,
+            new_region_options(),
+            Backend::SQLite,
+            csl(),
+        )
+        .await?;
         region.extend(3).await?;
 
         // Close extent 1
@@ -1743,8 +1757,13 @@ pub(crate) mod test {
 
         // Create the region, make three extents
         let dir = tempdir()?;
-        let mut region =
-            Region::create_sqlite(&dir, new_region_options(), csl()).await?;
+        let mut region = Region::create_with_backend(
+            &dir,
+            new_region_options(),
+            Backend::SQLite,
+            csl(),
+        )
+        .await?;
         region.extend(3).await?;
 
         // Make copy directory for this extent
@@ -1832,9 +1851,13 @@ pub(crate) mod test {
     async fn reopen_extent_partial_migration() -> Result<()> {
         let log = csl();
         let dir = tempdir()?;
-        let mut region =
-            Region::create_sqlite(&dir, new_region_options(), log.clone())
-                .await?;
+        let mut region = Region::create_with_backend(
+            &dir,
+            new_region_options(),
+            Backend::SQLite,
+            csl(),
+        )
+        .await?;
         region.extend(3).await?;
         let ddef = region.def();
 
@@ -1927,9 +1950,13 @@ pub(crate) mod test {
     async fn reopen_extent_partial_migration_corrupt() -> Result<()> {
         let log = csl();
         let dir = tempdir()?;
-        let mut region =
-            Region::create_sqlite(&dir, new_region_options(), log.clone())
-                .await?;
+        let mut region = Region::create_with_backend(
+            &dir,
+            new_region_options(),
+            Backend::SQLite,
+            csl(),
+        )
+        .await?;
         region.extend(3).await?;
         let ddef = region.def();
 
@@ -2324,9 +2351,13 @@ pub(crate) mod test {
     async fn test_big_write_migrate() -> Result<()> {
         let log = csl();
         let dir = tempdir()?;
-        let mut region =
-            Region::create_sqlite(&dir, new_region_options(), log.clone())
-                .await?;
+        let mut region = Region::create_with_backend(
+            &dir,
+            new_region_options(),
+            Backend::SQLite,
+            csl(),
+        )
+        .await?;
         region.extend(3).await?;
 
         let ddef = region.def();
