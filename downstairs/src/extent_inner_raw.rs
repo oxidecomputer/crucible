@@ -1154,6 +1154,11 @@ impl RawLayout {
         }
     }
 
+    /// Sets the dirty flag in the file true
+    ///
+    /// This unconditionally writes to the file; to avoid extra syscalls, it
+    /// would be wise to cache this at a higher level and only write if it has
+    /// changed.
     fn set_dirty(&self, file: &File) -> Result<(), CrucibleError> {
         let offset = self.metadata_offset();
         nix::sys::uio::pwrite(file.as_raw_fd(), &[1u8], offset as i64)
