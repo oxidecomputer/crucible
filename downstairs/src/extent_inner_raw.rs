@@ -1248,11 +1248,7 @@ impl RawLayout {
                 block_context: b.block_context,
                 on_disk_hash: b.on_disk_hash,
             });
-            bincode::serialize_into(&mut buf[n..], &d).map_err(|e| {
-                CrucibleError::IoError(format!(
-                    "could not serialize context: {e}"
-                ))
-            })?;
+            bincode::serialize_into(&mut buf[n..], &d).unwrap();
         }
         let offset = self.context_slot_offset(block_start, slot);
         nix::sys::uio::pwrite(file.as_raw_fd(), &buf, offset as i64)
@@ -1321,7 +1317,7 @@ impl RawLayout {
             ext_version: EXTENT_META_RAW,
         };
         let mut meta = [0u8; BLOCK_META_SIZE_BYTES as usize];
-        bincode::serialize_into(meta.as_mut_slice(), &d)?;
+        bincode::serialize_into(meta.as_mut_slice(), &d).unwrap();
         buf.extend(meta);
 
         let offset = self.active_context_offset();
