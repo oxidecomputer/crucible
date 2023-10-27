@@ -41,7 +41,6 @@ rand = { version = "0.8", features = ["min_const_gen", "small_rng"] }
 rand_chacha = { version = "0.3" }
 rand_core = { version = "0.6", default-features = false, features = ["std"] }
 reqwest = { version = "0.11", features = ["blocking", "json", "rustls-tls", "stream"] }
-rustls = { version = "0.21" }
 schemars = { version = "0.8", features = ["bytes", "chrono", "uuid1"] }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
@@ -87,7 +86,7 @@ uuid = { version = "1", features = ["serde", "v4"] }
 hyper = { version = "0.14", features = ["full"] }
 mio = { version = "0.8", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustls = { version = "0.21", default-features = false, features = ["dangerous_configuration"] }
+rustls = { version = "0.21", features = ["dangerous_configuration"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
@@ -97,7 +96,7 @@ once_cell = { version = "1", features = ["unstable"] }
 hyper = { version = "0.14", features = ["full"] }
 mio = { version = "0.8", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustls = { version = "0.21", default-features = false, features = ["dangerous_configuration"] }
+rustls = { version = "0.21", features = ["dangerous_configuration"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
@@ -107,7 +106,7 @@ once_cell = { version = "1", features = ["unstable"] }
 hyper = { version = "0.14", features = ["full"] }
 mio = { version = "0.8", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustls = { version = "0.21", default-features = false, features = ["dangerous_configuration"] }
+rustls = { version = "0.21", features = ["dangerous_configuration"] }
 tokio-util = { version = "0.7", features = ["codec", "io"] }
 
 [target.x86_64-unknown-illumos.build-dependencies]

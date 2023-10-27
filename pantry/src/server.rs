@@ -54,8 +54,7 @@ async fn attach(
 
     pantry
         .attach(path.id.clone(), body.volume_construction_request)
-        .await
-        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+        .await?;
 
     Ok(HttpResponseOk(AttachResult { id: path.id }))
 }
@@ -151,8 +150,7 @@ async fn import_from_url(
 
     let job_id = pantry
         .import_from_url(path.id.clone(), body.url, body.expected_digest)
-        .await
-        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+        .await?;
 
     Ok(HttpResponseOk(ImportFromUrlResponse { job_id }))
 }
@@ -176,10 +174,7 @@ async fn snapshot(
     let body = body.into_inner();
     let pantry = rc.context();
 
-    pantry
-        .snapshot(path.id.clone(), body.snapshot_id)
-        .await
-        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+    pantry.snapshot(path.id.clone(), body.snapshot_id).await?;
 
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -211,8 +206,7 @@ async fn bulk_write(
 
     pantry
         .bulk_write(path.id.clone(), body.offset, data)
-        .await
-        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+        .await?;
 
     Ok(HttpResponseUpdatedNoContent())
 }
@@ -243,8 +237,7 @@ async fn bulk_read(
 
     let data = pantry
         .bulk_read(path.id.clone(), body.offset, body.size)
-        .await
-        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+        .await?;
 
     Ok(HttpResponseOk(BulkReadResponse {
         base64_encoded_data: engine::general_purpose::STANDARD.encode(data),
@@ -268,10 +261,7 @@ async fn scrub(
     let path = path.into_inner();
     let pantry = rc.context();
 
-    let job_id = pantry
-        .scrub(path.id.clone())
-        .await
-        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+    let job_id = pantry.scrub(path.id.clone()).await?;
 
     Ok(HttpResponseOk(ScrubResponse { job_id }))
 }
@@ -306,8 +296,7 @@ async fn validate(
 
     let job_id = pantry
         .validate(path.id.clone(), body.expected_digest, body.size_to_validate)
-        .await
-        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+        .await?;
 
     Ok(HttpResponseOk(ValidateResponse { job_id }))
 }
@@ -324,10 +313,7 @@ async fn detach(
     let path = path.into_inner();
     let pantry = rc.context();
 
-    pantry
-        .detach(path.id)
-        .await
-        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+    pantry.detach(path.id).await?;
 
     Ok(HttpResponseDeleted())
 }

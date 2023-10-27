@@ -6,7 +6,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Result;
 use dropshot::HttpError;
 use sha2::Digest;
@@ -23,6 +22,8 @@ use crucible::BlockIO;
 use crucible::SnapshotDetails;
 use crucible::Volume;
 use crucible::VolumeConstructionRequest;
+use crucible_common::crucible_bail;
+use crucible_common::CrucibleError;
 
 use crate::server::ExpectedDigest;
 
@@ -93,7 +94,7 @@ impl PantryEntry {
         &self,
         url: String,
         expected_digest: Option<ExpectedDigest>,
-    ) -> Result<()> {
+    ) -> Result<(), CrucibleError> {
         // Construct a reqwest client that
         //
         // 1) times out after 10 seconds if a connection can't be made
@@ -107,7 +108,8 @@ impl PantryEntry {
         let client = reqwest::ClientBuilder::new()
             .connect_timeout(connect_timeout)
             .timeout(total_timeout)
-            .build()?;
+            .build()
+            .map_err(|e| CrucibleError::GenericError(e.to_string()))?;
 
         // Validate the URL can be reached, and grab the content length
         let response = retry_until_known_result(&self.log, {
@@ -115,10 +117,15 @@ impl PantryEntry {
             let url = url.clone();
             move || client.head(&url).send()
         })
-        .await?;
+        .await
+        .map_err(|e| CrucibleError::GenericError(e.to_string()))?;
 
         if !response.status().is_success() {
-            bail!("querying url returned: {}", response.status());
+            crucible_bail!(
+                GenericError,
+                "querying url returned: {}",
+                response.status()
+            );
         }
 
         let content_length = response
@@ -127,12 +134,18 @@ impl PantryEntry {
             .ok_or("no content length!")
             .map_err(|e| anyhow!(e))?;
 
-        let request_total_size = u64::from_str(content_length.to_str()?)?;
+        let request_total_size = u64::from_str(
+            content_length
+                .to_str()
+                .map_err(|e| CrucibleError::GenericError(e.to_string()))?,
+        )
+        .map_err(|e| CrucibleError::GenericError(e.to_string()))?;
 
         // check volume size
         let volume_total_size = self.volume.total_size().await?;
         if request_total_size > volume_total_size {
-            bail!(
+            crucible_bail!(
+                InvalidNumberOfBlocks,
                 "volume size {} smaller than size {} at url {}",
                 volume_total_size,
                 request_total_size,
@@ -171,7 +184,8 @@ impl PantryEntry {
                         .send()
                 }
             })
-            .await?;
+            .await
+            .map_err(|e| CrucibleError::GenericError(e.to_string()))?;
 
             let content_length = response
                 .headers()
@@ -179,11 +193,17 @@ impl PantryEntry {
                 .ok_or("no content length!")
                 .map_err(|e| anyhow!(e))?;
 
-            let content_length = u64::from_str(content_length.to_str()?)?;
+            let content_length = u64::from_str(
+                content_length
+                    .to_str()
+                    .map_err(|e| CrucibleError::GenericError(e.to_string()))?,
+            )
+            .map_err(|e| CrucibleError::GenericError(e.to_string()))?;
 
             if content_length != (end - start) {
                 // the remote web server didn't honour the RANGE header!
-                bail!(
+                crucible_bail!(
+                    GenericError,
                     "RANGE header bytes={}-{}, content length returned is {}!",
                     start,
                     end - 1,
@@ -194,7 +214,10 @@ impl PantryEntry {
             assert!(content_length <= Self::MAX_CHUNK_SIZE as u64);
             assert!(content_length % volume_block_size == 0);
 
-            let bytes = response.bytes().await?;
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|e| CrucibleError::GenericError(e.to_string()))?;
 
             if let Some(ref mut hasher) = hasher {
                 hasher.update(&bytes);
@@ -213,7 +236,8 @@ impl PantryEntry {
             match expected_digest.unwrap() {
                 ExpectedDigest::Sha256(expected_digest) => {
                     if expected_digest != digest {
-                        bail!(
+                        crucible_bail!(
+                            GenericError,
                             "sha256 digest mismatch! expected {}, saw {}",
                             expected_digest,
                             digest,
@@ -226,35 +250,42 @@ impl PantryEntry {
         Ok(())
     }
 
-    pub async fn snapshot(&self, snapshot_id: String) -> Result<()> {
+    pub async fn snapshot(
+        &self,
+        snapshot_id: String,
+    ) -> Result<(), CrucibleError> {
         self.volume
             .flush(Some(SnapshotDetails {
                 snapshot_name: snapshot_id,
             }))
-            .await?;
-
-        Ok(())
+            .await
     }
 
-    pub async fn bulk_write(&self, offset: u64, data: Vec<u8>) -> Result<()> {
+    pub async fn bulk_write(
+        &self,
+        offset: u64,
+        data: Vec<u8>,
+    ) -> Result<(), CrucibleError> {
         if data.len() > Self::MAX_CHUNK_SIZE {
-            bail!(
+            crucible_bail!(
+                InvalidNumberOfBlocks,
                 "data len {} over max chunk size {}!",
                 data.len(),
                 Self::MAX_CHUNK_SIZE,
             );
         }
 
-        self.volume
-            .write_to_byte_offset(offset, data.into())
-            .await?;
-
-        Ok(())
+        self.volume.write_to_byte_offset(offset, data.into()).await
     }
 
-    pub async fn bulk_read(&self, offset: u64, size: usize) -> Result<Vec<u8>> {
+    pub async fn bulk_read(
+        &self,
+        offset: u64,
+        size: usize,
+    ) -> Result<Vec<u8>, CrucibleError> {
         if size > Self::MAX_CHUNK_SIZE {
-            bail!(
+            crucible_bail!(
+                InvalidNumberOfBlocks,
                 "request len {} over max chunk size {}!",
                 size,
                 Self::MAX_CHUNK_SIZE,
@@ -271,16 +302,15 @@ impl PantryEntry {
         Ok(response.clone())
     }
 
-    pub async fn scrub(&self) -> Result<()> {
-        self.volume.scrub(None, None).await?;
-        Ok(())
+    pub async fn scrub(&self) -> Result<(), CrucibleError> {
+        self.volume.scrub(None, None).await
     }
 
     pub async fn validate(
         &self,
         expected_digest: ExpectedDigest,
         size_to_validate: Option<u64>,
-    ) -> Result<()> {
+    ) -> Result<(), CrucibleError> {
         let mut hasher = match expected_digest {
             ExpectedDigest::Sha256(_) => Sha256::new(),
         };
@@ -290,7 +320,8 @@ impl PantryEntry {
 
         let block_size = self.volume.get_block_size().await?;
         if (size_to_validate % block_size) != 0 {
-            bail!(
+            crucible_bail!(
+                InvalidNumberOfBlocks,
                 "size to validate {} not divisible by block size {}!",
                 size_to_validate,
                 block_size,
@@ -318,7 +349,8 @@ impl PantryEntry {
         match expected_digest {
             ExpectedDigest::Sha256(expected_digest) => {
                 if expected_digest != digest {
-                    bail!(
+                    crucible_bail!(
+                        GenericError,
                         "sha256 digest mismatch! expected {}, saw {}",
                         expected_digest,
                         digest,
@@ -330,7 +362,7 @@ impl PantryEntry {
         Ok(())
     }
 
-    pub async fn detach(&self) -> Result<()> {
+    pub async fn detach(&self) -> Result<(), CrucibleError> {
         self.volume.flush(None).await?;
         self.volume.deactivate().await?;
         Ok(())
@@ -348,7 +380,7 @@ pub struct Pantry {
 
     /// Pantry can run background jobs on Volumes, and currently running jobs
     /// are stored here.
-    jobs: Mutex<BTreeMap<String, JoinHandle<Result<()>>>>,
+    jobs: Mutex<BTreeMap<String, JoinHandle<Result<(), CrucibleError>>>>,
 }
 
 impl Pantry {
@@ -364,7 +396,7 @@ impl Pantry {
         &self,
         volume_id: String,
         volume_construction_request: VolumeConstructionRequest,
-    ) -> Result<()> {
+    ) -> Result<(), CrucibleError> {
         let mut entries = self.entries.lock().await;
         if let Some(entry) = entries.get(&volume_id) {
             // This function must be idempotent for the same inputs. If an entry
@@ -388,7 +420,8 @@ impl Pantry {
                     volume_id,
                 );
 
-                bail!(
+                crucible_bail!(
+                    Unsupported,
                     "Existing entry for {} with different volume construction \
                     request!",
                     volume_id,
@@ -476,9 +509,10 @@ impl Pantry {
         // it in the list of jobs.
         match jobs.remove(&job_id) {
             Some(join_handle) => {
-                let result = join_handle.await.map_err(|e| {
-                    HttpError::for_internal_error(e.to_string())
-                })?;
+                let result: Result<(), CrucibleError> =
+                    join_handle.await.map_err(|e| {
+                        HttpError::for_internal_error(e.to_string())
+                    })?;
 
                 jobs.remove(&job_id);
 
@@ -486,7 +520,7 @@ impl Pantry {
                     error!(self.log, "job {} failed with {}", job_id, e);
                 }
 
-                Ok(result)
+                Ok(result.map_err(|e| e.into()))
             }
 
             None => {
@@ -523,12 +557,7 @@ impl Pantry {
         snapshot_id: String,
     ) -> Result<(), HttpError> {
         let entry = self.entry(volume_id).await?;
-        entry
-            .snapshot(snapshot_id)
-            .await
-            .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
-
-        Ok(())
+        entry.snapshot(snapshot_id).await.map_err(|e| e.into())
     }
 
     pub async fn bulk_write(
@@ -538,12 +567,7 @@ impl Pantry {
         data: Vec<u8>,
     ) -> Result<(), HttpError> {
         let entry = self.entry(volume_id).await?;
-        entry
-            .bulk_write(offset, data)
-            .await
-            .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
-
-        Ok(())
+        entry.bulk_write(offset, data).await.map_err(|e| e.into())
     }
 
     pub async fn bulk_read(
@@ -553,12 +577,7 @@ impl Pantry {
         size: usize,
     ) -> Result<Vec<u8>, HttpError> {
         let entry = self.entry(volume_id).await?;
-        let response = entry
-            .bulk_read(offset, size)
-            .await
-            .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
-
-        Ok(response)
+        entry.bulk_read(offset, size).await.map_err(|e| e.into())
     }
 
     pub async fn scrub(&self, volume_id: String) -> Result<String, HttpError> {
@@ -596,7 +615,7 @@ impl Pantry {
 
     /// Remove an entry from the pantry, and detach it. If detach fails, the
     /// entry is still gone but this function will return an error.
-    pub async fn detach(&self, volume_id: String) -> Result<()> {
+    pub async fn detach(&self, volume_id: String) -> Result<(), CrucibleError> {
         let mut entries = self.entries.lock().await;
 
         info!(self.log, "detach removing entry for volume {}", volume_id);

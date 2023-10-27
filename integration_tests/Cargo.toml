@@ -20,6 +20,7 @@ crucible-downstairs.workspace = true
 crucible-pantry-client.workspace = true
 crucible-pantry.workspace = true
 crucible.workspace = true
+dropshot.workspace = true
 futures-core.workspace = true
 futures.workspace = true
 hex.workspace = true
