@@ -541,6 +541,8 @@ impl RawInner {
     ) -> Result<(), CrucibleError> {
         let layout = RawLayout::new(def.extent_size());
         let block_count = layout.block_count() as usize;
+        assert_eq!(block_count, def.extent_size().value as usize);
+        assert_eq!(block_count, ctxs.len());
 
         file.set_len(layout.file_size())?;
         layout.write_context_slots_contiguous(
