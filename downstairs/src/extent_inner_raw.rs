@@ -1908,7 +1908,7 @@ mod test {
     }
 
     #[test]
-    fn test_defragment() -> Result<()> {
+    fn test_defragment_full() -> Result<()> {
         let dir = tempdir()?;
         let mut inner =
             RawInner::create(dir.as_ref(), &new_region_definition(), 0)
@@ -2002,6 +2002,343 @@ mod test {
             assert_eq!(
                 inner.active_context[i],
                 ContextSlot::A,
+                "invalid context slot at {i}",
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_defragment_into_b() -> Result<()> {
+        let dir = tempdir()?;
+        let mut inner =
+            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
+                .unwrap();
+
+        // Write every other block, so that the active context slot alternates
+        let data = Bytes::from(vec![0x55; 512]);
+        let hash = integrity_hash(&[&data[..]]);
+
+        for i in 0..3 {
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(i * 2),
+                data: data.clone(),
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
+            };
+            inner.write(JobId(30), &[&write], false, IOV_MAX_TEST)?;
+        }
+        // 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+        // --|---|---|---|---|---|---|---|---|---
+        // B | A | B | A | B | A | A | A | A | A
+
+        for i in 0..10 {
+            assert_eq!(
+                inner.active_context[i],
+                if i % 2 == 0 && i <= 4 {
+                    ContextSlot::B
+                } else {
+                    ContextSlot::A
+                }
+            );
+        }
+        assert_eq!(inner.extra_syscall_count, 0);
+        assert_eq!(inner.extra_syscall_denominator, 3);
+        inner.flush(10, 10, JobId(10).into())?;
+        assert_eq!(inner.sync_index, 1);
+
+        // This should not have changed active context slots!
+        for i in 0..10 {
+            assert_eq!(
+                inner.active_context[i],
+                if i % 2 == 0 && i <= 4 {
+                    ContextSlot::B
+                } else {
+                    ContextSlot::A
+                }
+            );
+        }
+
+        // Now, do one big write, which will be forced to bounce between the
+        // context slots.
+        let mut writes = vec![];
+        let data = Bytes::from(vec![0x33; 512]);
+        let hash = integrity_hash(&[&data[..]]);
+        for i in 0..10 {
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(i),
+                data: data.clone(),
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
+            };
+            writes.push(write);
+        }
+        // This write should toggled every single context slot:
+        // 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+        // --|---|---|---|---|---|---|---|---|---
+        // A | B | A | B | A | B | B | B | B | B
+        let writes_ref: Vec<&_> = writes.iter().collect();
+        inner.write(JobId(30), &writes_ref, false, IOV_MAX_TEST)?;
+        for i in 0..10 {
+            assert_eq!(
+                inner.active_context[i],
+                if i % 2 == 0 && i <= 4 {
+                    ContextSlot::A
+                } else {
+                    ContextSlot::B
+                },
+                "invalid context slot at {i}",
+            );
+        }
+        assert!(inner.extra_syscall_count > 0);
+        assert_eq!(inner.extra_syscall_denominator, 1);
+
+        // Do a flush!  Because we had a bunch of extra syscalls, this should
+        // trigger defragmentation; after the flush, every context slot should
+        // be in array B (which minimizes copies)
+        assert_eq!(inner.sync_index, 1);
+        inner.flush(11, 11, JobId(11).into())?;
+        assert_eq!(inner.sync_index, 2);
+
+        for i in 0..10 {
+            assert_eq!(
+                inner.active_context[i],
+                ContextSlot::B,
+                "invalid context slot at {i}",
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_defragment_into_a() -> Result<()> {
+        // Identical to `test_defragment_a`, except that we force the
+        // defragmentation to copy into the A slots
+        let dir = tempdir()?;
+        let mut inner =
+            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
+                .unwrap();
+
+        // Write every other block, so that the active context slot alternates
+        let data = Bytes::from(vec![0x55; 512]);
+        let hash = integrity_hash(&[&data[..]]);
+
+        for i in 0..3 {
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(i * 2),
+                data: data.clone(),
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
+            };
+            inner.write(JobId(30), &[&write], false, IOV_MAX_TEST)?;
+        }
+        // 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+        // --|---|---|---|---|---|---|---|---|---
+        // B | A | B | A | B | A | A | A | A | A
+
+        for i in 0..10 {
+            assert_eq!(
+                inner.active_context[i],
+                if i % 2 == 0 && i <= 4 {
+                    ContextSlot::B
+                } else {
+                    ContextSlot::A
+                }
+            );
+        }
+        assert_eq!(inner.extra_syscall_count, 0);
+        assert_eq!(inner.extra_syscall_denominator, 3);
+        inner.flush(10, 10, JobId(10).into())?;
+        assert_eq!(inner.sync_index, 1);
+
+        // This should not have changed active context slots!
+        for i in 0..10 {
+            assert_eq!(
+                inner.active_context[i],
+                if i % 2 == 0 && i <= 4 {
+                    ContextSlot::B
+                } else {
+                    ContextSlot::A
+                }
+            );
+        }
+
+        // Now, do two big writes, which will be forced to bounce between the
+        // context slots.
+        let mut writes = vec![];
+        let data = Bytes::from(vec![0x33; 512]);
+        let hash = integrity_hash(&[&data[..]]);
+        for i in 0..10 {
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(i),
+                data: data.clone(),
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
+            };
+            writes.push(write);
+        }
+        let writes_ref: Vec<&_> = writes.iter().collect();
+        inner.write(JobId(30), &writes_ref, false, IOV_MAX_TEST)?;
+        inner.write(JobId(30), &writes_ref, false, IOV_MAX_TEST)?;
+        // This write should toggled every single context slot:
+        // 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+        // --|---|---|---|---|---|---|---|---|---
+        // B | A | B | A | B | A | A | A | A | A
+        for i in 0..10 {
+            assert_eq!(
+                inner.active_context[i],
+                if i % 2 == 0 && i <= 4 {
+                    ContextSlot::B
+                } else {
+                    ContextSlot::A
+                },
+                "invalid context slot at {i}",
+            );
+        }
+        assert!(inner.extra_syscall_count > 0);
+        assert_eq!(inner.extra_syscall_denominator, 2);
+
+        // Do a flush!  Because we had a bunch of extra syscalls, this should
+        // trigger defragmentation; after the flush, every context slot should
+        // be in array A (which minimizes copies)
+        assert_eq!(inner.sync_index, 1);
+        inner.flush(11, 11, JobId(11).into())?;
+        assert_eq!(inner.sync_index, 2);
+
+        for i in 0..10 {
+            assert_eq!(
+                inner.active_context[i],
+                ContextSlot::A,
+                "invalid context slot at {i}",
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_defragment_not_enough() -> Result<()> {
+        // Identical to `test_defragment_a`, except that we force the
+        // defragmentation to copy into the A slots
+        let dir = tempdir()?;
+        let mut inner =
+            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
+                .unwrap();
+
+        // Write every other block, so that the active context slot alternates
+        let data = Bytes::from(vec![0x55; 512]);
+        let hash = integrity_hash(&[&data[..]]);
+
+        for i in 0..2 {
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(i * 2),
+                data: data.clone(),
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
+            };
+            inner.write(JobId(30), &[&write], false, IOV_MAX_TEST)?;
+        }
+        // 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+        // --|---|---|---|---|---|---|---|---|---
+        // B | A | B | A | A | A | A | A | A | A
+
+        for i in 0..10 {
+            assert_eq!(
+                inner.active_context[i],
+                if i % 2 == 0 && i <= 2 {
+                    ContextSlot::B
+                } else {
+                    ContextSlot::A
+                }
+            );
+        }
+        assert_eq!(inner.extra_syscall_count, 0);
+        assert_eq!(inner.extra_syscall_denominator, 2);
+        inner.flush(10, 10, JobId(10).into())?;
+        assert_eq!(inner.sync_index, 1);
+
+        // This should not have changed active context slots!
+        for i in 0..10 {
+            assert_eq!(
+                inner.active_context[i],
+                if i % 2 == 0 && i <= 2 {
+                    ContextSlot::B
+                } else {
+                    ContextSlot::A
+                }
+            );
+        }
+
+        // Now, do two big writes, which will be forced to bounce between the
+        // context slots.
+        let mut writes = vec![];
+        let data = Bytes::from(vec![0x33; 512]);
+        let hash = integrity_hash(&[&data[..]]);
+        for i in 0..10 {
+            let write = crucible_protocol::Write {
+                eid: 0,
+                offset: Block::new_512(i),
+                data: data.clone(),
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash,
+                },
+            };
+            writes.push(write);
+        }
+        let writes_ref: Vec<&_> = writes.iter().collect();
+        inner.write(JobId(30), &writes_ref, false, IOV_MAX_TEST)?;
+        inner.write(JobId(30), &writes_ref, false, IOV_MAX_TEST)?;
+        // This write should toggled every single context slot:
+        // 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+        // --|---|---|---|---|---|---|---|---|---
+        // B | A | B | A | A | A | A | A | A | A
+        for i in 0..10 {
+            assert_eq!(
+                inner.active_context[i],
+                if i % 2 == 0 && i <= 2 {
+                    ContextSlot::B
+                } else {
+                    ContextSlot::A
+                },
+                "invalid context slot at {i}",
+            );
+        }
+        assert!(inner.extra_syscall_count > 0);
+        assert_eq!(inner.extra_syscall_denominator, 2);
+
+        // This write didn't add enough extra syscalls to trigger
+        // defragmentation.
+        assert_eq!(inner.sync_index, 1);
+        inner.flush(11, 11, JobId(11).into())?;
+        assert_eq!(inner.sync_index, 2);
+
+        // These should be the same!
+        for i in 0..10 {
+            assert_eq!(
+                inner.active_context[i],
+                if i % 2 == 0 && i <= 2 {
+                    ContextSlot::B
+                } else {
+                    ContextSlot::A
+                },
                 "invalid context slot at {i}",
             );
         }
