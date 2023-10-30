@@ -89,7 +89,7 @@ async fn main() -> Result<()> {
             let log = build_logger();
 
             let agent = if let Some(agent) = agent {
-                info!(log, "using agent at argument {:?}", agent);
+                info!(log, "using agent {:?}", agent);
                 agent
             } else {
                 info!(log, "finding listen_addr from smf");
@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
             };
 
             let dataset = if let Some(dataset) = dataset {
-                info!(log, "using dataset at argument {:?}", dataset);
+                info!(log, "using dataset {:?}", dataset);
                 dataset
             } else {
                 info!(log, "finding dataset from smf");
