@@ -2862,11 +2862,6 @@ struct Downstairs {
     log: Logger,
 
     /**
-     * Counters for the in flight work for the downstairs
-     */
-    io_state_count: IOStateCount,
-
-    /**
      * Live Repair Job IDs
      * If, while running live repair, we have an IO that spans repaired
      * extents and not yet repaired extents, we will reserve job IDs for the
@@ -2907,7 +2902,6 @@ impl Downstairs {
             reconcile_repaired: 0,
             reconcile_repair_needed: 0,
             log: log.new(o!("" => "downstairs".to_string())),
-            io_state_count: IOStateCount::new(),
             repair_job_ids: BTreeMap::new(),
             repair_min_id: None,
         }
@@ -2969,8 +2963,8 @@ impl Downstairs {
         let new_state = IOState::InProgress;
         let old_state = job.state.insert(client_id, new_state.clone());
         assert_eq!(old_state, IOState::New);
-        self.io_state_count.decr(&old_state, client_id);
-        self.io_state_count.incr(&new_state, client_id);
+        self.clients[client_id].io_state_count.decr(&old_state);
+        self.clients[client_id].io_state_count.incr(&new_state);
         let mut out = job.work.clone();
         drop(handle);
 
@@ -3277,8 +3271,10 @@ impl Downstairs {
             if matches!(state, IOState::InProgress | IOState::New) {
                 info!(self.log, "{} change {} to skipped", client_id, ds_id);
                 let old_state = job.state.insert(client_id, IOState::Skipped);
-                self.io_state_count.decr(&old_state, client_id);
-                self.io_state_count.incr(&IOState::Skipped, client_id);
+                self.clients[client_id].io_state_count.decr(&old_state);
+                self.clients[client_id]
+                    .io_state_count
+                    .incr(&IOState::Skipped);
                 self.clients[client_id].skipped_jobs.insert(*ds_id);
             }
         });
@@ -3373,8 +3369,8 @@ impl Downstairs {
             let old_state = job.state.insert(client_id, IOState::New);
             job.replay = true;
             if old_state != IOState::New {
-                self.io_state_count.decr(&old_state, client_id);
-                self.io_state_count.incr(&IOState::New, client_id);
+                self.clients[client_id].io_state_count.decr(&old_state);
+                self.clients[client_id].io_state_count.incr(&IOState::New);
                 self.clients[client_id].new_jobs.insert(*ds_id);
             }
         });
@@ -3403,8 +3399,10 @@ impl Downstairs {
 
             if matches!(state, IOState::InProgress | IOState::New) {
                 let old_state = job.state.insert(client_id, IOState::Skipped);
-                self.io_state_count.decr(&old_state, client_id);
-                self.io_state_count.incr(&IOState::Skipped, client_id);
+                self.clients[client_id].io_state_count.decr(&old_state);
+                self.clients[client_id]
+                    .io_state_count
+                    .incr(&IOState::Skipped);
                 self.clients[client_id].skipped_jobs.insert(*ds_id);
                 number_jobs_skipped += 1;
 
@@ -3469,7 +3467,7 @@ impl Downstairs {
      * for this client, but don't yet have a response.
      */
     fn submitted_work(&self, client_id: ClientId) -> usize {
-        self.io_state_count.in_progress[client_id] as usize
+        self.clients[client_id].io_state_count.in_progress as usize
     }
 
     /**
@@ -3477,8 +3475,7 @@ impl Downstairs {
      * work we have for a downstairs.
      */
     fn total_live_work(&self, client_id: ClientId) -> usize {
-        (self.io_state_count.new[client_id]
-            + self.io_state_count.in_progress[client_id]) as usize
+        self.clients[client_id].total_live_work()
     }
 
     /**
@@ -3515,7 +3512,7 @@ impl Downstairs {
                 | DsState::Replacing
                 | DsState::LiveRepairReady => {
                     io.state.insert(cid, IOState::Skipped);
-                    self.io_state_count.incr(&IOState::Skipped, cid);
+                    self.clients[cid].io_state_count.incr(&IOState::Skipped);
                     skipped += 1;
                     self.clients[cid].skipped_jobs.insert(io.ds_id);
                 }
@@ -3534,19 +3531,21 @@ impl Downstairs {
                     assert!(self.repair_min_id.is_some());
                     if io.work.send_io_live_repair(my_limit) {
                         // Leave this IO as New, the downstairs will receive it.
-                        self.io_state_count.incr(&IOState::New, cid);
+                        self.clients[cid].io_state_count.incr(&IOState::New);
                         self.clients[cid].new_jobs.insert(io.ds_id);
                     } else {
                         // Move this IO to skipped, we are not ready for
                         // the downstairs to receive it.
                         io.state.insert(cid, IOState::Skipped);
-                        self.io_state_count.incr(&IOState::Skipped, cid);
+                        self.clients[cid]
+                            .io_state_count
+                            .incr(&IOState::Skipped);
                         skipped += 1;
                         self.clients[cid].skipped_jobs.insert(io.ds_id);
                     }
                 }
                 _ => {
-                    self.io_state_count.incr(&IOState::New, cid);
+                    self.clients[cid].io_state_count.incr(&IOState::New);
                     self.clients[cid].new_jobs.insert(io.ds_id);
                 }
             }
@@ -3608,11 +3607,11 @@ impl Downstairs {
                 | DsState::Replacing
                 | DsState::LiveRepairReady => {
                     io.state.insert(cid, IOState::Skipped);
-                    self.io_state_count.incr(&IOState::Skipped, cid);
+                    self.clients[cid].io_state_count.incr(&IOState::Skipped);
                     self.clients[cid].skipped_jobs.insert(io.ds_id);
                 }
                 _ => {
-                    self.io_state_count.incr(&IOState::New, cid);
+                    self.clients[cid].io_state_count.incr(&IOState::New);
                     self.clients[cid].new_jobs.insert(io.ds_id);
                 }
             }
@@ -4061,8 +4060,8 @@ impl Downstairs {
         };
 
         let old_state = job.state.insert(client_id, new_state.clone());
-        self.io_state_count.decr(&old_state, client_id);
-        self.io_state_count.incr(&new_state, client_id);
+        self.clients[client_id].io_state_count.decr(&old_state);
+        self.clients[client_id].io_state_count.incr(&new_state);
 
         /*
          * Verify the job was InProgress
@@ -4602,7 +4601,7 @@ impl Downstairs {
                 self.completed_jobs.push(summary);
                 for cid in ClientId::iter() {
                     let old_state = &job.state[cid];
-                    self.io_state_count.decr(old_state, cid);
+                    self.clients[cid].io_state_count.decr(old_state);
                 }
             }
             // Now that we've collected jobs to retire, remove them from the map
@@ -4802,6 +4801,20 @@ impl Downstairs {
             f(&self.clients[ClientId::new(2)]),
         ]
     }
+
+    pub fn io_state_count(&self) -> IOStateCount {
+        let d = self.collect_stats(|c| c.io_state_count);
+        let f = |g: fn(ClientIOStateCount) -> u32| {
+            ClientData([g(d[0]), g(d[1]), g(d[2])])
+        };
+        IOStateCount {
+            new: f(|d| d.new),
+            in_progress: f(|d| d.in_progress),
+            done: f(|d| d.done),
+            skipped: f(|d| d.skipped),
+            error: f(|d| d.error),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -4929,6 +4942,11 @@ struct DownstairsClient {
      * Count of times a downstairs has had flow control turned on
      */
     flow_control: usize,
+
+    /**
+     * Counters for the in flight work for the downstairs
+     */
+    io_state_count: ClientIOStateCount,
 }
 
 impl DownstairsClient {
@@ -4953,6 +4971,7 @@ impl DownstairsClient {
             connected: 0,
             replaced: 0,
             flow_control: 0,
+            io_state_count: ClientIOStateCount::new(),
         }
     }
 
@@ -4989,6 +5008,10 @@ impl DownstairsClient {
             self.flow_control += 1;
             (out, true)
         }
+    }
+
+    fn total_live_work(&self) -> usize {
+        (self.io_state_count.new + self.io_state_count.in_progress) as usize
     }
 }
 
@@ -5417,7 +5440,7 @@ impl Upstairs {
         let ds_count = self.ds_work_active().await;
         let ds_state = self.ds_state_copy().await;
         let ds = self.downstairs.lock().await;
-        let ds_io_count = ds.io_state_count;
+        let ds_io_count = ds.io_state_count();
         let ds_reconciled = ds.reconcile_repaired;
         let ds_reconcile_needed = ds.reconcile_repair_needed;
         let ds_live_repair_completed =
@@ -8437,6 +8460,45 @@ impl fmt::Display for IOState {
 }
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+pub struct ClientIOStateCount {
+    pub new: u32,
+    pub in_progress: u32,
+    pub done: u32,
+    pub skipped: u32,
+    pub error: u32,
+}
+
+impl ClientIOStateCount {
+    fn new() -> ClientIOStateCount {
+        ClientIOStateCount {
+            new: 0,
+            in_progress: 0,
+            done: 0,
+            skipped: 0,
+            error: 0,
+        }
+    }
+
+    pub fn incr(&mut self, state: &IOState) {
+        *self.get_mut(state) += 1;
+    }
+
+    pub fn decr(&mut self, state: &IOState) {
+        *self.get_mut(state) -= 1;
+    }
+
+    fn get_mut(&mut self, state: &IOState) -> &mut u32 {
+        match state {
+            IOState::New => &mut self.new,
+            IOState::InProgress => &mut self.in_progress,
+            IOState::Done => &mut self.done,
+            IOState::Skipped => &mut self.skipped,
+            IOState::Error(_) => &mut self.error,
+        }
+    }
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub struct IOStateCount {
     pub new: ClientData<u32>,
     pub in_progress: ClientData<u32>,
@@ -8446,16 +8508,6 @@ pub struct IOStateCount {
 }
 
 impl IOStateCount {
-    fn new() -> IOStateCount {
-        IOStateCount {
-            new: ClientData::new(0),
-            in_progress: ClientData::new(0),
-            done: ClientData::new(0),
-            skipped: ClientData::new(0),
-            error: ClientData::new(0),
-        }
-    }
-
     fn show_all(&self) {
         println!("   STATES      DS:0   DS:1   DS:2   TOTAL");
         self.show(IOState::New);
@@ -10805,7 +10857,7 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
 
             println!();
         }
-        ds.io_state_count.show_all();
+        ds.io_state_count().show_all();
         print!("Last Flush: ");
         for lf in ds.clients.iter().map(|c| c.last_flush) {
             print!("{} ", lf);

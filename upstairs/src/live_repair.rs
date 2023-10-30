@@ -5584,11 +5584,11 @@ pub mod repair_test {
         show_all_work(&up).await;
         let mut ds = up.downstairs.lock().await;
         // Good downstairs don't need changes
-        assert!(!ds.dependencies_need_cleanup(ClientId::new(0)));
-        assert!(!ds.dependencies_need_cleanup(ClientId::new(2)));
+        assert!(!ds.clients[ClientId::new(0)].dependencies_need_cleanup());
+        assert!(!ds.clients[ClientId::new(2)].dependencies_need_cleanup());
 
         // LiveRepair downstairs might need a change
-        assert!(ds.dependencies_need_cleanup(ClientId::new(1)));
+        assert!(ds.clients[ClientId::new(1)].dependencies_need_cleanup());
         for job_id in (1003..1006).map(JobId) {
             let job = ds.ds_active.get(&job_id).unwrap();
             // jobs 3,4,5 will be skipped for our LiveRepair downstairs.
@@ -5686,11 +5686,11 @@ pub mod repair_test {
 
         let mut ds = up.downstairs.lock().await;
         // Good downstairs don't need changes
-        assert!(!ds.dependencies_need_cleanup(ClientId::new(0)));
-        assert!(!ds.dependencies_need_cleanup(ClientId::new(2)));
+        assert!(!ds.clients[ClientId::new(0)].dependencies_need_cleanup());
+        assert!(!ds.clients[ClientId::new(2)].dependencies_need_cleanup());
 
         // LiveRepair downstairs might need a change
-        assert!(ds.dependencies_need_cleanup(ClientId::new(1)));
+        assert!(ds.clients[ClientId::new(1)].dependencies_need_cleanup());
 
         // For the three latest jobs, they should be New as they are IOs that
         // are on an extent we "already repaired".
