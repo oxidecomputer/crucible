@@ -1317,6 +1317,10 @@ impl RawLayout {
     /// Write out the active context array and metadata section of the file
     ///
     /// This is done in a single write, so it should be atomic.
+    ///
+    /// # Panics
+    /// `active_context.len()` must match `self.block_count()`, and the function
+    /// will panic otherwise.
     fn write_active_context_and_metadata(
         &self,
         file: &File,
@@ -1325,6 +1329,8 @@ impl RawLayout {
         flush_number: u64,
         gen_number: u64,
     ) -> Result<(), CrucibleError> {
+        assert_eq!(active_context.len(), self.block_count() as usize);
+
         // Serialize bitpacked active slot values
         let mut buf = self.buf.take();
         buf.clear();
