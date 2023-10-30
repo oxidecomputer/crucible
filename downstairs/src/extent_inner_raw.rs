@@ -835,7 +835,7 @@ impl RawInner {
         &mut self,
         block_contexts: &[DownstairsBlockContext],
     ) -> Result<(), CrucibleError> {
-        // If any of these block contexts will be overwriting an unsyched
+        // If any of these block contexts will be overwriting an unsynched
         // context slot, then we insert a sync here.
         let needs_sync = block_contexts.iter().any(|block_context| {
             let block = block_context.block as usize;
