@@ -332,8 +332,7 @@ impl Extent {
         //        .db file)
         //      - Open the extent using our existing SQLite extent code
         //      - Using standard extent APIs, find the metadata and encryption
-        //        context for each block. Encode this in the new raw file format
-        //        (as a Vec<u8>)
+        //        context for each block. Append this to the existing data file.
         //      - Close the (SQLite) extent
         //      - Open the extent data file in append mode, and append the new
         //        raw metadata + block contexts to the end of the file.
