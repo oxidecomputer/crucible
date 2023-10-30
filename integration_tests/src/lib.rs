@@ -2320,20 +2320,6 @@ mod test {
         let mut test_downstairs_set =
             TestDownstairsSet::small_sqlite(false).await?;
         // This must be a SQLite extent!
-        println!(
-            "{:?}",
-            test_downstairs_set
-                .downstairs1
-                .tempdir
-                .path()
-                .join("00/000/000.db")
-        );
-        let out = std::process::Command::new("tree")
-            .arg(test_downstairs_set.downstairs1.tempdir.path())
-            .output()
-            .expect("failed to execute process");
-        println!("{}", std::str::from_utf8(&out.stdout).unwrap());
-
         assert!(test_downstairs_set
             .downstairs1
             .tempdir
@@ -2524,20 +2510,6 @@ mod test {
         let mut test_downstairs_set =
             TestDownstairsSet::small_sqlite(false).await?;
         // This must be a SQLite extent!
-        println!(
-            "{:?}",
-            test_downstairs_set
-                .downstairs1
-                .tempdir
-                .path()
-                .join("00/000/000.db")
-        );
-        let out = std::process::Command::new("tree")
-            .arg(test_downstairs_set.downstairs1.tempdir.path())
-            .output()
-            .expect("failed to execute process");
-        println!("{}", std::str::from_utf8(&out.stdout).unwrap());
-
         assert!(test_downstairs_set
             .downstairs1
             .tempdir
