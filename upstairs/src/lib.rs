@@ -733,10 +733,7 @@ where
             return Ok(true);
         } else {
             let n = MAX_ACTIVE_COUNT - active_count;
-            let (new_work, flow_control) = ds.new_work(client_id, n);
-            if flow_control {
-                ds.clients[client_id].flow_control += 1;
-            }
+            let (new_work, flow_control) = ds.clients[client_id].new_work(n);
             (new_work, flow_control)
         }
     };
@@ -2977,7 +2974,7 @@ impl Downstairs {
         let mut out = job.work.clone();
         drop(handle);
 
-        if self.dependencies_need_cleanup(client_id) {
+        if self.clients[client_id].dependencies_need_cleanup() {
             match &mut out {
                 IOop::Write { dependencies, .. }
                 | IOop::WriteUnwritten { dependencies, .. }
@@ -3004,17 +3001,6 @@ impl Downstairs {
             }
         }
         Some(out)
-    }
-
-    /*
-     * Determine if the conditions exist where we need to remove dependencies
-     * for an IOop during live repair.  We only need to do this if the
-     * downstairs in question is in LiveRepair, and there are skipped
-     * jobs for this downstairs.
-     */
-    fn dependencies_need_cleanup(&mut self, client_id: ClientId) -> bool {
-        self.clients[client_id].state == DsState::LiveRepair
-            && !self.clients[client_id].skipped_jobs.is_empty()
     }
 
     /// Given a client ID that is undergoing LiveRepair, go through the list
@@ -3468,31 +3454,6 @@ impl Downstairs {
         // As this downstairs is now faulted, we clear the extent_limit.
         self.clients[client_id].extent_limit = None;
         notify_guest
-    }
-
-    /// Return a list of downstairs request IDs that represent unissued
-    /// requests for this client.
-    ///
-    /// Returns a tuple of `(jobs, flow control)` where flow control is true if
-    /// the jobs list has been clamped to `max_count`.
-    fn new_work(
-        &mut self,
-        client_id: ClientId,
-        max_count: usize,
-    ) -> (BTreeSet<JobId>, bool) {
-        if max_count >= self.clients[client_id].new_jobs.len() {
-            // Happy path: we can grab everything
-            (std::mem::take(&mut self.clients[client_id].new_jobs), false)
-        } else {
-            // Otherwise, pop elements from the queue
-            let mut out = BTreeSet::new();
-            for _ in 0..max_count {
-                out.insert(
-                    self.clients[client_id].new_jobs.pop_first().unwrap(),
-                );
-            }
-            (out, true)
-        }
     }
 
     /**
@@ -4998,6 +4959,36 @@ impl DownstairsClient {
     fn end_live_repair(&mut self) {
         self.repair_info = None;
         self.extent_limit = None;
+    }
+
+    /*
+     * Determine if the conditions exist where we need to remove dependencies
+     * for an IOop during live repair.  We only need to do this if the
+     * downstairs in question is in LiveRepair, and there are skipped
+     * jobs for this downstairs.
+     */
+    fn dependencies_need_cleanup(&self) -> bool {
+        self.state == DsState::LiveRepair && !self.skipped_jobs.is_empty()
+    }
+
+    /// Return a list of downstairs request IDs that represent unissued
+    /// requests for this client.
+    ///
+    /// Returns a tuple of `(jobs, flow control)` where flow control is true if
+    /// the jobs list has been clamped to `max_count`.
+    fn new_work(&mut self, max_count: usize) -> (BTreeSet<JobId>, bool) {
+        if max_count >= self.new_jobs.len() {
+            // Happy path: we can grab everything
+            (std::mem::take(&mut self.new_jobs), false)
+        } else {
+            // Otherwise, pop elements from the queue
+            let mut out = BTreeSet::new();
+            for _ in 0..max_count {
+                out.insert(self.new_jobs.pop_first().unwrap());
+            }
+            self.flow_control += 1;
+            (out, true)
+        }
     }
 }
 
