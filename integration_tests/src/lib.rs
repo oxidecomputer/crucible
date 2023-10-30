@@ -2501,12 +2501,10 @@ mod test {
 
     #[tokio::test]
     async fn integration_test_sqlite_migration() -> Result<()> {
-        // Test using an old SQLite backend as a read-only parent.
-
         const BLOCK_SIZE: usize = 512;
 
-        // boot three downstairs, write some data to them, then change to
-        // read-only.
+        // boot three downstairs, write some data to them, then reopen as
+        // read-write (which will automatically migrate the extent)
         let mut test_downstairs_set =
             TestDownstairsSet::small_sqlite(false).await?;
         // This must be a SQLite extent!
