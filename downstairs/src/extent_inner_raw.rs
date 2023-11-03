@@ -1053,6 +1053,8 @@ impl RawInner {
         // We track the number of A vs B slots, as well as the range covered by
         // the slots.  It's that range that we'll need to read + write, so we
         // want to pick whichever slot does less work.
+        assert!(!self.dirty); // This can only be called after a flush!
+
         #[derive(Copy, Clone)]
         struct Counter {
             count: usize,
