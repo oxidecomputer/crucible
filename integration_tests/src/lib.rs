@@ -3851,6 +3851,69 @@ mod test {
         );
     }
 
+    /// Assert that the Pantry will fail for non-block sized writes
+    #[tokio::test]
+    async fn test_pantry_fail_bulk_write_one_byte() {
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = TestDownstairsSet::small(false).await.unwrap();
+
+        // Start a pantry, get the client for it, then use it to bulk_write in data
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
+
+        // The Pantry should reject the one byte write
+        let e = client
+            .bulk_write(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::BulkWriteRequest {
+                    offset: 0,
+                    base64_encoded_data: engine::general_purpose::STANDARD
+                        .encode(vec![123; 1]),
+                },
+            )
+            .await
+            .unwrap_err();
+
+        let crucible_pantry_client::Error::ErrorResponse(e) = e else {
+            panic!("expected ErrorResponse, got {e}");
+        };
+        assert_eq!(e.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        client.detach(&volume_id.to_string()).await.unwrap();
+    }
+
+    /// Assert that the Pantry will fail for non-block sized reads
+    #[tokio::test]
+    async fn test_pantry_fail_bulk_read_one_byte() {
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = TestDownstairsSet::small(false).await.unwrap();
+
+        // Start a pantry, get the client for it, then use it to bulk_read data
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
+
+        // The Pantry should reject the one byte write
+        let e = client
+            .bulk_read(
+                &volume_id.to_string(),
+                &crucible_pantry_client::types::BulkReadRequest {
+                    offset: 0,
+                    size: 1,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        let crucible_pantry_client::Error::ErrorResponse(e) = e else {
+            panic!("expected ErrorResponse, got {e}");
+        };
+        assert_eq!(e.status(), reqwest::StatusCode::BAD_REQUEST);
+
+        client.detach(&volume_id.to_string()).await.unwrap();
+    }
+
     #[tokio::test]
     async fn test_pantry_scrub() {
         // Test scrubbing the OVMF image from a URL

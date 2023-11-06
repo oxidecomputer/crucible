@@ -481,6 +481,12 @@ impl Volume {
             return Ok(());
         }
 
+        let bs = self.get_block_size().await?;
+
+        if (data.len() % bs as usize) != 0 {
+            crucible_bail!(DataLenUnaligned);
+        }
+
         let affected_sub_volumes = self.sub_volumes_for_lba_range(
             offset.value,
             data.len() as u64 / self.block_size,
@@ -634,6 +640,12 @@ impl BlockIO for Volume {
                     "No read only parent, no sub volumes!",
                 );
             }
+        }
+
+        let bs = self.get_block_size().await?;
+
+        if (data.len() % bs as usize) != 0 {
+            crucible_bail!(DataLenUnaligned);
         }
 
         let affected_sub_volumes = self.sub_volumes_for_lba_range(

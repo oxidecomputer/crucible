@@ -26,6 +26,7 @@ toml.workspace = true
 twox-hash.workspace = true
 uuid.workspace = true
 crucible-workspace-hack.workspace = true
+dropshot.workspace = true
 
 [build-dependencies]
 vergen = { version = "8.2", features = ["cargo", "git", "git2", "rustc" ] }

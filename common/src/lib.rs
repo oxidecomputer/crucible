@@ -154,11 +154,9 @@ impl From<std::io::Error> for CrucibleError {
     }
 }
 
-// Clippy complains but code won't compile without the Into!
-#[allow(clippy::from_over_into)]
-impl Into<std::io::Error> for CrucibleError {
-    fn into(self) -> std::io::Error {
-        std::io::Error::new(std::io::ErrorKind::Other, self)
+impl From<CrucibleError> for std::io::Error {
+    fn from(e: CrucibleError) -> Self {
+        std::io::Error::new(std::io::ErrorKind::Other, e)
     }
 }
 
@@ -342,4 +340,55 @@ pub fn build_logger() -> slog::Logger {
     }
 
     log
+}
+
+impl From<CrucibleError> for dropshot::HttpError {
+    fn from(e: CrucibleError) -> Self {
+        match e {
+            CrucibleError::BlockSizeMismatch
+            | CrucibleError::DataLenUnaligned
+            | CrucibleError::InvalidNumberOfBlocks(_)
+            | CrucibleError::ModifyingReadOnlyRegion
+            | CrucibleError::OffsetInvalid
+            | CrucibleError::OffsetUnaligned
+            | CrucibleError::ReplaceRequestInvalid(_)
+            | CrucibleError::SnapshotExistsAlready(_)
+            | CrucibleError::Unsupported(_) => {
+                dropshot::HttpError::for_bad_request(None, e.to_string())
+            }
+
+            CrucibleError::IoError(_)
+            | CrucibleError::SnapshotFailed(_)
+            | CrucibleError::UpstairsInactive => {
+                dropshot::HttpError::for_unavail(None, e.to_string())
+            }
+
+            CrucibleError::CannotReceiveBlocks(_)
+            | CrucibleError::CannotServeBlocks(_)
+            | CrucibleError::DataLockError
+            | CrucibleError::DecryptionError
+            | CrucibleError::Disconnect
+            | CrucibleError::EncryptionError(_)
+            | CrucibleError::GenerationNumberTooLow(_)
+            | CrucibleError::GenericError(_)
+            | CrucibleError::HashMismatch
+            | CrucibleError::InvalidExtent
+            | CrucibleError::LBARangeOverlap
+            | CrucibleError::NoLongerActive
+            | CrucibleError::PropertyNotAvailable(_)
+            | CrucibleError::RecvDisconnected
+            | CrucibleError::RegionAssembleError
+            | CrucibleError::RepairFilesInvalid(_)
+            | CrucibleError::RepairRequestError(_)
+            | CrucibleError::RepairStreamError(_)
+            | CrucibleError::RwLockError(_)
+            | CrucibleError::SendError(_)
+            | CrucibleError::SubvolumeSizeMismatch
+            | CrucibleError::UpstairsAlreadyActive
+            | CrucibleError::UpstairsDeactivating
+            | CrucibleError::UuidMismatch => {
+                dropshot::HttpError::for_internal_error(e.to_string())
+            }
+        }
+    }
 }
