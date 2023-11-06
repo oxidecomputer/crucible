@@ -77,6 +77,290 @@ fn get_client(agent: &SocketAddr) -> CrucibleAgentClient {
     CrucibleAgentClient::new_with_client(&format!("http://{}", agent), client)
 }
 
+async fn main_thread(log: Logger, agent: SocketAddr, dataset: String) {
+    'outer: loop {
+        // Create a 1 GB region
+        let region_id = Uuid::new_v4();
+
+        let region_request = CreateRegion {
+            block_size: 512,
+            extent_count: 16,
+            extent_size: 131072,
+            id: RegionId(region_id.to_string()),
+            encrypted: true,
+            cert_pem: None,
+            key_pem: None,
+            root_pem: None,
+        };
+
+        loop {
+            info!(log, "requesting region {:?}", region_id);
+            let client = get_client(&agent);
+            let r = client.region_create(&region_request).await;
+            drop(client);
+
+            let region = match r {
+                Ok(region) => {
+                    info!(log, "requested region {:?} ok", region_id,);
+                    region
+                }
+
+                Err(e) => {
+                    error!(
+                        log,
+                        "requesting region {:?} failed: {:?}", region_id, e,
+                    );
+                    break 'outer;
+                }
+            };
+
+            match region.state {
+                RegionState::Requested => {
+                    info!(
+                        log,
+                        "waiting for region {:?}: state {:?}",
+                        region_id,
+                        region.state,
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+
+                RegionState::Created => {
+                    info!(
+                        log,
+                        "region {:?} state {:?}", region_id, region.state,
+                    );
+                    break;
+                }
+
+                _ => {
+                    info!(
+                        log,
+                        "region {:?} unknown state {:?}",
+                        region_id,
+                        region.state,
+                    );
+                    break 'outer;
+                }
+            }
+        }
+
+        // Optionally snapshot said region
+        if random() {
+            let snapshot_id = Uuid::new_v4();
+            let snapshot = format!(
+                "{}/regions/{:?}@{:?}",
+                dataset, region_id, snapshot_id,
+            );
+            command(&log, "/usr/sbin/zfs", &["snapshot", &snapshot]).unwrap();
+
+            let client = get_client(&agent);
+            let r = client
+                .region_get_snapshots(&RegionId(region_id.to_string()))
+                .await;
+            drop(client);
+            match r {
+                Ok(_) => {
+                    info!(log, "get region {:?} snapshots ok", region_id,);
+                }
+
+                Err(e) => {
+                    info!(
+                        log,
+                        "get region {:?} snapshots failed with {:?}",
+                        region_id,
+                        e,
+                    );
+                    break 'outer;
+                }
+            }
+
+            let client = get_client(&agent);
+            let r = client
+                .region_get_snapshot(
+                    &RegionId(region_id.to_string()),
+                    &snapshot_id.to_string(),
+                )
+                .await;
+            drop(client);
+            match r {
+                Ok(_) => {
+                    info!(
+                        log,
+                        "get region {:?} snapshot {:?} ok",
+                        region_id,
+                        snapshot_id,
+                    );
+                }
+
+                Err(e) => {
+                    info!(
+                        log,
+                        "get region {:?} snapshot {:?} failed with {:?}",
+                        region_id,
+                        snapshot_id,
+                        e,
+                    );
+                    break 'outer;
+                }
+            }
+
+            let client = get_client(&agent);
+            let r = client
+                .region_delete_snapshot(
+                    &RegionId(region_id.to_string()),
+                    &snapshot_id.to_string(),
+                )
+                .await;
+            drop(client);
+            match r {
+                Ok(_) => {
+                    info!(
+                        log,
+                        "delete region {:?} snapshot {:?} ok",
+                        region_id,
+                        snapshot_id,
+                    );
+                }
+
+                Err(e) => {
+                    info!(
+                        log,
+                        "delete region {:?} snapshot {:?} failed with {:?}",
+                        region_id,
+                        snapshot_id,
+                        e,
+                    );
+                    break 'outer;
+                }
+            }
+        }
+
+        // Delete region
+        loop {
+            info!(log, "tombstoning region {:?}", region_id);
+            let client = get_client(&agent);
+            let r =
+                client.region_delete(&RegionId(region_id.to_string())).await;
+            drop(client);
+            match r {
+                Ok(_) => {
+                    info!(log, "tombstoning region {:?} ok", region_id);
+                }
+
+                Err(e) => {
+                    error!(
+                        log,
+                        "tombstoning region {:?} failed with {:?}",
+                        region_id,
+                        e,
+                    );
+                    break 'outer;
+                }
+            }
+
+            let client = get_client(&agent);
+            let r = client.region_get(&RegionId(region_id.to_string())).await;
+            drop(client);
+            let region = match r {
+                Ok(region) => {
+                    info!(log, "get region {:?} ok", region_id);
+                    region
+                }
+
+                Err(e) => {
+                    error!(
+                        log,
+                        "get region {:?} failed with {:?}", region_id, e,
+                    );
+                    break 'outer;
+                }
+            };
+
+            match region.state {
+                RegionState::Tombstoned => {
+                    info!(
+                        log,
+                        "waiting for region {:?}: state {:?}",
+                        region_id,
+                        region.state,
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+
+                RegionState::Destroyed => {
+                    info!(
+                        log,
+                        "region {:?} state {:?}", region_id, region.state,
+                    );
+                    break;
+                }
+
+                _ => {
+                    info!(
+                        log,
+                        "region {:?} unknown state {:?}",
+                        region_id,
+                        region.state,
+                    );
+                    break 'outer;
+                }
+            }
+        }
+    }
+}
+
+async fn query_thread(log: Logger, agent: SocketAddr) {
+    'outer: loop {
+        let client = get_client(&agent);
+        let r = client.region_list().await;
+        drop(client);
+
+        let regions = match r {
+            Ok(regions) => {
+                info!(log, "list regions ok");
+                regions
+            }
+
+            Err(e) => {
+                error!(log, "list regions failed with {:?}", e);
+                break 'outer;
+            }
+        };
+
+        for region in regions.iter() {
+            if region.state == RegionState::Created {
+                let client = get_client(&agent);
+                let r = client.region_get_snapshots(&region.id).await;
+                drop(client);
+
+                match r {
+                    Ok(result) => {
+                        info!(
+                            log,
+                            "get region {:?} snapshots ok: {}",
+                            region.id,
+                            result.snapshots.len(),
+                        );
+                    }
+
+                    Err(e) => {
+                        error!(
+                            log,
+                            "get region {:?} snapshots failed with {:?}",
+                            region.id,
+                            e,
+                        );
+
+                        // this is ok - the region could have
+                        // been deleted in the meantime
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::try_parse()?;
@@ -138,206 +422,22 @@ async fn main() -> Result<()> {
                 tasks
             );
 
-            let mut jhs: Vec<tokio::task::JoinHandle<_>> = (0..tasks).map(|i| {
-                let log = log.new(slog::o!("task" => i));
-                let dataset = dataset.clone();
+            let mut jhs: Vec<tokio::task::JoinHandle<_>> = (0..tasks)
+                .map(|i| {
+                    let log = log.new(slog::o!("task" => i));
+                    let dataset = dataset.clone();
 
-                tokio::spawn(async move {
-                    'outer: loop {
-                        // Create a 1 GB region
-                        let region_id = Uuid::new_v4();
-
-                        let region_request = CreateRegion {
-                            block_size: 512,
-                            extent_count: 16,
-                            extent_size: 131072,
-                            id: RegionId(region_id.to_string()),
-                            encrypted: true,
-                            cert_pem: None,
-                            key_pem: None,
-                            root_pem: None,
-                        };
-
-                        loop {
-                            info!(log, "requesting region {:?}", region_id);
-                            let client = get_client(&agent);
-                            let r = client.region_create(&region_request).await;
-                            drop(client);
-
-                            let region = match r {
-                                Ok(region) => {
-                                    info!(log, "requested region {:?} ok", region_id);
-                                    region
-                                }
-
-                                Err(e) => {
-                                    error!(log, "requesting region {:?} failed with {:?}", region_id, e);
-                                    break 'outer;
-                                }
-                            };
-
-                            match region.state {
-                                RegionState::Requested => {
-                                    info!(log, "waiting for region {:?}: state {:?}", region_id, region.state);
-                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                                }
-
-                                RegionState::Created => {
-                                    info!(log, "region {:?} state {:?}", region_id, region.state);
-                                    break;
-                                }
-
-                                _ => {
-                                    info!(log, "region {:?} unknown state {:?}", region_id, region.state);
-                                    break 'outer;
-                                }
-                            }
-                        }
-
-                        // Optionally snapshot said region
-                        if random() {
-                            let snapshot_id = Uuid::new_v4();
-                            let snapshot = format!("{}/regions/{:?}@{:?}", dataset, region_id, snapshot_id);
-                            command(&log, "/usr/sbin/zfs", &["snapshot", &snapshot]).unwrap();
-
-                            let client = get_client(&agent);
-                            let r = client.region_get_snapshots(&RegionId(region_id.to_string())).await;
-                            drop(client);
-                            match r {
-                                Ok(_) => {
-                                    info!(log, "get region {:?} snapshots ok", region_id);
-                                }
-
-                                Err(e) => {
-                                    info!(log, "get region {:?} snapshots failed with {:?}", region_id, e);
-                                    break 'outer;
-                                }
-                            }
-
-                            let client = get_client(&agent);
-                            let r = client.region_get_snapshot(&RegionId(region_id.to_string()), &snapshot_id.to_string()).await;
-                            drop(client);
-                            match r {
-                                Ok(_) => {
-                                    info!(log, "get region {:?} snapshot {:?} ok", region_id, snapshot_id);
-                                }
-
-                                Err(e) => {
-                                    info!(log, "get region {:?} snapshot {:?} failed with {:?}", region_id, snapshot_id, e);
-                                    break 'outer;
-                                }
-                            }
-
-                            let client = get_client(&agent);
-                            let r = client.region_delete_snapshot(&RegionId(region_id.to_string()), &snapshot_id.to_string()).await;
-                            drop(client);
-                            match r {
-                                Ok(_) => {
-                                    info!(log, "delete region {:?} snapshot {:?} ok", region_id, snapshot_id);
-                                }
-
-                                Err(e) => {
-                                    info!(log, "delete region {:?} snapshot {:?} failed with {:?}", region_id, snapshot_id, e);
-                                    break 'outer;
-                                }
-                            }
-                        }
-
-                        // Delete region
-                        loop {
-                            info!(log, "tombstoning region {:?}", region_id);
-                            let client = get_client(&agent);
-                            let r = client.region_delete(&RegionId(region_id.to_string())).await;
-                            drop(client);
-                            match r {
-                                Ok(_) => {
-                                    info!(log, "tombstoning region {:?} ok", region_id);
-                                }
-
-                                Err(e) => {
-                                    error!(log, "tombstoning region {:?} failed with {:?}", region_id, e);
-                                    break 'outer;
-                                }
-                            }
-
-                            let client = get_client(&agent);
-                            let r = client.region_get(&RegionId(region_id.to_string())).await;
-                            drop(client);
-                            let region = match r {
-                                Ok(region) => {
-                                    info!(log, "get region {:?} ok", region_id);
-                                    region
-                                }
-
-                                Err(e) => {
-                                    error!(log, "get region {:?} failed with {:?}", region_id, e);
-                                    break 'outer;
-                                }
-                            };
-
-                            match region.state {
-                                RegionState::Tombstoned => {
-                                    info!(log, "waiting for region {:?}: state {:?}", region_id, region.state);
-                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                                }
-
-                                RegionState::Destroyed => {
-                                    info!(log, "region {:?} state {:?}", region_id, region.state);
-                                    break;
-                                }
-
-                                _ => {
-                                    info!(log, "region {:?} unknown state {:?}", region_id, region.state);
-                                    break 'outer;
-                                }
-                            }
-                        }
-                    }
+                    tokio::spawn(async move {
+                        main_thread(log, agent, dataset).await
+                    })
                 })
-            }).collect();
+                .collect();
 
             // Add another task that grabs all regions, and queries all
             // snapshots for those regions
-            jhs.push(tokio::spawn(async move {
-                'outer: loop {
-                    let client = get_client(&agent);
-                    let r = client.region_list().await;
-                    drop(client);
-
-                    let regions = match r {
-                        Ok(regions) => {
-                            info!(log, "list regions ok");
-                            regions
-                        }
-
-                        Err(e) => {
-                            error!(log, "list regions failed with {:?}", e);
-                            break 'outer;
-                        }
-                    };
-
-                    for region in regions.iter() {
-                        if region.state == RegionState::Created {
-                            let client = get_client(&agent);
-                            let r = client.region_get_snapshots(&region.id).await;
-                            drop(client);
-
-                            match r {
-                                Ok(result) => {
-                                    info!(log, "get region {:?} snapshots ok: {}", region.id, result.snapshots.len());
-                                }
-
-                                Err(e) => {
-                                    error!(log, "get region {:?} snapshots failed with {:?}", region.id, e);
-
-                                    // this is ok - the region could have
-                                    // been deleted in the meantime
-                                }
-                            }
-                        }
-                    }
-                }
-            }));
+            jhs.push(tokio::spawn(
+                async move { query_thread(log, agent).await },
+            ));
 
             // Run until CTRL-C or all the tasks panic
             for jh in jhs {
