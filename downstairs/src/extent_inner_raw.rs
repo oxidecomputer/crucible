@@ -1471,6 +1471,7 @@ impl RawLayout {
             });
         }
         assert_eq!(active_context.len(), self.block_count() as usize);
+        self.buf.set(buf);
         Ok(active_context)
     }
 }
