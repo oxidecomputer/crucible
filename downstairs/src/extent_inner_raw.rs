@@ -1236,13 +1236,6 @@ impl RawInner {
 /// Data structure that implements the on-disk layout of a raw extent file
 struct RawLayout {
     extent_size: Block,
-
-    /// Miscellaneous buffer for reading and writing
-    ///
-    /// This is simply to avoid churning through memory allocations.  It is the
-    /// user's responsibility to take `buf` out of the cell when it's in use,
-    /// and return it when they're done with it.
-    buf: std::cell::Cell<Vec<u8>>,
 }
 
 impl std::fmt::Debug for RawLayout {
@@ -1255,10 +1248,7 @@ impl std::fmt::Debug for RawLayout {
 
 impl RawLayout {
     fn new(extent_size: Block) -> Self {
-        RawLayout {
-            extent_size,
-            buf: std::cell::Cell::default(),
-        }
+        RawLayout { extent_size }
     }
 
     /// Sets the dirty flag in the file true
@@ -1347,8 +1337,7 @@ impl RawLayout {
     where
         I: Iterator<Item = Option<&'a DownstairsBlockContext>>,
     {
-        let mut buf = self.buf.take();
-        buf.clear();
+        let mut buf = vec![];
 
         for block_context in iter {
             let n = buf.len();
@@ -1363,7 +1352,6 @@ impl RawLayout {
         pwrite_all(file.as_raw_fd(), &buf, offset as i64).map_err(|e| {
             CrucibleError::IoError(format!("writing context slots failed: {e}"))
         })?;
-        self.buf.set(buf);
         Ok(())
     }
 
@@ -1374,8 +1362,8 @@ impl RawLayout {
         block_count: u64,
         slot: ContextSlot,
     ) -> Result<Vec<Option<DownstairsBlockContext>>, CrucibleError> {
-        let mut buf = self.buf.take();
-        buf.resize((BLOCK_CONTEXT_SLOT_SIZE_BYTES * block_count) as usize, 0u8);
+        let mut buf =
+            vec![0u8; (BLOCK_CONTEXT_SLOT_SIZE_BYTES * block_count) as usize];
 
         let offset = self.context_slot_offset(block_start, slot);
         pread_all(file.as_raw_fd(), &mut buf, offset as i64).map_err(|e| {
@@ -1397,7 +1385,6 @@ impl RawLayout {
                 on_disk_hash: c.on_disk_hash,
             }));
         }
-        self.buf.set(buf);
         Ok(out)
     }
 
@@ -1419,8 +1406,7 @@ impl RawLayout {
         assert_eq!(active_context.len(), self.block_count() as usize);
 
         // Serialize bitpacked active slot values
-        let mut buf = self.buf.take();
-        buf.clear();
+        let mut buf = vec![];
         for c in active_context.chunks(8) {
             let mut v = 0;
             for (i, slot) in c.iter().enumerate() {
@@ -1444,7 +1430,6 @@ impl RawLayout {
         pwrite_all(file.as_raw_fd(), &buf, offset as i64).map_err(|e| {
             CrucibleError::IoError(format!("writing metadata failed: {e}"))
         })?;
-        self.buf.set(buf);
 
         Ok(())
     }
@@ -1456,8 +1441,7 @@ impl RawLayout {
         &self,
         file: &File,
     ) -> Result<Vec<ContextSlot>, CrucibleError> {
-        let mut buf = self.buf.take();
-        buf.resize(self.active_context_size() as usize, 0u8);
+        let mut buf = vec![0u8; self.active_context_size() as usize];
         let offset = self.active_context_offset();
         pread_all(file.as_raw_fd(), &mut buf, offset as i64).map_err(|e| {
             CrucibleError::IoError(format!(
@@ -1479,7 +1463,6 @@ impl RawLayout {
             });
         }
         assert_eq!(active_context.len(), self.block_count() as usize);
-        self.buf.set(buf);
         Ok(active_context)
     }
 }
