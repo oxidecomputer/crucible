@@ -103,18 +103,14 @@ pub struct RawInner {
     /// This allows us to only write the flag when the value changes
     dirty: bool,
 
-    /// Monotonically increasing sync index
+    /// Marks whether the given context slot is dirty
     ///
-    /// This is unrelated to `flush_number` or `gen_number`; it's purely
-    /// internal to this data structure and is transient.  We use this value to
-    /// determine whether a context slot has been persisted to disk or not.
-    sync_index: u64,
-
-    /// The value of `sync_index` when the current value of a context slot was
-    /// synched to disk.  When the value of a context slot changes, the value in
-    /// this array is set to `self.sync_index + 1` indicates that the slot has
-    /// not yet been synched.
-    context_slot_synched_at: Vec<[u64; 2]>,
+    /// A dirty context slot has not yet been saved to disk, and must be
+    /// synched before being overwritten.
+    ///
+    /// Context slots are stored as a 2-bit field, with bit 0 marking
+    /// `ContextSlot::A` and bit 1 marking `ContextSlot::B`.
+    context_slot_dirty: Vec<u8>,
 
     /// Total number of extra syscalls due to context slot fragmentation
     extra_syscall_count: u64,
@@ -356,7 +352,7 @@ impl ExtentInner for RawInner {
                 self.extent_number,
             )));
         }
-        self.sync_index += 1;
+        self.context_slot_dirty.fill(0);
         cdt::extent__flush__file__done!(|| {
             (job_id.get(), self.extent_number, 0)
         });
@@ -475,11 +471,7 @@ impl RawInner {
                 ContextSlot::A; // both slots are empty, so this is fine
                 def.extent_size().value as usize
             ],
-            context_slot_synched_at: vec![
-                [0, 0];
-                def.extent_size().value as usize
-            ],
-            sync_index: 0,
+            context_slot_dirty: vec![0; def.extent_size().value as usize],
             extra_syscall_count: 0,
             extra_syscall_denominator: 0,
             block_unique_scratch: vec![0; def.extent_size().value as usize],
@@ -638,13 +630,9 @@ impl RawInner {
             extent_number,
             extent_size: def.extent_size(),
             layout: RawLayout::new(def.extent_size()),
-            context_slot_synched_at: vec![
-                [0, 0];
-                def.extent_size().value as usize
-            ],
+            context_slot_dirty: vec![0; def.extent_size().value as usize],
             extra_syscall_count: 0,
             extra_syscall_denominator: 0,
-            sync_index: 0,
             block_unique_scratch: vec![0; def.extent_size().value as usize],
             block_unique_index: 0,
         })
@@ -724,10 +712,7 @@ impl RawInner {
             let block = block_context.block as usize;
             // We'll be writing to the inactive slot
             let slot = !self.active_context[block];
-            let last_sync = self.context_slot_synched_at[block][slot as usize];
-            // We should never be > 1 sync ahead!
-            assert!(last_sync <= self.sync_index + 1);
-            last_sync > self.sync_index
+            (self.context_slot_dirty[block] & (1 << slot as usize)) != 0
         });
         if needs_sync {
             self.file.sync_all().map_err(|e| {
@@ -736,7 +721,7 @@ impl RawInner {
                     self.extent_number,
                 ))
             })?;
-            self.sync_index += 1;
+            self.context_slot_dirty.fill(0);
         }
         // Mark the to-be-written slots as unsynched on disk
         //
@@ -746,8 +731,7 @@ impl RawInner {
         for block_context in block_contexts {
             let block = block_context.block as usize;
             let slot = !self.active_context[block];
-            self.context_slot_synched_at[block][slot as usize] =
-                self.sync_index + 1;
+            self.context_slot_dirty[block] |= 1 << (slot as usize);
         }
 
         let mut start = 0;
@@ -992,8 +976,7 @@ impl RawInner {
 
                 // Mark this slot as unsynched, so that we don't overwrite
                 // it later on without a sync
-                self.context_slot_synched_at[block][!copy_from as usize] =
-                    self.sync_index + 1;
+                self.context_slot_dirty[block] |= 1 << (!copy_from as usize);
             }
         }
         let r = self.layout.write_context_slots_contiguous(
@@ -1842,17 +1825,39 @@ mod test {
                 hash,
             },
         };
-        // The context should be written to slot 0
+
+        // Write block 1, so that we can notice when a sync happens.  The write
+        // should go to slot B.
+        let write1 = crucible_protocol::Write {
+            offset: Block::new_512(1),
+            ..write.clone()
+        };
+        inner.write(JobId(10), &[&write1], false, IOV_MAX_TEST)?;
+        assert_eq!(inner.context_slot_dirty[0], 0b00);
+        assert_eq!(inner.active_context[0], ContextSlot::A);
+        assert_eq!(inner.context_slot_dirty[1], 0b10);
+        assert_eq!(inner.active_context[1], ContextSlot::B);
+
+        // The context should be written to block 0, slot B
         inner.write(JobId(10), &[&write], false, IOV_MAX_TEST)?;
-        assert_eq!(inner.sync_index, 0);
+        assert_eq!(inner.context_slot_dirty[0], 0b10);
+        assert_eq!(inner.active_context[0], ContextSlot::B);
+        assert_eq!(inner.context_slot_dirty[1], 0b10); // unchanged
+        assert_eq!(inner.active_context[1], ContextSlot::B); // unchanged
 
-        // The context should be written to slot 1
+        // The context should be written to block 0, slot A
         inner.write(JobId(11), &[&write], false, IOV_MAX_TEST)?;
-        assert_eq!(inner.sync_index, 0);
+        assert_eq!(inner.context_slot_dirty[0], 0b11);
+        assert_eq!(inner.active_context[0], ContextSlot::A);
+        assert_eq!(inner.context_slot_dirty[1], 0b10); // unchanged
+        assert_eq!(inner.active_context[1], ContextSlot::B); // unchanged
 
-        // The context should be written to slot 0, forcing a sync
+        // The context should be written to slot B, forcing a sync
         inner.write(JobId(12), &[&write], false, IOV_MAX_TEST)?;
-        assert_eq!(inner.sync_index, 1);
+        assert_eq!(inner.context_slot_dirty[0], 0b10);
+        assert_eq!(inner.active_context[0], ContextSlot::B);
+        assert_eq!(inner.context_slot_dirty[1], 0b00);
+        assert_eq!(inner.active_context[1], ContextSlot::B); // unchanged
 
         Ok(())
     }
@@ -1879,27 +1884,27 @@ mod test {
         // The context should be written to slot B
         inner.write(JobId(10), &[&write], false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
-        assert_eq!(inner.sync_index, 0);
+        assert_eq!(inner.context_slot_dirty[0], 0b10);
 
-        // Flush!  This will bump the sync number, marking slot B as synched
+        // Flush!  This will mark all slots as synched
         inner.flush(12, 12, JobId(11).into())?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
-        assert_eq!(inner.sync_index, 1);
+        assert_eq!(inner.context_slot_dirty[0], 0b00);
 
         // The context should be written to slot A
         inner.write(JobId(11), &[&write], false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::A);
-        assert_eq!(inner.sync_index, 1);
+        assert_eq!(inner.context_slot_dirty[0], 0b01);
 
         // The context should be written to slot B
         inner.write(JobId(12), &[&write], false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
-        assert_eq!(inner.sync_index, 1);
+        assert_eq!(inner.context_slot_dirty[0], 0b11);
 
         // The context should be written to slot A, forcing a sync
         inner.write(JobId(12), &[&write], false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::A);
-        assert_eq!(inner.sync_index, 2);
+        assert_eq!(inner.context_slot_dirty[0], 0b01);
 
         Ok(())
     }
@@ -1923,28 +1928,35 @@ mod test {
                 hash,
             },
         };
-        // The context should be written to slot 0
+        // The context should be written to slot B
         inner.write(JobId(10), &[&write], false, IOV_MAX_TEST)?;
-        assert_eq!(inner.sync_index, 0);
+        assert_eq!(inner.active_context[0], ContextSlot::B);
+        assert_eq!(inner.context_slot_dirty[0], 0b10);
 
-        // The context should be written to slot 1
+        // The context should be written to slot A
         inner.write(JobId(11), &[&write], false, IOV_MAX_TEST)?;
-        assert_eq!(inner.sync_index, 0);
+        assert_eq!(inner.active_context[0], ContextSlot::A);
+        assert_eq!(inner.context_slot_dirty[0], 0b11);
 
-        // Flush, which should bump the sync number (marking slot 0 as synched)
+        // Flush!  This will mark all slots as synched
         inner.flush(12, 12, JobId(11).into())?;
+        assert_eq!(inner.active_context[0], ContextSlot::A);
+        assert_eq!(inner.context_slot_dirty[0], 0b00);
 
-        // The context should be written to slot 0
+        // The context should be written to slot B
         inner.write(JobId(12), &[&write], false, IOV_MAX_TEST)?;
-        assert_eq!(inner.sync_index, 1);
+        assert_eq!(inner.active_context[0], ContextSlot::B);
+        assert_eq!(inner.context_slot_dirty[0], 0b10);
 
-        // The context should be written to slot 1
+        // The context should be written to slot A
         inner.write(JobId(12), &[&write], false, IOV_MAX_TEST)?;
-        assert_eq!(inner.sync_index, 1);
+        assert_eq!(inner.active_context[0], ContextSlot::A);
+        assert_eq!(inner.context_slot_dirty[0], 0b11);
 
-        // The context should be written to slot 0, forcing a sync
-        inner.write(JobId(12), &[&write], false, IOV_MAX_TEST)?;
-        assert_eq!(inner.sync_index, 2);
+        // The context should be written to slot B, forcing a sync
+        inner.write(JobId(11), &[&write], false, IOV_MAX_TEST)?;
+        assert_eq!(inner.active_context[0], ContextSlot::B);
+        assert_eq!(inner.context_slot_dirty[0], 0b10);
 
         Ok(())
     }
@@ -2054,7 +2066,7 @@ mod test {
         assert_eq!(inner.extra_syscall_count, 0);
         assert_eq!(inner.extra_syscall_denominator, 5);
         inner.flush(10, 10, JobId(10).into())?;
-        assert_eq!(inner.sync_index, 1);
+        assert!(inner.context_slot_dirty.iter().all(|v| *v == 0));
 
         // This should not have changed active context slots!
         for i in 0..10 {
@@ -2105,9 +2117,7 @@ mod test {
         // Do a flush!  Because we had a bunch of extra syscalls, this should
         // trigger defragmentation; after the flush, every context slot should
         // be in array A.
-        assert_eq!(inner.sync_index, 1);
         inner.flush(11, 11, JobId(11).into())?;
-        assert_eq!(inner.sync_index, 2);
 
         for i in 0..10 {
             assert_eq!(
@@ -2160,7 +2170,6 @@ mod test {
         assert_eq!(inner.extra_syscall_count, 0);
         assert_eq!(inner.extra_syscall_denominator, 3);
         inner.flush(10, 10, JobId(10).into())?;
-        assert_eq!(inner.sync_index, 1);
 
         // This should not have changed active context slots!
         for i in 0..10 {
@@ -2214,9 +2223,7 @@ mod test {
         // Do a flush!  Because we had a bunch of extra syscalls, this should
         // trigger defragmentation; after the flush, every context slot should
         // be in array B (which minimizes copies)
-        assert_eq!(inner.sync_index, 1);
         inner.flush(11, 11, JobId(11).into())?;
-        assert_eq!(inner.sync_index, 2);
 
         for i in 0..10 {
             assert_eq!(
@@ -2271,7 +2278,6 @@ mod test {
         assert_eq!(inner.extra_syscall_count, 0);
         assert_eq!(inner.extra_syscall_denominator, 3);
         inner.flush(10, 10, JobId(10).into())?;
-        assert_eq!(inner.sync_index, 1);
 
         // This should not have changed active context slots!
         for i in 0..10 {
@@ -2326,9 +2332,7 @@ mod test {
         // Do a flush!  Because we had a bunch of extra syscalls, this should
         // trigger defragmentation; after the flush, every context slot should
         // be in array A (which minimizes copies)
-        assert_eq!(inner.sync_index, 1);
         inner.flush(11, 11, JobId(11).into())?;
-        assert_eq!(inner.sync_index, 2);
 
         for i in 0..10 {
             assert_eq!(
@@ -2383,7 +2387,6 @@ mod test {
         assert_eq!(inner.extra_syscall_count, 0);
         assert_eq!(inner.extra_syscall_denominator, 2);
         inner.flush(10, 10, JobId(10).into())?;
-        assert_eq!(inner.sync_index, 1);
 
         // This should not have changed active context slots!
         for i in 0..10 {
@@ -2437,9 +2440,7 @@ mod test {
 
         // This write didn't add enough extra syscalls to trigger
         // defragmentation.
-        assert_eq!(inner.sync_index, 1);
         inner.flush(11, 11, JobId(11).into())?;
-        assert_eq!(inner.sync_index, 2);
 
         // These should be the same!
         for i in 0..10 {
@@ -2511,14 +2512,12 @@ mod test {
 
         let write_refs: Vec<_> = writes.iter().collect();
 
-        assert_eq!(inner.sync_index, 0);
-        assert_eq!(inner.context_slot_synched_at[0], [0, 0]);
+        assert_eq!(inner.context_slot_dirty[0], 0b00);
         inner.write(JobId(30), &write_refs, false, IOV_MAX_TEST)?;
 
         // The write should be split into four separate calls to
         // `write_without_overlaps`, triggering one bonus fsync.
-        assert_eq!(inner.sync_index, 1);
-        assert_eq!(inner.context_slot_synched_at[0], [2, 2]);
+        assert_eq!(inner.context_slot_dirty[0], 0b11);
 
         // Block 0 should be 0x03 repeated.
         let mut resp = Vec::new();
