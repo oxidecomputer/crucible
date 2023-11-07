@@ -1013,6 +1013,14 @@ impl RawInner {
             for block in counter.min_block..=counter.max_block {
                 self.active_context[block as usize] = !copy_from;
             }
+            // At this point, the `dirty` bit is not set, but values in
+            // `self.active_context` disagree with the active context slot
+            // stored in the file.  Normally, this is bad: if we crashed and
+            // reloaded the file from disk right at this moment, we'd end up
+            // with different values in `self.active_context`.  In this case,
+            // though, it's okay: the values that have changed have the **same
+            // data** in both context slots, so it would still be a valid state
+            // for the file.
         }
         r.map(|_| ())
     }
