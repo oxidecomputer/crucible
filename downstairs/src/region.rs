@@ -27,7 +27,7 @@ use crate::extent::{
 };
 
 /**
- * Validate a list of sorted repair files.
+ * Validate the repair file.
  *
  * There is only one repair file: the raw file itself (which also contains
  * structured context and metadata at the end).
