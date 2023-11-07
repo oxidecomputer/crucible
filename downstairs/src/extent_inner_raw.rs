@@ -121,6 +121,12 @@ pub struct RawInner {
 
     /// Denominator corresponding to `extra_syscall_count`
     extra_syscall_denominator: u64,
+
+    /// Scratch data for doing a quick block uniqueness check
+    block_unique_scratch: Vec<u8>,
+
+    /// Scratch index for doing a quick block uniqueness check
+    block_unique_index: u8,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -159,180 +165,39 @@ impl ExtentInner for RawInner {
         only_write_unwritten: bool,
         iov_max: usize,
     ) -> Result<(), CrucibleError> {
-        /*
-         * In order to be crash consistent, perform the following steps in
-         * order:
-         *
-         * 1) set the dirty bit
-         * 2) for each write:
-         *   a) write out encryption context and hashes first
-         *   b) write out extent data second
-         *
-         * If encryption context is written after the extent data, a crash or
-         * interruption before extent data is written would potentially leave
-         * data on the disk that cannot be decrypted.
-         *
-         * If hash is written after extent data, same thing - a crash or
-         * interruption would leave data on disk that would fail the
-         * integrity hash check.
-         *
-         * Note that writing extent data here does not assume that it is
-         * durably on disk - the only guarantee of that is returning
-         * ok from fsync. The data is only potentially on disk and
-         * this depends on operating system implementation.
-         *
-         * To minimize the performance hit of sending many transactions to the
-         * filesystem, as much as possible is written at the same time. This
-         * means multiple loops are required. The steps now look like:
-         *
-         * 1) set the dirty bit
-         * 2) gather and write all encryption contexts + hashes
-         * 3) write all extent data
-         *
-         * If "only_write_unwritten" is true, then we only issue a write for
-         * a block if that block has not been written to yet.  Note
-         * that we can have a write that is "sparse" if the range of
-         * blocks it contains has a mix of written an unwritten
-         * blocks.
-         *
-         * We define a block being written to or not has if that block has
-         * `Some(...)` with a matching checksum serialized into a context slot
-         * or not. So it is required that a written block has a checksum.
-         */
-
-        // If `only_write_written`, we need to skip writing to blocks that
-        // already contain data. We'll first query the metadata to see which
-        // blocks have hashes
-        let mut writes_to_skip = HashSet::new();
-        if only_write_unwritten {
-            cdt::extent__write__get__hashes__start!(|| {
-                (job_id.0, self.extent_number, writes.len() as u64)
-            });
-            let mut write_run_start = 0;
-            while write_run_start < writes.len() {
-                let first_write = writes[write_run_start];
-
-                // Starting from the first write in the potential run, we scan
-                // forward until we find a write with a block that isn't
-                // contiguous with the request before it. Since we're counting
-                // pairs, and the number of pairs is one less than the number of
-                // writes, we need to add 1 to get our actual run length.
-                let n_contiguous_writes = writes[write_run_start..]
-                    .windows(2)
-                    .take_while(|wr_pair| {
-                        wr_pair[0].offset.value + 1 == wr_pair[1].offset.value
-                    })
-                    .count()
-                    + 1;
-
-                // Query hashes for the write range.
-                let block_contexts = self.get_block_contexts(
-                    first_write.offset.value,
-                    n_contiguous_writes as u64,
-                )?;
-
-                for (i, block_contexts) in block_contexts.iter().enumerate() {
-                    if block_contexts.is_some() {
-                        let _ = writes_to_skip
-                            .insert(i as u64 + first_write.offset.value);
-                    }
-                }
-
-                write_run_start += n_contiguous_writes;
-            }
-            cdt::extent__write__get__hashes__done!(|| {
-                (job_id.0, self.extent_number, writes.len() as u64)
-            });
-
-            if writes_to_skip.len() == writes.len() {
-                // Nothing to do
-                return Ok(());
-            }
-        }
-
-        self.set_dirty()?;
-
-        // Write all the context data to the raw file
-        //
-        // TODO right now we're including the integrity_hash() time in the
-        // measured time.  Is it small enough to be ignored?
-        cdt::extent__write__raw__context__insert__start!(|| {
-            (job_id.0, self.extent_number, writes.len() as u64)
-        });
-
-        // Compute block contexts, then write them to disk
-        let block_ctx: Vec<_> = writes
-            .iter()
-            .filter(|write| !writes_to_skip.contains(&write.offset.value))
-            .map(|write| {
-                // TODO it would be nice if we could profile what % of time we're
-                // spending on hashes locally vs writing to disk
-                let on_disk_hash = integrity_hash(&[&write.data[..]]);
-
-                DownstairsBlockContext {
-                    block_context: write.block_context,
-                    block: write.offset.value,
-                    on_disk_hash,
-                }
-            })
-            .collect();
-
-        self.set_block_contexts(&block_ctx)?;
-
-        cdt::extent__write__raw__context__insert__done!(|| {
-            (job_id.0, self.extent_number, writes.len() as u64)
-        });
-
-        // PERFORMANCE TODO:
-        //
-        // Something worth considering for small writes is that, based on
-        // my memory of conversations we had with propolis folks about what
-        // OSes expect out of an NVMe driver, I believe our contract with the
-        // upstairs doesn't require us to have the writes inside the file
-        // until after a flush() returns. If that is indeed true, we could
-        // buffer a certain amount of writes, only actually writing that
-        // buffer when either a flush is issued or the buffer exceeds some
-        // set size (based on our memory constraints). This would have
-        // benefits on any workload that frequently writes to the same block
-        // between flushes, would have benefits for small contiguous writes
-        // issued over multiple write commands by letting us batch them into
-        // a larger write, and (speculation) may benefit non-contiguous writes
-        // by cutting down the number of metadata writes. But, it introduces
-        // complexity. The time spent implementing that would probably better be
-        // spent switching to aio or something like that.
-        cdt::extent__write__file__start!(|| {
-            (job_id.0, self.extent_number, writes.len() as u64)
-        });
-
-        let r = self.write_inner(writes, &writes_to_skip, iov_max);
-
-        if r.is_err() {
-            for write in writes.iter() {
-                let block = write.offset.value;
-                if !writes_to_skip.contains(&block) {
-                    // Try to recompute the context slot from the file.  If this
-                    // fails, then we _really_ can't recover, so bail out
-                    // unceremoniously.
-                    self.recompute_slot_from_file(block).unwrap();
-                }
-            }
+        // If the same block is written multiple times in a single write, then
+        // (1) that's weird, and (2) we need to handle it specially.
+        if self.are_blocks_unique(writes.iter().map(|v| v.offset.value)) {
+            self.write_without_overlaps(
+                job_id,
+                writes,
+                only_write_unwritten,
+                iov_max,
+            )
         } else {
-            // Now that writes have gone through, update active context slots
-            for write in writes.iter() {
-                let block = write.offset.value;
-                if !writes_to_skip.contains(&block) {
-                    // We always write to the inactive slot, so just swap it
-                    self.active_context[block as usize] =
-                        !self.active_context[block as usize];
+            // Special handle for writes which touch the same block multiple
+            // times!  We split the `writes` slice into sub-slices of unique
+            // writes.
+            let mut seen = HashSet::new();
+            let mut start = 0;
+            for i in 0..=writes.len() {
+                // If this value is a duplicate or we have reached the end of
+                // the list, then write everything up to this point and adjust
+                // our starting point and `seen` array
+                if i == writes.len() || !seen.insert(writes[i].offset.value) {
+                    self.write_without_overlaps(
+                        job_id,
+                        &writes[start..i],
+                        only_write_unwritten,
+                        iov_max,
+                    )?;
+                    seen.clear();
+                    seen.extend(writes.get(i).map(|w| w.offset.value));
+                    start = i;
                 }
             }
+            Ok(())
         }
-
-        cdt::extent__write__file__done!(|| {
-            (job_id.0, self.extent_number, writes.len() as u64)
-        });
-
-        Ok(())
     }
 
     fn read(
@@ -605,6 +470,8 @@ impl RawInner {
             sync_index: 0,
             extra_syscall_count: 0,
             extra_syscall_denominator: 0,
+            block_unique_scratch: vec![0; def.extent_size().value as usize],
+            block_unique_index: 0,
         };
         // Setting the flush number also writes the extent version, since
         // they're serialized together in the same block.
@@ -766,6 +633,8 @@ impl RawInner {
             extra_syscall_count: 0,
             extra_syscall_denominator: 0,
             sync_index: 0,
+            block_unique_scratch: vec![0; def.extent_size().value as usize],
+            block_unique_index: 0,
         })
     }
 
@@ -1134,6 +1003,213 @@ impl RawInner {
             }
         }
         r.map(|_| ())
+    }
+
+    /// Implementation details for `ExtentInner::write`
+    ///
+    /// This function requires that `writes` not have any overlapping writes,
+    /// i.e. blocks that are written multiple times.  We write the contexts
+    /// first, then block data; if a single block is written multiple times,
+    /// then we'd write multiple contexts, then multiple block data, and it
+    /// would be possible for them to get out of sync.
+    fn write_without_overlaps(
+        &mut self,
+        job_id: JobId,
+        writes: &[&crucible_protocol::Write],
+        only_write_unwritten: bool,
+        iov_max: usize,
+    ) -> Result<(), CrucibleError> {
+        /*
+         * In order to be crash consistent, perform the following steps in
+         * order:
+         *
+         * 1) set the dirty bit
+         * 2) for each write:
+         *   a) write out encryption context and hashes first
+         *   b) write out extent data second
+         *
+         * If encryption context is written after the extent data, a crash or
+         * interruption before extent data is written would potentially leave
+         * data on the disk that cannot be decrypted.
+         *
+         * If hash is written after extent data, same thing - a crash or
+         * interruption would leave data on disk that would fail the
+         * integrity hash check.
+         *
+         * Note that writing extent data here does not assume that it is
+         * durably on disk - the only guarantee of that is returning
+         * ok from fsync. The data is only potentially on disk and
+         * this depends on operating system implementation.
+         *
+         * To minimize the performance hit of sending many transactions to the
+         * filesystem, as much as possible is written at the same time. This
+         * means multiple loops are required. The steps now look like:
+         *
+         * 1) set the dirty bit
+         * 2) gather and write all encryption contexts + hashes
+         * 3) write all extent data
+         *
+         * If "only_write_unwritten" is true, then we only issue a write for
+         * a block if that block has not been written to yet.  Note
+         * that we can have a write that is "sparse" if the range of
+         * blocks it contains has a mix of written an unwritten
+         * blocks.
+         *
+         * We define a block being written to or not has if that block has
+         * `Some(...)` with a matching checksum serialized into a context slot
+         * or not. So it is required that a written block has a checksum.
+         */
+
+        // If `only_write_written`, we need to skip writing to blocks that
+        // already contain data. We'll first query the metadata to see which
+        // blocks have hashes
+        let mut writes_to_skip = HashSet::new();
+        if only_write_unwritten {
+            cdt::extent__write__get__hashes__start!(|| {
+                (job_id.0, self.extent_number, writes.len() as u64)
+            });
+            let mut write_run_start = 0;
+            while write_run_start < writes.len() {
+                let first_write = writes[write_run_start];
+
+                // Starting from the first write in the potential run, we scan
+                // forward until we find a write with a block that isn't
+                // contiguous with the request before it. Since we're counting
+                // pairs, and the number of pairs is one less than the number of
+                // writes, we need to add 1 to get our actual run length.
+                let n_contiguous_writes = writes[write_run_start..]
+                    .windows(2)
+                    .take_while(|wr_pair| {
+                        wr_pair[0].offset.value + 1 == wr_pair[1].offset.value
+                    })
+                    .count()
+                    + 1;
+
+                // Query hashes for the write range.
+                let block_contexts = self.get_block_contexts(
+                    first_write.offset.value,
+                    n_contiguous_writes as u64,
+                )?;
+
+                for (i, block_contexts) in block_contexts.iter().enumerate() {
+                    if block_contexts.is_some() {
+                        let _ = writes_to_skip
+                            .insert(i as u64 + first_write.offset.value);
+                    }
+                }
+
+                write_run_start += n_contiguous_writes;
+            }
+            cdt::extent__write__get__hashes__done!(|| {
+                (job_id.0, self.extent_number, writes.len() as u64)
+            });
+
+            if writes_to_skip.len() == writes.len() {
+                // Nothing to do
+                return Ok(());
+            }
+        }
+
+        self.set_dirty()?;
+
+        // Write all the context data to the raw file
+        //
+        // TODO right now we're including the integrity_hash() time in the
+        // measured time.  Is it small enough to be ignored?
+        cdt::extent__write__raw__context__insert__start!(|| {
+            (job_id.0, self.extent_number, writes.len() as u64)
+        });
+
+        // Compute block contexts, then write them to disk
+        let block_ctx: Vec<_> = writes
+            .iter()
+            .filter(|write| !writes_to_skip.contains(&write.offset.value))
+            .map(|write| {
+                // TODO it would be nice if we could profile what % of time we're
+                // spending on hashes locally vs writing to disk
+                let on_disk_hash = integrity_hash(&[&write.data[..]]);
+
+                DownstairsBlockContext {
+                    block_context: write.block_context,
+                    block: write.offset.value,
+                    on_disk_hash,
+                }
+            })
+            .collect();
+
+        self.set_block_contexts(&block_ctx)?;
+
+        cdt::extent__write__raw__context__insert__done!(|| {
+            (job_id.0, self.extent_number, writes.len() as u64)
+        });
+
+        // PERFORMANCE TODO:
+        //
+        // Something worth considering for small writes is that, based on
+        // my memory of conversations we had with propolis folks about what
+        // OSes expect out of an NVMe driver, I believe our contract with the
+        // upstairs doesn't require us to have the writes inside the file
+        // until after a flush() returns. If that is indeed true, we could
+        // buffer a certain amount of writes, only actually writing that
+        // buffer when either a flush is issued or the buffer exceeds some
+        // set size (based on our memory constraints). This would have
+        // benefits on any workload that frequently writes to the same block
+        // between flushes, would have benefits for small contiguous writes
+        // issued over multiple write commands by letting us batch them into
+        // a larger write, and (speculation) may benefit non-contiguous writes
+        // by cutting down the number of metadata writes. But, it introduces
+        // complexity. The time spent implementing that would probably better be
+        // spent switching to aio or something like that.
+        cdt::extent__write__file__start!(|| {
+            (job_id.0, self.extent_number, writes.len() as u64)
+        });
+
+        let r = self.write_inner(writes, &writes_to_skip, iov_max);
+
+        if r.is_err() {
+            for write in writes.iter() {
+                let block = write.offset.value;
+                if !writes_to_skip.contains(&block) {
+                    // Try to recompute the context slot from the file.  If this
+                    // fails, then we _really_ can't recover, so bail out
+                    // unceremoniously.
+                    self.recompute_slot_from_file(block).unwrap();
+                }
+            }
+        } else {
+            // Now that writes have gone through, update active context slots
+            for write in writes.iter() {
+                let block = write.offset.value;
+                if !writes_to_skip.contains(&block) {
+                    // We always write to the inactive slot, so just swap it
+                    self.active_context[block as usize] =
+                        !self.active_context[block as usize];
+                }
+            }
+        }
+
+        cdt::extent__write__file__done!(|| {
+            (job_id.0, self.extent_number, writes.len() as u64)
+        });
+
+        Ok(())
+    }
+
+    /// Cheap test that a set of blocks are unique
+    ///
+    /// Under rare circumstances, the test may return a false negative – saying
+    /// that blocks are not unique when they in fact are.  That's fine for our
+    /// use case.
+    fn are_blocks_unique<I: Iterator<Item = u64>>(&mut self, iter: I) -> bool {
+        self.block_unique_index = self.block_unique_index.wrapping_add(1);
+        for i in iter {
+            if self.block_unique_scratch[i as usize] == self.block_unique_index
+            {
+                return false;
+            }
+            self.block_unique_scratch[i as usize] = self.block_unique_index;
+        }
+        true
     }
 }
 
@@ -2371,5 +2447,99 @@ mod test {
         };
         let mut meta_buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
         bincode::serialize_into(meta_buf.as_mut_slice(), &Some(m)).unwrap();
+    }
+
+    /// Test that multiple writes to the same location work
+    #[test]
+    fn test_multiple_writes_to_same_location_raw() -> Result<()> {
+        let dir = tempdir()?;
+        let mut inner =
+            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
+                .unwrap();
+
+        // Write the same block four times in the same write command.
+
+        let writes: Vec<_> = (0..4)
+            .map(|i| {
+                let data = Bytes::from(vec![i as u8; 512]);
+                let hash = integrity_hash(&[&data[..]]);
+
+                crucible_protocol::Write {
+                    eid: 0,
+                    offset: Block::new_512(0),
+                    data,
+                    block_context: BlockContext {
+                        encryption_context: None,
+                        hash,
+                    },
+                }
+            })
+            .collect();
+
+        let write_refs: Vec<_> = writes.iter().collect();
+
+        assert_eq!(inner.sync_index, 0);
+        assert_eq!(inner.context_slot_synched_at[0], [0, 0]);
+        inner.write(JobId(30), &write_refs, false, IOV_MAX_TEST)?;
+
+        // The write should be split into four separate calls to
+        // `write_without_overlaps`, triggering one bonus fsync.
+        assert_eq!(inner.sync_index, 1);
+        assert_eq!(inner.context_slot_synched_at[0], [2, 2]);
+
+        // Block 0 should be 0x03 repeated.
+        let mut resp = Vec::new();
+        let read = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(0),
+        };
+
+        inner.read(JobId(31), &[&read], &mut resp, IOV_MAX_TEST)?;
+
+        let data = Bytes::from(vec![0x03; 512]);
+        let hash = integrity_hash(&[&data[..]]);
+        let block_context = BlockContext {
+            encryption_context: None,
+            hash,
+        };
+
+        assert_eq!(
+            resp,
+            vec![ReadResponse {
+                eid: 0,
+                offset: Block::new_512(0),
+                data: BytesMut::from(data.as_ref()),
+                // Only the most recent block context should be returned
+                block_contexts: vec![block_context],
+            }]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_are_blocks_unique() -> Result<()> {
+        let dir = tempdir()?;
+        let mut inner =
+            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
+                .unwrap();
+        assert!(inner.are_blocks_unique([0, 1, 2, 3].into_iter()));
+        assert!(!inner.are_blocks_unique([0, 1, 2, 0].into_iter()));
+        assert!(!inner.are_blocks_unique([0, 1, 1, 4].into_iter()));
+        assert!(inner.are_blocks_unique([4, 3, 2, 1].into_iter()));
+
+        // Test the false-negative behavior.  It's not load-bearing, but this is
+        // a good check for our understanding of the data structure.
+        let mut inner =
+            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
+                .unwrap();
+        for _ in 0..u8::MAX {
+            assert!(inner.are_blocks_unique([1].into_iter()));
+        }
+        assert!(!inner.are_blocks_unique([0].into_iter()));
+
+        // After a single false negative, we should see correct values
+        assert!(inner.are_blocks_unique([0].into_iter()));
+        Ok(())
     }
 }
