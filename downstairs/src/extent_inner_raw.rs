@@ -117,12 +117,6 @@ pub struct RawInner {
 
     /// Denominator corresponding to `extra_syscall_count`
     extra_syscall_denominator: u64,
-
-    /// Scratch data for doing a quick block uniqueness check
-    block_unique_scratch: Vec<u8>,
-
-    /// Scratch index for doing a quick block uniqueness check
-    block_unique_index: u8,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -162,38 +156,31 @@ impl ExtentInner for RawInner {
         iov_max: usize,
     ) -> Result<(), CrucibleError> {
         // If the same block is written multiple times in a single write, then
-        // (1) that's weird, and (2) we need to handle it specially.
-        if self.are_blocks_unique(writes.iter().map(|v| v.offset.value)) {
-            self.write_without_overlaps(
-                job_id,
-                writes,
-                only_write_unwritten,
-                iov_max,
-            )
-        } else {
-            // Special handle for writes which touch the same block multiple
-            // times!  We split the `writes` slice into sub-slices of unique
-            // writes.
-            let mut seen = HashSet::new();
-            let mut start = 0;
-            for i in 0..=writes.len() {
-                // If this value is a duplicate or we have reached the end of
-                // the list, then write everything up to this point and adjust
-                // our starting point and `seen` array
-                if i == writes.len() || !seen.insert(writes[i].offset.value) {
-                    self.write_without_overlaps(
-                        job_id,
-                        &writes[start..i],
-                        only_write_unwritten,
-                        iov_max,
-                    )?;
+        // (1) that's weird, and (2) we need to handle it specially.  To handle
+        // such cases, we split the `writes` slice into sub-slices of unique
+        // writes.
+        let mut seen = HashSet::new();
+        let mut start = 0;
+        for i in 0..=writes.len() {
+            // If this value is a duplicate or we have reached the end of
+            // the list, then write everything up to this point and adjust
+            // our starting point and `seen` array
+            if i == writes.len() || !seen.insert(writes[i].offset.value) {
+                self.write_without_overlaps(
+                    job_id,
+                    &writes[start..i],
+                    only_write_unwritten,
+                    iov_max,
+                )?;
+                // Keep going, resetting the hashmap and start position
+                if i != writes.len() {
                     seen.clear();
-                    seen.extend(writes.get(i).map(|w| w.offset.value));
+                    seen.insert(writes[i].offset.value);
                     start = i;
                 }
             }
-            Ok(())
         }
+        Ok(())
     }
 
     fn read(
@@ -474,8 +461,6 @@ impl RawInner {
             context_slot_dirty: vec![0; def.extent_size().value as usize],
             extra_syscall_count: 0,
             extra_syscall_denominator: 0,
-            block_unique_scratch: vec![0; def.extent_size().value as usize],
-            block_unique_index: 0,
         };
         // Setting the flush number also writes the extent version, since
         // they're serialized together in the same block.
@@ -633,8 +618,6 @@ impl RawInner {
             context_slot_dirty: vec![0; def.extent_size().value as usize],
             extra_syscall_count: 0,
             extra_syscall_denominator: 0,
-            block_unique_scratch: vec![0; def.extent_size().value as usize],
-            block_unique_index: 0,
         })
     }
 
@@ -1196,23 +1179,6 @@ impl RawInner {
         });
 
         Ok(())
-    }
-
-    /// Cheap test that a set of blocks are unique
-    ///
-    /// Under rare circumstances, the test may return a false negative – saying
-    /// that blocks are not unique when they in fact are.  That's fine for our
-    /// use case.
-    fn are_blocks_unique<I: Iterator<Item = u64>>(&mut self, iter: I) -> bool {
-        self.block_unique_index = self.block_unique_index.wrapping_add(1);
-        for i in iter {
-            if self.block_unique_scratch[i as usize] == self.block_unique_index
-            {
-                return false;
-            }
-            self.block_unique_scratch[i as usize] = self.block_unique_index;
-        }
-        true
     }
 }
 
@@ -2546,32 +2512,6 @@ mod test {
             }]
         );
 
-        Ok(())
-    }
-
-    #[test]
-    fn test_are_blocks_unique() -> Result<()> {
-        let dir = tempdir()?;
-        let mut inner =
-            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
-        assert!(inner.are_blocks_unique([0, 1, 2, 3].into_iter()));
-        assert!(!inner.are_blocks_unique([0, 1, 2, 0].into_iter()));
-        assert!(!inner.are_blocks_unique([0, 1, 1, 4].into_iter()));
-        assert!(inner.are_blocks_unique([4, 3, 2, 1].into_iter()));
-
-        // Test the false-negative behavior.  It's not load-bearing, but this is
-        // a good check for our understanding of the data structure.
-        let mut inner =
-            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
-        for _ in 0..u8::MAX {
-            assert!(inner.are_blocks_unique([1].into_iter()));
-        }
-        assert!(!inner.are_blocks_unique([0].into_iter()));
-
-        // After a single false negative, we should see correct values
-        assert!(inner.are_blocks_unique([0].into_iter()));
         Ok(())
     }
 }
