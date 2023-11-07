@@ -249,9 +249,11 @@ impl ExtentInner for RawInner {
             }
 
             // Create what amounts to an iovec for each response data buffer.
+            let mut expected_bytes = 0;
             for resp in
                 &mut responses[resp_run_start..][..n_contiguous_requests]
             {
+                expected_bytes += resp.data.len();
                 iovecs.push(IoSliceMut::new(&mut resp.data[..]));
             }
 
@@ -260,7 +262,10 @@ impl ExtentInner for RawInner {
                 (job_id.0, self.extent_number, n_contiguous_requests as u64)
             });
 
-            nix::sys::uio::preadv(
+            // Perform the bulk read, then check against the expected number of
+            // bytes.  We could do more robust error handling here (e.g.
+            // retrying in a loop), but for now, simply bailing out seems wise.
+            let num_bytes = nix::sys::uio::preadv(
                 self.file.as_raw_fd(),
                 &mut iovecs,
                 first_req.offset.value as i64 * block_size as i64,
@@ -271,6 +276,13 @@ impl ExtentInner for RawInner {
                     self.extent_number
                 ))
             })?;
+            if num_bytes != expected_bytes {
+                return Err(CrucibleError::IoError(format!(
+                    "extent {}: incomplete read \
+                     (expected {expected_bytes}, got {num_bytes})",
+                    self.extent_number
+                )));
+            }
 
             cdt::extent__read__file__done!(|| {
                 (job_id.0, self.extent_number, n_contiguous_requests as u64)
@@ -661,7 +673,7 @@ impl RawInner {
         // Read the block data itself:
         let block_size = self.extent_size.block_size_in_bytes();
         let mut buf = vec![0; block_size as usize];
-        nix::sys::uio::pread(
+        pread_all(
             self.file.as_raw_fd(),
             &mut buf,
             (block_size as u64 * block) as i64,
@@ -1248,12 +1260,9 @@ impl RawLayout {
     /// changed.
     fn set_dirty(&self, file: &File) -> Result<(), CrucibleError> {
         let offset = self.metadata_offset();
-        nix::sys::uio::pwrite(file.as_raw_fd(), &[1u8], offset as i64)
-            .map_err(|e| {
-                CrucibleError::IoError(format!(
-                    "writing dirty byte failed: {e}",
-                ))
-            })?;
+        pwrite_all(file.as_raw_fd(), &[1u8], offset as i64).map_err(|e| {
+            CrucibleError::IoError(format!("writing dirty byte failed: {e}",))
+        })?;
         Ok(())
     }
 
@@ -1312,10 +1321,9 @@ impl RawLayout {
     fn get_metadata(&self, file: &File) -> Result<OnDiskMeta, CrucibleError> {
         let mut buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
         let offset = self.metadata_offset();
-        nix::sys::uio::pread(file.as_raw_fd(), &mut buf, offset as i64)
-            .map_err(|e| {
-                CrucibleError::IoError(format!("reading metadata failed: {e}"))
-            })?;
+        pread_all(file.as_raw_fd(), &mut buf, offset as i64).map_err(|e| {
+            CrucibleError::IoError(format!("reading metadata failed: {e}"))
+        })?;
         let out: OnDiskMeta = bincode::deserialize(&buf)
             .map_err(|e| CrucibleError::BadMetadata(e.to_string()))?;
         Ok(out)
@@ -1344,13 +1352,9 @@ impl RawLayout {
             bincode::serialize_into(&mut buf[n..], &d).unwrap();
         }
         let offset = self.context_slot_offset(block_start, slot);
-        nix::sys::uio::pwrite(file.as_raw_fd(), &buf, offset as i64).map_err(
-            |e| {
-                CrucibleError::IoError(format!(
-                    "writing context slots failed: {e}"
-                ))
-            },
-        )?;
+        pwrite_all(file.as_raw_fd(), &buf, offset as i64).map_err(|e| {
+            CrucibleError::IoError(format!("writing context slots failed: {e}"))
+        })?;
         self.buf.set(buf);
         Ok(())
     }
@@ -1366,12 +1370,9 @@ impl RawLayout {
         buf.resize((BLOCK_CONTEXT_SLOT_SIZE_BYTES * block_count) as usize, 0u8);
 
         let offset = self.context_slot_offset(block_start, slot);
-        nix::sys::uio::pread(file.as_raw_fd(), &mut buf, offset as i64)
-            .map_err(|e| {
-                CrucibleError::IoError(format!(
-                    "reading context slots failed: {e}"
-                ))
-            })?;
+        pread_all(file.as_raw_fd(), &mut buf, offset as i64).map_err(|e| {
+            CrucibleError::IoError(format!("reading context slots failed: {e}"))
+        })?;
 
         let mut out = vec![];
         for (i, chunk) in buf
@@ -1432,9 +1433,9 @@ impl RawLayout {
 
         let offset = self.active_context_offset();
 
-        nix::sys::uio::pwrite(file.as_raw_fd(), &buf, offset as i64).map_err(
-            |e| CrucibleError::IoError(format!("writing metadata failed: {e}")),
-        )?;
+        pwrite_all(file.as_raw_fd(), &buf, offset as i64).map_err(|e| {
+            CrucibleError::IoError(format!("writing metadata failed: {e}"))
+        })?;
         self.buf.set(buf);
 
         Ok(())
@@ -1450,12 +1451,11 @@ impl RawLayout {
         let mut buf = self.buf.take();
         buf.resize(self.active_context_size() as usize, 0u8);
         let offset = self.active_context_offset();
-        nix::sys::uio::pread(file.as_raw_fd(), &mut buf, offset as i64)
-            .map_err(|e| {
-                CrucibleError::IoError(format!(
-                    "could not read active contexts: {e}"
-                ))
-            })?;
+        pread_all(file.as_raw_fd(), &mut buf, offset as i64).map_err(|e| {
+            CrucibleError::IoError(format!(
+                "could not read active contexts: {e}"
+            ))
+        })?;
 
         let mut active_context = vec![];
         for bit in buf
@@ -1474,6 +1474,47 @@ impl RawLayout {
         self.buf.set(buf);
         Ok(active_context)
     }
+}
+
+/// Call `pread` repeatedly to read an entire buffer
+///
+/// Quoth the standard,
+///
+/// > The value returned may be less than nbyte if the number of bytes left in
+/// > the file is less than nbyte, if the read() request was interrupted by a
+/// > signal, or if the file is a pipe or FIFO or special file and has fewer
+/// > than nbyte bytes immediately available for reading. For example, a read()
+/// > from a file associated with a terminal may return one typed line of data.
+///
+/// We don't have to worry about most of these conditions, but it may be
+/// possible for Crucible to be interrupted by a signal, so let's play it safe.
+fn pread_all(
+    fd: std::os::fd::RawFd,
+    mut buf: &mut [u8],
+    mut offset: i64,
+) -> Result<(), nix::errno::Errno> {
+    while !buf.is_empty() {
+        let n = nix::sys::uio::pread(fd, buf, offset)?;
+        offset += n as i64;
+        buf = &mut buf[n..];
+    }
+    Ok(())
+}
+
+/// Call `pwrite` repeatedly to write an entire buffer
+///
+/// See details for why this is necessary in [`pread_all`]
+fn pwrite_all(
+    fd: std::os::fd::RawFd,
+    mut buf: &[u8],
+    mut offset: i64,
+) -> Result<(), nix::errno::Errno> {
+    while !buf.is_empty() {
+        let n = nix::sys::uio::pwrite(fd, buf, offset)?;
+        offset += n as i64;
+        buf = &buf[n..];
+    }
+    Ok(())
 }
 
 #[cfg(test)]

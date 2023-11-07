@@ -1074,6 +1074,7 @@ struct BatchedPwritevState<'a> {
     byte_offset: u64,
     iovecs: Vec<IoSlice<'a>>,
     next_block_in_run: u64,
+    expected_bytes: usize,
 }
 
 pub(crate) struct BatchedPwritev<'a> {
@@ -1137,6 +1138,7 @@ impl<'a> BatchedPwritev<'a> {
             assert_eq!(block, state.next_block_in_run);
             state.iovecs.push(IoSlice::new(&write.data));
             state.next_block_in_run += 1;
+            state.expected_bytes += write.data.len();
         } else {
             // start fresh
             self.state = Some(BatchedPwritevState {
@@ -1146,6 +1148,7 @@ impl<'a> BatchedPwritev<'a> {
                     iovecs.push(IoSlice::new(&write.data));
                     iovecs
                 },
+                expected_bytes: write.data.len(),
                 next_block_in_run: block + 1,
             });
         }
@@ -1158,12 +1161,18 @@ impl<'a> BatchedPwritev<'a> {
         if let Some(state) = &mut self.state {
             assert!(!state.iovecs.is_empty());
 
-            nix::sys::uio::pwritev(
+            let n = nix::sys::uio::pwritev(
                 self.fd,
                 &state.iovecs[..],
                 state.byte_offset as i64,
             )
             .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+            if n != state.expected_bytes {
+                return Err(CrucibleError::IoError(format!(
+                    "pwritev incomplete (expected {}, got {n} bytes)",
+                    state.expected_bytes
+                )));
+            }
 
             self.state = None;
         }
