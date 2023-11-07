@@ -395,7 +395,10 @@ impl From<CrucibleError> for dropshot::HttpError {
             | CrucibleError::SubvolumeSizeMismatch
             | CrucibleError::UpstairsAlreadyActive
             | CrucibleError::UpstairsDeactivating
-            | CrucibleError::UuidMismatch => {
+            | CrucibleError::UuidMismatch
+            | CrucibleError::MissingContextSlot(..)
+            | CrucibleError::BadMetadata(..)
+            | CrucibleError::BadContextSlot(..) => {
                 dropshot::HttpError::for_internal_error(e.to_string())
             }
         }
