@@ -764,7 +764,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -777,7 +776,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -794,7 +792,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -836,7 +833,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -850,7 +846,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -864,7 +859,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -904,7 +898,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None
             )
@@ -917,7 +910,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -930,7 +922,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -970,7 +961,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -983,7 +973,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -996,7 +985,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -1034,7 +1022,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -1054,7 +1041,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -1070,7 +1056,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -1102,7 +1087,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None
             )
@@ -1118,7 +1102,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -1138,7 +1121,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -1171,7 +1153,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -1184,7 +1165,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -1200,7 +1180,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -1237,7 +1216,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -1250,7 +1228,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -1263,7 +1240,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -1378,7 +1354,6 @@ pub(crate) mod up_test {
             id,
             ClientId::new(0),
             r1,
-            &None,
             UpState::Active,
             None,
         )
@@ -1398,7 +1373,6 @@ pub(crate) mod up_test {
                     id,
                     ClientId::new(1),
                     r2,
-                    &None,
                     UpState::Active,
                     None,
                 )
@@ -1432,7 +1406,6 @@ pub(crate) mod up_test {
             id,
             ClientId::new(0),
             r1,
-            &None,
             UpState::Active,
             None,
         )
@@ -1452,7 +1425,6 @@ pub(crate) mod up_test {
                     id,
                     ClientId::new(1),
                     r2,
-                    &None,
                     UpState::Active,
                     None,
                 )
@@ -1484,7 +1456,6 @@ pub(crate) mod up_test {
             id,
             ClientId::new(0),
             r1,
-            &None,
             UpState::Active,
             None,
         )
@@ -1497,7 +1468,6 @@ pub(crate) mod up_test {
             id,
             ClientId::new(1),
             r2,
-            &None,
             UpState::Active,
             None,
         )
@@ -1511,7 +1481,6 @@ pub(crate) mod up_test {
                     id,
                     ClientId::new(2),
                     r3,
-                    &None,
                     UpState::Active,
                     None,
                 )
@@ -1546,7 +1515,6 @@ pub(crate) mod up_test {
             id,
             ClientId::new(0),
             r1,
-            &None,
             UpState::Active,
             None,
         )
@@ -1560,7 +1528,6 @@ pub(crate) mod up_test {
             id,
             ClientId::new(1),
             r2,
-            &None,
             UpState::Active,
             None,
         )
@@ -1574,7 +1541,6 @@ pub(crate) mod up_test {
                     id,
                     ClientId::new(2),
                     r3,
-                    &None,
                     UpState::Active,
                     None,
                 )
@@ -1610,7 +1576,6 @@ pub(crate) mod up_test {
             id,
             ClientId::new(0),
             r1,
-            &None,
             UpState::Active,
             None,
         )
@@ -1628,7 +1593,6 @@ pub(crate) mod up_test {
                     id,
                     ClientId::new(1),
                     r2,
-                    &None,
                     UpState::Active,
                     None,
                 )
@@ -1662,7 +1626,6 @@ pub(crate) mod up_test {
             id,
             ClientId::new(0),
             r1,
-            &None,
             UpState::Active,
             None,
         )
@@ -1677,7 +1640,6 @@ pub(crate) mod up_test {
                     id,
                     ClientId::new(1),
                     r2,
-                    &None,
                     UpState::Active,
                     None,
                 )
@@ -1710,7 +1672,6 @@ pub(crate) mod up_test {
             id,
             ClientId::new(0),
             r1,
-            &None,
             UpState::Active,
             None,
         )
@@ -1725,7 +1686,6 @@ pub(crate) mod up_test {
                     id,
                     ClientId::new(1),
                     r2,
-                    &None,
                     UpState::Active,
                     None,
                 )
@@ -1778,7 +1738,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -1791,7 +1750,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -1806,7 +1764,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 response,
-                &None,
                 UpState::Active,
                 None,
             )
@@ -1881,7 +1838,6 @@ pub(crate) mod up_test {
             next_id,
             ClientId::new(0),
             response.clone(),
-            &None,
             UpState::Active,
             None,
         )
@@ -1891,7 +1847,6 @@ pub(crate) mod up_test {
             next_id,
             ClientId::new(2),
             response,
-            &None,
             UpState::Active,
             None,
         )
@@ -1971,7 +1926,6 @@ pub(crate) mod up_test {
             next_id,
             ClientId::new(0),
             Ok(vec![]),
-            &None,
             UpState::Active,
             None,
         )
@@ -2053,7 +2007,6 @@ pub(crate) mod up_test {
             next_id,
             ClientId::new(0),
             Ok(vec![]),
-            &None,
             UpState::Active,
             None,
         )
@@ -2067,7 +2020,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -2139,7 +2091,6 @@ pub(crate) mod up_test {
             next_id,
             ClientId::new(0),
             response.clone(),
-            &None,
             UpState::Active,
             None,
         )
@@ -2149,7 +2100,6 @@ pub(crate) mod up_test {
             next_id,
             ClientId::new(2),
             response,
-            &None,
             UpState::Active,
             None,
         )
@@ -2215,7 +2165,6 @@ pub(crate) mod up_test {
             next_id,
             ClientId::new(0),
             Ok(vec![]),
-            &None,
             UpState::Active,
             None,
         )
@@ -2285,7 +2234,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -2298,7 +2246,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2346,7 +2293,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -2359,7 +2305,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -2375,7 +2320,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -2412,7 +2356,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -2425,7 +2368,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -2441,7 +2383,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -2487,7 +2428,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -2504,7 +2444,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -2517,7 +2456,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -2555,7 +2493,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -2566,7 +2503,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2576,7 +2512,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2624,7 +2559,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -2653,7 +2587,6 @@ pub(crate) mod up_test {
                 next_id,
                 cid,
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -2734,7 +2667,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2744,7 +2676,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2754,7 +2685,6 @@ pub(crate) mod up_test {
                 id2,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2764,7 +2694,6 @@ pub(crate) mod up_test {
                 id2,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2794,7 +2723,6 @@ pub(crate) mod up_test {
                 flush_id,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2804,7 +2732,6 @@ pub(crate) mod up_test {
                 flush_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2835,7 +2762,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2845,7 +2771,6 @@ pub(crate) mod up_test {
                 id2,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2861,7 +2786,6 @@ pub(crate) mod up_test {
                 flush_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2917,7 +2841,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2927,7 +2850,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2937,7 +2859,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2967,7 +2888,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2977,7 +2897,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2987,7 +2906,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3062,7 +2980,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3072,7 +2989,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3082,7 +2998,6 @@ pub(crate) mod up_test {
                 id2,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3092,7 +3007,6 @@ pub(crate) mod up_test {
                 id2,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3122,7 +3036,6 @@ pub(crate) mod up_test {
                 flush_id,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3132,7 +3045,6 @@ pub(crate) mod up_test {
                 flush_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3161,7 +3073,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3171,7 +3082,6 @@ pub(crate) mod up_test {
                 id2,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3187,7 +3097,6 @@ pub(crate) mod up_test {
                 flush_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3226,7 +3135,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3278,7 +3186,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3297,7 +3204,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3325,7 +3231,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3362,7 +3267,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3400,7 +3304,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3460,7 +3363,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3493,7 +3395,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3553,7 +3454,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3571,7 +3471,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3602,7 +3501,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3657,7 +3555,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3667,7 +3564,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3700,7 +3596,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3752,7 +3647,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3762,7 +3656,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3793,7 +3686,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3803,7 +3695,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3980,7 +3871,6 @@ pub(crate) mod up_test {
             id1,
             ClientId::new(0),
             Ok(vec![]),
-            &None,
             UpState::Active,
             None,
         )
@@ -3989,7 +3879,6 @@ pub(crate) mod up_test {
             id1,
             ClientId::new(1),
             Ok(vec![]),
-            &None,
             UpState::Active,
             None,
         )
@@ -3998,7 +3887,6 @@ pub(crate) mod up_test {
             id1,
             ClientId::new(2),
             Ok(vec![]),
-            &None,
             UpState::Active,
             None,
         )
@@ -4019,7 +3907,6 @@ pub(crate) mod up_test {
                 flush_id,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Deactivating,
                 None
             )
@@ -4031,7 +3918,6 @@ pub(crate) mod up_test {
                 flush_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Deactivating,
                 None
             )
@@ -4062,7 +3948,6 @@ pub(crate) mod up_test {
                 flush_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Deactivating,
                 None
             )
@@ -4179,7 +4064,6 @@ pub(crate) mod up_test {
             id1,
             ClientId::new(0),
             Ok(vec![]),
-            &None,
             UpState::Deactivating,
             None,
         )
@@ -4188,7 +4072,6 @@ pub(crate) mod up_test {
             id1,
             ClientId::new(1),
             Ok(vec![]),
-            &None,
             UpState::Deactivating,
             None,
         )
@@ -4197,7 +4080,6 @@ pub(crate) mod up_test {
             id1,
             ClientId::new(2),
             Ok(vec![]),
-            &None,
             UpState::Deactivating,
             None,
         )
@@ -5093,6 +4975,7 @@ pub(crate) mod up_test {
     }
 
     #[tokio::test]
+    #[should_panic]
     async fn bad_decryption_means_panic() {
         // Failure to decrypt means panic.
         // This result has a valid hash, but won't decrypt.
@@ -5117,6 +5000,7 @@ pub(crate) mod up_test {
         ds.enqueue(op, ds_done_tx.clone()).await;
 
         ds.in_progress(next_id, ClientId::new(0));
+        drop(ds);
 
         // fake read response from downstairs that will fail decryption
 
@@ -5151,21 +5035,13 @@ pub(crate) mod up_test {
             }],
         }]);
 
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                ds.process_ds_completion(
-                    next_id,
-                    ClientId::new(0),
-                    response,
-                    &Some(context),
-                    UpState::Active,
-                    None,
-                )
-            }));
-        assert!(result.is_err());
+        let _result = upstairs
+            .process_ds_operation(next_id, ClientId::new(0), response, None)
+            .await;
     }
 
     #[tokio::test]
+    #[should_panic]
     async fn bad_read_hash_means_panic() {
         // Verify that a bad hash on a read will panic
         let upstairs = Upstairs::test_default(None);
@@ -5179,6 +5055,7 @@ pub(crate) mod up_test {
 
         ds.enqueue(op, ds_done_tx.clone()).await;
         ds.in_progress(next_id, ClientId::new(0));
+        drop(ds);
 
         // fake read response from downstairs that will fail integrity hash
         // check
@@ -5196,25 +5073,20 @@ pub(crate) mod up_test {
             }],
         }]);
 
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                ds.process_ds_completion(
-                    next_id,
-                    ClientId::new(0),
-                    response,
-                    &None,
-                    UpState::Active,
-                    None,
-                )
-            }));
-        assert!(result.is_err());
+        let _result = upstairs
+            .process_ds_operation(next_id, ClientId::new(0), response, None)
+            .await;
     }
 
     #[tokio::test]
+    #[should_panic]
     async fn bad_hash_on_encrypted_read_panic() {
         // Verify that a decryption failure on a read will panic.
-        let mut ds = Downstairs::new(csl(), ClientMap::new());
+        let upstairs = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        upstairs.set_active().await.unwrap();
+        let mut ds = upstairs.downstairs.lock().await;
+
         let next_id = ds.next_id();
 
         let (request, op) = create_generic_read_eob(&mut ds, next_id);
@@ -5231,6 +5103,7 @@ pub(crate) mod up_test {
         ds.enqueue(op, ds_done_tx.clone()).await;
 
         ds.in_progress(next_id, ClientId::new(0));
+        drop(ds);
 
         // fake read response from downstairs that will fail integrity hash
         // check
@@ -5254,18 +5127,9 @@ pub(crate) mod up_test {
             }],
         }]);
 
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                ds.process_ds_completion(
-                    next_id,
-                    ClientId::new(0),
-                    response,
-                    &Some(context),
-                    UpState::Active,
-                    None,
-                )
-            }));
-        assert!(result.is_err());
+        let _result = upstairs
+            .process_ds_operation(next_id, ClientId::new(0), response, None)
+            .await;
     }
 
     #[tokio::test]
@@ -8893,7 +8757,6 @@ pub(crate) mod up_test {
                     ds_id,
                     client_id,
                     Ok(vec![]),
-                    &None,
                     UpState::Active,
                     None,
                 )
