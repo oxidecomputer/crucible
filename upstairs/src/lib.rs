@@ -5954,6 +5954,20 @@ impl Upstairs {
         let ddef = self.ddef.lock().await.get_def().unwrap();
 
         /*
+         * Verify IO is in range for our region.  If not give up now and
+         * report error.
+         */
+        match ddef.validate_io(offset, data.len()) {
+            Ok(()) => {}
+            Err(e) => {
+                if let Some(req) = req {
+                    req.send_err(e);
+                }
+                return Err(());
+            }
+        }
+
+        /*
          * Given the offset and buffer size, figure out what extent and
          * byte offset that translates into. Keep in mind that an offset
          * and length may span two extents.
@@ -6031,20 +6045,6 @@ impl Upstairs {
 
         // While we've got the lock, update our current backpressure
         self.set_backpressure_with_downstairs(&downstairs);
-
-        /*
-         * Verify IO is in range for our region.  If not give up now and
-         * report error.
-         */
-        match ddef.validate_io(offset, data.len()) {
-            Ok(()) => {}
-            Err(e) => {
-                if let Some(req) = req {
-                    req.send_err(e);
-                }
-                return Err(());
-            }
-        }
 
         self.set_flush_need();
 
