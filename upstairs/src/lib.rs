@@ -5951,17 +5951,7 @@ impl Upstairs {
             return Err(());
         }
 
-        /*
-         * Get the next ID for the guest work struct we will make at the
-         * end. This ID is also put into the IO struct we create that
-         * handles the operation(s) on the storage side.
-         */
-        let mut gw = self.guest.guest_work.lock().await;
-        let mut downstairs = self.downstairs.lock().await;
         let ddef = self.ddef.lock().await.get_def().unwrap();
-
-        // While we've got the lock, update our current backpressure
-        self.set_backpressure_with_downstairs(&downstairs);
 
         /*
          * Verify IO is in range for our region.  If not give up now and
@@ -5977,8 +5967,6 @@ impl Upstairs {
             }
         }
 
-        self.set_flush_need();
-
         /*
          * Given the offset and buffer size, figure out what extent and
          * byte offset that translates into. Keep in mind that an offset
@@ -5989,26 +5977,6 @@ impl Upstairs {
             offset,
             Block::from_bytes(data.len(), &ddef),
         );
-
-        /*
-         * Grab this ID after extent_from_offset: in case of Err we don't
-         * want to create a gap in the IDs.
-         */
-        let gw_id: u64 = gw.next_gw_id();
-        if is_write_unwritten {
-            cdt::gw__write__unwritten__start!(|| (gw_id));
-        } else {
-            cdt::gw__write__start!(|| (gw_id));
-        }
-
-        // The impacted blocks may span our extent under repair.  If that's the
-        // case, then reserve repair jobs now (but do not enqueue them); this
-        // makes our dependencies correct.
-        downstairs.check_repair_ids_for_range(impacted_blocks);
-
-        // After reserving any LiveRepair IDs, go get one for this job.
-        // This is required to avoid circular dependencies.
-        let next_id = downstairs.next_id();
 
         let mut writes: Vec<crucible_protocol::Write> =
             Vec::with_capacity(impacted_blocks.len(&ddef));
@@ -6066,6 +6034,39 @@ impl Upstairs {
 
             cur_offset += byte_len;
         }
+
+        /*
+         * Get the next ID for the guest work struct we will make at the
+         * end. This ID is also put into the IO struct we create that
+         * handles the operation(s) on the storage side.
+         */
+        let mut gw = self.guest.guest_work.lock().await;
+        let mut downstairs = self.downstairs.lock().await;
+
+        // While we've got the lock, update our current backpressure
+        self.set_backpressure_with_downstairs(&downstairs);
+
+        self.set_flush_need();
+
+        /*
+         * Grab this ID after extent_from_offset: in case of Err we don't
+         * want to create a gap in the IDs.
+         */
+        let gw_id: u64 = gw.next_gw_id();
+        if is_write_unwritten {
+            cdt::gw__write__unwritten__start!(|| (gw_id));
+        } else {
+            cdt::gw__write__start!(|| (gw_id));
+        }
+
+        // The impacted blocks may span our extent under repair.  If that's the
+        // case, then reserve repair jobs now (but do not enqueue them); this
+        // makes our dependencies correct.
+        downstairs.check_repair_ids_for_range(impacted_blocks);
+
+        // After reserving any LiveRepair IDs, go get one for this job.
+        // This is required to avoid circular dependencies.
+        let next_id = downstairs.next_id();
 
         let wr = create_write_eob(
             &mut downstairs,
