@@ -1,11 +1,8 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
     cdt, crucible_bail,
-    extent::{
-        check_input, extent_path, DownstairsBlockContext, ExtentInner,
-        ExtentMeta, EXTENT_META_SQLITE,
-    },
-    integrity_hash, mkdir_for_file,
+    extent::{check_input, extent_path, DownstairsBlockContext, ExtentInner},
+    integrity_hash,
     region::{BatchedPwritev, JobOrReconciliationId},
     Block, BlockContext, CrucibleError, JobId, ReadResponse, RegionDefinition,
 };
@@ -160,7 +157,7 @@ impl ExtentInner for SqliteInner {
     }
 
     fn read(
-        &self,
+        &mut self,
         job_id: JobId,
         requests: &[&crucible_protocol::ReadRequest],
         responses: &mut Vec<crucible_protocol::ReadResponse>,
@@ -394,7 +391,7 @@ impl ExtentInner for SqliteInner {
             let on_disk_hash = integrity_hash(&[&write.data[..]]);
 
             self.set_block_context(&DownstairsBlockContext {
-                block_context: write.block_context.clone(),
+                block_context: write.block_context,
                 block: write.offset.value,
                 on_disk_hash,
             })?;
@@ -489,7 +486,7 @@ impl ExtentInner for SqliteInner {
     /// parent Vec contains all contexts for a single block.
     #[cfg(test)]
     fn get_block_contexts(
-        &self,
+        &mut self,
         block: u64,
         count: u64,
     ) -> Result<Vec<Vec<DownstairsBlockContext>>, CrucibleError> {
@@ -508,6 +505,41 @@ impl ExtentInner for SqliteInner {
 }
 
 impl SqliteInner {
+    /// Exports context slots for every block in the file
+    ///
+    /// Unlike `get_block_contexts`, this function ensures that only a single
+    /// context per block is present (or `None`, if the block is unwritten).
+    pub fn export_contexts(
+        &mut self,
+    ) -> Result<Vec<Option<DownstairsBlockContext>>> {
+        // Check whether we need to rehash.  This is theoretically represented
+        // by the `dirty` bit, but we're being _somewhat_ paranoid and manually
+        // forcing a rehash if any blocks have multiple contexts stored.
+        let ctxs = self.get_block_contexts(0, self.extent_size.value)?;
+        let needs_rehash = ctxs.iter().any(|c| c.len() > 1);
+
+        let mut ctxs = if needs_rehash {
+            // Clean up stale hashes.  After this is done, each block should
+            // have either 0 or 1 contexts.
+            self.fully_rehash_and_clean_all_stale_contexts(true)?;
+            self.get_block_contexts(0, self.extent_size.value)?
+        } else {
+            ctxs
+        };
+
+        let mut out = vec![];
+        for c in ctxs.iter_mut() {
+            let ctx = match c.len() {
+                0 => None,
+                1 => c.pop(),
+                i => panic!("invalid context count: {i}"),
+            };
+            out.push(ctx);
+        }
+
+        Ok(out)
+    }
+
     fn get_block_contexts(
         &self,
         block: u64,
@@ -558,11 +590,19 @@ impl SqliteInner {
         Ok(results)
     }
 
+    // We should never create a new SQLite-backed extent in production code,
+    // because we should be using raw extents everywhere.  However, we'll create
+    // them during tests to check that our automatic migration system works.
+    #[cfg(any(test, feature = "integration-tests"))]
     pub fn create(
         dir: &Path,
         def: &RegionDefinition,
         extent_number: u32,
     ) -> Result<Self> {
+        use crate::{
+            extent::{ExtentMeta, EXTENT_META_SQLITE},
+            mkdir_for_file,
+        };
         let mut path = extent_path(dir, extent_number);
         let bcount = def.extent_size().value;
         let size = def.block_size().checked_mul(bcount).unwrap();
@@ -709,12 +749,13 @@ impl SqliteInner {
     }
 
     pub fn open(
-        path: &Path,
+        dir: &Path,
         def: &RegionDefinition,
         extent_number: u32,
         read_only: bool,
         log: &Logger,
     ) -> Result<Self> {
+        let mut path = extent_path(dir, extent_number);
         let bcount = def.extent_size().value;
         let size = def.block_size().checked_mul(bcount).unwrap();
 
@@ -722,7 +763,7 @@ impl SqliteInner {
          * Open the extent file and verify the size is as we expect.
          */
         let file =
-            match OpenOptions::new().read(true).write(!read_only).open(path) {
+            match OpenOptions::new().read(true).write(!read_only).open(&path) {
                 Err(e) => {
                     error!(
                         log,
@@ -749,7 +790,6 @@ impl SqliteInner {
         /*
          * Open a connection to the metadata db
          */
-        let mut path = path.to_path_buf();
         path.set_extension("db");
         let metadb = match open_sqlite_connection(&path) {
             Err(e) => {
@@ -778,7 +818,9 @@ impl SqliteInner {
         };
         // Clean out any irrelevant block contexts, which may be present
         // if downstairs crashed between a write() and a flush().
-        out.fully_rehash_and_clean_all_stale_contexts(false)?;
+        if !read_only {
+            out.fully_rehash_and_clean_all_stale_contexts(false)?;
+        }
         Ok(out)
     }
 
@@ -1496,7 +1538,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(0),
                 data: data.clone(),
-                block_context: block_context.clone(),
+                block_context,
             };
             inner.write(JobId(20), &[&write], true, IOV_MAX_TEST)?;
 
@@ -1531,7 +1573,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(1),
                 data: data.clone(),
-                block_context: block_context.clone(),
+                block_context,
             };
             inner.write(JobId(30), &[&write], true, IOV_MAX_TEST)?;
 
@@ -1598,7 +1640,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(0),
                 data: data.clone(),
-                block_context: block_context.clone(),
+                block_context,
             };
             inner.write(JobId(30), &[&write], true, IOV_MAX_TEST)?;
 

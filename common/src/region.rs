@@ -274,7 +274,7 @@ impl RegionDefinition {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct RegionOptions {
     /**
      * The size of each block in bytes.  Must be a power of 2, minimum 512.

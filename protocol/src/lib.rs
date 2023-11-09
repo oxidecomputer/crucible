@@ -157,7 +157,7 @@ impl ReadResponse {
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BlockContext {
     /// If this is a non-encrypted write, then the integrity hasher has the
     /// data as an input:
@@ -183,7 +183,7 @@ pub struct BlockContext {
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EncryptionContext {
     pub nonce: [u8; 12],
     pub tag: [u8; 16],
@@ -241,6 +241,12 @@ pub struct SnapshotDetails {
 #[repr(u32)]
 #[derive(IntoPrimitive)]
 pub enum MessageVersion {
+    /// Switched to raw file extents
+    ///
+    /// The message format remains the same, but live repair between SQLite and
+    /// raw file extents is not possible.
+    V5 = 5,
+
     /// Added ErrorReport
     V4 = 4,
 
@@ -255,7 +261,7 @@ pub enum MessageVersion {
 }
 impl MessageVersion {
     pub const fn current() -> Self {
-        Self::V4
+        Self::V5
     }
 }
 
@@ -264,7 +270,7 @@ impl MessageVersion {
  * This, along with the MessageVersion enum above should be updated whenever
  * changes are made to the Message enum below.
  */
-pub const CRUCIBLE_MESSAGE_VERSION: u32 = 4;
+pub const CRUCIBLE_MESSAGE_VERSION: u32 = 5;
 
 /*
  * If you add or change the Message enum, you must also increment the

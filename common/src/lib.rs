@@ -146,6 +146,15 @@ pub enum CrucibleError {
 
     #[error("Invalid downstairs replace {0}")]
     ReplaceRequestInvalid(String),
+
+    #[error("missing context slot for block {0}")]
+    MissingContextSlot(u64),
+
+    #[error("metadata deserialization failed: {0}")]
+    BadMetadata(String),
+
+    #[error("context slot deserialization failed: {0}")]
+    BadContextSlot(String),
 }
 
 impl From<std::io::Error> for CrucibleError {
@@ -386,7 +395,10 @@ impl From<CrucibleError> for dropshot::HttpError {
             | CrucibleError::SubvolumeSizeMismatch
             | CrucibleError::UpstairsAlreadyActive
             | CrucibleError::UpstairsDeactivating
-            | CrucibleError::UuidMismatch => {
+            | CrucibleError::UuidMismatch
+            | CrucibleError::MissingContextSlot(..)
+            | CrucibleError::BadMetadata(..)
+            | CrucibleError::BadContextSlot(..) => {
                 dropshot::HttpError::for_internal_error(e.to_string())
             }
         }
