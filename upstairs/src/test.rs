@@ -4975,7 +4975,6 @@ pub(crate) mod up_test {
     }
 
     #[tokio::test]
-    #[should_panic]
     async fn bad_decryption_means_panic() {
         // Failure to decrypt means panic.
         // This result has a valid hash, but won't decrypt.
@@ -5035,9 +5034,20 @@ pub(crate) mod up_test {
             }],
         }]);
 
-        let _result = upstairs
-            .process_ds_operation(next_id, ClientId::new(0), response, None)
-            .await;
+        // Don't use `should_panic`, as the `unwrap` above could cause this test
+        // to pass for the wrong reason.
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let handle = tokio::runtime::Handle::current();
+                handle.block_on(upstairs.process_ds_operation(
+                    next_id,
+                    ClientId::new(0),
+                    response,
+                    None,
+                ))
+            }));
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -5079,7 +5089,6 @@ pub(crate) mod up_test {
     }
 
     #[tokio::test]
-    #[should_panic]
     async fn bad_hash_on_encrypted_read_panic() {
         // Verify that a decryption failure on a read will panic.
         let upstairs = Upstairs::test_default(None);
@@ -5127,9 +5136,20 @@ pub(crate) mod up_test {
             }],
         }]);
 
-        let _result = upstairs
-            .process_ds_operation(next_id, ClientId::new(0), response, None)
-            .await;
+        // Don't use `should_panic`, as the `unwrap` above could cause this test
+        // to pass for the wrong reason.
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let handle = tokio::runtime::Handle::current();
+                handle.block_on(upstairs.process_ds_operation(
+                    next_id,
+                    ClientId::new(0),
+                    response,
+                    None,
+                ))
+            }));
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]
