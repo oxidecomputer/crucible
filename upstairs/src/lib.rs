@@ -4067,7 +4067,6 @@ impl Downstairs {
 
         let mut valid_hash = None;
         let mut successful_decryption = false;
-        let mut successful_hash = false;
 
         // Attempt decryption with each encryption context, and fail if all
         // do not work. The most recent encryption context will most likely
@@ -4092,7 +4091,6 @@ impl Downstairs {
             ]);
 
             if computed_hash == ctx.hash {
-                successful_hash = true;
                 valid_hash = Some(ctx.hash);
 
                 // Now that the integrity hash was verified, attempt
@@ -4132,7 +4130,21 @@ impl Downstairs {
             }
         }
 
-        if !successful_hash {
+        if let Some(valid_hash) = valid_hash {
+            if !successful_decryption {
+                // no hash + encryption context combination decrypted this block
+                error!(log, "Decryption failed with correct hash");
+                Err(CrucibleError::DecryptionError)
+            } else {
+                // Filter out contexts that don't match, and return the successful
+                // hash.
+                response
+                    .block_contexts
+                    .retain(|context| context.hash == valid_hash);
+
+                Ok(Some(valid_hash))
+            }
+        } else {
             error!(log, "No match for integrity hash");
             for ctx in response.block_contexts.iter() {
                 let block_encryption_ctx = if let Some(block_encryption_ctx) =
@@ -4159,22 +4171,6 @@ impl Downstairs {
 
             // no hash was correct
             Err(CrucibleError::HashMismatch)
-        } else if !successful_decryption {
-            // no hash + encryption context combination decrypted this block
-            error!(log, "Decryption failed with correct hash");
-            Err(CrucibleError::DecryptionError)
-        } else {
-            let Some(valid_hash) = valid_hash else {
-                panic!("valid hash is None!");
-            };
-
-            // Filter out contexts that don't match, and return the successful
-            // hash.
-            response
-                .block_contexts
-                .retain(|context| context.hash == valid_hash);
-
-            Ok(Some(valid_hash))
         }
     }
 
