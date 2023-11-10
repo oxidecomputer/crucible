@@ -4380,15 +4380,7 @@ impl Downstairs {
                     let read_data: Vec<ReadResponse> = read_data.unwrap();
                     assert!(!read_data.is_empty());
 
-                    let mismatch = std::iter::zip(
-                        job.read_response_hashes.iter(),
-                        read_data.iter().map(|response| {
-                            response.block_contexts.get(0).map(|ctx| ctx.hash)
-                        }),
-                    )
-                    .any(|(l, r)| *l != r);
-
-                    if mismatch {
+                    if !job.check_read_response_hashes(&read_data) {
                         // XXX This error needs to go to Nexus
                         // XXX This will become the "force all downstairs
                         // to stop and refuse to restart" mode.
@@ -4474,7 +4466,7 @@ impl Downstairs {
                                 // zeros), or one valid context (because the
                                 // rest were filtered out). Turn this into an
                                 // Option here.
-                                read_response.hashes().first().copied()
+                                read_response.first_hash()
                             })
                             .collect();
 
@@ -4501,18 +4493,7 @@ impl Downstairs {
                             job.ds_id
                         );
 
-                        let mismatch = std::iter::zip(
-                            job.read_response_hashes.iter(),
-                            read_data.iter().map(|response| {
-                                response
-                                    .block_contexts
-                                    .get(0)
-                                    .map(|ctx| ctx.hash)
-                            }),
-                        )
-                        .any(|(l, r)| *l != r);
-
-                        if mismatch {
+                        if !job.check_read_response_hashes(&read_data) {
                             // XXX This error needs to go to Nexus
                             // XXX This will become the "force all downstairs
                             // to stop and refuse to restart" mode.
@@ -8015,6 +7996,19 @@ impl DownstairsIO {
             ack_status: self.ack_status,
             state,
         }
+    }
+
+    /// Compare this struct's read_response_hashes to the hashes in a list of
+    /// ReadResponses, returning false if there is a mismatch.
+    pub fn check_read_response_hashes(
+        &self,
+        read_data: &[ReadResponse],
+    ) -> bool {
+        std::iter::zip(
+            self.read_response_hashes.iter(),
+            read_data.iter().map(|response| response.first_hash()),
+        )
+        .all(|(l, r)| *l == r)
     }
 }
 
