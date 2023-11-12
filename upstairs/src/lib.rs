@@ -67,7 +67,7 @@ mod impacted_blocks;
 pub use impacted_blocks::*;
 
 mod live_repair;
-pub use live_repair::{check_for_repair, ExtentInfo, RepairCheck};
+pub use live_repair::{check_and_run_repair, ExtentInfo, RepairCheck};
 
 mod active_jobs;
 use active_jobs::ActiveJobs;
@@ -3001,6 +3001,13 @@ struct Downstairs {
     repair_min_id: Option<JobId>,
 
     /**
+     * When repairing, this will be the used to indicate to a running
+     * repair task needs to stop waiting for an answer from repair work
+     * and abort the repair.
+     */
+    repair_stop: Option<mpsc::Sender<bool>>,
+
+    /**
      * Count of downstairs connections
      */
     connected: ClientData<usize>,
@@ -3048,6 +3055,7 @@ impl Downstairs {
             extent_limit: ClientMap::new(),
             repair_job_ids: BTreeMap::new(),
             repair_min_id: None,
+            repair_stop: None,
             connected: ClientData::new(0),
             replaced: ClientData::new(0),
             flow_control: ClientData::new(0),
@@ -3062,6 +3070,8 @@ impl Downstairs {
         self.extent_limit = ClientMap::new();
         self.repair_job_ids = BTreeMap::new();
         self.repair_min_id = None;
+        // ZZZ come back and verify this is good
+        self.repair_stop = None;
     }
 
     /**
@@ -3077,6 +3087,46 @@ impl Downstairs {
      */
     fn peek_next_id(&self) -> JobId {
         self.next_id
+    }
+
+    // ZZZ
+    // add counter for when we go here.
+    // Send the log that we want to use.
+    fn abort_job(&mut self, ds_id: JobId, client_id: ClientId) {
+        let mut handle = match self.ds_active.get_mut(&ds_id) {
+            Some(handle) => handle,
+            None => {
+                // This job that we aborted is no longer on the active list.
+                // As we release the lock after first finding it, it's possible
+                // for the job state to change.
+                warn!(
+                    self.log,
+                    "[{client_id}] Job {ds_id} no longer on active list"
+                );
+                return;
+            }
+        };
+        let job = handle.job();
+
+        if job.state[client_id] == IOState::New
+            || job.state[client_id] == IOState::InProgress
+        {
+            let new_state = IOState::Skipped;
+            let old_state = job.state.insert(client_id, new_state.clone());
+            self.io_state_count.decr(&old_state, client_id);
+            self.io_state_count.incr(&new_state, client_id);
+        }
+
+        // We are here because we are aborting this IO.  If the job is not
+        // acked, and we have moved all jobs to the proper state, we can
+        // also move the IO itself to AbortReady.
+        let wc = job.state_count();
+        if (wc.error + wc.skipped + wc.done) == 3
+            && job.ack_status != AckStatus::Acked
+        {
+            job.ack_status = AckStatus::AbortReady;
+            warn!(self.log, "[{client_id}] Job {ds_id} AbortReady AAA");
+        }
     }
 
     /// Mark this request as in progress for this client, and return the
@@ -3180,6 +3230,7 @@ impl Downstairs {
         );
         assert_eq!(self.ds_state[client_id], DsState::LiveRepair);
         assert!(self.repair_min_id.is_some());
+        assert!(self.repair_stop.is_some());
 
         deps.retain(|x| !self.ds_skipped_jobs[client_id].contains(x));
 
@@ -3437,6 +3488,38 @@ impl Downstairs {
         self.ds_new[client_id].clear();
     }
 
+    fn ds_fault_offline(&mut self, client_id: ClientId) {
+        info!(
+            self.log,
+            "[{}] client skip all {} jobs for fault",
+            client_id,
+            self.ds_active.len(),
+        );
+
+        self.ds_active.for_each(|ds_id, job| {
+            let state = &job.state[client_id];
+
+            if matches!(state, IOState::InProgress | IOState::New) {
+                info!(self.log, "{} change {} to skipped", client_id, ds_id);
+                let old_state = job.state.insert(client_id, IOState::Skipped);
+                self.io_state_count.decr(&old_state, client_id);
+                self.io_state_count.incr(&IOState::Skipped, client_id);
+                self.ds_skipped_jobs[client_id].insert(*ds_id);
+                if job.ack_status == AckStatus::NotAcked {
+                    // Who will clean this up.
+                    error!(
+                        self.log,
+                        "AAA This job might not get acked {:?}", job
+                    );
+                }
+            }
+        });
+
+        // All of IOState::New jobs are now IOState::Skipped, so clear our
+        // cache of new jobs for this downstairs.
+        self.ds_new[client_id].clear();
+    }
+
     /**
      * We have reconnected to a downstairs. Move every job since the
      * last flush for this client_id back to New, even if we already have
@@ -3559,7 +3642,9 @@ impl Downstairs {
 
                 // Check to see if this being skipped means we can ACK
                 // the job back to the guest.
-                if job.ack_status == AckStatus::Acked {
+                if job.ack_status == AckStatus::Acked
+                    || job.ack_status == AckStatus::Aborted
+                {
                     // Push this onto a queue to do the retire check when
                     // we aren't doing a mutable iteration.
                     retire_check.push(*ds_id);
@@ -3602,6 +3687,9 @@ impl Downstairs {
 
         // As this downstairs is now faulted, we clear the extent_limit.
         self.extent_limit.remove(&client_id);
+        // ZZZ Stop other things?  What else to fault?
+        // Maybe not notify other things, as we may need that channel
+        // to break through a stuck repair.
         notify_guest
     }
 
@@ -3703,6 +3791,7 @@ impl Downstairs {
                             .unwrap_or(*first as u64)
                     });
                     assert!(self.repair_min_id.is_some());
+                    assert!(self.repair_stop.is_some());
                     if io.work.send_io_live_repair(my_limit) {
                         // Leave this IO as New, the downstairs will receive it.
                         self.io_state_count.incr(&IOState::New, cid);
@@ -3796,7 +3885,7 @@ impl Downstairs {
 
     fn ack(&mut self, ds_id: JobId) {
         /*
-         * Move AckReady to Acked.
+         * Move AckReady -> Acked, or AbortReady -> Aborted.
          */
         let mut handle = self
             .ds_active
@@ -3805,13 +3894,16 @@ impl Downstairs {
             .unwrap();
         let job = handle.job();
 
-        if job.ack_status != AckStatus::AckReady {
-            panic!(
-                "Job {} not in proper state to ACK:{:?}",
-                ds_id, job.ack_status,
-            );
+        match job.ack_status {
+            AckStatus::AbortReady => job.ack_status = AckStatus::Aborted,
+            AckStatus::AckReady => job.ack_status = AckStatus::Acked,
+            _ => {
+                panic!(
+                    "Job {} not in proper state to ACK:{:?}",
+                    ds_id, job.ack_status,
+                );
+            }
         }
-        job.ack_status = AckStatus::Acked;
     }
 
     /*
@@ -4706,7 +4798,9 @@ impl Downstairs {
          * to the guest, then there will be no more work on this job
          * but messages may still be unprocessed.
          */
-        if job.ack_status == AckStatus::Acked {
+        if job.ack_status == AckStatus::Acked
+            || job.ack_status == AckStatus::Aborted
+        {
             drop(handle);
             self.retire_check(ds_id);
         } else if job.ack_status == AckStatus::NotAcked {
@@ -4771,7 +4865,10 @@ impl Downstairs {
                 // ahead of the ACK from something that flush depends on.
                 // The downstairs does handle the dependency.
                 let wc = job.state_count();
-                if wc.active != 0 || job.ack_status != AckStatus::Acked {
+                if wc.active != 0
+                    || (job.ack_status != AckStatus::Acked
+                        && job.ack_status != AckStatus::Aborted)
+                {
                     warn!(
                         self.log,
                         "[rc] leave job {} on the queue when removing {} {:?}",
@@ -4785,7 +4882,15 @@ impl Downstairs {
                 // Assert the job is actually done, then complete it
                 assert_eq!(wc.error + wc.skipped + wc.done, 3);
                 assert!(!self.completed.contains(&id));
-                assert_eq!(job.ack_status, AckStatus::Acked);
+                match job.ack_status {
+                    AckStatus::Acked | AckStatus::Aborted => {}
+                    _ => {
+                        panic!(
+                            "Retire check for job {:?} in invalid state {}",
+                            job, job.ack_status,
+                        );
+                    }
+                }
                 assert_eq!(job.ds_id, id);
 
                 retired.push(job.ds_id);
@@ -6247,6 +6352,10 @@ impl Upstairs {
         // Should we move jobs now?  When do we move work that has
         // been submitted over to "skipped"
         ds.ds_state[client_id] = new_state;
+        if new_state == DsState::Faulted {
+            warn!(self.log, "[{}] faulted, aborting all jobs", client_id);
+            ds.ds_fault_offline(client_id);
+        }
     }
 
     /*
@@ -8400,6 +8509,8 @@ pub enum AckStatus {
     NotAcked,
     AckReady,
     Acked,
+    AbortReady,
+    Aborted,
 }
 
 impl fmt::Display for AckStatus {
@@ -8415,6 +8526,12 @@ impl fmt::Display for AckStatus {
             }
             AckStatus::Acked => {
                 write!(f, "{0:>8}", "Acked")
+            }
+            AckStatus::AbortReady => {
+                write!(f, "{0:>8}", "AbortRdy")
+            }
+            AckStatus::Aborted => {
+                write!(f, "{0:>8}", "Aborted")
             }
         }
     }
@@ -9660,16 +9777,22 @@ async fn up_ds_listen(up: &Arc<Upstairs>, mut ds_done_rx: mpsc::Receiver<()>) {
         for ds_id_done in ack_list.iter() {
             let mut ds = up.downstairs.lock().await;
             debug!(up.log, "up_ds_listen process {}", ds_id_done);
-
-            let mut handle = ds.ds_active.get_mut(ds_id_done).unwrap();
+            let mut handle = match ds.ds_active.get_mut(ds_id_done) {
+                Some(handle) => handle,
+                None => {
+                    panic!("up_ds_listen can't find job {}", ds_id_done);
+                }
+            };
             let done = handle.job();
 
             /*
              * Make sure the job state has not changed since we made the
              * list.
              */
-            if done.ack_status != AckStatus::AckReady {
-                info!(
+            if done.ack_status != AckStatus::AckReady
+                && done.ack_status != AckStatus::AbortReady
+            {
+                warn!(
                     up.log,
                     "Job {} no longer ready, skip for now", ds_id_done
                 );
@@ -10197,7 +10320,7 @@ async fn up_listen(
                 gone_too_long(up, dst[0].ds_done_tx.clone()).await;
             }
             _ = sleep_until(repair_check_interval), if repair_check => {
-                match check_for_repair(up, &dst).await {
+                match check_and_run_repair(up, &dst).await {
                     RepairCheck::RepairStarted => {
                         repair_check = false;
                         info!(up.log, "Live Repair started");
@@ -10208,7 +10331,18 @@ async fn up_listen(
                     RepairCheck::RepairInProgress => {
                         repair_check = true;
                         repair_check_interval = deadline_secs(60.0);
-                        info!(up.log, "Live Repair in progress, try again");
+                        warn!(up.log, "Live Repair in progress, try again");
+                    },
+                    RepairCheck::RepairAborted => {
+                        repair_check = true;
+                        repair_check_interval = deadline_secs(2.0);
+                        warn!(up.log, "Live Repair aborted, try again");
+                        up.ds_state_show().await;
+                        // If no downstairs is in LiveRepair, then we are
+                        // the downstairs that needs to be in LiveRepair.
+                        // We have sent the abort signal to the running
+                        // live repair, so we give it just a little time to
+                        // clean up and then go try again.
                     },
                     RepairCheck::InvalidState => {
                         repair_check = false;
@@ -10713,6 +10847,7 @@ async fn show_all_work(up: &Arc<Upstairs>) -> WQCounts {
             break;
         }
     }
+    up.ds_state_show().await;
     println!();
     drop(up_done);
 

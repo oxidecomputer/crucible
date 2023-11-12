@@ -21,18 +21,20 @@ function ctrl_c() {
     echo "Stopping at your request"
     if ps -p "$dsc_pid" ; then
         ${dsc} cmd shutdown
-        wait "$dsc_pid"
+        # wait "$dsc_pid"
     fi
     if ps -p "$crutest_pid" ; then
         kill "$crutest_pid"
-        wait "$crutest_pid"
+        # wait "$crutest_pid"
     fi
+    exit 1
 }
 
 loop_log=/tmp/test_fail_live_repair_summary.log
 test_log=/tmp/test_fail_live_repair.log
 dsc_test_log=/tmp/test_fail_live_repair_dsc.log
 verify_file=/tmp/test_fail_live_verify
+aaa_log=/tmp/aaa_test_fail_live_verify
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export BINDIR=${BINDIR:-$ROOT/target/release}
@@ -55,6 +57,7 @@ fi
 
 echo "" > ${loop_log}
 echo "" > ${test_log}
+echo "" > ${aaa_log}
 echo "" > ${dsc_test_log}
 if [[ -f "$verify_file" ]]; then
     rm  ${verify_file}
@@ -88,20 +91,25 @@ done
 
 gen=1
 # Initial seed for verify file
+echo  "$crucible_test" fill "${args[@]}" -q -g "$gen"\
+          --verify-out "$verify_file" \
+          --retry-activate goeeeesto  "$test_log"
 if ! "$crucible_test" fill "${args[@]}" -q -g "$gen"\
           --verify-out "$verify_file" \
           --retry-activate >> "$test_log" 2>&1 ; then
     echo Failed on initial verify seed, check "$test_log"
     ${dsc} cmd shutdown
+    exit 1
 fi
 (( gen += 1 ))
 
-for i in {1..20}
+for i in {1..10}
 do
     SECONDS=0
     choice=$((RANDOM % 3))
 
     # The state of our chosen downstairs is based on an offset
+    grep AAA "$test_log" >> "$aaa_log"
     echo "" > "$test_log"
     echo "New loop starts now $(date) faulting: $choice" >> "$test_log"
     # Start sending IO.
@@ -113,9 +121,25 @@ do
     crutest_pid=$!
     sleep 5
 
-    curl -X POST http://127.0.0.1:7777/downstairs/fault/"${choice}"
+    ${dsc} cmd stop -c "$choice" >> "$dsc_test_log" 2>&1 &
+    # Wait for our downstairs to fault
+    echo Wait for our downstairs to fault
+    choice_state="undefined"
+    while [[ "$choice_state" != "faulted" ]]; do
+        sleep 3
+        if [[ $choice -eq 0 ]]; then
+            choice_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $8}')
+        elif [[ $choice -eq 1 ]]; then
+            choice_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $10}')
+        else
+            choice_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $12}')
+        fi
+    done
+
+    ${dsc} cmd start -c "$choice" >> "$dsc_test_log" 2>&1 &
 
     # Wait for our downstairs to begin live_repair
+    echo Wait for our downstairs to begin live_repair
     choice_state="undefined"
     while [[ "$choice_state" != "live_repair" ]]; do
         sleep 3
@@ -128,19 +152,24 @@ do
         fi
     done
 
-    # Let the repair do some repairing.
-    sleep 5
+    rand_sleep=$((RANDOM % 20))
+    sleep $rand_sleep
+    echo "Stop $choice again"
+    ${dsc} cmd stop -c "$choice" >> "$dsc_test_log" 2>&1 &
 
-    # Now fault the downstairs again.
-    curl -X POST http://127.0.0.1:7777/downstairs/fault/"${choice}"
+    sleep 2
+    echo "Start $choice for a second time"
+    ${dsc} cmd start -c "$choice" >> "$dsc_test_log" 2>&1 &
 
     # Now wait for all downstairs to be active
+    echo Now wait for all downstairs to be active
     all_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $8","$10","$12}')
     while [[ "${all_state}" != "active,active,active" ]]; do
         sleep 5
         all_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $8","$10","$12}')
     done
 
+    echo All downstairs active, now stop IO test and wait for it to finish
     kill -SIGUSR1 $crutest_pid
     wait $crutest_pid
     result=$?

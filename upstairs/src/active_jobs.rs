@@ -271,7 +271,10 @@ impl<'a> DownstairsIOHandle<'a> {
 impl<'a> std::ops::Drop for DownstairsIOHandle<'a> {
     fn drop(&mut self) {
         match (self.initial_status, self.job.ack_status) {
-            (AckStatus::NotAcked, AckStatus::AckReady) => {
+            (
+                AckStatus::NotAcked,
+                AckStatus::AckReady | AckStatus::AbortReady,
+            ) => {
                 let prev = self.ackable.insert(self.job.ds_id);
                 assert!(prev);
             }
@@ -279,15 +282,33 @@ impl<'a> std::ops::Drop for DownstairsIOHandle<'a> {
                 let prev = self.ackable.remove(&self.job.ds_id);
                 assert!(prev);
             }
+            (AckStatus::AbortReady, AckStatus::Aborted) => {
+                let prev = self.ackable.remove(&self.job.ds_id);
+                assert!(prev);
+            }
             // None transitions
             (AckStatus::AckReady, AckStatus::AckReady)
+            | (AckStatus::AckReady, AckStatus::AbortReady)
             | (AckStatus::Acked, AckStatus::Acked)
-            | (AckStatus::NotAcked, AckStatus::NotAcked) => (),
+            | (AckStatus::NotAcked, AckStatus::NotAcked)
+            | (AckStatus::AbortReady, AckStatus::AbortReady) => (),
+            (AckStatus::Aborted, AckStatus::Aborted) => (),
 
             // Invalid transitions!
             (AckStatus::NotAcked, AckStatus::Acked)
+            | (AckStatus::NotAcked, AckStatus::Aborted)
+            | (AckStatus::AckReady, AckStatus::Aborted)
             | (AckStatus::Acked, AckStatus::NotAcked)
-            | (AckStatus::Acked, AckStatus::AckReady) => {
+            | (AckStatus::Acked, AckStatus::AckReady)
+            | (AckStatus::Acked, AckStatus::AbortReady)
+            | (AckStatus::Acked, AckStatus::Aborted)
+            | (AckStatus::AbortReady, AckStatus::NotAcked)
+            | (AckStatus::AbortReady, AckStatus::AckReady)
+            | (AckStatus::AbortReady, AckStatus::Acked)
+            | (AckStatus::Aborted, AckStatus::Acked)
+            | (AckStatus::Aborted, AckStatus::NotAcked)
+            | (AckStatus::Aborted, AckStatus::AckReady)
+            | (AckStatus::Aborted, AckStatus::AbortReady) => {
                 panic!(
                     "invalid transition: {:?} => {:?}",
                     self.initial_status, self.job.ack_status

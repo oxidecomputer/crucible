@@ -83,7 +83,7 @@ pub struct ExtentInfo {
     pub dirty: bool,
 }
 
-// Return values from the check_for_repair function.
+// Return values from the check_and_run_repair function.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq)]
 pub enum RepairCheck {
@@ -93,13 +93,15 @@ pub enum RepairCheck {
     NoRepairNeeded,
     // We need repair, but a repair was already in progress
     RepairInProgress,
+    // A previous repair was aborted
+    RepairAborted,
     // Upstairs is not in a valid state for live repair
     InvalidState,
 }
 
 // Determine if we need to perform a live repair.
 // Return status in RepairCheck to indicate what the status is.
-pub async fn check_for_repair(
+pub async fn check_and_run_repair(
     up: &Arc<Upstairs>,
     dst: &[Target],
 ) -> RepairCheck {
@@ -149,53 +151,80 @@ pub async fn check_for_repair(
         info!(up.log, "No Live Repair required at this time");
         RepairCheck::NoRepairNeeded
     } else if repair > 0 {
-        // This also means repair_ready > 0
         // We can only have one live repair going at a time, so if a
         // downstairs has gone Faulted then to LiveRepairReady, it will have
         // to wait until the currently running LiveRepair has completed.
         warn!(up.log, "Upstairs already in repair, trying again later");
         RepairCheck::RepairInProgress
     } else {
-        // If a live repair was in progress and encountered an error, that
-        // downstairs itself will be marked Faulted.  It is possible for
-        // that downstairs to reconnect and get back to LiveRepairReady
-        // and be requesting for a repair before the repair task has wrapped
-        // up the failed repair that this downstairs was part of.  For that
-        // situation, let the repair finish and retry this repair request.
-        if ds.repair_min_id.is_some() {
-            warn!(up.log, "Upstairs repair task running, trying again later");
-            return RepairCheck::RepairInProgress;
-        }
+        assert_eq!(repair, 0);
+        // We have a downstairs that need repair.
+        // We don't have any downstairs that are being repaired at the moment.
+        // We do need to check and see if the downstairs that wants to be
+        // repaired now was possibly under repair before.  That prior repair
+        // could have aborted in a way that left the repair process waiting for
+        // an answer from a downstairs that was never going to come, or, the
+        // repair task has just not quite finished cleaning up after itself
+        // and will do so shortly.
+        match ds.repair_stop {
+            Some(ref repair_stop) => {
+                assert!(ds.repair_min_id.is_some());
+                // If set, it this means the same downstairs that needs
+                // repair is also the one that was under repair.
+                // Send the live repair task a message that it needs to
+                // stop trying and abort and clean things up so we can start a
+                // new live repair.
+                warn!(up.log, "LR in progress but without a downstairs");
+                let res = repair_stop.send(true).await;
+                warn!(up.log, "Sent stop request, got: {:?}", res);
+                // If we are sending repair stop, we should also
+                // clear extent_limit  ZZZ XXX
+                return RepairCheck::RepairAborted;
+            }
+            None => {
+                assert!(ds.repair_min_id.is_none());
+                // Move the upstairs that were LiveRepairReady to
+                // LiveRepair.  We do this now while we have the lock to avoid
+                // having to do all these checks again in live_repair_main
+                for cid in ClientId::iter() {
+                    if ds.ds_state[cid] == DsState::LiveRepairReady {
+                        up.ds_transition_with_lock(
+                            &mut ds,
+                            up_state,
+                            cid,
+                            DsState::LiveRepair,
+                        );
+                    }
+                }
 
-        // Move the upstairs that were RR to officially ready.
-        // We do this now while we have the lock to avoid having to do all
-        // these checks again in live_repair_main
-        for cid in ClientId::iter() {
-            if ds.ds_state[cid] == DsState::LiveRepairReady {
-                up.ds_transition_with_lock(
-                    &mut ds,
-                    up_state,
-                    cid,
-                    DsState::LiveRepair,
-                );
+                // Create the channel we can use to abort a repair.
+                let (repair_stop_tx, mut repair_stop_rx) =
+                    mpsc::channel::<bool>(1);
+                ds.repair_stop = Some(repair_stop_tx);
+
+                // This being set indicates a LiveRepair is in progress.
+                ds.repair_min_id = Some(ds.peek_next_id());
+                drop(ds);
+
+                let upc = Arc::clone(up);
+                let mut ds_work_vec = Vec::with_capacity(3);
+                for d in dst.iter().take(3) {
+                    ds_work_vec.push(d.ds_work_tx.clone());
+                }
+                let ds_done_tx = dst[0].ds_done_tx.clone();
+                tokio::spawn(async move {
+                    let res = live_repair_main(
+                        &upc,
+                        ds_work_vec,
+                        ds_done_tx,
+                        &mut repair_stop_rx,
+                    )
+                    .await;
+                    warn!(upc.log, "Live Repair returns {:?}", res);
+                });
+                RepairCheck::RepairStarted
             }
         }
-
-        // This being set indicates a LiveRepair is in progress.
-        ds.repair_min_id = Some(ds.peek_next_id());
-        drop(ds);
-
-        let upc = Arc::clone(up);
-        let mut ds_work_vec = Vec::with_capacity(3);
-        for d in dst.iter().take(3) {
-            ds_work_vec.push(d.ds_work_tx.clone());
-        }
-        let ds_done_tx = dst[0].ds_done_tx.clone();
-        tokio::spawn(async move {
-            let res = live_repair_main(&upc, ds_work_vec, ds_done_tx).await;
-            warn!(upc.log, "Live Repair returns {:?}", res);
-        });
-        RepairCheck::RepairStarted
     }
 }
 
@@ -225,6 +254,7 @@ async fn live_repair_main(
     up: &Arc<Upstairs>,
     ds_work_vec: Vec<mpsc::Sender<u64>>,
     ds_done_tx: mpsc::Sender<()>,
+    repair_stop_rx: &mut mpsc::Receiver<bool>,
 ) -> Result<()> {
     let log = up.log.new(o!("task" => "repair".to_string()));
     warn!(log, "Live Repair main task begins.");
@@ -249,6 +279,8 @@ async fn live_repair_main(
     // When we transitioned this downstairs to LiveRepair, it should have set
     // the minimum for repair, though we will update it again below.
     assert!(ds.repair_min_id.is_some());
+    // We should have a stop channel setup for the repair.
+    assert!(ds.repair_stop.is_some());
 
     for cid in ClientId::iter() {
         match ds.ds_state[cid] {
@@ -315,7 +347,7 @@ async fn live_repair_main(
         cdt::extent__or__start!(|| (eid));
 
         if failed_repair {
-            info!(log, "extent {} repair has failed", eid);
+            error!(log, "extent {} repair has failed", eid);
             let active = up.active.lock().await;
             let up_state = active.up_state;
             if up_state != UpState::Active {
@@ -329,11 +361,22 @@ async fn live_repair_main(
 
             // Verify state has been cleared.
             for cid in ClientId::iter() {
+                if ds.extent_limit.get(&cid).is_some() {
+                    warn!(
+                        log,
+                        "ZZZ extent {} repair has failed, about to panic", eid
+                    );
+                    //ds.extent_limit.remove(&cid);
+                }
+                // Special case, if we aborted this, when can
+                // we throw out extent limit?
+
                 assert!(ds.extent_limit.get(&cid).is_none());
                 assert!(ds.ds_state[cid] != DsState::LiveRepair);
             }
-            // This will not be set until the repair task exits.
+            // This will not be cleared until the repair task exits.
             assert!(ds.repair_min_id.is_some());
+            assert!(ds.repair_stop.is_some());
 
             if ds.query_repair_ids(eid) {
                 // There are some reservations we need to clear out.
@@ -351,6 +394,7 @@ async fn live_repair_main(
                 source_downstairs,
                 repair_downstairs.clone(),
                 &ds_done_tx,
+                repair_stop_rx,
             )
             .await
             .is_err()
@@ -847,6 +891,7 @@ impl Upstairs {
     // take action to abort the repair process.
     // If we changed abort_repair to true, return that, otherwise return
     // whatever was sent to us.
+    #[allow(clippy::too_many_arguments)]
     async fn wait_and_process_repair_ack(
         &self,
         brw: block_req::BlockReqWaiter,
@@ -854,28 +899,64 @@ impl Upstairs {
         eid: u64,
         mut abort_repair: bool,
         ds_done_tx: &mpsc::Sender<()>,
+        repair_stop_rx: &mut mpsc::Receiver<bool>,
+        repair: &[ClientId],
     ) -> bool {
         // Independent of the current abort_repair state, we wait for
         // the ACK from a job we have submitted to the work queue.
-        match brw.wait().await {
-            Ok(()) => {
-                debug!(self.log, "Extent {} id:{} Done", eid, ds_id);
-            }
-            Err(e) => {
-                error!(
-                    self.log,
-                    "Extent {} close id:{} Failed: {}", eid, ds_id, e
-                );
-                // If we don't already have an error, then go ahead
-                // and take the error action path now.
+        //
+        // We also wait on a "bail out" signal that could come from
+        // the outside telling us that it's time to give up on this repair
+        // and move on.
+
+        let mut new_abort_repair = false;
+        let mut repair_stop = false;
+        tokio::select! {
+            ss = repair_stop_rx.recv() => {
+                warn!(self.log, "RR stop repair received: {:?}", ss);
                 if !abort_repair {
-                    let active = self.active.lock().await;
-                    let up_state = active.up_state;
-                    let mut ds = self.downstairs.lock().await;
-                    drop(active);
-                    self.abort_repair_ds(&mut ds, up_state, ds_done_tx);
-                    abort_repair = true;
+                    new_abort_repair = true;
                 }
+                repair_stop = true;
+            }
+            brw_status = brw.wait() => {
+                match brw_status {
+                    Ok(()) => {
+                        debug!(self.log, "Extent {} id:{} Done", eid, ds_id);
+                    }
+                    Err(e) => {
+                        error!(
+                            self.log,
+                            "Extent {} job id:{} Failed: {}", eid, ds_id, e
+                        );
+                        // If we don't already have an error, then go ahead
+                        // and take the error action path now.
+                        if !abort_repair {
+                            new_abort_repair = true;
+                        }
+                    }
+                }
+            }
+        }
+        if new_abort_repair {
+            let active = self.active.lock().await;
+            let up_state = active.up_state;
+            let mut ds = self.downstairs.lock().await;
+            drop(active);
+            self.abort_repair_ds(&mut ds, up_state, ds_done_tx);
+            abort_repair = true;
+        }
+        if repair_stop {
+            let mut ds = self.downstairs.lock().await;
+            assert_eq!(
+                ds.ds_state
+                    .iter()
+                    .filter(|state| **state == DsState::LiveRepair)
+                    .count(),
+                0
+            );
+            for cid in repair.iter().copied() {
+                ds.abort_job(ds_id, cid);
             }
         }
         abort_repair
@@ -946,6 +1027,7 @@ impl Upstairs {
         source: ClientId,
         repair: Vec<ClientId>,
         ds_done_tx: &mpsc::Sender<()>,
+        repair_stop_rx: &mut mpsc::Receiver<bool>,
     ) -> Result<()> {
         debug!(self.log, "RE:{} Repair extent begins", eid);
 
@@ -987,6 +1069,7 @@ impl Upstairs {
             bail!("Abort repair due to state change in downstairs");
         }
         assert!(ds.repair_min_id.is_some());
+        assert!(ds.repair_stop.is_some());
         assert!(ds.repair_info.is_empty());
 
         // Update our extent limit to this extent.
@@ -1090,7 +1173,13 @@ impl Upstairs {
 
         let mut abort_repair = self
             .wait_and_process_repair_ack(
-                close_brw, close_id, eid, false, ds_done_tx,
+                close_brw,
+                close_id,
+                eid,
+                false,
+                ds_done_tx,
+                repair_stop_rx,
+                &repair,
             )
             .await;
 
@@ -1117,6 +1206,7 @@ impl Upstairs {
         // If we are aborting the repair, then send a NoOp now.
         // Otherwise, send the repair IO.
         let repair_brw = if abort_repair {
+            warn!(self.log, "RE: aborting repair close failed");
             create_and_enqueue_noop_io(
                 &mut ds,
                 &mut gw,
@@ -1160,6 +1250,8 @@ impl Upstairs {
                 eid,
                 abort_repair,
                 ds_done_tx,
+                repair_stop_rx,
+                &repair,
             )
             .await;
 
@@ -1215,6 +1307,8 @@ impl Upstairs {
                 eid,
                 abort_repair,
                 ds_done_tx,
+                repair_stop_rx,
+                &repair,
             )
             .await;
 
@@ -1237,8 +1331,12 @@ impl Upstairs {
                 eid,
                 abort_repair,
                 ds_done_tx,
+                repair_stop_rx,
+                &repair,
             )
             .await;
+
+        warn!(self.log, "Done with final repair ack");
 
         // One final check to be sure nothing we need has gone astray
         // for these last few commands, but only if we are not already
@@ -1275,8 +1373,10 @@ impl Upstairs {
                     .count(),
                 0
             );
+
             bail!("Failed to repair extent {}", eid)
         } else {
+            info!(self.log, "RE: All done in repair world");
             Ok(())
         }
     }
@@ -1290,7 +1390,9 @@ pub mod repair_test {
     // Test function to create just enough of an Upstairs for our needs.
     // The caller will indicate which downstairs client it wished to be
     // moved to LiveRepair.
-    async fn create_test_upstairs(fail_id: ClientId) -> Arc<Upstairs> {
+    async fn create_test_upstairs(
+        fail_id: ClientId,
+    ) -> (Arc<Upstairs>, mpsc::Receiver<bool>) {
         let mut ddef = RegionDefinition::default();
         ddef.set_block_size(512);
         ddef.set_extent_size(Block::new_512(3));
@@ -1312,9 +1414,13 @@ pub mod repair_test {
         up.ds_transition(fail_id, DsState::Faulted).await;
         up.ds_transition(fail_id, DsState::LiveRepairReady).await;
         up.ds_transition(fail_id, DsState::LiveRepair).await;
-        up.downstairs.lock().await.repair_min_id = Some(JobId(1000));
+        let mut ds = up.downstairs.lock().await;
+        ds.repair_min_id = Some(JobId(1000));
+        let (repair_stop_tx, repair_stop_rx) = mpsc::channel::<bool>(1);
+        ds.repair_stop = Some(repair_stop_tx);
+        drop(ds);
 
-        up
+        (up, repair_stop_rx)
     }
 
     fn csl() -> Logger {
@@ -1420,12 +1526,13 @@ pub mod repair_test {
         or_ds: ClientId,
     ) -> (
         Arc<Upstairs>,
+        // tokio::task::JoinHandle<std::result::Result<(), anyhow::Error>>,
         tokio::task::JoinHandle<()>,
         Vec<mpsc::Receiver<u64>>,
     ) {
         assert!(or_ds.get() < 3);
         let source_ds = ClientId::new((or_ds.get() + 1) % 3);
-        let up = create_test_upstairs(or_ds).await;
+        let (up, mut repair_stop_rx) = create_test_upstairs(or_ds).await;
         let (dst, ds_work_rx) = create_test_dst_rx();
         let mut ds_work_vec = Vec::with_capacity(3);
         for this_target in dst.iter().take(3) {
@@ -1441,9 +1548,10 @@ pub mod repair_test {
                 source_ds,
                 [or_ds].to_vec(),
                 &ds_done_tx,
+                &mut repair_stop_rx,
             )
             .await
-            .unwrap();
+            .unwrap()
         });
 
         // The first thing that should happen after we start repair_exetnt
@@ -1460,7 +1568,7 @@ pub mod repair_test {
     }
 
     #[tokio::test]
-    async fn test_check_for_repair_normal() {
+    async fn test_check_and_run_repair_normal() {
         // No repair needed here.
         // Verify we can't repair when the upstairs is not active.
         // Verify we wont try to repair if it's not needed.
@@ -1474,7 +1582,7 @@ pub mod repair_test {
 
         // Before we are active, we return InvalidState
         assert_eq!(
-            check_for_repair(&up, &dst).await,
+            check_and_run_repair(&up, &dst).await,
             RepairCheck::InvalidState
         );
 
@@ -1485,7 +1593,7 @@ pub mod repair_test {
             up.ds_transition(cid, DsState::Active).await;
         }
         assert_eq!(
-            check_for_repair(&up, &dst).await,
+            check_and_run_repair(&up, &dst).await,
             RepairCheck::NoRepairNeeded
         );
 
@@ -1494,11 +1602,12 @@ pub mod repair_test {
         for cid in ClientId::iter() {
             assert_eq!(ds.ds_state[cid], DsState::Active);
         }
-        assert!(ds.repair_min_id.is_none())
+        assert!(ds.repair_min_id.is_none());
+        assert!(ds.repair_stop.is_none());
     }
 
     #[tokio::test]
-    async fn test_check_for_repair_do_repair() {
+    async fn test_check_and_run_repair_do_repair() {
         // No repair needed here.
         let (dst, _ds_work_rx) = create_test_dst_rx();
         let mut ddef = RegionDefinition::default();
@@ -1517,16 +1626,17 @@ pub mod repair_test {
         up.ds_transition(ClientId::new(1), DsState::LiveRepairReady)
             .await;
         assert_eq!(
-            check_for_repair(&up, &dst).await,
+            check_and_run_repair(&up, &dst).await,
             RepairCheck::RepairStarted
         );
         let ds = up.downstairs.lock().await;
         assert_eq!(ds.ds_state[ClientId::new(1)], DsState::LiveRepair);
-        assert!(ds.repair_min_id.is_some())
+        assert!(ds.repair_min_id.is_some());
+        assert!(ds.repair_stop.is_some())
     }
 
     #[tokio::test]
-    async fn test_check_for_repair_do_two_repair() {
+    async fn test_check_and_run_repair_do_two_repair() {
         // No repair needed here.
         let (dst, _ds_work_rx) = create_test_dst_rx();
         let mut ddef = RegionDefinition::default();
@@ -1548,18 +1658,19 @@ pub mod repair_test {
         up.ds_transition(ClientId::new(2), DsState::LiveRepairReady)
             .await;
         assert_eq!(
-            check_for_repair(&up, &dst).await,
+            check_and_run_repair(&up, &dst).await,
             RepairCheck::RepairStarted
         );
         let ds = up.downstairs.lock().await;
         assert_eq!(ds.ds_state[ClientId::new(0)], DsState::Active);
         assert_eq!(ds.ds_state[ClientId::new(1)], DsState::LiveRepair);
         assert_eq!(ds.ds_state[ClientId::new(2)], DsState::LiveRepair);
-        assert!(ds.repair_min_id.is_some())
+        assert!(ds.repair_min_id.is_some());
+        assert!(ds.repair_stop.is_some())
     }
 
     #[tokio::test]
-    async fn test_check_for_repair_already_repair() {
+    async fn test_check_and_run_repair_already_repair() {
         // No repair needed here.
         let (dst, _ds_work_rx) = create_test_dst_rx();
         let mut ddef = RegionDefinition::default();
@@ -1584,13 +1695,15 @@ pub mod repair_test {
         up.ds_transition(ClientId::new(0), DsState::LiveRepairReady)
             .await;
         assert_eq!(
-            check_for_repair(&up, &dst).await,
+            check_and_run_repair(&up, &dst).await,
             RepairCheck::RepairInProgress
         );
     }
 
     #[tokio::test]
-    async fn test_check_for_repair_task_running() {
+    async fn test_check_and_run_repair_results() {
+        // Walk through the different situations and capture the expected
+        // behavior from the check_and_run_repair() function.
         let (dst, _ds_work_rx) = create_test_dst_rx();
         let mut ddef = RegionDefinition::default();
         ddef.set_block_size(512);
@@ -1604,18 +1717,49 @@ pub mod repair_test {
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
         }
-        up.ds_transition(ClientId::new(1), DsState::Faulted).await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady)
+
+        // All good, no repair needed
+        assert_eq!(
+            check_and_run_repair(&up, &dst).await,
+            RepairCheck::NoRepairNeeded
+        );
+
+        // One downstairs is ready for repair:
+        up.ds_transition(ClientId::new(2), DsState::Faulted).await;
+        up.ds_transition(ClientId::new(2), DsState::LiveRepairReady)
             .await;
-        let mut ds = up.downstairs.lock().await;
-        ds.repair_min_id = Some(JobId(3));
+
+        // If we check now, we should be told that a repair was started
+        assert_eq!(
+            check_and_run_repair(&up, &dst).await,
+            RepairCheck::RepairStarted
+        );
+        let ds = up.downstairs.lock().await;
+        assert!(ds.repair_min_id.is_some());
+        assert!(ds.repair_stop.is_some());
         drop(ds);
 
+        // Because we are, in theory, now repairing this downstairs, a call
+        // to check_and_run_repair will not indicate any new repairs are needed.
         assert_eq!(
-            check_for_repair(&up, &dst).await,
-            RepairCheck::RepairInProgress
+            check_and_run_repair(&up, &dst).await,
+            RepairCheck::NoRepairNeeded
+        );
+
+        // That same downstairs now exits repair, and comes back around and
+        // wants to try again.  We should now see oud previous repair in
+        // progress.  As this client is the same client that was being
+        // repaired, the check will determine that our previous repair
+        // failed and indicate that it needed to be aborted.
+        up.ds_transition(ClientId::new(2), DsState::Faulted).await;
+        up.ds_transition(ClientId::new(2), DsState::LiveRepairReady)
+            .await;
+        assert_eq!(
+            check_and_run_repair(&up, &dst).await,
+            RepairCheck::RepairAborted
         );
     }
+
     // Test the permutations of calling repair_extent with each downstairs
     // as the one needing LiveRepair
     #[tokio::test]
@@ -2431,6 +2575,7 @@ pub mod repair_test {
         let ds = up.downstairs.lock().await;
         assert_eq!(ds.ds_active.len(), 4);
 
+        error!(up.log, "Alan");
         // Differences from the usual path start here.
         let job = ds.ds_active.get(&ds_noop_id).unwrap();
         match &job.work {
@@ -2596,7 +2741,7 @@ pub mod repair_test {
     async fn test_reserve_extent_repair_ids() {
         // Verify that we can reserve extent IDs for repair work, and they
         // are allocated as expected.
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
 
         let mut ds = up.downstairs.lock().await;
         assert!(!ds.query_repair_ids(0));
@@ -2640,7 +2785,7 @@ pub mod repair_test {
         // Verify that IOs put on the queue when a downstairs is
         // in LiveRepair and extent_limit is still None will be skipped
         // only by the downstairs that is in LiveRepair..
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         up.submit_write(
@@ -2690,7 +2835,7 @@ pub mod repair_test {
         // Verify that io put on the queue when a downstairs is
         // in LiveRepair and the IO is below the extent_limit
         // will be sent to all downstairs for processing.
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
@@ -2746,7 +2891,7 @@ pub mod repair_test {
         // For this situation, we are relying on the submit_write method
         // of the Upstairs to correctly add the dependencies for the
         // in flight or soon to be in flight repair jobs.
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
@@ -2798,7 +2943,7 @@ pub mod repair_test {
         // Verify that an IO put on the queue when a downstairs is
         // in LiveRepair and the IO is above the extent_limit will
         // be skipped by the downstairs that is in LiveRepair..
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
@@ -2890,7 +3035,7 @@ pub mod repair_test {
         //   4 | W W W | W W W | W W W | 3
         //   5 | R R R | R R R | R R R | 4
         //   6 | WuWuWu| WuWuWu| WuWuWu| 5
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
@@ -2978,7 +3123,7 @@ pub mod repair_test {
         //   3 |       |       | RpRpRp|
         //   4 | R R R | R R R | R R R | 3
         //
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
@@ -3044,7 +3189,7 @@ pub mod repair_test {
         //   3 |       |       | RpRpRp|
         //   4 | W W W | W W W | W W W | 3
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
@@ -3116,7 +3261,7 @@ pub mod repair_test {
         //   7 |       |       | RpRpRp|
         //   8 | W W W | W W W | W W W | 3,7
         //
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
@@ -3153,7 +3298,7 @@ pub mod repair_test {
         // result and put it on the live repair hashmap.
         // As we don't have an actual downstairs here, we "fake it" by
         // feeding the responses we expect back from the downstairs.
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
 
         let mut gw = up.guest.guest_work.lock().await;
         let mut ds = up.downstairs.lock().await;
@@ -3735,7 +3880,7 @@ pub mod repair_test {
         // Make sure the create_and_enqueue_reopen_io() function does
         // what we expect it to do, which also tests create_reopen_io()
         // function as well.
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
 
         let mut gw = up.guest.guest_work.lock().await;
         let mut ds = up.downstairs.lock().await;
@@ -3793,7 +3938,7 @@ pub mod repair_test {
         // Make sure the create_and_enqueue_close_io() function does
         // what we expect it to do, which also tests create_close_io()
         // function as well.
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
 
         let mut gw = up.guest.guest_work.lock().await;
         let mut ds = up.downstairs.lock().await;
@@ -3871,7 +4016,7 @@ pub mod repair_test {
         // what we expect it to do, which also tests create_repair_io()
         // function as well.  In this case we expect the job created to
         // be a no-op job.
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
 
         let mut gw = up.guest.guest_work.lock().await;
         let mut ds = up.downstairs.lock().await;
@@ -3939,7 +4084,7 @@ pub mod repair_test {
         // Make sure the create_and_enqueue_repair_io() function does
         // what we expect it to do, which also tests create_repair_io()
         // function as well.
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
 
         let mut gw = up.guest.guest_work.lock().await;
         let mut ds = up.downstairs.lock().await;
@@ -4110,7 +4255,7 @@ pub mod repair_test {
         //   5 | RpRpRp| 4
         //   6 | RpRpRp| 5
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         // Write operations 0 to 2
@@ -4167,7 +4312,7 @@ pub mod repair_test {
         //   5 | RpRpRp| 4
         //   6 | RpRpRp| 5
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         // Create read operations 0 to 2
@@ -4223,7 +4368,7 @@ pub mod repair_test {
         //   5 |RpRpRp |
         //   6 |RpRpRp |
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         up.submit_read(
@@ -4287,7 +4432,7 @@ pub mod repair_test {
         //   1 | RpRpRp| 0
         //   2 | RpRpRp| 1
         //   3 | RpRpRp| 2
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let eid = 0;
         create_and_enqueue_repair_ops(&up, eid).await;
 
@@ -4318,7 +4463,7 @@ pub mod repair_test {
         //   3 | RpRpRp| 2
         //   4 |     W | 3
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         // Repair IO functions assume you have the locks
@@ -4364,7 +4509,7 @@ pub mod repair_test {
         //   2 | RpRpRp|
         //   3 | RpRpRp|
         //   4 | R     | 3
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         // Repair IO functions assume you have the locks already
@@ -4409,7 +4554,7 @@ pub mod repair_test {
         //   2 | RpRpRp|
         //   3 | RpRpRp|
         //   4 | F F F | 3
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         // Repair IO functions assume you have the locks already
@@ -4450,7 +4595,7 @@ pub mod repair_test {
         //   3 |       | RpRpRp|       |
         //   4 |       | RpRpRp|       |
         //   5 |       | RpRpRp|       |
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         up.submit_write(
@@ -4497,7 +4642,7 @@ pub mod repair_test {
         //   3 |       | RpRpRp|       |
         //   4 |       |       |   R   |
         //   5 |  W    |       |       |
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         create_and_enqueue_repair_ops(&up, 1).await;
@@ -4544,7 +4689,7 @@ pub mod repair_test {
         //   3 |       | RpRpRp|
         //   4 |       | RpRpRp|
         //   5 | F F F | F F F | 0,4
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         up.submit_flush(None, None, ds_done_tx.clone())
@@ -4587,7 +4732,7 @@ pub mod repair_test {
         //   6 |       | RpRpRp|
         //   7 |       | RpRpRp|
         //   8 |       | RpRpRp|
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         create_and_enqueue_repair_ops(&up, 0).await;
@@ -4623,7 +4768,7 @@ pub mod repair_test {
         //   3 |       | RpRpRp| 0
         //   4 |       | RpRpRp| 0
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         // A write of blocks 1,2 and 3 which spans the extent.
@@ -4660,7 +4805,7 @@ pub mod repair_test {
         //   3 | RpRpRp|       |
         //   4 | RpRpRp|       |
         //
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         // A write of blocks 2,3 and 4 which spans the extent.
@@ -4699,7 +4844,7 @@ pub mod repair_test {
         //   3 |       | RpRpRp|
         //   4 |       | RpRpRp|
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         // A read of blocks 1,2 and 3 which spans the extent.
@@ -4735,7 +4880,7 @@ pub mod repair_test {
         //   3 | RpRpRp|       |
         //   4 | RpRpRp|       |
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         // A read of blocks 2,3 and 4 which spans the extent.
@@ -4778,7 +4923,7 @@ pub mod repair_test {
         //   7 |       | RpRpRp| 6
         //   8 |       | RpRpRp| 6
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         // A write of blocks 2 and 3 which spans the extent.
@@ -4817,7 +4962,7 @@ pub mod repair_test {
         //   3 |       | RpRpRp|       |
         //   4 |       | RpRpRp|       |
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         // A read of blocks 0-8, spans three extents.
@@ -4885,7 +5030,7 @@ pub mod repair_test {
         // We also verify that the job IDs make sense for our repair id
         // reservation that happens when we need to insert a job like this.
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         create_and_enqueue_repair_ops(&up, 0).await;
@@ -4929,7 +5074,7 @@ pub mod repair_test {
         //   3 |       | RpRpRp| 2
         //   4 |   R R | R     | 3
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         create_and_enqueue_repair_ops(&up, 1).await;
@@ -4967,7 +5112,7 @@ pub mod repair_test {
         //   4 |       | RpRpRp|       |
         //   5 |       | RpRpRp|       |
         //
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         up.submit_read(
@@ -5028,7 +5173,7 @@ pub mod repair_test {
         //  13 |       |       | RpRpRp| 12
         //  14 |       |       | RpRpRp| 13
         //  15 |       |       | RpRpRp| 14
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         up.submit_write(
@@ -5121,7 +5266,7 @@ pub mod repair_test {
         //   0 |   R   |       |
         //   0 | F F F | F F F | 0,1
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         // A write of blocks 2,3,4 which spans the extent.
@@ -5191,7 +5336,7 @@ pub mod repair_test {
         //   3 |       | RpRpRp|
         //   4 |     W | W W   | 3
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
@@ -5246,7 +5391,7 @@ pub mod repair_test {
         //   3 |       | RpRpRp| 2
         //  *4 |     R | R R   | 3
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
@@ -5298,7 +5443,7 @@ pub mod repair_test {
         // ----|-------|-------|-----
         //   0 | F F F | F F F |
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
@@ -5320,7 +5465,7 @@ pub mod repair_test {
     async fn test_live_repair_send_io_write_below() {
         // Verify that we will send a write during LiveRepair when
         // the IO is an extent that is already repaired.
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
@@ -5393,7 +5538,7 @@ pub mod repair_test {
         // Move the LiveRepair downstairs to Faulted.
         // Move all IO for that downstairs to skipped.
         // Clear the extent_limit setting for that downstairs.
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let eid = 0u64;
@@ -5430,7 +5575,7 @@ pub mod repair_test {
         // Starting with one downstairs in LiveRepair state and future
         // repair job IDs reserved (but not created yet). The functions
         // will verify that four noop repair jobs will be queued.
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let eid = 0u64;
@@ -5476,7 +5621,7 @@ pub mod repair_test {
         // have been reserved (but not created yet). The functions will
         // clear the reserved repair jobs, but not bother to submit them
         // as once a downstairs has failed, it's not doing any more work.
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         up.ds_transition(ClientId::new(0), DsState::Faulted).await;
         up.ds_transition(ClientId::new(2), DsState::Faulted).await;
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
@@ -5571,6 +5716,8 @@ pub mod repair_test {
 
         let mut ds = up.downstairs.lock().await;
         ds.repair_min_id = Some(ds.peek_next_id());
+        let (repair_stop_tx, mut _repair_stop_rx) = mpsc::channel::<bool>(1);
+        ds.repair_stop = Some(repair_stop_tx);
         drop(ds);
         // New jobs will go -> Skipped for the downstairs in repair.
         submit_three_ios(&up, &ds_done_tx).await;
@@ -5666,6 +5813,8 @@ pub mod repair_test {
             .await;
         let mut ds = up.downstairs.lock().await;
         ds.repair_min_id = Some(ds.peek_next_id());
+        let (repair_stop_tx, mut _repair_stop_rx) = mpsc::channel::<bool>(1);
+        ds.repair_stop = Some(repair_stop_tx);
         drop(ds);
 
         // New jobs will go -> Skipped for the downstairs in repair.
@@ -5792,6 +5941,8 @@ pub mod repair_test {
             .await;
         let mut ds = up.downstairs.lock().await;
         ds.repair_min_id = Some(ds.peek_next_id());
+        let (repair_stop_tx, mut _repair_stop_rx) = mpsc::channel::<bool>(1);
+        ds.repair_stop = Some(repair_stop_tx);
         drop(ds);
 
         // Put a repair job on the queue.
@@ -5964,6 +6115,8 @@ pub mod repair_test {
         let mut gw = up.guest.guest_work.lock().await;
         let mut ds = up.downstairs.lock().await;
         ds.repair_min_id = Some(ds.peek_next_id());
+        let (repair_stop_tx, mut _repair_stop_rx) = mpsc::channel::<bool>(1);
+        ds.repair_stop = Some(repair_stop_tx);
         ds.extent_limit.insert(ClientId::new(1), eid as usize);
 
         // Upstairs "guest" work IDs.
@@ -6115,7 +6268,7 @@ pub mod repair_test {
         //   6 |       |     W | 3
         //
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         // Make downstairs 1 in LiveRepair
         up.ds_transition(ClientId::new(1), DsState::Faulted).await;
         up.ds_transition(ClientId::new(1), DsState::LiveRepairReady)
@@ -6210,7 +6363,7 @@ pub mod repair_test {
         // read job in this example), then it needs reserved repair job IDs for
         // every extent that it touches.
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let (up, _) = create_test_upstairs(ClientId::new(1)).await;
         // Make downstairs 1 in LiveRepair
         up.ds_transition(ClientId::new(1), DsState::Faulted).await;
         up.ds_transition(ClientId::new(1), DsState::LiveRepairReady)

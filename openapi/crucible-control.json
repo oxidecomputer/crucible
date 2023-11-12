@@ -74,7 +74,9 @@
         "enum": [
           "NotAcked",
           "AckReady",
-          "Acked"
+          "Acked",
+          "AbortReady",
+          "Aborted"
         ]
       },
       "DownstairsWork": {
