@@ -3977,10 +3977,8 @@ impl Downstairs {
         response: &mut ReadResponse,
         log: &Logger,
     ) -> Result<Option<u64>, CrucibleError> {
-        // check integrity hashes - make sure at least one is correct.
-        let mut valid_hash = None;
-
         if !response.block_contexts.is_empty() {
+            // check integrity hashes - make sure at least one is correct.
             let mut successful_hash = false;
             let computed_hash = integrity_hash(&[&response.data[..]]);
 
@@ -3998,7 +3996,8 @@ impl Downstairs {
                 response
                     .block_contexts
                     .retain(|context| context.hash == computed_hash);
-                valid_hash = Some(computed_hash);
+
+                Ok(Some(computed_hash))
             } else {
                 // No integrity hash was correct for this response
                 error!(log, "No match computed hash:0x{:x}", computed_hash,);
@@ -4024,9 +4023,9 @@ impl Downstairs {
             //
             // XXX if it's not a blank block, we may be under attack?
             assert!(response.data[..].iter().all(|&x| x == 0));
-        }
 
-        Ok(valid_hash)
+            Ok(None)
+        }
     }
 
     /// Returns:
