@@ -14,6 +14,17 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export BINDIR=${BINDIR:-$ROOT/target/release}
 
 echo "Nightly starts at $(date)" | tee "$output_file"
+echo "$(date) LiveRepairFail start" >> "$output_file"
+banner LRFail
+./tools/test_fail_live_repair.sh -l 40
+res=$?
+if [[ "$res" -eq 0 ]]; then
+    echo "$(date) LiveRepairFail pass" >> "$output_file"
+else
+    echo "$(date) LiveRepairFail failed with: $res" >> "$output_file"
+    (( err += 1 ))
+fi
+
 echo "$(date) hammer start" >> "$output_file"
 banner hammer
 ./tools/hammer_loop.sh -l 200

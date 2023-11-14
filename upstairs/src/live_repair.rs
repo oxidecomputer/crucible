@@ -178,7 +178,6 @@ pub async fn check_and_run_repair(
                 let res = repair_stop.send(true).await;
                 warn!(up.log, "Sent stop request, got: {:?}", res);
                 // If we are sending repair stop, we should also
-                // clear extent_limit  ZZZ XXX
                 return RepairCheck::RepairAborted;
             }
             None => {
@@ -361,20 +360,11 @@ async fn live_repair_main(
 
             // Verify state has been cleared.
             for cid in ClientId::iter() {
-                if ds.extent_limit.get(&cid).is_some() {
-                    warn!(
-                        log,
-                        "ZZZ extent {} repair has failed, about to panic", eid
-                    );
-                    //ds.extent_limit.remove(&cid);
-                }
-                // Special case, if we aborted this, when can
-                // we throw out extent limit?
-
                 assert!(ds.extent_limit.get(&cid).is_none());
                 assert!(ds.ds_state[cid] != DsState::LiveRepair);
             }
-            // This will not be cleared until the repair task exits.
+
+            // These will not be cleared until the repair task exits.
             assert!(ds.repair_min_id.is_some());
             assert!(ds.repair_stop.is_some());
 
@@ -399,7 +389,12 @@ async fn live_repair_main(
             .await
             .is_err()
         {
-            warn!(log, "Error After extent {} repair", eid);
+            warn!(log, "Error after extent {} repair", eid);
+            let ds = up.downstairs.lock().await;
+            for cid in ClientId::iter() {
+                assert!(ds.extent_limit.get(&cid).is_none());
+            }
+            drop(ds);
             failed_repair = true;
         }
         cdt::extent__or__done!(|| (eid));
@@ -1084,6 +1079,7 @@ impl Upstairs {
                 assert!(ds.extent_limit.get(ds_repair).is_none())
             }
             ds.extent_limit.insert(*ds_repair, eid as usize);
+            error!(self.log, "RE:{} ZZZ extent_limit set", eid);
         }
 
         // Upstairs "guest" work IDs.

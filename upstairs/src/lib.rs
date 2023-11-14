@@ -3070,7 +3070,6 @@ impl Downstairs {
         self.extent_limit = ClientMap::new();
         self.repair_job_ids = BTreeMap::new();
         self.repair_min_id = None;
-        // ZZZ come back and verify this is good
         self.repair_stop = None;
     }
 
@@ -3089,9 +3088,6 @@ impl Downstairs {
         self.next_id
     }
 
-    // ZZZ
-    // add counter for when we go here.
-    // Send the log that we want to use.
     fn abort_job(&mut self, ds_id: JobId, client_id: ClientId) {
         let mut handle = match self.ds_active.get_mut(&ds_id) {
             Some(handle) => handle,
@@ -3488,38 +3484,6 @@ impl Downstairs {
         self.ds_new[client_id].clear();
     }
 
-    fn ds_fault_offline(&mut self, client_id: ClientId) {
-        info!(
-            self.log,
-            "[{}] client skip all {} jobs for fault",
-            client_id,
-            self.ds_active.len(),
-        );
-
-        self.ds_active.for_each(|ds_id, job| {
-            let state = &job.state[client_id];
-
-            if matches!(state, IOState::InProgress | IOState::New) {
-                info!(self.log, "{} change {} to skipped", client_id, ds_id);
-                let old_state = job.state.insert(client_id, IOState::Skipped);
-                self.io_state_count.decr(&old_state, client_id);
-                self.io_state_count.incr(&IOState::Skipped, client_id);
-                self.ds_skipped_jobs[client_id].insert(*ds_id);
-                if job.ack_status == AckStatus::NotAcked {
-                    // Who will clean this up.
-                    error!(
-                        self.log,
-                        "AAA This job might not get acked {:?}", job
-                    );
-                }
-            }
-        });
-
-        // All of IOState::New jobs are now IOState::Skipped, so clear our
-        // cache of new jobs for this downstairs.
-        self.ds_new[client_id].clear();
-    }
-
     /**
      * We have reconnected to a downstairs. Move every job since the
      * last flush for this client_id back to New, even if we already have
@@ -3687,9 +3651,7 @@ impl Downstairs {
 
         // As this downstairs is now faulted, we clear the extent_limit.
         self.extent_limit.remove(&client_id);
-        // ZZZ Stop other things?  What else to fault?
-        // Maybe not notify other things, as we may need that channel
-        // to break through a stuck repair.
+
         notify_guest
     }
 
@@ -6349,12 +6311,10 @@ impl Upstairs {
             new_state,
         );
 
-        // Should we move jobs now?  When do we move work that has
-        // been submitted over to "skipped"
         ds.ds_state[client_id] = new_state;
         if new_state == DsState::Faulted {
             warn!(self.log, "[{}] faulted, aborting all jobs", client_id);
-            ds.ds_fault_offline(client_id);
+            ds.ds_set_faulted(client_id);
         }
     }
 
