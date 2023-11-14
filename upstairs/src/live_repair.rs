@@ -1667,7 +1667,6 @@ pub mod repair_test {
                 ds_close_id,
                 cid,
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 Some(ei),
             )
@@ -2169,7 +2168,6 @@ pub mod repair_test {
                 ds_close_id,
                 cid,
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 Some(ei),
             )
@@ -2353,7 +2351,6 @@ pub mod repair_test {
                 ds_close_id,
                 cid,
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 Some(ei),
             )
@@ -2507,7 +2504,6 @@ pub mod repair_test {
                 ds_close_id,
                 cid,
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 Some(ei),
             )
@@ -3201,7 +3197,6 @@ pub mod repair_test {
                 repair_ids.close_id,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 Some(ei)
             )
@@ -3228,7 +3223,6 @@ pub mod repair_test {
                 repair_ids.close_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 Some(ei)
             )
@@ -3249,7 +3243,6 @@ pub mod repair_test {
                 repair_ids.close_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 Some(ei)
             )

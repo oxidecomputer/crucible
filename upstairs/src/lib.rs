@@ -3977,24 +3977,28 @@ impl Downstairs {
         response: &mut ReadResponse,
         log: &Logger,
     ) -> Result<Option<u64>, CrucibleError> {
-        // check integrity hashes - make sure at least one is correct.
-        let mut valid_hash = None;
-
         if !response.block_contexts.is_empty() {
+            // check integrity hashes - make sure at least one is correct.
             let mut successful_hash = false;
-
             let computed_hash = integrity_hash(&[&response.data[..]]);
 
             // The most recent hash is probably going to be the right one.
             for context in response.block_contexts.iter().rev() {
                 if computed_hash == context.hash {
                     successful_hash = true;
-                    valid_hash = Some(context.hash);
                     break;
                 }
             }
 
-            if !successful_hash {
+            if successful_hash {
+                // Filter out contexts that don't match, and return the
+                // successful hash.
+                response
+                    .block_contexts
+                    .retain(|context| context.hash == computed_hash);
+
+                Ok(Some(computed_hash))
+            } else {
                 // No integrity hash was correct for this response
                 error!(log, "No match computed hash:0x{:x}", computed_hash,);
                 for context in response.block_contexts.iter().rev() {
@@ -4005,7 +4009,7 @@ impl Downstairs {
                     error!(log, "[{}]:{}", i, response.data[i]);
                 }
 
-                return Err(CrucibleError::HashMismatch);
+                Err(CrucibleError::HashMismatch)
             }
         } else {
             // No block context(s) in the response!
@@ -4019,9 +4023,9 @@ impl Downstairs {
             //
             // XXX if it's not a blank block, we may be under attack?
             assert!(response.data[..].iter().all(|&x| x == 0));
-        }
 
-        Ok(valid_hash)
+            Ok(None)
+        }
     }
 
     /// Returns:
@@ -4061,9 +4065,7 @@ impl Downstairs {
         }
 
         let mut valid_hash = None;
-
         let mut successful_decryption = false;
-        let mut successful_hash = false;
 
         // Attempt decryption with each encryption context, and fail if all
         // do not work. The most recent encryption context will most likely
@@ -4088,7 +4090,6 @@ impl Downstairs {
             ]);
 
             if computed_hash == ctx.hash {
-                successful_hash = true;
                 valid_hash = Some(ctx.hash);
 
                 // Now that the integrity hash was verified, attempt
@@ -4107,16 +4108,15 @@ impl Downstairs {
                     successful_decryption = true;
                     break;
                 } else {
-                    // Because hashes, nonces, and tags are committed to
-                    // disk every time there is a Crucible write, but data
-                    // is only committed to disk when there's a Crucible
-                    // flush, only one hash + nonce + tag + data combination
-                    // will be correct. Due to the fact that nonces are
+                    // Only one hash + nonce + tag combination will match the
+                    // data that is returned. Due to the fact that nonces are
                     // random for each write, even if the Guest wrote the
                     // same data block 100 times, only one index will be
-                    // valid.
+                    // valid. The sqlite backend will return any number of block
+                    // contexts, where the raw file backend will only return
+                    // one (because it knows the active slot).
                     //
-                    // if the computed integrity hash matched but decryption
+                    // If the computed integrity hash matched but decryption
                     // failed, continue to the next contexts. the current
                     // hashing algorithm (xxHash) is not a cryptographic hash
                     // and is only u64, so collisions are not impossible.
@@ -4128,7 +4128,23 @@ impl Downstairs {
             }
         }
 
-        if !successful_hash {
+        if let Some(valid_hash) = valid_hash {
+            if !successful_decryption {
+                // No encryption context combination decrypted this block, but
+                // one valid hash was found. This can occur if the decryption
+                // key doesn't match the key that the data was encrypted with.
+                error!(log, "Decryption failed with correct hash");
+                Err(CrucibleError::DecryptionError)
+            } else {
+                // Filter out contexts that don't match, and return the successful
+                // hash.
+                response
+                    .block_contexts
+                    .retain(|context| context.hash == valid_hash);
+
+                Ok(Some(valid_hash))
+            }
+        } else {
             error!(log, "No match for integrity hash");
             for ctx in response.block_contexts.iter() {
                 let block_encryption_ctx = if let Some(block_encryption_ctx) =
@@ -4152,15 +4168,9 @@ impl Downstairs {
                     computed_hash
                 );
             }
+
             // no hash was correct
             Err(CrucibleError::HashMismatch)
-        } else if !successful_decryption {
-            // no hash + encryption context combination decrypted this block
-            error!(log, "Decryption failed with correct hash");
-            Err(CrucibleError::DecryptionError)
-        } else {
-            // Ok!
-            Ok(valid_hash)
         }
     }
 
@@ -4177,8 +4187,7 @@ impl Downstairs {
         &mut self,
         ds_id: JobId,
         client_id: ClientId,
-        responses: Result<Vec<ReadResponse>, CrucibleError>,
-        encryption_context: &Option<Arc<EncryptionContext>>,
+        read_data: Result<Vec<ReadResponse>, CrucibleError>,
         up_state: UpState,
         extent_info: Option<ExtentInfo>,
     ) -> Result<bool> {
@@ -4206,78 +4215,6 @@ impl Downstairs {
             );
             return Ok(true);
         }
-
-        // Validate integrity hashes and optionally authenticated decryption.
-        //
-        // With AE, responses can come back that are invalid given an encryption
-        // context. Test this here. It will allow us to determine if the
-        // decryption is bad and set the job result to error accordingly.
-        let mut read_response_hashes = Vec::new();
-        let read_data: Result<Vec<ReadResponse>, CrucibleError> =
-            if let Some(context) = &encryption_context {
-                if let Ok(mut responses) = responses {
-                    let vlog = self.log.clone();
-                    let result: Result<(), CrucibleError> =
-                        responses.iter_mut().try_for_each(|x| {
-                            let mh =
-                                Downstairs::validate_encrypted_read_response(
-                                    x, context, &vlog,
-                                )?;
-                            read_response_hashes.push(mh);
-                            Ok(())
-                        });
-
-                    if let Some(error) = result.err() {
-                        Err(error)
-                    } else {
-                        Ok(responses)
-                    }
-                } else {
-                    // The downstairs sent us this error
-                    error!(
-                        self.log,
-                        "[{}] DS Reports error {:?} on job {}, {:?} EC",
-                        client_id,
-                        responses,
-                        ds_id,
-                        job,
-                    );
-                    // bad responses
-                    responses
-                }
-            } else {
-                // no upstairs encryption context
-                if let Ok(mut responses) = responses {
-                    let vlog = self.log.clone();
-                    let result: Result<(), CrucibleError> =
-                        responses.iter_mut().try_for_each(|x| {
-                            let mh =
-                                Downstairs::validate_unencrypted_read_response(
-                                    x, &vlog,
-                                )?;
-                            read_response_hashes.push(mh);
-                            Ok(())
-                        });
-
-                    if let Some(error) = result.err() {
-                        Err(error)
-                    } else {
-                        Ok(responses)
-                    }
-                } else {
-                    // The downstairs sent us this error
-                    error!(
-                        self.log,
-                        "[{}] DS Reports error {:?} on job {}, {:?}",
-                        client_id,
-                        responses,
-                        ds_id,
-                        job,
-                    );
-                    // bad responses
-                    responses
-                }
-            };
 
         let new_state = if let Err(ref e) = read_data {
             error!(
@@ -4438,14 +4375,28 @@ impl Downstairs {
                 } => {
                     /*
                      * For a read, make sure the data from a previous read
-                     * has the same hash
+                     * has the same list of hashes
                      */
                     let read_data: Vec<ReadResponse> = read_data.unwrap();
                     assert!(!read_data.is_empty());
-                    if job.read_response_hashes != read_response_hashes {
+
+                    if !job.check_read_response_hashes(&read_data) {
                         // XXX This error needs to go to Nexus
                         // XXX This will become the "force all downstairs
                         // to stop and refuse to restart" mode.
+
+                        // Store read_response_hashes as a Vec here, to avoid
+                        // the allocation outside this branch.
+                        let read_response_hashes: Vec<_> = read_data
+                            .iter()
+                            .map(|response| {
+                                response
+                                    .block_contexts
+                                    .get(0)
+                                    .map(|ctx| ctx.hash)
+                            })
+                            .collect();
+
                         let msg = format!(
                             "[{}] read hash mismatch on id {}\n\
                             Expected {:x?}\n\
@@ -4505,8 +4456,22 @@ impl Downstairs {
                     if jobs_completed_ok == 1 {
                         assert!(job.data.is_none());
                         assert!(job.read_response_hashes.is_empty());
+
+                        job.read_response_hashes = read_data
+                            .iter()
+                            .map(|read_response| {
+                                // Each entry in a validated list of read
+                                // responses will have either an empty list of
+                                // hashes (meaning the data block was all
+                                // zeros), or one valid context (because the
+                                // rest were filtered out). Turn this into an
+                                // Option here.
+                                read_response.first_hash()
+                            })
+                            .collect();
+
                         job.data = Some(read_data);
-                        job.read_response_hashes = read_response_hashes;
+
                         notify_guest = true;
                         assert_eq!(job.ack_status, AckStatus::NotAcked);
                         job.ack_status = AckStatus::AckReady;
@@ -4517,9 +4482,9 @@ impl Downstairs {
                         cdt::up__to__ds__read__done!(|| job.guest_id);
                     } else {
                         /*
-                         * If another job has finished already, we can
-                         * compare our read hash to
-                         * that and verify they are the same.
+                         * If another job has finished already, we can compare
+                         * our list of read hashes to that and verify they are
+                         * the same.
                          */
                         debug!(
                             self.log,
@@ -4527,10 +4492,24 @@ impl Downstairs {
                             client_id,
                             job.ds_id
                         );
-                        if job.read_response_hashes != read_response_hashes {
+
+                        if !job.check_read_response_hashes(&read_data) {
                             // XXX This error needs to go to Nexus
                             // XXX This will become the "force all downstairs
                             // to stop and refuse to restart" mode.
+
+                            // Store read_response_hashes as a Vec here, to
+                            // avoid the allocation outside this branch.
+                            let read_response_hashes: Vec<_> = read_data
+                                .iter()
+                                .map(|response| {
+                                    response
+                                        .block_contexts
+                                        .get(0)
+                                        .map(|ctx| ctx.hash)
+                                })
+                                .collect();
+
                             panic!(
                                 "[{}] read hash mismatch on {} \n\
                                 Expected {:x?}\n\
@@ -7232,6 +7211,83 @@ impl Upstairs {
         Ok(())
     }
 
+    /// Consume a list of ReadResponse, and validate them. Filter out block
+    /// contexts that are not valid.
+    fn return_validated_read_data(
+        &self,
+        ds_id: JobId,
+        client_id: ClientId,
+        read_data: Result<Vec<ReadResponse>, CrucibleError>,
+    ) -> Result<Vec<ReadResponse>, CrucibleError> {
+        // Validate integrity hashes and optionally authenticated decryption.
+        //
+        // With AE, responses can come back that are invalid given an encryption
+        // context. Test this here, and filter out those that are invalid. It
+        // will allow us to determine if the decryption is bad and set the job
+        // result to error accordingly.
+        //
+        // Importantly, do this without holding any locks!
+        if let Some(context) = &self.encryption_context {
+            if let Ok(mut read_data) = read_data {
+                let vlog = self.log.clone();
+                let result: Result<(), CrucibleError> =
+                    read_data.iter_mut().try_for_each(|x| {
+                        Downstairs::validate_encrypted_read_response(
+                            x, context, &vlog,
+                        )?;
+                        Ok(())
+                    });
+
+                if let Some(error) = result.err() {
+                    Err(error)
+                } else {
+                    Ok(read_data)
+                }
+            } else {
+                // The downstairs sent us this error, do not attempt to
+                // validate
+                error!(
+                    self.log,
+                    "[{}] DS Reports error {:?} on job {} EC",
+                    client_id,
+                    read_data,
+                    ds_id,
+                );
+                read_data
+            }
+        } else {
+            // no upstairs encryption context
+            if let Ok(mut read_data) = read_data {
+                let vlog = self.log.clone();
+                let result: Result<(), CrucibleError> =
+                    read_data.iter_mut().try_for_each(|x| {
+                        Downstairs::validate_unencrypted_read_response(
+                            x, &vlog,
+                        )?;
+                        Ok(())
+                    });
+
+                if let Some(error) = result.err() {
+                    Err(error)
+                } else {
+                    Ok(read_data)
+                }
+            } else {
+                // The downstairs sent us this error, do not attempt to
+                // validate
+                error!(
+                    self.log,
+                    "[{}] DS Reports error {:?} on job {}",
+                    client_id,
+                    read_data,
+                    ds_id,
+                );
+
+                read_data
+            }
+        }
+    }
+
     /*
      * Process a downstairs operation.
      * We have received a response to an IO operation.  Here we take the
@@ -7247,6 +7303,9 @@ impl Upstairs {
         read_data: Result<Vec<ReadResponse>, CrucibleError>,
         extent_info: Option<ExtentInfo>,
     ) -> Result<bool> {
+        let read_data =
+            self.return_validated_read_data(ds_id, client_id, read_data);
+
         /*
          * We can't get the upstairs state lock when holding the downstairs
          * lock, but we need to make decisions about this downstairs work
@@ -7263,7 +7322,6 @@ impl Upstairs {
          * active lock, we don't care because their will be a flush coming
          * to the work queue behind us and we have the downstairs lock.
          */
-
         let active = self.active.lock().await;
         let mut ds = self.downstairs.lock().await;
         let up_state = active.up_state;
@@ -7305,7 +7363,6 @@ impl Upstairs {
             ds_id,
             client_id,
             read_data,
-            &self.encryption_context,
             up_state,
             extent_info,
         ) {
@@ -7939,6 +7996,19 @@ impl DownstairsIO {
             ack_status: self.ack_status,
             state,
         }
+    }
+
+    /// Compare this struct's read_response_hashes to the hashes in a list of
+    /// ReadResponses, returning false if there is a mismatch.
+    pub fn check_read_response_hashes(
+        &self,
+        read_data: &[ReadResponse],
+    ) -> bool {
+        std::iter::zip(
+            self.read_response_hashes.iter(),
+            read_data.iter().map(|response| response.first_hash()),
+        )
+        .all(|(l, r)| *l == r)
     }
 }
 
