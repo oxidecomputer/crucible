@@ -4009,7 +4009,7 @@ impl Downstairs {
                     error!(log, "[{}]:{}", i, response.data[i]);
                 }
 
-                return Err(CrucibleError::HashMismatch);
+                Err(CrucibleError::HashMismatch)
             }
         } else {
             // No block context(s) in the response!
@@ -4108,16 +4108,15 @@ impl Downstairs {
                     successful_decryption = true;
                     break;
                 } else {
-                    // Because hashes, nonces, and tags are committed to
-                    // disk every time there is a Crucible write, but data
-                    // is only committed to disk when there's a Crucible
-                    // flush, only one hash + nonce + tag + data combination
-                    // will be correct. Due to the fact that nonces are
+                    // Only one hash + nonce + tag combination will match the
+                    // data that is returned. Due to the fact that nonces are
                     // random for each write, even if the Guest wrote the
                     // same data block 100 times, only one index will be
-                    // valid.
+                    // valid. The sqlite backend will return any number of block
+                    // contexts, where the raw file backend will only return
+                    // one (because it knows the active slot).
                     //
-                    // if the computed integrity hash matched but decryption
+                    // If the computed integrity hash matched but decryption
                     // failed, continue to the next contexts. the current
                     // hashing algorithm (xxHash) is not a cryptographic hash
                     // and is only u64, so collisions are not impossible.
@@ -4131,7 +4130,9 @@ impl Downstairs {
 
         if let Some(valid_hash) = valid_hash {
             if !successful_decryption {
-                // no hash + encryption context combination decrypted this block
+                // No encryption context combination decrypted this block, but
+                // one valid hash was found. This can occur if the decryption
+                // key doesn't match the key that the data was encrypted with.
                 error!(log, "Decryption failed with correct hash");
                 Err(CrucibleError::DecryptionError)
             } else {
