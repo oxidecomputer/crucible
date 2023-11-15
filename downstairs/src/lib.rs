@@ -953,12 +953,10 @@ where
      */
     while job_channel_rx.recv().await.is_some() {
         // Add a little time to completion for this operation.
-        /*
         if ads.lock().await.lossy && random() && random() {
             info!(ads.lock().await.log, "[lossy] sleeping 1 second");
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        */
 
         if !ads.lock().await.is_active(upstairs_connection) {
             // We are not an active downstairs, wait until we are
@@ -2177,9 +2175,6 @@ impl Downstairs {
                 } else {
                     self.region.close_extent(*extent).await
                 };
-                if self.lossy {
-                    panic!("ZZZ EC");
-                }
                 debug!(
                     self.log,
                     "JustClose :{} extent {} deps:{:?} res:{}",
@@ -2208,9 +2203,6 @@ impl Downstairs {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    if self.lossy {
-                        panic!("ZZZ EFC");
-                    }
                     // If flush fails, return that result.
                     // Else, if close fails, return that result.
                     // Else, return the f/g/d from the close.
@@ -2254,9 +2246,6 @@ impl Downstairs {
                 source_repair_address,
                 repair_downstairs: _,
             } => {
-                if self.lossy {
-                    panic!("ZZZ ELR");
-                }
                 debug!(
                     self.log,
                     "ExtentLiveRepair: extent {} sra:{:?}",
@@ -2291,9 +2280,6 @@ impl Downstairs {
                 dependencies,
                 extent,
             } => {
-                if self.lossy {
-                    panic!("ZZZ ELR");
-                }
                 let result = if !self.is_active(job.upstairs_connection) {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)

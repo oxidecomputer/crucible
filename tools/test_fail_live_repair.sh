@@ -21,11 +21,11 @@ function ctrl_c() {
     echo "Stopping at your request"
     if ps -p "$dsc_pid" ; then
         ${dsc} cmd shutdown
-        # wait "$dsc_pid"
+        wait "$dsc_pid"
     fi
     if ps -p "$crutest_pid" ; then
         kill "$crutest_pid"
-        # wait "$crutest_pid"
+        wait "$crutest_pid"
     fi
     exit 1
 }

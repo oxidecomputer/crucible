@@ -3001,9 +3001,9 @@ struct Downstairs {
     repair_min_id: Option<JobId>,
 
     /**
-     * When repairing, this will be the used to indicate to a running
-     * repair task needs to stop waiting for an answer from repair work
-     * and abort the repair.
+     * When repairing, this will be used to indicate to a running repair
+     * task needs to stop waiting for an answer from repair work and abort
+     * the repair.
      */
     repair_stop: Option<mpsc::Sender<bool>>,
 
@@ -3121,7 +3121,7 @@ impl Downstairs {
             && job.ack_status != AckStatus::Acked
         {
             job.ack_status = AckStatus::AbortReady;
-            warn!(self.log, "[{client_id}] Job {ds_id} AbortReady AAA");
+            warn!(self.log, "[{client_id}] Job {ds_id} AbortReady");
         }
     }
 
