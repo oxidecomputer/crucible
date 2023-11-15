@@ -306,9 +306,9 @@ checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
 
 [[package]]
 name = "base64"
-version = "0.21.4"
+version = "0.21.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ba43ea6f343b788c8764558649e08df62f86c6ef251fdaeb1ffd010a9ae50a2"
+checksum = "35636a1494ede3b646cc98f74f8e62c773a38a659ebc777a2cf26b9b74171df9"
 
 [[package]]
 name = "base64ct"
@@ -718,7 +718,7 @@ dependencies = [
  "anyhow",
  "async-recursion",
  "async-trait",
- "base64 0.21.4",
+ "base64 0.21.5",
  "bytes",
  "chrono",
  "crucible-client-types",
@@ -809,7 +809,7 @@ dependencies = [
 name = "crucible-client-types"
 version = "0.1.0"
 dependencies = [
- "base64 0.21.4",
+ "base64 0.21.5",
  "crucible-workspace-hack",
  "schemars",
  "serde",
@@ -943,7 +943,7 @@ name = "crucible-integration-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.21.4",
+ "base64 0.21.5",
  "bytes",
  "crucible",
  "crucible-client-types",
@@ -1007,7 +1007,7 @@ name = "crucible-pantry"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "base64 0.21.4",
+ "base64 0.21.5",
  "chrono",
  "clap",
  "crucible",
@@ -1363,7 +1363,7 @@ source = "git+https://github.com/oxidecomputer/dropshot?branch=main#aca6de3cfc16
 dependencies = [
  "async-stream",
  "async-trait",
- "base64 0.21.4",
+ "base64 0.21.5",
  "bytes",
  "camino",
  "chrono",
@@ -3656,7 +3656,7 @@ version = "0.11.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e9ad3fe7488d7e34558a2033d45a0c90b72d97b4f80705666fea71472e2e6a1"
 dependencies = [
- "base64 0.21.4",
+ "base64 0.21.5",
  "bytes",
  "encoding_rs",
  "futures-core",
@@ -3813,7 +3813,7 @@ version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d3987094b1d07b653b7dfdc3f70ce9a1da9c51ac18c1b06b662e4f9a0e9f4b2"
 dependencies = [
- "base64 0.21.4",
+ "base64 0.21.5",
 ]
 
 [[package]]
