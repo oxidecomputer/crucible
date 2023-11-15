@@ -63,7 +63,7 @@ num_enum = "0.7"
 num-derive = "0.4"
 num-traits = "0.2"
 omicron-zone-package = "0.9.1"
-openapiv3 = "1.0"
+openapiv3 = "2.0.0-rc.1"
 opentelemetry = "0.21.0"
 opentelemetry-jaeger = { version = "0.17.0" }
 percent-encoding = "2.3"
@@ -105,10 +105,10 @@ uuid = { version = "1", features = [ "serde", "v4" ] }
 
 # git
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main", features = [ "usdt-probes" ] }
-omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
+omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "add-oximeter-producer-kind" }
 openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
-oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
-oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
+oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "add-oximeter-producer-kind" }
+oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "add-oximeter-producer-kind" }
 progenitor = { git = "https://github.com/oxidecomputer/progenitor", branch = "main" }
 
 # local path

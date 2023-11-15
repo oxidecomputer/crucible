@@ -1,4 +1,4 @@
-// Copyright 2021 Oxide Computer Company
+// Copyright 2023 Oxide Computer Company
 use super::*;
 
 use dropshot::{
@@ -6,6 +6,7 @@ use dropshot::{
     HandlerTaskMode,
 };
 use omicron_common::api::internal::nexus::ProducerEndpoint;
+use omicron_common::api::internal::nexus::ProducerKind;
 use oximeter::{
     types::{Cumulative, Sample},
     Metric, MetricsError, Producer, Target,
@@ -152,6 +153,7 @@ pub async fn ox_stats(
 
     let server_info = ProducerEndpoint {
         id: Uuid::new_v4(),
+        kind: Some(ProducerKind::Service),
         address: my_address,
         base_route: "/collect".to_string(),
         interval: Duration::from_secs(10),

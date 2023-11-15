@@ -773,8 +773,11 @@ where
          * If in_progress returns None, it means that this job on this
          * client should be skipped.
          */
-        let Some(job) = u.downstairs.lock().await.in_progress(new_id, client_id)
-            else { continue; };
+        let Some(job) =
+            u.downstairs.lock().await.in_progress(new_id, client_id)
+        else {
+            continue;
+        };
 
         match job {
             IOop::Write {
@@ -4940,7 +4943,9 @@ impl Downstairs {
 
     /// Reserves repair IDs if impacted blocks overlap our extent under repair
     fn check_repair_ids_for_range(&mut self, impacted_blocks: ImpactedBlocks) {
-        let Some(eur) = self.get_extent_under_repair() else { return; };
+        let Some(eur) = self.get_extent_under_repair() else {
+            return;
+        };
         let mut future_repair = false;
         for eid in impacted_blocks.extents().into_iter().flatten() {
             if eid == *eur.start() {

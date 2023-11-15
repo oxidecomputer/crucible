@@ -1,9 +1,10 @@
-// Copyright 2022 Oxide Computer Company
+// Copyright 2023 Oxide Computer Company
 use anyhow::{bail, Result};
 use dropshot::{
     ConfigDropshot, ConfigLogging, ConfigLoggingLevel, HandlerTaskMode,
 };
 use omicron_common::api::internal::nexus::ProducerEndpoint;
+use omicron_common::api::internal::nexus::ProducerKind;
 use oximeter_producer::{Config, LogConfig, Server};
 use std::net::SocketAddr;
 use uuid::Uuid;
@@ -31,6 +32,7 @@ pub async fn client_oximeter(
 
     let server_info = ProducerEndpoint {
         id: Uuid::new_v4(),
+        kind: Some(ProducerKind::Service),
         address: my_address,
         base_route: "/collect".to_string(),
         interval: tokio::time::Duration::from_secs(10),

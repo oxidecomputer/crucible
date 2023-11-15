@@ -354,7 +354,9 @@ impl BlockMap {
         // We record every job, even if it's empty
         self.job_to_range.insert(job, r);
 
-        let Some(r) = Self::blocks_to_range(r) else { return; };
+        let Some(r) = Self::blocks_to_range(r) else {
+            return;
+        };
         self.insert_splits(r.clone());
 
         // Iterate over the range covered by our new job, either modifying
@@ -468,7 +470,9 @@ impl BlockMap {
             .next()
             .map(|(start, _)| *start)
             .or_else(|| self.addr_to_jobs.first_key_value().map(|(k, _)| *k))
-            else { return; };
+        else {
+            return;
+        };
         while pos <= r.end {
             let (end, value) = self.addr_to_jobs.get(&pos).unwrap();
             let end = *end;
@@ -496,7 +500,9 @@ impl BlockMap {
                         .range(end..)
                         .next()
                         .map(|(start, _)| *start)
-                        else { break; };
+                    else {
+                        break;
+                    };
                     pos = next_pos;
                 }
             }
@@ -530,7 +536,9 @@ impl BlockMap {
             .job_to_range
             .remove(&job)
             .and_then(Self::blocks_to_range)
-            else { return; };
+        else {
+            return;
+        };
 
         self.insert_splits(r.clone());
 
