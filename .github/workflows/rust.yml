@@ -13,7 +13,7 @@ jobs:
   check-style:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608 # v4
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4
     - name: Report rustfmt version
       run: cargo fmt -- --version
     - name: Check style
@@ -21,14 +21,14 @@ jobs:
   build-docs:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608 # v4
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4
     - uses: dtolnay/rust-toolchain@1.66
     - name: Test build documentation
       run: cargo doc
   build-and-test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608 # v4
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4
     - uses: dtolnay/rust-toolchain@1.66
     - name: Build
       run: cargo build --verbose
@@ -42,7 +42,7 @@ jobs:
   clippy:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608 # v4
+    - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4
     - uses: dtolnay/rust-toolchain@1.66
     - name: Test Libraries
       run: cargo clippy --all-targets
