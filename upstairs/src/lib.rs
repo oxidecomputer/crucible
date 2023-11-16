@@ -1309,9 +1309,8 @@ where
                              */
                             info!(
                                 up.log,
-                                "[{}] upstairs guest_io_ready=TRUE, promote! session {}",
+                                "[{}] upstairs guest_io_ready=TRUE, promote!",
                                 up_coms.client_id,
-                                up.session_id,
                             );
                             self_promotion = true;
                             fw.send(Message::PromoteToActive {
