@@ -8471,6 +8471,7 @@ impl IOStateCount {
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum AckStatus {
     NotAcked,
     AckReady,

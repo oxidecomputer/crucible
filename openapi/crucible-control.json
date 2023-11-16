@@ -56,25 +56,13 @@
     }
   },
   "components": {
-    "responses": {
-      "Error": {
-        "description": "Error",
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/Error"
-            }
-          }
-        }
-      }
-    },
     "schemas": {
       "AckStatus": {
         "type": "string",
         "enum": [
-          "NotAcked",
-          "AckReady",
-          "Acked"
+          "not_acked",
+          "ack_ready",
+          "acked"
         ]
       },
       "DownstairsWork": {
@@ -286,6 +274,18 @@
           "replay",
           "state"
         ]
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "Error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
       }
     }
   }
