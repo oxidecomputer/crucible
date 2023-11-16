@@ -17,7 +17,7 @@ mod test {
     use httptest::{matchers::*, responders::*, Expectation, Server};
     use rand::Rng;
     use sha2::Digest;
-    use slog::{info, o, Drain, Logger};
+    use slog::{info, o, warn, Drain, Logger};
     use tempfile::*;
     use tokio::sync::mpsc;
     use uuid::*;
@@ -2864,8 +2864,11 @@ mod test {
     #[tokio::test]
     async fn integration_test_volume_replace_downstairs_then_takeover(
     ) -> Result<()> {
-        // Replace a downstairs with a new one, then an Upstairs with a newer
-        // generation number activates.
+        let log = csl();
+        // Replace a downstairs with a new one which will kick off
+        // LiveRepair. Then spin up a new Upstairs with a newer
+        // generation number that will take over from the current
+        // Upstairs that is in the middle of the LiveRepair.
         const BLOCK_SIZE: usize = 512;
 
         // boot three downstairs, write some data to them
@@ -2901,6 +2904,8 @@ mod test {
             )
             .await?;
 
+        volume.flush(None).await?;
+
         // Create a new downstairs, then replace one of our current
         // downstairs with that new one.
         let new_downstairs = test_downstairs_set.new_downstairs().await?;
@@ -2915,31 +2920,24 @@ mod test {
             .unwrap();
 
         assert_eq!(res, ReplaceResult::Started);
-
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            match volume
-                .replace_downstairs(
-                    test_downstairs_set.opts().id,
-                    test_downstairs_set.downstairs1_address().await,
-                    new_downstairs.address().await,
-                )
-                .await
-                .unwrap()
-            {
-                ReplaceResult::StartedAlready => {
-                    eprintln!(
-                        "Waited for some repair work, proceeding with test"
-                    );
-                    break;
-                }
-                ReplaceResult::CompletedAlready => {
-                    // This test is invalid if the repair completed already
-                    panic!("Downstairs replacement completed");
-                }
-                x => {
-                    panic!("Bad result from replace_downstairs: {:?}", x);
-                }
+        match volume
+            .replace_downstairs(
+                test_downstairs_set.opts().id,
+                test_downstairs_set.downstairs1_address().await,
+                new_downstairs.address().await,
+            )
+            .await
+            .unwrap()
+        {
+            ReplaceResult::StartedAlready => {
+                warn!(log, "Waited for some repair work, proceeding with test");
+            }
+            ReplaceResult::CompletedAlready => {
+                // This test is invalid if the repair completed already
+                panic!("Downstairs replacement completed");
+            }
+            x => {
+                panic!("Bad result from replace_downstairs: {:?}", x);
             }
         }
 
@@ -2970,13 +2968,7 @@ mod test {
 
         while !new_volume.query_is_active().await? {
             // new_volume will repair before activating, so this waits for that
-            println!("Waiting for new_volume activate");
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-        }
-
-        // Old volume is no longer active
-        while volume.query_is_active().await? {
-            println!("Waiting for old volume to deactivate");
+            warn!(log, "Waiting for new_volume activate");
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
         }
 
