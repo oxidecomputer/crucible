@@ -4820,7 +4820,7 @@ impl Downstairs {
 #[derive(Debug)]
 struct DownstairsClient {
     /**
-     * UUID for each downstairs, index by client ID
+     * UUID for this downstairs
      */
     uuid: Option<Uuid>,
 
@@ -4849,17 +4849,17 @@ struct DownstairsClient {
     last_flush: JobId,
 
     /**
-     * Errors recorded, indexed by client ID.
+     * Errors recorded
      */
     downstairs_errors: usize,
 
     /**
-     * Cache of new jobs, indexed by client ID.
+     * Cache of new jobs
      */
     new_jobs: BTreeSet<JobId>,
 
     /**
-     * Jobs that have been skipped, indexed by client ID.
+     * Jobs that have been skipped
      */
     skipped_jobs: BTreeSet<JobId>,
 
