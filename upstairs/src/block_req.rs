@@ -42,6 +42,11 @@ impl BlockReq {
         // XXX this eats the result!
         let _ = self.sender.send(r);
     }
+
+    /// Consume this BlockReq and return the inner oneshot sender
+    pub fn take_sender(self) -> oneshot::Sender<Result<(), CrucibleError>> {
+        self.sender
+    }
 }
 
 /**

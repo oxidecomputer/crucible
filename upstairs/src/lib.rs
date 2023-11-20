@@ -74,6 +74,10 @@ use active_jobs::ActiveJobs;
 
 use async_trait::async_trait;
 
+mod client;
+mod downstairs;
+mod upstairs;
+
 // Max number of outstanding IOs between the upstairs and the downstairs
 // before we give up and mark that downstairs faulted.
 const IO_OUTSTANDING_MAX: usize = 57000;

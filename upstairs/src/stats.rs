@@ -76,17 +76,17 @@ pub struct ExtentReopen {
 // All the counter stats in one struct.
 #[derive(Clone, Debug)]
 pub struct UpCountStat {
-    stat_name: CrucibleUpstairs,
-    activated_count: Activated,
-    write_count: Write,
-    write_bytes: WriteBytes,
-    read_count: Read,
-    read_bytes: ReadBytes,
-    flush_count: Flush,
-    flush_close_count: FlushClose,
-    extent_repair_count: ExtentRepair,
-    extent_noop_count: ExtentNoOp,
-    extent_reopen_count: ExtentReopen,
+    pub stat_name: CrucibleUpstairs,
+    pub activated_count: Activated,
+    pub write_count: Write,
+    pub write_bytes: WriteBytes,
+    pub read_count: Read,
+    pub read_bytes: ReadBytes,
+    pub flush_count: Flush,
+    pub flush_close_count: FlushClose,
+    pub extent_repair_count: ExtentRepair,
+    pub extent_noop_count: ExtentNoOp,
+    pub extent_reopen_count: ExtentReopen,
 }
 
 impl UpCountStat {
