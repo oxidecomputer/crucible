@@ -764,7 +764,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -777,7 +776,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -794,7 +792,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -836,7 +833,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -850,7 +846,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -864,7 +859,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -904,7 +898,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None
             )
@@ -917,7 +910,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -930,7 +922,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -942,9 +933,9 @@ pub(crate) mod up_test {
 
         assert_eq!(ds.completed.len(), 1);
         // No skipped jobs here.
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 0);
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
     }
 
     #[tokio::test]
@@ -970,7 +961,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -983,7 +973,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -996,7 +985,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -1034,7 +1022,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -1054,7 +1041,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -1070,7 +1056,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -1102,7 +1087,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None
             )
@@ -1118,7 +1102,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -1138,7 +1121,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -1171,7 +1153,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -1184,7 +1165,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -1200,7 +1180,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -1237,7 +1216,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -1250,7 +1228,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -1263,7 +1240,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -1378,7 +1354,6 @@ pub(crate) mod up_test {
             id,
             ClientId::new(0),
             r1,
-            &None,
             UpState::Active,
             None,
         )
@@ -1398,7 +1373,6 @@ pub(crate) mod up_test {
                     id,
                     ClientId::new(1),
                     r2,
-                    &None,
                     UpState::Active,
                     None,
                 )
@@ -1432,7 +1406,6 @@ pub(crate) mod up_test {
             id,
             ClientId::new(0),
             r1,
-            &None,
             UpState::Active,
             None,
         )
@@ -1452,7 +1425,6 @@ pub(crate) mod up_test {
                     id,
                     ClientId::new(1),
                     r2,
-                    &None,
                     UpState::Active,
                     None,
                 )
@@ -1484,7 +1456,6 @@ pub(crate) mod up_test {
             id,
             ClientId::new(0),
             r1,
-            &None,
             UpState::Active,
             None,
         )
@@ -1497,7 +1468,6 @@ pub(crate) mod up_test {
             id,
             ClientId::new(1),
             r2,
-            &None,
             UpState::Active,
             None,
         )
@@ -1511,7 +1481,6 @@ pub(crate) mod up_test {
                     id,
                     ClientId::new(2),
                     r3,
-                    &None,
                     UpState::Active,
                     None,
                 )
@@ -1546,7 +1515,6 @@ pub(crate) mod up_test {
             id,
             ClientId::new(0),
             r1,
-            &None,
             UpState::Active,
             None,
         )
@@ -1560,7 +1528,6 @@ pub(crate) mod up_test {
             id,
             ClientId::new(1),
             r2,
-            &None,
             UpState::Active,
             None,
         )
@@ -1574,7 +1541,6 @@ pub(crate) mod up_test {
                     id,
                     ClientId::new(2),
                     r3,
-                    &None,
                     UpState::Active,
                     None,
                 )
@@ -1610,7 +1576,6 @@ pub(crate) mod up_test {
             id,
             ClientId::new(0),
             r1,
-            &None,
             UpState::Active,
             None,
         )
@@ -1628,7 +1593,6 @@ pub(crate) mod up_test {
                     id,
                     ClientId::new(1),
                     r2,
-                    &None,
                     UpState::Active,
                     None,
                 )
@@ -1662,7 +1626,6 @@ pub(crate) mod up_test {
             id,
             ClientId::new(0),
             r1,
-            &None,
             UpState::Active,
             None,
         )
@@ -1677,7 +1640,6 @@ pub(crate) mod up_test {
                     id,
                     ClientId::new(1),
                     r2,
-                    &None,
                     UpState::Active,
                     None,
                 )
@@ -1710,7 +1672,6 @@ pub(crate) mod up_test {
             id,
             ClientId::new(0),
             r1,
-            &None,
             UpState::Active,
             None,
         )
@@ -1725,7 +1686,6 @@ pub(crate) mod up_test {
                     id,
                     ClientId::new(1),
                     r2,
-                    &None,
                     UpState::Active,
                     None,
                 )
@@ -1778,7 +1738,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -1791,7 +1750,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -1806,7 +1764,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 response,
-                &None,
                 UpState::Active,
                 None,
             )
@@ -1816,9 +1773,9 @@ pub(crate) mod up_test {
         // if it's just a write, then it should be false.
         assert_eq!(res, is_write_unwritten);
 
-        assert!(ds.downstairs_errors[ClientId::new(0)] > 0);
-        assert!(ds.downstairs_errors[ClientId::new(1)] > 0);
-        assert_eq!(ds.downstairs_errors[ClientId::new(2)], 0);
+        assert!(ds.clients[ClientId::new(0)].downstairs_errors > 0);
+        assert!(ds.clients[ClientId::new(1)].downstairs_errors > 0);
+        assert_eq!(ds.clients[ClientId::new(2)].downstairs_errors, 0);
     }
 
     #[tokio::test]
@@ -1881,7 +1838,6 @@ pub(crate) mod up_test {
             next_id,
             ClientId::new(0),
             response.clone(),
-            &None,
             UpState::Active,
             None,
         )
@@ -1891,7 +1847,6 @@ pub(crate) mod up_test {
             next_id,
             ClientId::new(2),
             response,
-            &None,
             UpState::Active,
             None,
         )
@@ -1971,7 +1926,6 @@ pub(crate) mod up_test {
             next_id,
             ClientId::new(0),
             Ok(vec![]),
-            &None,
             UpState::Active,
             None,
         )
@@ -2053,7 +2007,6 @@ pub(crate) mod up_test {
             next_id,
             ClientId::new(0),
             Ok(vec![]),
-            &None,
             UpState::Active,
             None,
         )
@@ -2067,7 +2020,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -2139,7 +2091,6 @@ pub(crate) mod up_test {
             next_id,
             ClientId::new(0),
             response.clone(),
-            &None,
             UpState::Active,
             None,
         )
@@ -2149,7 +2100,6 @@ pub(crate) mod up_test {
             next_id,
             ClientId::new(2),
             response,
-            &None,
             UpState::Active,
             None,
         )
@@ -2215,7 +2165,6 @@ pub(crate) mod up_test {
             next_id,
             ClientId::new(0),
             Ok(vec![]),
-            &None,
             UpState::Active,
             None,
         )
@@ -2285,7 +2234,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -2298,7 +2246,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2346,7 +2293,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -2359,7 +2305,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -2375,7 +2320,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -2391,9 +2335,9 @@ pub(crate) mod up_test {
             Some(vec![Bytes::from_static(&[3])]),
         );
 
-        assert_eq!(ds.downstairs_errors[ClientId::new(0)], 0);
-        assert_eq!(ds.downstairs_errors[ClientId::new(1)], 0);
-        assert_eq!(ds.downstairs_errors[ClientId::new(2)], 0);
+        assert_eq!(ds.clients[ClientId::new(0)].downstairs_errors, 0);
+        assert_eq!(ds.clients[ClientId::new(1)].downstairs_errors, 0);
+        assert_eq!(ds.clients[ClientId::new(2)].downstairs_errors, 0);
 
         // send another read, and expect all to return something
         // (reads shouldn't cause a Failed transition)
@@ -2412,7 +2356,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -2425,7 +2368,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Err(CrucibleError::GenericError("bad".to_string())),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -2441,7 +2383,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -2487,7 +2428,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -2504,7 +2444,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -2517,7 +2456,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -2555,7 +2493,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -2566,7 +2503,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2576,7 +2512,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2624,7 +2559,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -2653,7 +2587,6 @@ pub(crate) mod up_test {
                 next_id,
                 cid,
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None,
             )
@@ -2734,7 +2667,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2744,7 +2676,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2754,7 +2685,6 @@ pub(crate) mod up_test {
                 id2,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2764,7 +2694,6 @@ pub(crate) mod up_test {
                 id2,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2794,7 +2723,6 @@ pub(crate) mod up_test {
                 flush_id,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2804,7 +2732,6 @@ pub(crate) mod up_test {
                 flush_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2815,9 +2742,9 @@ pub(crate) mod up_test {
 
         // Make sure downstairs 0 and 1 update their last flush id and
         // that downstairs 2 does not.
-        assert_eq!(ds.ds_last_flush[ClientId::new(0)], flush_id);
-        assert_eq!(ds.ds_last_flush[ClientId::new(1)], flush_id);
-        assert_eq!(ds.ds_last_flush[ClientId::new(2)], JobId(0));
+        assert_eq!(ds.clients[ClientId::new(0)].last_flush, flush_id);
+        assert_eq!(ds.clients[ClientId::new(1)].last_flush, flush_id);
+        assert_eq!(ds.clients[ClientId::new(2)].last_flush, JobId(0));
 
         // Should not retire yet.
         ds.retire_check(flush_id);
@@ -2835,7 +2762,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2845,7 +2771,6 @@ pub(crate) mod up_test {
                 id2,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2861,7 +2786,6 @@ pub(crate) mod up_test {
                 flush_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2870,7 +2794,7 @@ pub(crate) mod up_test {
         // All three jobs should now move to completed
         assert_eq!(ds.completed.len(), 3);
         // Downstairs 2 should update the last flush it just did.
-        assert_eq!(ds.ds_last_flush[ClientId::new(2)], flush_id);
+        assert_eq!(ds.clients[ClientId::new(2)].last_flush, flush_id);
     }
 
     #[tokio::test]
@@ -2917,7 +2841,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2927,7 +2850,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2937,7 +2859,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2967,7 +2888,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2977,7 +2897,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -2987,7 +2906,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3062,7 +2980,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3072,7 +2989,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3082,7 +2998,6 @@ pub(crate) mod up_test {
                 id2,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3092,7 +3007,6 @@ pub(crate) mod up_test {
                 id2,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3122,7 +3036,6 @@ pub(crate) mod up_test {
                 flush_id,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3132,7 +3045,6 @@ pub(crate) mod up_test {
                 flush_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3149,9 +3061,9 @@ pub(crate) mod up_test {
         assert_eq!(ds.completed.len(), 0);
 
         // Verify who has updated their last flush.
-        assert_eq!(ds.ds_last_flush[ClientId::new(0)], flush_id);
-        assert_eq!(ds.ds_last_flush[ClientId::new(1)], JobId(0));
-        assert_eq!(ds.ds_last_flush[ClientId::new(2)], flush_id);
+        assert_eq!(ds.clients[ClientId::new(0)].last_flush, flush_id);
+        assert_eq!(ds.clients[ClientId::new(1)].last_flush, JobId(0));
+        assert_eq!(ds.clients[ClientId::new(2)].last_flush, flush_id);
 
         // Now, finish sending and completing the writes
         assert!(ds.in_progress(id1, ClientId::new(2)).is_some());
@@ -3161,7 +3073,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3171,7 +3082,6 @@ pub(crate) mod up_test {
                 id2,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3187,7 +3097,6 @@ pub(crate) mod up_test {
                 flush_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3197,7 +3106,7 @@ pub(crate) mod up_test {
         assert_eq!(ds.completed.len(), 3);
 
         // downstairs 1 should now have that flush
-        assert_eq!(ds.ds_last_flush[ClientId::new(1)], flush_id);
+        assert_eq!(ds.clients[ClientId::new(1)].last_flush, flush_id);
     }
 
     #[tokio::test]
@@ -3226,7 +3135,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3278,7 +3186,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3297,7 +3204,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3325,7 +3231,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3362,7 +3267,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3400,7 +3304,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3460,7 +3363,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3493,7 +3395,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3553,7 +3454,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(0),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3571,7 +3471,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3602,7 +3501,6 @@ pub(crate) mod up_test {
                 next_id,
                 ClientId::new(1),
                 response,
-                &None,
                 UpState::Active,
                 None
             )
@@ -3657,7 +3555,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3667,7 +3564,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3700,7 +3596,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3752,7 +3647,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3762,7 +3656,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3793,7 +3686,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3803,7 +3695,6 @@ pub(crate) mod up_test {
                 id1,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 None
             )
@@ -3944,9 +3835,9 @@ pub(crate) mod up_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         up.set_active().await.unwrap();
         let mut ds = up.downstairs.lock().await;
-        ds.ds_state[ClientId::new(0)] = DsState::Active;
-        ds.ds_state[ClientId::new(1)] = DsState::Active;
-        ds.ds_state[ClientId::new(2)] = DsState::Active;
+        ds.clients[ClientId::new(0)].state = DsState::Active;
+        ds.clients[ClientId::new(1)].state = DsState::Active;
+        ds.clients[ClientId::new(2)].state = DsState::Active;
 
         // Build a write, put it on the work queue.
         let id1 = ds.next_id();
@@ -3980,7 +3871,6 @@ pub(crate) mod up_test {
             id1,
             ClientId::new(0),
             Ok(vec![]),
-            &None,
             UpState::Active,
             None,
         )
@@ -3989,7 +3879,6 @@ pub(crate) mod up_test {
             id1,
             ClientId::new(1),
             Ok(vec![]),
-            &None,
             UpState::Active,
             None,
         )
@@ -3998,7 +3887,6 @@ pub(crate) mod up_test {
             id1,
             ClientId::new(2),
             Ok(vec![]),
-            &None,
             UpState::Active,
             None,
         )
@@ -4019,7 +3907,6 @@ pub(crate) mod up_test {
                 flush_id,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Deactivating,
                 None
             )
@@ -4031,7 +3918,6 @@ pub(crate) mod up_test {
                 flush_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Deactivating,
                 None
             )
@@ -4051,9 +3937,9 @@ pub(crate) mod up_test {
 
         ds = up.downstairs.lock().await;
         // Make sure the correct DS have changed state.
-        assert_eq!(ds.ds_state[ClientId::new(0)], DsState::Deactivated);
-        assert_eq!(ds.ds_state[ClientId::new(2)], DsState::Deactivated);
-        assert_eq!(ds.ds_state[ClientId::new(1)], DsState::Active);
+        assert_eq!(ds.clients[ClientId::new(0)].state, DsState::Deactivated);
+        assert_eq!(ds.clients[ClientId::new(2)].state, DsState::Deactivated);
+        assert_eq!(ds.clients[ClientId::new(1)].state, DsState::Active);
 
         // Send and complete the flush
         ds.in_progress(flush_id, ClientId::new(1));
@@ -4062,7 +3948,6 @@ pub(crate) mod up_test {
                 flush_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Deactivating,
                 None
             )
@@ -4084,9 +3969,9 @@ pub(crate) mod up_test {
 
         // Verify after the ds_missing, all downstairs are New
         let ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_state[ClientId::new(0)], DsState::New);
-        assert_eq!(ds.ds_state[ClientId::new(1)], DsState::New);
-        assert_eq!(ds.ds_state[ClientId::new(2)], DsState::New);
+        assert_eq!(ds.clients[ClientId::new(0)].state, DsState::New);
+        assert_eq!(ds.clients[ClientId::new(1)].state, DsState::New);
+        assert_eq!(ds.clients[ClientId::new(2)].state, DsState::New);
     }
 
     #[tokio::test]
@@ -4100,9 +3985,9 @@ pub(crate) mod up_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         up.set_active().await.unwrap();
         let mut ds = up.downstairs.lock().await;
-        ds.ds_state[ClientId::new(0)] = DsState::Active;
-        ds.ds_state[ClientId::new(1)] = DsState::Active;
-        ds.ds_state[ClientId::new(2)] = DsState::Active;
+        ds.clients[ClientId::new(0)].state = DsState::Active;
+        ds.clients[ClientId::new(1)].state = DsState::Active;
+        ds.clients[ClientId::new(2)].state = DsState::Active;
 
         drop(ds);
         up.set_deactivate(None, ds_done_tx.clone()).await.unwrap();
@@ -4114,9 +3999,9 @@ pub(crate) mod up_test {
 
         ds = up.downstairs.lock().await;
         // Make sure the correct DS have changed state.
-        assert_eq!(ds.ds_state[ClientId::new(0)], DsState::Deactivated);
-        assert_eq!(ds.ds_state[ClientId::new(1)], DsState::Deactivated);
-        assert_eq!(ds.ds_state[ClientId::new(2)], DsState::Deactivated);
+        assert_eq!(ds.clients[ClientId::new(0)].state, DsState::Deactivated);
+        assert_eq!(ds.clients[ClientId::new(1)].state, DsState::Deactivated);
+        assert_eq!(ds.clients[ClientId::new(2)].state, DsState::Deactivated);
         drop(ds);
 
         // Mark all three DS as missing, which moves their state to New
@@ -4147,9 +4032,9 @@ pub(crate) mod up_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         up.set_active().await.unwrap();
         let mut ds = up.downstairs.lock().await;
-        ds.ds_state[ClientId::new(0)] = DsState::Active;
-        ds.ds_state[ClientId::new(1)] = DsState::Active;
-        ds.ds_state[ClientId::new(2)] = DsState::Active;
+        ds.clients[ClientId::new(0)].state = DsState::Active;
+        ds.clients[ClientId::new(1)].state = DsState::Active;
+        ds.clients[ClientId::new(2)].state = DsState::Active;
 
         // Build a write, put it on the work queue.
         let id1 = ds.next_id();
@@ -4179,7 +4064,6 @@ pub(crate) mod up_test {
             id1,
             ClientId::new(0),
             Ok(vec![]),
-            &None,
             UpState::Deactivating,
             None,
         )
@@ -4188,7 +4072,6 @@ pub(crate) mod up_test {
             id1,
             ClientId::new(1),
             Ok(vec![]),
-            &None,
             UpState::Deactivating,
             None,
         )
@@ -4197,7 +4080,6 @@ pub(crate) mod up_test {
             id1,
             ClientId::new(2),
             Ok(vec![]),
-            &None,
             UpState::Deactivating,
             None,
         )
@@ -4218,9 +4100,9 @@ pub(crate) mod up_test {
 
         ds = up.downstairs.lock().await;
         // Make sure no DS have changed state.
-        assert_eq!(ds.ds_state[ClientId::new(0)], DsState::Active);
-        assert_eq!(ds.ds_state[ClientId::new(2)], DsState::Active);
-        assert_eq!(ds.ds_state[ClientId::new(1)], DsState::Active);
+        assert_eq!(ds.clients[ClientId::new(0)].state, DsState::Active);
+        assert_eq!(ds.clients[ClientId::new(2)].state, DsState::Active);
+        assert_eq!(ds.clients[ClientId::new(1)].state, DsState::Active);
     }
 
     #[tokio::test]
@@ -4246,9 +4128,9 @@ pub(crate) mod up_test {
         let up = Upstairs::test_default(None);
         up.set_active().await.unwrap();
         let mut ds = up.downstairs.lock().await;
-        ds.ds_state[ClientId::new(0)] = DsState::Active;
-        ds.ds_state[ClientId::new(1)] = DsState::Active;
-        ds.ds_state[ClientId::new(2)] = DsState::Active;
+        ds.clients[ClientId::new(0)].state = DsState::Active;
+        ds.clients[ClientId::new(1)].state = DsState::Active;
+        ds.clients[ClientId::new(2)].state = DsState::Active;
 
         drop(ds);
 
@@ -4259,9 +4141,9 @@ pub(crate) mod up_test {
 
         ds = up.downstairs.lock().await;
         // Make sure no DS have changed state.
-        assert_eq!(ds.ds_state[ClientId::new(0)], DsState::Active);
-        assert_eq!(ds.ds_state[ClientId::new(1)], DsState::Active);
-        assert_eq!(ds.ds_state[ClientId::new(2)], DsState::Active);
+        assert_eq!(ds.clients[ClientId::new(0)].state, DsState::Active);
+        assert_eq!(ds.clients[ClientId::new(1)].state, DsState::Active);
+        assert_eq!(ds.clients[ClientId::new(2)].state, DsState::Active);
     }
 
     #[tokio::test]
@@ -4277,9 +4159,9 @@ pub(crate) mod up_test {
 
         let ds = up.downstairs.lock().await;
         // Make sure no DS have changed state.
-        assert_eq!(ds.ds_state[ClientId::new(0)], DsState::New);
-        assert_eq!(ds.ds_state[ClientId::new(1)], DsState::New);
-        assert_eq!(ds.ds_state[ClientId::new(2)], DsState::New);
+        assert_eq!(ds.clients[ClientId::new(0)].state, DsState::New);
+        assert_eq!(ds.clients[ClientId::new(1)].state, DsState::New);
+        assert_eq!(ds.clients[ClientId::new(2)].state, DsState::New);
     }
 
     #[tokio::test]
@@ -4453,9 +4335,9 @@ pub(crate) mod up_test {
         // No repairs on the queue, should return None
         let up = Upstairs::test_default(None);
         let mut ds = up.downstairs.lock().await;
-        ds.ds_state[ClientId::new(0)] = DsState::Repair;
-        ds.ds_state[ClientId::new(1)] = DsState::Repair;
-        ds.ds_state[ClientId::new(2)] = DsState::Repair;
+        ds.clients[ClientId::new(0)].state = DsState::Repair;
+        ds.clients[ClientId::new(1)].state = DsState::Repair;
+        ds.clients[ClientId::new(2)].state = DsState::Repair;
         let w = ds.rep_in_progress(ClientId::new(0));
         assert_eq!(w, None);
     }
@@ -4478,17 +4360,17 @@ pub(crate) mod up_test {
                 },
             ));
             // A downstairs is not in Repair state
-            ds.ds_state[ClientId::new(0)] = DsState::Repair;
-            ds.ds_state[ClientId::new(1)] = DsState::WaitQuorum;
-            ds.ds_state[ClientId::new(2)] = DsState::Repair;
+            ds.clients[ClientId::new(0)].state = DsState::Repair;
+            ds.clients[ClientId::new(1)].state = DsState::WaitQuorum;
+            ds.clients[ClientId::new(2)].state = DsState::Repair;
         }
         // Move that job to next to do.
         let nw = up.new_rec_work().await;
         assert!(nw.is_err());
         let mut ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_state[ClientId::new(0)], DsState::FailedRepair);
-        assert_eq!(ds.ds_state[ClientId::new(1)], DsState::WaitQuorum);
-        assert_eq!(ds.ds_state[ClientId::new(2)], DsState::FailedRepair);
+        assert_eq!(ds.clients[ClientId::new(0)].state, DsState::FailedRepair);
+        assert_eq!(ds.clients[ClientId::new(1)].state, DsState::WaitQuorum);
+        assert_eq!(ds.clients[ClientId::new(2)].state, DsState::FailedRepair);
 
         // Verify rep_in_progress now returns none for all DS
         assert!(ds.reconcile_task_list.is_empty());
@@ -4506,9 +4388,9 @@ pub(crate) mod up_test {
         let rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
-            ds.ds_state[ClientId::new(0)] = DsState::Repair;
-            ds.ds_state[ClientId::new(1)] = DsState::Repair;
-            ds.ds_state[ClientId::new(2)] = DsState::Repair;
+            ds.clients[ClientId::new(0)].state = DsState::Repair;
+            ds.clients[ClientId::new(1)].state = DsState::Repair;
+            ds.clients[ClientId::new(2)].state = DsState::Repair;
             // Put two jobs on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -4528,7 +4410,7 @@ pub(crate) mod up_test {
         assert!(ds.rep_in_progress(ClientId::new(2)).is_some());
 
         // Now verify we can be done even if a DS is gone
-        ds.ds_state[ClientId::new(1)] = DsState::New;
+        ds.clients[ClientId::new(1)].state = DsState::New;
         // Now, make sure we consider this done only after all three are done
         assert!(!ds.rep_done(ClientId::new(0), rep_id));
         assert!(!ds.rep_done(ClientId::new(1), rep_id));
@@ -4540,9 +4422,9 @@ pub(crate) mod up_test {
         let nw = up.new_rec_work().await;
         assert!(nw.is_err());
         let mut ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_state[ClientId::new(0)], DsState::FailedRepair);
-        assert_eq!(ds.ds_state[ClientId::new(1)], DsState::New);
-        assert_eq!(ds.ds_state[ClientId::new(2)], DsState::FailedRepair);
+        assert_eq!(ds.clients[ClientId::new(0)].state, DsState::FailedRepair);
+        assert_eq!(ds.clients[ClientId::new(1)].state, DsState::New);
+        assert_eq!(ds.clients[ClientId::new(2)].state, DsState::FailedRepair);
 
         // Verify rep_in_progress now returns none for all DS
         assert!(ds.reconcile_task_list.is_empty());
@@ -4559,9 +4441,9 @@ pub(crate) mod up_test {
         let rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
-            ds.ds_state[ClientId::new(0)] = DsState::Repair;
-            ds.ds_state[ClientId::new(1)] = DsState::Repair;
-            ds.ds_state[ClientId::new(2)] = DsState::Repair;
+            ds.clients[ClientId::new(0)].state = DsState::Repair;
+            ds.clients[ClientId::new(1)].state = DsState::Repair;
+            ds.clients[ClientId::new(2)].state = DsState::Repair;
             // Put a job on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -4578,12 +4460,12 @@ pub(crate) mod up_test {
         // Mark all three as in progress
         assert!(ds.rep_in_progress(ClientId::new(0)).is_some());
         assert!(ds.rep_in_progress(ClientId::new(1)).is_some());
-        ds.ds_state[ClientId::new(2)] = DsState::New;
+        ds.clients[ClientId::new(2)].state = DsState::New;
         assert!(ds.rep_in_progress(ClientId::new(2)).is_none());
 
         // Okay, now the DS is back and ready for repair, verify it will
         // start taking work.
-        ds.ds_state[ClientId::new(2)] = DsState::Repair;
+        ds.clients[ClientId::new(2)].state = DsState::Repair;
         assert!(ds.rep_in_progress(ClientId::new(2)).is_some());
     }
 
@@ -4595,9 +4477,9 @@ pub(crate) mod up_test {
         let rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
-            ds.ds_state[ClientId::new(0)] = DsState::Repair;
-            ds.ds_state[ClientId::new(1)] = DsState::Repair;
-            ds.ds_state[ClientId::new(2)] = DsState::Repair;
+            ds.clients[ClientId::new(0)].state = DsState::Repair;
+            ds.clients[ClientId::new(1)].state = DsState::Repair;
+            ds.clients[ClientId::new(2)].state = DsState::Repair;
             // Put a job on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -4622,9 +4504,9 @@ pub(crate) mod up_test {
         let rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
-            ds.ds_state[ClientId::new(0)] = DsState::Repair;
-            ds.ds_state[ClientId::new(1)] = DsState::Repair;
-            ds.ds_state[ClientId::new(2)] = DsState::Repair;
+            ds.clients[ClientId::new(0)].state = DsState::Repair;
+            ds.clients[ClientId::new(1)].state = DsState::Repair;
+            ds.clients[ClientId::new(2)].state = DsState::Repair;
             // Put a job on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -4646,9 +4528,9 @@ pub(crate) mod up_test {
         let mut rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
-            ds.ds_state[ClientId::new(0)] = DsState::Repair;
-            ds.ds_state[ClientId::new(1)] = DsState::Repair;
-            ds.ds_state[ClientId::new(2)] = DsState::Repair;
+            ds.clients[ClientId::new(0)].state = DsState::Repair;
+            ds.clients[ClientId::new(1)].state = DsState::Repair;
+            ds.clients[ClientId::new(2)].state = DsState::Repair;
             // Put two jobs on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -4708,9 +4590,9 @@ pub(crate) mod up_test {
         let rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
-            ds.ds_state[ClientId::new(0)] = DsState::Repair;
-            ds.ds_state[ClientId::new(1)] = DsState::Repair;
-            ds.ds_state[ClientId::new(2)] = DsState::Repair;
+            ds.clients[ClientId::new(0)].state = DsState::Repair;
+            ds.clients[ClientId::new(1)].state = DsState::Repair;
+            ds.clients[ClientId::new(2)].state = DsState::Repair;
             // Put two jobs on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -4754,9 +4636,9 @@ pub(crate) mod up_test {
         let rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
-            ds.ds_state[ClientId::new(0)] = DsState::Repair;
-            ds.ds_state[ClientId::new(1)] = DsState::Repair;
-            ds.ds_state[ClientId::new(2)] = DsState::Repair;
+            ds.clients[ClientId::new(0)].state = DsState::Repair;
+            ds.clients[ClientId::new(1)].state = DsState::Repair;
+            ds.clients[ClientId::new(2)].state = DsState::Repair;
             // Put a job on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -4795,9 +4677,9 @@ pub(crate) mod up_test {
         let rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
-            ds.ds_state[ClientId::new(0)] = DsState::Repair;
-            ds.ds_state[ClientId::new(1)] = DsState::Repair;
-            ds.ds_state[ClientId::new(2)] = DsState::Repair;
+            ds.clients[ClientId::new(0)].state = DsState::Repair;
+            ds.clients[ClientId::new(1)].state = DsState::Repair;
+            ds.clients[ClientId::new(2)].state = DsState::Repair;
             // Put a job on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -4831,9 +4713,9 @@ pub(crate) mod up_test {
         let rep_id = ReconciliationId(0);
         {
             let mut ds = up.downstairs.lock().await;
-            ds.ds_state[ClientId::new(0)] = DsState::Repair;
-            ds.ds_state[ClientId::new(1)] = DsState::Repair;
-            ds.ds_state[ClientId::new(2)] = DsState::Repair;
+            ds.clients[ClientId::new(0)].state = DsState::Repair;
+            ds.clients[ClientId::new(1)].state = DsState::Repair;
+            ds.clients[ClientId::new(2)].state = DsState::Repair;
             // Put a job on the todo list
             ds.reconcile_task_list.push_back(ReconcileIO::new(
                 rep_id,
@@ -4862,9 +4744,9 @@ pub(crate) mod up_test {
         let r0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 801);
         let r1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 802);
         let r2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 803);
-        ds.ds_repair.insert(ClientId::new(0), r0);
-        ds.ds_repair.insert(ClientId::new(1), r1);
-        ds.ds_repair.insert(ClientId::new(2), r2);
+        ds.clients[ClientId::new(0)].repair_addr = Some(r0);
+        ds.clients[ClientId::new(1)].repair_addr = Some(r1);
+        ds.clients[ClientId::new(2)].repair_addr = Some(r2);
 
         let repair_extent = 9;
         let mut rec_list = HashMap::new();
@@ -4982,9 +4864,9 @@ pub(crate) mod up_test {
         let r0 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 801);
         let r1 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 802);
         let r2 = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 803);
-        ds.ds_repair.insert(ClientId::new(0), r0);
-        ds.ds_repair.insert(ClientId::new(1), r1);
-        ds.ds_repair.insert(ClientId::new(2), r2);
+        ds.clients[ClientId::new(0)].repair_addr = Some(r0);
+        ds.clients[ClientId::new(1)].repair_addr = Some(r1);
+        ds.clients[ClientId::new(2)].repair_addr = Some(r2);
 
         let repair_extent = 5;
         let mut rec_list = HashMap::new();
@@ -5117,6 +4999,7 @@ pub(crate) mod up_test {
         ds.enqueue(op, ds_done_tx.clone()).await;
 
         ds.in_progress(next_id, ClientId::new(0));
+        drop(ds);
 
         // fake read response from downstairs that will fail decryption
 
@@ -5151,21 +5034,24 @@ pub(crate) mod up_test {
             }],
         }]);
 
+        // Don't use `should_panic`, as the `unwrap` above could cause this test
+        // to pass for the wrong reason.
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                ds.process_ds_completion(
+                let handle = tokio::runtime::Handle::current();
+                handle.block_on(upstairs.process_ds_operation(
                     next_id,
                     ClientId::new(0),
                     response,
-                    &Some(context),
-                    UpState::Active,
                     None,
-                )
+                ))
             }));
+
         assert!(result.is_err());
     }
 
     #[tokio::test]
+    #[should_panic]
     async fn bad_read_hash_means_panic() {
         // Verify that a bad hash on a read will panic
         let upstairs = Upstairs::test_default(None);
@@ -5179,6 +5065,7 @@ pub(crate) mod up_test {
 
         ds.enqueue(op, ds_done_tx.clone()).await;
         ds.in_progress(next_id, ClientId::new(0));
+        drop(ds);
 
         // fake read response from downstairs that will fail integrity hash
         // check
@@ -5196,25 +5083,19 @@ pub(crate) mod up_test {
             }],
         }]);
 
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                ds.process_ds_completion(
-                    next_id,
-                    ClientId::new(0),
-                    response,
-                    &None,
-                    UpState::Active,
-                    None,
-                )
-            }));
-        assert!(result.is_err());
+        let _result = upstairs
+            .process_ds_operation(next_id, ClientId::new(0), response, None)
+            .await;
     }
 
     #[tokio::test]
     async fn bad_hash_on_encrypted_read_panic() {
         // Verify that a decryption failure on a read will panic.
-        let mut ds = Downstairs::new(csl(), ClientMap::new());
+        let upstairs = Upstairs::test_default(None);
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        upstairs.set_active().await.unwrap();
+        let mut ds = upstairs.downstairs.lock().await;
+
         let next_id = ds.next_id();
 
         let (request, op) = create_generic_read_eob(&mut ds, next_id);
@@ -5231,6 +5112,7 @@ pub(crate) mod up_test {
         ds.enqueue(op, ds_done_tx.clone()).await;
 
         ds.in_progress(next_id, ClientId::new(0));
+        drop(ds);
 
         // fake read response from downstairs that will fail integrity hash
         // check
@@ -5254,17 +5136,19 @@ pub(crate) mod up_test {
             }],
         }]);
 
+        // Don't use `should_panic`, as the `unwrap` above could cause this test
+        // to pass for the wrong reason.
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                ds.process_ds_completion(
+                let handle = tokio::runtime::Handle::current();
+                handle.block_on(upstairs.process_ds_operation(
                     next_id,
                     ClientId::new(0),
                     response,
-                    &Some(context),
-                    UpState::Active,
                     None,
-                )
+                ))
             }));
+
         assert!(result.is_err());
     }
 
@@ -5845,9 +5729,9 @@ pub(crate) mod up_test {
             assert!(ds.in_progress(next_id, ClientId::new(2)).is_some());
 
             // We should have one job on the skipped job list for failed DS
-            assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 1);
-            assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 0);
-            assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 0);
+            assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
+            assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
+            assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
 
             next_id
         };
@@ -5923,10 +5807,12 @@ pub(crate) mod up_test {
         assert_eq!(ds.completed.len(), 3);
 
         // The last skipped flush should still be on the skipped list
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 1);
-        assert!(ds.ds_skipped_jobs[ClientId::new(0)].contains(&JobId(1002)));
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 0);
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
+        assert!(ds.clients[ClientId::new(0)]
+            .skipped_jobs
+            .contains(&JobId(1002)));
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
     }
 
     #[tokio::test]
@@ -6030,9 +5916,9 @@ pub(crate) mod up_test {
             assert!(ds.in_progress(next_id, ClientId::new(2)).is_some());
 
             // Two downstairs should have a skipped job on their lists.
-            assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 1);
-            assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 1);
-            assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 0);
+            assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
+            assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
+            assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
 
             next_id
         };
@@ -6292,9 +6178,9 @@ pub(crate) mod up_test {
 
         // A faulted write won't change skipped job count.
         let ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 0);
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
         drop(ds);
 
         // Verify we can ack this work
@@ -6334,10 +6220,12 @@ pub(crate) mod up_test {
 
         // One downstairs should have a skipped job on its list.
         let ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 1);
-        assert!(ds.ds_skipped_jobs[ClientId::new(1)].contains(&JobId(1001)));
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 0);
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
+        assert!(ds.clients[ClientId::new(1)]
+            .skipped_jobs
+            .contains(&JobId(1001)));
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
         drop(ds);
 
         // Enqueue the flush.
@@ -6389,10 +6277,12 @@ pub(crate) mod up_test {
         assert_eq!(ds.completed.len(), 3);
 
         // Only the skipped flush should remain.
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 1);
-        assert!(ds.ds_skipped_jobs[ClientId::new(1)].contains(&JobId(1002)));
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 0);
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
+        assert!(ds.clients[ClientId::new(1)]
+            .skipped_jobs
+            .contains(&JobId(1002)));
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
     }
 
     #[tokio::test]
@@ -6477,9 +6367,9 @@ pub(crate) mod up_test {
         assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
         assert_eq!(job.state[ClientId::new(2)], IOState::New);
 
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 0);
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
 
         drop(ds);
     }
@@ -6553,9 +6443,9 @@ pub(crate) mod up_test {
         assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
         assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
 
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 0);
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
         drop(ds);
     }
 
@@ -6608,9 +6498,9 @@ pub(crate) mod up_test {
             let job = ds.ds_active.get(&write_one).unwrap();
             assert_eq!(job.state[cid], IOState::Done);
         }
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 0);
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
         drop(ds);
 
         // New write, this one will have a failure
@@ -6660,9 +6550,9 @@ pub(crate) mod up_test {
         );
 
         // A failed job does not change the skipped count.
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 0);
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
         drop(ds);
     }
 
@@ -6786,9 +6676,9 @@ pub(crate) mod up_test {
         assert_eq!(job.state[ClientId::new(1)], IOState::InProgress);
         assert_eq!(job.state[ClientId::new(2)], IOState::Skipped);
 
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 1);
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 1);
         drop(ds);
     }
 
@@ -6840,9 +6730,9 @@ pub(crate) mod up_test {
         assert_eq!(job.state[ClientId::new(2)], IOState::New);
 
         // Three skipped jobs for downstairs zero
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 3);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 0);
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 3);
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
         drop(ds);
     }
 
@@ -6895,9 +6785,9 @@ pub(crate) mod up_test {
         assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
 
         // Three skipped jobs on downstairs client 0
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 3);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 0);
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 3);
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
         drop(ds);
 
         // Do the write
@@ -6948,8 +6838,10 @@ pub(crate) mod up_test {
         ds.retire_check(flush_one);
 
         // Skipped jobs just has the flush
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 1);
-        assert!(ds.ds_skipped_jobs[ClientId::new(0)].contains(&JobId(1002)));
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
+        assert!(ds.clients[ClientId::new(0)]
+            .skipped_jobs
+            .contains(&JobId(1002)));
         assert_eq!(ds.ackable_work().len(), 0);
 
         // The writes, the read, and the flush should be completed.
@@ -7011,9 +6903,9 @@ pub(crate) mod up_test {
         assert_eq!(job.state[ClientId::new(2)], IOState::Skipped);
 
         // Skipped jobs added on downstairs client 0
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 3);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 0);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 3);
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 3);
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 3);
         drop(ds);
 
         // Do the write
@@ -7052,10 +6944,14 @@ pub(crate) mod up_test {
         ds.retire_check(flush_one);
 
         // Skipped jobs now just have the flush.
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 1);
-        assert!(ds.ds_skipped_jobs[ClientId::new(0)].contains(&JobId(1002)));
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 1);
-        assert!(ds.ds_skipped_jobs[ClientId::new(2)].contains(&JobId(1002)));
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
+        assert!(ds.clients[ClientId::new(0)]
+            .skipped_jobs
+            .contains(&JobId(1002)));
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 1);
+        assert!(ds.clients[ClientId::new(2)]
+            .skipped_jobs
+            .contains(&JobId(1002)));
         assert_eq!(ds.ackable_work().len(), 0);
 
         // The writes, the read, and the flush should be completed.
@@ -7101,9 +6997,9 @@ pub(crate) mod up_test {
         assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
         assert_eq!(job.state[ClientId::new(2)], IOState::Skipped);
 
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 1);
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 1);
         drop(ds);
 
         // Verify jobs can be acked.
@@ -7118,9 +7014,9 @@ pub(crate) mod up_test {
         ds.retire_check(read_one);
 
         // Our skipped jobs have not yet been cleared.
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 1);
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 1);
         assert_eq!(ds.ackable_work().len(), 0);
     }
 
@@ -7150,9 +7046,9 @@ pub(crate) mod up_test {
         assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
         assert_eq!(job.state[ClientId::new(2)], IOState::Skipped);
 
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 1);
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 1);
         drop(ds);
 
         // Verify jobs can be acked.
@@ -7166,9 +7062,9 @@ pub(crate) mod up_test {
 
         ds.retire_check(write_one);
         // No flush, no change in skipped jobs.
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(0)].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(1)].len(), 1);
-        assert_eq!(ds.ds_skipped_jobs[ClientId::new(2)].len(), 1);
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 1);
 
         assert_eq!(ds.ackable_work().len(), 0);
     }
@@ -7199,8 +7095,8 @@ pub(crate) mod up_test {
         assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
         assert_eq!(job.state[ClientId::new(2)], IOState::Skipped);
         for cid in ClientId::iter() {
-            assert_eq!(ds.ds_skipped_jobs[cid].len(), 1);
-            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1000)));
+            assert_eq!(ds.clients[cid].skipped_jobs.len(), 1);
+            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1000)));
         }
         drop(ds);
 
@@ -7223,8 +7119,8 @@ pub(crate) mod up_test {
 
         // Skipped jobs still has the flush.
         for cid in ClientId::iter() {
-            assert_eq!(ds.ds_skipped_jobs[cid].len(), 1);
-            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1000)));
+            assert_eq!(ds.clients[cid].skipped_jobs.len(), 1);
+            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1000)));
         }
         drop(ds);
     }
@@ -7269,10 +7165,10 @@ pub(crate) mod up_test {
 
         // Skipped jobs are not yet cleared.
         for cid in ClientId::iter() {
-            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1000)));
-            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1001)));
-            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1002)));
-            assert_eq!(ds.ds_skipped_jobs[cid].len(), 3);
+            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1000)));
+            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1001)));
+            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1002)));
+            assert_eq!(ds.clients[cid].skipped_jobs.len(), 3);
         }
 
         // Verify all IOs are done
@@ -7296,8 +7192,8 @@ pub(crate) mod up_test {
 
         // Skipped jobs now just has the flush
         for cid in ClientId::iter() {
-            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1002)));
-            assert_eq!(ds.ds_skipped_jobs[cid].len(), 1);
+            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1002)));
+            assert_eq!(ds.clients[cid].skipped_jobs.len(), 1);
         }
     }
 
@@ -7353,13 +7249,13 @@ pub(crate) mod up_test {
 
         // Six jobs have been skipped.
         for cid in ClientId::iter() {
-            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1000)));
-            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1001)));
-            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1002)));
-            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1003)));
-            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1004)));
-            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1005)));
-            assert_eq!(ds.ds_skipped_jobs[cid].len(), 6);
+            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1000)));
+            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1001)));
+            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1002)));
+            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1003)));
+            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1004)));
+            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1005)));
+            assert_eq!(ds.clients[cid].skipped_jobs.len(), 6);
         }
 
         // Ack the first 3 jobs
@@ -7374,11 +7270,11 @@ pub(crate) mod up_test {
         // The first two skipped jobs are now cleared and the non-acked
         // jobs remain on the list, as well as the last flush.
         for cid in ClientId::iter() {
-            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1002)));
-            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1003)));
-            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1004)));
-            assert!(ds.ds_skipped_jobs[cid].contains(&JobId(1005)));
-            assert_eq!(ds.ds_skipped_jobs[cid].len(), 4);
+            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1002)));
+            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1003)));
+            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1004)));
+            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1005)));
+            assert_eq!(ds.clients[cid].skipped_jobs.len(), 4);
         }
     }
 
@@ -8893,7 +8789,6 @@ pub(crate) mod up_test {
                     ds_id,
                     client_id,
                     Ok(vec![]),
-                    &None,
                     UpState::Active,
                     None,
                 )
@@ -9069,5 +8964,113 @@ pub(crate) mod up_test {
             *data_buffers.get(&second_id).unwrap().as_vec().await,
             second_response_data.to_vec()
         );
+    }
+
+    #[test]
+    fn test_check_read_response_hashes() {
+        // Regular happy path
+        let job = DownstairsIO {
+            ds_id: JobId(1),
+            guest_id: 1,
+            work: IOop::Read {
+                dependencies: vec![],
+                requests: vec![],
+            },
+            state: ClientData::new(IOState::New),
+            ack_status: AckStatus::NotAcked,
+            replay: false,
+            data: None,
+            read_response_hashes: vec![Some(123)],
+        };
+
+        assert!(job.check_read_response_hashes(&[ReadResponse {
+            eid: 0,
+            offset: Block::new_512(1),
+            data: BytesMut::default(),
+            block_contexts: vec![BlockContext {
+                hash: 123,
+                encryption_context: None,
+            }],
+        }]));
+
+        // Mismatch!
+        let job = DownstairsIO {
+            ds_id: JobId(1),
+            guest_id: 1,
+            work: IOop::Read {
+                dependencies: vec![],
+                requests: vec![],
+            },
+            state: ClientData::new(IOState::New),
+            ack_status: AckStatus::NotAcked,
+            replay: false,
+            data: None,
+            read_response_hashes: vec![Some(456)],
+        };
+
+        assert!(!job.check_read_response_hashes(&[ReadResponse {
+            eid: 0,
+            offset: Block::new_512(1),
+            data: BytesMut::default(),
+            block_contexts: vec![BlockContext {
+                hash: 123,
+                encryption_context: None,
+            }],
+        }]));
+
+        // Length mismatch
+        let job = DownstairsIO {
+            ds_id: JobId(1),
+            guest_id: 1,
+            work: IOop::Read {
+                dependencies: vec![],
+                requests: vec![],
+            },
+            state: ClientData::new(IOState::New),
+            ack_status: AckStatus::NotAcked,
+            replay: false,
+            data: None,
+            read_response_hashes: vec![Some(456), Some(123)],
+        };
+
+        assert!(!job.check_read_response_hashes(&[ReadResponse {
+            eid: 0,
+            offset: Block::new_512(1),
+            data: BytesMut::default(),
+            block_contexts: vec![BlockContext {
+                hash: 123,
+                encryption_context: None,
+            }],
+        }]));
+
+        let job = DownstairsIO {
+            ds_id: JobId(1),
+            guest_id: 1,
+            work: IOop::Read {
+                dependencies: vec![],
+                requests: vec![],
+            },
+            state: ClientData::new(IOState::New),
+            ack_status: AckStatus::NotAcked,
+            replay: false,
+            data: None,
+            read_response_hashes: vec![Some(777)],
+        };
+
+        assert!(!job.check_read_response_hashes(&[ReadResponse {
+            eid: 0,
+            offset: Block::new_512(1),
+            data: BytesMut::default(),
+            block_contexts: vec![
+                BlockContext {
+                    hash: 123,
+                    encryption_context: None,
+                },
+                BlockContext {
+                    hash: 456,
+                    encryption_context: None,
+                },
+            ],
+        }]));
     }
 }

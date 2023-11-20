@@ -119,14 +119,14 @@ pub async fn check_and_run_repair(
         // There's no state drift to repair anyway, this read-only Upstairs
         // wouldn't have caused any modifications.
         for cid in ClientId::iter() {
-            if ds.ds_state[cid] == DsState::LiveRepairReady {
+            if ds.clients[cid].state == DsState::LiveRepairReady {
                 up.ds_transition_with_lock(
                     &mut ds,
                     up_state,
                     cid,
                     DsState::Active,
                 );
-                ds.ro_lr_skipped[cid] += 1;
+                ds.clients[cid].ro_lr_skipped += 1;
             }
         }
 
@@ -136,15 +136,15 @@ pub async fn check_and_run_repair(
     // Verify that all downstairs and the upstairs are in the proper state
     // before we begin a live repair.
     let repair = ds
-        .ds_state
+        .clients
         .iter()
-        .filter(|state| **state == DsState::LiveRepair)
+        .filter(|c| c.state == DsState::LiveRepair)
         .count();
 
     let repair_ready = ds
-        .ds_state
+        .clients
         .iter()
-        .filter(|state| **state == DsState::LiveRepairReady)
+        .filter(|c| c.state == DsState::LiveRepairReady)
         .count();
 
     if repair_ready == 0 {
@@ -186,7 +186,7 @@ pub async fn check_and_run_repair(
                 // LiveRepair.  We do this now while we have the lock to avoid
                 // having to do all these checks again in live_repair_main
                 for cid in ClientId::iter() {
-                    if ds.ds_state[cid] == DsState::LiveRepairReady {
+                    if ds.clients[cid].state == DsState::LiveRepairReady {
                         up.ds_transition_with_lock(
                             &mut ds,
                             up_state,
@@ -274,7 +274,7 @@ async fn live_repair_main(
     // Make sure things are as we expect them to be.
     assert!(ds.repair_job_ids.is_empty());
     // Verify no extent_limits are Some
-    assert_eq!(ds.extent_limit.iter().count(), 0);
+    assert!(ds.clients.iter().all(|c| c.extent_limit.is_none()));
     // When we transitioned this downstairs to LiveRepair, it should have set
     // the minimum for repair, though we will update it again below.
     assert!(ds.repair_min_id.is_some());
@@ -282,7 +282,7 @@ async fn live_repair_main(
     assert!(ds.repair_stop.is_some());
 
     for cid in ClientId::iter() {
-        match ds.ds_state[cid] {
+        match ds.clients[cid].state {
             DsState::LiveRepair => {
                 repair_downstairs.push(cid);
             }
@@ -360,8 +360,8 @@ async fn live_repair_main(
 
             // Verify state has been cleared.
             for cid in ClientId::iter() {
-                assert!(ds.extent_limit.get(&cid).is_none());
-                assert!(ds.ds_state[cid] != DsState::LiveRepair);
+                assert!(ds.clients[cid].extent_limit.is_none());
+                assert!(ds.clients[cid].state != DsState::LiveRepair);
             }
 
             // These will not be cleared until the repair task exits.
@@ -392,7 +392,7 @@ async fn live_repair_main(
             warn!(log, "Error after extent {} repair", eid);
             let ds = up.downstairs.lock().await;
             for cid in ClientId::iter() {
-                assert!(ds.extent_limit.get(&cid).is_none());
+                assert!(ds.clients[cid].extent_limit.is_none());
             }
             drop(ds);
             failed_repair = true;
@@ -446,16 +446,16 @@ async fn live_repair_main(
 
     if failed_repair {
         for cid in ClientId::iter() {
-            assert!(ds.extent_limit.get(&cid).is_none());
-            assert!(ds.ds_state[cid] != DsState::LiveRepair);
+            assert!(ds.clients[cid].extent_limit.is_none());
+            assert!(ds.clients[cid].state != DsState::LiveRepair);
         }
         for &cid in repair_downstairs.iter() {
-            ds.live_repair_aborted[cid] += 1;
+            ds.clients[cid].live_repair_aborted += 1;
         }
     } else {
         for &cid in repair_downstairs.iter() {
             up.ds_transition_with_lock(&mut ds, up_state, cid, DsState::Active);
-            ds.live_repair_completed[cid] += 1;
+            ds.clients[cid].live_repair_completed += 1;
         }
     }
     ds.end_live_repair();
@@ -589,10 +589,10 @@ fn repair_or_noop(
 
     let mut need_repair = Vec::new();
     debug!(ds.log, "Get repair info for {} source", source);
-    let good_ei = ds.repair_info.remove(&source).unwrap();
+    let good_ei = ds.clients[source].repair_info.take().unwrap();
     for broken_extent in repair.iter() {
         debug!(ds.log, "Get repair info for {} bad", broken_extent);
-        let repair_ei = ds.repair_info.remove(broken_extent).unwrap();
+        let repair_ei = ds.clients[*broken_extent].repair_info.take().unwrap();
 
         let repair =
             if repair_ei.dirty || repair_ei.generation != good_ei.generation {
@@ -608,12 +608,14 @@ fn repair_or_noop(
 
     // Now that we have consumed the contents, be sure to clear
     // out anything we did not look at.  There could be something left
-    ds.repair_info = ClientMap::new();
+    for c in ds.clients.iter_mut() {
+        c.repair_info = None;
+    }
 
     if need_repair.is_empty() {
         info!(ds.log, "No repair needed for extent {}", extent);
         for &cid in repair.iter() {
-            ds.extents_confirmed[cid] += 1;
+            ds.clients[cid].extents_confirmed += 1;
         }
         create_noop_io(repair_id, repair_deps, gw_repair_id)
     } else {
@@ -622,7 +624,7 @@ fn repair_or_noop(
             "Repair for extent {} s:{} d:{:?}", extent, source, need_repair
         );
         for &cid in repair.iter() {
-            ds.extents_repaired[cid] += 1;
+            ds.clients[cid].extents_repaired += 1;
         }
         let repair_address = ds.repair_addr(source);
 
@@ -766,11 +768,11 @@ fn repair_ds_state_change(
     repair: &[ClientId],
 ) -> bool {
     for &cid in repair.iter() {
-        if ds.ds_state[cid] != DsState::LiveRepair {
+        if ds.clients[cid].state != DsState::LiveRepair {
             return true;
         }
     }
-    ds.ds_state[source] != DsState::Active
+    ds.clients[source].state != DsState::Active
 }
 
 impl Upstairs {
@@ -785,7 +787,7 @@ impl Upstairs {
     ) {
         let mut notify_guest = false;
         for cid in ClientId::iter() {
-            if ds.ds_state[cid] == DsState::LiveRepair {
+            if ds.clients[cid].state == DsState::LiveRepair {
                 if ds.ds_set_faulted(cid) {
                     notify_guest = true;
                 }
@@ -832,9 +834,9 @@ impl Upstairs {
             // anyway, so just give up.  There is no way we can make
             // progress, and no point in creating any more work.
             if ds
-                .ds_state
+                .clients
                 .iter()
-                .filter(|state| **state == DsState::Faulted)
+                .filter(|c| c.state == DsState::Faulted)
                 .count()
                 == 3
             {
@@ -944,9 +946,9 @@ impl Upstairs {
         if repair_stop {
             let mut ds = self.downstairs.lock().await;
             assert_eq!(
-                ds.ds_state
+                ds.clients
                     .iter()
-                    .filter(|state| **state == DsState::LiveRepair)
+                    .filter(|c| c.state == DsState::LiveRepair)
                     .count(),
                 0
             );
@@ -1065,21 +1067,20 @@ impl Upstairs {
         }
         assert!(ds.repair_min_id.is_some());
         assert!(ds.repair_stop.is_some());
-        assert!(ds.repair_info.is_empty());
+        assert!(ds.clients.iter().all(|c| c.repair_info.is_none()));
 
         // Update our extent limit to this extent.
         for ds_repair in repair.iter() {
             // We should be walking up the extents one at a time.
             if eid > 0 {
                 assert_eq!(
-                    ds.extent_limit.get(ds_repair).cloned(),
+                    ds.clients[*ds_repair].extent_limit,
                     Some(eid as usize - 1)
                 );
             } else {
-                assert!(ds.extent_limit.get(ds_repair).is_none())
+                assert!(ds.clients[*ds_repair].extent_limit.is_none());
             }
-            ds.extent_limit.insert(*ds_repair, eid as usize);
-            error!(self.log, "RE:{} ZZZ extent_limit set", eid);
+            ds.clients[*ds_repair].extent_limit = Some(eid as usize);
         }
 
         // Upstairs "guest" work IDs.
@@ -1363,9 +1364,9 @@ impl Upstairs {
             warn!(self.log, "RE:{} Bailing with error", eid);
             let ds = self.downstairs.lock().await;
             assert_eq!(
-                ds.ds_state
+                ds.clients
                     .iter()
-                    .filter(|state| **state == DsState::LiveRepair)
+                    .filter(|c| c.state == DsState::LiveRepair)
                     .count(),
                 0
             );
@@ -1428,7 +1429,8 @@ pub mod repair_test {
     fn create_test_downstairs() -> Downstairs {
         let mut ds = Downstairs::new(csl(), ClientMap::new());
         for cid in ClientId::iter() {
-            ds.ds_repair.insert(cid, "127.0.0.1:1234".parse().unwrap());
+            ds.clients[cid].repair_addr =
+                Some("127.0.0.1:1234".parse().unwrap());
         }
         ds
     }
@@ -1596,7 +1598,7 @@ pub mod repair_test {
         // No downstairs should change state.
         let ds = up.downstairs.lock().await;
         for cid in ClientId::iter() {
-            assert_eq!(ds.ds_state[cid], DsState::Active);
+            assert_eq!(ds.clients[cid].state, DsState::Active);
         }
         assert!(ds.repair_min_id.is_none());
         assert!(ds.repair_stop.is_none());
@@ -1626,9 +1628,9 @@ pub mod repair_test {
             RepairCheck::RepairStarted
         );
         let ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_state[ClientId::new(1)], DsState::LiveRepair);
+        assert_eq!(ds.clients[ClientId::new(1)].state, DsState::LiveRepair);
         assert!(ds.repair_min_id.is_some());
-        assert!(ds.repair_stop.is_some())
+        assert!(ds.repair_stop.is_some());
     }
 
     #[tokio::test]
@@ -1658,11 +1660,11 @@ pub mod repair_test {
             RepairCheck::RepairStarted
         );
         let ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_state[ClientId::new(0)], DsState::Active);
-        assert_eq!(ds.ds_state[ClientId::new(1)], DsState::LiveRepair);
-        assert_eq!(ds.ds_state[ClientId::new(2)], DsState::LiveRepair);
+        assert_eq!(ds.clients[ClientId::new(0)].state, DsState::Active);
+        assert_eq!(ds.clients[ClientId::new(1)].state, DsState::LiveRepair);
+        assert_eq!(ds.clients[ClientId::new(2)].state, DsState::LiveRepair);
         assert!(ds.repair_min_id.is_some());
-        assert!(ds.repair_stop.is_some())
+        assert!(ds.repair_stop.is_some());
     }
 
     #[tokio::test]
@@ -1807,7 +1809,6 @@ pub mod repair_test {
                 ds_close_id,
                 cid,
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 Some(ei),
             )
@@ -2068,7 +2069,7 @@ pub mod repair_test {
         }
 
         assert_eq!(job.state_count().done, 3);
-        assert_eq!(ds.ds_state[or_ds], DsState::LiveRepair);
+        assert_eq!(ds.clients[or_ds].state, DsState::LiveRepair);
     }
 
     #[tokio::test]
@@ -2135,7 +2136,7 @@ pub mod repair_test {
 
         // process_ds_operation should force the downstairs to fail
         assert_eq!(
-            up.downstairs.lock().await.ds_state[err_ds],
+            up.downstairs.lock().await.clients[err_ds].state,
             DsState::Faulted
         );
 
@@ -2253,8 +2254,8 @@ pub mod repair_test {
             assert_eq!(job.state_count().skipped, 2);
         }
 
-        assert_eq!(ds.ds_state[err_ds], DsState::Faulted);
-        assert_eq!(ds.ds_state[or_ds], DsState::Faulted);
+        assert_eq!(ds.clients[err_ds].state, DsState::Faulted);
+        assert_eq!(ds.clients[or_ds].state, DsState::Faulted);
     }
 
     #[tokio::test]
@@ -2309,7 +2310,6 @@ pub mod repair_test {
                 ds_close_id,
                 cid,
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 Some(ei),
             )
@@ -2361,7 +2361,7 @@ pub mod repair_test {
         // reported the error, and the downstairs that is under repair to
         // fail.
         assert_eq!(
-            up.downstairs.lock().await.ds_state[err_ds],
+            up.downstairs.lock().await.clients[err_ds].state,
             DsState::Faulted
         );
         // When we completed the repair jobs, the repair_extent should
@@ -2444,8 +2444,8 @@ pub mod repair_test {
             assert_eq!(job.state_count().skipped, 1);
         }
 
-        assert_eq!(ds.ds_state[err_ds], DsState::Faulted);
-        assert_eq!(ds.ds_state[or_ds], DsState::Faulted);
+        assert_eq!(ds.clients[err_ds].state, DsState::Faulted);
+        assert_eq!(ds.clients[or_ds].state, DsState::Faulted);
     }
 
     #[tokio::test]
@@ -2493,7 +2493,6 @@ pub mod repair_test {
                 ds_close_id,
                 cid,
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 Some(ei),
             )
@@ -2599,8 +2598,8 @@ pub mod repair_test {
             assert_eq!(job.state_count().skipped, 1);
         }
 
-        assert_eq!(ds.ds_state[err_ds], DsState::Faulted);
-        assert_eq!(ds.ds_state[or_ds], DsState::Faulted);
+        assert_eq!(ds.clients[err_ds].state, DsState::Faulted);
+        assert_eq!(ds.clients[or_ds].state, DsState::Faulted);
     }
 
     #[tokio::test]
@@ -2648,7 +2647,6 @@ pub mod repair_test {
                 ds_close_id,
                 cid,
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 Some(ei),
             )
@@ -2729,8 +2727,8 @@ pub mod repair_test {
         assert_eq!(job.state_count().done, 2);
         assert_eq!(job.state_count().error, 1);
 
-        assert_eq!(ds.ds_state[err_ds], DsState::Faulted);
-        assert_eq!(ds.ds_state[or_ds], DsState::Faulted);
+        assert_eq!(ds.clients[err_ds].state, DsState::Faulted);
+        assert_eq!(ds.clients[or_ds].state, DsState::Faulted);
     }
 
     #[tokio::test]
@@ -2817,7 +2815,7 @@ pub mod repair_test {
         let id = 1000;
 
         let mut ds = up.downstairs.lock().await;
-        assert!(ds.extent_limit.get(&ClientId::new(1)).is_none());
+        assert!(ds.clients[ClientId::new(1)].extent_limit.is_none());
         // Check all three IOs.
         for job_id in (id..id + 3).map(JobId) {
             assert!(ds.in_progress(job_id, ClientId::new(0)).is_some());
@@ -2835,7 +2833,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit.insert(ClientId::new(1), 1);
+        ds.clients[ClientId::new(1)].extent_limit = Some(1);
         drop(ds);
 
         // Our default extent size is 3, so block 3 will be on extent 1
@@ -2891,7 +2889,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit.insert(ClientId::new(1), 0);
+        ds.clients[ClientId::new(1)].extent_limit = Some(0);
         drop(ds);
 
         up.submit_write(
@@ -2943,7 +2941,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit.insert(ClientId::new(1), 1);
+        ds.clients[ClientId::new(1)].extent_limit = Some(1);
         drop(ds);
 
         up.submit_write(
@@ -3035,7 +3033,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit.insert(ClientId::new(1), 1);
+        ds.clients[ClientId::new(1)].extent_limit = Some(1);
         drop(ds);
 
         // Our default extent size is 3, so block 3 will be on extent 1
@@ -3123,7 +3121,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit.insert(ClientId::new(1), 1);
+        ds.clients[ClientId::new(1)].extent_limit = Some(1);
         drop(ds);
 
         // Our default extent size is 3, so block 3 will be on extent 1
@@ -3189,7 +3187,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit.insert(ClientId::new(1), 1);
+        ds.clients[ClientId::new(1)].extent_limit = Some(1);
         drop(ds);
 
         // Our default extent size is 3, so block 3 will be on extent 1
@@ -3261,7 +3259,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit.insert(ClientId::new(1), 0);
+        ds.clients[ClientId::new(1)].extent_limit = Some(0);
         drop(ds);
 
         // Our default extent size is 3, so block 3 will be on extent 1
@@ -3299,8 +3297,8 @@ pub mod repair_test {
         let mut gw = up.guest.guest_work.lock().await;
         let mut ds = up.downstairs.lock().await;
         let eid = 1;
-        ds.extent_limit
-            .insert(ClientId::new(1), eid.try_into().unwrap());
+        ds.clients[ClientId::new(1)].extent_limit =
+            Some(eid.try_into().unwrap());
 
         let gw_close_id = 1;
         let (repair_ids, deps) = ds.get_repair_ids(eid);
@@ -3342,7 +3340,6 @@ pub mod repair_test {
                 repair_ids.close_id,
                 ClientId::new(0),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 Some(ei)
             )
@@ -3350,12 +3347,12 @@ pub mod repair_test {
 
         // Verify the extent information has been added to the repair info
         // hashmap for client 0
-        let new_ei = ds.repair_info.get(&ClientId::new(0)).unwrap();
+        let new_ei = ds.clients[ClientId::new(0)].repair_info.unwrap();
         assert_eq!(new_ei.generation, 5);
         assert_eq!(new_ei.flush_number, 3);
         assert!(!new_ei.dirty);
-        assert!(ds.repair_info.remove(&ClientId::new(1)).is_none());
-        assert!(ds.repair_info.remove(&ClientId::new(2)).is_none());
+        assert!(ds.clients[ClientId::new(1)].repair_info.is_none());
+        assert!(ds.clients[ClientId::new(2)].repair_info.is_none());
 
         // Verify the extent information has been added to the repair info
         // hashmap for client 1
@@ -3369,16 +3366,15 @@ pub mod repair_test {
                 repair_ids.close_id,
                 ClientId::new(1),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 Some(ei)
             )
             .unwrap());
-        let new_ei = ds.repair_info.get(&ClientId::new(1)).unwrap();
+        let new_ei = ds.clients[ClientId::new(1)].repair_info.unwrap();
         assert_eq!(new_ei.generation, 2);
         assert_eq!(new_ei.flush_number, 4);
         assert!(new_ei.dirty);
-        assert!(ds.repair_info.remove(&ClientId::new(2)).is_none());
+        assert!(ds.clients[ClientId::new(2)].repair_info.is_none());
 
         let ei = ExtentInfo {
             generation: 29,
@@ -3390,12 +3386,11 @@ pub mod repair_test {
                 repair_ids.close_id,
                 ClientId::new(2),
                 Ok(vec![]),
-                &None,
                 UpState::Active,
                 Some(ei)
             )
             .unwrap());
-        let new_ei = ds.repair_info.get(&ClientId::new(2)).unwrap();
+        let new_ei = ds.clients[ClientId::new(2)].repair_info.unwrap();
         assert_eq!(new_ei.generation, 29);
         assert_eq!(new_ei.flush_number, 444);
         assert!(!new_ei.dirty);
@@ -3427,9 +3422,18 @@ pub mod repair_test {
                 flush_number: 3,
                 dirty: false,
             };
-            assert!(ds.repair_info.insert(ClientId::new(0), ei).is_none());
-            assert!(ds.repair_info.insert(ClientId::new(1), ei).is_none());
-            assert!(ds.repair_info.insert(ClientId::new(2), ei).is_none());
+            assert!(ds.clients[ClientId::new(0)]
+                .repair_info
+                .replace(ei)
+                .is_none());
+            assert!(ds.clients[ClientId::new(1)]
+                .repair_info
+                .replace(ei)
+                .is_none());
+            assert!(ds.clients[ClientId::new(2)]
+                .repair_info
+                .replace(ei)
+                .is_none());
 
             let repair_extent = if source == ClientId::new(0) {
                 vec![ClientId::new(1), ClientId::new(2)]
@@ -3528,31 +3532,31 @@ pub mod repair_test {
             // is the source.
             // First try one source, one repair
             let repair = if source == ClientId::new(0) {
-                assert!(ds
+                assert!(ds.clients[ClientId::new(0)]
                     .repair_info
-                    .insert(ClientId::new(0), good_ei)
+                    .replace(good_ei)
                     .is_none());
-                assert!(ds
+                assert!(ds.clients[ClientId::new(1)]
                     .repair_info
-                    .insert(ClientId::new(1), bad_ei)
+                    .replace(bad_ei)
                     .is_none());
-                assert!(ds
+                assert!(ds.clients[ClientId::new(2)]
                     .repair_info
-                    .insert(ClientId::new(2), good_ei)
+                    .replace(good_ei)
                     .is_none());
                 vec![ClientId::new(1)]
             } else {
-                assert!(ds
+                assert!(ds.clients[ClientId::new(0)]
                     .repair_info
-                    .insert(ClientId::new(0), bad_ei)
+                    .replace(bad_ei)
                     .is_none());
-                assert!(ds
+                assert!(ds.clients[ClientId::new(1)]
                     .repair_info
-                    .insert(ClientId::new(1), good_ei)
+                    .replace(good_ei)
                     .is_none());
-                assert!(ds
+                assert!(ds.clients[ClientId::new(2)]
                     .repair_info
-                    .insert(ClientId::new(2), good_ei)
+                    .replace(good_ei)
                     .is_none());
                 vec![ClientId::new(0)]
             };
@@ -3562,31 +3566,31 @@ pub mod repair_test {
 
             // Next try the other downstairs to repair.
             let repair = if source == ClientId::new(2) {
-                assert!(ds
+                assert!(ds.clients[ClientId::new(0)]
                     .repair_info
-                    .insert(ClientId::new(0), good_ei)
+                    .replace(good_ei)
                     .is_none());
-                assert!(ds
+                assert!(ds.clients[ClientId::new(1)]
                     .repair_info
-                    .insert(ClientId::new(1), bad_ei)
+                    .replace(bad_ei)
                     .is_none());
-                assert!(ds
+                assert!(ds.clients[ClientId::new(2)]
                     .repair_info
-                    .insert(ClientId::new(2), good_ei)
+                    .replace(good_ei)
                     .is_none());
                 vec![ClientId::new(1)]
             } else {
-                assert!(ds
+                assert!(ds.clients[ClientId::new(0)]
                     .repair_info
-                    .insert(ClientId::new(0), good_ei)
+                    .replace(good_ei)
                     .is_none());
-                assert!(ds
+                assert!(ds.clients[ClientId::new(1)]
                     .repair_info
-                    .insert(ClientId::new(1), good_ei)
+                    .replace(good_ei)
                     .is_none());
-                assert!(ds
+                assert!(ds.clients[ClientId::new(2)]
                     .repair_info
-                    .insert(ClientId::new(2), bad_ei)
+                    .replace(bad_ei)
                     .is_none());
                 vec![ClientId::new(2)]
             };
@@ -3614,45 +3618,45 @@ pub mod repair_test {
             // is the source.
             // One source, two repair
             let repair = if source == ClientId::new(0) {
-                assert!(ds
+                assert!(ds.clients[ClientId::new(0)]
                     .repair_info
-                    .insert(ClientId::new(0), good_ei)
+                    .replace(good_ei)
                     .is_none());
-                assert!(ds
+                assert!(ds.clients[ClientId::new(1)]
                     .repair_info
-                    .insert(ClientId::new(1), bad_ei)
+                    .replace(bad_ei)
                     .is_none());
-                assert!(ds
+                assert!(ds.clients[ClientId::new(2)]
                     .repair_info
-                    .insert(ClientId::new(2), bad_ei)
+                    .replace(bad_ei)
                     .is_none());
                 vec![ClientId::new(1), ClientId::new(2)]
             } else if source == ClientId::new(1) {
-                assert!(ds
+                assert!(ds.clients[ClientId::new(0)]
                     .repair_info
-                    .insert(ClientId::new(0), bad_ei)
+                    .replace(bad_ei)
                     .is_none());
-                assert!(ds
+                assert!(ds.clients[ClientId::new(1)]
                     .repair_info
-                    .insert(ClientId::new(1), good_ei)
+                    .replace(good_ei)
                     .is_none());
-                assert!(ds
+                assert!(ds.clients[ClientId::new(2)]
                     .repair_info
-                    .insert(ClientId::new(2), bad_ei)
+                    .replace(bad_ei)
                     .is_none());
                 vec![ClientId::new(0), ClientId::new(2)]
             } else {
-                assert!(ds
+                assert!(ds.clients[ClientId::new(0)]
                     .repair_info
-                    .insert(ClientId::new(0), bad_ei)
+                    .replace(bad_ei)
                     .is_none());
-                assert!(ds
+                assert!(ds.clients[ClientId::new(1)]
                     .repair_info
-                    .insert(ClientId::new(1), bad_ei)
+                    .replace(bad_ei)
                     .is_none());
-                assert!(ds
+                assert!(ds.clients[ClientId::new(2)]
                     .repair_info
-                    .insert(ClientId::new(2), good_ei)
+                    .replace(good_ei)
                     .is_none());
                 vec![ClientId::new(0), ClientId::new(1)]
             };
@@ -3882,8 +3886,8 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
 
         let eid = 1;
-        ds.extent_limit
-            .insert(ClientId::new(1), eid.try_into().unwrap());
+        ds.clients[ClientId::new(1)].extent_limit =
+            Some(eid.try_into().unwrap());
 
         // Upstairs "guest" work IDs.
         let gw_r_id: u64 = 1;
@@ -3940,8 +3944,8 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
 
         let eid = 1;
-        ds.extent_limit
-            .insert(ClientId::new(1), eid.try_into().unwrap());
+        ds.clients[ClientId::new(1)].extent_limit =
+            Some(eid.try_into().unwrap());
 
         // Upstairs "guest" work IDs.
         let gw_close_id: u64 = 1;
@@ -4018,8 +4022,8 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
 
         let eid = 1;
-        ds.extent_limit
-            .insert(ClientId::new(1), eid.try_into().unwrap());
+        ds.clients[ClientId::new(1)].extent_limit =
+            Some(eid.try_into().unwrap());
 
         // Upstairs "guest" work IDs.
         let gw_repair_id: u64 = gw.next_gw_id();
@@ -4039,7 +4043,7 @@ pub mod repair_test {
             dirty: false,
         };
         for cid in ClientId::iter() {
-            ds.repair_info.insert(cid, ei);
+            ds.clients[cid].repair_info = Some(ei);
         }
 
         let _repair_brw = create_and_enqueue_repair_io(
@@ -4086,8 +4090,8 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
 
         let eid = 1;
-        ds.extent_limit
-            .insert(ClientId::new(1), eid.try_into().unwrap());
+        ds.clients[ClientId::new(1)].extent_limit =
+            Some(eid.try_into().unwrap());
 
         // Upstairs "guest" work IDs.
         let gw_repair_id: u64 = gw.next_gw_id();
@@ -4105,17 +4109,18 @@ pub mod repair_test {
             flush_number: 3,
             dirty: false,
         };
-        ds.repair_info.insert(ClientId::new(0), ei);
-        ds.repair_info.insert(ClientId::new(1), ei);
+        ds.clients[ClientId::new(0)].repair_info = Some(ei);
+        ds.clients[ClientId::new(1)].repair_info = Some(ei);
         let bad_ei = ExtentInfo {
             generation: 5,
             flush_number: 2,
             dirty: false,
         };
-        ds.repair_info.insert(ClientId::new(2), bad_ei);
+        ds.clients[ClientId::new(2)].repair_info = Some(bad_ei);
         // We also need a fake repair address
         for cid in ClientId::iter() {
-            ds.ds_repair.insert(cid, "127.0.0.1:1234".parse().unwrap());
+            ds.clients[cid].repair_addr =
+                Some("127.0.0.1:1234".parse().unwrap());
         }
 
         let _reopen_brw = create_and_enqueue_repair_io(
@@ -4184,8 +4189,8 @@ pub mod repair_test {
     async fn create_and_enqueue_repair_ops(up: &Arc<Upstairs>, eid: u64) {
         let mut gw = up.guest.guest_work.lock().await;
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit
-            .insert(ClientId::new(1), eid.try_into().unwrap());
+        ds.clients[ClientId::new(1)].extent_limit =
+            Some(eid.try_into().unwrap());
 
         let (extent_repair_ids, deps) = ds.get_repair_ids(eid);
 
@@ -4270,8 +4275,8 @@ pub mod repair_test {
         // Repair IO functions assume you have the locks
         let mut ds = up.downstairs.lock().await;
         let eid = 0;
-        ds.extent_limit
-            .insert(ClientId::new(1), eid.try_into().unwrap());
+        ds.clients[ClientId::new(1)].extent_limit =
+            Some(eid.try_into().unwrap());
         drop(ds);
 
         create_and_enqueue_repair_ops(&up, eid).await;
@@ -4326,8 +4331,8 @@ pub mod repair_test {
         // Repair IO functions assume you have the locks already
         let mut ds = up.downstairs.lock().await;
         let eid = 0;
-        ds.extent_limit
-            .insert(ClientId::new(1), eid.try_into().unwrap());
+        ds.clients[ClientId::new(1)].extent_limit =
+            Some(eid.try_into().unwrap());
         drop(ds);
 
         create_and_enqueue_repair_ops(&up, eid).await;
@@ -4393,8 +4398,8 @@ pub mod repair_test {
         // Repair IO functions assume you have the locks already
         let mut ds = up.downstairs.lock().await;
         let eid = 0;
-        ds.extent_limit
-            .insert(ClientId::new(1), eid.try_into().unwrap());
+        ds.clients[ClientId::new(1)].extent_limit =
+            Some(eid.try_into().unwrap());
         drop(ds);
 
         create_and_enqueue_repair_ops(&up, eid).await;
@@ -4465,8 +4470,8 @@ pub mod repair_test {
         // Repair IO functions assume you have the locks
         let mut ds = up.downstairs.lock().await;
         let eid = 0;
-        ds.extent_limit
-            .insert(ClientId::new(1), eid.try_into().unwrap());
+        ds.clients[ClientId::new(1)].extent_limit =
+            Some(eid.try_into().unwrap());
 
         drop(ds);
 
@@ -4511,8 +4516,8 @@ pub mod repair_test {
         // Repair IO functions assume you have the locks already
         let mut ds = up.downstairs.lock().await;
         let eid = 0;
-        ds.extent_limit
-            .insert(ClientId::new(1), eid.try_into().unwrap());
+        ds.clients[ClientId::new(1)].extent_limit =
+            Some(eid.try_into().unwrap());
         drop(ds);
 
         create_and_enqueue_repair_ops(&up, eid).await;
@@ -4556,8 +4561,8 @@ pub mod repair_test {
         // Repair IO functions assume you have the locks already
         let mut ds = up.downstairs.lock().await;
         let eid = 0;
-        ds.extent_limit
-            .insert(ClientId::new(1), eid.try_into().unwrap());
+        ds.clients[ClientId::new(1)].extent_limit =
+            Some(eid.try_into().unwrap());
         drop(ds);
 
         create_and_enqueue_repair_ops(&up, eid).await;
@@ -5336,7 +5341,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit.insert(ClientId::new(1), 0);
+        ds.clients[ClientId::new(1)].extent_limit = Some(0);
         drop(ds);
 
         // A write of blocks 2,3,4 which spans extents.
@@ -5391,7 +5396,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit.insert(ClientId::new(1), 0);
+        ds.clients[ClientId::new(1)].extent_limit = Some(0);
         drop(ds);
 
         // A read of blocks 2,3,4 which spans extents.
@@ -5443,7 +5448,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit.insert(ClientId::new(1), 0);
+        ds.clients[ClientId::new(1)].extent_limit = Some(0);
         drop(ds);
 
         up.submit_flush(None, None, ds_done_tx.clone())
@@ -5465,7 +5470,7 @@ pub mod repair_test {
         let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit.insert(ClientId::new(1), 1);
+        ds.clients[ClientId::new(1)].extent_limit = Some(1);
         drop(ds);
 
         let job_id = JobId(1000);
@@ -5539,7 +5544,7 @@ pub mod repair_test {
 
         let eid = 0u64;
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit.insert(ClientId::new(1), eid as usize);
+        ds.clients[ClientId::new(1)].extent_limit = Some(eid as usize);
         drop(ds);
 
         submit_three_ios(&up, &ds_done_tx).await;
@@ -5550,9 +5555,9 @@ pub mod repair_test {
         up.abort_repair_ds(&mut ds, UpState::Active, &ds_done_tx);
         up.abort_repair_extent(&mut gw, &mut ds, eid);
 
-        assert_eq!(ds.ds_state[ClientId::new(0)], DsState::Active);
-        assert_eq!(ds.ds_state[ClientId::new(1)], DsState::Faulted);
-        assert_eq!(ds.ds_state[ClientId::new(0)], DsState::Active);
+        assert_eq!(ds.clients[ClientId::new(0)].state, DsState::Active);
+        assert_eq!(ds.clients[ClientId::new(1)].state, DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(0)].state, DsState::Active);
 
         // Check all three IOs again, downstairs 1 will be skipped..
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
@@ -5562,7 +5567,7 @@ pub mod repair_test {
             assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
             assert_eq!(job.state[ClientId::new(2)], IOState::New);
         }
-        assert_eq!(ds.extent_limit.get(&ClientId::new(1)), None);
+        assert!(ds.clients[ClientId::new(1)].extent_limit.is_none());
     }
 
     #[tokio::test]
@@ -5576,7 +5581,7 @@ pub mod repair_test {
 
         let eid = 0u64;
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit.insert(ClientId::new(1), eid as usize);
+        ds.clients[ClientId::new(1)].extent_limit = Some(eid as usize);
         drop(ds);
 
         submit_three_ios(&up, &ds_done_tx).await;
@@ -5624,9 +5629,9 @@ pub mod repair_test {
 
         let eid = 0u64;
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit.insert(ClientId::new(0), eid as usize);
-        ds.extent_limit.insert(ClientId::new(1), eid as usize);
-        ds.extent_limit.insert(ClientId::new(2), eid as usize);
+        ds.clients[ClientId::new(0)].extent_limit = Some(eid as usize);
+        ds.clients[ClientId::new(1)].extent_limit = Some(eid as usize);
+        ds.clients[ClientId::new(2)].extent_limit = Some(eid as usize);
         drop(ds);
 
         submit_three_ios(&up, &ds_done_tx).await;
@@ -5670,7 +5675,7 @@ pub mod repair_test {
                 flush_numbers: vec![2, 2, 2, 2],
                 dirty: vec![false, false, false, false],
             };
-            up.downstairs.lock().await.region_metadata.insert(cid, dsr);
+            up.downstairs.lock().await.clients[cid].region_metadata = Some(dsr);
             up.ds_transition(cid, DsState::WaitQuorum).await;
             up.ds_transition(cid, DsState::Active).await;
         }
@@ -5721,11 +5726,11 @@ pub mod repair_test {
         show_all_work(&up).await;
         let mut ds = up.downstairs.lock().await;
         // Good downstairs don't need changes
-        assert!(!ds.dependencies_need_cleanup(ClientId::new(0)));
-        assert!(!ds.dependencies_need_cleanup(ClientId::new(2)));
+        assert!(!ds.clients[ClientId::new(0)].dependencies_need_cleanup());
+        assert!(!ds.clients[ClientId::new(2)].dependencies_need_cleanup());
 
         // LiveRepair downstairs might need a change
-        assert!(ds.dependencies_need_cleanup(ClientId::new(1)));
+        assert!(ds.clients[ClientId::new(1)].dependencies_need_cleanup());
         for job_id in (1003..1006).map(JobId) {
             let job = ds.ds_active.get(&job_id).unwrap();
             // jobs 3,4,5 will be skipped for our LiveRepair downstairs.
@@ -5817,7 +5822,7 @@ pub mod repair_test {
         submit_three_ios(&up, &ds_done_tx).await;
 
         let mut ds = up.downstairs.lock().await;
-        ds.extent_limit.insert(ClientId::new(1), 1);
+        ds.clients[ClientId::new(1)].extent_limit = Some(1);
         drop(ds);
 
         // New jobs will go -> Skipped for the downstairs in repair.
@@ -5825,11 +5830,11 @@ pub mod repair_test {
 
         let mut ds = up.downstairs.lock().await;
         // Good downstairs don't need changes
-        assert!(!ds.dependencies_need_cleanup(ClientId::new(0)));
-        assert!(!ds.dependencies_need_cleanup(ClientId::new(2)));
+        assert!(!ds.clients[ClientId::new(0)].dependencies_need_cleanup());
+        assert!(!ds.clients[ClientId::new(2)].dependencies_need_cleanup());
 
         // LiveRepair downstairs might need a change
-        assert!(ds.dependencies_need_cleanup(ClientId::new(1)));
+        assert!(ds.clients[ClientId::new(1)].dependencies_need_cleanup());
 
         // For the three latest jobs, they should be New as they are IOs that
         // are on an extent we "already repaired".
@@ -6113,7 +6118,7 @@ pub mod repair_test {
         ds.repair_min_id = Some(ds.peek_next_id());
         let (repair_stop_tx, mut _repair_stop_rx) = mpsc::channel::<bool>(1);
         ds.repair_stop = Some(repair_stop_tx);
-        ds.extent_limit.insert(ClientId::new(1), eid as usize);
+        ds.clients[ClientId::new(1)].extent_limit = Some(eid as usize);
 
         // Upstairs "guest" work IDs.
         let gw_close_id: u64 = gw.next_gw_id();
@@ -6276,7 +6281,7 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
 
         // Make extent 0 under repair
-        ds.extent_limit.insert(ClientId::new(1), 0);
+        ds.clients[ClientId::new(1)].extent_limit = Some(0);
         drop(ds);
 
         // A write of blocks 2,3,4 which spans extents 0-1.
@@ -6371,7 +6376,7 @@ pub mod repair_test {
         let mut ds = up.downstairs.lock().await;
 
         // Make extent 0 under repair
-        ds.extent_limit.insert(ClientId::new(1), 0);
+        ds.clients[ClientId::new(1)].extent_limit = Some(0);
         drop(ds);
 
         // A write of blocks 3,4,5,6 which spans extents 1-2.

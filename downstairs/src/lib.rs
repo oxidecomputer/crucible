@@ -948,12 +948,16 @@ async fn do_work_task<T>(
 where
     T: tokio::io::AsyncWrite + std::marker::Unpin,
 {
+    // The lossy attribute currently does not change at runtime. To avoid
+    // continually locking the downstairs, cache the result here.
+    let is_lossy = ads.lock().await.lossy;
+
     /*
      * job_channel_rx is a notification that we should look for new work.
      */
     while job_channel_rx.recv().await.is_some() {
         // Add a little time to completion for this operation.
-        if ads.lock().await.lossy && random() && random() {
+        if is_lossy && random() && random() {
             info!(ads.lock().await.log, "[lossy] sleeping 1 second");
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
@@ -980,17 +984,15 @@ where
 
         /*
          * We don't have to do jobs in order, but the dependencies are, at
-         * least for now, always going to be in order of job id.  So,
-         * to best move things forward it is going to be fewer laps
-         * through the list if we take the lowest job id first.
+         * least for now, always going to be in order of job id. `new_work` is
+         * sorted before it is returned so this function iterates through jobs
+         * in order.
          */
-        new_work.sort_unstable();
-
         while !new_work.is_empty() {
             let mut repeat_work = Vec::with_capacity(new_work.len());
 
             for new_id in new_work.drain(..) {
-                if ads.lock().await.lossy && random() && random() {
+                if is_lossy && random() && random() {
                     // Skip a job that needs to be done. Sometimes
                     info!(ads.lock().await.log, "[lossy] skipping {}", new_id);
                     repeat_work.push(new_id);
@@ -1666,6 +1668,9 @@ where
             Ok(())
         })
     };
+
+    // The lossy attribute currently does not change at runtime. To avoid
+    // continually locking the downstairs, cache the result here.
     let lossy = ads.lock().await.lossy;
 
     tokio::pin!(dw_task);
