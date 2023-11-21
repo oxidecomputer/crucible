@@ -930,6 +930,7 @@ struct MonitorInfo {
 
 /// State of a downstairs.
 #[derive(Debug, Copy, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum DownstairsState {
     Stopped,
     Stopping,

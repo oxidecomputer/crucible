@@ -5,7 +5,7 @@
     "version": "0.0.0"
   },
   "paths": {
-    "/crucible/pantry/0/job/{id}/is_finished": {
+    "/crucible/pantry/0/job/{id}/is-finished": {
       "get": {
         "summary": "Poll to see if a Pantry background job is done",
         "operationId": "is_job_finished",
@@ -144,7 +144,7 @@
         }
       }
     },
-    "/crucible/pantry/0/volume/{id}/bulk_read": {
+    "/crucible/pantry/0/volume/{id}/bulk-read": {
       "post": {
         "summary": "Bulk read data from a volume at a specified offset",
         "operationId": "bulk_read",
@@ -188,7 +188,7 @@
         }
       }
     },
-    "/crucible/pantry/0/volume/{id}/bulk_write": {
+    "/crucible/pantry/0/volume/{id}/bulk-write": {
       "post": {
         "summary": "Bulk write data into a volume at a specified offset",
         "operationId": "bulk_write",
@@ -225,7 +225,7 @@
         }
       }
     },
-    "/crucible/pantry/0/volume/{id}/import_from_url": {
+    "/crucible/pantry/0/volume/{id}/import-from-url": {
       "post": {
         "summary": "Import data from a URL into a volume",
         "operationId": "import_from_url",
@@ -386,18 +386,6 @@
     }
   },
   "components": {
-    "responses": {
-      "Error": {
-        "description": "Error",
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/Error"
-            }
-          }
-        }
-      }
-    },
     "schemas": {
       "AttachRequest": {
         "type": "object",
@@ -544,12 +532,12 @@
           {
             "type": "object",
             "properties": {
-              "Sha256": {
+              "sha256": {
                 "type": "string"
               }
             },
             "required": [
-              "Sha256"
+              "sha256"
             ],
             "additionalProperties": false
           }
@@ -800,6 +788,18 @@
             ]
           }
         ]
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "Error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
       }
     }
   }

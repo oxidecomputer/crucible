@@ -763,8 +763,11 @@ where
          * If in_progress returns None, it means that this job on this
          * client should be skipped.
          */
-        let Some(job) = u.downstairs.lock().await.in_progress(new_id, client_id)
-            else { continue; };
+        let Some(job) =
+            u.downstairs.lock().await.in_progress(new_id, client_id)
+        else {
+            continue;
+        };
 
         match job {
             IOop::Write {
@@ -4767,7 +4770,9 @@ impl Downstairs {
 
     /// Reserves repair IDs if impacted blocks overlap our extent under repair
     fn check_repair_ids_for_range(&mut self, impacted_blocks: ImpactedBlocks) {
-        let Some(eur) = self.get_extent_under_repair() else { return; };
+        let Some(eur) = self.get_extent_under_repair() else {
+            return;
+        };
         let mut future_repair = false;
         for eid in impacted_blocks.extents().into_iter().flatten() {
             if eid == *eur.start() {
@@ -6648,8 +6653,9 @@ impl Upstairs {
         let mut max_flush = 0;
         let mut max_gen = 0;
         for cid in ClientId::iter() {
-            let Some(rec) = ds.clients[cid].region_metadata.as_ref()
-                else { continue; };
+            let Some(rec) = ds.clients[cid].region_metadata.as_ref() else {
+                continue;
+            };
             let mf = rec.flush_numbers.iter().max().unwrap() + 1;
             if mf > max_flush {
                 max_flush = mf;
@@ -7583,8 +7589,9 @@ impl Upstairs {
         let mut new_client_id: Option<ClientId> = None;
         let mut old_client_id: Option<ClientId> = None;
         for client_id in ClientId::iter() {
-            let Some(ds_target) = ds.clients[client_id].target
-                else { continue; };
+            let Some(ds_target) = ds.clients[client_id].target else {
+                continue;
+            };
             if ds_target == new {
                 new_client_id = Some(client_id);
                 info!(self.log, "{id} found new target: {new} at {client_id}");
@@ -8557,6 +8564,7 @@ impl IOStateCount {
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum AckStatus {
     NotAcked,
     AckReady,

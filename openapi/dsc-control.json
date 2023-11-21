@@ -393,30 +393,18 @@
     }
   },
   "components": {
-    "responses": {
-      "Error": {
-        "description": "Error",
-        "content": {
-          "application/json": {
-            "schema": {
-              "$ref": "#/components/schemas/Error"
-            }
-          }
-        }
-      }
-    },
     "schemas": {
       "DownstairsState": {
         "description": "State of a downstairs.",
         "type": "string",
         "enum": [
-          "Stopped",
-          "Stopping",
-          "Starting",
-          "Running",
-          "Exit",
-          "Error",
-          "Failed"
+          "stopped",
+          "stopping",
+          "starting",
+          "running",
+          "exit",
+          "error",
+          "failed"
         ]
       },
       "Error": {
@@ -437,6 +425,18 @@
           "message",
           "request_id"
         ]
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "Error",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
       }
     }
   }
