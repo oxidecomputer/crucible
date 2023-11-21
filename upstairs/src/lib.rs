@@ -6653,8 +6653,9 @@ impl Upstairs {
         let mut max_flush = 0;
         let mut max_gen = 0;
         for cid in ClientId::iter() {
-            let Some(rec) = ds.clients[cid].region_metadata.as_ref()
-                else { continue; };
+            let Some(rec) = ds.clients[cid].region_metadata.as_ref() else {
+                continue;
+            };
             let mf = rec.flush_numbers.iter().max().unwrap() + 1;
             if mf > max_flush {
                 max_flush = mf;
@@ -7588,8 +7589,9 @@ impl Upstairs {
         let mut new_client_id: Option<ClientId> = None;
         let mut old_client_id: Option<ClientId> = None;
         for client_id in ClientId::iter() {
-            let Some(ds_target) = ds.clients[client_id].target
-                else { continue; };
+            let Some(ds_target) = ds.clients[client_id].target else {
+                continue;
+            };
             if ds_target == new {
                 new_client_id = Some(client_id);
                 info!(self.log, "{id} found new target: {new} at {client_id}");
