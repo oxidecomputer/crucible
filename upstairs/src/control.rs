@@ -122,16 +122,11 @@ async fn upstairs_fill_info(
     let ds_jobs = ds.ds_active.len();
     let repair_done = ds.reconcile_repaired;
     let repair_needed = ds.reconcile_repair_needed;
-    let extents_repaired = ds.extents_repaired;
-    let extents_confirmed = ds.extents_confirmed;
-    let extent_limit = ds.extent_limit;
-    let live_repair_completed = ds.live_repair_completed;
-    let live_repair_aborted = ds.live_repair_aborted;
-
-    // Convert from a map of extent limits to a Vec<Option<usize>>
-    let extent_limit = ClientId::iter()
-        .map(|i| extent_limit.get(&i).cloned())
-        .collect();
+    let extents_repaired = ds.collect_stats(|c| c.extents_repaired);
+    let extents_confirmed = ds.collect_stats(|c| c.extents_confirmed);
+    let extent_limit = ds.collect_stats(|c| c.extent_limit);
+    let live_repair_completed = ds.collect_stats(|c| c.live_repair_completed);
+    let live_repair_aborted = ds.collect_stats(|c| c.live_repair_aborted);
 
     Ok(HttpResponseOk(UpstairsStats {
         state: act,
@@ -140,11 +135,11 @@ async fn upstairs_fill_info(
         ds_jobs,
         repair_done,
         repair_needed,
-        extents_repaired: extents_repaired.0.to_vec(),
-        extents_confirmed: extents_confirmed.0.to_vec(),
-        extent_limit,
-        live_repair_completed: live_repair_completed.0.to_vec(),
-        live_repair_aborted: live_repair_aborted.0.to_vec(),
+        extents_repaired: extents_repaired.to_vec(),
+        extents_confirmed: extents_confirmed.to_vec(),
+        extent_limit: extent_limit.to_vec(),
+        live_repair_completed: live_repair_completed.to_vec(),
+        live_repair_aborted: live_repair_aborted.to_vec(),
     }))
 }
 
