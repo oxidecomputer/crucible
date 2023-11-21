@@ -12,7 +12,6 @@ use crucible_common::CrucibleError;
 
 use std::sync::Arc;
 
-use oximeter::Metric;
 use ringbuffer::RingBuffer;
 use slog::{error, info, warn, Logger};
 use tokio::{
@@ -164,10 +163,9 @@ impl Upstairs {
     /// Apply an action returned from [`Upstairs::select`]
     async fn apply(&mut self, action: UpstairsAction) {
         match action {
-            UpstairsAction::Downstairs(DownstairsAction::Client {
-                client_id,
-                action,
-            }) => self.apply_downstairs_action(client_id, action).await,
+            UpstairsAction::Downstairs(d) => {
+                self.apply_downstairs_action(d).await
+            }
             UpstairsAction::Guest(b) => self.apply_guest_request(b).await,
             UpstairsAction::LeakCheck => {
                 const LEAK_MS: usize = 1000;
@@ -707,7 +705,24 @@ impl Upstairs {
     }
 
     /// React to an event sent by one of the downstairs clients
-    async fn apply_downstairs_action(
+    async fn apply_downstairs_action(&mut self, d: DownstairsAction) {
+        match d {
+            DownstairsAction::Client { client_id, action } => {
+                self.apply_client_action(client_id, action).await;
+            }
+            DownstairsAction::AckReady => {
+                self.ack_ready().await;
+            }
+        }
+    }
+
+    async fn ack_ready(&mut self) {
+        let mut gw = self.guest.guest_work.lock().await;
+        self.downstairs.ack_jobs(&mut gw, &mut self.stats).await;
+    }
+
+    /// React to an event sent by one of the downstairs clients
+    async fn apply_client_action(
         &mut self,
         client_id: ClientId,
         action: ClientAction,
@@ -718,7 +733,7 @@ impl Upstairs {
             }
             ClientAction::Timeout => {
                 // Ask the downstairs client task to stop, because the client
-                // has hit a Cruible timeout.
+                // has hit a Crucible timeout.
                 //
                 // This will come back to `TaskStopped`, at which point we'll
                 // clear out the task and restart it.
@@ -964,7 +979,7 @@ impl Upstairs {
             self.log,
             "{} is now active with session: {}", self.uuid, self.session_id
         );
-        *self.stats.activated_count.datum_mut() += 1;
+        self.stats.add_activation();
     }
 
     async fn on_no_longer_active(&mut self, client_id: ClientId, m: Message) {

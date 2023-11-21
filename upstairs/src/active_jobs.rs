@@ -209,6 +209,10 @@ impl ActiveJobs {
         dep
     }
 
+    pub fn has_ackable_work(&self) -> bool {
+        !self.ackable.is_empty()
+    }
+
     pub fn ackable_work(&self) -> BTreeSet<JobId> {
         self.ackable.clone()
     }

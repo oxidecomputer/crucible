@@ -12,10 +12,10 @@ use crate::{
     upstairs::UpstairsState,
     AckStatus, ActiveJobs, AllocRingBuffer, ClientData, ClientId,
     CrucibleError, DownstairsIO, DownstairsMend, DsState, EncryptionContext,
-    ExtentFix, ExtentInfo, ExtentRepairIDs, IOState, IOStateCount, IOop,
-    ImpactedBlocks, JobId, Message, ReadRequest, ReadResponse, ReconcileIO,
-    ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
-    WorkSummary,
+    ExtentFix, ExtentInfo, ExtentRepairIDs, GuestWork, IOState, IOStateCount,
+    IOop, ImpactedBlocks, JobId, Message, ReadRequest, ReadResponse,
+    ReconcileIO, ReconciliationId, RegionDefinition, ReplaceResult,
+    SnapshotDetails, UpCountStat, WorkSummary,
 };
 use crucible_common::MAX_ACTIVE_COUNT;
 
@@ -109,10 +109,14 @@ pub(crate) struct Downstairs {
 
 #[derive(Debug)]
 pub(crate) enum DownstairsAction {
+    /// We received a client action from the given client
     Client {
         client_id: ClientId,
         action: ClientAction,
     },
+
+    /// There is ackable work in our queue
+    AckReady,
 }
 
 impl Downstairs {
@@ -143,6 +147,199 @@ impl Downstairs {
                     client_id: ClientId::new(2),
                     action
                 }
+            }
+            _ = futures::future::ready(()),
+                if self.ds_active.has_ackable_work() =>
+            {
+                DownstairsAction::AckReady
+            }
+        }
+    }
+
+    /// Send back acks for all jobs that are `AckReady`
+    pub(crate) async fn ack_jobs(
+        &mut self,
+        gw: &mut GuestWork,
+        up_stats: &mut UpCountStat,
+    ) {
+        debug!(self.log, "ack_jobs called in Downstairs");
+
+        let ack_list = self.ds_active.ackable_work();
+        let jobs_checked = ack_list.len();
+        for ds_id_done in ack_list.iter() {
+            self.ack_job(*ds_id_done, gw, up_stats).await;
+        }
+        debug!(self.log, "ack_ready handled {jobs_checked} jobs");
+    }
+
+    /// Send the ack for a single job back upstairs through `GuestWork`
+    ///
+    /// Update stats for the upstairs as well
+    async fn ack_job(
+        &mut self,
+        ds_id: JobId,
+        gw: &mut GuestWork,
+        up_stats: &mut UpCountStat,
+    ) {
+        debug!(self.log, "ack_jobs process {}", ds_id);
+
+        let mut handle = self.ds_active.get_mut(&ds_id).unwrap();
+        let done = handle.job();
+
+        /*
+         * Make sure the job state has not changed since we made the
+         * list.
+         */
+        if done.ack_status != AckStatus::AckReady {
+            info!(self.log, "Job {ds_id} no longer ready, skip for now");
+            return;
+        }
+
+        let gw_id = done.guest_id;
+        assert_eq!(done.ds_id, ds_id);
+
+        let data = done.data.take();
+
+        done.ack_status = AckStatus::Acked;
+        let r = Self::result(done);
+        Self::cdt_gw_work_done(done, up_stats);
+        drop(handle);
+        debug!(self.log, "[A] ack job {}:{}", ds_id, gw_id);
+
+        gw.gw_ds_complete(gw_id, ds_id, data, r, &self.log).await;
+
+        self.retire_check(ds_id);
+    }
+
+    /// Verify that we have enough valid IO results when considering all
+    /// downstairs results before we send back success to the guest.
+    ///
+    /// During normal operations, reads can have two failures or skipps and
+    /// still return valid data.
+    ///
+    /// During normal operations, write, write_unwritten, and flush can have one
+    /// error or skip and still return success to the upstairs (though, the
+    /// downstairs normally will not return error to the upstairs on W/F).
+    ///
+    /// For repair, we don't permit any errors, but do allow and handle the
+    /// "skipped" case for IOs.  This allows us to recover if we are repairing a
+    /// downstairs and one of the valid remaining downstairs goes offline.
+    fn result(job: &DownstairsIO) -> Result<(), CrucibleError> {
+        /*
+         * TODO: this doesn't tell the Guest what the error(s) were?
+         */
+        let wc = job.state_count();
+
+        let bad_job = match &job.work {
+            IOop::Read { .. } => wc.error == 3,
+            IOop::Write { .. } => wc.skipped + wc.error > 1,
+            IOop::WriteUnwritten { .. } => wc.skipped + wc.error > 1,
+            IOop::Flush { .. } => wc.skipped + wc.error > 1,
+            IOop::ExtentClose {
+                dependencies: _,
+                extent,
+            } => {
+                panic!("Received illegal IOop::ExtentClose: {}", extent);
+            }
+            IOop::ExtentFlushClose { .. } => wc.error >= 1 || wc.skipped > 1,
+            IOop::ExtentLiveRepair { .. } => wc.error >= 1 || wc.skipped > 1,
+            IOop::ExtentLiveReopen { .. } => wc.error >= 1 || wc.skipped > 1,
+            IOop::ExtentLiveNoOp { .. } => wc.error >= 1 || wc.skipped > 1,
+        };
+
+        if bad_job {
+            Err(CrucibleError::IoError(format!(
+                "{} out of 3 downstairs failed to complete this IO",
+                wc.error + wc.skipped,
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Match on the `IOop` type, update stats, and fire DTrace probes
+    fn cdt_gw_work_done(job: &DownstairsIO, stats: &mut UpCountStat) {
+        let ds_id = job.ds_id;
+        let gw_id = job.guest_id;
+        let io_size = job.io_size();
+        match &job.work {
+            IOop::Read {
+                dependencies: _,
+                requests: _,
+            } => {
+                cdt::gw__read__done!(|| (gw_id));
+                stats.add_read(io_size as i64);
+            }
+            IOop::Write {
+                dependencies: _,
+                writes: _,
+            } => {
+                cdt::gw__write__done!(|| (gw_id));
+                stats.add_write(io_size as i64);
+            }
+            IOop::WriteUnwritten {
+                dependencies: _,
+                writes: _,
+            } => {
+                cdt::gw__write__unwritten__done!(|| (gw_id));
+                // We don't include WriteUnwritten operation in the
+                // metrics for this guest.
+            }
+            IOop::Flush {
+                dependencies: _,
+                flush_number: _,
+                gen_number: _,
+                snapshot_details: _,
+                extent_limit: _,
+            } => {
+                cdt::gw__flush__done!(|| (gw_id));
+                stats.add_flush();
+            }
+            IOop::ExtentClose {
+                dependencies: _,
+                extent,
+            } => {
+                // The upstairs should never have an ExtentClose on the
+                // work queue.  We will always use ExtentFlushClose as the
+                // IOop, then convert to the proper Message to send to
+                // each downstairs depending on the source/repair downstairs
+                // values in that IOop.
+                panic!(
+                    "job: {} gw: {}  Received illegal IOop::ExtentClose {}",
+                    ds_id, gw_id, extent,
+                );
+            }
+            IOop::ExtentFlushClose {
+                dependencies: _,
+                extent,
+                flush_number: _,
+                gen_number: _,
+                source_downstairs: _,
+                repair_downstairs: _,
+            } => {
+                cdt::gw__close__done!(|| (gw_id, extent));
+                stats.add_flush_close();
+            }
+            IOop::ExtentLiveRepair {
+                dependencies: _,
+                extent,
+                source_downstairs: _,
+                source_repair_address: _,
+                repair_downstairs: _,
+            } => {
+                cdt::gw__repair__done!(|| (gw_id, extent));
+                stats.add_extent_repair();
+            }
+            IOop::ExtentLiveNoOp { dependencies: _ } => {
+                cdt::gw__noop__done!(|| (gw_id));
+                stats.add_extent_noop();
+            }
+            IOop::ExtentLiveReopen {
+                dependencies: _,
+                extent,
+            } => {
+                cdt::gw__reopen__done!(|| (gw_id, extent));
+                stats.add_extent_reopen();
             }
         }
     }
@@ -1673,9 +1870,9 @@ impl Downstairs {
             } => {
                 // The Upstairs should not consider a job completed until it has
                 // returned an Ok result, and should therefore log and eat all
-                // ErrorReport messages here. This will change in the future when
-                // the Upstairs tracks the number of errors per Downstairs, and acts
-                // on that information somehow.
+                // ErrorReport messages here. This will change in the future
+                // when the Upstairs tracks the number of errors per Downstairs,
+                // and acts on that information somehow.
                 error!(
                     self.clients[client_id].log,
                     "job id {} saw error {:?}", job_id, error
@@ -1683,8 +1880,8 @@ impl Downstairs {
 
                 // However, there is one case (see `check_message_for_abort` in
                 // downstairs/src/lib.rs) where the Upstairs **does** need to
-                // act: when a repair job in the Downstairs fails, that Downstairs
-                // aborts itself and reconnects.
+                // act: when a repair job in the Downstairs fails, that
+                // Downstairs aborts itself and reconnects.
                 if let Some(job) = self.ds_active.get(job_id) {
                     if job.work.is_repair() {
                         // Return the error and let the previously written error
@@ -1718,15 +1915,15 @@ impl Downstairs {
                 ds_id,
                 upstairs_id,
             );
-
+            // TODO should these errors cause more behavior?  Right now, they're
+            // only logged in the caller and then we move on.
             return Err(CrucibleError::UuidMismatch);
         }
 
         if self.session_id != session_id {
             warn!(
                 self.clients[client_id].log,
-                "[{}] u.session_id {:?} != job {} session_id {:?}!",
-                client_id,
+                "u.session_id {:?} != job {} session_id {:?}!",
                 self.session_id,
                 ds_id,
                 session_id,

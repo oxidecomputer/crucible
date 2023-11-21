@@ -76,17 +76,17 @@ pub struct ExtentReopen {
 // All the counter stats in one struct.
 #[derive(Clone, Debug)]
 pub struct UpCountStat {
-    pub stat_name: CrucibleUpstairs,
-    pub activated_count: Activated,
-    pub write_count: Write,
-    pub write_bytes: WriteBytes,
-    pub read_count: Read,
-    pub read_bytes: ReadBytes,
-    pub flush_count: Flush,
-    pub flush_close_count: FlushClose,
-    pub extent_repair_count: ExtentRepair,
-    pub extent_noop_count: ExtentNoOp,
-    pub extent_reopen_count: ExtentReopen,
+    stat_name: CrucibleUpstairs,
+    activated_count: Activated,
+    write_count: Write,
+    write_bytes: WriteBytes,
+    read_count: Read,
+    read_bytes: ReadBytes,
+    flush_count: Flush,
+    flush_close_count: FlushClose,
+    extent_repair_count: ExtentRepair,
+    extent_noop_count: ExtentNoOp,
+    extent_reopen_count: ExtentReopen,
 }
 
 impl UpCountStat {
@@ -104,6 +104,46 @@ impl UpCountStat {
             extent_noop_count: Default::default(),
             extent_reopen_count: Default::default(),
         }
+    }
+
+    // When an operation happens that we wish to record in Oximeter,
+    // one of these methods will be called.  Each method will get the
+    // correct field of UpCountStat to record the update.
+    pub fn add_activation(&mut self) {
+        let datum = self.activated_count.datum_mut();
+        *datum += 1;
+    }
+    pub fn add_write(&mut self, bytes: i64) {
+        let datum = self.write_bytes.datum_mut();
+        *datum += bytes;
+        let datum = self.write_count.datum_mut();
+        *datum += 1;
+    }
+    pub fn add_read(&mut self, bytes: i64) {
+        let datum = self.read_bytes.datum_mut();
+        *datum += bytes;
+        let datum = self.read_count.datum_mut();
+        *datum += 1;
+    }
+    pub fn add_flush(&mut self) {
+        let datum = self.flush_count.datum_mut();
+        *datum += 1;
+    }
+    pub fn add_flush_close(&mut self) {
+        let datum = self.flush_close_count.datum_mut();
+        *datum += 1;
+    }
+    pub fn add_extent_repair(&mut self) {
+        let datum = self.extent_repair_count.datum_mut();
+        *datum += 1;
+    }
+    pub fn add_extent_noop(&mut self) {
+        let datum = self.extent_noop_count.datum_mut();
+        *datum += 1;
+    }
+    pub fn add_extent_reopen(&mut self) {
+        let datum = self.extent_reopen_count.datum_mut();
+        *datum += 1;
     }
 }
 
