@@ -3,6 +3,7 @@
 use crate::{
     cdt,
     client::{ClientAction, ClientRunResult, ClientStopReason},
+    deadline_secs,
     downstairs::{Downstairs, DownstairsAction},
     extent_from_offset, integrity_hash, Block, BlockContext, BlockOp, BlockReq,
     Buffer, Bytes, ClientId, DsState, EncryptionContext, GtoS, Guest, Message,
@@ -10,7 +11,7 @@ use crate::{
 };
 use crucible_common::CrucibleError;
 
-use std::sync::Arc;
+use std::{ops::DerefMut, sync::Arc};
 
 use ringbuffer::RingBuffer;
 use slog::{error, info, warn, Logger};
@@ -69,13 +70,6 @@ struct Upstairs {
     ///
     /// A single job submitted can produce multiple downstairs requests.
     guest: Arc<Guest>,
-
-    /// Current flush number
-    ///
-    /// This is the highest flush number from all three downstairs on startup,
-    /// and increments by one each time the guest sends a flush (including
-    /// automatic flushes).
-    next_flush: u64,
 
     /// Region definition
     ///
@@ -189,7 +183,68 @@ impl Upstairs {
                     self.submit_flush(None, None).await;
                 }
             }
-            UpstairsAction::RepairCheck => unimplemented!(),
+            UpstairsAction::RepairCheck => {
+                self.on_repair_check().await;
+            }
+        }
+    }
+
+    async fn on_repair_check(&mut self) {
+        info!(self.log, "Checking if live repair is needed");
+        if !matches!(self.state, UpstairsState::Active) {
+            info!(self.log, "inactive, no live repair needed");
+            self.repair_check_interval = None;
+            return;
+        }
+
+        if self.read_only {
+            info!(self.log, "read-only, no live repair needed");
+            // Repair can't happen on a read-only downstairs, so short circuit
+            // here. There's no state drift to repair anyway, this read-only
+            // Upstairs wouldn't have caused any modifications.
+            for c in self.downstairs.clients.iter_mut() {
+                c.skip_live_repair(&self.state);
+            }
+            self.repair_check_interval = None;
+            return;
+        }
+
+        // Verify that all downstairs and the upstairs are in the proper state
+        // before we begin a live repair.
+        let repair = self
+            .downstairs
+            .clients
+            .iter()
+            .filter(|c| c.state() == DsState::LiveRepair)
+            .count();
+
+        let repair_ready = self
+            .downstairs
+            .clients
+            .iter()
+            .filter(|c| c.state() == DsState::LiveRepairReady)
+            .count();
+
+        if repair_ready == 0 {
+            info!(self.log, "No Live Repair required at this time");
+            self.repair_check_interval = None;
+        } else if repair > 0
+            || !self
+                .downstairs
+                .start_live_repair(
+                    &self.state,
+                    self.guest.guest_work.lock().await.deref_mut(),
+                    self.ddef.get_def().unwrap().extent_count().into(),
+                    self.generation,
+                )
+                .await
+        {
+            // This also means repair_ready > 0
+            // We can only have one live repair going at a time, so if a
+            // downstairs has gone Faulted then to LiveRepairReady, it will have
+            // to wait until the currently running LiveRepair has completed.
+            warn!(self.log, "Upstairs already in repair, trying again later");
+            self.repair_check_interval = Some(deadline_secs(60.0));
         }
     }
 
@@ -464,18 +519,6 @@ impl Upstairs {
         }
     }
 
-    /// Returns the next flush number
-    ///
-    /// If we are doing a flush, the flush number and the rn number
-    /// must both go up together. We don't want a lower next_id
-    /// with a higher flush_number to be possible, as that can introduce
-    /// dependency deadlock.
-    fn next_flush_id(&mut self) -> u64 {
-        let out = self.next_flush;
-        self.next_flush += 1;
-        out
-    }
-
     async fn submit_flush(
         &mut self,
         req: Option<BlockReq>,
@@ -487,7 +530,6 @@ impl Upstairs {
         // BlockOp::Flush level above.
 
         self.need_flush = false;
-        let next_flush = self.next_flush_id();
 
         /*
          * Get the next ID for our new guest work job. Note that the flush
@@ -504,7 +546,6 @@ impl Upstairs {
 
         let next_id = self.downstairs.submit_flush(
             gw_id,
-            next_flush,
             self.generation,
             snapshot_details,
         );
@@ -713,6 +754,12 @@ impl Upstairs {
             DownstairsAction::AckReady => {
                 self.ack_ready().await;
             }
+            DownstairsAction::LiveRepair(r) => {
+                let mut gw = self.guest.guest_work.lock().await;
+                self.downstairs
+                    .on_live_repair(r, &mut gw, &self.state, self.generation)
+                    .await;
+            }
         }
     }
 
@@ -817,11 +864,17 @@ impl Upstairs {
                             DsState::Active => (),
                             DsState::WaitQuorum => {
                                 // See if we have a quorum
-                                self.connect_region_set().await
+                                if self.connect_region_set().await {
+                                    // We connected, start periodic live-repair
+                                    // checking in the main loop.
+                                    self.repair_check_interval =
+                                        Some(deadline_secs(1.0));
+                                }
                             }
                             DsState::LiveRepairReady => {
-                                // See if we can do live-repair
-                                // ???
+                                // Immediately check for live-repair (?)
+                                self.repair_check_interval =
+                                    Some(deadline_secs(0.0));
                             }
                             s => panic!("bad state after negotiation: {s:?}"),
                         }
@@ -889,7 +942,7 @@ impl Upstairs {
     /// **can't** activate, then we should notify the requestor of failure.
     ///
     /// If we have a problem here, we can't activate the upstairs.
-    async fn connect_region_set(&mut self) {
+    async fn connect_region_set(&mut self) -> bool {
         /*
          * Reconciliation only happens during initialization.
          * Look at all three downstairs region information collected.
@@ -903,7 +956,7 @@ impl Upstairs {
                     "could not connect region set due to bad state: {:?}",
                     self.state
                 );
-                return;
+                return false;
             }
             /*
              * Make sure all downstairs are in the correct state before we
@@ -920,7 +973,7 @@ impl Upstairs {
                     self.log,
                     "Waiting for {} more clients to be ready", not_ready
                 );
-                return;
+                return false;
             }
 
             /*
@@ -932,9 +985,7 @@ impl Upstairs {
              * downstairs out, forget any activation requests, and the
              * upstairs goes back to waiting for another activation request.
              */
-            self.downstairs
-                .collate(self.generation, &mut self.next_flush, &self.state)
-                .await
+            self.downstairs.collate(self.generation, &self.state).await
         };
 
         match collate_status {
@@ -945,17 +996,20 @@ impl Upstairs {
                 // already set to FailedRepair in the call to
                 // `Downstairs::collate`
                 self.set_inactive(e);
+                false
             }
             Ok(true) => {
                 // We have populated all of the reconciliation requests in
                 // `Downstairs::reconcile_task_list`.  Start reconciliation by
                 // sending the first request.
                 self.downstairs.send_next_reconciliation_req().await;
+                true
             }
             Ok(false) => {
                 info!(self.log, "No downstairs repair required");
                 self.on_reconciliation_done(DsState::WaitQuorum);
                 info!(self.log, "Set Active after no repair");
+                true
             }
         }
     }

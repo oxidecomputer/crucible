@@ -119,7 +119,7 @@ pub(crate) struct DownstairsClient {
      * by those downstairs and is used to decide if an extent requires
      * repair or not.
      */
-    repair_info: Option<ExtentInfo>,
+    pub(crate) repair_info: Option<ExtentInfo>,
 
     /// If set, marks how far live repair has proceeded for this downstairs
     ///
@@ -139,7 +139,7 @@ pub(crate) struct DownstairsClient {
     ///
     /// This is only used during live repair, and will only ever be
     /// set on a downstairs that is undergoing live repair.
-    pub(crate) extent_limit: Option<usize>,
+    pub(crate) extent_limit: Option<u64>,
 
     /// Deadline for the next ping
     ping_interval: Instant,
@@ -747,7 +747,7 @@ impl DownstairsClient {
     pub(crate) fn enqueue(
         &mut self,
         io: &mut DownstairsIO,
-        last_repair_id: Option<u64>,
+        last_repair_extent: Option<u64>,
     ) -> IOState {
         assert_eq!(io.state[self.client_id], IOState::New);
 
@@ -772,9 +772,7 @@ impl DownstairsClient {
                 // downstairs.  This is either the extent under repair (if
                 // there are no reserved repair jobs), or the last extent
                 // for which we have reserved a repair job ID.
-                let my_limit =
-                    last_repair_id.or(self.extent_limit.map(|v| v as u64));
-                // TODO store extent_limit as Option<u64>?
+                let my_limit = last_repair_extent.or(self.extent_limit);
 
                 if io.work.send_io_live_repair(my_limit) {
                     // Leave this IO as New, the downstairs will receive it.
@@ -997,6 +995,31 @@ impl DownstairsClient {
     /// This is only useful when marking the downstair as faulted or similar
     pub(crate) fn clear_new_jobs(&mut self) {
         self.new_jobs.clear()
+    }
+
+    /// Aborts an in-progress live repair, restarting the task
+    ///
+    /// # Panics
+    /// If this client is not in `DsState::LiveRepair`
+    pub(crate) async fn abort_repair(&mut self, up_state: &UpstairsState) {
+        assert_eq!(self.state, DsState::LiveRepair);
+        self.checked_state_transition(up_state, DsState::Faulted);
+        self.halt_io_task(ClientStopReason::FailedLiveRepair).await;
+        self.repair_info = None;
+        self.extent_limit = None;
+        self.stats.live_repair_aborted += 1;
+    }
+
+    /// Finishes an in-progress live repair, setting our state to `Active`
+    ///
+    /// # Panics
+    /// If this client is not in `DsState::LiveRepair`
+    pub(crate) fn finish_repair(&mut self, up_state: &UpstairsState) {
+        assert_eq!(self.state, DsState::LiveRepair);
+        self.checked_state_transition(up_state, DsState::Active);
+        self.repair_info = None;
+        self.extent_limit = None;
+        self.stats.live_repair_completed += 1;
     }
 
     /// Resets our timeout deadline
@@ -1378,6 +1401,27 @@ impl DownstairsClient {
             .send(ClientRequest::Message(m))
             .await
             .unwrap() // TODO is this okay?
+    }
+
+    /// Skips from `LiveRepairRead` to `Active`; a no-op otherwise
+    ///
+    /// # Panics
+    /// If this downstairs is not read-only
+    pub(crate) fn skip_live_repair(&mut self, up_state: &UpstairsState) {
+        if self.state == DsState::LiveRepairReady {
+            assert!(self.read_only);
+            // TODO: could we do this transition early, by automatically
+            // skipping LiveRepairReady if read-only?
+            self.checked_state_transition(up_state, DsState::Active);
+            self.stats.ro_lr_skipped += 1;
+        }
+    }
+
+    /// Moves from `LiveRepairReady` to `LiveRepair`; a no-op otherwise
+    pub(crate) fn start_live_repair(&mut self, up_state: &UpstairsState) {
+        if self.state == DsState::LiveRepairReady {
+            self.checked_state_transition(up_state, DsState::LiveRepair);
+        }
     }
 
     /// Continues the negotiation and initial reconciliation process
@@ -2112,6 +2156,9 @@ pub(crate) enum ClientStopReason {
 
     /// Negotiation says that we are incompatible
     Incompatible,
+
+    /// Live-repair failed
+    FailedLiveRepair,
 }
 
 /// Response received from the I/O task

@@ -87,13 +87,13 @@ pub struct ExtentInfo {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq)]
 pub enum RepairCheck {
-    // We started a repair task
+    /// We started a repair task
     RepairStarted,
-    // No repair is needed
+    /// No repair is needed
     NoRepairNeeded,
-    // We need repair, but a repair was already in progress
+    /// We need repair, but a repair was already in progress
     RepairInProgress,
-    // Upstairs is not in a valid state for live repair
+    /// Upstairs is not in a valid state for live repair
     InvalidState,
 }
 
