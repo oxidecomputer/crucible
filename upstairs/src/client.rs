@@ -21,6 +21,10 @@ use tokio::{
 use tokio_util::codec::{FramedRead, FramedWrite};
 use uuid::Uuid;
 
+const TIMEOUT_SECS: f32 = 50.0;
+const PING_INTERVAL_SECS: f32 = 5.0;
+const MORE_WORK_INTERVAL_SECS: f32 = 1.0;
+
 /// Handle to a running I/O task
 ///
 /// The I/O task is "thin"; it simply forwards messages around.  The task
@@ -152,18 +156,18 @@ impl DownstairsClient {
         log: Logger,
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     ) -> Self {
-        Self {
+        let mut out = Self {
             cfg,
-            client_task: None, // TODO start up?
+            client_task: None, // started up below
             client_id,
             region_uuid: None,
             negotiation_state: NegotiationState::Start,
             ping_count: 0,
-            ping_interval: deadline_secs(1.0), // TODO is this right?
+            ping_interval: deadline_secs(PING_INTERVAL_SECS),
             more_work: None,
             tls_context,
             promote_state: None,
-            timeout_deadline: deadline_secs(60.0), // TODO is this right?
+            timeout_deadline: deadline_secs(TIMEOUT_SECS),
             log,
             target_addr,
             repair_addr: None,
@@ -176,7 +180,9 @@ impl DownstairsClient {
             repair_info: None,
             extent_limit: None,
             io_state_count: ClientIOStateCount::new(),
-        }
+        };
+        out.start_task(false);
+        out
     }
     /// Choose which `ClientAction` to apply
     ///
@@ -237,6 +243,7 @@ impl DownstairsClient {
     ///
     /// If the client task is **not** running, log a warning to that effect.
     pub(crate) async fn send_ping(&mut self) {
+        self.ping_interval = deadline_secs(PING_INTERVAL_SECS);
         // It's possible for the client task to have stopped after we requested
         // the ping.  If that's the case, then we'll catch it on the next
         // go-around, and should just log an error here.
@@ -502,7 +509,7 @@ impl DownstairsClient {
             if self.more_work.is_none() {
                 warn!(self.log, "flow control start");
             }
-            self.more_work = Some(deadline_secs(1.0));
+            self.more_work = Some(deadline_secs(MORE_WORK_INTERVAL_SECS));
         } else {
             if self.more_work.is_some() {
                 warn!(self.log, "flow control end");
@@ -1042,7 +1049,7 @@ impl DownstairsClient {
 
     /// Resets our timeout deadline
     pub(crate) fn reset_timeout(&mut self) {
-        self.timeout_deadline = deadline_secs(50.0);
+        self.timeout_deadline = deadline_secs(TIMEOUT_SECS);
     }
 
     pub(crate) fn process_io_completion(
