@@ -26,7 +26,7 @@ pub(crate) fn build_api() -> ApiDescription<UpstairsInfo> {
  * provides access to upstairs information and downstairs work queues.
  */
 pub async fn start(
-    up: mpsc::Sender<ControlRequest>,
+    up: UpstairsInfo,
     log: Logger,
     addr: SocketAddr,
 ) -> Result<(), String> {
@@ -48,7 +48,7 @@ pub async fn start(
      * The functions that implement our API endpoints will share this
      * context.
      */
-    let api_context = UpstairsInfo { up };
+    let api_context = up;
 
     /*
      * Set up the server.
@@ -98,7 +98,7 @@ impl UpstairsInfo {
     /**
      * Return a new UpstairsInfo.
      */
-    pub fn new(up: crate::upstairs::Upstairs) -> UpstairsInfo {
+    pub(crate) fn new(up: &crate::upstairs::Upstairs) -> UpstairsInfo {
         UpstairsInfo {
             up: up.control_tx.clone(),
         }

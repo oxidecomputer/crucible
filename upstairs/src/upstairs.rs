@@ -23,6 +23,9 @@ use tokio::{
 };
 use uuid::Uuid;
 
+/// How often to log stats for DTrace
+const STAT_INTERVAL_SECS: f32 = 1.0;
+
 #[derive(Debug)]
 pub(crate) enum UpstairsState {
     /// The upstairs is just coming online
@@ -107,6 +110,9 @@ pub(crate) struct Upstairs {
     /// Next time to trigger an automatic flush
     flush_deadline: Instant,
 
+    /// Next time to trigger a stats update
+    stat_deadline: Instant,
+
     /// Interval between automatic flushes
     flush_timeout_secs: f32,
 
@@ -125,6 +131,7 @@ enum UpstairsAction {
     Guest(BlockReq),
     LeakCheck,
     FlushCheck,
+    StatUpdate,
     RepairCheck,
     Control(ControlRequest),
 }
@@ -230,6 +237,7 @@ impl Upstairs {
             repair_check_interval: None,
             leak_deadline: deadline_secs(1.0),
             flush_deadline: deadline_secs(flush_timeout_secs),
+            stat_deadline: deadline_secs(STAT_INTERVAL_SECS),
             flush_timeout_secs,
             guest,
             ddef: rd_status,
@@ -274,6 +282,9 @@ impl Upstairs {
             _ = sleep_until(self.flush_deadline) => {
                 UpstairsAction::FlushCheck
             }
+            _ = sleep_until(self.stat_deadline) => {
+                UpstairsAction::StatUpdate
+            }
             c = self.control_rx.recv() => {
                 // We can always unwrap this, because we hold a handle to the tx
                 // side as well (so the channel will never close)
@@ -309,9 +320,12 @@ impl Upstairs {
             UpstairsAction::FlushCheck => {
                 if self.need_flush {
                     self.submit_flush(None, None).await;
-                    self.flush_deadline =
-                        deadline_secs(self.flush_timeout_secs);
                 }
+                self.flush_deadline = deadline_secs(self.flush_timeout_secs);
+            }
+            UpstairsAction::StatUpdate => {
+                self.on_stat_update().await;
+                self.stat_deadline = deadline_secs(STAT_INTERVAL_SECS);
             }
             UpstairsAction::RepairCheck => {
                 self.on_repair_check().await;
@@ -323,6 +337,61 @@ impl Upstairs {
         // For now, check backpressure after every event.  We may want to make
         // this more nuanced in the future.
         self.set_backpressure();
+    }
+
+    /// Fires the `up-status` DTrace probe
+    async fn on_stat_update(&self) {
+        let up_count = self.guest.guest_work.lock().await.active.len() as u32;
+        let ds_count = self.downstairs.active_count() as u32;
+        let ds_state = self.downstairs.collect_stats(|c| c.state());
+
+        let ds_io_count = self.downstairs.io_state_count();
+        let ds_reconciled = self.downstairs.reconcile_repaired();
+        let ds_reconcile_needed = self.downstairs.reconcile_repair_needed();
+        let ds_live_repair_completed = self
+            .downstairs
+            .collect_stats(|c| c.stats.live_repair_completed);
+        let ds_live_repair_aborted = self
+            .downstairs
+            .collect_stats(|c| c.stats.live_repair_aborted);
+        let ds_connected = self.downstairs.collect_stats(|c| c.stats.connected);
+        let ds_replaced = self.downstairs.collect_stats(|c| c.stats.replaced);
+        let ds_flow_control =
+            self.downstairs.collect_stats(|c| c.stats.flow_control);
+        let ds_extents_repaired =
+            self.downstairs.collect_stats(|c| c.stats.extents_repaired);
+        let ds_extents_confirmed =
+            self.downstairs.collect_stats(|c| c.stats.extents_confirmed);
+        let ds_ro_lr_skipped =
+            self.downstairs.collect_stats(|c| c.stats.ro_lr_skipped);
+
+        let up_backpressure = self
+            .guest
+            .backpressure_us
+            .load(std::sync::atomic::Ordering::Acquire);
+        let write_bytes_out = self.downstairs.write_bytes_outstanding();
+
+        cdt::up__status!(|| {
+            let arg = Arg {
+                up_count,
+                up_backpressure,
+                write_bytes_out,
+                ds_count,
+                ds_state,
+                ds_io_count,
+                ds_reconciled,
+                ds_reconcile_needed,
+                ds_live_repair_completed,
+                ds_live_repair_aborted,
+                ds_connected,
+                ds_replaced,
+                ds_flow_control,
+                ds_extents_repaired,
+                ds_extents_confirmed,
+                ds_ro_lr_skipped,
+            };
+            ("stats", arg)
+        });
     }
 
     /// Handles a request from the (optional) control server
@@ -360,7 +429,7 @@ impl Upstairs {
                     UpstairsState::Deactivating => crate::UpState::Deactivating,
                 };
 
-                tx.send(crate::control::UpstairsStats {
+                let r = tx.send(crate::control::UpstairsStats {
                     state,
                     ds_state: ds_state.to_vec(),
                     up_jobs,
@@ -373,10 +442,16 @@ impl Upstairs {
                     live_repair_completed: live_repair_completed.to_vec(),
                     live_repair_aborted: live_repair_aborted.to_vec(),
                 });
+                if r.is_err() {
+                    warn!(self.log, "control message reply failed");
+                }
             }
             ControlRequest::DownstairsWorkQueue(tx) => {
                 let out = self.downstairs.get_work_summary();
-                tx.send(out);
+                let r = tx.send(out);
+                if r.is_err() {
+                    warn!(self.log, "control message reply failed");
+                }
             }
         }
     }
