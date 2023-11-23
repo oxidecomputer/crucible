@@ -3,12 +3,13 @@
 use crate::{
     cdt,
     client::{ClientAction, ClientRunResult, ClientStopReason},
+    control::ControlRequest,
     deadline_secs,
     downstairs::{Downstairs, DownstairsAction},
     extent_from_offset, integrity_hash, Block, BlockContext, BlockOp, BlockReq,
     Buffer, Bytes, ClientId, ClientMap, CrucibleOpts, DsState,
     EncryptionContext, GtoS, Guest, Message, RegionDefinition,
-    RegionDefinitionStatus, SnapshotDetails, UpCountStat, WQCounts,
+    RegionDefinitionStatus, SnapshotDetails, UpStatOuter, WQCounts,
 };
 use crucible_common::CrucibleError;
 
@@ -17,7 +18,7 @@ use std::{ops::DerefMut, sync::Arc};
 use ringbuffer::RingBuffer;
 use slog::{error, info, o, warn, Logger};
 use tokio::{
-    sync::oneshot,
+    sync::{mpsc, oneshot},
     time::{sleep_until, Instant},
 };
 use uuid::Uuid;
@@ -49,7 +50,7 @@ pub(crate) enum UpstairsState {
     Deactivating,
 }
 
-struct Upstairs {
+pub(crate) struct Upstairs {
     /// Current state
     state: UpstairsState,
 
@@ -86,13 +87,16 @@ struct Upstairs {
     need_flush: bool,
 
     /// Statistics for this upstairs
-    stats: UpCountStat,
+    ///
+    /// Shared with the metrics producer, so this `struct` wraps a
+    /// `std::sync::Mutex`
+    pub(crate) stats: UpStatOuter,
 
     /// Fixed configuration
     cfg: Arc<UpstairsConfig>,
 
     /// Logger used by the upstairs
-    log: Logger,
+    pub(crate) log: Logger,
 
     /// Next time to check for repairs
     repair_check_interval: Option<Instant>,
@@ -102,6 +106,17 @@ struct Upstairs {
 
     /// Next time to trigger an automatic flush
     flush_deadline: Instant,
+
+    /// Interval between automatic flushes
+    flush_timeout_secs: f32,
+
+    /// Receiver queue for control requests
+    control_rx: mpsc::Receiver<ControlRequest>,
+
+    /// Sender handle for control requests
+    ///
+    /// This is public so that others can clone it to get a controller handle
+    pub(crate) control_tx: mpsc::Sender<ControlRequest>,
 }
 
 #[derive(Debug)]
@@ -111,6 +126,7 @@ enum UpstairsAction {
     LeakCheck,
     FlushCheck,
     RepairCheck,
+    Control(ControlRequest),
 }
 
 #[derive(Debug)]
@@ -178,7 +194,7 @@ impl Upstairs {
         });
 
         let uuid = opt.id;
-        let stats = UpCountStat::new(uuid);
+        let stats = UpStatOuter::new(uuid);
 
         let rd_status = match expected_region_def {
             None => RegionDefinitionStatus::WaitingForDownstairs,
@@ -205,19 +221,32 @@ impl Upstairs {
             tls_context,
             log.new(o!("" => "downstairs")),
         );
+        let flush_timeout_secs = opt.flush_timeout.unwrap_or(0.5);
+        let (control_tx, control_rx) = tokio::sync::mpsc::channel(500);
         Upstairs {
             state: UpstairsState::Initializing,
             cfg,
             generation: gen,
             repair_check_interval: None,
             leak_deadline: deadline_secs(1.0),
-            flush_deadline: deadline_secs(0.5),
+            flush_deadline: deadline_secs(flush_timeout_secs),
+            flush_timeout_secs,
             guest,
             ddef: rd_status,
             need_flush: false,
             stats,
             log,
             downstairs,
+            control_rx,
+            control_tx,
+        }
+    }
+
+    /// Runs the upstairs (forever)
+    pub(crate) async fn run(&mut self) {
+        loop {
+            let action = self.select().await;
+            self.apply(action).await
         }
     }
 
@@ -244,6 +273,11 @@ impl Upstairs {
             }
             _ = sleep_until(self.flush_deadline) => {
                 UpstairsAction::FlushCheck
+            }
+            c = self.control_rx.recv() => {
+                // We can always unwrap this, because we hold a handle to the tx
+                // side as well (so the channel will never close)
+                UpstairsAction::Control(c.unwrap())
             }
         }
     }
@@ -275,10 +309,70 @@ impl Upstairs {
             UpstairsAction::FlushCheck => {
                 if self.need_flush {
                     self.submit_flush(None, None).await;
+                    self.flush_deadline =
+                        deadline_secs(self.flush_timeout_secs);
                 }
             }
             UpstairsAction::RepairCheck => {
                 self.on_repair_check().await;
+            }
+            UpstairsAction::Control(c) => {
+                self.on_control_req(c).await;
+            }
+        }
+    }
+
+    async fn on_control_req(&self, c: ControlRequest) {
+        match c {
+            ControlRequest::UpstairsStats(tx) => {
+                let ds_state = self.downstairs.collect_stats(|c| c.state());
+                let up_jobs = self.guest.guest_work.lock().await.active.len();
+                let ds_jobs = self.downstairs.active_count();
+                let repair_done = self.downstairs.reconcile_repaired();
+                let repair_needed = self.downstairs.reconcile_repair_needed();
+                let extents_repaired =
+                    self.downstairs.collect_stats(|c| c.stats.extents_repaired);
+                let extents_confirmed = self
+                    .downstairs
+                    .collect_stats(|c| c.stats.extents_confirmed);
+                let extent_limit = self
+                    .downstairs
+                    .collect_stats(|c| c.extent_limit.map(|v| v as usize));
+                let live_repair_completed = self
+                    .downstairs
+                    .collect_stats(|c| c.stats.live_repair_completed);
+                let live_repair_aborted = self
+                    .downstairs
+                    .collect_stats(|c| c.stats.live_repair_aborted);
+
+                // Translate from rich UpstairsState to simplified UpState
+                // TODO: remove this distinction?
+                let state = match &self.state {
+                    UpstairsState::Initializing
+                    | UpstairsState::GoActive { .. } => {
+                        crate::UpState::Initializing
+                    }
+                    UpstairsState::Active => crate::UpState::Active,
+                    UpstairsState::Deactivating => crate::UpState::Deactivating,
+                };
+
+                tx.send(crate::control::UpstairsStats {
+                    state,
+                    ds_state: ds_state.to_vec(),
+                    up_jobs,
+                    ds_jobs,
+                    repair_done,
+                    repair_needed,
+                    extents_repaired: extents_repaired.to_vec(),
+                    extents_confirmed: extents_confirmed.to_vec(),
+                    extent_limit: extent_limit.to_vec(),
+                    live_repair_completed: live_repair_completed.to_vec(),
+                    live_repair_aborted: live_repair_aborted.to_vec(),
+                });
+            }
+            ControlRequest::DownstairsWorkQueue(tx) => {
+                let out = self.downstairs.get_work_summary();
+                tx.send(out);
             }
         }
     }
@@ -860,7 +954,7 @@ impl Upstairs {
 
     async fn ack_ready(&mut self) {
         let mut gw = self.guest.guest_work.lock().await;
-        self.downstairs.ack_jobs(&mut gw, &mut self.stats).await;
+        self.downstairs.ack_jobs(&mut gw, &self.stats).await;
     }
 
     /// React to an event sent by one of the downstairs clients

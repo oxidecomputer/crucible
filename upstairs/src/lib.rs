@@ -10463,131 +10463,45 @@ pub async fn up_main(
         info!(log, "Using region definition {:?}", rd);
     }
 
+    let tls_context = if let Some(cert_pem_path) = &opt.cert_pem {
+        let key_pem_path = opt.key_pem.as_ref().unwrap();
+        let root_cert_pem_path = opt.root_cert_pem.as_ref().unwrap();
+
+        let tls_context = crucible_common::x509::TLSContext::from_paths(
+            cert_pem_path,
+            key_pem_path,
+            root_cert_pem_path,
+        )?;
+
+        Some(Arc::new(tls_context))
+    } else {
+        None
+    };
+
     /*
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
      */
-    let up = Upstairs::new(&opt, gen, region_def, guest, log);
-
-    /*
-     * Use this channel to receive updates on target status from each task
-     * we create to connect to a downstairs.
-     */
-    let (ds_status_tx, ds_status_rx) = mpsc::channel::<Condition>(32);
-
-    /*
-     * Use this channel to receive updates on the completion of reconcile
-     * work requests.
-     */
-    let (ds_reconcile_done_tx, ds_reconcile_done_rx) =
-        mpsc::channel::<Repair>(32);
-
-    /*
-     * Use this channel to indicate in the upstairs that all downstairs
-     * operations for a specific request have completed.
-     */
-    let (ds_done_tx, ds_done_rx) = mpsc::channel(MAX_ACTIVE_COUNT + 50);
-
-    /*
-     * spawn a task to listen for ds completed work which will then
-     * take care of transitioning guest work structs to done.
-     */
-    let upc = Arc::clone(&up);
-    tokio::spawn(async move {
-        up_ds_listen(&upc, ds_done_rx).await;
-    });
+    let mut up =
+        upstairs::Upstairs::new(&opt, gen, region_def, guest, tls_context, log);
 
     if let Some(pr) = producer_registry {
-        let up_oxc = Arc::clone(&up);
-        let ups = up_oxc.stats.clone();
+        let ups = up.stats.clone();
         if let Err(e) = pr.register_producer(ups) {
-            error!(up_oxc.log, "Failed to register metric producer: {}", e);
+            error!(up.log, "Failed to register metric producer: {}", e);
         }
     }
 
-    let tls_context = if let Some(cert_pem_path) = opt.cert_pem {
-        let key_pem_path = opt.key_pem.unwrap();
-        let root_cert_pem_path = opt.root_cert_pem.unwrap();
-
-        let tls_context = crucible_common::x509::TLSContext::from_paths(
-            &cert_pem_path,
-            &key_pem_path,
-            &root_cert_pem_path,
-        )?;
-
-        Some(tls_context)
-    } else {
-        None
-    };
-    let tls_context = Arc::new(tokio::sync::Mutex::new(tls_context));
-
-    /*
-     * Create one downstairs task structure (dst) for the three downstairs
-     * tasks.
-     */
-    let mut dst = Vec::new();
-    for client_id in ClientId::iter() {
-        /*
-         * Create the channel that we will use to request that the loop
-         * check for work to do in the central structure.
-         */
-        let (ds_work_tx, ds_work_rx) = mpsc::channel(500);
-        /*
-         * Create the channel used to submit reconcile work to each
-         * downstairs (when work is required).
-         */
-        let (ds_reconcile_work_tx, ds_reconcile_work_rx) = watch::channel(1);
-
-        // Notify when it's time to go active.
-        let (ds_active_tx, ds_active_rx) = watch::channel(0);
-
-        let up = Arc::clone(&up);
-        let up_coms = UpComs {
-            client_id,
-            ds_work_rx,
-            ds_status_tx: ds_status_tx.clone(),
-            ds_done_tx: ds_done_tx.clone(),
-            ds_active_rx,
-            ds_reconcile_work_rx,
-            ds_reconcile_done_tx: ds_reconcile_done_tx.clone(),
-        };
-        let tls_context = tls_context.clone();
-        tokio::spawn(async move {
-            looper(tls_context, &up, up_coms).await;
-        });
-
-        dst.push(Target {
-            ds_work_tx,
-            ds_done_tx: ds_done_tx.clone(),
-            ds_active_tx,
-            ds_reconcile_work_tx,
-        });
-    }
-
-    // If requested, start the control http server on the given address:port
     if let Some(control) = opt.control {
-        let upi = Arc::clone(&up);
+        let c = up.control_tx.clone();
+        let log = up.log.new(o!("task" => "control".to_string()));
         tokio::spawn(async move {
-            let r = control::start(&upi, control).await;
-            info!(upi.log, "Control HTTP task finished with {:?}", r);
+            let r = control::start(c, log.clone(), control).await;
+            info!(log, "Control HTTP task finished with {:?}", r);
         });
     }
-    // Drop here, otherwise receivers will be kept waiting if looper quits
-    drop(ds_done_tx);
-    drop(ds_status_tx);
-    drop(ds_reconcile_done_tx);
 
-    let flush_timeout = opt.flush_timeout;
-    let join_handle = tokio::spawn(async move {
-        /*
-         * The final step is to call this function to wait for our downstairs
-         * tasks to connect to their respective downstairs instance.
-         * Once connected, we then take work requests from the guest and
-         * submit them into the upstairs
-         */
-        up_listen(&up, dst, ds_status_rx, ds_reconcile_done_rx, flush_timeout)
-            .await
-    });
+    let join_handle = tokio::spawn(async move { up.run().await });
 
     Ok(join_handle)
 }

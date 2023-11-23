@@ -105,46 +105,6 @@ impl UpCountStat {
             extent_reopen_count: Default::default(),
         }
     }
-
-    // When an operation happens that we wish to record in Oximeter,
-    // one of these methods will be called.  Each method will get the
-    // correct field of UpCountStat to record the update.
-    pub fn add_activation(&mut self) {
-        let datum = self.activated_count.datum_mut();
-        *datum += 1;
-    }
-    pub fn add_write(&mut self, bytes: i64) {
-        let datum = self.write_bytes.datum_mut();
-        *datum += bytes;
-        let datum = self.write_count.datum_mut();
-        *datum += 1;
-    }
-    pub fn add_read(&mut self, bytes: i64) {
-        let datum = self.read_bytes.datum_mut();
-        *datum += bytes;
-        let datum = self.read_count.datum_mut();
-        *datum += 1;
-    }
-    pub fn add_flush(&mut self) {
-        let datum = self.flush_count.datum_mut();
-        *datum += 1;
-    }
-    pub fn add_flush_close(&mut self) {
-        let datum = self.flush_close_count.datum_mut();
-        *datum += 1;
-    }
-    pub fn add_extent_repair(&mut self) {
-        let datum = self.extent_repair_count.datum_mut();
-        *datum += 1;
-    }
-    pub fn add_extent_noop(&mut self) {
-        let datum = self.extent_noop_count.datum_mut();
-        *datum += 1;
-    }
-    pub fn add_extent_reopen(&mut self) {
-        let datum = self.extent_reopen_count.datum_mut();
-        *datum += 1;
-    }
 }
 
 // This struct wraps the stat struct in an Arc/Mutex so the worker tasks can
@@ -155,6 +115,13 @@ pub struct UpStatOuter {
 }
 
 impl UpStatOuter {
+    pub fn new(uuid: Uuid) -> Self {
+        Self {
+            up_stat_wrap: Arc::new(std::sync::Mutex::new(UpCountStat::new(
+                uuid,
+            ))),
+        }
+    }
     // When an operation happens that we wish to record in Oximeter,
     // one of these methods will be called.  Each method will get the
     // correct field of UpCountStat to record the update.

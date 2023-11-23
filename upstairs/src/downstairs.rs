@@ -16,7 +16,7 @@ use crate::{
     ExtentRepairIDs, GtoS, GuestWork, IOState, IOStateCount, IOop,
     ImpactedBlocks, JobId, Message, ReadRequest, ReadResponse, ReconcileIO,
     ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
-    UpCountStat, WorkSummary,
+    UpStatOuter, WorkSummary,
 };
 use crucible_common::MAX_ACTIVE_COUNT;
 
@@ -355,7 +355,7 @@ impl Downstairs {
     pub(crate) async fn ack_jobs(
         &mut self,
         gw: &mut GuestWork,
-        up_stats: &mut UpCountStat,
+        up_stats: &UpStatOuter,
     ) {
         debug!(self.log, "ack_jobs called in Downstairs");
 
@@ -374,7 +374,7 @@ impl Downstairs {
         &mut self,
         ds_id: JobId,
         gw: &mut GuestWork,
-        up_stats: &mut UpCountStat,
+        up_stats: &UpStatOuter,
     ) {
         debug!(self.log, "ack_jobs process {}", ds_id);
 
@@ -453,7 +453,7 @@ impl Downstairs {
     }
 
     /// Match on the `IOop` type, update stats, and fire DTrace probes
-    fn cdt_gw_work_done(job: &DownstairsIO, stats: &mut UpCountStat) {
+    fn cdt_gw_work_done(job: &DownstairsIO, stats: &UpStatOuter) {
         let ds_id = job.ds_id;
         let gw_id = job.guest_id;
         let io_size = job.io_size();
@@ -3122,5 +3122,29 @@ impl Downstairs {
                 debug!(self.log, "[{}] Set AckReady {}", client_id, job.ds_id);
             }
         }
+    }
+
+    /// Accessor for [`Downstairs::reconcile_repaired`]
+    pub(crate) fn reconcile_repaired(&self) -> usize {
+        self.reconcile_repaired
+    }
+
+    /// Accessor for [`Downstairs::reconcile_repair_needed`]
+    pub(crate) fn reconcile_repair_needed(&self) -> usize {
+        self.reconcile_repair_needed
+    }
+
+    pub(crate) fn get_work_summary(&self) -> crate::control::DownstairsWork {
+        let mut kvec: Vec<_> = self.ds_active.keys().cloned().collect();
+        kvec.sort_unstable();
+
+        let mut jobs = Vec::new();
+        for id in kvec.iter() {
+            let job = self.ds_active.get(id).unwrap();
+            let work_summary = job.io_summarize();
+            jobs.push(work_summary);
+        }
+        let completed = self.completed_jobs.to_vec();
+        crate::control::DownstairsWork { jobs, completed }
     }
 }

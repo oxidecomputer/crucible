@@ -10,11 +10,10 @@ use dropshot::RequestContext;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
-use std::sync::Arc;
 
 use super::*;
 
-pub(crate) fn build_api() -> ApiDescription<Arc<UpstairsInfo>> {
+pub(crate) fn build_api() -> ApiDescription<UpstairsInfo> {
     let mut api = ApiDescription::new();
     api.register(upstairs_fill_info).unwrap();
     api.register(downstairs_work_queue).unwrap();
@@ -26,7 +25,11 @@ pub(crate) fn build_api() -> ApiDescription<Arc<UpstairsInfo>> {
  * Start up a dropshot server along side the Upstairs.  This interface
  * provides access to upstairs information and downstairs work queues.
  */
-pub async fn start(up: &Arc<Upstairs>, addr: SocketAddr) -> Result<(), String> {
+pub async fn start(
+    up: mpsc::Sender<ControlRequest>,
+    log: Logger,
+    addr: SocketAddr,
+) -> Result<(), String> {
     /*
      * Setup dropshot
      */
@@ -35,8 +38,6 @@ pub async fn start(up: &Arc<Upstairs>, addr: SocketAddr) -> Result<(), String> {
         request_body_max_bytes: 1024,
         default_handler_task_mode: HandlerTaskMode::Detached,
     };
-
-    let log = up.log.new(o!("task" => "control".to_string()));
 
     /*
      * Build a description of the API.
@@ -47,7 +48,7 @@ pub async fn start(up: &Arc<Upstairs>, addr: SocketAddr) -> Result<(), String> {
      * The functions that implement our API endpoints will share this
      * context.
      */
-    let api_context = Arc::new(UpstairsInfo::new(up));
+    let api_context = UpstairsInfo { up };
 
     /*
      * Set up the server.
@@ -64,22 +65,43 @@ pub async fn start(up: &Arc<Upstairs>, addr: SocketAddr) -> Result<(), String> {
     server.await
 }
 
+/// Request sent to the upstairs by the control server
+///
+/// Values are returned through the provided oneshot channel
+pub(crate) enum ControlRequest {
+    DownstairsWorkQueue(oneshot::Sender<DownstairsWork>),
+    UpstairsStats(oneshot::Sender<UpstairsStats>),
+}
+
+impl std::fmt::Debug for ControlRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ControlRequest::DownstairsWorkQueue(..) => {
+                f.debug_struct("DownstairsWorkQueue").finish()
+            }
+            ControlRequest::UpstairsStats(..) => {
+                f.debug_struct("UpstairsStats").finish()
+            }
+        }
+    }
+}
+
 /**
  * The state shared by handler functions
  */
 pub struct UpstairsInfo {
-    /**
-     * Upstairs structure that is used to gather all the info stats
-     */
-    up: Arc<Upstairs>,
+    /// Channel used to send messages to the upstairs
+    up: mpsc::Sender<ControlRequest>,
 }
 
 impl UpstairsInfo {
     /**
      * Return a new UpstairsInfo.
      */
-    pub fn new(up: &Arc<Upstairs>) -> UpstairsInfo {
-        UpstairsInfo { up: up.clone() }
+    pub fn new(up: crate::upstairs::Upstairs) -> UpstairsInfo {
+        UpstairsInfo {
+            up: up.control_tx.clone(),
+        }
     }
 }
 
@@ -88,18 +110,18 @@ impl UpstairsInfo {
  * a response to a GET request
  */
 #[derive(Deserialize, Serialize, JsonSchema)]
-struct UpstairsStats {
-    state: UpState,
-    ds_state: Vec<DsState>,
-    up_jobs: usize,
-    ds_jobs: usize,
-    repair_done: usize,
-    repair_needed: usize,
-    extents_repaired: Vec<usize>,
-    extents_confirmed: Vec<usize>,
-    extent_limit: Vec<Option<usize>>,
-    live_repair_completed: Vec<usize>,
-    live_repair_aborted: Vec<usize>,
+pub(crate) struct UpstairsStats {
+    pub state: UpState,
+    pub ds_state: Vec<DsState>,
+    pub up_jobs: usize,
+    pub ds_jobs: usize,
+    pub repair_done: usize,
+    pub repair_needed: usize,
+    pub extents_repaired: Vec<usize>,
+    pub extents_confirmed: Vec<usize>,
+    pub extent_limit: Vec<Option<usize>>,
+    pub live_repair_completed: Vec<usize>,
+    pub live_repair_aborted: Vec<usize>,
 }
 
 /**
@@ -111,59 +133,28 @@ struct UpstairsStats {
     unpublished = false,
 }]
 async fn upstairs_fill_info(
-    rqctx: RequestContext<Arc<UpstairsInfo>>,
+    rqctx: RequestContext<UpstairsInfo>,
 ) -> Result<HttpResponseOk<UpstairsStats>, HttpError> {
     let api_context = rqctx.context();
 
-    let act = api_context.up.active.lock().await.up_state;
-    let ds_state = api_context.up.ds_state_copy().await;
-    let up_jobs = api_context.up.guest.guest_work.lock().await.active.len();
-    let ds = api_context.up.downstairs.lock().await;
-    let ds_jobs = ds.ds_active.len();
-    let repair_done = ds.reconcile_repaired;
-    let repair_needed = ds.reconcile_repair_needed;
-    let extents_repaired = ds.collect_stats(|c| c.extents_repaired);
-    let extents_confirmed = ds.collect_stats(|c| c.extents_confirmed);
-    let extent_limit = ds.collect_stats(|c| c.extent_limit);
-    let live_repair_completed = ds.collect_stats(|c| c.live_repair_completed);
-    let live_repair_aborted = ds.collect_stats(|c| c.live_repair_aborted);
+    let (tx, rx) = oneshot::channel();
+    api_context
+        .up
+        .send(ControlRequest::UpstairsStats(tx))
+        .await
+        .unwrap();
 
-    Ok(HttpResponseOk(UpstairsStats {
-        state: act,
-        ds_state: ds_state.0.to_vec(),
-        up_jobs,
-        ds_jobs,
-        repair_done,
-        repair_needed,
-        extents_repaired: extents_repaired.to_vec(),
-        extents_confirmed: extents_confirmed.to_vec(),
-        extent_limit: extent_limit.to_vec(),
-        live_repair_completed: live_repair_completed.to_vec(),
-        live_repair_aborted: live_repair_aborted.to_vec(),
-    }))
+    let out = rx.await.unwrap();
+    Ok(HttpResponseOk(out))
 }
 
 /**
  * `DownstairsWork` holds the information gathered from the downstairs
  */
 #[derive(Deserialize, Serialize, JsonSchema)]
-struct DownstairsWork {
-    jobs: Vec<WorkSummary>,
-    completed: Vec<WorkSummary>,
-}
-
-async fn build_downstairs_job_list(up: &Arc<Upstairs>) -> Vec<WorkSummary> {
-    let ds = up.downstairs.lock().await;
-    let mut kvec: Vec<_> = ds.ds_active.keys().cloned().collect();
-    kvec.sort_unstable();
-
-    let mut jobs = Vec::new();
-    for id in kvec.iter() {
-        let job = ds.ds_active.get(id).unwrap();
-        let work_summary = job.io_summarize();
-        jobs.push(work_summary);
-    }
-    jobs
+pub(crate) struct DownstairsWork {
+    pub jobs: Vec<WorkSummary>,
+    pub completed: Vec<WorkSummary>,
 }
 
 /**
@@ -176,15 +167,19 @@ async fn build_downstairs_job_list(up: &Arc<Upstairs>) -> Vec<WorkSummary> {
     unpublished = false,
 }]
 async fn downstairs_work_queue(
-    rqctx: RequestContext<Arc<UpstairsInfo>>,
+    rqctx: RequestContext<UpstairsInfo>,
 ) -> Result<HttpResponseOk<DownstairsWork>, HttpError> {
     let api_context = rqctx.context();
 
-    let jobs = build_downstairs_job_list(&api_context.up.clone()).await;
-    let ds = api_context.up.downstairs.lock().await;
-    let completed = ds.completed_jobs.to_vec();
+    let (tx, rx) = oneshot::channel();
+    api_context
+        .up
+        .send(ControlRequest::DownstairsWorkQueue(tx))
+        .await
+        .unwrap();
 
-    Ok(HttpResponseOk(DownstairsWork { jobs, completed }))
+    let out = rx.await.unwrap();
+    Ok(HttpResponseOk(out))
 }
 
 #[cfg(test)]
