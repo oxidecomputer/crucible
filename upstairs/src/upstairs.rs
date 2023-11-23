@@ -6,7 +6,8 @@ use crate::{
     deadline_secs,
     downstairs::{Downstairs, DownstairsAction},
     extent_from_offset, integrity_hash, Block, BlockContext, BlockOp, BlockReq,
-    Buffer, Bytes, ClientId, DsState, EncryptionContext, GtoS, Guest, Message,
+    Buffer, Bytes, ClientId, ClientMap, CrucibleOpts, DsState,
+    EncryptionContext, GtoS, Guest, Message, RegionDefinition,
     RegionDefinitionStatus, SnapshotDetails, UpCountStat, WQCounts,
 };
 use crucible_common::CrucibleError;
@@ -14,7 +15,7 @@ use crucible_common::CrucibleError;
 use std::{ops::DerefMut, sync::Arc};
 
 use ringbuffer::RingBuffer;
-use slog::{error, info, warn, Logger};
+use slog::{error, info, o, warn, Logger};
 use tokio::{
     sync::oneshot,
     time::{sleep_until, Instant},
@@ -55,12 +56,6 @@ struct Upstairs {
     /// Downstairs jobs and per-client state
     downstairs: Downstairs,
 
-    /// Upstairs UUID
-    uuid: Uuid,
-
-    /// Unique session ID
-    session_id: Uuid,
-
     /// Upstairs generation number
     ///
     /// This increases each time an Upstairs starts
@@ -80,11 +75,6 @@ struct Upstairs {
     /// block offset.
     ddef: RegionDefinitionStatus,
 
-    /// Encryption context, if present
-    ///
-    /// This is `Some(..)` if a key is provided in the `CrucibleOpts`
-    encryption_context: Option<Arc<EncryptionContext>>,
-
     /// Marks whether a flush is needed
     ///
     /// The Upstairs keeps all IOs in memory until a flush is ACK'd back from
@@ -98,14 +88,11 @@ struct Upstairs {
     /// Statistics for this upstairs
     stats: UpCountStat,
 
-    /// Operate in read-only mode
-    read_only: bool,
+    /// Fixed configuration
+    cfg: Arc<UpstairsConfig>,
 
     /// Logger used by the upstairs
     log: Logger,
-
-    /// Does this Upstairs throw random errors?
-    lossy: bool,
 
     /// Next time to check for repairs
     repair_check_interval: Option<Instant>,
@@ -126,7 +113,114 @@ enum UpstairsAction {
     RepairCheck,
 }
 
+#[derive(Debug)]
+pub(crate) struct UpstairsConfig {
+    /// Upstairs UUID
+    pub upstairs_id: Uuid,
+
+    /// Unique session ID
+    pub session_id: Uuid,
+
+    pub read_only: bool,
+
+    /// Encryption context, if present
+    ///
+    /// This is `Some(..)` if a key is provided in the `CrucibleOpts`
+    pub encryption_context: Option<EncryptionContext>,
+
+    /// Does this Upstairs throw random errors?
+    pub lossy: bool,
+}
+
+impl UpstairsConfig {
+    pub(crate) fn encrypted(&self) -> bool {
+        self.encryption_context.is_some()
+    }
+}
+
 impl Upstairs {
+    pub(crate) fn new(
+        opt: &CrucibleOpts,
+        gen: u64,
+        expected_region_def: Option<RegionDefinition>,
+        guest: Arc<Guest>,
+        tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
+        log: Logger,
+    ) -> Self {
+        /*
+         * XXX Make sure we have three and only three downstairs
+         */
+        #[cfg(not(test))]
+        assert_eq!(opt.target.len(), 3);
+
+        // Build the target map, which is either empty (during some tests) or
+        // fully populated with all three targets.
+        let mut ds_target = ClientMap::new();
+        for (i, v) in opt.target.iter().enumerate() {
+            ds_target.insert(ClientId::new(i as u8), *v);
+        }
+
+        // Create an encryption context if a key is supplied.
+        let encryption_context = opt.key_bytes().map(|key| {
+            EncryptionContext::new(
+                key,
+                // XXX: Figure out what to do if no expected region definition
+                // was supplied. It would be good to do BlockOp::QueryBlockSize
+                // here, but this creates a deadlock. Upstairs::new runs before
+                // up_ds_listen in up_main, and up_ds_listen needs to run to
+                // answer BlockOp::QueryBlockSize. (Note that the downstairs
+                // have not reported in yet, so if no expected definition was
+                // supplied no downstairs information is available.)
+                expected_region_def
+                    .map(|rd| rd.block_size() as usize)
+                    .unwrap_or(512),
+            )
+        });
+
+        let uuid = opt.id;
+        let stats = UpCountStat::new(uuid);
+
+        let rd_status = match expected_region_def {
+            None => RegionDefinitionStatus::WaitingForDownstairs,
+            Some(d) => RegionDefinitionStatus::ExpectingFromDownstairs(d),
+        };
+
+        let session_id = Uuid::new_v4();
+        let log = log.new(o!("session_id" => session_id.to_string()));
+        info!(log, "Crucible {} has session id: {}", uuid, session_id);
+        info!(log, "Upstairs opts: {}", opt);
+
+        let cfg = Arc::new(UpstairsConfig {
+            encryption_context,
+            upstairs_id: uuid,
+            session_id,
+            read_only: opt.read_only,
+            lossy: opt.lossy,
+        });
+
+        info!(log, "Crucible stats registered with UUID: {}", uuid);
+        let downstairs = Downstairs::new(
+            cfg.clone(),
+            ds_target,
+            tls_context,
+            log.new(o!("" => "downstairs")),
+        );
+        Upstairs {
+            state: UpstairsState::Initializing,
+            cfg,
+            generation: gen,
+            repair_check_interval: None,
+            leak_deadline: deadline_secs(1.0),
+            flush_deadline: deadline_secs(0.5),
+            guest,
+            ddef: rd_status,
+            need_flush: false,
+            stats,
+            log,
+            downstairs,
+        }
+    }
+
     /// Select an event from possible actions
     async fn select(&mut self) -> UpstairsAction {
         tokio::select! {
@@ -197,7 +291,7 @@ impl Upstairs {
             return;
         }
 
-        if self.read_only {
+        if self.cfg.read_only {
             info!(self.log, "read-only, no live repair needed");
             // Repair can't happen on a read-only downstairs, so short circuit
             // here. There's no state drift to repair anyway, this read-only
@@ -272,7 +366,7 @@ impl Upstairs {
                 req.send_ok();
             }
             BlockOp::QueryUpstairsUuid { data } => {
-                *data.lock().await = self.uuid;
+                *data.lock().await = self.cfg.upstairs_id;
                 req.send_ok();
             }
             BlockOp::Deactivate => {
@@ -463,7 +557,7 @@ impl Upstairs {
         match self.state {
             UpstairsState::Initializing => {
                 self.state = UpstairsState::GoActive { reply };
-                info!(self.log, "{} active request set", self.uuid);
+                info!(self.log, "{} active request set", self.cfg.upstairs_id);
             }
             UpstairsState::GoActive { .. } => {
                 panic!("set_active_request called while already going active");
@@ -471,14 +565,15 @@ impl Upstairs {
             UpstairsState::Deactivating => {
                 warn!(
                     self.log,
-                    "{} active denied while Deactivating", self.uuid
+                    "{} active denied while Deactivating", self.cfg.upstairs_id
                 );
                 let _ = reply.send(Err(CrucibleError::UpstairsDeactivating));
             }
             UpstairsState::Active => {
                 info!(
                     self.log,
-                    "{} Request to activate upstairs already active", self.uuid
+                    "{} Request to activate upstairs already active",
+                    self.cfg.upstairs_id
                 );
                 let _ = reply.send(Err(CrucibleError::UpstairsAlreadyActive));
             }
@@ -627,7 +722,7 @@ impl Upstairs {
             req.send_err(CrucibleError::UpstairsInactive);
             return;
         }
-        if self.read_only {
+        if self.cfg.read_only {
             req.send_err(CrucibleError::ModifyingReadOnlyRegion);
             return;
         }
@@ -661,7 +756,7 @@ impl Upstairs {
             let byte_len: usize = ddef.block_size() as usize;
 
             let (sub_data, encryption_context, hash) = if let Some(context) =
-                &self.encryption_context
+                &self.cfg.encryption_context
             {
                 // Encrypt here
                 let mut mut_data =
@@ -795,7 +890,7 @@ impl Upstairs {
                 self.on_client_task_stopped(client_id, r);
             }
             ClientAction::Work | ClientAction::MoreWork => {
-                self.downstairs.io_send(client_id, self.lossy).await;
+                self.downstairs.io_send(client_id).await;
             }
         }
     }
@@ -823,7 +918,6 @@ impl Upstairs {
                 let r = self.downstairs.process_io_completion(
                     client_id,
                     m,
-                    &self.encryption_context,
                     &self.state,
                 );
                 if let Err(e) = r {
@@ -1031,7 +1125,9 @@ impl Upstairs {
         reply.send(Ok(())).unwrap();
         info!(
             self.log,
-            "{} is now active with session: {}", self.uuid, self.session_id
+            "{} is now active with session: {}",
+            self.cfg.upstairs_id,
+            self.cfg.session_id
         );
         self.stats.add_activation();
     }
@@ -1058,7 +1154,7 @@ impl Upstairs {
         // warning or error message
 
         // What if the newly active upstairs has the same UUID?
-        let uuid_desc = if self.uuid == new_upstairs_id {
+        let uuid_desc = if self.cfg.upstairs_id == new_upstairs_id {
             "same upstairs UUID".to_owned()
         } else {
             format!("different upstairs UUID {new_upstairs_id:?}")

@@ -3871,7 +3871,7 @@ impl Downstairs {
     /// between each read.
     fn validate_encrypted_read_response(
         response: &mut ReadResponse,
-        encryption_context: &Arc<EncryptionContext>,
+        encryption_context: &EncryptionContext,
         log: &Logger,
     ) -> Result<Option<u64>, CrucibleError> {
         // XXX because we don't have block generation numbers, an attacker

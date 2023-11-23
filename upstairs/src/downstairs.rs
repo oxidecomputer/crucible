@@ -9,13 +9,14 @@ use std::{
 use crate::{
     cdt,
     client::{ClientAction, DownstairsClient},
-    upstairs::UpstairsState,
+    upstairs::{UpstairsConfig, UpstairsState},
     AckStatus, ActiveJobs, AllocRingBuffer, BlockOp, BlockReq, BlockReqWaiter,
-    ClientData, ClientId, CrucibleError, DownstairsIO, DownstairsMend, DsState,
-    EncryptionContext, ExtentFix, ExtentInfo, ExtentRepairIDs, GtoS, GuestWork,
-    IOState, IOStateCount, IOop, ImpactedBlocks, JobId, Message, ReadRequest,
-    ReadResponse, ReconcileIO, ReconciliationId, RegionDefinition,
-    ReplaceResult, SnapshotDetails, UpCountStat, WorkSummary,
+    ClientData, ClientIOStateCount, ClientId, ClientMap, CrucibleError,
+    DownstairsIO, DownstairsMend, DsState, ExtentFix, ExtentInfo,
+    ExtentRepairIDs, GtoS, GuestWork, IOState, IOStateCount, IOop,
+    ImpactedBlocks, JobId, Message, ReadRequest, ReadResponse, ReconcileIO,
+    ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
+    UpCountStat, WorkSummary,
 };
 use crucible_common::MAX_ACTIVE_COUNT;
 
@@ -31,14 +32,11 @@ use uuid::Uuid;
  */
 #[derive(Debug)]
 pub(crate) struct Downstairs {
+    /// Shared configuration
+    cfg: Arc<UpstairsConfig>,
+
     /// Per-client data
     pub(crate) clients: ClientData<DownstairsClient>,
-
-    /// Upstairs UUID, copied here for ease of use
-    upstairs_id: Uuid,
-
-    /// Upstairs session UUID, copied here for ease of use
-    session_id: Uuid,
 
     /// The active list of IO for the downstairs.
     ds_active: ActiveJobs,
@@ -89,9 +87,6 @@ pub(crate) struct Downstairs {
 
     /// The logger for messages sent from downstairs methods.
     log: Logger,
-
-    /// Counters for the in flight work for the downstairs
-    io_state_count: IOStateCount,
 
     /// Data for an in-progress live repair
     repair: Option<LiveRepairData>,
@@ -266,6 +261,40 @@ pub(crate) enum DownstairsAction {
 }
 
 impl Downstairs {
+    pub(crate) fn new(
+        cfg: Arc<UpstairsConfig>,
+        ds_target: ClientMap<SocketAddr>,
+        tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
+        log: Logger,
+    ) -> Self {
+        let mut clients = [None, None, None];
+        for i in ClientId::iter() {
+            clients[i.get() as usize] = Some(DownstairsClient::new(
+                i,
+                cfg.clone(),
+                ds_target.get(&ClientId::new(0)).copied(),
+                log.new(o!("client" => i.get().to_string())),
+                tls_context.clone(),
+            ));
+        }
+        let clients = clients.map(Option::unwrap);
+        Self {
+            clients: ClientData(clients),
+            cfg,
+            next_flush: 0,
+            ds_active: ActiveJobs::new(),
+            write_bytes_outstanding: 0,
+            completed: AllocRingBuffer::new(2048),
+            completed_jobs: AllocRingBuffer::new(8),
+            next_id: JobId(1000),
+            reconcile_current_work: None,
+            reconcile_task_list: VecDeque::new(),
+            reconcile_repaired: 0,
+            reconcile_repair_needed: 0,
+            log: log.new(o!("" => "downstairs".to_string())),
+            repair: None,
+        }
+    }
     /// Choose which `DownstairsAction` to apply
     ///
     /// This function is called from within a top-level `select!`, so not only
@@ -510,20 +539,12 @@ impl Downstairs {
         }
     }
 
-    pub(crate) async fn perform_work(
-        &mut self,
-        client_id: ClientId,
-        lossy: bool,
-    ) {
-        let more = self.io_send(client_id, lossy).await;
+    pub(crate) async fn perform_work(&mut self, client_id: ClientId) {
+        let more = self.io_send(client_id).await;
         self.clients[client_id].set_more_work(more);
     }
 
-    pub(crate) async fn io_send(
-        &mut self,
-        client_id: ClientId,
-        lossy: bool,
-    ) -> bool {
+    pub(crate) async fn io_send(&mut self, client_id: ClientId) -> bool {
         /*
          * Build ourselves a list of all the jobs on the work hashmap that
          * have the job state for our client id in the IOState::New
@@ -541,8 +562,7 @@ impl Downstairs {
          */
         let client = &mut self.clients[client_id];
         let (new_work, flow_control) = {
-            let active_count =
-                self.io_state_count.in_progress[client_id] as usize;
+            let active_count = client.io_state_count.in_progress as usize;
             if active_count > MAX_ACTIVE_COUNT {
                 // Can't do any work
                 client.stats.flow_control += 1;
@@ -570,7 +590,7 @@ impl Downstairs {
              * Walk the list of work to do, update its status as in progress
              * and send the details to our downstairs.
              */
-            if lossy && random() && random() {
+            if self.cfg.lossy && random() && random() {
                 /*
                  * Requeue this work so it isn't completely lost.
                  */
@@ -592,8 +612,8 @@ impl Downstairs {
                 } => {
                     cdt::ds__write__io__start!(|| (new_id.0, client_id.get()));
                     Message::Write {
-                        upstairs_id: self.upstairs_id,
-                        session_id: self.session_id,
+                        upstairs_id: self.cfg.upstairs_id,
+                        session_id: self.cfg.session_id,
                         job_id: new_id,
                         dependencies,
                         writes,
@@ -608,8 +628,8 @@ impl Downstairs {
                         client_id.get()
                     ));
                     Message::WriteUnwritten {
-                        upstairs_id: self.upstairs_id,
-                        session_id: self.session_id,
+                        upstairs_id: self.cfg.upstairs_id,
+                        session_id: self.cfg.session_id,
                         job_id: new_id,
                         dependencies,
                         writes,
@@ -624,8 +644,8 @@ impl Downstairs {
                 } => {
                     cdt::ds__flush__io__start!(|| (new_id.0, client_id.get()));
                     Message::Flush {
-                        upstairs_id: self.upstairs_id,
-                        session_id: self.session_id,
+                        upstairs_id: self.cfg.upstairs_id,
+                        session_id: self.cfg.session_id,
                         job_id: new_id,
                         dependencies,
                         flush_number,
@@ -640,8 +660,8 @@ impl Downstairs {
                 } => {
                     cdt::ds__read__io__start!(|| (new_id.0, client_id.get()));
                     Message::ReadRequest {
-                        upstairs_id: self.upstairs_id,
-                        session_id: self.session_id,
+                        upstairs_id: self.cfg.upstairs_id,
+                        session_id: self.cfg.session_id,
                         job_id: new_id,
                         dependencies,
                         requests,
@@ -675,16 +695,16 @@ impl Downstairs {
                     if repair_downstairs.contains(&client_id) {
                         // We are the downstairs being repaired, so just close.
                         Message::ExtentLiveClose {
-                            upstairs_id: self.upstairs_id,
-                            session_id: self.session_id,
+                            upstairs_id: self.cfg.upstairs_id,
+                            session_id: self.cfg.session_id,
                             job_id: new_id,
                             dependencies,
                             extent_id: extent,
                         }
                     } else {
                         Message::ExtentLiveFlushClose {
-                            upstairs_id: self.upstairs_id,
-                            session_id: self.session_id,
+                            upstairs_id: self.cfg.upstairs_id,
+                            session_id: self.cfg.session_id,
                             job_id: new_id,
                             dependencies,
                             extent_id: extent,
@@ -707,8 +727,8 @@ impl Downstairs {
                     ));
                     if repair_downstairs.contains(&client_id) {
                         Message::ExtentLiveRepair {
-                            upstairs_id: self.upstairs_id,
-                            session_id: self.session_id,
+                            upstairs_id: self.cfg.upstairs_id,
+                            session_id: self.cfg.session_id,
                             job_id: new_id,
                             dependencies,
                             extent_id: extent,
@@ -717,8 +737,8 @@ impl Downstairs {
                         }
                     } else {
                         Message::ExtentLiveNoOp {
-                            upstairs_id: self.upstairs_id,
-                            session_id: self.session_id,
+                            upstairs_id: self.cfg.upstairs_id,
+                            session_id: self.cfg.session_id,
                             job_id: new_id,
                             dependencies,
                         }
@@ -734,8 +754,8 @@ impl Downstairs {
                         extent
                     ));
                     Message::ExtentLiveReopen {
-                        upstairs_id: self.upstairs_id,
-                        session_id: self.session_id,
+                        upstairs_id: self.cfg.upstairs_id,
+                        session_id: self.cfg.session_id,
                         job_id: new_id,
                         dependencies,
                         extent_id: extent,
@@ -744,8 +764,8 @@ impl Downstairs {
                 IOop::ExtentLiveNoOp { dependencies } => {
                     cdt::ds__noop__start!(|| (new_id.0, client_id.get()));
                     Message::ExtentLiveNoOp {
-                        upstairs_id: self.upstairs_id,
-                        session_id: self.session_id,
+                        upstairs_id: self.cfg.upstairs_id,
+                        session_id: self.cfg.session_id,
                         job_id: new_id,
                         dependencies,
                     }
@@ -2694,12 +2714,38 @@ impl Downstairs {
 
             println!();
         }
-        self.io_state_count.show_all();
+        self.io_state_count().show_all();
         print!("Last Flush: ");
         for c in self.clients.iter() {
             print!("{} ", c.last_flush());
         }
         println!();
+    }
+
+    /// Collects stats from the three `DownstairsClient`s
+    pub fn collect_stats<T, F: Fn(&DownstairsClient) -> T>(
+        &self,
+        f: F,
+    ) -> [T; 3] {
+        [
+            f(&self.clients[ClientId::new(0)]),
+            f(&self.clients[ClientId::new(1)]),
+            f(&self.clients[ClientId::new(2)]),
+        ]
+    }
+
+    pub fn io_state_count(&self) -> IOStateCount {
+        let d = self.collect_stats(|c| c.io_state_count);
+        let f = |g: fn(ClientIOStateCount) -> u32| {
+            ClientData([g(d[0]), g(d[1]), g(d[2])])
+        };
+        IOStateCount {
+            new: f(|d| d.new),
+            in_progress: f(|d| d.in_progress),
+            done: f(|d| d.done),
+            skipped: f(|d| d.skipped),
+            error: f(|d| d.error),
+        }
     }
 
     /// Prints the last `n` completed jobs to `stdout`
@@ -2716,7 +2762,6 @@ impl Downstairs {
         &mut self,
         client_id: ClientId,
         m: Message,
-        encryption_context: &Option<Arc<EncryptionContext>>,
         up_state: &UpstairsState,
     ) -> Result<(), CrucibleError> {
         let (upstairs_id, session_id, ds_id, read_data, extent_info) = match &m
@@ -2890,11 +2935,11 @@ impl Downstairs {
             m => panic!("called on_io_completion with invalid message {m:?}"),
         };
 
-        if self.upstairs_id != upstairs_id {
+        if self.cfg.upstairs_id != upstairs_id {
             warn!(
                 self.clients[client_id].log,
                 "upstairs_id {:?} != job {} upstairs_id {:?}!",
-                self.upstairs_id,
+                self.cfg.upstairs_id,
                 ds_id,
                 upstairs_id,
             );
@@ -2903,11 +2948,11 @@ impl Downstairs {
             return Err(CrucibleError::UuidMismatch);
         }
 
-        if self.session_id != session_id {
+        if self.cfg.session_id != session_id {
             warn!(
                 self.clients[client_id].log,
                 "u.session_id {:?} != job {} session_id {:?}!",
-                self.session_id,
+                self.cfg.session_id,
                 ds_id,
                 session_id,
             );
@@ -2936,7 +2981,7 @@ impl Downstairs {
                 warn!(
                     self.clients[client_id].log,
                     "{} WARNING finish job {} when downstairs state: {}",
-                    self.upstairs_id,
+                    self.cfg.upstairs_id,
                     ds_id,
                     ds_state
                 );
@@ -2947,7 +2992,6 @@ impl Downstairs {
             ds_id,
             client_id,
             read_data,
-            encryption_context,
             up_state,
             extent_info,
         );
@@ -3033,7 +3077,6 @@ impl Downstairs {
         ds_id: JobId,
         client_id: ClientId,
         responses: Result<Vec<ReadResponse>, CrucibleError>,
-        encryption_context: &Option<Arc<EncryptionContext>>,
         up_state: &UpstairsState,
         extent_info: Option<ExtentInfo>,
     ) {
@@ -3051,7 +3094,6 @@ impl Downstairs {
         self.clients[client_id].process_io_completion(
             job,
             responses,
-            encryption_context,
             deactivate,
             extent_info,
         );

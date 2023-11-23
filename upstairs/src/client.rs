@@ -1,19 +1,15 @@
 #![allow(dead_code)] // TODO remove this
 
 use crate::{
-    cdt, deadline_secs, upstairs::UpstairsState, AckStatus, ClientIOStateCount,
-    ClientId, CrucibleDecoder, CrucibleEncoder, CrucibleError, DownstairsIO,
-    DsState, EncryptionContext, ExtentInfo, IOState, IOop, JobId, Message,
-    ReadResponse, ReconcileIO, RegionDefinitionStatus, RegionMetadata,
+    cdt, deadline_secs, upstairs::UpstairsConfig, upstairs::UpstairsState,
+    AckStatus, ClientIOStateCount, ClientId, CrucibleDecoder, CrucibleEncoder,
+    CrucibleError, DownstairsIO, DsState, ExtentInfo, IOState, IOop, JobId,
+    Message, ReadResponse, ReconcileIO, RegionDefinitionStatus, RegionMetadata,
     WrappedStream,
 };
 use crucible_protocol::{ReconciliationId, CRUCIBLE_MESSAGE_VERSION};
 
-use std::{
-    collections::{BTreeSet, HashSet},
-    net::SocketAddr,
-    sync::Arc,
-};
+use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
 
 use futures::{SinkExt, StreamExt};
 use slog::{debug, error, info, o, warn, Logger};
@@ -41,6 +37,9 @@ struct ClientTaskHandle {
 
 #[derive(Debug)]
 pub(crate) struct DownstairsClient {
+    /// Shared (static) configuration
+    cfg: Arc<UpstairsConfig>,
+
     /// One's own client ID
     client_id: ClientId,
 
@@ -52,24 +51,6 @@ pub(crate) struct DownstairsClient {
 
     /// IO state counters
     pub(crate) io_state_count: ClientIOStateCount,
-
-    /// UUID for this upstairs
-    upstairs_id: Uuid,
-
-    /// UUID for this session
-    session_id: Uuid,
-
-    /// Is this client read-only?
-    ///
-    /// This value must be identical to `read_only` in the parent objects, but
-    /// is duplicated here for ease of use.
-    read_only: bool,
-
-    /// Is this client encrypted?
-    ///
-    /// This value must be identical to `encrypted` in the parent objects, but
-    /// is duplicated here for ease of use.
-    encrypted: bool,
 
     /// UUID for this downstairs region
     ///
@@ -103,7 +84,7 @@ pub(crate) struct DownstairsClient {
     new_jobs: BTreeSet<JobId>,
 
     /// Jobs that have been skipped
-    pub(crate) skipped_jobs: HashSet<JobId>,
+    pub(crate) skipped_jobs: BTreeSet<JobId>,
 
     /// Region metadata for this particular Downstairs
     ///
@@ -164,6 +145,39 @@ pub(crate) struct DownstairsClient {
 }
 
 impl DownstairsClient {
+    pub(crate) fn new(
+        client_id: ClientId,
+        cfg: Arc<UpstairsConfig>,
+        target_addr: Option<SocketAddr>,
+        log: Logger,
+        tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
+    ) -> Self {
+        Self {
+            cfg,
+            client_task: None, // TODO start up?
+            client_id,
+            region_uuid: None,
+            negotiation_state: NegotiationState::Start,
+            ping_count: 0,
+            ping_interval: deadline_secs(1.0), // TODO is this right?
+            more_work: None,
+            tls_context,
+            promote_state: None,
+            timeout_deadline: deadline_secs(60.0), // TODO is this right?
+            log,
+            target_addr,
+            repair_addr: None,
+            state: DsState::New,
+            last_flush: JobId(0),
+            stats: DownstairsStats::default(),
+            new_jobs: BTreeSet::new(),
+            skipped_jobs: BTreeSet::new(),
+            region_metadata: None,
+            repair_info: None,
+            extent_limit: None,
+            io_state_count: ClientIOStateCount::new(),
+        }
+    }
     /// Choose which `ClientAction` to apply
     ///
     /// This function is called from within a top-level `select!`, so not only
@@ -193,7 +207,8 @@ impl DownstairsClient {
             } => {
                 d
             }
-            _ = sleep_until(self.ping_interval), if self.client_task.is_some() => {
+            _ = sleep_until(self.ping_interval), if self.client_task.is_some()
+            => {
                 ClientAction::Ping
             }
             _ = sleep_until(self.timeout_deadline) => {
@@ -666,8 +681,8 @@ impl DownstairsClient {
                     .unwrap()
                     .client_request_tx
                     .send(ClientRequest::Message(Message::PromoteToActive {
-                        upstairs_id: self.upstairs_id,
-                        session_id: self.session_id,
+                        upstairs_id: self.cfg.upstairs_id,
+                        session_id: self.cfg.session_id,
                         gen,
                     }))
                     .await;
@@ -829,7 +844,7 @@ impl DownstairsClient {
         let panic_invalid = || {
             panic!(
                 "[{}] {} Invalid transition: {:?} -> {:?}",
-                self.client_id, self.upstairs_id, old_state, new_state
+                self.client_id, self.cfg.upstairs_id, old_state, new_state
             )
         };
         match new_state {
@@ -845,7 +860,7 @@ impl DownstairsClient {
                         panic!(
                             "[{}] {} Bad up active state change {} -> {}",
                             self.client_id,
-                            self.upstairs_id,
+                            self.cfg.upstairs_id,
                             old_state,
                             new_state,
                         );
@@ -856,7 +871,10 @@ impl DownstairsClient {
                 {
                     panic!(
                         "[{}] {} Negotiation failed, {:?} -> {:?}",
-                        self.client_id, self.upstairs_id, old_state, new_state,
+                        self.client_id,
+                        self.cfg.upstairs_id,
+                        old_state,
+                        new_state,
                     );
                 }
             }
@@ -894,7 +912,7 @@ impl DownstairsClient {
                     | DsState::Repair
                     | DsState::LiveRepair => {} // Okay
 
-                    DsState::LiveRepairReady if self.read_only => {} // Okay
+                    DsState::LiveRepairReady if self.cfg.read_only => {} // Okay
 
                     _ => {
                         panic_invalid();
@@ -1031,7 +1049,6 @@ impl DownstairsClient {
         &mut self,
         job: &mut DownstairsIO,
         mut responses: Result<Vec<ReadResponse>, CrucibleError>,
-        encryption_context: &Option<Arc<EncryptionContext>>,
         deactivate: bool,
         extent_info: Option<ExtentInfo>,
     ) {
@@ -1055,7 +1072,7 @@ impl DownstairsClient {
         let new_state = match &mut responses {
             Ok(responses) => {
                 responses.iter_mut().for_each(|x| {
-                    let mh = if let Some(context) = &encryption_context {
+                    let mh = if let Some(context) = &self.cfg.encryption_context {
                         crate::Downstairs::validate_encrypted_read_response(
                             x, context, &self.log,
                         )
@@ -1409,7 +1426,7 @@ impl DownstairsClient {
     /// If this downstairs is not read-only
     pub(crate) fn skip_live_repair(&mut self, up_state: &UpstairsState) {
         if self.state == DsState::LiveRepairReady {
-            assert!(self.read_only);
+            assert!(self.cfg.read_only);
             // TODO: could we do this transition early, by automatically
             // skipping LiveRepairReady if read-only?
             self.checked_state_transition(up_state, DsState::Active);
@@ -1565,8 +1582,8 @@ impl DownstairsClient {
                 match self.promote_state {
                     Some(PromoteState::Waiting(gen)) => {
                         self.send_client_message(Message::PromoteToActive {
-                            upstairs_id: self.upstairs_id,
-                            session_id: self.session_id,
+                            upstairs_id: self.cfg.upstairs_id,
+                            session_id: self.cfg.session_id,
                             gen,
                         })
                         .await;
@@ -1601,7 +1618,7 @@ impl DownstairsClient {
                 error!(
                     self.log,
                     "downstairs encrypted is {expected}, ours is {}",
-                    self.encrypted
+                    self.cfg.encrypted()
                 );
                 self.restart_connection(
                     up_state,
@@ -1613,7 +1630,7 @@ impl DownstairsClient {
                 error!(
                     self.log,
                     "downstairs read_only is {expected}, ours is {}",
-                    self.read_only,
+                    self.cfg.read_only,
                 );
                 self.restart_connection(
                     up_state,
@@ -1640,8 +1657,8 @@ impl DownstairsClient {
                     return Ok(false);
                 }
 
-                let match_uuid = self.upstairs_id == upstairs_id;
-                let match_session = self.session_id == session_id;
+                let match_uuid = self.cfg.upstairs_id == upstairs_id;
+                let match_session = self.cfg.session_id == session_id;
                 let match_gen = upstairs_gen == gen;
                 let matches_self = match_uuid && match_session && match_gen;
 
@@ -1652,7 +1669,7 @@ impl DownstairsClient {
                         if !match_uuid {
                             format!(
                                 "UUID {:?} != {:?}",
-                                self.upstairs_id, upstairs_id
+                                self.cfg.upstairs_id, upstairs_id
                             )
                         } else {
                             String::new()
@@ -1660,7 +1677,7 @@ impl DownstairsClient {
                         if !match_session {
                             format!(
                                 "session {:?} != {:?}",
-                                self.session_id, session_id
+                                self.cfg.session_id, session_id
                             )
                         } else {
                             String::new()
@@ -1718,7 +1735,7 @@ impl DownstairsClient {
 
                 // Add (and/or verify) this region info to our
                 // collection for each downstairs.
-                if region_def.get_encrypted() != self.encrypted {
+                if region_def.get_encrypted() != self.cfg.encrypted() {
                     error!(self.log, "encryption expectation mismatch!");
                     self.restart_connection(
                         up_state,
@@ -1861,7 +1878,7 @@ impl DownstairsClient {
                             "[{}] join from invalid state {} {} {:?}",
                             self.client_id,
                             bad_state,
-                            self.upstairs_id,
+                            self.cfg.upstairs_id,
                             self.negotiation_state,
                         );
                     }
@@ -2094,7 +2111,7 @@ pub(crate) enum ClientAction {
     MoreWork,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct DownstairsStats {
     /// Number of errors recorded
     pub downstairs_errors: usize,
