@@ -320,8 +320,12 @@ impl Upstairs {
                 self.on_control_req(c).await;
             }
         }
+        // For now, check backpressure after every event.  We may want to make
+        // this more nuanced in the future.
+        self.set_backpressure();
     }
 
+    /// Handles a request from the (optional) control server
     async fn on_control_req(&self, c: ControlRequest) {
         match c {
             ControlRequest::UpstairsStats(tx) => {
@@ -1356,5 +1360,18 @@ impl Upstairs {
                 self.state = UpstairsState::Initializing;
             }
         }
+    }
+
+    fn set_backpressure(&self) {
+        let dsw_max = self
+            .downstairs
+            .clients
+            .iter()
+            .map(|c| c.total_live_work())
+            .max()
+            .unwrap_or(0);
+        let ratio = dsw_max as f64 / crate::IO_OUTSTANDING_MAX as f64;
+        self.guest
+            .set_backpressure(self.downstairs.write_bytes_outstanding(), ratio);
     }
 }

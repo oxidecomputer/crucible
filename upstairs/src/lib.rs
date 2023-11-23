@@ -10507,53 +10507,6 @@ pub async fn up_main(
 }
 
 /*
- * Create a write DownstairsIO structure from an EID, and offset, and
- * the data buffer
- *
- * The is_write_unwritten bool indicates if this write is a regular
- * write (false) or a write_unwritten write (true) and allows us to
- * construct the proper IOop to submit to the downstairs.
- */
-fn create_write_eob(
-    ds: &mut Downstairs,
-    ds_id: JobId,
-    blocks: ImpactedBlocks,
-    gw_id: u64,
-    writes: Vec<crucible_protocol::Write>,
-    is_write_unwritten: bool,
-) -> DownstairsIO {
-    let dependencies = ds.ds_active.deps_for_write(ds_id, blocks);
-    cdt::gw__write__deps!(|| (
-        ds.ds_active.len() as u64,
-        dependencies.len() as u64
-    ));
-    debug!(ds.log, "IO Write {} has deps {:?}", ds_id, dependencies);
-
-    let awrite = if is_write_unwritten {
-        IOop::WriteUnwritten {
-            dependencies,
-            writes,
-        }
-    } else {
-        IOop::Write {
-            dependencies,
-            writes,
-        }
-    };
-
-    DownstairsIO {
-        ds_id,
-        guest_id: gw_id,
-        work: awrite,
-        state: ClientData::new(IOState::New),
-        ack_status: AckStatus::NotAcked,
-        replay: false,
-        data: None,
-        read_response_hashes: Vec::new(),
-    }
-}
-
-/*
  * Create a write DownstairsIO structure from an EID, and offset, and the
  * data buffer. Used for converting a guest IO read request into a
  * DownstairsIO that the downstairs can understand.

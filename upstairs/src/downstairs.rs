@@ -3147,4 +3147,8 @@ impl Downstairs {
         let completed = self.completed_jobs.to_vec();
         crate::control::DownstairsWork { jobs, completed }
     }
+
+    pub(crate) fn write_bytes_outstanding(&self) -> u64 {
+        self.write_bytes_outstanding as u64
+    }
 }

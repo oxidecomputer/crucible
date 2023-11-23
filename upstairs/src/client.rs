@@ -2070,6 +2070,10 @@ impl DownstairsClient {
             .iter()
             .all(|s| matches!(s, IOState::Done | IOState::Skipped))
     }
+
+    pub(crate) fn total_live_work(&self) -> usize {
+        (self.io_state_count.new + self.io_state_count.in_progress) as usize
+    }
 }
 
 /// How to handle "promote to active" requests
