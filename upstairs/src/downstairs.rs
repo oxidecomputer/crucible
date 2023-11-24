@@ -9,14 +9,14 @@ use std::{
 use crate::{
     cdt,
     client::{ClientAction, ClientStopReason, DownstairsClient},
+    live_repair::ExtentInfo,
     upstairs::{UpstairsConfig, UpstairsState},
     AckStatus, ActiveJobs, AllocRingBuffer, BlockOp, BlockReq, BlockReqWaiter,
     ClientData, ClientIOStateCount, ClientId, ClientMap, CrucibleError,
-    DownstairsIO, DownstairsMend, DsState, ExtentFix, ExtentInfo,
-    ExtentRepairIDs, GtoS, GuestWork, IOState, IOStateCount, IOop,
-    ImpactedBlocks, JobId, Message, ReadRequest, ReadResponse, ReconcileIO,
-    ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
-    UpStatOuter, WorkSummary,
+    DownstairsIO, DownstairsMend, DsState, ExtentFix, ExtentRepairIDs, GtoS,
+    GuestWork, IOState, IOStateCount, IOop, ImpactedBlocks, JobId, Message,
+    ReadRequest, ReadResponse, ReconcileIO, ReconciliationId, RegionDefinition,
+    ReplaceResult, SnapshotDetails, UpStatOuter, WorkSummary,
 };
 use crucible_common::MAX_ACTIVE_COUNT;
 
@@ -2015,7 +2015,7 @@ impl Downstairs {
          * Build the flush request, and take note of the request ID that
          * will be assigned to this new piece of work.
          */
-        let fl = crate::create_flush(
+        let fl = Self::create_flush(
             next_id,
             dep,
             flush_id,
@@ -2027,6 +2027,39 @@ impl Downstairs {
 
         self.enqueue(fl);
         next_id
+    }
+
+    /*
+     * Create a flush DownstairsIO structure.
+     */
+    #[allow(clippy::too_many_arguments)]
+    fn create_flush(
+        ds_id: JobId,
+        dependencies: Vec<JobId>,
+        flush_number: u64,
+        guest_id: u64,
+        gen_number: u64,
+        snapshot_details: Option<SnapshotDetails>,
+        extent_limit: Option<usize>,
+    ) -> DownstairsIO {
+        let flush = IOop::Flush {
+            dependencies,
+            flush_number,
+            gen_number,
+            snapshot_details,
+            extent_limit,
+        };
+
+        DownstairsIO {
+            ds_id,
+            guest_id,
+            work: flush,
+            state: ClientData::new(IOState::New),
+            ack_status: AckStatus::NotAcked,
+            replay: false,
+            data: None,
+            read_response_hashes: Vec::new(),
+        }
     }
 
     /// Reserves repair IDs if impacted blocks overlap our extent under repair
@@ -3168,6 +3201,6 @@ impl Downstairs {
     }
 
     pub(crate) fn write_bytes_outstanding(&self) -> u64 {
-        self.write_bytes_outstanding as u64
+        self.write_bytes_outstanding
     }
 }

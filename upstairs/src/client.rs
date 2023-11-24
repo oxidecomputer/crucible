@@ -1,11 +1,12 @@
 #![allow(dead_code)] // TODO remove this
 
 use crate::{
-    cdt, deadline_secs, upstairs::UpstairsConfig, upstairs::UpstairsState,
-    AckStatus, ClientIOStateCount, ClientId, CrucibleDecoder, CrucibleEncoder,
-    CrucibleError, DownstairsIO, DsState, ExtentInfo, IOState, IOop, JobId,
-    Message, ReadResponse, ReconcileIO, RegionDefinitionStatus, RegionMetadata,
-    WrappedStream,
+    cdt, deadline_secs, integrity_hash, live_repair::ExtentInfo,
+    upstairs::UpstairsConfig, upstairs::UpstairsState, AckStatus,
+    ClientIOStateCount, ClientId, CrucibleDecoder, CrucibleEncoder,
+    CrucibleError, DownstairsIO, DsState, EncryptionContext, IOState, IOop,
+    JobId, Message, ReadResponse, ReconcileIO, RegionDefinitionStatus,
+    RegionMetadata, WrappedStream,
 };
 use crucible_protocol::{ReconciliationId, CRUCIBLE_MESSAGE_VERSION};
 
@@ -1089,16 +1090,15 @@ impl DownstairsClient {
         let new_state = match &mut responses {
             Ok(responses) => {
                 responses.iter_mut().for_each(|x| {
-                    let mh = if let Some(context) = &self.cfg.encryption_context {
-                        crate::Downstairs::validate_encrypted_read_response(
-                            x, context, &self.log,
-                        )
-                    } else {
-                        crate::Downstairs::validate_unencrypted_read_response(
-                            x, &self.log,
-                        )
-                    }
-                    .expect("decryption failed");
+                    let mh =
+                        if let Some(context) = &self.cfg.encryption_context {
+                            validate_encrypted_read_response(
+                                x, context, &self.log,
+                            )
+                        } else {
+                            validate_unencrypted_read_response(x, &self.log)
+                        }
+                        .expect("decryption failed");
                     read_response_hashes.push(mh);
                 });
                 jobs_completed_ok += 1;
@@ -2397,5 +2397,209 @@ where
                 }
             }
         }
+    }
+}
+
+/// Returns:
+/// - Ok(Some(valid_hash)) for successfully decrypted data
+/// - Ok(None) if there were no block contexts and block was all 0
+/// - Err otherwise
+///
+/// The return value of this will be stored with the job, and compared
+/// between each read.
+fn validate_encrypted_read_response(
+    response: &mut ReadResponse,
+    encryption_context: &EncryptionContext,
+    log: &Logger,
+) -> Result<Option<u64>, CrucibleError> {
+    // XXX because we don't have block generation numbers, an attacker
+    // downstairs could:
+    //
+    // 1) remove encryption context and cause a denial of service, or
+    // 2) roll back a block by writing an old data and encryption context
+    //
+    // check that this read response contains block contexts that contain
+    // (at least one) encryption context.
+
+    if response.block_contexts.is_empty() {
+        // No block context(s) in the response!
+        //
+        // Either this is a read of an unwritten block, or an attacker
+        // removed the encryption contexts from the db. Because the Upstairs
+        // will perform reconciliation before activating, and because the
+        // final step of reconciliation is a flush (which will remove block
+        // contexts that do not match with the extent data), we should never
+        // expect to see this case unless this is a blank block.
+        //
+        // XXX if it's not a blank block, we may be under attack?
+        assert!(response.data[..].iter().all(|&x| x == 0));
+        return Ok(None);
+    }
+
+    let mut valid_hash = None;
+    let mut successful_decryption = false;
+
+    // Attempt decryption with each encryption context, and fail if all
+    // do not work. The most recent encryption context will most likely
+    // be the correct one so start there.
+    for ctx in response.block_contexts.iter().rev() {
+        let block_encryption_ctx =
+            if let Some(block_encryption_ctx) = &ctx.encryption_context {
+                block_encryption_ctx
+            } else {
+                // this block context is missing an encryption context!
+                // continue to see if another block context has a valid one.
+                //
+                // XXX should this be an error instead?
+                continue;
+            };
+
+        // Validate integrity hash before decryption
+        let computed_hash = integrity_hash(&[
+            &block_encryption_ctx.nonce[..],
+            &block_encryption_ctx.tag[..],
+            &response.data[..],
+        ]);
+
+        if computed_hash == ctx.hash {
+            valid_hash = Some(ctx.hash);
+
+            // Now that the integrity hash was verified, attempt
+            // decryption.
+            //
+            // Note: decrypt_in_place does not overwrite the buffer if
+            // it fails, otherwise we would need to copy here. There's a
+            // unit test to validate this behaviour.
+            use aes_gcm_siv::{Nonce, Tag};
+            let decryption_result = encryption_context.decrypt_in_place(
+                &mut response.data[..],
+                Nonce::from_slice(&block_encryption_ctx.nonce[..]),
+                Tag::from_slice(&block_encryption_ctx.tag[..]),
+            );
+
+            if decryption_result.is_ok() {
+                successful_decryption = true;
+                break;
+            } else {
+                // Only one hash + nonce + tag combination will match the
+                // data that is returned. Due to the fact that nonces are
+                // random for each write, even if the Guest wrote the
+                // same data block 100 times, only one index will be
+                // valid. The sqlite backend will return any number of block
+                // contexts, where the raw file backend will only return
+                // one (because it knows the active slot).
+                //
+                // If the computed integrity hash matched but decryption
+                // failed, continue to the next contexts. the current
+                // hashing algorithm (xxHash) is not a cryptographic hash
+                // and is only u64, so collisions are not impossible.
+                warn!(
+                    log,
+                    "Decryption failed even though integrity hash matched!"
+                );
+            }
+        }
+    }
+
+    if let Some(valid_hash) = valid_hash {
+        if !successful_decryption {
+            // No encryption context combination decrypted this block, but
+            // one valid hash was found. This can occur if the decryption
+            // key doesn't match the key that the data was encrypted with.
+            error!(log, "Decryption failed with correct hash");
+            Err(CrucibleError::DecryptionError)
+        } else {
+            // Filter out contexts that don't match, and return the successful
+            // hash.
+            response
+                .block_contexts
+                .retain(|context| context.hash == valid_hash);
+
+            Ok(Some(valid_hash))
+        }
+    } else {
+        error!(log, "No match for integrity hash");
+        for ctx in response.block_contexts.iter() {
+            let block_encryption_ctx =
+                if let Some(block_encryption_ctx) = &ctx.encryption_context {
+                    block_encryption_ctx
+                } else {
+                    error!(log, "missing encryption context!");
+                    continue;
+                };
+
+            let computed_hash = integrity_hash(&[
+                &block_encryption_ctx.nonce[..],
+                &block_encryption_ctx.tag[..],
+                &response.data[..],
+            ]);
+            error!(
+                log,
+                "Expected: 0x{:x} != Computed: 0x{:x}", ctx.hash, computed_hash
+            );
+        }
+
+        // no hash was correct
+        Err(CrucibleError::HashMismatch)
+    }
+}
+
+/// Returns:
+/// - Ok(Some(valid_hash)) where the integrity hash matches
+/// - Ok(None) where there is no integrity hash in the response and the
+///   block is all 0
+/// - Err otherwise
+fn validate_unencrypted_read_response(
+    response: &mut ReadResponse,
+    log: &Logger,
+) -> Result<Option<u64>, CrucibleError> {
+    if !response.block_contexts.is_empty() {
+        // check integrity hashes - make sure at least one is correct.
+        let mut successful_hash = false;
+        let computed_hash = integrity_hash(&[&response.data[..]]);
+
+        // The most recent hash is probably going to be the right one.
+        for context in response.block_contexts.iter().rev() {
+            if computed_hash == context.hash {
+                successful_hash = true;
+                break;
+            }
+        }
+
+        if successful_hash {
+            // Filter out contexts that don't match, and return the
+            // successful hash.
+            response
+                .block_contexts
+                .retain(|context| context.hash == computed_hash);
+
+            Ok(Some(computed_hash))
+        } else {
+            // No integrity hash was correct for this response
+            error!(log, "No match computed hash:0x{:x}", computed_hash,);
+            for context in response.block_contexts.iter().rev() {
+                error!(log, "No match          hash:0x{:x}", context.hash);
+            }
+            error!(log, "Data from hash:");
+            for i in 0..6 {
+                error!(log, "[{}]:{}", i, response.data[i]);
+            }
+
+            Err(CrucibleError::HashMismatch)
+        }
+    } else {
+        // No block context(s) in the response!
+        //
+        // Either this is a read of an unwritten block, or an attacker
+        // removed the hashes from the db. Because the Upstairs will perform
+        // reconciliation before activating, and because the final step of
+        // reconciliation is a flush (which will remove block contexts that
+        // do not match with the extent data), we should never expect to see
+        // this case unless this is a blank block.
+        //
+        // XXX if it's not a blank block, we may be under attack?
+        assert!(response.data[..].iter().all(|&x| x == 0));
+
+        Ok(None)
     }
 }
