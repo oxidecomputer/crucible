@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     cdt,
-    client::{ClientAction, DownstairsClient},
+    client::{ClientAction, ClientStopReason, DownstairsClient},
     upstairs::{UpstairsConfig, UpstairsState},
     AckStatus, ActiveJobs, AllocRingBuffer, BlockOp, BlockReq, BlockReqWaiter,
     ClientData, ClientIOStateCount, ClientId, ClientMap, CrucibleError,
@@ -2404,6 +2404,24 @@ impl Downstairs {
         Ok(ReplaceResult::Started)
     }
 
+    pub(crate) async fn check_gone_too_long(
+        &mut self,
+        client_id: ClientId,
+        up_state: &UpstairsState,
+    ) {
+        let work_count = self.clients[client_id].total_live_work();
+        if work_count > crate::IO_OUTSTANDING_MAX {
+            warn!(
+                self.log,
+                "downstairs failed, too many outstanding jobs {}", work_count,
+            );
+            self.skip_all_jobs(client_id);
+            self.clients[client_id]
+                .fault(up_state, ClientStopReason::TooManyOutstandingJobs)
+                .await;
+        }
+    }
+
     /// Move all `New` and `InProgress` jobs for the given client to `Skipped`
     ///
     /// This may lead to jobs being marked as ackable, since a skipped job
@@ -3044,6 +3062,7 @@ impl Downstairs {
                     self.skip_all_jobs(client_id);
                     self.clients[client_id]
                         .checked_state_transition(up_state, DsState::Faulted);
+                    // TODO should we restart the client task here?
                 }
             }
         }

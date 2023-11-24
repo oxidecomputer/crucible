@@ -299,7 +299,10 @@ impl Upstairs {
             UpstairsAction::Downstairs(d) => {
                 self.apply_downstairs_action(d).await
             }
-            UpstairsAction::Guest(b) => self.apply_guest_request(b).await,
+            UpstairsAction::Guest(b) => {
+                self.apply_guest_request(b).await;
+                self.gone_too_long().await;
+            }
             UpstairsAction::LeakCheck => {
                 const LEAK_MS: usize = 1000;
                 let leak_tick =
@@ -337,6 +340,32 @@ impl Upstairs {
         // For now, check backpressure after every event.  We may want to make
         // this more nuanced in the future.
         self.set_backpressure();
+    }
+
+    /// Check outstanding IOops for each downstairs.
+    ///
+    /// If the number is too high, then mark that downstairs as failed, scrub
+    /// any outstanding jobs.
+    ///
+    /// Updates downstairs backpressure to help keep the system stable
+    async fn gone_too_long(&mut self) {
+        // If we are not active, then just exit.
+        if !matches!(self.state, UpstairsState::Active) {
+            return;
+        }
+
+        for cid in ClientId::iter() {
+            // Only downstairs in these states are checked.
+            match self.downstairs.clients[cid].state() {
+                DsState::Active
+                | DsState::LiveRepair
+                | DsState::Offline
+                | DsState::Replay => {
+                    self.downstairs.check_gone_too_long(cid, &self.state).await;
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Fires the `up-status` DTrace probe

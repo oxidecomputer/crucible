@@ -1035,6 +1035,16 @@ impl DownstairsClient {
         self.stats.live_repair_aborted += 1;
     }
 
+    /// Sets the state to `Fault` and restarts the IO task
+    pub(crate) async fn fault(
+        &mut self,
+        up_state: &UpstairsState,
+        reason: ClientStopReason,
+    ) {
+        self.checked_state_transition(up_state, DsState::Faulted);
+        self.halt_io_task(reason).await;
+    }
+
     /// Finishes an in-progress live repair, setting our state to `Active`
     ///
     /// # Panics
@@ -2187,6 +2197,9 @@ pub(crate) enum ClientStopReason {
 
     /// Live-repair failed
     FailedLiveRepair,
+
+    /// Too many jobs in the queue
+    TooManyOutstandingJobs,
 }
 
 /// Response received from the I/O task
