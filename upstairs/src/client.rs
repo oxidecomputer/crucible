@@ -522,7 +522,7 @@ impl DownstairsClient {
     /// When the downstairs is marked as missing, handle its state transition
     ///
     /// Returns `true` if we need to do replay work, `false` otherwise.
-    pub(crate) fn on_missing(&mut self) -> bool {
+    pub(crate) fn on_missing(&mut self) {
         let current = &self.state;
         let new_state = match current {
             DsState::Active | DsState::Replay | DsState::Offline => {
@@ -554,13 +554,13 @@ impl DownstairsClient {
             "Gone missing, transition from {current:?} to {new_state:?}"
         );
 
-        let needs_replay = matches!(new_state, DsState::Offline);
-
         // Should we move jobs now?  When do we move work that has
         // been submitted over to "skipped"
         self.state = new_state;
 
-        needs_replay
+        // Mark the client task as absent
+        assert!(self.client_task.is_some());
+        self.client_task = None;
     }
 
     /// Checks whether this Downstairs is ready for the upstairs to deactivate
