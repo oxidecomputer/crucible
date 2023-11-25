@@ -1604,12 +1604,10 @@ impl DownstairsClient {
                         panic!("got YesItsMe with promote_state == Sent");
                     }
                     None => {
-                        self.checked_state_transition(
-                            up_state,
-                            DsState::WaitActive,
-                        );
+                        // Nothing to do here, wait for set_active_request
                     }
                 }
+                self.checked_state_transition(up_state, DsState::WaitActive);
             }
             Message::VersionMismatch { version } => {
                 error!(
