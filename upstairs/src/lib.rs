@@ -864,7 +864,7 @@ struct DownstairsIO {
     /*
      * Has this been acked to the guest yet?
      */
-    ack_status: AckStatus,
+    acked: bool,
 
     /*
      * Is this a replay job, meaning we may have already sent it
@@ -984,7 +984,11 @@ impl DownstairsIO {
             job_type,
             num_blocks,
             deps,
-            ack_status: self.ack_status,
+            ack_status: if self.acked {
+                AckStatus::NotAcked
+            } else {
+                AckStatus::Acked
+            },
             state,
         }
     }

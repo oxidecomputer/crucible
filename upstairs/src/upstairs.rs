@@ -340,6 +340,9 @@ impl Upstairs {
         // For now, check backpressure after every event.  We may want to make
         // this more nuanced in the future.
         self.set_backpressure();
+
+        // Handle any jobs that have become ready for acks
+        self.ack_ready().await;
     }
 
     /// Check outstanding IOops for each downstairs.
@@ -1054,9 +1057,6 @@ impl Upstairs {
         match d {
             DownstairsAction::Client { client_id, action } => {
                 self.apply_client_action(client_id, action).await;
-            }
-            DownstairsAction::AckReady => {
-                self.ack_ready().await;
             }
             DownstairsAction::LiveRepair(r) => {
                 let mut gw = self.guest.guest_work.lock().await;

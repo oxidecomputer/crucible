@@ -3,8 +3,7 @@
 use crucible_protocol::JobId;
 
 use crate::{
-    AckStatus, DownstairsIO, ExtentRepairIDs, IOop, ImpactedAddr,
-    ImpactedBlocks,
+    DownstairsIO, ExtentRepairIDs, IOop, ImpactedAddr, ImpactedBlocks,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -29,7 +28,6 @@ use std::collections::{BTreeMap, BTreeSet};
 #[derive(Debug, Default)]
 pub(crate) struct ActiveJobs {
     jobs: BTreeMap<JobId, DownstairsIO>,
-    ackable: BTreeSet<JobId>,
     block_to_active: BlockMap,
 }
 
@@ -46,10 +44,8 @@ impl ActiveJobs {
 
     /// Looks up a job by ID, returning a mutable reference
     #[inline]
-    pub fn get_mut(&mut self, job_id: &JobId) -> Option<DownstairsIOHandle> {
-        self.jobs
-            .get_mut(job_id)
-            .map(|job| DownstairsIOHandle::new(job, &mut self.ackable))
+    pub fn get_mut(&mut self, job_id: &JobId) -> Option<&mut DownstairsIO> {
+        self.jobs.get_mut(job_id)
     }
 
     /// Returns the total number of active jobs
@@ -68,8 +64,7 @@ impl ActiveJobs {
     #[inline]
     pub fn for_each<F: FnMut(&JobId, &mut DownstairsIO)>(&mut self, mut f: F) {
         for (job_id, job) in self.jobs.iter_mut() {
-            let handle = DownstairsIOHandle::new(job, &mut self.ackable);
-            f(job_id, handle.job);
+            f(job_id, job);
         }
     }
 
@@ -209,14 +204,6 @@ impl ActiveJobs {
         dep
     }
 
-    pub fn has_ackable_work(&self) -> bool {
-        !self.ackable.is_empty()
-    }
-
-    pub fn ackable_work(&self) -> BTreeSet<JobId> {
-        self.ackable.clone()
-    }
-
     #[cfg(test)]
     pub fn get_extents_for(&self, job: JobId) -> ImpactedBlocks {
         *self.block_to_active.job_to_range.get(&job).unwrap()
@@ -229,75 +216,6 @@ impl<'a> IntoIterator for &'a ActiveJobs {
 
     fn into_iter(self) -> Self::IntoIter {
         self.jobs.iter()
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-/// Handle for a `DownstairsIO` that keeps secondary data in sync
-///
-/// Many parts of the code want to modify a `DownstairsIO` by directly poking
-/// its fields.  This makes it hard to keep secondary data in sync, e.g.
-/// maintaining a separate list of all ackable IOs.
-pub(crate) struct DownstairsIOHandle<'a> {
-    pub job: &'a mut DownstairsIO,
-    initial_status: AckStatus,
-    ackable: &'a mut BTreeSet<JobId>,
-}
-
-impl<'a> std::fmt::Debug for DownstairsIOHandle<'a> {
-    fn fmt(
-        &self,
-        f: &mut std::fmt::Formatter<'_>,
-    ) -> Result<(), std::fmt::Error> {
-        self.job.fmt(f)
-    }
-}
-
-impl<'a> DownstairsIOHandle<'a> {
-    fn new(
-        job: &'a mut DownstairsIO,
-        ackable: &'a mut BTreeSet<JobId>,
-    ) -> Self {
-        let initial_status = job.ack_status;
-        Self {
-            job,
-            initial_status,
-            ackable,
-        }
-    }
-
-    pub fn job(&mut self) -> &mut DownstairsIO {
-        self.job
-    }
-}
-
-impl<'a> std::ops::Drop for DownstairsIOHandle<'a> {
-    fn drop(&mut self) {
-        match (self.initial_status, self.job.ack_status) {
-            (AckStatus::NotAcked, AckStatus::AckReady) => {
-                let prev = self.ackable.insert(self.job.ds_id);
-                assert!(prev);
-            }
-            (AckStatus::AckReady, AckStatus::Acked | AckStatus::NotAcked) => {
-                let prev = self.ackable.remove(&self.job.ds_id);
-                assert!(prev);
-            }
-            // None transitions
-            (AckStatus::AckReady, AckStatus::AckReady)
-            | (AckStatus::Acked, AckStatus::Acked)
-            | (AckStatus::NotAcked, AckStatus::NotAcked) => (),
-
-            // Invalid transitions!
-            (AckStatus::NotAcked, AckStatus::Acked)
-            | (AckStatus::Acked, AckStatus::NotAcked)
-            | (AckStatus::Acked, AckStatus::AckReady) => {
-                panic!(
-                    "invalid transition: {:?} => {:?}",
-                    self.initial_status, self.job.ack_status
-                )
-            }
-        }
     }
 }
 

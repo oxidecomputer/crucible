@@ -1,7 +1,7 @@
 #![allow(dead_code)] // TODO remove this
                      //
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     net::SocketAddr,
     sync::Arc,
 };
@@ -90,6 +90,11 @@ pub(crate) struct Downstairs {
 
     /// Data for an in-progress live repair
     repair: Option<LiveRepairData>,
+
+    /// Jobs that are ready to be acked
+    ///
+    /// This must be handled after every event
+    ackable_work: BTreeSet<JobId>,
 }
 
 /// State machine for a live-repair operation
@@ -253,9 +258,6 @@ pub(crate) enum DownstairsAction {
         action: ClientAction,
     },
 
-    /// There is ackable work in our queue
-    AckReady,
-
     /// The currently-awaited `LiveRepair` job has returned a result
     LiveRepair(Result<(), CrucibleError>),
 }
@@ -292,6 +294,7 @@ impl Downstairs {
             reconcile_repaired: 0,
             reconcile_repair_needed: 0,
             log: log.new(o!("" => "downstairs".to_string())),
+            ackable_work: BTreeSet::new(),
             repair: None,
         }
     }
@@ -322,11 +325,6 @@ impl Downstairs {
                     client_id: ClientId::new(2),
                     action
                 }
-            }
-            _ = futures::future::ready(()),
-                if self.ds_active.has_ackable_work() =>
-            {
-                DownstairsAction::AckReady
             }
             r = async {
                 if let Some(r) = self.repair.as_mut() {
@@ -359,7 +357,7 @@ impl Downstairs {
     ) {
         debug!(self.log, "ack_jobs called in Downstairs");
 
-        let ack_list = self.ds_active.ackable_work();
+        let ack_list = std::mem::take(&mut self.ackable_work);
         let jobs_checked = ack_list.len();
         for ds_id_done in ack_list.iter() {
             self.ack_job(*ds_id_done, gw, up_stats).await;
@@ -378,27 +376,17 @@ impl Downstairs {
     ) {
         debug!(self.log, "ack_jobs process {}", ds_id);
 
-        let mut handle = self.ds_active.get_mut(&ds_id).unwrap();
-        let done = handle.job();
-
-        /*
-         * Make sure the job state has not changed since we made the
-         * list.
-         */
-        if done.ack_status != AckStatus::AckReady {
-            info!(self.log, "Job {ds_id} no longer ready, skip for now");
-            return;
-        }
+        let mut done = self.ds_active.get_mut(&ds_id).unwrap();
+        assert!(!done.acked);
 
         let gw_id = done.guest_id;
         assert_eq!(done.ds_id, ds_id);
 
         let data = done.data.take();
 
-        done.ack_status = AckStatus::Acked;
+        done.acked = true;
         let r = Self::result(done);
         Self::cdt_gw_work_done(done, up_stats);
-        drop(handle);
         debug!(self.log, "[A] ack job {}:{}", ds_id, gw_id);
 
         gw.gw_ds_complete(gw_id, ds_id, data, r, &self.log).await;
@@ -786,17 +774,13 @@ impl Downstairs {
         ds_id: JobId,
         client_id: ClientId,
     ) -> Option<IOop> {
-        let mut handle = match self.ds_active.get_mut(&ds_id) {
-            Some(handle) => handle,
-            None => {
-                // This job, that we thought was good, is not.  As we don't
-                // keep the lock when gathering job IDs to work on, it is
-                // possible to have a out of date work list.
-                warn!(self.log, "[{client_id}] Job {ds_id} not on active list");
-                return None;
-            }
+        let Some(job) = self.ds_active.get_mut(&ds_id) else {
+            // This job, that we thought was good, is not.  As we don't
+            // keep the lock when gathering job IDs to work on, it is
+            // possible to have a out of date work list.
+            warn!(self.log, "[{client_id}] Job {ds_id} not on active list");
+            return None;
         };
-        let job = handle.job();
 
         // If current state is Skipped, then we have nothing to do here.
         if matches!(job.state[client_id], IOState::Skipped) {
@@ -1378,7 +1362,7 @@ impl Downstairs {
             guest_id: gw_id,
             work: noop_ioop,
             state: ClientData::new(IOState::New),
-            ack_status: AckStatus::NotAcked,
+            acked: false,
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
@@ -1506,7 +1490,7 @@ impl Downstairs {
             guest_id: gw_id,
             work: repair_ioop,
             state: ClientData::new(IOState::New),
-            ack_status: AckStatus::NotAcked,
+            acked: false,
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
@@ -1653,7 +1637,7 @@ impl Downstairs {
             guest_id: gw_id,
             work: reopen_ioop,
             state: ClientData::new(IOState::New),
-            ack_status: AckStatus::NotAcked,
+            acked: false,
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
@@ -1707,7 +1691,7 @@ impl Downstairs {
             guest_id: gw_id,
             work: close_ioop,
             state: ClientData::new(IOState::New),
-            ack_status: AckStatus::NotAcked,
+            acked: false,
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
@@ -2055,7 +2039,7 @@ impl Downstairs {
             guest_id,
             work: flush,
             state: ClientData::new(IOState::New),
-            ack_status: AckStatus::NotAcked,
+            acked: false,
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
@@ -2165,7 +2149,7 @@ impl Downstairs {
             guest_id,
             work: aread,
             state: ClientData::new(IOState::New),
-            ack_status: AckStatus::NotAcked,
+            acked: false,
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
@@ -2211,7 +2195,7 @@ impl Downstairs {
             guest_id,
             work: awrite,
             state: ClientData::new(IOState::New),
-            ack_status: AckStatus::NotAcked,
+            acked: false,
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
@@ -2261,10 +2245,9 @@ impl Downstairs {
         }
 
         if skipped == 3 || is_write {
-            let mut handle = self.ds_active.get_mut(&ds_id).unwrap();
-            let job = handle.job();
-            assert_eq!(job.ack_status, AckStatus::NotAcked);
-            job.ack_status = AckStatus::AckReady;
+            let job = self.ds_active.get_mut(&ds_id).unwrap();
+            assert!(!job.acked);
+            self.ackable_work.insert(ds_id);
         }
     }
 
@@ -2478,27 +2461,19 @@ impl Downstairs {
 
                 // Check to see if this being skipped means we can ACK
                 // the job back to the guest.
-                if job.ack_status == AckStatus::Acked {
+                if job.acked {
                     // Push this onto a queue to do the retire check when
                     // we aren't doing a mutable iteration.
                     retire_check.push(*ds_id);
-                } else if job.ack_status == AckStatus::NotAcked {
+                } else {
                     let wc = job.state_count();
                     if (wc.error + wc.skipped + wc.done) == 3 {
                         info!(
                             self.log,
                             "[{}] notify = true for {}", client_id, ds_id
                         );
-                        job.ack_status = AckStatus::AckReady;
+                        self.ackable_work.insert(*ds_id);
                     }
-                } else {
-                    info!(
-                        self.log,
-                        "[{}] job {} middle: {}",
-                        client_id,
-                        ds_id,
-                        job.ack_status
-                    );
                 }
             }
         });
@@ -2584,7 +2559,7 @@ impl Downstairs {
                 // ahead of the ACK from something that flush depends on.
                 // The downstairs does handle the dependency.
                 let wc = job.state_count();
-                if wc.active != 0 || job.ack_status != AckStatus::Acked {
+                if wc.active != 0 || !job.acked {
                     warn!(
                         self.log,
                         "[rc] leave job {} on the queue when removing {} {:?}",
@@ -2598,7 +2573,7 @@ impl Downstairs {
                 // Assert the job is actually done, then complete it
                 assert_eq!(wc.error + wc.skipped + wc.done, 3);
                 assert!(!self.completed.contains(&id));
-                assert_eq!(job.ack_status, AckStatus::Acked);
+                assert!(job.acked);
                 assert_eq!(job.ds_id, id);
 
                 retired.push(job.ds_id);
@@ -2660,7 +2635,11 @@ impl Downstairs {
         );
 
         for (id, job) in &self.ds_active {
-            let ack = job.ack_status;
+            let ack = if job.acked {
+                AckStatus::Acked
+            } else {
+                AckStatus::NotAcked
+            };
 
             let (job_type, num_blocks): (String, usize) = match &job.work {
                 IOop::Read {
@@ -3138,17 +3117,18 @@ impl Downstairs {
          */
         let deactivate = matches!(up_state, UpstairsState::Deactivating);
 
-        let Some(mut handle) = self.ds_active.get_mut(&ds_id) else {
+        let Some(job) = self.ds_active.get_mut(&ds_id) else {
             panic!("reqid {ds_id} is not active");
         };
-        let job = handle.job();
 
-        self.clients[client_id].process_io_completion(
+        if self.clients[client_id].process_io_completion(
             job,
             responses,
             deactivate,
             extent_info,
-        );
+        ) {
+            self.ackable_work.insert(ds_id);
+        }
 
         /*
          * If all 3 jobs are done, we can check here to see if we can
@@ -3156,10 +3136,9 @@ impl Downstairs {
          * to the guest, then there will be no more work on this job
          * but messages may still be unprocessed.
          */
-        if job.ack_status == AckStatus::Acked {
-            drop(handle);
+        if job.acked {
             self.retire_check(ds_id);
-        } else if job.ack_status == AckStatus::NotAcked {
+        } else {
             // If we reach this then the job probably has errors and
             // hasn't acked back yet. We check for NotAcked so we don't
             // double count three done and return true if we already have
@@ -3170,7 +3149,7 @@ impl Downstairs {
             // we must switch our state to failed.  This condition is
             // handled in Downstairs::result()
             if (wc.error + wc.skipped + wc.done) == 3 {
-                job.ack_status = AckStatus::AckReady;
+                self.ackable_work.insert(ds_id);
                 debug!(self.log, "[{}] Set AckReady {}", client_id, job.ds_id);
             }
         }

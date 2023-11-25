@@ -2,11 +2,10 @@
 
 use crate::{
     cdt, deadline_secs, integrity_hash, live_repair::ExtentInfo,
-    upstairs::UpstairsConfig, upstairs::UpstairsState, AckStatus,
-    ClientIOStateCount, ClientId, CrucibleDecoder, CrucibleEncoder,
-    CrucibleError, DownstairsIO, DsState, EncryptionContext, IOState, IOop,
-    JobId, Message, ReadResponse, ReconcileIO, RegionDefinitionStatus,
-    RegionMetadata, WrappedStream,
+    upstairs::UpstairsConfig, upstairs::UpstairsState, ClientIOStateCount,
+    ClientId, CrucibleDecoder, CrucibleEncoder, CrucibleError, DownstairsIO,
+    DsState, EncryptionContext, IOState, IOop, JobId, Message, ReadResponse,
+    ReconcileIO, RegionDefinitionStatus, RegionMetadata, WrappedStream,
 };
 use crucible_protocol::{ReconciliationId, CRUCIBLE_MESSAGE_VERSION};
 
@@ -376,55 +375,14 @@ impl DownstairsClient {
     }
 
     pub(crate) fn replay_job(&mut self, job: &mut DownstairsIO) {
-        let is_read = job.work.is_read();
-        let is_write = matches!(job.work, IOop::Write { .. });
-        let wc = job.state_count();
-        let jobs_completed_ok = wc.completed_ok();
-
         /*
          * If the job is InProgress or New, then we can just go back
          * to New and no extra work is required.
-         * If it's Done, then we need to look further
+         * If it's Done, then by definition it has been acked; assert that here
+         * to double-check.
          */
         if IOState::Done == job.state[self.client_id] {
-            /*
-             * If the job is acked, then we are good to go and
-             * we can re-send it downstairs and the upstairs ack
-             * path will handle a downstairs ack for a job that
-             * we already ack'd back to the guest.
-             *
-             * If the job is AckReady, then we need to decide
-             * if this downstairs job was part of what made it AckReady
-             * and if so, we need to undo that AckReady status.
-             */
-            if job.ack_status == AckStatus::AckReady {
-                if is_read {
-                    if jobs_completed_ok == 1 {
-                        info!(self.log, "Remove read data for {}", job.ds_id);
-                        job.data = None;
-                        job.ack_status = AckStatus::NotAcked;
-                        job.read_response_hashes = Vec::new();
-                    }
-                } else if is_write {
-                    /*
-                     * Writes we ack when we put them on the upstairs work
-                     * queue, so a replay here won't change that.
-                     */
-                } else {
-                    /*
-                     * For a write_unwritten or a flush, if we have 3
-                     * completed, then we can leave this job as AckReady, if
-                     * not, then we have to undo the AckReady.
-                     */
-                    if jobs_completed_ok < 3 {
-                        info!(
-                            self.log,
-                            "Remove AckReady for Wu/F {}", job.ds_id
-                        );
-                        job.ack_status = AckStatus::NotAcked;
-                    }
-                }
-            }
+            assert!(job.acked);
         }
         let old_state = self.set_job_state(job, IOState::New);
         job.replay = true;
@@ -1063,23 +1021,27 @@ impl DownstairsClient {
         self.timeout_deadline = deadline_secs(TIMEOUT_SECS);
     }
 
+    /// Handles a single IO operation
+    ///
+    /// Returns `true` if the job is now ackable, `false` otherwise
     pub(crate) fn process_io_completion(
         &mut self,
         job: &mut DownstairsIO,
         mut responses: Result<Vec<ReadResponse>, CrucibleError>,
         deactivate: bool,
         extent_info: Option<ExtentInfo>,
-    ) {
+    ) -> bool {
         let ds_id = job.ds_id;
         if job.state[self.client_id] == IOState::Skipped {
             // This job was already marked as skipped, and at that time
             // all required action was taken on it.  We can drop any more
             // processing of it here and return.
             warn!(self.log, "Dropping already skipped job {}", ds_id);
-            return;
+            return false;
         }
 
         let mut jobs_completed_ok = job.state_count().completed_ok();
+        let mut ackable = false;
 
         // Validate integrity hashes and optionally authenticated decryption.
         //
@@ -1202,7 +1164,7 @@ impl DownstairsClient {
                     }
                 }
             }
-        } else if job.ack_status == AckStatus::Acked {
+        } else if job.acked {
             assert_eq!(new_state, IOState::Done);
             /*
              * If this job is already acked, then we don't have much
@@ -1274,7 +1236,7 @@ impl DownstairsClient {
             }
         } else {
             assert_eq!(new_state, IOState::Done);
-            assert_ne!(job.ack_status, AckStatus::Acked);
+            assert!(!job.acked);
 
             let read_data: Vec<ReadResponse> = responses.unwrap();
 
@@ -1291,8 +1253,8 @@ impl DownstairsClient {
                         assert!(job.read_response_hashes.is_empty());
                         job.data = Some(read_data);
                         job.read_response_hashes = read_response_hashes;
-                        assert_eq!(job.ack_status, AckStatus::NotAcked);
-                        job.ack_status = AckStatus::AckReady;
+                        assert!(!job.acked);
+                        ackable = true;
                         debug!(self.log, "Read AckReady {}", job.ds_id);
                         cdt::up__to__ds__read__done!(|| job.guest_id);
                     } else {
@@ -1324,7 +1286,7 @@ impl DownstairsClient {
                     assert!(read_data.is_empty());
                     assert!(extent_info.is_none());
                     if jobs_completed_ok == 2 {
-                        job.ack_status = AckStatus::AckReady;
+                        ackable = true;
                         cdt::up__to__ds__write__done!(|| job.guest_id);
                     }
                 }
@@ -1332,7 +1294,7 @@ impl DownstairsClient {
                     assert!(read_data.is_empty());
                     assert!(extent_info.is_none());
                     if jobs_completed_ok == 2 {
-                        job.ack_status = AckStatus::AckReady;
+                        ackable = true;
                         cdt::up__to__ds__write__unwritten__done!(
                             || job.guest_id
                         );
@@ -1359,7 +1321,7 @@ impl DownstairsClient {
                         };
 
                     if jobs_completed_ok == ack_at_num_jobs {
-                        job.ack_status = AckStatus::AckReady;
+                        ackable = true;
                         cdt::up__to__ds__flush__done!(|| job.guest_id);
                         if deactivate {
                             debug!(self.log, "deactivate flush {ds_id} done");
@@ -1385,33 +1347,34 @@ impl DownstairsClient {
                     }
 
                     if jobs_completed_ok == 3 {
-                        job.ack_status = AckStatus::AckReady;
                         debug!(self.log, "ExtentFlushClose {ds_id} AckReady");
+                        ackable = true;
                     }
                 }
                 IOop::ExtentLiveRepair { .. } => {
                     assert!(read_data.is_empty());
                     if jobs_completed_ok == 3 {
                         debug!(self.log, "ExtentLiveRepair AckReady {ds_id}");
-                        job.ack_status = AckStatus::AckReady;
+                        ackable = true;
                     }
                 }
                 IOop::ExtentLiveReopen { .. } => {
                     assert!(read_data.is_empty());
                     if jobs_completed_ok == 3 {
                         debug!(self.log, "ExtentLiveReopen AckReady {ds_id}");
-                        job.ack_status = AckStatus::AckReady;
+                        ackable = true;
                     }
                 }
                 IOop::ExtentLiveNoOp { .. } => {
                     assert!(read_data.is_empty());
                     if jobs_completed_ok == 3 {
                         debug!(self.log, "ExtentLiveNoOp AckReady {ds_id}");
-                        job.ack_status = AckStatus::AckReady;
+                        ackable = true;
                     }
                 }
             }
         }
+        ackable
     }
 
     /// Mark this client as disabled and halt its IO task
