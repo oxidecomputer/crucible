@@ -2035,6 +2035,11 @@ impl DownstairsClient {
                     info!(self.log, "sending repair request {repair_id:?}");
                     self.send_client_message(job.op.clone()).await;
                 } else {
+                    // Skip this job for this Downstairs, since it's narrowly
+                    // aimed at a different client.
+                    let prev_state =
+                        job.state.insert(self.client_id, IOState::Skipped);
+                    assert_eq!(prev_state, IOState::InProgress);
                     info!(self.log, "no action needed request {repair_id:?}");
                 }
             }
