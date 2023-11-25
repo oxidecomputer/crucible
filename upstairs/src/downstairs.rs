@@ -3086,15 +3086,17 @@ impl Downstairs {
 
     /// Returns a client error associated with the given job
     ///
-    /// # Panics
-    /// If that job is not active
+    /// Returns `None` if that job is no longer active or has no error
+    /// associated with it. For example, this can happen for the third (out of
+    /// three) FlushAck messages, since the job is retired upon 2/3 flushes
+    /// returning okay.
     fn client_error(
         &self,
         ds_id: JobId,
         client_id: ClientId,
     ) -> Option<CrucibleError> {
         let Some(job) = self.ds_active.get(&ds_id) else {
-            panic!("reqid {ds_id} is not active");
+            return None;
         };
 
         let state = &job.state[client_id];

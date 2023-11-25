@@ -174,7 +174,7 @@ impl Upstairs {
          * XXX Make sure we have three and only three downstairs
          */
         #[cfg(not(test))]
-        assert_eq!(opt.target.len(), 3);
+        assert_eq!(opt.target.len(), 3, "bad targets {:?}", opt.target);
 
         // Build the target map, which is either empty (during some tests) or
         // fully populated with all three targets.

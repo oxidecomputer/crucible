@@ -693,7 +693,14 @@ impl DownstairsClient {
                     );
                 }
                 self.promote_state = Some(PromoteState::Sent(gen));
-                assert_eq!(self.negotiation_state, NegotiationState::Start);
+                // TODO: negotiation / promotion state is spread across
+                // DsState, PromoteState, and NegotiationState.  We should
+                // consolidate into a single place
+                assert!(
+                    self.negotiation_state == NegotiationState::Start
+                        || self.negotiation_state
+                            == NegotiationState::WaitForPromote
+                );
                 self.negotiation_state = NegotiationState::WaitForPromote;
             }
             s => panic!("invalid state for set_active_request: {s:?}"),
