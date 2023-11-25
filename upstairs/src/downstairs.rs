@@ -3054,7 +3054,7 @@ impl Downstairs {
             Some(CrucibleError::SnapshotExistsAlready(_)) => {
                 // This is fine, nothing to worry about
             }
-            _ => {
+            Some(_err) => {
                 let Some(job) = self.ds_active.get(&ds_id) else {
                     panic!("I don't think we should be here");
                 };
@@ -3076,6 +3076,9 @@ impl Downstairs {
                         .checked_state_transition(up_state, DsState::Faulted);
                     // TODO should we restart the client task here?
                 }
+            }
+            None => {
+                // Nothing to do here, no error!
             }
         }
         Ok(())
