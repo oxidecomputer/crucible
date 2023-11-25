@@ -749,7 +749,9 @@ impl DownstairsClient {
 
         info!(
             self.log,
-            "Gone missing, transition from {} to {}", self.state, new_state,
+            "restarting connection, transition from {} to {}",
+            self.state,
+            new_state,
         );
 
         self.checked_state_transition(up_state, new_state);
@@ -2035,8 +2037,8 @@ impl DownstairsClient {
                     info!(self.log, "sending repair request {repair_id:?}");
                     self.send_client_message(job.op.clone()).await;
                 } else {
-                    // Skip this job for this Downstairs, since it's narrowly
-                    // aimed at a different client.
+                    // Skip this job for this Downstairs, since only the target
+                    // clients need to do the repair.
                     let prev_state =
                         job.state.insert(self.client_id, IOState::Skipped);
                     assert_eq!(prev_state, IOState::InProgress);
