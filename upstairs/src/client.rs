@@ -1607,6 +1607,17 @@ impl DownstairsClient {
                         })
                         .await;
                         self.promote_state = Some(PromoteState::Sent(gen));
+                        self.negotiation_state =
+                            NegotiationState::WaitForPromote;
+                        // TODO This is an unfortunate corner of the state
+                        // machine, where we have to be in WaitActive despite
+                        // _already_ having gone active.
+                        if self.state == DsState::New {
+                            self.checked_state_transition(
+                                up_state,
+                                DsState::WaitActive,
+                            );
+                        }
                     }
                     Some(PromoteState::Sent(_gen)) => {
                         // We shouldn't be able to get here.
@@ -1614,9 +1625,12 @@ impl DownstairsClient {
                     }
                     None => {
                         // Nothing to do here, wait for set_active_request
+                        self.checked_state_transition(
+                            up_state,
+                            DsState::WaitActive,
+                        );
                     }
                 }
-                self.checked_state_transition(up_state, DsState::WaitActive);
             }
             Message::VersionMismatch { version } => {
                 error!(
