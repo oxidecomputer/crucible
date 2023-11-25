@@ -1079,6 +1079,9 @@ impl Upstairs {
         action: ClientAction,
     ) {
         match action {
+            ClientAction::Connected => {
+                self.downstairs.clients[client_id].send_here_i_am().await;
+            }
             ClientAction::Ping => {
                 self.downstairs.clients[client_id].send_ping().await;
             }

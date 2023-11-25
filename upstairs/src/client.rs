@@ -200,6 +200,8 @@ impl DownstairsClient {
                                 "client_response_rx closed unexpectedly"
                             );
                             match m {
+                                ClientResponse::Connected =>
+                                    ClientAction::Connected,
                                 ClientResponse::Message(m) =>
                                     ClientAction::Response(m),
                                 ClientResponse::Done(r) =>
@@ -236,6 +238,34 @@ impl DownstairsClient {
             {
                 ClientAction::MoreWork
             }
+        }
+    }
+
+    /// If the client task is running, send a `Message::HereIAm`
+    ///
+    /// If the client task is **not** running, log a warning to that effect.
+    pub(crate) async fn send_here_i_am(&mut self) {
+        if let Some(task) = &self.client_task {
+            if let Err(e) = task
+                .client_request_tx
+                .send(ClientRequest::Message(Message::HereIAm {
+                    version: CRUCIBLE_MESSAGE_VERSION,
+                    upstairs_id: self.cfg.upstairs_id,
+                    session_id: self.cfg.session_id,
+                    gen: 0, // IGNORED
+                    read_only: self.cfg.read_only,
+                    encrypted: self.cfg.encrypted(),
+                    alternate_versions: vec![],
+                }))
+                .await
+            {
+                warn!(self.log, "failed to send HereIAm: {e}");
+                // TODO we should probably fail more loudly here?
+            }
+        } else {
+            panic!(
+                "send_here_i_am should not be called when client task is stopped"
+            );
         }
     }
 
@@ -2076,6 +2106,9 @@ enum NegotiationState {
 /// action (which need not be).
 #[derive(Debug)]
 pub(crate) enum ClientAction {
+    /// We have connected to the socket
+    Connected,
+
     /// We have received a message on the client task channel
     Response(Message),
 
@@ -2168,7 +2201,11 @@ pub(crate) enum ClientStopReason {
 /// Response received from the I/O task
 #[derive(Debug)]
 pub(crate) enum ClientResponse {
+    /// We have connected to the socket and are starting the main loop
+    Connected,
+    /// We have received a message over the network
     Message(Message),
+    /// The client task has stopped
     Done(ClientRunResult),
 }
 
@@ -2324,6 +2361,9 @@ where
     R: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
     W: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
 {
+    tx.send(ClientResponse::Connected)
+        .await
+        .expect("client_response_tx closed unexpectedly");
     loop {
         tokio::select! {
             f = fr.next() => {

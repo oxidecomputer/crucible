@@ -274,7 +274,7 @@ impl Downstairs {
             clients[i.get() as usize] = Some(DownstairsClient::new(
                 i,
                 cfg.clone(),
-                ds_target.get(&ClientId::new(0)).copied(),
+                ds_target.get(&i).copied(),
                 log.new(o!("client" => i.get().to_string())),
                 tls_context.clone(),
             ));
