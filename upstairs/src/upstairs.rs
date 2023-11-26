@@ -685,7 +685,7 @@ impl Upstairs {
                 self.submit_write(offset, data, req, false).await
             }
             BlockOp::WriteUnwritten { offset, data } => {
-                self.submit_write(offset, data, req, false).await
+                self.submit_write(offset, data, req, true).await
             }
             BlockOp::Flush { snapshot_details } => {
                 /*
