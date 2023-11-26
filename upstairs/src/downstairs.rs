@@ -839,6 +839,65 @@ impl Downstairs {
         self.ds_active.is_empty()
     }
 
+    /// Tries to deactivate the given client
+    ///
+    /// If successful, the client state will be set to `Deactivated` and the IO
+    /// task will be stopped.  This will trigger a `ClientAction::TaskStopped`
+    /// in the main task, which will in turn restart the IO task.
+    ///
+    /// Returns `true` on success, `false` otherwise
+    pub(crate) async fn try_deactivate(
+        &mut self,
+        client_id: ClientId,
+        up_state: &UpstairsState,
+    ) -> bool {
+        if self.ds_active.is_empty() {
+            info!(self.log, "[{}] deactivate, no work so YES", client_id);
+            self.clients[client_id].deactivate(up_state).await;
+            return true;
+        }
+        // If there are jobs in the queue, then we have to check them!
+        let last_id = self.ds_active.keys().next_back().unwrap();
+
+        /*
+         * The last job must be a flush.  It's possible to get
+         * here right after deactivating is set, but before the final
+         * flush happens.
+         */
+        if !self.is_flush(*last_id) {
+            info!(
+                self.log,
+                "[{}] deactivate last job {} not flush, NO", client_id, last_id
+            );
+            return false;
+        }
+        /*
+         * Now count our jobs.  Any job not done or skipped means
+         * we are not ready to deactivate.
+         */
+        for (id, job) in &self.ds_active {
+            let state = &job.state[client_id];
+            if state == &IOState::New || state == &IOState::InProgress {
+                info!(
+                    self.log,
+                    "[{}] deactivate job {} not {:?} flush, NO",
+                    client_id,
+                    id,
+                    state
+                );
+                return false;
+            }
+        }
+        /*
+         * To arrive here, we verified our most recent job is a flush, and
+         * none of the jobs that are on our active job list are New or
+         * InProgress (either error, skipped, or done)
+         */
+        info!(self.log, "[{}] check deactivate YES", client_id);
+        self.clients[client_id].deactivate(up_state).await;
+        true
+    }
+
     /// Assign a new downstairs job ID.
     pub(crate) fn next_id(&mut self) -> JobId {
         let id = self.next_id;

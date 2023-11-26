@@ -578,6 +578,12 @@ impl DownstairsClient {
         }
     }
 
+    /// Switches the client state to Deactivated and stops the IO task
+    pub(crate) async fn deactivate(&mut self, up_state: &UpstairsState) {
+        self.checked_state_transition(up_state, DsState::Deactivated);
+        self.halt_io_task(ClientStopReason::Deactivated).await;
+    }
+
     /// Resets this Downstairs and start a fresh connection
     ///
     /// # Panics
@@ -2226,6 +2232,9 @@ pub(crate) enum ClientStopReason {
 
     /// Too many jobs in the queue
     TooManyOutstandingJobs,
+
+    /// The upstairs has requested that we deactivate
+    Deactivated,
 }
 
 /// Response received from the I/O task

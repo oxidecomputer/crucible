@@ -16,7 +16,7 @@ use crucible_common::CrucibleError;
 use std::{ops::DerefMut, sync::Arc};
 
 use ringbuffer::RingBuffer;
-use slog::{error, info, o, warn, Logger};
+use slog::{debug, error, info, o, warn, Logger};
 use tokio::{
     sync::{mpsc, oneshot},
     time::{sleep_until, Instant},
@@ -824,8 +824,10 @@ impl Upstairs {
         self.state = UpstairsState::Deactivating;
 
         if self.downstairs.set_deactivate() {
+            debug!(self.log, "set_deactivate was successful");
             req.send_ok();
         } else {
+            debug!(self.log, "not ready to deactivate; submitting final flush");
             self.submit_flush(Some(req), None).await
         }
     }
@@ -1238,6 +1240,13 @@ impl Upstairs {
             | Message::PromoteToActive { .. }
             | Message::Unknown(..) => {
                 panic!("invalid response {m:?}")
+            }
+        }
+        if matches!(self.state, UpstairsState::Deactivating) {
+            if self.downstairs.try_deactivate(client_id, &self.state).await {
+                info!(self.log, "deactivated client {client_id}");
+            } else {
+                info!(self.log, "not ready to deactivate client {client_id}");
             }
         }
     }
