@@ -224,7 +224,8 @@ impl DownstairsClient {
             }
             _ = futures::future::ready(()),
                 if self.client_task.is_some() && !self.new_jobs.is_empty()
-                    && self.state == DsState::Active =>
+                    && matches!(
+                        self.state, DsState::Active | DsState::LiveRepair) =>
             {
                 ClientAction::Work
             }
@@ -236,7 +237,8 @@ impl DownstairsClient {
                     }
                 },
                 if self.client_task.is_some()
-                    && self.state == DsState::Active =>
+                    && matches!(
+                        self.state, DsState::Active | DsState::LiveRepair) =>
             {
                 ClientAction::MoreWork
             }

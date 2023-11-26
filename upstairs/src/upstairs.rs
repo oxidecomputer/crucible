@@ -523,7 +523,11 @@ impl Upstairs {
             .count();
 
         if repair_ready == 0 {
-            info!(self.log, "No Live Repair required at this time");
+            if repair > 0 {
+                info!(self.log, "Live Repair already running");
+            } else {
+                info!(self.log, "No Live Repair required at this time");
+            }
             self.repair_check_interval = None;
         } else if repair > 0
             || !self
