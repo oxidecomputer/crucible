@@ -223,7 +223,8 @@ impl DownstairsClient {
                 ClientAction::Timeout
             }
             _ = futures::future::ready(()),
-                if self.client_task.is_some() && !self.new_jobs.is_empty() =>
+                if self.client_task.is_some() && !self.new_jobs.is_empty()
+                    && self.state == DsState::Active =>
             {
                 ClientAction::Work
             }
@@ -234,7 +235,8 @@ impl DownstairsClient {
                         futures::future::pending().await
                     }
                 },
-                if self.client_task.is_some() =>
+                if self.client_task.is_some()
+                    && self.state == DsState::Active =>
             {
                 ClientAction::MoreWork
             }
@@ -2272,6 +2274,7 @@ async fn client_run(
     )
     .await;
 
+    warn!(log, "client task is sending Done({r:?})");
     tx.send(ClientResponse::Done(r)).await.unwrap();
     while let Some(v) = rx.recv().await {
         warn!(log, "exiting client task is ignoring message {v:?}");

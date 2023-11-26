@@ -799,13 +799,14 @@ impl Downstairs {
         client_id: ClientId,
         auto_promote: Option<u64>,
     ) {
+        // Restart the IO task
+        self.clients[client_id].reinitialize(auto_promote);
+
         // If this client is coming back from being offline, then replay all of
         // its jobs.
         if self.clients[client_id].state() == DsState::Offline {
             self.replay_jobs(client_id);
         }
-        // Restart the IO task
-        self.clients[client_id].reinitialize(auto_promote);
     }
 
     /// Tries to deactivate all of the Downstairs clients
