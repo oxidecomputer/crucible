@@ -635,23 +635,14 @@ impl DownstairsClient {
             self.client_task.is_none(),
             "cannot start task when it is already running"
         );
-        let (client_request_tx, mut client_request_rx) = mpsc::channel(500);
+        let (client_request_tx, client_request_rx) = mpsc::channel(500);
         let (_client_response_tx, client_response_rx) = mpsc::channel(500);
-        let (client_stop_tx, mut client_stop_rx) = oneshot::channel();
+        let (client_stop_tx, client_stop_rx) = oneshot::channel();
 
-        let log = self.log.new(o!("" => "io task"));
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    r = client_request_rx.recv() => {
-                        debug!(log, "got request {r:?}");
-                    }
-                    r = &mut client_stop_rx => {
-                        panic!("asked dummy IO task to stop: {r:?}");
-                    }
-                }
-            }
-        });
+        // Forget these without dropping them, so that we can send values into
+        // the void!
+        std::mem::forget(client_request_rx);
+        std::mem::forget(client_stop_rx);
 
         self.client_task = Some(ClientTaskHandle {
             client_request_tx,

@@ -367,6 +367,11 @@ impl Downstairs {
         }
     }
 
+    /// Checks whether we have ackable work
+    pub(crate) fn has_ackable_jobs(&self) -> bool {
+        !self.ackable_work.is_empty()
+    }
+
     /// Send back acks for all jobs that are `AckReady`
     pub(crate) async fn ack_jobs(
         &mut self,
@@ -1768,6 +1773,46 @@ impl Downstairs {
         }
     }
 
+    #[cfg(test)]
+    fn create_write_eob(
+        &mut self,
+        ds_id: JobId,
+        blocks: ImpactedBlocks,
+        gw_id: u64,
+        writes: Vec<crucible_protocol::Write>,
+        is_write_unwritten: bool,
+    ) -> DownstairsIO {
+        let dependencies = self.ds_active.deps_for_write(ds_id, blocks);
+        cdt::gw__write__deps!(|| (
+            self.ds_active.len() as u64,
+            dependencies.len() as u64
+        ));
+        debug!(self.log, "IO Write {} has deps {:?}", ds_id, dependencies);
+
+        let awrite = if is_write_unwritten {
+            IOop::WriteUnwritten {
+                dependencies,
+                writes,
+            }
+        } else {
+            IOop::Write {
+                dependencies,
+                writes,
+            }
+        };
+
+        DownstairsIO {
+            ds_id,
+            guest_id: gw_id,
+            work: awrite,
+            state: ClientData::new(IOState::New),
+            acked: false,
+            replay: false,
+            data: None,
+            read_response_hashes: Vec::new(),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn create_close_io(
         &mut self,
@@ -2280,6 +2325,7 @@ impl Downstairs {
         // then reserve job IDs for those jobs.
         self.check_repair_ids_for_range(blocks);
 
+        // TODO delegate to `create_write_eob` here?
         let ds_id = self.next_id();
         let dependencies = self.ds_active.deps_for_write(ds_id, blocks);
         cdt::gw__write__deps!(|| (
@@ -3347,8 +3393,12 @@ impl Downstairs {
 mod test {
     use super::Downstairs;
     use crate::{
-        test::create_generic_read_eob, upstairs::UpstairsState, ClientId,
-        CrucibleError, ReadResponse, SnapshotDetails,
+        test::{
+            create_generic_read_eob, generic_read_request,
+            generic_write_request,
+        },
+        upstairs::UpstairsState,
+        ClientId, CrucibleError, ReadResponse, SnapshotDetails,
     };
     use ringbuffer::RingBuffer;
 
@@ -4118,5 +4168,137 @@ mod test {
                 )
             }));
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn work_read_two_ok_one_bad() {
+        // Test that missing data on the 2nd read response will panic
+        let mut ds = Downstairs::test_default();
+
+        let (request, iblocks) = generic_read_request();
+        let next_id = {
+            let next_id = ds.next_id();
+
+            let op =
+                ds.create_read_eob(next_id, iblocks, 10, vec![request.clone()]);
+
+            ds.enqueue(op);
+
+            ds.in_progress(next_id, ClientId::new(0));
+            ds.in_progress(next_id, ClientId::new(1));
+            ds.in_progress(next_id, ClientId::new(2));
+
+            next_id
+        };
+
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            response.clone(),
+            &UpstairsState::Active,
+            None,
+        );
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            response,
+            &UpstairsState::Active,
+            None,
+        );
+
+        // emulated run in up_ds_listen
+        ds.ack(next_id);
+        ds.retire_check(next_id);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        );
+
+        assert_eq!(ds.ackable_work.len(), 0);
+        // Work won't be completed until we get a flush.
+        assert_eq!(ds.completed.len(), 0);
+    }
+
+    #[test]
+    fn work_write_unwritten_errors_are_counted() {
+        // Verify that write IO errors are counted.
+        work_errors_are_counted(false);
+    }
+
+    // Verify that write_unwritten IO errors are counted.
+    #[test]
+    fn work_write_errors_are_counted() {
+        work_errors_are_counted(true);
+    }
+
+    // Instead of copying all the write tests, we put a wrapper around them
+    // that takes write_unwritten as an arg.
+    fn work_errors_are_counted(is_write_unwritten: bool) {
+        let mut ds = Downstairs::test_default();
+
+        let next_id = ds.next_id();
+
+        // send a write, and clients 0 and 1 will return errors
+
+        let (request, iblocks) = generic_write_request();
+        let op = ds.create_write_eob(
+            next_id,
+            iblocks,
+            10,
+            vec![request],
+            is_write_unwritten,
+        );
+
+        ds.enqueue(op);
+
+        assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
+        assert!(ds.in_progress(next_id, ClientId::new(1)).is_some());
+        assert!(ds.in_progress(next_id, ClientId::new(2)).is_some());
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        );
+
+        assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        );
+
+        assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
+
+        let response = Ok(vec![]);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            response,
+            &UpstairsState::Active,
+            None,
+        );
+
+        // If it's write_unwritten, then this should have returned true,
+        // if it's just a write, then it should be false.
+        assert_eq!(ds.ackable_work.len(), is_write_unwritten as usize);
+
+        assert!(ds.clients[ClientId::new(0)].stats.downstairs_errors > 0);
+        assert!(ds.clients[ClientId::new(1)].stats.downstairs_errors > 0);
+        assert_eq!(ds.clients[ClientId::new(2)].stats.downstairs_errors, 0);
     }
 }

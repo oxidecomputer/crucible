@@ -3,7 +3,7 @@
 use crate::downstairs::Downstairs;
 use crate::*;
 
-fn generic_read_request() -> (ReadRequest, ImpactedBlocks) {
+pub(crate) fn generic_read_request() -> (ReadRequest, ImpactedBlocks) {
     let request = ReadRequest {
         eid: 0,
         offset: Block::new_512(7),
@@ -21,7 +21,8 @@ fn generic_read_request() -> (ReadRequest, ImpactedBlocks) {
     (request, iblocks)
 }
 
-fn generic_write_request() -> (crucible_protocol::Write, ImpactedBlocks) {
+pub(crate) fn generic_write_request(
+) -> (crucible_protocol::Write, ImpactedBlocks) {
     let request = crucible_protocol::Write {
         eid: 0,
         offset: Block::new_512(7),
@@ -54,9 +55,9 @@ pub(crate) fn create_generic_read_eob(
     (request, op)
 }
 
-#[cfg(feature = "NOLOL")]
+#[cfg(feature = "DISABLED")]
 pub(crate) mod up_test {
-    use crate::*;
+    use super::*;
     use crate::{
         client::{
             validate_encrypted_read_response,
@@ -741,167 +742,6 @@ pub(crate) mod up_test {
         assert_eq!(read_response.data, original_data);
 
         Ok(())
-    }
-
-    #[tokio::test]
-    async fn work_read_two_ok_one_bad() {
-        let upstairs = Upstairs::test_default(None);
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        upstairs.set_active().await.unwrap();
-
-        let (request, iblocks) = generic_read_request();
-        let next_id = {
-            let mut ds = upstairs.downstairs.lock().await;
-
-            let next_id = ds.next_id();
-
-            let op = create_read_eob(
-                &mut ds,
-                next_id,
-                iblocks,
-                10,
-                vec![request.clone()],
-            );
-
-            ds.enqueue(op, ds_done_tx.clone()).await;
-
-            ds.in_progress(next_id, ClientId::new(0));
-            ds.in_progress(next_id, ClientId::new(1));
-            ds.in_progress(next_id, ClientId::new(2));
-
-            next_id
-        };
-
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
-
-        assert!(upstairs
-            .process_ds_operation(
-                next_id,
-                ClientId::new(2),
-                response.clone(),
-                None
-            )
-            .await
-            .unwrap());
-
-        assert!(!upstairs
-            .process_ds_operation(next_id, ClientId::new(0), response, None)
-            .await
-            .unwrap());
-
-        {
-            // emulated run in up_ds_listen
-
-            let mut ds = upstairs.downstairs.lock().await;
-            let state = ds.ds_active.get(&next_id).unwrap().ack_status;
-            assert_eq!(state, AckStatus::AckReady);
-            ds.ack(next_id);
-
-            ds.retire_check(next_id);
-        }
-
-        assert!(!upstairs
-            .process_ds_operation(
-                next_id,
-                ClientId::new(1),
-                Err(CrucibleError::GenericError("bad".to_string())),
-                None,
-            )
-            .await
-            .unwrap());
-
-        {
-            let mut ds = upstairs.downstairs.lock().await;
-            assert_eq!(ds.ackable_work().len(), 0);
-            // Work won't be completed until we get a flush.
-            assert_eq!(ds.completed.len(), 0);
-        }
-    }
-
-    #[tokio::test]
-    async fn work_write_unwritten_errors_are_counted() {
-        // Verify that write IO errors are counted.
-        work_errors_are_counted(false).await;
-    }
-
-    #[tokio::test]
-    // Verify that write_unwritten IO errors are counted.
-    async fn work_write_errors_are_counted() {
-        work_errors_are_counted(true).await;
-    }
-
-    // Instead of copying all the write tests, we put a wrapper around them
-    // that takes write_unwritten as an arg.
-    async fn work_errors_are_counted(is_write_unwritten: bool) {
-        let upstairs = Upstairs::test_default(None);
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        upstairs.set_active().await.unwrap();
-        let mut ds = upstairs.downstairs.lock().await;
-
-        let next_id = ds.next_id();
-
-        // send a write, and clients 0 and 1 will return errors
-
-        let (request, iblocks) = generic_write_request();
-        let op = create_write_eob(
-            &mut ds,
-            next_id,
-            iblocks,
-            10,
-            vec![request],
-            is_write_unwritten,
-        );
-
-        ds.enqueue(op, ds_done_tx.clone()).await;
-
-        assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
-        assert!(ds.in_progress(next_id, ClientId::new(1)).is_some());
-        assert!(ds.in_progress(next_id, ClientId::new(2)).is_some());
-
-        assert!(!ds
-            .process_ds_completion(
-                next_id,
-                ClientId::new(0),
-                Err(CrucibleError::GenericError("bad".to_string())),
-                UpState::Active,
-                None,
-            )
-            .unwrap());
-
-        assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
-
-        assert!(!ds
-            .process_ds_completion(
-                next_id,
-                ClientId::new(1),
-                Err(CrucibleError::GenericError("bad".to_string())),
-                UpState::Active,
-                None,
-            )
-            .unwrap());
-
-        assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
-
-        let response = Ok(vec![]);
-
-        let res = ds
-            .process_ds_completion(
-                next_id,
-                ClientId::new(2),
-                response,
-                UpState::Active,
-                None,
-            )
-            .unwrap();
-
-        // If it's write_unwritten, then this should have returned true,
-        // if it's just a write, then it should be false.
-        assert_eq!(res, is_write_unwritten);
-
-        assert!(ds.clients[ClientId::new(0)].downstairs_errors > 0);
-        assert!(ds.clients[ClientId::new(1)].downstairs_errors > 0);
-        assert_eq!(ds.clients[ClientId::new(2)].downstairs_errors, 0);
     }
 
     #[tokio::test]

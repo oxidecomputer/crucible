@@ -1093,8 +1093,10 @@ impl Upstairs {
     }
 
     async fn ack_ready(&mut self) {
-        let mut gw = self.guest.guest_work.lock().await;
-        self.downstairs.ack_jobs(&mut gw, &self.stats).await;
+        if self.downstairs.has_ackable_jobs() {
+            let mut gw = self.guest.guest_work.lock().await;
+            self.downstairs.ack_jobs(&mut gw, &self.stats).await;
+        }
     }
 
     /// React to an event sent by one of the downstairs clients
