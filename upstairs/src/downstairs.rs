@@ -3265,6 +3265,10 @@ impl Downstairs {
     /// Wrapper for marking a single job as done from the given client
     ///
     /// This can be used to test handling of ackable work, etc.
+    ///
+    /// Returns true if the given job has gone from not ackable (not present in
+    /// `self.ackable_work`) to ackable.  This is for historical reasons,
+    /// because it's often used in existing tests.
     #[cfg(test)]
     pub fn process_ds_completion(
         &mut self,
@@ -3273,7 +3277,8 @@ impl Downstairs {
         responses: Result<Vec<ReadResponse>, CrucibleError>,
         up_state: &UpstairsState,
         extent_info: Option<ExtentInfo>,
-    ) {
+    ) -> bool {
+        let was_ackable = self.ackable_work.contains(&ds_id);
         self.process_io_completion_inner(
             ds_id,
             client_id,
@@ -3281,6 +3286,8 @@ impl Downstairs {
             up_state,
             extent_info,
         );
+        let now_ackable = self.ackable_work.contains(&ds_id);
+        !was_ackable && now_ackable
     }
 
     fn process_io_completion_inner(
@@ -3398,7 +3405,7 @@ mod test {
             generic_write_request,
         },
         upstairs::UpstairsState,
-        ClientId, CrucibleError, ReadResponse, SnapshotDetails,
+        ClientId, CrucibleError, JobId, ReadResponse, SnapshotDetails,
     };
     use ringbuffer::RingBuffer;
 
@@ -3417,36 +3424,36 @@ mod test {
         ds.in_progress(next_id, ClientId::new(1));
         ds.in_progress(next_id, ClientId::new(2));
 
-        ds.process_ds_completion(
+        assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
             Ok(vec![]),
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        ds.process_ds_completion(
+        assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(1),
             Ok(vec![]),
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 1);
         assert_eq!(ds.completed.len(), 0);
 
         assert!(!ds.ds_active.get(&next_id).unwrap().acked);
         ds.ack(next_id);
 
-        ds.process_ds_completion(
+        assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
             Ok(vec![]),
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 0);
         assert_eq!(ds.completed.len(), 1);
     }
@@ -3476,35 +3483,35 @@ mod test {
         ds.in_progress(next_id, ClientId::new(1));
         ds.in_progress(next_id, ClientId::new(2));
 
-        ds.process_ds_completion(
+        assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
             Ok(vec![]),
             &UpstairsState::Active,
             None,
-        );
+        ));
 
         assert_eq!(ds.ackable_work.len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        ds.process_ds_completion(
+        assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
             Ok(vec![]),
             &UpstairsState::Active,
             None,
-        );
+        ));
 
         assert_eq!(ds.ackable_work.len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        ds.process_ds_completion(
+        assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(2),
             Ok(vec![]),
             &UpstairsState::Active,
             None,
-        );
+        ));
 
         assert_eq!(ds.ackable_work.len(), 1);
 
@@ -3529,33 +3536,33 @@ mod test {
         ds.in_progress(next_id, ClientId::new(1));
         ds.in_progress(next_id, ClientId::new(2));
 
-        ds.process_ds_completion(
+        assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
             Err(CrucibleError::GenericError("bad".to_string())),
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        ds.process_ds_completion(
+        assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
             Ok(vec![]),
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        ds.process_ds_completion(
+        assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(2),
             Ok(vec![]),
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 1);
 
         ds.ack(next_id);
@@ -3583,33 +3590,33 @@ mod test {
         ds.in_progress(next_id, ClientId::new(1));
         ds.in_progress(next_id, ClientId::new(2));
 
-        ds.process_ds_completion(
+        assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
             Err(CrucibleError::GenericError("bad".to_string())),
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        ds.process_ds_completion(
+        assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
             Ok(vec![]),
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        ds.process_ds_completion(
+        assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(2),
             Err(CrucibleError::GenericError("bad".to_string())),
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 1);
 
         ds.ack(next_id);
@@ -3635,13 +3642,13 @@ mod test {
         let response =
             Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
-        ds.process_ds_completion(
+        assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(0),
             response,
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 1);
         assert_eq!(ds.completed.len(), 0);
 
@@ -3650,26 +3657,26 @@ mod test {
         let response =
             Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
-        ds.process_ds_completion(
+        assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
             response,
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
         let response =
             Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
-        ds.process_ds_completion(
+        assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
             response,
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 0);
         // A flush is required to move work to completed
         assert_eq!(ds.completed.len(), 0);
@@ -3689,26 +3696,26 @@ mod test {
         ds.in_progress(next_id, ClientId::new(1));
         ds.in_progress(next_id, ClientId::new(2));
 
-        ds.process_ds_completion(
+        assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
             Err(CrucibleError::GenericError("bad".to_string())),
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
         let response =
             Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
-        ds.process_ds_completion(
+        assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(1),
             response,
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 1);
         assert_eq!(ds.completed.len(), 0);
 
@@ -3717,13 +3724,13 @@ mod test {
         let response =
             Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
-        ds.process_ds_completion(
+        assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
             response,
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 0);
         // A flush is required to move work to completed
         // That this is still zero is part of the test
@@ -3744,36 +3751,36 @@ mod test {
         ds.in_progress(next_id, ClientId::new(1));
         ds.in_progress(next_id, ClientId::new(2));
 
-        ds.process_ds_completion(
+        assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
             Err(CrucibleError::GenericError("bad".to_string())),
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        ds.process_ds_completion(
+        assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
             Err(CrucibleError::GenericError("bad".to_string())),
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
         let response =
             Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
 
-        ds.process_ds_completion(
+        assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(2),
             response,
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 1);
 
         ds.ack(next_id);
@@ -3798,39 +3805,96 @@ mod test {
         ds.in_progress(next_id, ClientId::new(1));
         ds.in_progress(next_id, ClientId::new(2));
 
-        ds.process_ds_completion(
+        assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
             Err(CrucibleError::GenericError("bad".to_string())),
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        ds.process_ds_completion(
+        assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
             Err(CrucibleError::GenericError("bad".to_string())),
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 0);
         assert_eq!(ds.completed.len(), 0);
 
-        ds.process_ds_completion(
+        assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(2),
             Err(CrucibleError::GenericError("bad".to_string())),
             &UpstairsState::Active,
             None,
-        );
+        ));
         assert_eq!(ds.ackable_work.len(), 1);
 
         ds.ack(next_id);
         ds.retire_check(next_id);
 
         assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn work_read_two_ok_one_bad() {
+        // Test that missing data on the 2nd read response will panic
+        let mut ds = Downstairs::test_default();
+
+        let (request, iblocks) = generic_read_request();
+        let next_id = {
+            let next_id = ds.next_id();
+
+            let op =
+                ds.create_read_eob(next_id, iblocks, 10, vec![request.clone()]);
+
+            ds.enqueue(op);
+
+            ds.in_progress(next_id, ClientId::new(0));
+            ds.in_progress(next_id, ClientId::new(1));
+            ds.in_progress(next_id, ClientId::new(2));
+
+            next_id
+        };
+
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+
+        assert!(ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            response.clone(),
+            &UpstairsState::Active,
+            None,
+        ));
+
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            response,
+            &UpstairsState::Active,
+            None,
+        ));
+
+        // emulated run in up_ds_listen
+        ds.ack(next_id);
+        ds.retire_check(next_id);
+
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        ));
+
+        assert_eq!(ds.ackable_work.len(), 0);
+        // Work won't be completed until we get a flush.
         assert_eq!(ds.completed.len(), 0);
     }
 
@@ -4170,63 +4234,6 @@ mod test {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn work_read_two_ok_one_bad() {
-        // Test that missing data on the 2nd read response will panic
-        let mut ds = Downstairs::test_default();
-
-        let (request, iblocks) = generic_read_request();
-        let next_id = {
-            let next_id = ds.next_id();
-
-            let op =
-                ds.create_read_eob(next_id, iblocks, 10, vec![request.clone()]);
-
-            ds.enqueue(op);
-
-            ds.in_progress(next_id, ClientId::new(0));
-            ds.in_progress(next_id, ClientId::new(1));
-            ds.in_progress(next_id, ClientId::new(2));
-
-            next_id
-        };
-
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
-
-        ds.process_ds_completion(
-            next_id,
-            ClientId::new(2),
-            response.clone(),
-            &UpstairsState::Active,
-            None,
-        );
-
-        ds.process_ds_completion(
-            next_id,
-            ClientId::new(0),
-            response,
-            &UpstairsState::Active,
-            None,
-        );
-
-        // emulated run in up_ds_listen
-        ds.ack(next_id);
-        ds.retire_check(next_id);
-
-        ds.process_ds_completion(
-            next_id,
-            ClientId::new(1),
-            Err(CrucibleError::GenericError("bad".to_string())),
-            &UpstairsState::Active,
-            None,
-        );
-
-        assert_eq!(ds.ackable_work.len(), 0);
-        // Work won't be completed until we get a flush.
-        assert_eq!(ds.completed.len(), 0);
-    }
-
     #[test]
     fn work_write_unwritten_errors_are_counted() {
         // Verify that write IO errors are counted.
@@ -4263,23 +4270,23 @@ mod test {
         assert!(ds.in_progress(next_id, ClientId::new(1)).is_some());
         assert!(ds.in_progress(next_id, ClientId::new(2)).is_some());
 
-        ds.process_ds_completion(
+        assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
             Err(CrucibleError::GenericError("bad".to_string())),
             &UpstairsState::Active,
             None,
-        );
+        ));
 
         assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
 
-        ds.process_ds_completion(
+        assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
             Err(CrucibleError::GenericError("bad".to_string())),
             &UpstairsState::Active,
             None,
-        );
+        ));
 
         assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
 
@@ -4288,13 +4295,17 @@ mod test {
         assert_eq!(ds.ackable_work.len(), !is_write_unwritten as usize);
 
         let response = Ok(vec![]);
-        ds.process_ds_completion(
+        let res = ds.process_ds_completion(
             next_id,
             ClientId::new(2),
             response,
             &UpstairsState::Active,
             None,
         );
+
+        // If it's write_unwritten, then this should have returned true,
+        // if it's just a write, then it should be false.
+        assert_eq!(res, is_write_unwritten);
 
         // After the last response, both write and write_unwritten should be
         // marked as ackable.
@@ -4303,5 +4314,181 @@ mod test {
         assert!(ds.clients[ClientId::new(0)].stats.downstairs_errors > 0);
         assert!(ds.clients[ClientId::new(1)].stats.downstairs_errors > 0);
         assert_eq!(ds.clients[ClientId::new(2)].stats.downstairs_errors, 0);
+    }
+
+    #[test]
+    fn work_delay_completion_flush_write() {
+        work_delay_completion_flush(false);
+    }
+
+    #[test]
+    fn work_delay_completion_flush_write_unwritten() {
+        work_delay_completion_flush(true);
+    }
+
+    fn work_delay_completion_flush(is_write_unwritten: bool) {
+        // Verify that a write/write_unwritten remains on the active
+        // queue until a flush comes through and clears it.  In this case,
+        // we only complete 2/3 for each IO.  We later come back and finish
+        // the 3rd IO and the flush, which then allows the work to be
+        // completed.
+        let mut ds = Downstairs::test_default();
+
+        // Create two writes, put them on the work queue
+        let id1 = ds.next_id();
+        let id2 = ds.next_id();
+
+        let (request, iblocks) = generic_write_request();
+        let op = ds.create_write_eob(
+            id1,
+            iblocks,
+            10,
+            vec![request],
+            is_write_unwritten,
+        );
+        ds.enqueue(op);
+
+        let (request, iblocks) = generic_write_request();
+        let op = ds.create_write_eob(
+            id2,
+            iblocks,
+            20,
+            vec![request],
+            is_write_unwritten,
+        );
+        ds.enqueue(op);
+
+        // Simulate sending both writes to downstairs 0 and 1
+        assert!(ds.in_progress(id1, ClientId::new(0)).is_some());
+        assert!(ds.in_progress(id1, ClientId::new(1)).is_some());
+        assert!(ds.in_progress(id2, ClientId::new(0)).is_some());
+        assert!(ds.in_progress(id2, ClientId::new(1)).is_some());
+
+        // Simulate completing both writes to downstairs 0 and 1
+        //
+        // write_unwritten jobs become ackable upon the second completion;
+        // normal writes were ackable from the start (and hence
+        // process_ds_completion always returns `false`)
+        assert!(!ds.process_ds_completion(
+            id1,
+            ClientId::new(0),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        ));
+        assert_eq!(
+            ds.process_ds_completion(
+                id1,
+                ClientId::new(1),
+                Ok(vec![]),
+                &UpstairsState::Active,
+                None,
+            ),
+            is_write_unwritten
+        );
+        assert!(!ds.process_ds_completion(
+            id2,
+            ClientId::new(0),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        ));
+        assert_eq!(
+            ds.process_ds_completion(
+                id2,
+                ClientId::new(1),
+                Ok(vec![]),
+                &UpstairsState::Active,
+                None,
+            ),
+            is_write_unwritten
+        );
+
+        // Both writes can now ACK to the guest.
+        ds.ack(id1);
+        ds.ack(id2);
+
+        // Work stays on active queue till the flush
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        // Create the flush, put on the work queue
+        let flush_id = ds.next_id();
+        let dep = ds.ds_active.deps_for_flush(flush_id);
+        let op = Downstairs::create_flush(flush_id, dep, 10, 0, 0, None, None);
+        ds.enqueue(op);
+
+        // Simulate sending the flush to downstairs 0 and 1
+        ds.in_progress(flush_id, ClientId::new(0));
+        ds.in_progress(flush_id, ClientId::new(1));
+
+        // Simulate completing the flush to downstairs 0 and 1
+        assert!(!ds.process_ds_completion(
+            flush_id,
+            ClientId::new(0),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        ));
+        assert!(ds.process_ds_completion(
+            flush_id,
+            ClientId::new(1),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        ));
+
+        // Ack the flush back to the guest
+        ds.ack(flush_id);
+
+        // Make sure downstairs 0 and 1 update their last flush id and
+        // that downstairs 2 does not.
+        assert_eq!(ds.clients[ClientId::new(0)].last_flush, flush_id);
+        assert_eq!(ds.clients[ClientId::new(1)].last_flush, flush_id);
+        assert_eq!(ds.clients[ClientId::new(2)].last_flush, JobId(0));
+
+        // Should not retire yet.
+        ds.retire_check(flush_id);
+
+        assert_eq!(ds.ackable_work.len(), 0);
+
+        // Make sure all work is still on the active side
+        assert_eq!(ds.completed.len(), 0);
+
+        // Now, finish the writes to downstairs 2
+        assert!(ds.in_progress(id1, ClientId::new(2)).is_some());
+        assert!(ds.in_progress(id2, ClientId::new(2)).is_some());
+        assert!(!ds.process_ds_completion(
+            id1,
+            ClientId::new(2),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        ));
+        assert!(!ds.process_ds_completion(
+            id2,
+            ClientId::new(2),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        ));
+
+        // The job should not move to completed until the flush goes as well.
+        assert_eq!(ds.completed.len(), 0);
+
+        // Complete the flush on downstairs 2.
+        ds.in_progress(flush_id, ClientId::new(2));
+        assert!(!ds.process_ds_completion(
+            flush_id,
+            ClientId::new(2),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        ));
+
+        // All three jobs should now move to completed
+        assert_eq!(ds.completed.len(), 3);
+        // Downstairs 2 should update the last flush it just did.
+        assert_eq!(ds.clients[ClientId::new(2)].last_flush, flush_id);
     }
 }
