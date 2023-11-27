@@ -15,7 +15,7 @@ use futures::{SinkExt, StreamExt};
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::{
     net::{TcpSocket, TcpStream},
-    sync::mpsc::{channel, Receiver, Sender},
+    sync::{mpsc, oneshot},
     time::{sleep_until, Instant},
 };
 use tokio_util::codec::{FramedRead, FramedWrite};
@@ -33,10 +33,19 @@ const MORE_WORK_INTERVAL_SECS: f32 = 1.0;
 #[derive(Debug)]
 struct ClientTaskHandle {
     /// Handle to send data to the I/O task
-    client_request_tx: Sender<ClientRequest>,
+    client_request_tx: mpsc::Sender<Message>,
+
+    /// One-shot sender to stop the client
+    ///
+    /// This is a oneshot so that functions which stop the client don't
+    /// necessarily need to be `async`.
+    ///
+    /// It is `None` if we have already requested that the client stop, but have
+    /// not yet seen the task finished.
+    client_stop_tx: Option<oneshot::Sender<ClientStopReason>>,
 
     /// Handle to receive data from the I/O task
-    client_response_rx: Receiver<ClientResponse>,
+    client_response_rx: mpsc::Receiver<ClientResponse>,
 }
 
 #[derive(Debug)]
@@ -252,7 +261,7 @@ impl DownstairsClient {
         if let Some(task) = &self.client_task {
             if let Err(e) = task
                 .client_request_tx
-                .send(ClientRequest::Message(Message::HereIAm {
+                .send(Message::HereIAm {
                     version: CRUCIBLE_MESSAGE_VERSION,
                     upstairs_id: self.cfg.upstairs_id,
                     session_id: self.cfg.session_id,
@@ -260,7 +269,7 @@ impl DownstairsClient {
                     read_only: self.cfg.read_only,
                     encrypted: self.cfg.encrypted(),
                     alternate_versions: vec![],
-                }))
+                })
                 .await
             {
                 warn!(self.log, "failed to send HereIAm: {e}");
@@ -282,11 +291,7 @@ impl DownstairsClient {
         // the ping.  If that's the case, then we'll catch it on the next
         // go-around, and should just log an error here.
         if let Some(task) = &self.client_task {
-            if let Err(e) = task
-                .client_request_tx
-                .send(ClientRequest::Message(Message::Ruok))
-                .await
-            {
+            if let Err(e) = task.client_request_tx.send(Message::Ruok).await {
                 warn!(self.log, "failed to send ping: {e}");
             }
         } else {
@@ -299,12 +304,14 @@ impl DownstairsClient {
         }
     }
 
-    pub(crate) async fn halt_io_task(&mut self, r: ClientStopReason) {
-        if let Some(task) = &self.client_task {
-            if let Err(e) =
-                task.client_request_tx.send(ClientRequest::Stop(r)).await
-            {
-                warn!(self.log, "failed to send stop request: {e}")
+    pub(crate) fn halt_io_task(&mut self, r: ClientStopReason) {
+        if let Some(task) = &mut self.client_task {
+            if let Some(t) = std::mem::take(&mut task.client_stop_tx) {
+                if let Err(_e) = t.send(r) {
+                    warn!(self.log, "failed to send stop request")
+                }
+            } else {
+                warn!(self.log, "client task is already stopping")
             }
         } else {
             panic!(
@@ -345,9 +352,7 @@ impl DownstairsClient {
 
     pub(crate) async fn send(&mut self, m: Message) {
         if let Some(task) = &self.client_task {
-            if let Err(e) =
-                task.client_request_tx.send(ClientRequest::Message(m)).await
-            {
+            if let Err(e) = task.client_request_tx.send(m).await {
                 warn!(self.log, "failed to send message: {e}")
             }
         } else {
@@ -579,9 +584,9 @@ impl DownstairsClient {
     }
 
     /// Switches the client state to Deactivated and stops the IO task
-    pub(crate) async fn deactivate(&mut self, up_state: &UpstairsState) {
+    pub(crate) fn deactivate(&mut self, up_state: &UpstairsState) {
         self.checked_state_transition(up_state, DsState::Deactivated);
-        self.halt_io_task(ClientStopReason::Deactivated).await;
+        self.halt_io_task(ClientStopReason::Deactivated)
     }
 
     /// Resets this Downstairs and start a fresh connection
@@ -621,8 +626,9 @@ impl DownstairsClient {
             "cannot start task when it is already running"
         );
         let target = self.target_addr.expect("socket address is not populated");
-        let (client_request_tx, client_request_rx) = channel(500);
-        let (client_response_tx, client_response_rx) = channel(500);
+        let (client_request_tx, client_request_rx) = mpsc::channel(500);
+        let (client_response_tx, client_response_rx) = mpsc::channel(500);
+        let (client_stop_tx, client_stop_rx) = oneshot::channel();
 
         let tls_context = self.tls_context.clone();
         let log = self.log.new(o!("" => "io task"));
@@ -633,6 +639,7 @@ impl DownstairsClient {
                 tls_context,
                 target,
                 client_request_rx,
+                client_stop_rx,
                 client_response_tx,
                 delay,
                 log,
@@ -642,6 +649,7 @@ impl DownstairsClient {
 
         self.client_task = Some(ClientTaskHandle {
             client_request_tx,
+            client_stop_tx: Some(client_stop_tx),
             client_response_rx,
         });
     }
@@ -686,11 +694,11 @@ impl DownstairsClient {
                     .as_ref()
                     .unwrap()
                     .client_request_tx
-                    .send(ClientRequest::Message(Message::PromoteToActive {
+                    .send(Message::PromoteToActive {
                         upstairs_id: self.cfg.upstairs_id,
                         session_id: self.cfg.session_id,
                         gen,
-                    }))
+                    })
                     .await;
 
                 // If the client task has stopped, then print a warning but
@@ -723,14 +731,13 @@ impl DownstairsClient {
     }
 
     /// Sets the current state to `DsState::FailedRepair`
-    pub(crate) async fn set_failed_repair(&mut self, up_state: &UpstairsState) {
+    pub(crate) fn set_failed_repair(&mut self, up_state: &UpstairsState) {
         info!(self.log, "Transition from {} to FailedRepair", self.state);
         self.checked_state_transition(up_state, DsState::FailedRepair);
         self.restart_connection(up_state, ClientStopReason::FailedRepair)
-            .await;
     }
 
-    async fn restart_connection(
+    fn restart_connection(
         &mut self,
         up_state: &UpstairsState,
         reason: ClientStopReason,
@@ -765,7 +772,7 @@ impl DownstairsClient {
         );
 
         self.checked_state_transition(up_state, new_state);
-        self.halt_io_task(reason).await;
+        self.halt_io_task(reason);
     }
 
     /// Sets the current state to `DsState::Active`
@@ -826,7 +833,7 @@ impl DownstairsClient {
     }
 
     /// Prepares for a new connection, then restarts the IO task
-    pub(crate) async fn replace(
+    pub(crate) fn replace(
         &mut self,
         up_state: &UpstairsState,
         new: SocketAddr,
@@ -837,7 +844,7 @@ impl DownstairsClient {
         self.checked_state_transition(up_state, DsState::Replacing);
         self.stats.replaced += 1;
 
-        self.halt_io_task(ClientStopReason::Replacing).await;
+        self.halt_io_task(ClientStopReason::Replacing);
     }
 
     /// Sets `self.state` to `new_state`, with logging and validity checking
@@ -1034,23 +1041,23 @@ impl DownstairsClient {
     ///
     /// # Panics
     /// If this client is not in `DsState::LiveRepair`
-    pub(crate) async fn abort_repair(&mut self, up_state: &UpstairsState) {
+    pub(crate) fn abort_repair(&mut self, up_state: &UpstairsState) {
         assert_eq!(self.state, DsState::LiveRepair);
         self.checked_state_transition(up_state, DsState::Faulted);
-        self.halt_io_task(ClientStopReason::FailedLiveRepair).await;
+        self.halt_io_task(ClientStopReason::FailedLiveRepair);
         self.repair_info = None;
         self.extent_limit = None;
         self.stats.live_repair_aborted += 1;
     }
 
     /// Sets the state to `Fault` and restarts the IO task
-    pub(crate) async fn fault(
+    pub(crate) fn fault(
         &mut self,
         up_state: &UpstairsState,
         reason: ClientStopReason,
     ) {
         self.checked_state_transition(up_state, DsState::Faulted);
-        self.halt_io_task(reason).await;
+        self.halt_io_task(reason);
     }
 
     /// Finishes an in-progress live repair, setting our state to `Active`
@@ -1429,9 +1436,9 @@ impl DownstairsClient {
     /// Mark this client as disabled and halt its IO task
     ///
     /// The IO task will automatically restart in the main event handler
-    pub(crate) async fn disable(&mut self, up_state: &UpstairsState) {
+    pub(crate) fn disable(&mut self, up_state: &UpstairsState) {
         self.checked_state_transition(up_state, DsState::Disabled);
-        self.halt_io_task(ClientStopReason::Disabled).await;
+        self.halt_io_task(ClientStopReason::Disabled);
     }
 
     /// Helper function to send a message to the client
@@ -1444,7 +1451,7 @@ impl DownstairsClient {
             .as_ref()
             .expect("can't send message without client task")
             .client_request_tx
-            .send(ClientRequest::Message(m))
+            .send(m)
             .await
             .unwrap() // TODO is this okay?
     }
@@ -1584,8 +1591,7 @@ impl DownstairsClient {
                     self.restart_connection(
                         up_state,
                         ClientStopReason::BadNegotiationOrder,
-                    )
-                    .await;
+                    );
                     return Ok(false);
                 }
                 if version != CRUCIBLE_MESSAGE_VERSION {
@@ -1602,8 +1608,7 @@ impl DownstairsClient {
                     self.restart_connection(
                         up_state,
                         ClientStopReason::Incompatible,
-                    )
-                    .await;
+                    );
                     return Ok(false);
                 }
                 self.negotiation_state = NegotiationState::WaitForPromote;
@@ -1652,8 +1657,7 @@ impl DownstairsClient {
                 self.restart_connection(
                     up_state,
                     ClientStopReason::Incompatible,
-                )
-                .await;
+                );
             }
             Message::EncryptedMismatch { expected } => {
                 error!(
@@ -1664,8 +1668,7 @@ impl DownstairsClient {
                 self.restart_connection(
                     up_state,
                     ClientStopReason::Incompatible,
-                )
-                .await;
+                );
             }
             Message::ReadOnlyMismatch { expected } => {
                 error!(
@@ -1676,8 +1679,7 @@ impl DownstairsClient {
                 self.restart_connection(
                     up_state,
                     ClientStopReason::Incompatible,
-                )
-                .await;
+                );
             }
             Message::YouAreNowActive {
                 upstairs_id,
@@ -1693,8 +1695,7 @@ impl DownstairsClient {
                     self.restart_connection(
                         up_state,
                         ClientStopReason::BadNegotiationOrder,
-                    )
-                    .await;
+                    );
                     return Ok(false);
                 }
 
@@ -1738,17 +1739,15 @@ impl DownstairsClient {
                         self.restart_connection(
                             up_state,
                             ClientStopReason::Incompatible,
-                        )
-                        .await;
+                        );
                         return Err(CrucibleError::GenerationNumberTooLow(
-                            gen_error.clone(),
+                            gen_error,
                         ));
                     } else {
                         self.restart_connection(
                             up_state,
                             ClientStopReason::Incompatible,
-                        )
-                        .await;
+                        );
                         return Err(CrucibleError::UuidMismatch);
                     }
                 }
@@ -1763,8 +1762,7 @@ impl DownstairsClient {
                     self.restart_connection(
                         up_state,
                         ClientStopReason::BadNegotiationOrder,
-                    )
-                    .await;
+                    );
                     return Ok(false);
                 }
                 info!(
@@ -1781,8 +1779,7 @@ impl DownstairsClient {
                     self.restart_connection(
                         up_state,
                         ClientStopReason::Incompatible,
-                    )
-                    .await;
+                    );
                     return Ok(false);
                 }
 
@@ -1911,8 +1908,7 @@ impl DownstairsClient {
                         self.restart_connection(
                             up_state,
                             ClientStopReason::Replacing,
-                        )
-                        .await;
+                        );
                     }
                     bad_state => {
                         panic!(
@@ -1931,8 +1927,7 @@ impl DownstairsClient {
                     self.restart_connection(
                         up_state,
                         ClientStopReason::BadNegotiationOrder,
-                    )
-                    .await;
+                    );
                     return Ok(false); // TODO should we trigger set_inactive?
                 }
                 match self.state {
@@ -1945,8 +1940,7 @@ impl DownstairsClient {
                         self.restart_connection(
                             up_state,
                             ClientStopReason::Replacing,
-                        )
-                        .await;
+                        );
                         return Ok(false); // TODO should we trigger set_inactive?
                     }
                     DsState::Offline => (),
@@ -1982,8 +1976,7 @@ impl DownstairsClient {
                     self.restart_connection(
                         up_state,
                         ClientStopReason::BadNegotiationOrder,
-                    )
-                    .await;
+                    );
                     return Ok(false); // TODO should we trigger set_inactive?
                 }
                 match self.state {
@@ -2002,8 +1995,7 @@ impl DownstairsClient {
                         self.restart_connection(
                             up_state,
                             ClientStopReason::Replacing,
-                        )
-                        .await;
+                        );
                         return Ok(false); // TODO should we trigger set_inactive?
                     }
                     DsState::Faulted | DsState::Replaced => {
@@ -2022,7 +2014,7 @@ impl DownstairsClient {
                  */
                 let dsr = RegionMetadata {
                     generation: gen_numbers,
-                    flush_numbers: flush_numbers.clone(),
+                    flush_numbers,
                     dirty: dirty_bits,
                 };
 
@@ -2194,16 +2186,6 @@ pub(crate) struct DownstairsStats {
     pub flow_control: usize,
 }
 
-/// Request sent to the I/O task
-#[derive(Debug)]
-pub(crate) enum ClientRequest {
-    /// Send the given message down the network connection
-    Message(Message),
-
-    /// Stop the task, reporting the given reason
-    Stop(ClientStopReason),
-}
-
 /// When the upstairs halts the IO client task, it must provide a reason
 #[derive(Debug)]
 pub(crate) enum ClientStopReason {
@@ -2265,12 +2247,14 @@ pub(crate) enum ClientRunResult {
     Finished,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn client_run(
     client_id: ClientId,
     tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     target: SocketAddr,
-    mut rx: Receiver<ClientRequest>,
-    tx: Sender<ClientResponse>,
+    mut rx: mpsc::Receiver<Message>,
+    mut stop: oneshot::Receiver<ClientStopReason>,
+    tx: mpsc::Sender<ClientResponse>,
     delay: bool,
     log: Logger,
 ) {
@@ -2279,6 +2263,7 @@ async fn client_run(
         tls_context,
         target,
         &mut rx,
+        &mut stop,
         &tx,
         delay,
         &log,
@@ -2293,12 +2278,14 @@ async fn client_run(
     info!(log, "client task is exiting");
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn client_run_inner(
     client_id: ClientId,
     tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     target: SocketAddr,
-    rx: &mut Receiver<ClientRequest>,
-    tx: &Sender<ClientResponse>,
+    rx: &mut mpsc::Receiver<Message>,
+    stop: &mut oneshot::Receiver<ClientStopReason>,
+    tx: &mpsc::Sender<ClientResponse>,
     delay: bool,
     log: &Logger,
 ) -> ClientRunResult {
@@ -2361,13 +2348,14 @@ async fn client_run_inner(
             WrappedStream::Http(tcp)
         }
     };
-    proc_stream(tcp, rx, tx, log).await
+    proc_stream(tcp, rx, stop, tx, log).await
 }
 
 async fn proc_stream(
     stream: WrappedStream,
-    rx: &mut Receiver<ClientRequest>,
-    tx: &Sender<ClientResponse>,
+    rx: &mut mpsc::Receiver<Message>,
+    stop: &mut oneshot::Receiver<ClientStopReason>,
+    tx: &mpsc::Sender<ClientResponse>,
     log: &Logger,
 ) -> ClientRunResult {
     match stream {
@@ -2377,7 +2365,7 @@ async fn proc_stream(
             let fr = FramedRead::new(read, CrucibleDecoder::new());
             let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
-            cmd_loop(rx, tx, fr, fw, log).await
+            cmd_loop(rx, stop, tx, fr, fw, log).await
         }
         WrappedStream::Https(stream) => {
             let (read, write) = tokio::io::split(stream);
@@ -2385,14 +2373,15 @@ async fn proc_stream(
             let fr = FramedRead::new(read, CrucibleDecoder::new());
             let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
-            cmd_loop(rx, tx, fr, fw, log).await
+            cmd_loop(rx, stop, tx, fr, fw, log).await
         }
     }
 }
 
 async fn cmd_loop<R, W>(
-    rx: &mut Receiver<ClientRequest>,
-    tx: &Sender<ClientResponse>,
+    rx: &mut mpsc::Receiver<Message>,
+    stop: &mut oneshot::Receiver<ClientStopReason>,
+    tx: &mpsc::Sender<ClientResponse>,
     mut fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
     mut fw: FramedWrite<W, crucible_protocol::CrucibleEncoder>,
     log: &Logger,
@@ -2428,14 +2417,17 @@ where
                 let Some(m) = m else {
                     panic!("client_request_tx closed unexpectedly");
                 };
-                match m {
-                    ClientRequest::Message(m) => {
-                        if let Err(e) = fw.send(m).await {
-                            break ClientRunResult::WriteFailed(e);
-                        }
-                    },
-                    ClientRequest::Stop(r) => {
-                        break ClientRunResult::RequestedStop(r);
+                if let Err(e) = fw.send(m).await {
+                    break ClientRunResult::WriteFailed(e);
+                }
+            }
+            s = &mut *stop => {
+                match s {
+                    Ok(s) => {
+                        break ClientRunResult::RequestedStop(s);
+                    }
+                    Err(e) => {
+                        panic!("client_stop_rx closed unexpectedly: {e:?}");
                     }
                 }
             }

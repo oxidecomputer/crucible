@@ -846,14 +846,14 @@ impl Downstairs {
     /// in the main task, which will in turn restart the IO task.
     ///
     /// Returns `true` on success, `false` otherwise
-    pub(crate) async fn try_deactivate(
+    pub(crate) fn try_deactivate(
         &mut self,
         client_id: ClientId,
         up_state: &UpstairsState,
     ) -> bool {
         if self.ds_active.is_empty() {
             info!(self.log, "[{}] deactivate, no work so YES", client_id);
-            self.clients[client_id].deactivate(up_state).await;
+            self.clients[client_id].deactivate(up_state);
             return true;
         }
         // If there are jobs in the queue, then we have to check them!
@@ -894,7 +894,7 @@ impl Downstairs {
          * InProgress (either error, skipped, or done)
          */
         info!(self.log, "[{}] check deactivate YES", client_id);
-        self.clients[client_id].deactivate(up_state).await;
+        self.clients[client_id].deactivate(up_state);
         true
     }
 
@@ -940,7 +940,7 @@ impl Downstairs {
     /// Decide if we need repair, and if so create the repair list
     ///
     /// Returns `true` if repair is needed, `false` otherwise
-    pub(crate) async fn collate(
+    pub(crate) fn collate(
         &mut self,
         gen: u64,
         up_state: &UpstairsState,
@@ -958,7 +958,7 @@ impl Downstairs {
                 match c.state() {
                     DsState::WaitQuorum => {
                         // Set this task as FailedRepair then restart it
-                        c.set_failed_repair(up_state).await;
+                        c.set_failed_repair(up_state);
                         warn!(
                             self.log,
                             "Mark {i} as FAILED Collate in final check"
@@ -1100,7 +1100,7 @@ impl Downstairs {
     /// Tries to start live-repair
     ///
     /// Returns true on success, false otherwise
-    pub(crate) async fn start_live_repair(
+    pub(crate) fn start_live_repair(
         &mut self,
         up_state: &UpstairsState,
         gw: &mut GuestWork,
@@ -1153,13 +1153,13 @@ impl Downstairs {
 
         let Some(source_downstairs) = source_downstairs else {
             error!(self.log, "failed to find source downstairs for repair");
-            self.abort_repair(up_state).await;
+            self.abort_repair(up_state);
             return false;
         };
 
         if repair_downstairs.is_empty() {
             error!(self.log, "failed to find a downstairs needing repair");
-            self.abort_repair(up_state).await;
+            self.abort_repair(up_state);
             return false;
         }
 
@@ -1192,7 +1192,7 @@ impl Downstairs {
         true
     }
 
-    pub(crate) async fn on_live_repair(
+    pub(crate) fn on_live_repair(
         &mut self,
         r: Result<(), CrucibleError>,
         gw: &mut GuestWork,
@@ -1373,7 +1373,7 @@ impl Downstairs {
                 info!(self.log, "LiveRepair final flush returned {r:?}");
                 if repair.aborting_repair {
                     warn!(self.log, "aborting live-repair");
-                    self.abort_repair(up_state).await;
+                    self.abort_repair(up_state);
                     return;
                 } else {
                     info!(self.log, "live-repair completed successfully");
@@ -1948,7 +1948,7 @@ impl Downstairs {
             // Something has changed, so abort this repair.
             // Mark any downstairs that have not changed as failed and disable
             // them so that they restart.
-            self.abort_reconciliation(up_state).await;
+            self.abort_reconciliation(up_state);
             return false;
         }
 
@@ -1972,7 +1972,7 @@ impl Downstairs {
     ///
     /// Right now, we completely abort the repair operation on all clients if
     /// this happens, and let the Upstairs sort it out once the IO tasks close.
-    pub(crate) async fn on_reconciliation_failed(
+    pub(crate) fn on_reconciliation_failed(
         &mut self,
         client_id: ClientId,
         m: Message,
@@ -1985,10 +1985,10 @@ impl Downstairs {
             self.clients[client_id].log,
             "extent {extent_id} error on job {repair_id}: {error}"
         );
-        self.abort_reconciliation(up_state).await;
+        self.abort_reconciliation(up_state);
     }
 
-    async fn abort_reconciliation(&mut self, up_state: &UpstairsState) {
+    fn abort_reconciliation(&mut self, up_state: &UpstairsState) {
         warn!(self.log, "aborting reconciliation");
         // Something has changed, so abort this repair.
         // Mark any downstairs that have not changed as failed and disable
@@ -1997,7 +1997,7 @@ impl Downstairs {
             if c.state() == DsState::Repair {
                 // Restart the IO task.  This will cause the Upstairs to
                 // deactivate through a ClientAction::TaskStopped.
-                c.set_failed_repair(up_state).await;
+                c.set_failed_repair(up_state);
                 error!(self.log, "Mark {} as FAILED REPAIR", i);
             }
         }
@@ -2378,7 +2378,7 @@ impl Downstairs {
         }
     }
 
-    pub(crate) async fn replace(
+    pub(crate) fn replace(
         &mut self,
         id: Uuid,
         old: SocketAddr,
@@ -2475,12 +2475,12 @@ impl Downstairs {
         self.skip_all_jobs(old_client_id);
 
         // Clear the client state and restart the IO task
-        self.clients[old_client_id].replace(up_state, new).await;
+        self.clients[old_client_id].replace(up_state, new);
 
         Ok(ReplaceResult::Started)
     }
 
-    pub(crate) async fn check_gone_too_long(
+    pub(crate) fn check_gone_too_long(
         &mut self,
         client_id: ClientId,
         up_state: &UpstairsState,
@@ -2493,8 +2493,7 @@ impl Downstairs {
             );
             self.skip_all_jobs(client_id);
             self.clients[client_id]
-                .fault(up_state, ClientStopReason::TooManyOutstandingJobs)
-                .await;
+                .fault(up_state, ClientStopReason::TooManyOutstandingJobs);
         }
     }
 
@@ -2558,7 +2557,7 @@ impl Downstairs {
     }
 
     /// Aborts an in-progress live-repair
-    pub(crate) async fn abort_repair(&mut self, up_state: &UpstairsState) {
+    pub(crate) fn abort_repair(&mut self, up_state: &UpstairsState) {
         assert!(self
             .clients
             .iter()
@@ -2567,7 +2566,7 @@ impl Downstairs {
         for i in ClientId::iter() {
             if self.clients[i].state() == DsState::LiveRepair {
                 self.skip_all_jobs(i);
-                self.clients[i].abort_repair(up_state).await;
+                self.clients[i].abort_repair(up_state);
             }
         }
     }

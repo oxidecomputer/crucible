@@ -301,7 +301,7 @@ impl Upstairs {
             }
             UpstairsAction::Guest(b) => {
                 self.apply_guest_request(b).await;
-                self.gone_too_long().await;
+                self.gone_too_long();
             }
             UpstairsAction::LeakCheck => {
                 const LEAK_MS: usize = 1000;
@@ -349,7 +349,7 @@ impl Upstairs {
     ///
     /// If the number is too high, then mark that downstairs as failed, scrub
     /// any outstanding jobs, and restart the client IO task.
-    async fn gone_too_long(&mut self) {
+    fn gone_too_long(&mut self) {
         // If we are not active, then just exit.
         if !matches!(self.state, UpstairsState::Active) {
             return;
@@ -362,7 +362,7 @@ impl Upstairs {
                 | DsState::LiveRepair
                 | DsState::Offline
                 | DsState::Replay => {
-                    self.downstairs.check_gone_too_long(cid, &self.state).await;
+                    self.downstairs.check_gone_too_long(cid, &self.state);
                 }
                 _ => {}
             }
@@ -530,15 +530,12 @@ impl Upstairs {
             }
             self.repair_check_interval = None;
         } else if repair > 0
-            || !self
-                .downstairs
-                .start_live_repair(
-                    &self.state,
-                    self.guest.guest_work.lock().await.deref_mut(),
-                    self.ddef.get_def().unwrap().extent_count().into(),
-                    self.generation,
-                )
-                .await
+            || !self.downstairs.start_live_repair(
+                &self.state,
+                self.guest.guest_work.lock().await.deref_mut(),
+                self.ddef.get_def().unwrap().extent_count().into(),
+                self.generation,
+            )
         {
             // This also means repair_ready > 0
             // We can only have one live repair going at a time, so if a
@@ -706,8 +703,7 @@ impl Upstairs {
                 old,
                 new,
                 result,
-            } => match self.downstairs.replace(id, old, new, &self.state).await
-            {
+            } => match self.downstairs.replace(id, old, new, &self.state) {
                 Ok(v) => {
                     *result.lock().await = v;
                     req.send_ok();
@@ -1066,9 +1062,12 @@ impl Upstairs {
             }
             DownstairsAction::LiveRepair(r) => {
                 let mut gw = self.guest.guest_work.lock().await;
-                self.downstairs
-                    .on_live_repair(r, &mut gw, &self.state, self.generation)
-                    .await;
+                self.downstairs.on_live_repair(
+                    r,
+                    &mut gw,
+                    &self.state,
+                    self.generation,
+                );
             }
         }
     }
@@ -1098,8 +1097,7 @@ impl Upstairs {
                 // This will come back to `TaskStopped`, at which point we'll
                 // clear out the task and restart it.
                 self.downstairs.clients[client_id]
-                    .halt_io_task(ClientStopReason::Timeout)
-                    .await;
+                    .halt_io_task(ClientStopReason::Timeout);
             }
             ClientAction::Response(m) => {
                 self.on_client_message(client_id, m).await;
@@ -1195,9 +1193,11 @@ impl Upstairs {
             }
 
             Message::ExtentError { .. } => {
-                self.downstairs
-                    .on_reconciliation_failed(client_id, m, &self.state)
-                    .await;
+                self.downstairs.on_reconciliation_failed(
+                    client_id,
+                    m,
+                    &self.state,
+                );
             }
             Message::RepairAckId { .. } => {
                 if self
@@ -1211,11 +1211,11 @@ impl Upstairs {
             }
 
             Message::YouAreNoLongerActive { .. } => {
-                self.on_no_longer_active(client_id, m).await;
+                self.on_no_longer_active(client_id, m);
             }
 
             Message::UuidMismatch { .. } => {
-                self.on_uuid_mismatch(client_id, m).await;
+                self.on_uuid_mismatch(client_id, m);
             }
 
             // These are all messages that we send out, so we shouldn't see them
@@ -1243,7 +1243,7 @@ impl Upstairs {
             }
         }
         if matches!(self.state, UpstairsState::Deactivating) {
-            if self.downstairs.try_deactivate(client_id, &self.state).await {
+            if self.downstairs.try_deactivate(client_id, &self.state) {
                 info!(self.log, "deactivated client {client_id}");
             } else {
                 info!(self.log, "not ready to deactivate client {client_id}");
@@ -1351,7 +1351,7 @@ impl Upstairs {
              * downstairs out, forget any activation requests, and the
              * upstairs goes back to waiting for another activation request.
              */
-            self.downstairs.collate(self.generation, &self.state).await
+            self.downstairs.collate(self.generation, &self.state)
         };
 
         match collate_status {
@@ -1404,7 +1404,7 @@ impl Upstairs {
         self.stats.add_activation();
     }
 
-    async fn on_no_longer_active(&mut self, client_id: ClientId, m: Message) {
+    fn on_no_longer_active(&mut self, client_id: ClientId, m: Message) {
         let Message::YouAreNoLongerActive {
             new_upstairs_id,
             new_session_id,
@@ -1453,13 +1453,11 @@ impl Upstairs {
         };
 
         // Restart the state machine for this downstairs client
-        self.downstairs.clients[client_id]
-            .disable(&self.state)
-            .await;
+        self.downstairs.clients[client_id].disable(&self.state);
         self.set_inactive(CrucibleError::NoLongerActive);
     }
 
-    async fn on_uuid_mismatch(&mut self, client_id: ClientId, m: Message) {
+    fn on_uuid_mismatch(&mut self, client_id: ClientId, m: Message) {
         let Message::UuidMismatch {
             expected_id
         } = m else {
@@ -1473,9 +1471,7 @@ impl Upstairs {
         );
 
         // Restart the state machine for this downstairs client
-        self.downstairs.clients[client_id]
-            .disable(&self.state)
-            .await;
+        self.downstairs.clients[client_id].disable(&self.state);
         self.set_inactive(CrucibleError::UuidMismatch);
     }
 
