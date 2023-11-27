@@ -200,6 +200,49 @@ impl DownstairsClient {
         out.start_task(false);
         out
     }
+
+    /// Builds a minimal `DownstairsClient` for testing
+    ///
+    /// The resulting client has no target address; any packets sent by the
+    /// client will disappear into the void.
+    #[cfg(test)]
+    fn test_default() -> Self {
+        let cfg = Arc::new(UpstairsConfig {
+            encryption_context: None,
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            read_only: false,
+            lossy: false,
+        });
+        let mut out = Self {
+            cfg,
+            client_task: None, // started up below
+            client_id: ClientId::new(0),
+            region_uuid: None,
+            negotiation_state: NegotiationState::Start,
+            ping_count: 0,
+            ping_interval: deadline_secs(PING_INTERVAL_SECS),
+            more_work: None,
+            tls_context: None,
+            promote_state: None,
+            timeout_deadline: deadline_secs(TIMEOUT_SECS),
+            log: crucible_common::build_logger(),
+            target_addr: None,
+            repair_addr: None,
+            state: DsState::New,
+            last_flush: JobId(0),
+            stats: DownstairsStats::default(),
+            new_jobs: BTreeSet::new(),
+            skipped_jobs: BTreeSet::new(),
+            region_metadata: None,
+            repair_info: None,
+            extent_limit: None,
+            io_state_count: ClientIOStateCount::new(),
+        };
+        out.start_dummy_task();
+        out
+    }
+
     /// Choose which `ClientAction` to apply
     ///
     /// This function is called from within a top-level `select!`, so not only
@@ -2670,5 +2713,191 @@ pub(crate) fn validate_unencrypted_read_response(
         assert!(response.data[..].iter().all(|&x| x == 0));
 
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn downstairs_transition_normal() {
+        // Verify the correct downstairs progression
+        // New -> WA -> WQ -> Active
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitActive,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitQuorum,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Active,
+        );
+    }
+
+    #[test]
+    fn downstairs_transition_replay() {
+        // Verify offline goes to replay
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitActive,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitQuorum,
+        );
+        // Upstairs goes active!
+        client
+            .checked_state_transition(&UpstairsState::Active, DsState::Active);
+        client
+            .checked_state_transition(&UpstairsState::Active, DsState::Offline);
+        client
+            .checked_state_transition(&UpstairsState::Active, DsState::Replay);
+    }
+
+    #[test]
+    fn downstairs_transition_deactivate_new() {
+        // Verify deactivate goes to new
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitActive,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitQuorum,
+        );
+        // Upstairs goes active!
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Active,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Active,
+            DsState::Deactivated,
+        );
+        client.checked_state_transition(&UpstairsState::Active, DsState::New);
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_deactivate_not_new() {
+        // Verify deactivate goes to new
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Deactivated,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_deactivate_not_wa() {
+        // Verify no deactivate from wa
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitActive,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Deactivated,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_deactivate_not_wq() {
+        // Verify no deactivate from wq
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitActive,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitQuorum,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Deactivated,
+        );
+    }
+
+    #[test]
+    fn downstairs_transition_active_to_faulted() {
+        // Verify active upstairs can go to faulted
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitActive,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitQuorum,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Active,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Faulted,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_disconnect_no_active() {
+        // Verify no activation from disconnected
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitActive,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitQuorum,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Deactivated,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Active,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_offline_no_active() {
+        // Verify no activation from offline
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitActive,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitQuorum,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Active,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Offline,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Active,
+        );
     }
 }
