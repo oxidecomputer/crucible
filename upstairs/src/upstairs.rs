@@ -2857,4 +2857,55 @@ mod test {
         // assert write depends on just the flush
         assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
     }
+
+    #[tokio::test]
+    async fn test_deps_depend_on_acked_work() {
+        // Test that jobs will depend on acked work (important for the case of
+        // replay - the upstairs will replay all work since the last flush if a
+        // downstairs leaves and comes back)
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // submit a write, complete, then ack it
+
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            )
+            .await;
+
+        {
+            let ds = &mut upstairs.downstairs;
+            let jobs = ds.get_all_jobs();
+            assert_eq!(jobs.len(), 1);
+
+            let ds_id = jobs[0].ds_id;
+
+            crate::downstairs::test::finish_job(ds, ds_id);
+        }
+
+        // submit an overlapping write
+
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            )
+            .await;
+
+        {
+            let ds = &upstairs.downstairs;
+            let jobs = ds.get_all_jobs();
+
+            // retire_check not run yet, so there's two active jobs
+            assert_eq!(jobs.len(), 2);
+
+            // the second write should still depend on the first write!
+            assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
+        }
+    }
 }

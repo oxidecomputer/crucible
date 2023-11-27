@@ -3288,6 +3288,7 @@ impl Downstairs {
         );
         let now_ackable = self.ackable_work.contains(&ds_id);
         !was_ackable && now_ackable
+        // TODO should this also ack the job, to mimick our event loop?
     }
 
     fn process_io_completion_inner(
@@ -3415,7 +3416,7 @@ impl Downstairs {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use super::Downstairs;
     use crate::{
         integrity_hash,
@@ -3436,6 +3437,25 @@ mod test {
         net::{IpAddr, Ipv4Addr, SocketAddr},
         sync::Arc,
     };
+
+    /// Forces the given job to completion and acks it
+    ///
+    /// This calls `Downstairs`-internal APIs and is therefore in the same
+    /// module, but should not be used outside of test code.
+    pub(crate) fn finish_job(ds: &mut Downstairs, ds_id: JobId) {
+        for client_id in ClientId::iter() {
+            ds.in_progress(ds_id, client_id);
+            ds.process_ds_completion(
+                ds_id,
+                client_id,
+                Ok(vec![]),
+                &UpstairsState::Active,
+                None,
+            );
+        }
+
+        ds.ack(ds_id);
+    }
 
     #[tokio::test]
     async fn work_flush_three_ok() {
