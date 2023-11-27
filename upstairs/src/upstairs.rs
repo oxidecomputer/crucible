@@ -4,10 +4,11 @@ use crate::{
     control::ControlRequest,
     deadline_secs,
     downstairs::{Downstairs, DownstairsAction},
-    extent_from_offset, integrity_hash, Block, BlockContext, BlockOp, BlockReq,
-    Buffer, Bytes, ClientId, ClientMap, CrucibleOpts, DsState,
-    EncryptionContext, GtoS, Guest, Message, RegionDefinition,
-    RegionDefinitionStatus, SnapshotDetails, UpStatOuter, WQCounts,
+    extent_from_offset, integrity_hash,
+    stats::UpStatOuter,
+    Block, BlockContext, BlockOp, BlockReq, Buffer, Bytes, ClientId, ClientMap,
+    CrucibleOpts, DsState, EncryptionContext, GtoS, Guest, Message,
+    RegionDefinition, RegionDefinitionStatus, SnapshotDetails, WQCounts,
 };
 use crucible_common::CrucibleError;
 
@@ -1104,7 +1105,7 @@ impl Upstairs {
                 self.on_client_task_stopped(client_id, r);
             }
             ClientAction::Work | ClientAction::MoreWork => {
-                self.downstairs.io_send(client_id).await;
+                self.downstairs.perform_work(client_id).await;
             }
         }
     }

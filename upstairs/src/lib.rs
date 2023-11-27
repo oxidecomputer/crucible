@@ -7,7 +7,7 @@ use std::clone::Clone;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
-use std::io::{Read, Result as IOResult, Seek, SeekFrom, Write};
+use std::io::{Read as _, Result as IOResult, Seek, SeekFrom, Write as _};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -56,7 +56,6 @@ pub use mend::{DownstairsMend, ExtentFix, RegionMetadata};
 pub use pseudo_file::CruciblePseudoFile;
 
 mod stats;
-pub use stats::*;
 
 mod impacted_blocks;
 pub use impacted_blocks::*;

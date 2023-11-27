@@ -1,5 +1,6 @@
 // Copyright 2021 Oxide Computer Company
 use super::*;
+use std::io::{Read, Write};
 
 /*
  * IO operations are okay to submit directly to Upstairs if:

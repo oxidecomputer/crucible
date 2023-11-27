@@ -8,13 +8,14 @@ use crate::{
     cdt,
     client::{ClientAction, ClientStopReason, DownstairsClient},
     live_repair::ExtentInfo,
+    stats::UpStatOuter,
     upstairs::{UpstairsConfig, UpstairsState},
     AckStatus, ActiveJobs, AllocRingBuffer, BlockOp, BlockReq, BlockReqWaiter,
     ClientData, ClientIOStateCount, ClientId, ClientMap, CrucibleError,
     DownstairsIO, DownstairsMend, DsState, ExtentFix, ExtentRepairIDs, GtoS,
     GuestWork, IOState, IOStateCount, IOop, ImpactedBlocks, JobId, Message,
     ReadRequest, ReadResponse, ReconcileIO, ReconciliationId, RegionDefinition,
-    ReplaceResult, SnapshotDetails, UpStatOuter, WorkSummary,
+    ReplaceResult, SnapshotDetails, WorkSummary,
 };
 use crucible_common::MAX_ACTIVE_COUNT;
 
@@ -902,11 +903,6 @@ impl Downstairs {
         let id = self.next_id;
         self.next_id.0 += 1;
         id
-    }
-
-    /// Peeks at the next downstairs job ID
-    fn peek_next_id(&self) -> JobId {
-        self.next_id
     }
 
     /// Moves all pending jobs back to the `new_jobs` queue
