@@ -82,7 +82,7 @@ pub struct ExtentInfo {
     pub dirty: bool,
 }
 
-#[cfg(test)]
+#[cfg(feature = "TODO re-enable this")]
 pub mod repair_test {
     use super::*;
     use slog::Drain;

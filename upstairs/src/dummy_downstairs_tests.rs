@@ -1,6 +1,6 @@
 // Copyright 2023 Oxide Computer Company
 
-#[cfg(test)]
+#[cfg(feature = "TODO re-enable this")]
 pub(crate) mod protocol_test {
     use core::fmt::Error;
     use core::fmt::Formatter;

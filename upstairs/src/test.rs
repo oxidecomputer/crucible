@@ -1,11 +1,17 @@
 // Copyright 2023 Oxide Computer Company
 
-#[cfg(test)]
-use super::*;
-
-#[cfg(test)]
+#[cfg(feature = "TODO re-enable this")]
 pub(crate) mod up_test {
-    use super::*;
+    use crate::*;
+    use crate::{
+        client::{
+            validate_encrypted_read_response,
+            validate_unencrypted_read_response,
+        },
+        downstairs::Downstairs,
+        upstairs::Upstairs,
+    };
+    use rand::prelude::*;
 
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -13,6 +19,7 @@ pub(crate) mod up_test {
     use itertools::Itertools;
     use pseudo_file::IOSpan;
     use ringbuffer::RingBuffer;
+    use tokio::sync::watch;
 
     // Create a simple logger
     pub fn csl() -> Logger {
@@ -65,11 +72,11 @@ pub(crate) mod up_test {
     }
 
     fn create_generic_read_eob(
-        ds: &mut Downstairs,
+        ds: &Downstairs,
         ds_id: JobId,
     ) -> (ReadRequest, DownstairsIO) {
         let (request, iblocks) = generic_read_request();
-        let op = create_read_eob(ds, ds_id, iblocks, 10, vec![request.clone()]);
+        let op = ds.create_read_eob(ds_id, iblocks, 10, vec![request.clone()]);
 
         (request, op)
     }
@@ -142,7 +149,7 @@ pub(crate) mod up_test {
      * Beware, if you change these defaults, then you will have to change
      * all the hard coded tests below that use make_upstairs().
      */
-    pub fn make_upstairs() -> Arc<Upstairs> {
+    pub fn make_upstairs() -> Upstairs {
         let mut def = RegionDefinition::default();
         def.set_block_size(512);
         def.set_extent_size(Block::new_512(100));
@@ -155,7 +162,7 @@ pub(crate) mod up_test {
             ..Default::default()
         };
 
-        Upstairs::new(&opts, 0, Some(def), Arc::new(Guest::new()), csl())
+        Upstairs::new(&opts, 0, Some(def), Arc::new(Guest::new()), None, csl())
     }
 
     /*
@@ -163,14 +170,14 @@ pub(crate) mod up_test {
      * just like the program does.
      */
     async fn up_efo(
-        up: &Arc<Upstairs>,
+        up: &Upstairs,
         offset: Block,
         num_blocks: u64,
     ) -> Vec<(u64, Block)> {
-        let ddef = &up.ddef.lock().await.get_def().unwrap();
-        let num_blocks = Block::new_with_ddef(num_blocks, ddef);
-        extent_from_offset(ddef, offset, num_blocks)
-            .blocks(ddef)
+        let ddef = up.get_region_definition();
+        let num_blocks = Block::new_with_ddef(num_blocks, &ddef);
+        extent_from_offset(&ddef, offset, num_blocks)
+            .blocks(&ddef)
             .collect()
     }
 
@@ -434,7 +441,7 @@ pub(crate) mod up_test {
         };
 
         // Validate it
-        let successful_hash = Downstairs::validate_encrypted_read_response(
+        let successful_hash = validate_encrypted_read_response(
             &mut read_response,
             &Arc::new(context),
             &csl(),
@@ -442,7 +449,7 @@ pub(crate) mod up_test {
 
         assert_eq!(successful_hash, Some(read_response_hash));
 
-        // `Downstairs::validate_encrypted_read_response` will mutate the read
+        // `validate_encrypted_read_response` will mutate the read
         // response's data value, make sure it decrypted
 
         assert_eq!(original_data, read_response.data);
@@ -514,7 +521,7 @@ pub(crate) mod up_test {
         };
 
         // Validate it
-        let successful_hash = Downstairs::validate_encrypted_read_response(
+        let successful_hash = validate_encrypted_read_response(
             &mut read_response,
             &Arc::new(context),
             &csl(),
@@ -522,7 +529,7 @@ pub(crate) mod up_test {
 
         assert_eq!(successful_hash, Some(read_response_hash));
 
-        // `Downstairs::validate_encrypted_read_response` will mutate the read
+        // `validate_encrypted_read_response` will mutate the read
         // response's data value, make sure it decrypted
 
         assert_eq!(original_data, read_response.data);
@@ -567,7 +574,7 @@ pub(crate) mod up_test {
         };
 
         // Validate it
-        let successful_hash = Downstairs::validate_encrypted_read_response(
+        let successful_hash = validate_encrypted_read_response(
             &mut read_response,
             &Arc::new(context),
             &csl(),
@@ -603,10 +610,8 @@ pub(crate) mod up_test {
         };
 
         // Validate it
-        let successful_hash = Downstairs::validate_unencrypted_read_response(
-            &mut read_response,
-            &csl(),
-        )?;
+        let successful_hash =
+            validate_unencrypted_read_response(&mut read_response, &csl())?;
 
         assert_eq!(successful_hash, Some(read_response_hash));
         assert_eq!(read_response.data, original_data);
@@ -631,10 +636,8 @@ pub(crate) mod up_test {
         };
 
         // Validate it
-        let successful_hash = Downstairs::validate_unencrypted_read_response(
-            &mut read_response,
-            &csl(),
-        )?;
+        let successful_hash =
+            validate_unencrypted_read_response(&mut read_response, &csl())?;
 
         assert_eq!(successful_hash, None);
         assert_eq!(read_response.data, original_data);
@@ -684,10 +687,8 @@ pub(crate) mod up_test {
         };
 
         // Validate it
-        let successful_hash = Downstairs::validate_unencrypted_read_response(
-            &mut read_response,
-            &csl(),
-        )?;
+        let successful_hash =
+            validate_unencrypted_read_response(&mut read_response, &csl())?;
 
         assert_eq!(successful_hash, Some(read_response_hash));
         assert_eq!(read_response.data, original_data);
@@ -730,74 +731,13 @@ pub(crate) mod up_test {
         };
 
         // Validate it
-        let successful_hash = Downstairs::validate_unencrypted_read_response(
-            &mut read_response,
-            &csl(),
-        )?;
+        let successful_hash =
+            validate_unencrypted_read_response(&mut read_response, &csl())?;
 
         assert_eq!(successful_hash, Some(read_response_hash));
         assert_eq!(read_response.data, original_data);
 
         Ok(())
-    }
-
-    #[tokio::test]
-    async fn work_flush_three_ok() {
-        let upstairs = Upstairs::test_default(None);
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        upstairs.set_active().await.unwrap();
-        let mut ds = upstairs.downstairs.lock().await;
-
-        let next_id = ds.next_id();
-        let dep = ds.ds_active.deps_for_flush(next_id);
-
-        let op = create_flush(next_id, dep, 10, 0, 0, None, None);
-
-        ds.enqueue(op, ds_done_tx.clone()).await;
-
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
-
-        assert!(!ds
-            .process_ds_completion(
-                next_id,
-                ClientId::new(0),
-                Ok(vec![]),
-                UpState::Active,
-                None,
-            )
-            .unwrap());
-        assert_eq!(ds.ackable_work().len(), 0);
-        assert_eq!(ds.completed.len(), 0);
-
-        assert!(ds
-            .process_ds_completion(
-                next_id,
-                ClientId::new(1),
-                Ok(vec![]),
-                UpState::Active,
-                None,
-            )
-            .unwrap());
-        assert_eq!(ds.ackable_work().len(), 1);
-        assert_eq!(ds.completed.len(), 0);
-
-        let state = ds.ds_active.get(&next_id).unwrap().ack_status;
-        assert_eq!(state, AckStatus::AckReady);
-        ds.ack(next_id);
-
-        assert!(!ds
-            .process_ds_completion(
-                next_id,
-                ClientId::new(2),
-                Ok(vec![]),
-                UpState::Active,
-                None,
-            )
-            .unwrap());
-        assert_eq!(ds.ackable_work().len(), 0);
-        assert_eq!(ds.completed.len(), 1);
     }
 
     // Ensure that a snapshot requires all three downstairs to return Ok

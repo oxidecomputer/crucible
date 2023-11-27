@@ -37,7 +37,6 @@ use aes_gcm_siv::{Aes256GcmSiv, Key, KeyInit, Nonce, Tag};
 pub mod control;
 mod dummy_downstairs_tests;
 mod pseudo_file;
-mod test;
 
 pub mod volume;
 pub use volume::Volume;
@@ -61,6 +60,7 @@ mod impacted_blocks;
 pub use impacted_blocks::*;
 
 mod live_repair;
+mod test;
 
 mod active_jobs;
 use active_jobs::ActiveJobs;

@@ -297,6 +297,25 @@ impl Downstairs {
             repair: None,
         }
     }
+
+    /// Build a `Downstairs` for simple tests
+    ///
+    /// Note that this `Downstairs` does not have valid socket addresses, so the
+    /// client tasks won't start!
+    #[cfg(test)]
+    pub fn test_default() -> Self {
+        let log = crucible_common::build_logger();
+        let cfg = Arc::new(UpstairsConfig {
+            upstairs_id: Uuid::new_v4(),
+            read_only: false,
+            encryption_context: None,
+            lossy: false,
+            session_id: Uuid::new_v4(),
+        });
+
+        Self::new(cfg, ClientMap::new(), None, log)
+    }
+
     /// Choose which `DownstairsAction` to apply
     ///
     /// This function is called from within a top-level `select!`, so not only
@@ -1719,6 +1738,34 @@ impl Downstairs {
         gw.active.insert(gw_reopen_id, new_gtos);
         self.enqueue_repair(reopen_io);
         reopen_brw
+    }
+
+    #[cfg(test)]
+    pub(crate) fn create_read_eob(
+        &mut self,
+        ds_id: JobId,
+        blocks: ImpactedBlocks,
+        gw_id: u64,
+        requests: Vec<ReadRequest>,
+    ) -> DownstairsIO {
+        let dependencies = self.ds_active.deps_for_read(ds_id, blocks);
+        debug!(self.log, "IO Read  {} has deps {:?}", ds_id, dependencies);
+
+        let aread = IOop::Read {
+            dependencies,
+            requests,
+        };
+
+        DownstairsIO {
+            ds_id,
+            guest_id: gw_id,
+            work: aread,
+            state: ClientData::new(IOState::New),
+            acked: false,
+            replay: false,
+            data: None,
+            read_response_hashes: Vec::new(),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3169,6 +3216,27 @@ impl Downstairs {
         }
     }
 
+    /// Wrapper for marking a single job as done from the given client
+    ///
+    /// This can be used to test handling of ackable work, etc.
+    #[cfg(test)]
+    pub fn process_ds_completion(
+        &mut self,
+        ds_id: JobId,
+        client_id: ClientId,
+        responses: Result<Vec<ReadResponse>, CrucibleError>,
+        up_state: &UpstairsState,
+        extent_info: Option<ExtentInfo>,
+    ) {
+        self.process_io_completion_inner(
+            ds_id,
+            client_id,
+            responses,
+            up_state,
+            extent_info,
+        );
+    }
+
     fn process_io_completion_inner(
         &mut self,
         ds_id: JobId,
@@ -3247,5 +3315,86 @@ impl Downstairs {
 
     pub(crate) fn write_bytes_outstanding(&self) -> u64 {
         self.write_bytes_outstanding
+    }
+
+    /// Marks a single job as acked
+    ///
+    /// The job is removed from `self.ackable_work` and `acked` is set to `true`
+    /// in the job's state.
+    ///
+    /// This is only useful in tests; in real code, we'd also want to reply to
+    /// the guest when acking a job.
+    #[cfg(test)]
+    fn ack(&mut self, ds_id: JobId) {
+        /*
+         * Move AckReady to Acked.
+         */
+        let Some(job) = self.ds_active.get_mut(&ds_id) else {
+            panic!("reqid {} is not active", ds_id);
+        };
+        if !self.ackable_work.remove(&ds_id) {
+            panic!("Job {ds_id} is not ackable");
+        }
+
+        if job.acked {
+            panic!("Job {ds_id} already acked!");
+        }
+        job.acked = true;
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::Downstairs;
+    use crate::{upstairs::UpstairsState, ClientId};
+    use ringbuffer::RingBuffer;
+
+    #[tokio::test]
+    async fn work_flush_three_ok() {
+        let mut ds = Downstairs::test_default();
+
+        let next_id = ds.next_id();
+        let dep = ds.ds_active.deps_for_flush(next_id);
+
+        let op = Downstairs::create_flush(next_id, dep, 10, 0, 0, None, None);
+
+        ds.enqueue(op);
+
+        ds.in_progress(next_id, ClientId::new(0));
+        ds.in_progress(next_id, ClientId::new(1));
+        ds.in_progress(next_id, ClientId::new(2));
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 1);
+        assert_eq!(ds.completed.len(), 0);
+
+        assert!(!ds.ds_active.get(&next_id).unwrap().acked);
+        ds.ack(next_id);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 1);
     }
 }

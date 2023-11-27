@@ -249,6 +249,27 @@ impl Upstairs {
         }
     }
 
+    /// Build an Upstairs for simple tests
+    #[cfg(test)]
+    pub fn test_default(ddef: Option<RegionDefinition>) -> Self {
+        let opts = CrucibleOpts {
+            id: Uuid::new_v4(),
+            target: vec![],
+            lossy: false,
+            flush_timeout: None,
+            key: None,
+            cert_pem: None,
+            key_pem: None,
+            root_cert_pem: None,
+            control: None,
+            read_only: false,
+        };
+
+        let log = crucible_common::build_logger();
+
+        Self::new(&opts, 0, ddef, Arc::new(Guest::default()), None, log)
+    }
+
     /// Runs the upstairs (forever)
     pub(crate) async fn run(&mut self) {
         loop {
@@ -1541,5 +1562,15 @@ impl Upstairs {
         let ratio = dsw_max as f64 / crate::IO_OUTSTANDING_MAX as f64;
         self.guest
             .set_backpressure(self.downstairs.write_bytes_outstanding(), ratio);
+    }
+
+    /// Returns the `RegionDefinition`
+    ///
+    /// # Panics
+    /// If the region definition is not yet known (i.e. it wasn't provided on
+    /// startup, and no Downstairs have started talking to us yet).
+    #[cfg(test)]
+    pub(crate) fn get_region_definition(&self) -> RegionDefinition {
+        self.ddef.get_def().unwrap()
     }
 }

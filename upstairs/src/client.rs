@@ -188,6 +188,15 @@ impl DownstairsClient {
             extent_limit: None,
             io_state_count: ClientIOStateCount::new(),
         };
+
+        #[cfg(test)]
+        if target_addr.is_none() {
+            out.start_dummy_task();
+        } else {
+            out.start_task(false);
+        }
+
+        #[cfg(not(test))]
         out.start_task(false);
         out
     }
@@ -616,11 +625,45 @@ impl DownstairsClient {
         self.last_flush
     }
 
+    /// Starts a dummy IO task, saving the handle in `self.client_task`
+    ///
+    /// # Panics
+    /// If `self.client_task` is not `None`
+    #[cfg(test)]
+    fn start_dummy_task(&mut self) {
+        assert!(
+            self.client_task.is_none(),
+            "cannot start task when it is already running"
+        );
+        let (client_request_tx, mut client_request_rx) = mpsc::channel(500);
+        let (_client_response_tx, client_response_rx) = mpsc::channel(500);
+        let (client_stop_tx, mut client_stop_rx) = oneshot::channel();
+
+        let log = self.log.new(o!("" => "io task"));
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    r = client_request_rx.recv() => {
+                        debug!(log, "got request {r:?}");
+                    }
+                    r = &mut client_stop_rx => {
+                        panic!("asked dummy IO task to stop: {r:?}");
+                    }
+                }
+            }
+        });
+
+        self.client_task = Some(ClientTaskHandle {
+            client_request_tx,
+            client_stop_tx: Some(client_stop_tx),
+            client_response_rx,
+        });
+    }
     /// Starts a client IO task, saving the handle in `self.client_task`
     ///
     /// # Panics
     /// If `self.client_task` is not `None`, or `self.target_addr` is `None`
-    pub(crate) fn start_task(&mut self, delay: bool) {
+    fn start_task(&mut self, delay: bool) {
         assert!(
             self.client_task.is_none(),
             "cannot start task when it is already running"
@@ -2442,7 +2485,7 @@ where
 ///
 /// The return value of this will be stored with the job, and compared
 /// between each read.
-fn validate_encrypted_read_response(
+pub(crate) fn validate_encrypted_read_response(
     response: &mut ReadResponse,
     encryption_context: &EncryptionContext,
     log: &Logger,
@@ -2584,7 +2627,7 @@ fn validate_encrypted_read_response(
 /// - Ok(None) where there is no integrity hash in the response and the
 ///   block is all 0
 /// - Err otherwise
-fn validate_unencrypted_read_response(
+pub(crate) fn validate_unencrypted_read_response(
     response: &mut ReadResponse,
     log: &Logger,
 ) -> Result<Option<u64>, CrucibleError> {
