@@ -2900,4 +2900,213 @@ mod test {
             DsState::Active,
         );
     }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_same_wa() {
+        // Verify we can't go to the same state we are in
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitActive,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitActive,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_same_wq() {
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitActive,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitQuorum,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitQuorum,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_same_active() {
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitActive,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitQuorum,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Active,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Active,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_no_new_to_offline() {
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Offline,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Offline,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_same_offline() {
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitActive,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitQuorum,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Active,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Offline,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Offline,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_backwards() {
+        // Verify state can't go backwards
+        // New -> WA -> WQ -> WA
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitActive,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitQuorum,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitActive,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_bad_transition_wq() {
+        // Verify error when going straight to WQ
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitQuorum,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_bad_replay() {
+        // Verify new goes to replay will fail
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Replay,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_bad_offline() {
+        // Verify offline cannot go to WQ
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitActive,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitQuorum,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Active,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Offline,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitQuorum,
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn downstairs_transition_bad_active() {
+        // Verify active can't go back to WQ
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitActive,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitQuorum,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Active,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitQuorum,
+        );
+    }
+
+    #[test]
+    fn downstairs_transition_active_faulted() {
+        // Verify
+        let mut client = DownstairsClient::test_default();
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitActive,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::WaitQuorum,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Active,
+        );
+        client.checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Faulted,
+        );
+    }
 }
