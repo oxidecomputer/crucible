@@ -4283,8 +4283,11 @@ mod test {
 
         assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
 
-        let response = Ok(vec![]);
+        // Before the last response, the write is marked as ackable, but
+        // write_unwritten is not.
+        assert_eq!(ds.ackable_work.len(), !is_write_unwritten as usize);
 
+        let response = Ok(vec![]);
         ds.process_ds_completion(
             next_id,
             ClientId::new(2),
@@ -4293,9 +4296,9 @@ mod test {
             None,
         );
 
-        // If it's write_unwritten, then this should have returned true,
-        // if it's just a write, then it should be false.
-        assert_eq!(ds.ackable_work.len(), is_write_unwritten as usize);
+        // After the last response, both write and write_unwritten should be
+        // marked as ackable.
+        assert_eq!(ds.ackable_work.len(), 1);
 
         assert!(ds.clients[ClientId::new(0)].stats.downstairs_errors > 0);
         assert!(ds.clients[ClientId::new(1)].stats.downstairs_errors > 0);
