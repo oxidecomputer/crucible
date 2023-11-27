@@ -1,5 +1,3 @@
-#![allow(dead_code)] // TODO remove this
-                     //
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     net::SocketAddr,
@@ -376,7 +374,7 @@ impl Downstairs {
     ) {
         debug!(self.log, "ack_jobs process {}", ds_id);
 
-        let mut done = self.ds_active.get_mut(&ds_id).unwrap();
+        let done = self.ds_active.get_mut(&ds_id).unwrap();
         assert!(!done.acked);
 
         let gw_id = done.guest_id;
@@ -590,8 +588,9 @@ impl Downstairs {
              * If in_progress returns None, it means that this job on this
              * client should be skipped.
              */
-            let Some(job) = self.in_progress(new_id, client_id)
-                else { continue; };
+            let Some(job) = self.in_progress(new_id, client_id) else {
+                continue;
+            };
 
             let message = match job {
                 IOop::Write {
@@ -1954,9 +1953,9 @@ impl Downstairs {
 
         let Some(next) = self.reconcile_current_work.as_mut() else {
             // XXX what if we get a delayed ack?
-            panic!("got reconciliation ack with no current work"); 
+            panic!("got reconciliation ack with no current work");
         };
-        let Message::RepairAckId {repair_id} = m else {
+        let Message::RepairAckId { repair_id } = m else {
             panic!("invalid message {m:?} for on_reconciliation_ack");
         };
 
@@ -1978,7 +1977,12 @@ impl Downstairs {
         m: Message,
         up_state: &UpstairsState,
     ) {
-        let Message::ExtentError { repair_id, extent_id, error } = m else {
+        let Message::ExtentError {
+            repair_id,
+            extent_id,
+            error,
+        } = m
+        else {
             panic!("invalid message {m:?}");
         };
         error!(
@@ -2108,7 +2112,9 @@ impl Downstairs {
 
     /// Reserves repair IDs if impacted blocks overlap our extent under repair
     fn check_repair_ids_for_range(&mut self, impacted_blocks: ImpactedBlocks) {
-        let Some(eur) = self.get_extent_under_repair() else { return; };
+        let Some(eur) = self.get_extent_under_repair() else {
+            return;
+        };
         let mut future_repair = false;
         for eid in impacted_blocks.extents().into_iter().flatten() {
             if eid == *eur.start() {

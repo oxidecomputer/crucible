@@ -1,5 +1,3 @@
-#![allow(dead_code)] // TODO remove this
-
 use crate::{
     cdt,
     client::{ClientAction, ClientRunResult, ClientStopReason},
@@ -1409,7 +1407,8 @@ impl Upstairs {
             new_upstairs_id,
             new_session_id,
             new_gen,
-        } = m else {
+        } = m
+        else {
             panic!("called on_no_longer_active on invalid message {m:?}");
         };
 
@@ -1458,9 +1457,7 @@ impl Upstairs {
     }
 
     fn on_uuid_mismatch(&mut self, client_id: ClientId, m: Message) {
-        let Message::UuidMismatch {
-            expected_id
-        } = m else {
+        let Message::UuidMismatch { expected_id } = m else {
             panic!("called on_uuid_mismatch on invalid message {m:?}");
         };
 

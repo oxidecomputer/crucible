@@ -1,5 +1,3 @@
-#![allow(dead_code)] // TODO remove this
-
 use crate::{
     cdt, deadline_secs, integrity_hash, live_repair::ExtentInfo,
     upstairs::UpstairsConfig, upstairs::UpstairsState, ClientIOStateCount,
@@ -294,6 +292,8 @@ impl DownstairsClient {
             if let Err(e) = task.client_request_tx.send(Message::Ruok).await {
                 warn!(self.log, "failed to send ping: {e}");
             }
+            self.ping_count += 1;
+            cdt::ds__ping__sent!(|| (self.ping_count, self.client_id.get()));
         } else {
             // This, on the other hand, should not be possible, because we only
             // give the Ping action if the client task is Some, and we do not
