@@ -57,7 +57,7 @@ pub(crate) struct Upstairs {
     state: UpstairsState,
 
     /// Downstairs jobs and per-client state
-    downstairs: Downstairs,
+    pub(crate) downstairs: Downstairs,
 
     /// Upstairs generation number
     ///
@@ -603,7 +603,7 @@ impl Upstairs {
                 req.send_ok();
             }
             BlockOp::Deactivate => {
-                self.set_deactivate(req).await;
+                self.set_deactivate(req);
             }
             BlockOp::RepairOp => {
                 warn!(self.log, "Ignoring external BlockOp::RepairOp");
@@ -824,7 +824,7 @@ impl Upstairs {
     /// when complete.
     ///
     /// In either case, `self.state` is set to `UpstairsState::Deactivating`
-    async fn set_deactivate(&mut self, req: BlockReq) {
+    fn set_deactivate(&mut self, req: BlockReq) {
         info!(self.log, "Request to deactivate this guest");
         match self.state {
             UpstairsState::Initializing | UpstairsState::GoActive { .. } => {
@@ -844,7 +844,6 @@ impl Upstairs {
             req.send_ok();
         } else {
             debug!(self.log, "not ready to deactivate; submitting final flush");
-            self.submit_flush(Some(req), None).await
         }
     }
 
@@ -885,15 +884,39 @@ impl Upstairs {
         cdt::up__to__ds__flush__start!(|| (gw_id));
     }
 
-    /// Submit a read job to the downstairs
+    /// Submits a read job to the downstairs
     async fn submit_read(
         &mut self,
         offset: Block,
         data: Buffer,
         req: BlockReq,
     ) {
+        self.submit_read_inner(offset, data, Some(req)).await
+    }
+
+    /// Submits a dummy read (without associated `BlockReq`)
+    #[cfg(test)]
+    async fn submit_dummy_read(&mut self, offset: Block, data: Buffer) {
+        self.submit_read_inner(offset, data, None).await
+    }
+
+    /// Submit a read job to the downstairs, optionally without a `BlockReq`
+    ///
+    /// # Panics
+    /// If `req` is `None` and this isn't the test suite
+    async fn submit_read_inner(
+        &mut self,
+        offset: Block,
+        data: Buffer,
+        req: Option<BlockReq>,
+    ) {
+        #[cfg(not(test))]
+        assert!(req.is_some());
+
         if !self.guest_io_ready() {
-            req.send_err(CrucibleError::UpstairsInactive);
+            if let Some(req) = req {
+                req.send_err(CrucibleError::UpstairsInactive);
+            }
             return;
         }
 
@@ -909,7 +932,9 @@ impl Upstairs {
          * Verify IO is in range for our region
          */
         if let Err(e) = ddef.validate_io(offset, data.len()) {
-            req.send_err(e);
+            if let Some(req) = req {
+                req.send_err(e);
+            }
             return;
         }
 
@@ -939,12 +964,13 @@ impl Upstairs {
         // after submitting the job to the downstairs, because no one else is
         // modifying the Upstairs right now; even if the job finishes
         // instantaneously, it can't interrupt this function.
-        let new_gtos = GtoS::new(next_id, Some(data), Some(req));
+        let new_gtos = GtoS::new(next_id, Some(data), req);
         gw.active.insert(gw_id, new_gtos);
 
         cdt::up__to__ds__read__start!(|| (gw_id));
     }
 
+    /// Submits a new write job to the upstairs
     async fn submit_write(
         &mut self,
         offset: Block,
@@ -952,12 +978,46 @@ impl Upstairs {
         req: BlockReq,
         is_write_unwritten: bool,
     ) {
+        self.submit_write_inner(offset, data, Some(req), is_write_unwritten)
+            .await
+    }
+
+    /// Submits a dummy write (without an associated `BlockReq`)
+    #[cfg(test)]
+    async fn submit_dummy_write(
+        &mut self,
+        offset: Block,
+        data: Bytes,
+        is_write_unwritten: bool,
+    ) {
+        self.submit_write_inner(offset, data, None, is_write_unwritten)
+            .await
+    }
+
+    /// Submits a new write job to the upstairs, optionally without a `BlockReq`
+    ///
+    /// # Panics
+    /// If `req` is `None` and this isn't running in the test suite
+    async fn submit_write_inner(
+        &mut self,
+        offset: Block,
+        data: Bytes,
+        req: Option<BlockReq>,
+        is_write_unwritten: bool,
+    ) {
+        #[cfg(not(test))]
+        assert!(req.is_some());
+
         if !self.guest_io_ready() {
-            req.send_err(CrucibleError::UpstairsInactive);
+            if let Some(req) = req {
+                req.send_err(CrucibleError::UpstairsInactive);
+            }
             return;
         }
         if self.cfg.read_only {
-            req.send_err(CrucibleError::ModifyingReadOnlyRegion);
+            if let Some(req) = req {
+                req.send_err(CrucibleError::ModifyingReadOnlyRegion);
+            }
             return;
         }
 
@@ -966,7 +1026,9 @@ impl Upstairs {
          */
         let ddef = self.ddef.get_def().unwrap();
         if let Err(e) = ddef.validate_io(offset, data.len()) {
-            req.send_err(e);
+            if let Some(req) = req {
+                req.send_err(e);
+            }
             return;
         }
 
@@ -999,9 +1061,11 @@ impl Upstairs {
                 let (nonce, tag, hash) =
                     match context.encrypt_in_place(&mut mut_data[..]) {
                         Err(e) => {
-                            req.send_err(CrucibleError::EncryptionError(
-                                e.to_string(),
-                            ));
+                            if let Some(req) = req {
+                                req.send_err(CrucibleError::EncryptionError(
+                                    e.to_string(),
+                                ));
+                            }
                             return;
                         }
 
@@ -1062,9 +1126,9 @@ impl Upstairs {
             writes,
             is_write_unwritten,
         );
-        let new_gtos = GtoS::new(next_id, None, Some(req));
 
         // New work created, add to the guest_work HM
+        let new_gtos = GtoS::new(next_id, None, req);
         gw.active.insert(gw_id, new_gtos);
 
         if is_write_unwritten {
@@ -1496,6 +1560,31 @@ impl Upstairs {
         self.set_inactive(CrucibleError::UuidMismatch);
     }
 
+    /// Forces the upstairs state to `UpstairsState::Active`
+    ///
+    /// This means that we haven't gone through negotiation, so behavior may be
+    /// wonky or unexpected; this is only allowed during unit tests.
+    #[cfg(test)]
+    fn force_active(&mut self) -> Result<(), CrucibleError> {
+        match self.state {
+            UpstairsState::Initializing => {
+                self.state = UpstairsState::Active;
+                Ok(())
+            }
+            UpstairsState::Active | UpstairsState::GoActive { .. } => {
+                Err(CrucibleError::UpstairsAlreadyActive)
+            }
+            UpstairsState::Deactivating => {
+                /*
+                 * We don't support deactivate interruption, so we have to
+                 * let the currently running deactivation finish before we
+                 * can accept an activation.
+                 */
+                Err(CrucibleError::UpstairsDeactivating)
+            }
+        }
+    }
+
     fn set_inactive(&mut self, err: CrucibleError) {
         let prev =
             std::mem::replace(&mut self.state, UpstairsState::Initializing);
@@ -1574,5 +1663,1198 @@ impl Upstairs {
     #[cfg(test)]
     pub(crate) fn get_region_definition(&self) -> RegionDefinition {
         self.ddef.get_def().unwrap()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::test::make_upstairs;
+
+    // Job dependency tests
+    //
+    // Each job dependency test will include a chart of the operations and
+    // dependencies that are expected to be created through the submission of
+    // those operations. An example:
+    //
+    //             block
+    //    op# | 0 1 2 3 4 5 | deps
+    //    ----|-------------|-----
+    //      0 | W           |
+    //      1 |   W         |
+    //      2 |     W       |
+    //      3 | FFFFFFFFFFF | 0,1,2
+    //      4 |       W     | 3
+    //      5 |         W   | 3
+    //      6 |           W | 3
+    //
+    // The order of enqueued operations matches the op# column. In the above
+    // example, three writes were submitted, followed by a flush, followed by
+    // three more writes. There is only one operation per row.
+    //
+    // An operation marks what block it acts on in an extent (in the center
+    // column) with the type of operation it is: R is a read, W is a write, and
+    // Wu is a write unwritten. Flushes impact the whole extent and are marked
+    // with F across every block. If an operation covers more than one extent,
+    // it will have multiple columns titled 'block'.
+    //
+    // The deps column shows which operations this operation depends on -
+    // dependencies must run before the operation can run. If the column is
+    // empty, then the operation does not depend on any other operation. In the
+    // above example, operation 3 depends on operations 0, 1, and 2.
+    //
+
+    #[tokio::test]
+    async fn test_deps_writes_depend_on_overlapping_writes() {
+        // Test that the following job dependency graph is made:
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W     |
+        //   1 | W     | 0
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // op 0
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            )
+            .await;
+
+        // op 1
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0x00; 512]),
+                false,
+            )
+            .await;
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 2);
+
+        assert!(jobs[0].work.deps().is_empty());
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
+    }
+
+    #[tokio::test]
+    async fn test_deps_writes_depend_on_overlapping_writes_chain() {
+        // Test that the following job dependency graph is made:
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W     |
+        //   1 | W     | 0
+        //   2 | W     | 1
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // op 0
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            )
+            .await;
+
+        // op 1
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0x00; 512]),
+                false,
+            )
+            .await;
+
+        // op 2
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0x55; 512]),
+                false,
+            )
+            .await;
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 3);
+
+        assert!(jobs[0].work.deps().is_empty());
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
+        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id],);
+    }
+
+    #[tokio::test]
+    async fn test_deps_writes_depend_on_overlapping_writes_and_flushes() {
+        // Test that the following job dependency graph is made:
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W     |
+        //   1 | FFFFF | 0
+        //   2 | W     | 1
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // op 0
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            )
+            .await;
+
+        // op 1
+        upstairs.submit_flush(None, None).await;
+
+        // op 2
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0x55; 512]),
+                false,
+            )
+            .await;
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 3);
+
+        assert!(jobs[0].work.deps().is_empty()); // write (op 0)
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // flush (op 1)
+        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // write (op 2)
+    }
+
+    #[tokio::test]
+    async fn test_deps_all_writes_depend_on_flushes() {
+        // Test that the following job dependency graph is made:
+        //
+        //          block
+        // op# | 0 1 2 3 4 5 | deps
+        // ----|-------------|-----
+        //   0 | W           |
+        //   1 |   W         |
+        //   2 |     W       |
+        //   3 | FFFFFFFFFFF | 0,1,2
+        //   4 |       W     | 3
+        //   5 |         W   | 3
+        //   6 |           W | 3
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // ops 0 to 2
+        for i in 0..3 {
+            upstairs
+                .submit_dummy_write(
+                    Block::new_512(i),
+                    Bytes::from(vec![0xff; 512]),
+                    false,
+                )
+                .await;
+        }
+
+        // op 3
+        upstairs.submit_flush(None, None).await;
+
+        // ops 4 to 6
+        for i in 3..6 {
+            upstairs
+                .submit_dummy_write(
+                    Block::new_512(i),
+                    Bytes::from(vec![0xff; 512]),
+                    false,
+                )
+                .await;
+        }
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 7);
+
+        assert!(jobs[0].work.deps().is_empty()); // write @ 0
+        assert!(jobs[1].work.deps().is_empty()); // write @ 1
+        assert!(jobs[2].work.deps().is_empty()); // write @ 2
+
+        assert_eq!(
+            jobs[3].work.deps(), // flush
+            &[jobs[0].ds_id, jobs[1].ds_id, jobs[2].ds_id],
+        );
+
+        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // write @ 3
+        assert_eq!(jobs[5].work.deps(), &[jobs[3].ds_id]); // write @ 4
+        assert_eq!(jobs[6].work.deps(), &[jobs[3].ds_id]); // write @ 5
+    }
+
+    #[tokio::test]
+    async fn test_deps_little_writes_depend_on_big_write() {
+        // Test that the following job dependency graph is made:
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W W W |
+        //   1 | W     | 0
+        //   2 |   W   | 0
+        //   3 |     W | 0
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // op 0
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0xff; 512 * 3]),
+                false,
+            )
+            .await;
+
+        // ops 1 to 3
+        for i in 0..3 {
+            upstairs
+                .submit_dummy_write(
+                    Block::new_512(i),
+                    Bytes::from(vec![0xff; 512]),
+                    false,
+                )
+                .await;
+        }
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 4);
+
+        assert!(jobs[0].work.deps().is_empty()); // write @ 0,1,2
+
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // write @ 0
+        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id]); // write @ 1
+        assert_eq!(jobs[3].work.deps(), &[jobs[0].ds_id]); // write @ 2
+    }
+
+    #[tokio::test]
+    async fn test_deps_little_writes_depend_on_big_write_chain() {
+        // Test that the following job dependency graph is made:
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W W W |
+        //   1 | W     | 0
+        //   2 |   W   | 0
+        //   3 |     W | 0
+        //   4 | W     | 1
+        //   5 |   W   | 2
+        //   6 |     W | 3
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // op 0
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0xff; 512 * 3]),
+                false,
+            )
+            .await;
+
+        // ops 1 to 3
+        for i in 0..3 {
+            upstairs
+                .submit_dummy_write(
+                    Block::new_512(i),
+                    Bytes::from(vec![0xff; 512]),
+                    false,
+                )
+                .await;
+        }
+
+        // ops 4 to 6
+        for i in 0..3 {
+            upstairs
+                .submit_dummy_write(
+                    Block::new_512(i),
+                    Bytes::from(vec![0xff; 512]),
+                    false,
+                )
+                .await;
+        }
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 7);
+
+        assert!(jobs[0].work.deps().is_empty()); // write @ 0,1,2
+
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // write @ 0
+        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id]); // write @ 1
+        assert_eq!(jobs[3].work.deps(), &[jobs[0].ds_id]); // write @ 2
+
+        assert_eq!(
+            jobs[4].work.deps(), // second write @ 0
+            &[jobs[1].ds_id],
+        );
+        assert_eq!(
+            jobs[5].work.deps(), // second write @ 1
+            &[jobs[2].ds_id],
+        );
+        assert_eq!(
+            jobs[6].work.deps(), // second write @ 2
+            &[jobs[3].ds_id],
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deps_big_write_depends_on_little_writes() {
+        // Test that the following job dependency graph is made:
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W     |
+        //   1 |   W   |
+        //   2 |     W |
+        //   3 | W W W | 0,1,2
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // ops 0 to 2
+        for i in 0..3 {
+            upstairs
+                .submit_dummy_write(
+                    Block::new_512(i),
+                    Bytes::from(vec![0xff; 512]),
+                    false,
+                )
+                .await;
+        }
+
+        // op 3
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0xff; 512 * 3]),
+                false,
+            )
+            .await;
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 4);
+
+        assert!(jobs[0].work.deps().is_empty()); // write @ 0
+        assert!(jobs[1].work.deps().is_empty()); // write @ 1
+        assert!(jobs[2].work.deps().is_empty()); // write @ 2
+
+        assert_eq!(
+            jobs[3].work.deps(), // write @ 0,1,2
+            &[jobs[0].ds_id, jobs[1].ds_id, jobs[2].ds_id],
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deps_read_depends_on_write() {
+        // Test that the following job dependency graph is made:
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W     |
+        //   1 | R     | 0
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // op 0
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            )
+            .await;
+
+        // op 1
+        upstairs
+            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .await;
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 2);
+
+        assert!(jobs[0].work.deps().is_empty()); // write @ 0
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // read @ 0
+    }
+
+    #[tokio::test]
+    async fn test_deps_big_read_depends_on_little_writes() {
+        // Test that the following job dependency graph is made:
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W     |
+        //   1 |   W   |
+        //   2 |     W |
+        //   3 | R R   | 0,1
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // ops 0 to 2
+        for i in 0..3 {
+            upstairs
+                .submit_dummy_write(
+                    Block::new_512(i),
+                    Bytes::from(vec![0xff; 512]),
+                    false,
+                )
+                .await;
+        }
+
+        // op 3
+        upstairs
+            .submit_dummy_read(Block::new_512(0), Buffer::new(512 * 2))
+            .await;
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 4);
+
+        assert!(jobs[0].work.deps().is_empty()); // write @ 0
+        assert!(jobs[1].work.deps().is_empty()); // write @ 1
+        assert!(jobs[2].work.deps().is_empty()); // write @ 2
+
+        assert_eq!(
+            jobs[3].work.deps(), // read @ 0,1
+            &[jobs[0].ds_id, jobs[1].ds_id],
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deps_read_no_depend_on_read() {
+        // Test that the following job dependency graph is made:
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | R     |
+        //   1 | R     |
+        //
+        // (aka two reads don't depend on each other)
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // op 0
+        upstairs
+            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .await;
+
+        // op 1
+        upstairs
+            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .await;
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 2);
+
+        assert!(jobs[0].work.deps().is_empty()); // read @ 0
+        assert!(jobs[1].work.deps().is_empty()); // read @ 0
+    }
+
+    #[tokio::test]
+    async fn test_deps_multiple_reads_depend_on_write() {
+        // Test that the following job dependency graph is made:
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W     |
+        //   1 | R     | 0
+        //   2 | R     | 0
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // op 0
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            )
+            .await;
+
+        // op 1
+        upstairs
+            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .await;
+
+        // op 2
+        upstairs
+            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .await;
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 3);
+
+        assert!(jobs[0].work.deps().is_empty()); // write @ 0
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // read @ 0
+        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id]); // read @ 0
+    }
+
+    #[tokio::test]
+    async fn test_deps_read_depends_on_flush() {
+        // Test that the following job dependency graph is made:
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W     |
+        //   1 | FFFFF | 0
+        //   2 | R     | 1
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // op 0
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            )
+            .await;
+
+        // op 1
+        upstairs.submit_flush(None, None).await;
+
+        // op 2
+        upstairs
+            .submit_dummy_read(Block::new_512(0), Buffer::new(512 * 2))
+            .await;
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 3);
+
+        assert!(jobs[0].work.deps().is_empty()); // write @ 0
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // flush
+        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // read @ 0
+    }
+
+    #[tokio::test]
+    async fn test_deps_flushes_depend_on_flushes() {
+        // Test that the following job dependency graph is made:
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | FFFFF |
+        //   1 | FFFFF | 0
+        //   2 | FFFFF | 1
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        upstairs.submit_flush(None, None).await;
+
+        upstairs.submit_flush(None, None).await;
+
+        upstairs.submit_flush(None, None).await;
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 3);
+
+        assert!(jobs[0].work.deps().is_empty());
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
+        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]);
+    }
+
+    #[tokio::test]
+    async fn test_deps_flushes_depend_on_flushes_and_all_writes() {
+        // Test that the following job dependency graph is made:
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | FFFFF |
+        //   1 | W     | 0
+        //   2 |   W   | 0
+        //   3 | FFFFF | 0,1,2
+        //   4 | W     | 3
+        //   5 |   W   | 3
+        //   6 |     W | 3
+        //   7 | FFFFF | 3,4,5,6
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // op 0
+        upstairs.submit_flush(None, None).await;
+
+        // ops 1 to 2
+        for i in 0..2 {
+            upstairs
+                .submit_dummy_write(
+                    Block::new_512(i),
+                    Bytes::from(vec![0xff; 512]),
+                    false,
+                )
+                .await;
+        }
+
+        // op 3
+        upstairs.submit_flush(None, None).await;
+
+        // ops 4 to 6
+        for i in 0..3 {
+            upstairs
+                .submit_dummy_write(
+                    Block::new_512(i),
+                    Bytes::from(vec![0xff; 512]),
+                    false,
+                )
+                .await;
+        }
+
+        // op 7
+        upstairs.submit_flush(None, None).await;
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 8);
+
+        assert!(jobs[0].work.deps().is_empty()); // flush (op 0)
+
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // write (op 1)
+        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id]); // write (op 2)
+
+        assert_eq!(
+            jobs[3].work.deps(),
+            &[jobs[0].ds_id, jobs[1].ds_id, jobs[2].ds_id],
+        ); // flush (op 3)
+
+        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // write (op 4)
+        assert_eq!(jobs[5].work.deps(), &[jobs[3].ds_id]); // write (op 5)
+        assert_eq!(jobs[6].work.deps(), &[jobs[3].ds_id]); // write (op 6)
+
+        assert_eq!(
+            jobs[7].work.deps(), // flush (op 7)
+            &[jobs[3].ds_id, jobs[4].ds_id, jobs[5].ds_id, jobs[6].ds_id],
+        );
+    }
+
+    #[tokio::test]
+    async fn test_deps_writes_depend_on_read() {
+        // Test that the following job dependency graph is made:
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | R     |
+        //   1 | W     | 0
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // op 0
+        upstairs
+            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .await;
+
+        // op 1
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            )
+            .await;
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 2);
+
+        assert!(jobs[0].work.deps().is_empty()); // op 0
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+    }
+
+    #[tokio::test]
+    async fn test_deps_write_unwrittens_depend_on_read() {
+        // Test that the following job dependency graph is made:
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | R     |
+        //   1 | Wu    | 0
+        //   2 | R     | 1
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // op 0
+        upstairs
+            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .await;
+
+        // op 1
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0xff; 512]),
+                true,
+            )
+            .await;
+
+        // op 2
+        upstairs
+            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .await;
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 3);
+
+        assert!(jobs[0].work.deps().is_empty()); // op 0
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
+    }
+
+    #[tokio::test]
+    async fn test_deps_read_write_ladder_1() {
+        // Test that the following job dependency graph is made:
+        //
+        //          block
+        // op# | 0 1 2 3 4 5 | deps
+        // ----|-------------|-----
+        //   0 | R           |
+        //   1 | Wu          | 0
+        //   2 |   R R       |
+        //   3 |   W W       | 2
+        //   4 |       R R   |
+        //   5 |       WuWu  | 4
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // op 0
+        upstairs
+            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .await;
+
+        // op 1
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0xff; 512]),
+                true,
+            )
+            .await;
+
+        // op 2
+        upstairs
+            .submit_dummy_read(Block::new_512(1), Buffer::new(512 * 2))
+            .await;
+
+        // op 3
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(1),
+                Bytes::from(vec![0xff; 512 * 2]),
+                false,
+            )
+            .await;
+
+        // op 4
+        upstairs
+            .submit_dummy_read(Block::new_512(3), Buffer::new(512 * 2))
+            .await;
+
+        // op 5
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(3),
+                Bytes::from(vec![0xff; 512 * 2]),
+                true,
+            )
+            .await;
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 6);
+
+        assert!(jobs[0].work.deps().is_empty()); // op 0
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+
+        assert!(jobs[2].work.deps().is_empty()); // op 2
+        assert_eq!(jobs[3].work.deps(), &[jobs[2].ds_id]); // op 3
+
+        assert!(jobs[4].work.deps().is_empty()); // op 4
+        assert_eq!(jobs[5].work.deps(), &[jobs[4].ds_id]); // op 5
+    }
+
+    #[tokio::test]
+    async fn test_deps_read_write_ladder_2() {
+        // Test that the following job dependency graph is made:
+        //
+        //          block
+        // op# | 0 1 2 3 4 5 | deps
+        // ----|-------------|-----
+        //   0 | WuWu        |
+        //   1 |   WuWu      | 0
+        //   2 |     WuWu    | 1
+        //   3 |       WuWu  | 2
+        //   4 |         WuWu| 3
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // ops 0 to 4
+        for i in 0..5 {
+            upstairs
+                .submit_dummy_write(
+                    Block::new_512(i),
+                    Bytes::from(vec![0xff; 512 * 2]),
+                    true,
+                )
+                .await;
+        }
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 5);
+
+        assert!(jobs[0].work.deps().is_empty()); // op 0
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
+        assert_eq!(jobs[3].work.deps(), &[jobs[2].ds_id]); // op 3
+        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // op 4
+    }
+
+    #[tokio::test]
+    async fn test_deps_read_write_ladder_3() {
+        // Test that the following job dependency graph is made:
+        //
+        //          block
+        // op# | 0 1 2 3 4 5 | deps
+        // ----|-------------|-----
+        //   0 |         W W |
+        //   1 |       W W   | 0
+        //   2 |     W W     | 1
+        //   3 |   W W       | 2
+        //   4 | W W         | 3
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // ops 0 to 4
+        for i in (0..5).rev() {
+            upstairs
+                .submit_dummy_write(
+                    Block::new_512(i),
+                    Bytes::from(vec![0xff; 512 * 2]),
+                    false,
+                )
+                .await;
+        }
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 5);
+
+        assert!(jobs[0].work.deps().is_empty()); // op 0
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
+        assert_eq!(jobs[3].work.deps(), &[jobs[2].ds_id]); // op 3
+        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // op 4
+    }
+
+    #[tokio::test]
+    async fn test_deps_read_write_batman() {
+        // Test that the following job dependency graph is made:
+        //
+        //          block
+        // op# | 0 1 2 3 4 5 | deps
+        // ----|-------------|-----
+        //   0 | W W         |
+        //   1 |         W W |
+        //   2 |   W W W W   | 0,1
+        //   3 |             |
+        //   4 |             |
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // op 0
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(0),
+                Bytes::from(vec![0xff; 512 * 2]),
+                false,
+            )
+            .await;
+
+        // op 1
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(4),
+                Bytes::from(vec![0xff; 512 * 2]),
+                false,
+            )
+            .await;
+
+        // op 2
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(1),
+                Bytes::from(vec![0xff; 512 * 4]),
+                false,
+            )
+            .await;
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 3);
+
+        assert!(jobs[0].work.deps().is_empty()); // op 0
+        assert!(jobs[1].work.deps().is_empty()); // op 1
+        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id, jobs[1].ds_id],); // op 2
+    }
+
+    #[tokio::test]
+    async fn test_deps_multi_extent_write() {
+        // Test that the following job dependency graph is made:
+        //
+        //     |      block     |      block      |
+        // op# | 95 96 97 98 99 |  0  1  2  3  4  | deps
+        // ----|----------------|-----------------|-----
+        //   0 |  W  W          |                 |
+        //   1 |     W  W  W  W |  W  W  W        | 0
+        //   2 |                |        W  W     | 1
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // op 0
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(95),
+                Bytes::from(vec![0xff; 512 * 2]),
+                false,
+            )
+            .await;
+
+        // op 1
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(96),
+                Bytes::from(vec![0xff; 512 * 7]),
+                false,
+            )
+            .await;
+
+        // op 2
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(102),
+                Bytes::from(vec![0xff; 512 * 2]),
+                false,
+            )
+            .await;
+
+        let ds = &upstairs.downstairs;
+        let jobs = ds.get_all_jobs();
+        assert_eq!(jobs.len(), 3);
+
+        // confirm which extents are impacted (in case make_upstairs changes)
+        assert_eq!(ds.get_extents_for(jobs[0]).extents().unwrap().count(), 1);
+        assert_eq!(ds.get_extents_for(jobs[1]).extents().unwrap().count(), 2);
+        assert_eq!(ds.get_extents_for(jobs[2]).extents().unwrap().count(), 1);
+        assert_ne!(ds.get_extents_for(jobs[0]), ds.get_extents_for(jobs[2]));
+
+        // confirm deps
+        assert!(jobs[0].work.deps().is_empty()); // op 0
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
+    }
+
+    #[tokio::test]
+    async fn test_deps_multi_extent_there_and_back_again() {
+        // Test that the following job dependency graph is made:
+        //
+        //     |      block     |      block      |
+        // op# | 95 96 97 98 99 |  0  1  2  3  4  | deps
+        // ----|----------------|-----------------|-----
+        //   0 |  W  W          |                 |
+        //   1 |     W  W  W  W |  W  W  W        | 0
+        //   2 |                |     W           | 1
+        //   3 |              Wu|  Wu Wu          | 1,2
+        //   4 |              R |                 | 3
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // op 0
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(95),
+                Bytes::from(vec![0xff; 512 * 2]),
+                false,
+            )
+            .await;
+
+        // op 1
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(96),
+                Bytes::from(vec![0xff; 512 * 7]),
+                false,
+            )
+            .await;
+
+        // op 2
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(101),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            )
+            .await;
+
+        // op 3
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(99),
+                Bytes::from(vec![0xff; 512 * 3]),
+                true,
+            )
+            .await;
+
+        // op 4
+        upstairs
+            .submit_dummy_read(Block::new_512(99), Buffer::new(512))
+            .await;
+
+        let ds = &upstairs.downstairs;
+        let jobs = ds.get_all_jobs();
+        assert_eq!(jobs.len(), 5);
+
+        // confirm which extents are impacted (in case make_upstairs changes)
+        assert_eq!(ds.get_extents_for(jobs[0]).extents().unwrap().count(), 1);
+        assert_eq!(ds.get_extents_for(jobs[1]).extents().unwrap().count(), 2);
+        assert_eq!(ds.get_extents_for(jobs[2]).extents().unwrap().count(), 1);
+        assert_eq!(ds.get_extents_for(jobs[3]).extents().unwrap().count(), 2);
+        assert_eq!(ds.get_extents_for(jobs[4]).extents().unwrap().count(), 1);
+
+        assert_ne!(ds.get_extents_for(jobs[0]), ds.get_extents_for(jobs[2]));
+        assert_ne!(ds.get_extents_for(jobs[4]), ds.get_extents_for(jobs[2]));
+
+        assert!(jobs[0].work.deps().is_empty()); // op 0
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
+        assert_eq!(jobs[3].work.deps(), &[jobs[1].ds_id, jobs[2].ds_id]); // op 3
+        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // op 4
+    }
+
+    #[tokio::test]
+    async fn test_deps_multi_extent_batman() {
+        // Test that the following job dependency graph is made:
+        //
+        //     |      block     |      block      |
+        // op# | 95 96 97 98 99 |  0  1  2  3  4  | deps
+        // ----|----------------|-----------------|-----
+        //   0 |  W  W          |                 |
+        //   1 |                |        W        |
+        //   2 |     Wu Wu Wu Wu|  Wu Wu Wu       | 0,1
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // op 0
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(95),
+                Bytes::from(vec![0xff; 512 * 2]),
+                false,
+            )
+            .await;
+
+        // op 1
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(102),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            )
+            .await;
+
+        // op 2
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(96),
+                Bytes::from(vec![0xff; 512 * 7]),
+                true,
+            )
+            .await;
+
+        let ds = &upstairs.downstairs;
+        let jobs = ds.get_all_jobs();
+        assert_eq!(jobs.len(), 3);
+
+        // confirm which extents are impacted (in case make_upstairs changes)
+        assert_eq!(ds.get_extents_for(jobs[0]).extents().unwrap().count(), 1);
+        assert_eq!(ds.get_extents_for(jobs[1]).extents().unwrap().count(), 1);
+        assert_eq!(ds.get_extents_for(jobs[2]).extents().unwrap().count(), 2);
+
+        assert_ne!(ds.get_extents_for(jobs[0]), ds.get_extents_for(jobs[1]));
+
+        assert!(jobs[0].work.deps().is_empty()); // op 0
+        assert!(jobs[1].work.deps().is_empty()); // op 1
+        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id, jobs[1].ds_id]); // op 2
+    }
+
+    #[tokio::test]
+    async fn test_read_flush_write_hash_mismatch() {
+        // Test that the following job dependency graph is made:
+        //
+        //     |      block     |
+        // op# | 95 96 97 98 99 | deps
+        // ----|----------------|-----
+        //   0 |  R  R          |
+        //   1 | FFFFFFFFFFFFFFF| 0
+        //   2 |     W  W       | 1
+
+        let mut upstairs = make_upstairs();
+        upstairs.force_active().unwrap();
+
+        // op 0
+        upstairs
+            .submit_dummy_read(Block::new_512(95), Buffer::new(512 * 2))
+            .await;
+
+        // op 1
+        upstairs.submit_flush(None, None).await;
+
+        // op 2
+        upstairs
+            .submit_dummy_write(
+                Block::new_512(96),
+                Bytes::from(vec![0xff; 512 * 2]),
+                false,
+            )
+            .await;
+
+        let jobs = upstairs.downstairs.get_all_jobs();
+        assert_eq!(jobs.len(), 3);
+
+        // assert read has no deps
+        assert!(jobs[0].work.deps().is_empty()); // op 0
+
+        // assert flush depends on the read
+        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+
+        // assert write depends on just the flush
+        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
     }
 }

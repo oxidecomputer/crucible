@@ -3394,6 +3394,24 @@ impl Downstairs {
         }
         job.acked = true;
     }
+
+    /// Returns all jobs in sorted order by [`JobId`]
+    ///
+    /// This function is used in unit tests for the Upstairs
+    #[cfg(test)]
+    pub(crate) fn get_all_jobs(&self) -> Vec<&DownstairsIO> {
+        // This is a BTreeMap, so it's already sorted
+        self.ds_active.values().collect()
+    }
+
+    /// Return the extent range covered by the given job
+    ///
+    /// # Panics
+    /// If the job is not stored in our `Downstairs`
+    #[cfg(test)]
+    pub fn get_extents_for(&self, job: &DownstairsIO) -> ImpactedBlocks {
+        self.ds_active.get_extents_for(job.ds_id)
+    }
 }
 
 #[cfg(test)]
