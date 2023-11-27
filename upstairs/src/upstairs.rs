@@ -67,7 +67,7 @@ pub(crate) struct Upstairs {
     /// The guest struct keeps track of jobs accepted from the Guest
     ///
     /// A single job submitted can produce multiple downstairs requests.
-    guest: Arc<Guest>,
+    pub(crate) guest: Arc<Guest>,
 
     /// Region definition
     ///
@@ -1565,7 +1565,7 @@ impl Upstairs {
     /// This means that we haven't gone through negotiation, so behavior may be
     /// wonky or unexpected; this is only allowed during unit tests.
     #[cfg(test)]
-    fn force_active(&mut self) -> Result<(), CrucibleError> {
+    pub(crate) fn force_active(&mut self) -> Result<(), CrucibleError> {
         match self.state {
             UpstairsState::Initializing => {
                 self.state = UpstairsState::Active;
@@ -1583,6 +1583,20 @@ impl Upstairs {
                 Err(CrucibleError::UpstairsDeactivating)
             }
         }
+    }
+
+    /// Forces the downstairs client to the given state
+    ///
+    /// # Panics
+    /// If the state transition is invalid
+    #[cfg(test)]
+    pub(crate) fn force_ds_state(
+        &mut self,
+        client_id: ClientId,
+        state: DsState,
+    ) {
+        self.downstairs.clients[client_id]
+            .checked_state_transition(&self.state, state);
     }
 
     fn set_inactive(&mut self, err: CrucibleError) {
@@ -1670,6 +1684,21 @@ impl Upstairs {
 mod test {
     use super::*;
     use crate::test::make_upstairs;
+
+    #[tokio::test]
+    async fn reconcile_not_ready() {
+        // Verify reconcile returns false when a downstairs is not ready
+        let mut up = Upstairs::test_default(None);
+        up.force_ds_state(ClientId::new(0), DsState::WaitActive);
+        up.force_ds_state(ClientId::new(0), DsState::WaitQuorum);
+
+        up.force_ds_state(ClientId::new(1), DsState::WaitActive);
+        up.force_ds_state(ClientId::new(1), DsState::WaitQuorum);
+
+        let res = up.connect_region_set().await;
+        assert!(!res);
+        assert!(!matches!(&up.state, &UpstairsState::Active))
+    }
 
     // Job dependency tests
     //

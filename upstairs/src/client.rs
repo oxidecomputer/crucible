@@ -933,6 +933,7 @@ impl DownstairsClient {
         up_state: &UpstairsState,
         new_state: DsState,
     ) {
+        // TODO this should probably be private!
         info!(self.log, "ds_transition from {} to {new_state}", self.state);
 
         let old_state = self.state;
@@ -2119,6 +2120,10 @@ impl DownstairsClient {
         }
         let prev_state = job.state.insert(self.client_id, IOState::InProgress);
         assert_eq!(prev_state, IOState::New);
+
+        // Some reconciliation messages need to be adjusted on a per-client
+        // basis, e.g. not sending ExtentRepair to clients that aren't being
+        // repaired.
         match &job.op {
             Message::ExtentRepair {
                 repair_id,

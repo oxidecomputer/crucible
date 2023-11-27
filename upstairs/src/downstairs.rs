@@ -3191,6 +3191,7 @@ impl Downstairs {
                 );
                 self.clients[client_id]
                     .checked_state_transition(up_state, DsState::Disabled);
+                // TODO should we also restart the IO task here?
             }
             Some(CrucibleError::DecryptionError) => {
                 // We should always be able to decrypt the data.  If we
@@ -3412,6 +3413,16 @@ impl Downstairs {
     #[cfg(test)]
     pub fn get_extents_for(&self, job: &DownstairsIO) -> ImpactedBlocks {
         self.ds_active.get_extents_for(job.ds_id)
+    }
+
+    #[cfg(test)]
+    pub fn ackable_work(&self) -> &BTreeSet<JobId> {
+        &self.ackable_work
+    }
+
+    #[cfg(test)]
+    pub fn completed(&self) -> &AllocRingBuffer<JobId> {
+        &self.completed
     }
 }
 
