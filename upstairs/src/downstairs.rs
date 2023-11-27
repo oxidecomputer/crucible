@@ -3407,6 +3407,7 @@ mod test {
         upstairs::UpstairsState,
         ClientId, CrucibleError, JobId, ReadResponse, SnapshotDetails,
     };
+    use bytes::Bytes;
     use ringbuffer::RingBuffer;
 
     #[tokio::test]
@@ -4490,5 +4491,751 @@ mod test {
         assert_eq!(ds.completed.len(), 3);
         // Downstairs 2 should update the last flush it just did.
         assert_eq!(ds.clients[ClientId::new(2)].last_flush, flush_id);
+    }
+
+    #[tokio::test]
+    async fn work_assert_reads_do_not_cause_failure_state_transition() {
+        let mut ds = Downstairs::test_default();
+
+        let next_id = ds.next_id();
+
+        // send a read, and clients 0 and 1 will return errors
+
+        let (request, op) = create_generic_read_eob(&mut ds, next_id);
+
+        ds.enqueue(op);
+
+        assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
+        assert!(ds.in_progress(next_id, ClientId::new(1)).is_some());
+        assert!(ds.in_progress(next_id, ClientId::new(2)).is_some());
+
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        ));
+
+        assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
+
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        ));
+
+        assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
+
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[3])]);
+
+        assert!(ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            response,
+            &UpstairsState::Active,
+            None
+        ));
+
+        let responses = ds.ds_active.get(&next_id).unwrap().data.as_ref();
+        assert!(responses.is_some());
+        assert_eq!(
+            responses.map(|responses| responses
+                .iter()
+                .map(|response| response.data.clone().freeze())
+                .collect()),
+            Some(vec![Bytes::from_static(&[3])]),
+        );
+
+        assert_eq!(ds.clients[ClientId::new(0)].stats.downstairs_errors, 0);
+        assert_eq!(ds.clients[ClientId::new(1)].stats.downstairs_errors, 0);
+        assert_eq!(ds.clients[ClientId::new(2)].stats.downstairs_errors, 0);
+
+        // send another read, and expect all to return something
+        // (reads shouldn't cause a Failed transition)
+
+        let next_id = ds.next_id();
+        let (request, op) = create_generic_read_eob(&mut ds, next_id);
+
+        ds.enqueue(op);
+
+        assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
+        assert!(ds.in_progress(next_id, ClientId::new(1)).is_some());
+        assert!(ds.in_progress(next_id, ClientId::new(2)).is_some());
+
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        ));
+
+        assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
+
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        ));
+
+        assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
+
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[6])]);
+
+        assert!(ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            response,
+            &UpstairsState::Active,
+            None
+        ));
+
+        let responses = ds.ds_active.get(&next_id).unwrap().data.as_ref();
+        assert!(responses.is_some());
+        assert_eq!(
+            responses.map(|responses| responses
+                .iter()
+                .map(|response| response.data.clone().freeze())
+                .collect()),
+            Some(vec![Bytes::from_static(&[6])]),
+        );
+    }
+
+    #[tokio::test]
+    async fn work_completed_read_flush() {
+        // Verify that a read remains on the active queue until a flush
+        // comes through and clears it.
+        let mut ds = Downstairs::test_default();
+
+        // Build our read, put it into the work queue
+        let next_id = ds.next_id();
+
+        let (request, op) = create_generic_read_eob(&mut ds, next_id);
+
+        ds.enqueue(op);
+
+        // Move the work to submitted like we sent it to each downstairs
+        ds.in_progress(next_id, ClientId::new(0));
+        ds.in_progress(next_id, ClientId::new(1));
+        ds.in_progress(next_id, ClientId::new(2));
+
+        // Downstairs 0 now has completed this work.
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        assert!(ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            response,
+            &UpstairsState::Active,
+            None
+        ));
+
+        // One completion of a read means we can ACK
+        assert_eq!(ds.ackable_work.len(), 1);
+
+        // Complete downstairs 1 and 2
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            response,
+            &UpstairsState::Active,
+            None
+        ));
+
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            response,
+            &UpstairsState::Active,
+            None
+        ));
+
+        // Make sure the job is still active
+        assert_eq!(ds.completed.len(), 0);
+
+        // Ack the job to the guest (this checks whether it's ack ready)
+        ds.ack(next_id);
+
+        // Nothing left to ACK, but until the flush we keep the IO data.
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        // A flush is required to move work to completed
+        // Create the flush then send it to all downstairs.
+        let next_id = ds.next_id();
+        let deps = ds.ds_active.deps_for_flush(next_id);
+        let op = Downstairs::create_flush(next_id, deps, 10, 0, 0, None, None);
+
+        ds.enqueue(op);
+
+        ds.in_progress(next_id, ClientId::new(0));
+        ds.in_progress(next_id, ClientId::new(1));
+        ds.in_progress(next_id, ClientId::new(2));
+
+        // Complete the Flush at each downstairs.
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        ));
+        // Two completed means we return true (ack ready now)
+        assert!(ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None
+        ));
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None
+        ));
+
+        // ACK the flush and let retire_check move things along.
+        ds.ack(next_id);
+        ds.retire_check(next_id);
+
+        // Verify no more work to ack.
+        assert_eq!(ds.ackable_work.len(), 0);
+        // The read and the flush should now be moved to completed.
+        assert_eq!(ds.completed.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn retire_dont_retire_everything() {
+        // Verify that a read not ACKED remains on the active queue even
+        // if a flush comes through after it.
+        let mut ds = Downstairs::test_default();
+
+        // Build our read, put it into the work queue
+        let next_id = ds.next_id();
+
+        let (request, op) = create_generic_read_eob(&mut ds, next_id);
+
+        ds.enqueue(op);
+
+        // Move the work to submitted like we sent it to each downstairs
+        ds.in_progress(next_id, ClientId::new(0));
+        ds.in_progress(next_id, ClientId::new(1));
+        ds.in_progress(next_id, ClientId::new(2));
+
+        // Downstairs 0 now has completed this work.
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        assert!(ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            response,
+            &UpstairsState::Active,
+            None
+        ));
+
+        // One completion of a read means we can ACK
+        assert_eq!(ds.ackable_work.len(), 1);
+
+        // But, don't send the ack just yet.
+        // The job should be ack ready
+        assert!(ds.ackable_work.contains(&next_id));
+        assert!(!ds.ds_active.get(&next_id).unwrap().acked);
+
+        // A flush is required to move work to completed
+        // Create the flush then send it to all downstairs.
+        let next_id = ds.next_id();
+        let deps = ds.ds_active.deps_for_flush(next_id);
+        let op = Downstairs::create_flush(next_id, deps, 10, 0, 0, None, None);
+
+        ds.enqueue(op);
+
+        // Send and complete the Flush at each downstairs.
+        for cid in ClientId::iter() {
+            ds.in_progress(next_id, cid);
+            ds.process_ds_completion(
+                next_id,
+                cid,
+                Ok(vec![]),
+                &UpstairsState::Active,
+                None,
+            );
+        }
+
+        // ACK the flush and let retire_check move things along.
+        ds.ack(next_id);
+        ds.retire_check(next_id);
+
+        // Verify the read is still ack ready.
+        assert_eq!(ds.ackable_work.len(), 1);
+        // The the flush should now be moved to completed.
+        assert_eq!(ds.completed.len(), 1);
+        // The read should still be on the queue.
+        assert_eq!(ds.ds_active.len(), 1);
+    }
+
+    #[test]
+    fn work_completed_write_flush() {
+        work_completed_writeio_flush(false);
+    }
+
+    #[test]
+    fn work_completed_write_unwritten_flush() {
+        work_completed_writeio_flush(true);
+    }
+
+    fn work_completed_writeio_flush(is_write_unwritten: bool) {
+        // Verify that a write or write_unwritten remains on the active
+        // queue until a flush comes through and clears it.
+        let mut ds = Downstairs::test_default();
+
+        // Build our write IO.
+        let next_id = ds.next_id();
+
+        let (request, iblocks) = generic_write_request();
+        let op = ds.create_write_eob(
+            next_id,
+            iblocks,
+            10,
+            vec![request],
+            is_write_unwritten,
+        );
+        // Put the write on the queue.
+        ds.enqueue(op);
+
+        // Submit the write to all three downstairs.
+        ds.in_progress(next_id, ClientId::new(0));
+        ds.in_progress(next_id, ClientId::new(1));
+        ds.in_progress(next_id, ClientId::new(2));
+
+        // Complete the write on all three downstairs.
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None
+        ));
+        assert_eq!(
+            ds.process_ds_completion(
+                next_id,
+                ClientId::new(1),
+                Ok(vec![]),
+                &UpstairsState::Active,
+                None
+            ),
+            is_write_unwritten
+        );
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None
+        ));
+
+        // Ack the write to the guest
+        ds.ack(next_id);
+
+        // Work stays on active queue till the flush
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        // Create the flush IO
+        let next_id = ds.next_id();
+        let dep = ds.ds_active.deps_for_flush(next_id);
+        let op = Downstairs::create_flush(next_id, dep, 10, 0, 0, None, None);
+        ds.enqueue(op);
+
+        // Submit the flush to all three downstairs.
+        ds.in_progress(next_id, ClientId::new(0));
+        ds.in_progress(next_id, ClientId::new(1));
+        ds.in_progress(next_id, ClientId::new(2));
+
+        // Complete the flush on all three downstairs.
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None
+        ));
+        assert!(ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None
+        ));
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None
+        ));
+
+        ds.ack(next_id);
+        ds.retire_check(next_id);
+
+        assert_eq!(ds.ackable_work.len(), 0);
+        // The write and flush should now be completed.
+        assert_eq!(ds.completed.len(), 2);
+    }
+
+    #[test]
+    fn work_delay_completion_flush_order_write() {
+        work_delay_completion_flush_order(false);
+    }
+
+    #[test]
+    fn work_delay_completion_flush_order_write_unwritten() {
+        work_delay_completion_flush_order(true);
+    }
+
+    fn work_delay_completion_flush_order(is_write_unwritten: bool) {
+        // Verify that a write/write_unwritten remains on the active queue
+        // until a flush comes through and clears it.  In this case, we only
+        // complete 2 of 3 for each IO.  We later come back and finish the
+        // 3rd IO and the flush, which then allows the work to be completed.
+        // Also, we mix up which client finishes which job first.
+        let mut ds = Downstairs::test_default();
+
+        // Build two writes, put them on the work queue.
+        let id1 = ds.next_id();
+        let id2 = ds.next_id();
+
+        let (request, iblocks) = generic_write_request();
+        let op = ds.create_write_eob(
+            id1,
+            iblocks,
+            10,
+            vec![request],
+            is_write_unwritten,
+        );
+        ds.enqueue(op);
+
+        let (request, iblocks) = generic_write_request();
+        let op = ds.create_write_eob(
+            id2,
+            iblocks,
+            1,
+            vec![request],
+            is_write_unwritten,
+        );
+        ds.enqueue(op);
+
+        // Submit the two writes, to 2/3 of the downstairs.
+        assert!(ds.in_progress(id1, ClientId::new(0)).is_some());
+        assert!(ds.in_progress(id1, ClientId::new(1)).is_some());
+        assert!(ds.in_progress(id2, ClientId::new(1)).is_some());
+        assert!(ds.in_progress(id2, ClientId::new(2)).is_some());
+
+        // Complete the writes that we sent to the 2 downstairs.
+        assert!(!ds.process_ds_completion(
+            id1,
+            ClientId::new(0),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None
+        ));
+        assert_eq!(
+            ds.process_ds_completion(
+                id1,
+                ClientId::new(1),
+                Ok(vec![]),
+                &UpstairsState::Active,
+                None
+            ),
+            is_write_unwritten
+        );
+        assert!(!ds.process_ds_completion(
+            id2,
+            ClientId::new(1),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None
+        ));
+        assert_eq!(
+            ds.process_ds_completion(
+                id2,
+                ClientId::new(2),
+                Ok(vec![]),
+                &UpstairsState::Active,
+                None
+            ),
+            is_write_unwritten
+        );
+
+        // Ack the writes to the guest.
+        ds.ack(id1);
+        ds.ack(id2);
+
+        // Work stays on active queue till the flush.
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        // Create and enqueue the flush.
+        let flush_id = ds.next_id();
+        let dep = ds.ds_active.deps_for_flush(flush_id);
+        let op = Downstairs::create_flush(flush_id, dep, 10, 0, 0, None, None);
+        ds.enqueue(op);
+
+        // Send the flush to two downstairs.
+        ds.in_progress(flush_id, ClientId::new(0));
+        ds.in_progress(flush_id, ClientId::new(2));
+
+        // Complete the flush on those downstairs.
+        assert!(!ds.process_ds_completion(
+            flush_id,
+            ClientId::new(0),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None
+        ));
+        assert!(ds.process_ds_completion(
+            flush_id,
+            ClientId::new(2),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None
+        ));
+
+        // Ack the flush
+        ds.ack(flush_id);
+
+        // Should not retire yet
+        ds.retire_check(flush_id);
+
+        assert_eq!(ds.ackable_work.len(), 0);
+        // Not done yet, until all clients do the work.
+        assert_eq!(ds.completed.len(), 0);
+
+        // Verify who has updated their last flush.
+        assert_eq!(ds.clients[ClientId::new(0)].last_flush, flush_id);
+        assert_eq!(ds.clients[ClientId::new(1)].last_flush, JobId(0));
+        assert_eq!(ds.clients[ClientId::new(2)].last_flush, flush_id);
+
+        // Now, finish sending and completing the writes
+        assert!(ds.in_progress(id1, ClientId::new(2)).is_some());
+        assert!(ds.in_progress(id2, ClientId::new(0)).is_some());
+        assert!(!ds.process_ds_completion(
+            id1,
+            ClientId::new(2),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None
+        ));
+        assert!(!ds.process_ds_completion(
+            id2,
+            ClientId::new(0),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None
+        ));
+
+        // Completed work won't happen till the last flush is done
+        assert_eq!(ds.completed.len(), 0);
+
+        // Send and complete the flush
+        ds.in_progress(flush_id, ClientId::new(1));
+        assert!(!ds.process_ds_completion(
+            flush_id,
+            ClientId::new(1),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None
+        ));
+
+        // Now, all three jobs (w,w,f) will move to completed.
+        assert_eq!(ds.completed.len(), 3);
+
+        // downstairs 1 should now have that flush
+        assert_eq!(ds.clients[ClientId::new(1)].last_flush, flush_id);
+    }
+
+    #[tokio::test]
+    async fn work_completed_read_replay() {
+        // Verify that a single read will replay
+        let mut ds = Downstairs::test_default();
+
+        // Build our read IO and submit it to the work queue.
+        let next_id = ds.next_id();
+        let (request, op) = create_generic_read_eob(&mut ds, next_id);
+        ds.enqueue(op);
+
+        // Submit the read to all three downstairs
+        ds.in_progress(next_id, ClientId::new(0));
+        ds.in_progress(next_id, ClientId::new(1));
+        ds.in_progress(next_id, ClientId::new(2));
+
+        // Complete the read on one downstairs.
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        assert!(ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            response,
+            &UpstairsState::Active,
+            None
+        ));
+
+        // One completion should allow for an ACK
+        assert_eq!(ds.ackable_work.len(), 1);
+        assert!(ds.ackable_work.contains(&next_id));
+        assert!(!ds.ds_active.get(&next_id).unwrap().acked);
+
+        // The Downstairs will ack jobs immediately, during the event handler
+        ds.ack(next_id);
+
+        // Be sure the job is not yet in replay
+        assert!(!ds.ds_active.get(&next_id).unwrap().replay);
+        ds.replay_jobs(ClientId::new(0));
+        // Now the IO should be replay
+        assert!(ds.ds_active.get(&next_id).unwrap().replay);
+
+        // The IO is still acked
+        assert!(!ds.ackable_work.contains(&next_id));
+        assert!(ds.ds_active.get(&next_id).unwrap().acked);
+    }
+
+    #[tokio::test]
+    async fn work_completed_two_read_replay() {
+        // Verify that a read will replay and acks are handled correctly if
+        // there is more than one done read.
+        let mut ds = Downstairs::test_default();
+
+        // Build a read and put it on the work queue.
+        let next_id = ds.next_id();
+        let (request, op) = create_generic_read_eob(&mut ds, next_id);
+        ds.enqueue(op);
+
+        // Submit the read to each downstairs.
+        ds.in_progress(next_id, ClientId::new(0));
+        ds.in_progress(next_id, ClientId::new(1));
+        ds.in_progress(next_id, ClientId::new(2));
+
+        // Complete the read on one downstairs, verify it is ack ready.
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &[1, 2, 3, 4],
+        )]);
+        assert!(ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            response,
+            &UpstairsState::Active,
+            None
+        ));
+        // We always ack jobs right away
+        ds.ack(next_id);
+
+        // Complete the read on a 2nd downstairs.
+        let response = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &[1, 2, 3, 4],
+        )]);
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            response,
+            &UpstairsState::Active,
+            None
+        ));
+
+        // Now, take the first downstairs offline.
+        ds.replay_jobs(ClientId::new(0));
+
+        // The ack should still be done
+        assert!(ds.ds_active.get(&next_id).unwrap().acked);
+
+        // Taking the second downstairs offline, the ack should still be done
+        ds.replay_jobs(ClientId::new(1));
+        assert!(ds.ds_active.get(&next_id).unwrap().acked);
+
+        // Redo the read on DS 0, IO should remain acked
+        ds.in_progress(next_id, ClientId::new(0));
+
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            response,
+            &UpstairsState::Active,
+            None
+        ));
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert!(ds.ds_active.get(&next_id).unwrap().acked);
+    }
+
+    #[tokio::test]
+    async fn work_completed_ack_read_replay() {
+        // Verify that a read we Acked will still replay if that downstairs
+        // goes away. Make sure everything still finishes ok.
+        let mut ds = Downstairs::test_default();
+
+        // Create the read and put it on the work queue.
+        let next_id = ds.next_id();
+        let (request, op) = create_generic_read_eob(&mut ds, next_id);
+        ds.enqueue(op);
+
+        // Submit the read to each downstairs.
+        ds.in_progress(next_id, ClientId::new(0));
+        ds.in_progress(next_id, ClientId::new(1));
+        ds.in_progress(next_id, ClientId::new(2));
+
+        // Complete the read on one downstairs.
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        assert!(ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            response,
+            &UpstairsState::Active,
+            None
+        ));
+        // Immediately ack the job (which checks that it's ready)
+        ds.ack(next_id);
+
+        // Should not retire yet
+        ds.retire_check(next_id);
+
+        // No new ackable work.
+        assert_eq!(ds.ackable_work.len(), 0);
+        // Verify the IO has not completed yet.
+        assert_eq!(ds.completed.len(), 0);
+
+        // Now, take that downstairs offline
+        ds.replay_jobs(ClientId::new(0));
+
+        // Acked IO should remain so.
+        assert!(ds.ds_active.get(&next_id).unwrap().acked);
+
+        // Redo on DS 0, IO should remain acked.
+        ds.in_progress(next_id, ClientId::new(0));
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            response,
+            &UpstairsState::Active,
+            None
+        ));
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert!(ds.ds_active.get(&next_id).unwrap().acked);
     }
 }
