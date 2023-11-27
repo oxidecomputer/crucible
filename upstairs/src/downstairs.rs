@@ -3346,7 +3346,10 @@ impl Downstairs {
 #[cfg(test)]
 mod test {
     use super::Downstairs;
-    use crate::{upstairs::UpstairsState, ClientId};
+    use crate::{
+        test::create_generic_read_eob, upstairs::UpstairsState, ClientId,
+        CrucibleError, ReadResponse, SnapshotDetails,
+    };
     use ringbuffer::RingBuffer;
 
     #[tokio::test]
@@ -3396,5 +3399,724 @@ mod test {
         );
         assert_eq!(ds.ackable_work.len(), 0);
         assert_eq!(ds.completed.len(), 1);
+    }
+
+    // Ensure that a snapshot requires all three downstairs to return Ok
+    #[tokio::test]
+    async fn work_flush_snapshot_needs_three() {
+        let mut ds = Downstairs::test_default();
+
+        let next_id = ds.next_id();
+        let dep = ds.ds_active.deps_for_flush(next_id);
+        let op = Downstairs::create_flush(
+            next_id,
+            dep,
+            10,
+            0,
+            0,
+            Some(SnapshotDetails {
+                snapshot_name: String::from("snap"),
+            }),
+            None,
+        );
+
+        ds.enqueue(op);
+
+        ds.in_progress(next_id, ClientId::new(0));
+        ds.in_progress(next_id, ClientId::new(1));
+        ds.in_progress(next_id, ClientId::new(2));
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        );
+
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        );
+
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        );
+
+        assert_eq!(ds.ackable_work.len(), 1);
+
+        ds.ack(next_id);
+        ds.retire_check(next_id);
+
+        assert_eq!(ds.completed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn work_flush_one_error_then_ok() {
+        let mut ds = Downstairs::test_default();
+
+        let next_id = ds.next_id();
+        let dep = ds.ds_active.deps_for_flush(next_id);
+
+        let op = Downstairs::create_flush(next_id, dep, 10, 0, 0, None, None);
+
+        ds.enqueue(op);
+
+        ds.in_progress(next_id, ClientId::new(0));
+        ds.in_progress(next_id, ClientId::new(1));
+        ds.in_progress(next_id, ClientId::new(2));
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 1);
+
+        ds.ack(next_id);
+        ds.retire_check(next_id);
+
+        assert_eq!(ds.completed.len(), 1);
+        // No skipped jobs here.
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn work_flush_two_errors_equals_fail() {
+        let mut ds = Downstairs::test_default();
+
+        let next_id = ds.next_id();
+        let dep = ds.ds_active.deps_for_flush(next_id);
+
+        let op = Downstairs::create_flush(next_id, dep, 10, 0, 0, None, None);
+
+        ds.enqueue(op);
+
+        ds.in_progress(next_id, ClientId::new(0));
+        ds.in_progress(next_id, ClientId::new(1));
+        ds.in_progress(next_id, ClientId::new(2));
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 1);
+
+        ds.ack(next_id);
+        ds.retire_check(next_id);
+
+        assert_eq!(ds.completed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn work_read_one_ok() {
+        let mut ds = Downstairs::test_default();
+
+        let next_id = ds.next_id();
+
+        let (request, op) = create_generic_read_eob(&mut ds, next_id);
+
+        ds.enqueue(op);
+
+        ds.in_progress(next_id, ClientId::new(0));
+        ds.in_progress(next_id, ClientId::new(1));
+        ds.in_progress(next_id, ClientId::new(2));
+
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            response,
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 1);
+        assert_eq!(ds.completed.len(), 0);
+
+        ds.ack(next_id);
+
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            response,
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            response,
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 0);
+        // A flush is required to move work to completed
+        assert_eq!(ds.completed.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn work_read_one_bad_two_ok() {
+        let mut ds = Downstairs::test_default();
+
+        let next_id = ds.next_id();
+
+        let (request, op) = create_generic_read_eob(&mut ds, next_id);
+
+        ds.enqueue(op);
+
+        ds.in_progress(next_id, ClientId::new(0));
+        ds.in_progress(next_id, ClientId::new(1));
+        ds.in_progress(next_id, ClientId::new(2));
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            response,
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 1);
+        assert_eq!(ds.completed.len(), 0);
+
+        ds.ack(next_id);
+
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            response,
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 0);
+        // A flush is required to move work to completed
+        // That this is still zero is part of the test
+        assert_eq!(ds.completed.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn work_read_two_bad_one_ok() {
+        let mut ds = Downstairs::test_default();
+
+        let next_id = ds.next_id();
+
+        let (request, op) = create_generic_read_eob(&mut ds, next_id);
+
+        ds.enqueue(op);
+
+        ds.in_progress(next_id, ClientId::new(0));
+        ds.in_progress(next_id, ClientId::new(1));
+        ds.in_progress(next_id, ClientId::new(2));
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            response,
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 1);
+
+        ds.ack(next_id);
+        ds.retire_check(next_id);
+
+        // A flush is required to move work to completed
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn work_read_three_bad() {
+        let mut ds = Downstairs::test_default();
+
+        let next_id = ds.next_id();
+
+        let (_request, op) = create_generic_read_eob(&mut ds, next_id);
+
+        ds.enqueue(op);
+
+        ds.in_progress(next_id, ClientId::new(0));
+        ds.in_progress(next_id, ClientId::new(1));
+        ds.in_progress(next_id, ClientId::new(2));
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        );
+        assert_eq!(ds.ackable_work.len(), 1);
+
+        ds.ack(next_id);
+        ds.retire_check(next_id);
+
+        assert_eq!(ds.ackable_work.len(), 0);
+        assert_eq!(ds.completed.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn work_read_hash_mismatch() {
+        // Test that a hash mismatch will trigger a panic.
+        let mut ds = Downstairs::test_default();
+
+        let id = ds.next_id();
+
+        let (request, op) = create_generic_read_eob(&mut ds, id);
+
+        ds.enqueue(op);
+
+        ds.in_progress(id, ClientId::new(0));
+        ds.in_progress(id, ClientId::new(1));
+
+        // Generate the first read response, this will be what we compare
+        // future responses with.
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(&request, &[9])]);
+
+        ds.process_ds_completion(
+            id,
+            ClientId::new(0),
+            r1,
+            &UpstairsState::Active,
+            None,
+        );
+
+        // We must move the completed job along the process, this enables
+        // process_ds_completion to know to compare future jobs to this
+        // one.
+        ds.ack(id);
+
+        // Second read response, different hash
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(&request, &[1])]);
+
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ds.process_ds_completion(
+                    id,
+                    ClientId::new(1),
+                    r2,
+                    &UpstairsState::Active,
+                    None,
+                )
+            }));
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn work_read_hash_mismatch_ack() {
+        // Test that a hash mismatch will trigger a panic.
+        // We check here after a ACK, because that is a different location.
+        let mut ds = Downstairs::test_default();
+
+        let id = ds.next_id();
+
+        let (request, op) = create_generic_read_eob(&mut ds, id);
+
+        ds.enqueue(op);
+
+        ds.in_progress(id, ClientId::new(0));
+        ds.in_progress(id, ClientId::new(1));
+
+        // Generate the first read response, this will be what we compare
+        // future responses with.
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(&request, &[0])]);
+
+        ds.process_ds_completion(
+            id,
+            ClientId::new(0),
+            r1,
+            &UpstairsState::Active,
+            None,
+        );
+
+        // We must move the completed job along the process, this enables
+        // process_ds_completion to know to compare future jobs to this
+        // one.
+        ds.ack(id);
+
+        // Second read response, it matches the first.
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(&request, &[1])]);
+
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ds.process_ds_completion(
+                    id,
+                    ClientId::new(1),
+                    r2,
+                    &UpstairsState::Active,
+                    None,
+                )
+            }));
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn work_read_hash_mismatch_third() {
+        // Test that a hash mismatch on the third response will trigger a panic.
+        let mut ds = Downstairs::test_default();
+
+        let id = ds.next_id();
+
+        let (request, op) = create_generic_read_eob(&mut ds, id);
+
+        ds.enqueue(op);
+
+        ds.in_progress(id, ClientId::new(0));
+        ds.in_progress(id, ClientId::new(1));
+        ds.in_progress(id, ClientId::new(2));
+
+        // Generate the first read response, this will be what we compare
+        // future responses with.
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(&request, &[1])]);
+
+        ds.process_ds_completion(
+            id,
+            ClientId::new(0),
+            r1,
+            &UpstairsState::Active,
+            None,
+        );
+
+        // Second read response, it matches the first.
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(&request, &[1])]);
+
+        ds.process_ds_completion(
+            id,
+            ClientId::new(1),
+            r2,
+            &UpstairsState::Active,
+            None,
+        );
+
+        let r3 = Ok(vec![ReadResponse::from_request_with_data(&request, &[2])]);
+
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ds.process_ds_completion(
+                    id,
+                    ClientId::new(2),
+                    r3,
+                    &UpstairsState::Active,
+                    None,
+                )
+            }));
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn work_read_hash_mismatch_third_ack() {
+        // Test that a hash mismatch on the third response will trigger a panic.
+        // This one checks after an ACK.
+        let mut ds = Downstairs::test_default();
+
+        let id = ds.next_id();
+
+        let (request, op) = create_generic_read_eob(&mut ds, id);
+
+        ds.enqueue(op);
+
+        ds.in_progress(id, ClientId::new(0));
+        ds.in_progress(id, ClientId::new(1));
+        ds.in_progress(id, ClientId::new(2));
+
+        // Generate the first read response, this will be what we compare
+        // future responses with.
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(&request, &[1])]);
+
+        ds.process_ds_completion(
+            id,
+            ClientId::new(0),
+            r1,
+            &UpstairsState::Active,
+            None,
+        );
+
+        // Second read response, it matches the first.
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(&request, &[1])]);
+
+        ds.ack(id);
+        ds.process_ds_completion(
+            id,
+            ClientId::new(1),
+            r2,
+            &UpstairsState::Active,
+            None,
+        );
+
+        let r3 = Ok(vec![ReadResponse::from_request_with_data(&request, &[2])]);
+
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ds.process_ds_completion(
+                    id,
+                    ClientId::new(2),
+                    r3,
+                    &UpstairsState::Active,
+                    None,
+                )
+            }));
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn work_read_hash_mismatch_inside() {
+        // Test that a hash length mismatch will panic
+        let mut ds = Downstairs::test_default();
+
+        let id = ds.next_id();
+
+        let (request, op) = create_generic_read_eob(&mut ds, id);
+
+        ds.enqueue(op);
+
+        ds.in_progress(id, ClientId::new(0));
+        ds.in_progress(id, ClientId::new(1));
+
+        // Generate the first read response, this will be what we compare
+        // future responses with.
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &[1, 2, 3, 4],
+        )]);
+
+        ds.process_ds_completion(
+            id,
+            ClientId::new(0),
+            r1,
+            &UpstairsState::Active,
+            None,
+        );
+
+        // Second read response, hash vec has different length/
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(
+            &request,
+            &[1, 2, 3, 9],
+        )]);
+
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ds.process_ds_completion(
+                    id,
+                    ClientId::new(1),
+                    r2,
+                    &UpstairsState::Active,
+                    None,
+                )
+            }));
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn work_read_hash_mismatch_no_data() {
+        // Test that empty data first, then data later will trigger
+        // hash mismatch panic.
+        let mut ds = Downstairs::test_default();
+
+        let id = ds.next_id();
+
+        let (request, op) = create_generic_read_eob(&mut ds, id);
+
+        ds.enqueue(op);
+
+        ds.in_progress(id, ClientId::new(0));
+        ds.in_progress(id, ClientId::new(1));
+
+        // Generate the first read response, this will be what we compare
+        // future responses with.
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+
+        ds.process_ds_completion(
+            id,
+            ClientId::new(0),
+            r1,
+            &UpstairsState::Active,
+            None,
+        );
+
+        // Second read response, hash vec has different length/
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(&request, &[1])]);
+
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ds.process_ds_completion(
+                    id,
+                    ClientId::new(1),
+                    r2,
+                    &UpstairsState::Active,
+                    None,
+                )
+            }));
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn work_read_hash_mismatch_no_data_next() {
+        // Test that missing data on the 2nd read response will panic
+        let mut ds = Downstairs::test_default();
+
+        let id = ds.next_id();
+
+        let (request, op) = create_generic_read_eob(&mut ds, id);
+
+        ds.enqueue(op);
+
+        ds.in_progress(id, ClientId::new(0));
+        ds.in_progress(id, ClientId::new(1));
+
+        // Generate the first read response, this will be what we compare
+        // future responses with.
+        let r1 = Ok(vec![ReadResponse::from_request_with_data(&request, &[1])]);
+
+        ds.process_ds_completion(
+            id,
+            ClientId::new(0),
+            r1,
+            &UpstairsState::Active,
+            None,
+        );
+
+        // Second read response, hash vec has different length/
+        let r2 = Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ds.process_ds_completion(
+                    id,
+                    ClientId::new(1),
+                    r2,
+                    &UpstairsState::Active,
+                    None,
+                )
+            }));
+        assert!(result.is_err());
     }
 }

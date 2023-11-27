@@ -60,6 +60,8 @@ mod impacted_blocks;
 pub use impacted_blocks::*;
 
 mod live_repair;
+
+#[cfg(test)]
 mod test;
 
 mod active_jobs;
