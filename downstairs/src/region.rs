@@ -722,9 +722,8 @@ impl Region {
             HashMap::new();
 
         for write in writes {
-            let extent_vec = batched_writes
-                .entry(write.eid as usize)
-                .or_default();
+            let extent_vec =
+                batched_writes.entry(write.eid as usize).or_default();
             extent_vec.push(write);
         }
 

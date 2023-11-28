@@ -616,10 +616,8 @@ pub(crate) mod protocol_test {
 
         let (_jh1, mut ds1_messages) =
             harness.ds1().await.spawn_message_receiver();
-        let (_jh2, mut ds2_messages) =
-            harness.ds2.spawn_message_receiver();
-        let (_jh3, mut ds3_messages) =
-            harness.ds3.spawn_message_receiver();
+        let (_jh2, mut ds2_messages) = harness.ds2.spawn_message_receiver();
+        let (_jh3, mut ds3_messages) = harness.ds3.spawn_message_receiver();
 
         for _ in 0..MAX_ACTIVE_COUNT {
             let harness = harness.clone();
@@ -821,10 +819,8 @@ pub(crate) mod protocol_test {
 
         let (jh1, mut ds1_messages) =
             harness.ds1().await.spawn_message_receiver();
-        let (_jh2, mut ds2_messages) =
-            harness.ds2.spawn_message_receiver();
-        let (_jh3, mut ds3_messages) =
-            harness.ds3.spawn_message_receiver();
+        let (_jh2, mut ds2_messages) = harness.ds2.spawn_message_receiver();
+        let (_jh3, mut ds3_messages) = harness.ds3.spawn_message_receiver();
 
         // Send a read
         {
@@ -896,10 +892,8 @@ pub(crate) mod protocol_test {
 
         let (jh1, mut ds1_messages) =
             harness.ds1().await.spawn_message_receiver();
-        let (_jh2, mut ds2_messages) =
-            harness.ds2.spawn_message_receiver();
-        let (_jh3, mut ds3_messages) =
-            harness.ds3.spawn_message_receiver();
+        let (_jh2, mut ds2_messages) = harness.ds2.spawn_message_receiver();
+        let (_jh3, mut ds3_messages) = harness.ds3.spawn_message_receiver();
 
         // Send 200 more than IO_OUTSTANDING_MAX jobs. Flow control will kick in
         // at MAX_ACTIVE_COUNT messages, so we need to be sending read responses
@@ -1934,10 +1928,8 @@ pub(crate) mod protocol_test {
 
         let (jh1, mut ds1_messages) =
             harness.ds1().await.spawn_message_receiver();
-        let (_jh2, mut ds2_messages) =
-            harness.ds2.spawn_message_receiver();
-        let (_jh3, mut ds3_messages) =
-            harness.ds3.spawn_message_receiver();
+        let (_jh2, mut ds2_messages) = harness.ds2.spawn_message_receiver();
+        let (_jh3, mut ds3_messages) = harness.ds3.spawn_message_receiver();
 
         // Send 200 more than IO_OUTSTANDING_MAX jobs. Flow control will kick in
         // at MAX_ACTIVE_COUNT messages, so we need to be sending read responses
@@ -2640,10 +2632,8 @@ pub(crate) mod protocol_test {
 
         let (jh1, mut ds1_messages) =
             harness.ds1().await.spawn_message_receiver();
-        let (_jh2, mut ds2_messages) =
-            harness.ds2.spawn_message_receiver();
-        let (_jh3, mut ds3_messages) =
-            harness.ds3.spawn_message_receiver();
+        let (_jh2, mut ds2_messages) = harness.ds2.spawn_message_receiver();
+        let (_jh3, mut ds3_messages) = harness.ds3.spawn_message_receiver();
 
         // Send 200 more than IO_OUTSTANDING_MAX jobs. Flow control will kick in
         // at MAX_ACTIVE_COUNT messages, so we need to be sending read responses
