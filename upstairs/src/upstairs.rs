@@ -619,7 +619,7 @@ impl Upstairs {
                 req.send_ok();
             }
             BlockOp::Deactivate => {
-                self.set_deactivate(req);
+                self.set_deactivate(req).await;
             }
             BlockOp::RepairOp => {
                 warn!(self.log, "Ignoring external BlockOp::RepairOp");
@@ -840,7 +840,7 @@ impl Upstairs {
     /// when complete.
     ///
     /// In either case, `self.state` is set to `UpstairsState::Deactivating`
-    fn set_deactivate(&mut self, req: BlockReq) {
+    async fn set_deactivate(&mut self, req: BlockReq) {
         info!(self.log, "Request to deactivate this guest");
         match self.state {
             UpstairsState::Initializing | UpstairsState::GoActive { .. } => {
@@ -860,6 +860,7 @@ impl Upstairs {
             req.send_ok();
         } else {
             debug!(self.log, "not ready to deactivate; submitting final flush");
+            self.submit_flush(Some(req), None).await;
         }
     }
 
