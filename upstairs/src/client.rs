@@ -1059,7 +1059,8 @@ impl DownstairsClient {
                 match old_state {
                     DsState::Active
                     | DsState::Deactivated
-                    | DsState::Faulted => {} // Okay
+                    | DsState::Faulted
+                    | DsState::FailedRepair => {} // Okay
                     _ => {
                         panic_invalid();
                     }

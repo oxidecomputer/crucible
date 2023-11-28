@@ -2026,6 +2026,16 @@ impl Downstairs {
         m: Message,
         up_state: &UpstairsState,
     ) -> bool {
+        let Some(next) = self.reconcile_current_work.as_mut() else {
+            // This can happen if reconciliation is cancelled (e.g. one
+            // Downstairs died) but reconciliation acks are still coming through
+            // from the other downstairs.
+            //
+            // We can't do much about it, so log it and continue.
+            warn!(self.log, "got reconciliation ack without active work");
+            return false;
+        };
+
         // Check to make sure that we're still in a repair-ready state
         //
         // If any client have dropped out of repair-readiness (e.g. due to
@@ -2039,10 +2049,6 @@ impl Downstairs {
             return false;
         }
 
-        let Some(next) = self.reconcile_current_work.as_mut() else {
-            // XXX what if we get a delayed ack?
-            panic!("got reconciliation ack with no current work");
-        };
         let Message::RepairAckId { repair_id } = m else {
             panic!("invalid message {m:?} for on_reconciliation_ack");
         };
@@ -3436,8 +3442,9 @@ pub(crate) mod test {
             generic_write_request,
         },
         upstairs::UpstairsState,
-        BlockContext, ClientId, CrucibleError, EncryptionContext, ExtentFix,
-        IOState, JobId, ReadResponse, ReconciliationId, SnapshotDetails,
+        BlockContext, ClientId, CrucibleError, DsState, EncryptionContext,
+        ExtentFix, IOState, JobId, ReadResponse, ReconcileIO, ReconciliationId,
+        SnapshotDetails,
     };
     use bytes::{Bytes, BytesMut};
     use crucible_protocol::Message;
@@ -3466,6 +3473,23 @@ pub(crate) mod test {
         }
 
         ds.ack(ds_id);
+    }
+
+    fn set_all_repair(ds: &mut Downstairs) {
+        for i in ClientId::iter() {
+            ds.clients[i].checked_state_transition(
+                &UpstairsState::Initializing,
+                DsState::WaitActive,
+            );
+            ds.clients[i].checked_state_transition(
+                &UpstairsState::Initializing,
+                DsState::WaitQuorum,
+            );
+            ds.clients[i].checked_state_transition(
+                &UpstairsState::Initializing,
+                DsState::Repair,
+            );
+        }
     }
 
     #[tokio::test]
@@ -6047,5 +6071,376 @@ pub(crate) mod test {
             }));
 
         assert!(result.is_err());
+    }
+
+    // Tests for reconciliation
+    #[tokio::test]
+    async fn send_next_reconciliation_req_none() {
+        // No repairs on the queue, should return None
+        let mut ds = Downstairs::test_default();
+        set_all_repair(&mut ds);
+
+        let w = ds.send_next_reconciliation_req().await;
+        assert!(w); // reconciliation is "done", because there's nothing there
+    }
+
+    #[tokio::test]
+    async fn reconcile_repair_workflow_not_repair() {
+        // Verify that rep_in_progress will not give out work if a
+        // downstairs is not in the correct state, and that it will
+        // clear the work queue and mark other downstairs as failed.
+        let mut ds = Downstairs::test_default();
+
+        let close_id = ReconciliationId(0);
+        let rep_id = ReconciliationId(1);
+        // Put a jobs on the todo list
+        ds.reconcile_task_list.push_back(ReconcileIO::new(
+            close_id,
+            Message::ExtentClose {
+                repair_id: close_id,
+                extent_id: 1,
+            },
+        ));
+        ds.reconcile_task_list.push_back(ReconcileIO::new(
+            rep_id,
+            Message::ExtentClose {
+                repair_id: rep_id,
+                extent_id: 1,
+            },
+        ));
+        // Put 2/3 clients into the Repair state
+        for i in ClientId::iter() {
+            ds.clients[i].checked_state_transition(
+                &UpstairsState::Initializing,
+                DsState::WaitActive,
+            );
+            ds.clients[i].checked_state_transition(
+                &UpstairsState::Initializing,
+                DsState::WaitQuorum,
+            );
+            // Leave downstairs 1 in WaitQuorum
+            if i != ClientId::new(1) {
+                ds.clients[i].checked_state_transition(
+                    &UpstairsState::Initializing,
+                    DsState::Repair,
+                );
+            }
+        }
+
+        // Send an ack to trigger the reconciliation state check
+        let nw = ds
+            .on_reconciliation_ack(
+                ClientId::new(0),
+                Message::RepairAckId {
+                    repair_id: close_id,
+                },
+                &UpstairsState::Active,
+            )
+            .await;
+        assert!(!nw);
+
+        // The two troublesome tasks will pass through DsState::RepairFailed and
+        // end up in DsState::New.
+        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::New);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::WaitQuorum);
+        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::New);
+
+        // Verify that no more reconciliation work is happening
+        assert!(ds.reconcile_task_list.is_empty());
+        let w = ds.send_next_reconciliation_req().await;
+        assert!(w);
+    }
+
+    #[tokio::test]
+    async fn reconcile_repair_workflow_not_repair_later() {
+        // Verify that rep_done still works even after we have a downstairs
+        // in the FailedRepair state. Verify that attempts to get new work
+        // after a failed repair now return none.
+        let mut ds = Downstairs::test_default();
+        set_all_repair(&mut ds);
+
+        let up_state = UpstairsState::Active;
+        let rep_id = ReconciliationId(0);
+        // Put two jobs on the todo list
+        ds.reconcile_task_list.push_back(ReconcileIO::new(
+            rep_id,
+            Message::ExtentClose {
+                repair_id: rep_id,
+                extent_id: 1,
+            },
+        ));
+        // Send that job
+        ds.send_next_reconciliation_req().await;
+
+        // Downstairs 0 and 2 are okay, but 1 failed (for some reason!)
+        let msg = Message::RepairAckId { repair_id: rep_id };
+        assert!(
+            !ds.on_reconciliation_ack(ClientId::new(0), msg.clone(), &up_state)
+                .await
+        );
+        ds.on_reconciliation_failed(
+            ClientId::new(1),
+            Message::ExtentError {
+                repair_id: rep_id,
+                extent_id: 1,
+                error: CrucibleError::GenericError(
+                    "test extent error".to_owned(),
+                ),
+            },
+            &up_state,
+        );
+        slog::info!(ds.log, "sending third ack");
+        assert!(
+            !ds.on_reconciliation_ack(ClientId::new(2), msg.clone(), &up_state)
+                .await
+        );
+
+        // Getting the next work to do should verify the previous is done,
+        // and handle a state change for a downstairs.
+        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::New);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::New);
+        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::New);
+
+        // Verify that there are no reconciliation requests
+        assert!(ds.reconcile_task_list.is_empty());
+    }
+
+    #[tokio::test]
+    #[should_panic]
+    async fn reconcile_rep_in_progress_bad1() {
+        // Verify the same downstairs can't mark a job in progress twice
+        let mut ds = Downstairs::test_default();
+        set_all_repair(&mut ds);
+
+        let rep_id = ReconciliationId(0);
+        ds.reconcile_task_list.push_back(ReconcileIO::new(
+            rep_id,
+            Message::ExtentClose {
+                repair_id: rep_id,
+                extent_id: 1,
+            },
+        ));
+
+        // Send that req
+        assert!(!ds.send_next_reconciliation_req().await);
+        ds.send_next_reconciliation_req().await; // panics
+    }
+
+    #[tokio::test]
+    async fn reconcile_repair_workflow_1() {
+        let mut ds = Downstairs::test_default();
+        set_all_repair(&mut ds);
+
+        let up_state = UpstairsState::Active;
+        let close_id = ReconciliationId(0);
+        let rep_id = ReconciliationId(1);
+        ds.reconcile_task_list.push_back(ReconcileIO::new(
+            close_id,
+            Message::ExtentClose {
+                repair_id: close_id,
+                extent_id: 1,
+            },
+        ));
+        ds.reconcile_task_list.push_back(ReconcileIO::new(
+            rep_id,
+            Message::ExtentClose {
+                repair_id: rep_id,
+                extent_id: 1,
+            },
+        ));
+
+        // Send the close job.  Reconciliation isn't done at this point!
+        assert!(!ds.send_next_reconciliation_req().await);
+
+        // Ack the close job.  Reconciliation isn't done at this point, because
+        // there's another job in the task list.
+        let msg = Message::RepairAckId {
+            repair_id: close_id,
+        };
+        for i in ClientId::iter() {
+            assert!(!ds.on_reconciliation_ack(i, msg.clone(), &up_state).await);
+        }
+
+        // The third ack will have sent the next reconciliation job
+        assert!(ds.reconcile_task_list.is_empty());
+
+        // Now, make sure we consider this done only after all three are done
+        let msg = Message::RepairAckId { repair_id: rep_id };
+        assert!(
+            !ds.on_reconciliation_ack(ClientId::new(0), msg.clone(), &up_state)
+                .await
+        );
+        assert!(
+            !ds.on_reconciliation_ack(ClientId::new(1), msg.clone(), &up_state)
+                .await
+        );
+        // The third ack finishes reconciliation!
+        assert!(
+            ds.on_reconciliation_ack(ClientId::new(2), msg.clone(), &up_state)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_repair_workflow_2() {
+        // Verify Done or Skipped works when checking for a complete repair
+        let mut ds = Downstairs::test_default();
+        set_all_repair(&mut ds);
+
+        let up_state = UpstairsState::Active;
+        let rep_id = ReconciliationId(1);
+
+        // Queue up a repair message, which will be skiped for client 0
+        ds.reconcile_task_list.push_back(ReconcileIO::new(
+            rep_id,
+            Message::ExtentRepair {
+                repair_id: rep_id,
+                extent_id: 1,
+                source_client_id: ClientId::new(0),
+                source_repair_address: SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                    803,
+                ),
+                dest_clients: vec![ClientId::new(1), ClientId::new(2)],
+            },
+        ));
+
+        // Send the job.  Reconciliation isn't done at this point!
+        assert!(!ds.send_next_reconciliation_req().await);
+
+        // Mark all three as in progress
+        let Some(job) = &ds.reconcile_current_work else {
+            panic!("failed to find current work");
+        };
+        assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
+        assert_eq!(job.state[ClientId::new(1)], IOState::InProgress);
+        assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
+
+        let msg = Message::RepairAckId { repair_id: rep_id };
+        assert!(
+            !ds.on_reconciliation_ack(ClientId::new(1), msg.clone(), &up_state)
+                .await
+        );
+        // The second ack finishes reconciliation, because it was skipped for
+        // client 0 (which was the source of repairs).
+        assert!(
+            ds.on_reconciliation_ack(ClientId::new(2), msg.clone(), &up_state)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    #[should_panic]
+    async fn reconcile_repair_inprogress_not_done() {
+        // Verify Done or Skipped works when checking for a complete repair
+        let mut ds = Downstairs::test_default();
+        set_all_repair(&mut ds);
+
+        let up_state = UpstairsState::Active;
+        let rep_id = ReconciliationId(1);
+
+        // Queue up a repair message, which will be skiped for client 0
+        ds.reconcile_task_list.push_back(ReconcileIO::new(
+            rep_id,
+            Message::ExtentRepair {
+                repair_id: rep_id,
+                extent_id: 1,
+                source_client_id: ClientId::new(0),
+                source_repair_address: SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                    803,
+                ),
+                dest_clients: vec![ClientId::new(1), ClientId::new(2)],
+            },
+        ));
+
+        // Send the job.  Reconciliation isn't done at this point!
+        assert!(!ds.send_next_reconciliation_req().await);
+
+        // If we get back an ack from client 0, something has gone terribly
+        // wrong (because the jobs should have been skipped for it)
+        ds.on_reconciliation_ack(
+            ClientId::new(0),
+            Message::RepairAckId { repair_id: rep_id },
+            &up_state,
+        )
+        .await; // this should panic!
+    }
+
+    #[tokio::test]
+    #[should_panic]
+    async fn reconcile_repair_workflow_too_soon() {
+        // Verify Done or Skipped works when checking for a complete repair
+        let mut ds = Downstairs::test_default();
+        set_all_repair(&mut ds);
+
+        let up_state = UpstairsState::Active;
+        let rep_id = ReconciliationId(1);
+
+        // Queue up a repair message, which will be skiped for client 0
+        ds.reconcile_task_list.push_back(ReconcileIO::new(
+            rep_id,
+            Message::ExtentClose {
+                repair_id: rep_id,
+                extent_id: 1,
+            },
+        ));
+
+        // Note that we do not send the job here!
+
+        // If we get back an ack from client 0, something has gone terribly
+        // wrong (because we haven't sent the job yet!)
+        ds.on_reconciliation_ack(
+            ClientId::new(0),
+            Message::RepairAckId { repair_id: rep_id },
+            &up_state,
+        )
+        .await; // this should panic!
+    }
+
+    #[tokio::test]
+    #[should_panic]
+    async fn reconcile_leave_no_job_behind() {
+        // Verify we can't start a new job before the old is finished.
+        // Verify Done or Skipped works when checking for a complete repair
+        let mut ds = Downstairs::test_default();
+        set_all_repair(&mut ds);
+
+        let up_state = UpstairsState::Active;
+        let close_id = ReconciliationId(0);
+        let rep_id = ReconciliationId(1);
+
+        // Queue up a repair message, which will be skiped for client 0
+        ds.reconcile_task_list.push_back(ReconcileIO::new(
+            close_id,
+            Message::ExtentClose {
+                repair_id: close_id,
+                extent_id: 1,
+            },
+        ));
+        ds.reconcile_task_list.push_back(ReconcileIO::new(
+            rep_id,
+            Message::ExtentClose {
+                repair_id: rep_id,
+                extent_id: 1,
+            },
+        ));
+
+        // Send the first req; reconciliation is not yet done
+        assert!(!ds.send_next_reconciliation_req().await);
+
+        // Now, make sure we consider this done only after all three are done
+        let msg = Message::RepairAckId { repair_id: rep_id };
+        assert!(
+            !ds.on_reconciliation_ack(ClientId::new(1), msg.clone(), &up_state)
+                .await
+        );
+        assert!(
+            !ds.on_reconciliation_ack(ClientId::new(2), msg.clone(), &up_state)
+                .await
+        );
+        // don't finish
+
+        ds.send_next_reconciliation_req().await; // panics!
     }
 }
