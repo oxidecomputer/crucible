@@ -453,7 +453,7 @@ impl BlockMap {
     /// If such a range exists, returns its starting address (i.e. the key to
     /// look it up in [`self.addr_to_jobs`].
     fn find_split_location(&self, i: ImpactedAddr) -> Option<ImpactedAddr> {
-        match self.addr_to_jobs.range(..i).rev().next() {
+        match self.addr_to_jobs.range(..i).next_back() {
             Some((start, (end, _))) if i < *end => Some(*start),
             _ => None,
         }
@@ -466,8 +466,7 @@ impl BlockMap {
         let Some(mut pos) = self
             .addr_to_jobs
             .range(..r.start)
-            .rev()
-            .next()
+            .next_back()
             .map(|(start, _)| *start)
             .or_else(|| self.addr_to_jobs.first_key_value().map(|(k, _)| *k))
         else {
@@ -517,8 +516,7 @@ impl BlockMap {
         let start = self
             .addr_to_jobs
             .range(..=r.start)
-            .rev()
-            .next()
+            .next_back()
             .map(|(start, _)| *start)
             .unwrap_or(r.start);
         self.addr_to_jobs

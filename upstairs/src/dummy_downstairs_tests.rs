@@ -404,7 +404,7 @@ pub(crate) mod protocol_test {
 
         // Spawn a task to pull messages off the framed reader and put into a
         // channel
-        pub async fn spawn_message_receiver(
+        pub fn spawn_message_receiver(
             &self,
         ) -> (JoinHandle<()>, mpsc::Receiver<Message>) {
             let (tx, rx) = mpsc::channel(1000);
@@ -615,11 +615,11 @@ pub(crate) mod protocol_test {
         let harness = Arc::new(TestHarness::new().await?);
 
         let (_jh1, mut ds1_messages) =
-            harness.ds1().await.spawn_message_receiver().await;
+            harness.ds1().await.spawn_message_receiver();
         let (_jh2, mut ds2_messages) =
-            harness.ds2.spawn_message_receiver().await;
+            harness.ds2.spawn_message_receiver();
         let (_jh3, mut ds3_messages) =
-            harness.ds3.spawn_message_receiver().await;
+            harness.ds3.spawn_message_receiver();
 
         for _ in 0..MAX_ACTIVE_COUNT {
             let harness = harness.clone();
@@ -820,11 +820,11 @@ pub(crate) mod protocol_test {
         let harness = Arc::new(TestHarness::new().await?);
 
         let (jh1, mut ds1_messages) =
-            harness.ds1().await.spawn_message_receiver().await;
+            harness.ds1().await.spawn_message_receiver();
         let (_jh2, mut ds2_messages) =
-            harness.ds2.spawn_message_receiver().await;
+            harness.ds2.spawn_message_receiver();
         let (_jh3, mut ds3_messages) =
-            harness.ds3.spawn_message_receiver().await;
+            harness.ds3.spawn_message_receiver();
 
         // Send a read
         {
@@ -866,7 +866,7 @@ pub(crate) mod protocol_test {
         ds1.negotiate_start().await?;
         ds1.negotiate_step_last_flush(JobId(0)).await?;
 
-        let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver().await;
+        let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver();
 
         let mut ds1_message_second_time = None;
 
@@ -895,11 +895,11 @@ pub(crate) mod protocol_test {
         let harness = Arc::new(TestHarness::new().await?);
 
         let (jh1, mut ds1_messages) =
-            harness.ds1().await.spawn_message_receiver().await;
+            harness.ds1().await.spawn_message_receiver();
         let (_jh2, mut ds2_messages) =
-            harness.ds2.spawn_message_receiver().await;
+            harness.ds2.spawn_message_receiver();
         let (_jh3, mut ds3_messages) =
-            harness.ds3.spawn_message_receiver().await;
+            harness.ds3.spawn_message_receiver();
 
         // Send 200 more than IO_OUTSTANDING_MAX jobs. Flow control will kick in
         // at MAX_ACTIVE_COUNT messages, so we need to be sending read responses
@@ -1145,7 +1145,7 @@ pub(crate) mod protocol_test {
         ds1.negotiate_start().await?;
         ds1.negotiate_step_extent_versions_please().await?;
 
-        let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver().await;
+        let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver();
 
         // The Upstairs will start sending LiveRepair related work, which may be
         // out of order. Buffer some here.
@@ -1933,11 +1933,11 @@ pub(crate) mod protocol_test {
         let harness = Arc::new(TestHarness::new().await?);
 
         let (jh1, mut ds1_messages) =
-            harness.ds1().await.spawn_message_receiver().await;
+            harness.ds1().await.spawn_message_receiver();
         let (_jh2, mut ds2_messages) =
-            harness.ds2.spawn_message_receiver().await;
+            harness.ds2.spawn_message_receiver();
         let (_jh3, mut ds3_messages) =
-            harness.ds3.spawn_message_receiver().await;
+            harness.ds3.spawn_message_receiver();
 
         // Send 200 more than IO_OUTSTANDING_MAX jobs. Flow control will kick in
         // at MAX_ACTIVE_COUNT messages, so we need to be sending read responses
@@ -2189,7 +2189,7 @@ pub(crate) mod protocol_test {
         ds1.negotiate_start().await?;
         ds1.negotiate_step_extent_versions_please().await?;
 
-        let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver().await;
+        let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver();
 
         // The Upstairs will start sending LiveRepair related work, which may be
         // out of order. Buffer some here.
@@ -2445,7 +2445,7 @@ pub(crate) mod protocol_test {
         ds1.negotiate_step_extent_versions_please().await?;
 
         error!(harness.log, "ds1 spawn message receiver now!");
-        let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver().await;
+        let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver();
 
         // Continue faking for downstairs 2 and 3 - the work that was occuring
         // for extent 0 should finish before the Upstairs aborts the repair
@@ -2639,11 +2639,11 @@ pub(crate) mod protocol_test {
         let harness = Arc::new(TestHarness::new_ro().await?);
 
         let (jh1, mut ds1_messages) =
-            harness.ds1().await.spawn_message_receiver().await;
+            harness.ds1().await.spawn_message_receiver();
         let (_jh2, mut ds2_messages) =
-            harness.ds2.spawn_message_receiver().await;
+            harness.ds2.spawn_message_receiver();
         let (_jh3, mut ds3_messages) =
-            harness.ds3.spawn_message_receiver().await;
+            harness.ds3.spawn_message_receiver();
 
         // Send 200 more than IO_OUTSTANDING_MAX jobs. Flow control will kick in
         // at MAX_ACTIVE_COUNT messages, so we need to be sending read responses
@@ -2889,7 +2889,7 @@ pub(crate) mod protocol_test {
         ds1.negotiate_start().await?;
         ds1.negotiate_step_extent_versions_please().await?;
 
-        let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver().await;
+        let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver();
 
         // Wait for all three downstairs to be online before we send
         // our final read.

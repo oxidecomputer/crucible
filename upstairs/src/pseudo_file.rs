@@ -187,7 +187,7 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
  * The Read + Write impls here translate arbitrary sized operations into
  * calls for the underlying Crucible API.
  */
-impl<T: BlockIO> Read for CruciblePseudoFile<T> {
+impl<T: BlockIO> IORead for CruciblePseudoFile<T> {
     fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
         if !self.active {
             return Err(std::io::Error::new(
@@ -203,7 +203,7 @@ impl<T: BlockIO> Read for CruciblePseudoFile<T> {
     }
 }
 
-impl<T: BlockIO> Write for CruciblePseudoFile<T> {
+impl<T: BlockIO> IOWrite for CruciblePseudoFile<T> {
     fn write(&mut self, buf: &[u8]) -> IOResult<usize> {
         if !self.active {
             return Err(std::io::Error::new(

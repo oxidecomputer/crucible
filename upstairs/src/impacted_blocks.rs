@@ -1076,7 +1076,7 @@ mod test {
         point_d: (u64, u64),
     ) {
         // First we need to sort the points so we can use them correctly.
-        let mut sorted_points = vec![point_a, point_b, point_c, point_d];
+        let mut sorted_points = [point_a, point_b, point_c, point_d];
         sorted_points.sort();
         let (eid_a, block_a) = sorted_points[0];
         let (eid_b, block_b) = sorted_points[1];

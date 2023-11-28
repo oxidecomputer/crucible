@@ -1264,7 +1264,7 @@ async fn region_create_test(
     //  an option to the test to allow it from the command line.
     //  Since the larger sizes can currently take minutes/hours, those
     //  are commented out as well.
-    let region_size = vec![
+    let region_size = [
         1024 * 1024 * 1024,        //   1 GiB
         1024 * 1024 * 1024 * 10,   //  10 GiB
         1024 * 1024 * 1024 * 100,  // 100 GiB
@@ -1277,7 +1277,7 @@ async fn region_create_test(
     // The list of blocks per extent file, in crucible: extent_size
     // XXX This is again some self selected interesting values.  Expect
     // these to change as we learn more.
-    let extent_size = vec![4096, 8192, 16384, 32768];
+    let extent_size = [4096, 8192, 16384, 32768];
 
     // This header is the same for both the regular and the long test.
     print!(

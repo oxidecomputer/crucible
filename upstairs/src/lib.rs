@@ -8,7 +8,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::convert::TryFrom;
 use std::fmt;
 use std::fmt::{Debug, Formatter};
-use std::io::{Read, Result as IOResult, Seek, SeekFrom, Write};
+use std::io::{
+    Read as IORead, Result as IOResult, Seek, SeekFrom, Write as IOWrite,
+};
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -7602,7 +7604,7 @@ impl Upstairs {
             }
         }
 
-        if new_client_id.is_some() {
+        if let Some(new_client_id) = new_client_id {
             // Our new downstairs already exists.
             if old_client_id.is_some() {
                 // New target is present, but old is present too, so this is not
@@ -7617,7 +7619,7 @@ impl Upstairs {
 
             // We don't really know if the "old" matches what was old,
             // as that info is gone to us now, so assume it was true.
-            match ds.clients[new_client_id.unwrap()].state {
+            match ds.clients[new_client_id].state {
                 DsState::Replacing
                 | DsState::Replaced
                 | DsState::LiveRepairReady

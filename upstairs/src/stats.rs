@@ -19,7 +19,7 @@ pub struct Activated {
     pub count: Cumulative<i64>,
 }
 #[derive(Debug, Default, Copy, Clone, Metric)]
-pub struct Write {
+pub struct WriteCount {
     /// Count of region writes this upstairs has completed
     #[datum]
     pub count: Cumulative<i64>,
@@ -31,7 +31,7 @@ pub struct WriteBytes {
     pub count: Cumulative<i64>,
 }
 #[derive(Debug, Default, Copy, Clone, Metric)]
-pub struct Read {
+pub struct ReadCount {
     /// Count of region reads this upstairs has completed
     #[datum]
     pub count: Cumulative<i64>,
@@ -78,9 +78,9 @@ pub struct ExtentReopen {
 pub struct UpCountStat {
     stat_name: CrucibleUpstairs,
     activated_count: Activated,
-    write_count: Write,
+    write_count: WriteCount,
     write_bytes: WriteBytes,
-    read_count: Read,
+    read_count: ReadCount,
     read_bytes: ReadBytes,
     flush_count: Flush,
     flush_close_count: FlushClose,

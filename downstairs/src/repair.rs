@@ -25,7 +25,7 @@ pub struct FileServerContext {
     region_dir: PathBuf,
 }
 
-pub fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
+pub fn write_openapi<W: IOWrite>(f: &mut W) -> Result<()> {
     let api = build_api();
     api.openapi("Downstairs Repair", "0.0.0").write(f)?;
     Ok(())
