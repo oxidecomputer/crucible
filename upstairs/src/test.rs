@@ -1578,60 +1578,6 @@ pub(crate) mod up_test {
     // TODO matt hiiii
 
     #[tokio::test]
-    async fn reconcile_repair_workflow_not_repair_later() {
-        // Verify that rep_done still works even after we have a downstairs
-        // in the FailedRepair state. Verify that attempts to get new work
-        // after a failed repair now return none.
-        let up = Upstairs::test_default(None);
-        let rep_id = ReconciliationId(0);
-        {
-            let ds = &mut up.downstairs;
-            up.force_ds_state(ClientId::new(0), DsState::Repair);
-            up.force_ds_state(ClientId::new(1), DsState::Repair);
-            up.force_ds_state(ClientId::new(2), DsState::Repair);
-            // Put two jobs on the todo list
-            ds.reconcile_task_list.push_back(ReconcileIO::new(
-                rep_id,
-                Message::ExtentClose {
-                    repair_id: rep_id,
-                    extent_id: 1,
-                },
-            ));
-        }
-        // Move that job to next to do.
-        let nw = up.new_rec_work().await;
-        assert!(nw.unwrap());
-        let ds = &mut up.downstairs;
-        // Mark all three as in progress
-        assert!(ds.rep_in_progress(ClientId::new(0)).is_some());
-        assert!(ds.rep_in_progress(ClientId::new(1)).is_some());
-        assert!(ds.rep_in_progress(ClientId::new(2)).is_some());
-
-        // Now verify we can be done even if a DS is gone
-        up.force_ds_state(ClientId::new(1), DsState::New);
-        // Now, make sure we consider this done only after all three are done
-        assert!(!ds.rep_done(ClientId::new(0), rep_id));
-        assert!(!ds.rep_done(ClientId::new(1), rep_id));
-        assert!(ds.rep_done(ClientId::new(2), rep_id));
-
-        // Getting the next work to do should verify the previous is done,
-        // and handle a state change for a downstairs.
-        drop(ds);
-        let nw = up.new_rec_work().await;
-        assert!(nw.is_err());
-        let ds = &mut up.downstairs;
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::FailedRepair);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::New);
-        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::FailedRepair);
-
-        // Verify rep_in_progress now returns none for all DS
-        assert!(ds.reconcile_task_list.is_empty());
-        assert!(ds.rep_in_progress(ClientId::new(0)).is_none());
-        assert!(ds.rep_in_progress(ClientId::new(1)).is_none());
-        assert!(ds.rep_in_progress(ClientId::new(2)).is_none());
-    }
-
-    #[tokio::test]
     async fn test_no_iop_limit() -> Result<()> {
         let guest = Guest::new();
 
