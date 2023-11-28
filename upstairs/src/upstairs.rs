@@ -363,6 +363,18 @@ impl Upstairs {
 
         // Handle any jobs that have become ready for acks
         self.ack_ready().await;
+
+        // Check for client-side deactivation
+        if matches!(self.state, UpstairsState::Deactivating) {
+            info!(self.log, "checking for deactivation");
+            for i in ClientId::iter() {
+                if self.downstairs.try_deactivate(i, &self.state) {
+                    info!(self.log, "deactivated client {i}");
+                } else {
+                    info!(self.log, "not ready to deactivate client {i}");
+                }
+            }
+        }
     }
 
     /// Check outstanding IOops for each downstairs.
@@ -1328,13 +1340,6 @@ impl Upstairs {
                 panic!("invalid response {m:?}")
             }
         }
-        if matches!(self.state, UpstairsState::Deactivating) {
-            if self.downstairs.try_deactivate(client_id, &self.state) {
-                info!(self.log, "deactivated client {client_id}");
-            } else {
-                info!(self.log, "not ready to deactivate client {client_id}");
-            }
-        }
     }
 
     /// Checks whether we can connect all three regions
@@ -1585,20 +1590,6 @@ impl Upstairs {
         }
     }
 
-    /// Forces the downstairs client to the given state
-    ///
-    /// # Panics
-    /// If the state transition is invalid
-    #[cfg(test)]
-    pub(crate) fn force_ds_state(
-        &mut self,
-        client_id: ClientId,
-        state: DsState,
-    ) {
-        self.downstairs.clients[client_id]
-            .checked_state_transition(&self.state, state);
-    }
-
     fn set_inactive(&mut self, err: CrucibleError) {
         let prev =
             std::mem::replace(&mut self.state, UpstairsState::Initializing);
@@ -1683,21 +1674,114 @@ impl Upstairs {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::downstairs::test::set_all_active;
     use crate::test::make_upstairs;
 
     #[tokio::test]
     async fn reconcile_not_ready() {
         // Verify reconcile returns false when a downstairs is not ready
         let mut up = Upstairs::test_default(None);
-        up.force_ds_state(ClientId::new(0), DsState::WaitActive);
-        up.force_ds_state(ClientId::new(0), DsState::WaitQuorum);
+        up.downstairs.clients[ClientId::new(0)]
+            .checked_state_transition(&up.state, DsState::WaitActive);
+        up.downstairs.clients[ClientId::new(0)]
+            .checked_state_transition(&up.state, DsState::WaitQuorum);
 
-        up.force_ds_state(ClientId::new(1), DsState::WaitActive);
-        up.force_ds_state(ClientId::new(1), DsState::WaitQuorum);
+        up.downstairs.clients[ClientId::new(1)]
+            .checked_state_transition(&up.state, DsState::WaitActive);
+        up.downstairs.clients[ClientId::new(1)]
+            .checked_state_transition(&up.state, DsState::WaitQuorum);
 
         let res = up.connect_region_set().await;
         assert!(!res);
         assert!(!matches!(&up.state, &UpstairsState::Active))
+    }
+
+    #[tokio::test]
+    async fn deactivate_not_when_active() {
+        // Verify that we can't set deactivate on the upstairs when
+        // the upstairs is still in init.
+        // Verify that we can't set deactivate on the upstairs when
+        // we are deactivating.
+        // TODO: This test should change when we support this behavior.
+
+        let mut up = Upstairs::test_default(None);
+
+        let (ds_done_tx, ds_done_rx) = oneshot::channel();
+        up.set_deactivate(BlockReq::new(BlockOp::Deactivate, ds_done_tx));
+        assert!(ds_done_rx.await.unwrap().is_err());
+
+        up.force_active().unwrap();
+
+        let (ds_done_tx, ds_done_rx) = oneshot::channel();
+        up.set_deactivate(BlockReq::new(BlockOp::Deactivate, ds_done_tx));
+        assert!(ds_done_rx.await.unwrap().is_ok());
+
+        let (ds_done_tx, ds_done_rx) = oneshot::channel();
+        up.set_deactivate(BlockReq::new(BlockOp::Deactivate, ds_done_tx));
+        assert!(ds_done_rx.await.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn deactivate_when_empty() {
+        // Verify we can deactivate if no work is present, without
+        // creating a flush (as their should already have been one).
+        // Verify after all three downstairs are deactivated, we can
+        // transition the upstairs back to init.
+
+        let mut up = Upstairs::test_default(None);
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        // The deactivate message should happen immediately
+        let (ds_done_tx, ds_done_rx) = oneshot::channel();
+        up.set_deactivate(BlockReq::new(BlockOp::Deactivate, ds_done_tx));
+        assert!(ds_done_rx.await.unwrap().is_ok());
+
+        // Verify we can deactivate as there is no work
+        assert!(up.downstairs.try_deactivate(ClientId::new(0), &up.state));
+        assert!(up.downstairs.try_deactivate(ClientId::new(1), &up.state));
+        assert!(up.downstairs.try_deactivate(ClientId::new(2), &up.state));
+
+        // Make sure the correct DS have changed state.
+        for c in up.downstairs.clients.iter() {
+            assert_eq!(c.state(), DsState::Deactivated);
+        }
+
+        // Mark all three DS IO tasks as done, which moves their state to New
+        let r =
+            || ClientRunResult::RequestedStop(ClientStopReason::Deactivated);
+        up.on_client_task_stopped(ClientId::new(0), r());
+        assert_eq!(
+            up.downstairs.clients[ClientId::new(0)].state(),
+            DsState::New
+        );
+        assert!(matches!(up.state, UpstairsState::Deactivating));
+
+        up.on_client_task_stopped(ClientId::new(1), r());
+        assert_eq!(
+            up.downstairs.clients[ClientId::new(1)].state(),
+            DsState::New
+        );
+        assert!(matches!(up.state, UpstairsState::Deactivating));
+
+        // Once the third task stops, we're back in initializing
+        up.on_client_task_stopped(ClientId::new(2), r());
+        assert_eq!(
+            up.downstairs.clients[ClientId::new(2)].state(),
+            DsState::New
+        );
+        assert!(matches!(up.state, UpstairsState::Initializing));
+    }
+
+    #[tokio::test]
+    #[should_panic]
+    async fn deactivate_ds_not_when_initializing() {
+        // No deactivate of downstairs when upstairs not active.
+
+        let mut up = Upstairs::test_default(None);
+
+        // This should panic, because `up` is in the wrong state
+        up.downstairs.try_deactivate(ClientId::new(0), &up.state);
     }
 
     // Job dependency tests

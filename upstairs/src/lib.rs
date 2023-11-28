@@ -1007,6 +1007,52 @@ impl DownstairsIO {
         )
         .all(|(l, r)| *l == r)
     }
+
+    /// Verify that we have enough valid IO results when considering all
+    /// downstairs results before we send back success to the guest.
+    ///
+    /// During normal operations, reads can have two failures or skipps and
+    /// still return valid data.
+    ///
+    /// During normal operations, write, write_unwritten, and flush can have one
+    /// error or skip and still return success to the upstairs (though, the
+    /// downstairs normally will not return error to the upstairs on W/F).
+    ///
+    /// For repair, we don't permit any errors, but do allow and handle the
+    /// "skipped" case for IOs.  This allows us to recover if we are repairing a
+    /// downstairs and one of the valid remaining downstairs goes offline.
+    pub fn result(&self) -> Result<(), CrucibleError> {
+        /*
+         * TODO: this doesn't tell the Guest what the error(s) were?
+         */
+        let wc = self.state_count();
+
+        let bad_job = match &self.work {
+            IOop::Read { .. } => wc.error == 3,
+            IOop::Write { .. } => wc.skipped + wc.error > 1,
+            IOop::WriteUnwritten { .. } => wc.skipped + wc.error > 1,
+            IOop::Flush { .. } => wc.skipped + wc.error > 1,
+            IOop::ExtentClose {
+                dependencies: _,
+                extent,
+            } => {
+                panic!("Received illegal IOop::ExtentClose: {}", extent);
+            }
+            IOop::ExtentFlushClose { .. } => wc.error >= 1 || wc.skipped > 1,
+            IOop::ExtentLiveRepair { .. } => wc.error >= 1 || wc.skipped > 1,
+            IOop::ExtentLiveReopen { .. } => wc.error >= 1 || wc.skipped > 1,
+            IOop::ExtentLiveNoOp { .. } => wc.error >= 1 || wc.skipped > 1,
+        };
+
+        if bad_job {
+            Err(CrucibleError::IoError(format!(
+                "{} out of 3 downstairs failed to complete this IO",
+                wc.error + wc.skipped,
+            )))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 /**

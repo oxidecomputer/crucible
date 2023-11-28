@@ -408,59 +408,13 @@ impl Downstairs {
         let data = done.data.take();
 
         done.acked = true;
-        let r = Self::result(done);
+        let r = done.result();
         Self::cdt_gw_work_done(done, up_stats);
         debug!(self.log, "[A] ack job {}:{}", ds_id, gw_id);
 
         gw.gw_ds_complete(gw_id, ds_id, data, r, &self.log).await;
 
         self.retire_check(ds_id);
-    }
-
-    /// Verify that we have enough valid IO results when considering all
-    /// downstairs results before we send back success to the guest.
-    ///
-    /// During normal operations, reads can have two failures or skipps and
-    /// still return valid data.
-    ///
-    /// During normal operations, write, write_unwritten, and flush can have one
-    /// error or skip and still return success to the upstairs (though, the
-    /// downstairs normally will not return error to the upstairs on W/F).
-    ///
-    /// For repair, we don't permit any errors, but do allow and handle the
-    /// "skipped" case for IOs.  This allows us to recover if we are repairing a
-    /// downstairs and one of the valid remaining downstairs goes offline.
-    fn result(job: &DownstairsIO) -> Result<(), CrucibleError> {
-        /*
-         * TODO: this doesn't tell the Guest what the error(s) were?
-         */
-        let wc = job.state_count();
-
-        let bad_job = match &job.work {
-            IOop::Read { .. } => wc.error == 3,
-            IOop::Write { .. } => wc.skipped + wc.error > 1,
-            IOop::WriteUnwritten { .. } => wc.skipped + wc.error > 1,
-            IOop::Flush { .. } => wc.skipped + wc.error > 1,
-            IOop::ExtentClose {
-                dependencies: _,
-                extent,
-            } => {
-                panic!("Received illegal IOop::ExtentClose: {}", extent);
-            }
-            IOop::ExtentFlushClose { .. } => wc.error >= 1 || wc.skipped > 1,
-            IOop::ExtentLiveRepair { .. } => wc.error >= 1 || wc.skipped > 1,
-            IOop::ExtentLiveReopen { .. } => wc.error >= 1 || wc.skipped > 1,
-            IOop::ExtentLiveNoOp { .. } => wc.error >= 1 || wc.skipped > 1,
-        };
-
-        if bad_job {
-            Err(CrucibleError::IoError(format!(
-                "{} out of 3 downstairs failed to complete this IO",
-                wc.error + wc.skipped,
-            )))
-        } else {
-            Ok(())
-        }
     }
 
     /// Match on the `IOop` type, update stats, and fire DTrace probes
@@ -870,11 +824,18 @@ impl Downstairs {
     /// in the main task, which will in turn restart the IO task.
     ///
     /// Returns `true` on success, `false` otherwise
+    ///
+    /// # Panics
+    /// If `up_state` is not `UpstairsState::Deactivating`
     pub(crate) fn try_deactivate(
         &mut self,
         client_id: ClientId,
         up_state: &UpstairsState,
     ) -> bool {
+        assert!(
+            matches!(up_state, UpstairsState::Deactivating),
+            "up_state must be Deactivating, not {up_state:?}"
+        );
         if self.ds_active.is_empty() {
             info!(self.log, "[{}] deactivate, no work so YES", client_id);
             self.clients[client_id].deactivate(up_state);
@@ -2013,7 +1974,7 @@ impl Downstairs {
         false
     }
 
-    /// Handles an ack from a repair job
+    /// Handles an ack from a reconciliation job
     ///
     /// Returns `true` if reconciliation is complete
     ///
@@ -2033,6 +1994,8 @@ impl Downstairs {
             //
             // We can't do much about it, so log it and continue.
             warn!(self.log, "got reconciliation ack without active work");
+            // TODO: should we have a stronger state here, something like
+            // WaitingForCancelledReconciliation?
             return false;
         };
 
@@ -3342,7 +3305,7 @@ impl Downstairs {
 
             // If we are a write or a flush with one success, then
             // we must switch our state to failed.  This condition is
-            // handled in Downstairs::result()
+            // handled when we check the job result.
             if (wc.error + wc.skipped + wc.done) == 3 {
                 self.ackable_work.insert(ds_id);
                 debug!(self.log, "[{}] Set AckReady {}", client_id, job.ds_id);
@@ -3488,6 +3451,24 @@ pub(crate) mod test {
             ds.clients[i].checked_state_transition(
                 &UpstairsState::Initializing,
                 DsState::Repair,
+            );
+        }
+    }
+
+    /// Helper function to set all 3x clients as active, legally
+    pub(crate) fn set_all_active(ds: &mut Downstairs) {
+        for i in ClientId::iter() {
+            ds.clients[i].checked_state_transition(
+                &UpstairsState::Initializing,
+                DsState::WaitActive,
+            );
+            ds.clients[i].checked_state_transition(
+                &UpstairsState::Initializing,
+                DsState::WaitQuorum,
+            );
+            ds.clients[i].checked_state_transition(
+                &UpstairsState::Initializing,
+                DsState::Active,
             );
         }
     }
@@ -6108,24 +6089,17 @@ pub(crate) mod test {
                 extent_id: 1,
             },
         ));
-        // Put 2/3 clients into the Repair state
-        for i in ClientId::iter() {
-            ds.clients[i].checked_state_transition(
-                &UpstairsState::Initializing,
-                DsState::WaitActive,
-            );
-            ds.clients[i].checked_state_transition(
-                &UpstairsState::Initializing,
-                DsState::WaitQuorum,
-            );
-            // Leave downstairs 1 in WaitQuorum
-            if i != ClientId::new(1) {
-                ds.clients[i].checked_state_transition(
-                    &UpstairsState::Initializing,
-                    DsState::Repair,
-                );
-            }
-        }
+        set_all_repair(&mut ds);
+
+        // Send the first reconciliation req
+        assert!(!ds.send_next_reconciliation_req().await);
+
+        // Fault client 1, so that later event handling will kick us out of
+        // repair
+        ds.clients[ClientId::new(1)].checked_state_transition(
+            &UpstairsState::Initializing,
+            DsState::Faulted,
+        );
 
         // Send an ack to trigger the reconciliation state check
         let nw = ds
@@ -6142,7 +6116,7 @@ pub(crate) mod test {
         // The two troublesome tasks will pass through DsState::RepairFailed and
         // end up in DsState::New.
         assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::New);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::WaitQuorum);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::New);
 
         // Verify that no more reconciliation work is happening
@@ -6189,7 +6163,6 @@ pub(crate) mod test {
             },
             &up_state,
         );
-        slog::info!(ds.log, "sending third ack");
         assert!(
             !ds.on_reconciliation_ack(ClientId::new(2), msg.clone(), &up_state)
                 .await
@@ -6369,37 +6342,6 @@ pub(crate) mod test {
 
     #[tokio::test]
     #[should_panic]
-    async fn reconcile_repair_workflow_too_soon() {
-        // Verify Done or Skipped works when checking for a complete repair
-        let mut ds = Downstairs::test_default();
-        set_all_repair(&mut ds);
-
-        let up_state = UpstairsState::Active;
-        let rep_id = ReconciliationId(1);
-
-        // Queue up a repair message, which will be skiped for client 0
-        ds.reconcile_task_list.push_back(ReconcileIO::new(
-            rep_id,
-            Message::ExtentClose {
-                repair_id: rep_id,
-                extent_id: 1,
-            },
-        ));
-
-        // Note that we do not send the job here!
-
-        // If we get back an ack from client 0, something has gone terribly
-        // wrong (because we haven't sent the job yet!)
-        ds.on_reconciliation_ack(
-            ClientId::new(0),
-            Message::RepairAckId { repair_id: rep_id },
-            &up_state,
-        )
-        .await; // this should panic!
-    }
-
-    #[tokio::test]
-    #[should_panic]
     async fn reconcile_leave_no_job_behind() {
         // Verify we can't start a new job before the old is finished.
         // Verify Done or Skipped works when checking for a complete repair
@@ -6442,5 +6384,367 @@ pub(crate) mod test {
         // don't finish
 
         ds.send_next_reconciliation_req().await; // panics!
+    }
+
+    #[test]
+    fn write_unwritten_single_skip() {
+        // Verfy that a write_unwritten with one skipped job will still
+        // result in success sent back to the guest.
+        w_io_single_skip(true);
+    }
+    #[test]
+    fn write_single_skip() {
+        // Verfy that a write with one skipped job will still result in
+        // success being sent back to the guest.
+        w_io_single_skip(false);
+    }
+
+    fn w_io_single_skip(is_write_unwritten: bool) {
+        // A single downstairs skip won't prevent us from acking back OK to the
+        // guest for write operations
+        let mut ds = Downstairs::test_default();
+        set_all_active(&mut ds);
+
+        // Mark client 1 as faulted
+        ds.clients[ClientId::new(1)]
+            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+
+        let gw_id = 19;
+
+        // Create a write, enqueue it on both the downstairs
+        // and the guest work queues.
+        let (request, iblocks) = generic_write_request();
+        let next_id =
+            ds.submit_write(gw_id, iblocks, vec![request], is_write_unwritten);
+
+        // Send out the jobs
+        assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
+        assert!(ds.in_progress(next_id, ClientId::new(2)).is_some());
+
+        // Process resplies from the two running downstairs
+        let response = Ok(vec![]);
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            response.clone(),
+            &UpstairsState::Active,
+            None,
+        );
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            response,
+            &UpstairsState::Active,
+            None,
+        );
+
+        let ack_list = ds.ackable_work().clone();
+        assert_eq!(ack_list.len(), 1);
+
+        // Simulation of what happens in ack_jobs
+        for ds_id_done in ack_list.iter() {
+            assert_eq!(*ds_id_done, next_id);
+
+            ds.ack(*ds_id_done);
+
+            let done = ds.ds_active.get(ds_id_done).unwrap();
+            assert_eq!(done.guest_id, gw_id);
+            assert!(done.result().is_ok());
+        }
+    }
+
+    #[test]
+    fn write_unwritten_double_skip() {
+        // Verify that write IO errors are counted.
+        w_io_double_skip(true);
+    }
+
+    #[test]
+    fn write_double_skip() {
+        // Verify that write IO errors are counted.
+        w_io_double_skip(false);
+    }
+
+    fn w_io_double_skip(is_write_unwritten: bool) {
+        // up_ds_listen test, a double skip on a write or write_unwritten
+        // will result in an error back to the guest.
+        // A single downstairs skip won't prevent us from acking back OK to the
+        // guest for write operations
+        let mut ds = Downstairs::test_default();
+        set_all_active(&mut ds);
+
+        // Mark client 1 as faulted
+        ds.clients[ClientId::new(1)]
+            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+        ds.clients[ClientId::new(2)]
+            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+
+        let gw_id = 19;
+
+        // Create a write, enqueue it on both the downstairs
+        // and the guest work queues.
+        let (request, iblocks) = generic_write_request();
+        let next_id =
+            ds.submit_write(gw_id, iblocks, vec![request], is_write_unwritten);
+
+        assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        );
+
+        let ack_list = ds.ackable_work().clone();
+        assert_eq!(ack_list.len(), 1);
+
+        // Simulation of what happens in ack_jobs
+        for ds_id_done in ack_list.iter() {
+            assert_eq!(*ds_id_done, next_id);
+
+            ds.ack(*ds_id_done);
+
+            let done = ds.ds_active.get(ds_id_done).unwrap();
+            assert_eq!(done.guest_id, gw_id);
+            assert!(done.result().is_err());
+        }
+    }
+
+    #[test]
+    fn write_unwritten_fail_and_skip() {
+        // Verify that an write_unwritten error + a skip results in error
+        // back to the guest
+        w_io_fail_and_skip(true);
+    }
+    #[test]
+    fn write_fail_and_skip() {
+        // Verify that a write error + a skip results in error back to the
+        // guest
+        w_io_fail_and_skip(false);
+    }
+
+    fn w_io_fail_and_skip(is_write_unwritten: bool) {
+        // up_ds_listen test, a fail plus a skip on a write or write_unwritten
+        // will result in an error back to the guest.
+        let mut ds = Downstairs::test_default();
+        set_all_active(&mut ds);
+        ds.clients[ClientId::new(2)]
+            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+
+        let gw_id = 19;
+
+        // Create a write, enqueue it on both the downstairs
+        // and the guest work queues.
+        let (request, iblocks) = generic_write_request();
+        let next_id =
+            ds.submit_write(gw_id, iblocks, vec![request], is_write_unwritten);
+
+        assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
+        assert!(ds.in_progress(next_id, ClientId::new(1)).is_some());
+
+        // DS 0, the good IO.
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        );
+
+        // DS 1, return error.
+        // On a write_unwritten, This will return true because we have now
+        // completed all three IOs (skipped, ok, and error here).
+        let res = ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        );
+
+        assert_eq!(res, is_write_unwritten);
+
+        let ack_list = ds.ackable_work().clone();
+        assert_eq!(ack_list.len(), 1);
+
+        // Simulation of what happens in up_ds_listen
+        for ds_id_done in ack_list.iter() {
+            assert_eq!(*ds_id_done, next_id);
+
+            ds.ack(*ds_id_done);
+
+            let done = ds.ds_active.get(ds_id_done).unwrap();
+            assert_eq!(done.guest_id, gw_id);
+            assert!(done.result().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_io_single_skip() {
+        // up_ds_listen test, a single downstairs skip won't prevent us
+        // from acking back OK for a flush to the guest.
+        let mut ds = Downstairs::test_default();
+        set_all_active(&mut ds);
+        ds.clients[ClientId::new(1)]
+            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+
+        let gw_id = 19;
+        let next_id = JobId(1010);
+
+        // Create a flush, enqueue it on both the downstairs
+        // and the guest work queues.
+        let dep = ds.ds_active.deps_for_flush(next_id);
+        let op = Downstairs::create_flush(
+            next_id, dep, 22, // Flush number
+            gw_id, 11, // Gen number
+            None, None,
+        );
+
+        ds.enqueue(op);
+        assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
+        assert!(ds.in_progress(next_id, ClientId::new(2)).is_some());
+
+        let response = Ok(vec![]);
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            response.clone(),
+            &UpstairsState::Active,
+            None,
+        );
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            response,
+            &UpstairsState::Active,
+            None,
+        );
+
+        let ack_list = ds.ackable_work().clone();
+        assert_eq!(ack_list.len(), 1);
+
+        // Simulation of what happens in up_ds_listen
+        for ds_id_done in ack_list.iter() {
+            assert_eq!(*ds_id_done, next_id);
+
+            ds.ack(*ds_id_done);
+
+            let done = ds.ds_active.get(ds_id_done).unwrap();
+            assert_eq!(done.guest_id, gw_id);
+            assert!(done.result().is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_io_double_skip() {
+        // up_ds_listen test, a double skip on a flush will result in an error
+        // back to the guest.
+        let mut ds = Downstairs::test_default();
+        set_all_active(&mut ds);
+        ds.clients[ClientId::new(1)]
+            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+        ds.clients[ClientId::new(2)]
+            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+
+        let gw_id = 19;
+        let next_id = JobId(1010);
+
+        // Create a flush, enqueue it on both the downstairs
+        // and the guest work queues.
+        let deps = ds.ds_active.deps_for_flush(next_id);
+        let op = Downstairs::create_flush(
+            next_id, deps, 22, // Flush number
+            gw_id, 11, // Gen number
+            None, None,
+        );
+
+        ds.enqueue(op);
+        assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
+
+        ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None,
+        );
+
+        let ack_list = ds.ackable_work().clone();
+        assert_eq!(ack_list.len(), 1);
+
+        // Simulation of what happens in up_ds_listen
+        for ds_id_done in ack_list.iter() {
+            assert_eq!(*ds_id_done, next_id);
+
+            ds.ack(*ds_id_done);
+
+            let done = ds.ds_active.get(ds_id_done).unwrap();
+            assert_eq!(done.guest_id, gw_id);
+            assert!(done.result().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn flush_io_fail_and_skip() {
+        // up_ds_listen test, a fail plus a skip on a flush will result in an
+        // error back to the guest.
+        let mut ds = Downstairs::test_default();
+        set_all_active(&mut ds);
+        ds.clients[ClientId::new(0)]
+            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+
+        let gw_id = 19;
+        let next_id = JobId(1010);
+
+        // Create a flush, enqueue it on both the downstairs
+        // and the guest work queues.
+        let deps = ds.ds_active.deps_for_flush(next_id);
+        let op = Downstairs::create_flush(
+            next_id, deps, 22, // Flush number
+            gw_id, 11, // Gen number
+            None, None,
+        );
+
+        ds.enqueue(op);
+        assert!(ds.in_progress(next_id, ClientId::new(1)).is_some());
+        assert!(ds.in_progress(next_id, ClientId::new(2)).is_some());
+
+        // DS 1 has a failure, and this won't return true as we don't
+        // have enough success yet to ACK to the guest.
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            Err(CrucibleError::GenericError("bad".to_string())),
+            &UpstairsState::Active,
+            None,
+        ));
+
+        // DS 2 as it's the final IO will indicate it is time to notify
+        // the guest we have a result for them.
+        assert!(ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            Ok(vec![]),
+            &UpstairsState::Active,
+            None
+        ));
+
+        let ack_list = ds.ackable_work().clone();
+        assert_eq!(ack_list.len(), 1);
+
+        // Simulation of what happens in up_ds_listen
+        for ds_id_done in ack_list.iter() {
+            assert_eq!(*ds_id_done, next_id);
+
+            ds.ack(*ds_id_done);
+
+            let done = ds.ds_active.get(ds_id_done).unwrap();
+            assert_eq!(done.guest_id, gw_id);
+            assert!(done.result().is_err());
+        }
     }
 }

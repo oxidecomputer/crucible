@@ -189,14 +189,6 @@ impl DownstairsClient {
             io_state_count: ClientIOStateCount::new(),
         };
 
-        #[cfg(test)]
-        if target_addr.is_none() {
-            out.start_dummy_task();
-        } else {
-            out.start_task(false);
-        }
-
-        #[cfg(not(test))]
         out.start_task(false);
         out
     }
@@ -695,9 +687,25 @@ impl DownstairsClient {
     }
     /// Starts a client IO task, saving the handle in `self.client_task`
     ///
+    /// If we are running unit tests and `self.target_addr` is not populated, we
+    /// start a dummy task instead.
+    ///
     /// # Panics
-    /// If `self.client_task` is not `None`, or `self.target_addr` is `None`
+    /// If `self.client_task` is not `None`, or `self.target_addr` is `None` and
+    /// this isn't running in test mode
     fn start_task(&mut self, delay: bool) {
+        #[cfg(test)]
+        if self.target_addr.is_none() {
+            self.start_dummy_task();
+        } else {
+            self.start_network_task(delay);
+        }
+
+        #[cfg(not(test))]
+        self.start_network_task(delay);
+    }
+
+    fn start_network_task(&mut self, delay: bool) {
         assert!(
             self.client_task.is_none(),
             "cannot start task when it is already running"
