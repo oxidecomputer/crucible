@@ -105,7 +105,7 @@ pub(crate) struct Downstairs {
 ///
 /// Early states carry around reserved IDs (both `JobId` and guest work IDs), as
 /// well as a reserved `BlockReqWaiter` for the final flush.
-enum LiveRepairState {
+pub(crate) enum LiveRepairState {
     // TODO remove the BlockReqWaiters here, since we can handle the
     // `ExtentLive*Ack*` messages as they come in?
     //
@@ -214,7 +214,7 @@ pub(crate) struct LiveRepairData {
     extent_count: u64,
 
     /// Extent being repaired
-    active_extent: u64,
+    pub active_extent: u64,
 
     /// Minimum job ID the downstairs under repair needs to consider for deps
     min_id: JobId,
@@ -391,7 +391,10 @@ impl Downstairs {
     /// Send the ack for a single job back upstairs through `GuestWork`
     ///
     /// Update stats for the upstairs as well
-    async fn ack_job(
+    ///
+    /// This is public for the sake of unit testing, but shouldn't be called
+    /// outside of this module normally.
+    pub(crate) async fn ack_job(
         &mut self,
         ds_id: JobId,
         gw: &mut GuestWork,
@@ -747,7 +750,7 @@ impl Downstairs {
     ///
     /// If the job state is already [`IOState::Skipped`], then this task
     /// has no work to do, so return `None`.
-    fn in_progress(
+    pub(crate) fn in_progress(
         &mut self,
         ds_id: JobId,
         client_id: ClientId,
@@ -3350,7 +3353,7 @@ impl Downstairs {
     /// This is only useful in tests; in real code, we'd also want to reply to
     /// the guest when acking a job.
     #[cfg(test)]
-    fn ack(&mut self, ds_id: JobId) {
+    pub(crate) fn ack(&mut self, ds_id: JobId) {
         /*
          * Move AckReady to Acked.
          */
@@ -3398,6 +3401,11 @@ impl Downstairs {
     #[cfg(test)]
     pub(crate) fn repair(&self) -> &Option<LiveRepairData> {
         &self.repair
+    }
+
+    #[cfg(test)]
+    pub(crate) fn get_job(&self, ds_id: &JobId) -> Option<&DownstairsIO> {
+        self.ds_active.get(ds_id)
     }
 }
 

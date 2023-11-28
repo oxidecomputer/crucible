@@ -87,7 +87,7 @@ pub struct ExtentInfo {
 /// The values are never used during normal operation, but are checked in unit
 /// tests to make sure the state is as expected.
 #[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum RepairCheck {
     /// We started a repair task
     RepairStarted,
@@ -99,37 +99,40 @@ pub enum RepairCheck {
     InvalidState,
 }
 
-#[cfg(feature = "TODO re-enable this")]
+#[cfg(test)]
 pub mod repair_test {
     use super::*;
+    use crate::{
+        downstairs::{test::set_all_active, Downstairs},
+        upstairs::Upstairs,
+    };
     use slog::Drain;
+    use std::ops::DerefMut;
 
     // Test function to create just enough of an Upstairs for our needs.
     // The caller will indicate which downstairs client it wished to be
     // moved to LiveRepair.
-    async fn create_test_upstairs(fail_id: ClientId) -> Arc<Upstairs> {
+    async fn create_test_upstairs(fail_id: ClientId) -> Upstairs {
         let mut ddef = RegionDefinition::default();
         ddef.set_block_size(512);
         ddef.set_extent_size(Block::new_512(3));
         ddef.set_extent_count(4);
 
-        let up = Upstairs::test_default(Some(ddef));
-
-        for cid in ClientId::iter() {
-            up.ds_transition(cid, DsState::WaitActive).await;
-            up.ds_transition(cid, DsState::WaitQuorum).await;
-            up.ds_transition(cid, DsState::Active).await;
+        let mut up = Upstairs::test_default(Some(ddef));
+        set_all_active(&mut up.downstairs);
+        for c in up.downstairs.clients.iter_mut() {
             // Give all downstairs a repair address
-            up.ds_set_repair_address(cid, "0.0.0.0:1".parse().unwrap())
-                .await;
+            c.repair_addr = Some("0.0.0.0:1".parse().unwrap());
         }
 
         // Move our downstairs client fail_id to LiveRepair.
-        up.set_active().await.unwrap();
-        up.ds_transition(fail_id, DsState::Faulted).await;
-        up.ds_transition(fail_id, DsState::LiveRepairReady).await;
-        up.ds_transition(fail_id, DsState::LiveRepair).await;
-        up.downstairs.lock().await.repair_min_id = Some(JobId(1000));
+        up.force_active().unwrap();
+
+        let client = &mut up.downstairs.clients[fail_id];
+        client.checked_state_transition(&up.state, DsState::Faulted);
+        client.checked_state_transition(&up.state, DsState::LiveRepairReady);
+
+        assert_eq!(up.on_repair_check().await, RepairCheck::RepairStarted);
 
         up
     }
@@ -139,52 +142,11 @@ pub mod repair_test {
         Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
     }
 
-    // Test function to create a downstairs.
-    fn create_test_downstairs() -> Downstairs {
-        let mut ds = Downstairs::new(csl(), ClientMap::new());
-        for cid in ClientId::iter() {
-            ds.clients[cid].repair_addr =
-                Some("127.0.0.1:1234".parse().unwrap());
-        }
-        ds
-    }
-
-    // Create a test Target vec, we only really use one field here,
-    // but we have to create them all.  Also return the ds_work_rx
-    // so tests can send work over it without hitting an error.
-    fn create_test_dst_rx() -> (Vec<Target>, Vec<mpsc::Receiver<u64>>) {
-        let mut dst = Vec::new();
-        let mut ds_work_rx_vec = Vec::new();
-
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        for _cid in ClientId::iter() {
-            let (ds_work_tx, ds_work_rx) = mpsc::channel(500);
-            ds_work_rx_vec.push(ds_work_rx);
-            let (ds_reconcile_work_tx, _ds_reconcile_work_rx) =
-                watch::channel(1);
-            let (ds_active_tx, _ds_active_rx) = watch::channel(0);
-
-            let t = Target {
-                ds_work_tx,
-                ds_done_tx: ds_done_tx.clone(),
-                ds_active_tx,
-                ds_reconcile_work_tx,
-            };
-            dst.push(t);
-        }
-        // We return the work_rx so submitters to the work_tx won't
-        // encounter errors.  This allows the actual code to return
-        // an error if the channel is really down, and keeps up
-        // apperance for test code.
-        (dst, ds_work_rx_vec)
-    }
-
     // Test function to move a job to in_progress, then complete it.
     // We will skip processing the job ID on the downstairs client ids
     // on the skip_ds vec.
-    async fn move_and_complete_job(
-        up: &Arc<Upstairs>,
+    fn move_and_complete_job(
+        up: &mut Upstairs,
         ds_id: JobId,
         skip_ds: Vec<ClientId>,
     ) -> Result<()> {
@@ -192,26 +154,38 @@ pub mod repair_test {
             if skip_ds.contains(&cid) {
                 continue;
             }
-            up.downstairs.lock().await.in_progress(ds_id, cid);
-            up.process_ds_operation(ds_id, cid, Ok(vec![]), None)
-                .await?;
+            up.downstairs.in_progress(ds_id, cid);
+            up.downstairs.process_ds_completion(
+                ds_id,
+                cid,
+                Ok(vec![]),
+                &up.state,
+                None,
+            );
         }
         Ok(())
     }
 
     // Test function to ACK a job, given the ds_id and gw_id
     async fn ack_this_job(
-        up: &Arc<Upstairs>,
+        up: &mut Upstairs,
         gw_id: u64,
         ds_id: JobId,
         result: Result<(), CrucibleError>,
     ) {
         let mut gw = up.guest.guest_work.lock().await;
-        let mut ds = up.downstairs.lock().await;
-        let state = ds.ds_active.get(&ds_id).unwrap().ack_status;
-        assert_eq!(state, AckStatus::AckReady);
-        ds.ack(ds_id);
+        up.downstairs.ack(ds_id);
         gw.gw_ds_complete(gw_id, ds_id, None, result, &up.log).await;
+        drop(gw);
+
+        // Manually drive the upstairs state forward, because the job is now
+        // acked.
+        up.downstairs.on_live_repair(
+            Ok(()),
+            up.guest.guest_work.lock().await.deref_mut(),
+            &up.state,
+            up.generation,
+        );
     }
 
     // A function that does some setup that other tests can use to avoid
@@ -234,168 +208,18 @@ pub mod repair_test {
     // The result of the repair_extent is unwrapped and this result is
     // returned. Callers expecting error from repair_extent should expect
     // this unwrap will fail.
-    async fn start_up_and_repair(
-        or_ds: ClientId,
-    ) -> (
-        Arc<Upstairs>,
-        tokio::task::JoinHandle<()>,
-        Vec<mpsc::Receiver<u64>>,
-    ) {
-        assert!(or_ds.get() < 3);
-        let source_ds = ClientId::new((or_ds.get() + 1) % 3);
+    async fn start_up_and_repair(or_ds: ClientId) -> Upstairs {
         let up = create_test_upstairs(or_ds).await;
-        let (dst, ds_work_rx) = create_test_dst_rx();
-        let mut ds_work_vec = Vec::with_capacity(3);
-        for this_target in dst.iter().take(3) {
-            ds_work_vec.push(this_target.ds_work_tx.clone());
-        }
-        let upc = Arc::clone(&up);
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        let repair_handle = tokio::spawn(async move {
-            upc.repair_extent(
-                &ds_work_vec,
-                0,
-                source_ds,
-                [or_ds].to_vec(),
-                &ds_done_tx,
-            )
-            .await
-            .unwrap();
-        });
 
         // The first thing that should happen after we start repair_exetnt
         // is two jobs show up on the work queue, one for close and one for
         // the eventual re-open.  Wait here for those jobs to show up on the
         // work queue before returning.
-        let mut jobs = up.downstairs.lock().await.ds_active.len();
-        while jobs != 2 {
-            info!(up.log, "Waiting for Close + ReOpen jobs");
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            jobs = up.downstairs.lock().await.ds_active.len();
-        }
-        (up, repair_handle, ds_work_rx)
+        let jobs = up.downstairs.active_count();
+        assert_eq!(jobs, 2);
+        up
     }
 
-    #[tokio::test]
-    async fn test_check_for_repair_do_repair() {
-        // No repair needed here.
-        let (dst, _ds_work_rx) = create_test_dst_rx();
-        let mut ddef = RegionDefinition::default();
-        ddef.set_block_size(512);
-        ddef.set_extent_size(Block::new_512(3));
-        ddef.set_extent_count(4);
-
-        let up = Upstairs::test_default(Some(ddef));
-        up.set_active().await.unwrap();
-        for cid in ClientId::iter() {
-            up.ds_transition(cid, DsState::WaitActive).await;
-            up.ds_transition(cid, DsState::WaitQuorum).await;
-            up.ds_transition(cid, DsState::Active).await;
-        }
-        up.ds_transition(ClientId::new(1), DsState::Faulted).await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady)
-            .await;
-        assert_eq!(
-            check_for_repair(&up, &dst).await,
-            RepairCheck::RepairStarted
-        );
-        let ds = up.downstairs.lock().await;
-        assert_eq!(ds.clients[ClientId::new(1)].state, DsState::LiveRepair);
-        assert!(ds.repair_min_id.is_some())
-    }
-
-    #[tokio::test]
-    async fn test_check_for_repair_do_two_repair() {
-        // No repair needed here.
-        let (dst, _ds_work_rx) = create_test_dst_rx();
-        let mut ddef = RegionDefinition::default();
-        ddef.set_block_size(512);
-        ddef.set_extent_size(Block::new_512(3));
-        ddef.set_extent_count(4);
-
-        let up = Upstairs::test_default(Some(ddef));
-        up.set_active().await.unwrap();
-        for cid in ClientId::iter() {
-            up.ds_transition(cid, DsState::WaitActive).await;
-            up.ds_transition(cid, DsState::WaitQuorum).await;
-            up.ds_transition(cid, DsState::Active).await;
-        }
-        up.ds_transition(ClientId::new(1), DsState::Faulted).await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady)
-            .await;
-        up.ds_transition(ClientId::new(2), DsState::Faulted).await;
-        up.ds_transition(ClientId::new(2), DsState::LiveRepairReady)
-            .await;
-        assert_eq!(
-            check_for_repair(&up, &dst).await,
-            RepairCheck::RepairStarted
-        );
-        let ds = up.downstairs.lock().await;
-        assert_eq!(ds.clients[ClientId::new(0)].state, DsState::Active);
-        assert_eq!(ds.clients[ClientId::new(1)].state, DsState::LiveRepair);
-        assert_eq!(ds.clients[ClientId::new(2)].state, DsState::LiveRepair);
-        assert!(ds.repair_min_id.is_some())
-    }
-
-    #[tokio::test]
-    async fn test_check_for_repair_already_repair() {
-        // No repair needed here.
-        let (dst, _ds_work_rx) = create_test_dst_rx();
-        let mut ddef = RegionDefinition::default();
-        ddef.set_block_size(512);
-        ddef.set_extent_size(Block::new_512(3));
-        ddef.set_extent_count(4);
-
-        let up = Upstairs::test_default(Some(ddef));
-        up.set_active().await.unwrap();
-        for cid in ClientId::iter() {
-            up.ds_transition(cid, DsState::WaitActive).await;
-            up.ds_transition(cid, DsState::WaitQuorum).await;
-            up.ds_transition(cid, DsState::Active).await;
-        }
-        up.ds_transition(ClientId::new(1), DsState::Faulted).await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady)
-            .await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepair)
-            .await;
-        // Make ds 0 ready for repair.
-        up.ds_transition(ClientId::new(0), DsState::Faulted).await;
-        up.ds_transition(ClientId::new(0), DsState::LiveRepairReady)
-            .await;
-        assert_eq!(
-            check_for_repair(&up, &dst).await,
-            RepairCheck::RepairInProgress
-        );
-    }
-
-    #[tokio::test]
-    async fn test_check_for_repair_task_running() {
-        let (dst, _ds_work_rx) = create_test_dst_rx();
-        let mut ddef = RegionDefinition::default();
-        ddef.set_block_size(512);
-        ddef.set_extent_size(Block::new_512(3));
-        ddef.set_extent_count(4);
-
-        let up = Upstairs::test_default(Some(ddef));
-        up.set_active().await.unwrap();
-        for cid in ClientId::iter() {
-            up.ds_transition(cid, DsState::WaitActive).await;
-            up.ds_transition(cid, DsState::WaitQuorum).await;
-            up.ds_transition(cid, DsState::Active).await;
-        }
-        up.ds_transition(ClientId::new(1), DsState::Faulted).await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady)
-            .await;
-        let mut ds = up.downstairs.lock().await;
-        ds.repair_min_id = Some(JobId(3));
-        drop(ds);
-
-        assert_eq!(
-            check_for_repair(&up, &dst).await,
-            RepairCheck::RepairInProgress
-        );
-    }
     // Test the permutations of calling repair_extent with each downstairs
     // as the one needing LiveRepair
     #[tokio::test]
@@ -420,7 +244,8 @@ pub mod repair_test {
         // which we don't call here, we are only testing that the proper number
         // of jobs are issued at the proper times.
 
-        let (up, re_handle, _ds_work_vec) = start_up_and_repair(or_ds).await;
+        let mut up = start_up_and_repair(or_ds).await;
+        info!(up.log, "started up");
 
         // By default, the job IDs always start at 1000 and the gw IDs
         // always start at 1. Take advantage of that and knowing that we
@@ -440,81 +265,60 @@ pub mod repair_test {
             flush_number: 3,
             dirty: false,
         };
-        let mut ds = up.downstairs.lock().await;
         for cid in ClientId::iter() {
-            ds.in_progress(ds_close_id, cid);
-            ds.process_ds_completion(
+            up.downstairs.in_progress(ds_close_id, cid);
+            up.downstairs.process_ds_completion(
                 ds_close_id,
                 cid,
                 Ok(vec![]),
-                UpState::Active,
+                &up.state,
                 Some(ei),
-            )
-            .unwrap();
+            );
         }
-        drop(ds);
 
-        ack_this_job(&up, gw_close_id, ds_close_id, Ok(())).await;
+        info!(up.log, "acking job");
+        ack_this_job(&mut up, gw_close_id, ds_close_id, Ok(())).await;
+        info!(up.log, "acked job");
         // Once we process the IO completion, and drop the lock, the task
         // doing extent repair should submit the next IO.
 
-        // Wait for this repair job to show up.
-        let mut jobs = up.downstairs.lock().await.ds_active.len();
-        while jobs != 3 {
-            info!(up.log, "Waiting for 3 jobs (currently {})", jobs);
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            jobs = up.downstairs.lock().await.ds_active.len();
-        }
+        let jobs = up.downstairs.active_count();
+        assert_eq!(jobs, 3);
 
         // The repair job has shown up.  Move it forward.
-        move_and_complete_job(&up, ds_repair_id, vec![])
-            .await
-            .unwrap();
+        move_and_complete_job(&mut up, ds_repair_id, vec![]).unwrap();
 
         // Now ACK the repair job
-        ack_this_job(&up, gw_repair_id, ds_repair_id, Ok(())).await;
+        ack_this_job(&mut up, gw_repair_id, ds_repair_id, Ok(())).await;
 
         // When we completed the repair jobs, the repair_extent should
         // have gone ahead and issued the NoOp that should be issued
         // next.  Loop here waiting for that job to arrive.
-        let mut jobs = up.downstairs.lock().await.ds_active.len();
-
-        // Wait for the NoOp jobs to show up.
-        while jobs != 4 {
-            info!(up.log, "Waiting for 4 jobs (currently {})", jobs);
-            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-            show_all_work(&up).await;
-            jobs = up.downstairs.lock().await.ds_active.len();
-        }
+        let jobs = up.downstairs.active_count();
+        assert_eq!(jobs, 4);
 
         info!(up.log, "Now move the NoOp job forward");
-        move_and_complete_job(&up, ds_noop_id, vec![])
-            .await
-            .unwrap();
+        move_and_complete_job(&mut up, ds_noop_id, vec![]).unwrap();
 
-        ack_this_job(&up, gw_noop_id, ds_noop_id, Ok(())).await;
+        ack_this_job(&mut up, gw_noop_id, ds_noop_id, Ok(())).await;
 
         info!(up.log, "Finally, move the ReOpen job forward");
-        move_and_complete_job(&up, ds_reopen_id, vec![])
-            .await
-            .unwrap();
+        move_and_complete_job(&mut up, ds_reopen_id, vec![]).unwrap();
 
-        let mut ds = up.downstairs.lock().await;
-        assert_eq!(ds.ackable_work().len(), 1);
-        drop(ds);
+        assert_eq!(up.downstairs.ackable_work().len(), 1);
 
         info!(up.log, "Now ACK the reopen job");
-        ack_this_job(&up, gw_reopen_id, ds_reopen_id, Ok(())).await;
+        ack_this_job(&mut up, gw_reopen_id, ds_reopen_id, Ok(())).await;
 
         // The extent repair task should complete without error.
-        assert!(re_handle.await.is_ok());
+        assert_eq!(up.downstairs.repair().as_ref().unwrap().active_extent, 1);
 
-        // We should have 4 jobs on the queue.
-        let ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_active.len(), 4);
+        // We should have 6 jobs on the queue; 4 from the first extent, and 2
+        // more for the next extent (which was started when the job was acked)
+        assert_eq!(up.downstairs.active_count(), 6);
 
         info!(up.log, "jobs are: {:?}", jobs);
-        let job = ds.ds_active.get(&ds_close_id).unwrap();
+        let job = up.downstairs.get_job(&ds_close_id).unwrap();
         match &job.work {
             IOop::ExtentFlushClose { .. } => {}
             x => {
@@ -523,7 +327,7 @@ pub mod repair_test {
         }
         assert_eq!(job.state_count().done, 3);
 
-        let job = ds.ds_active.get(&ds_repair_id).unwrap();
+        let job = up.downstairs.get_job(&ds_repair_id).unwrap();
         match &job.work {
             IOop::ExtentLiveNoOp { .. } => {}
             x => {
@@ -532,7 +336,7 @@ pub mod repair_test {
         }
         assert_eq!(job.state_count().done, 3);
 
-        let job = ds.ds_active.get(&ds_noop_id).unwrap();
+        let job = up.downstairs.get_job(&ds_noop_id).unwrap();
         match &job.work {
             IOop::ExtentLiveNoOp { .. } => {}
             x => {
@@ -541,7 +345,7 @@ pub mod repair_test {
         }
         assert_eq!(job.state_count().done, 3);
 
-        let job = ds.ds_active.get(&ds_reopen_id).unwrap();
+        let job = up.downstairs.get_job(&ds_reopen_id).unwrap();
         match &job.work {
             IOop::ExtentLiveReopen { .. } => {}
             x => {
@@ -549,6 +353,19 @@ pub mod repair_test {
             }
         }
         assert_eq!(job.state_count().done, 3);
+    }
+}
+
+#[cfg(feature = "NOPE")]
+mod nope {
+    // Test function to create a downstairs.
+    fn create_test_downstairs() -> Downstairs {
+        let mut ds = Downstairs::new(csl(), ClientMap::new());
+        for cid in ClientId::iter() {
+            ds.clients[cid].repair_addr =
+                Some("127.0.0.1:1234".parse().unwrap());
+        }
+        ds
     }
 
     // Loop over the possible downstairs to be in LiveRepair and
