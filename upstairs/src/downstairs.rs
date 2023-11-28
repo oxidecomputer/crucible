@@ -3149,62 +3149,6 @@ impl Downstairs {
             extent_info,
         );
 
-        // Decide what to do when we have an error from this IO.
-        // Mark this downstairs as bad if this was a write or flush
-        match self.client_error(ds_id, client_id) {
-            Some(CrucibleError::UpstairsInactive) => {
-                error!(
-                    self.log,
-                    "Saw CrucibleError::UpstairsInactive on client {}!",
-                    client_id
-                );
-                self.clients[client_id]
-                    .checked_state_transition(up_state, DsState::Disabled);
-                // TODO should we also restart the IO task here?
-            }
-            Some(CrucibleError::DecryptionError) => {
-                // We should always be able to decrypt the data.  If we
-                // can't, then we have the wrong key, or the data (or key)
-                // is corrupted.
-                error!(
-                    self.clients[client_id].log,
-                    "Authenticated decryption failed on job: {:?}", ds_id
-                );
-                panic!(
-                    "[{}] Authenticated decryption failed on job: {:?}",
-                    client_id, ds_id
-                );
-            }
-            Some(CrucibleError::SnapshotExistsAlready(_)) => {
-                // This is fine, nothing to worry about
-            }
-            Some(_err) => {
-                let Some(job) = self.ds_active.get(&ds_id) else {
-                    panic!("I don't think we should be here");
-                };
-                if matches!(
-                    job.work,
-                    IOop::Write { .. }
-                        | IOop::Flush { .. }
-                        | IOop::WriteUnwritten { .. }
-                        | IOop::ExtentFlushClose { .. }
-                        | IOop::ExtentLiveRepair { .. }
-                        | IOop::ExtentLiveNoOp { .. }
-                        | IOop::ExtentLiveReopen { .. }
-                ) {
-                    // This error means the downstairs will go to Faulted.
-                    // Walk the active job list and mark any that were
-                    // new or in progress to skipped.
-                    self.skip_all_jobs(client_id);
-                    self.clients[client_id]
-                        .checked_state_transition(up_state, DsState::Faulted);
-                    // TODO should we restart the client task here?
-                }
-            }
-            None => {
-                // Nothing to do here, no error!
-            }
-        }
         Ok(())
     }
 
@@ -3309,6 +3253,63 @@ impl Downstairs {
             if (wc.error + wc.skipped + wc.done) == 3 {
                 self.ackable_work.insert(ds_id);
                 debug!(self.log, "[{}] Set AckReady {}", client_id, job.ds_id);
+            }
+        }
+
+        // Decide what to do when we have an error from this IO.
+        // Mark this downstairs as bad if this was a write or flush
+        match self.client_error(ds_id, client_id) {
+            Some(CrucibleError::UpstairsInactive) => {
+                error!(
+                    self.log,
+                    "Saw CrucibleError::UpstairsInactive on client {}!",
+                    client_id
+                );
+                self.clients[client_id]
+                    .checked_state_transition(up_state, DsState::Disabled);
+                // TODO should we also restart the IO task here?
+            }
+            Some(CrucibleError::DecryptionError) => {
+                // We should always be able to decrypt the data.  If we
+                // can't, then we have the wrong key, or the data (or key)
+                // is corrupted.
+                error!(
+                    self.clients[client_id].log,
+                    "Authenticated decryption failed on job: {:?}", ds_id
+                );
+                panic!(
+                    "[{}] Authenticated decryption failed on job: {:?}",
+                    client_id, ds_id
+                );
+            }
+            Some(CrucibleError::SnapshotExistsAlready(_)) => {
+                // This is fine, nothing to worry about
+            }
+            Some(_err) => {
+                let Some(job) = self.ds_active.get(&ds_id) else {
+                    panic!("I don't think we should be here");
+                };
+                if matches!(
+                    job.work,
+                    IOop::Write { .. }
+                        | IOop::Flush { .. }
+                        | IOop::WriteUnwritten { .. }
+                        | IOop::ExtentFlushClose { .. }
+                        | IOop::ExtentLiveRepair { .. }
+                        | IOop::ExtentLiveNoOp { .. }
+                        | IOop::ExtentLiveReopen { .. }
+                ) {
+                    // This error means the downstairs will go to Faulted.
+                    // Walk the active job list and mark any that were
+                    // new or in progress to skipped.
+                    self.skip_all_jobs(client_id);
+                    self.clients[client_id]
+                        .checked_state_transition(up_state, DsState::Faulted);
+                    // TODO should we restart the client task here?
+                }
+            }
+            None => {
+                // Nothing to do here, no error!
             }
         }
     }
@@ -3588,6 +3589,7 @@ pub(crate) mod test {
     #[tokio::test]
     async fn work_flush_one_error_then_ok() {
         let mut ds = Downstairs::test_default();
+        set_all_active(&mut ds);
 
         let next_id = ds.next_id();
         let dep = ds.ds_active.deps_for_flush(next_id);
@@ -3642,6 +3644,7 @@ pub(crate) mod test {
     #[tokio::test]
     async fn work_flush_two_errors_equals_fail() {
         let mut ds = Downstairs::test_default();
+        set_all_active(&mut ds);
 
         let next_id = ds.next_id();
         let dep = ds.ds_active.deps_for_flush(next_id);
@@ -4314,6 +4317,7 @@ pub(crate) mod test {
     // that takes write_unwritten as an arg.
     fn work_errors_are_counted(is_write_unwritten: bool) {
         let mut ds = Downstairs::test_default();
+        set_all_active(&mut ds);
 
         let next_id = ds.next_id();
 
@@ -6746,5 +6750,246 @@ pub(crate) mod test {
             assert_eq!(done.guest_id, gw_id);
             assert!(done.result().is_err());
         }
+    }
+
+    #[test]
+    fn work_writes_bad() {
+        // Verify that three bad writes will ACK the IO, and set the
+        // downstairs clients to failed.
+        // This test also makes sure proper mutex behavior is used in
+        // process_ds_operation.
+        let mut ds = Downstairs::test_default();
+        set_all_active(&mut ds);
+
+        let next_id = {
+            let next_id = ds.next_id();
+
+            let (request, iblocks) = generic_write_request();
+            let op =
+                ds.create_write_eob(next_id, iblocks, 10, vec![request], false);
+
+            ds.enqueue(op);
+
+            assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
+            assert!(ds.in_progress(next_id, ClientId::new(1)).is_some());
+            assert!(ds.in_progress(next_id, ClientId::new(2)).is_some());
+
+            next_id
+        };
+
+        // Set the error that everyone will use.
+        let response = Err(CrucibleError::GenericError("bad".to_string()));
+
+        // Process the operation for client 0
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            response.clone(),
+            &UpstairsState::Active,
+            None,
+        ));
+        // client 0 is failed, the others should be okay still
+        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Active);
+        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
+
+        // Process the operation for client 1
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            response.clone(),
+            &UpstairsState::Active,
+            None,
+        ));
+        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
+
+        // Three failures, But since this is a write we already have marked
+        // the ACK as ready.
+        // Process the operation for client 2
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            response,
+            &UpstairsState::Active,
+            None,
+        ));
+        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Faulted);
+
+        // Verify we can still ack this (failed) work
+        assert_eq!(ds.ackable_work().len(), 1);
+    }
+
+    #[test]
+    fn read_after_write_fail_is_alright() {
+        // Verify that if a single write fails on a downstairs, reads can still
+        // be acked.
+        //
+        // Verify after acking IOs, we can then send a flush and
+        // clear the jobs (some now failed/skipped) from the work queue.
+        let mut ds = Downstairs::test_default();
+        set_all_active(&mut ds);
+
+        // Create the write that fails on one DS
+        let next_id = {
+            let next_id = ds.next_id();
+
+            let (request, iblocks) = generic_write_request();
+            let op =
+                ds.create_write_eob(next_id, iblocks, 10, vec![request], false);
+
+            ds.enqueue(op);
+
+            ds.in_progress(next_id, ClientId::new(0));
+            ds.in_progress(next_id, ClientId::new(1));
+            ds.in_progress(next_id, ClientId::new(2));
+
+            next_id
+        };
+
+        // Set the error that everyone will use.
+        let err_response = Err(CrucibleError::GenericError("bad".to_string()));
+
+        // Process the error operation for client 0
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            err_response,
+            &UpstairsState::Active,
+            None
+        ));
+        // client 0 should be marked failed.
+        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
+
+        let ok_response = Ok(vec![]);
+        // Process the good operation for client 1
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            ok_response.clone(),
+            &UpstairsState::Active,
+            None
+        ));
+
+        // the operation was previously marked as ackable, because it's a write
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            ok_response,
+            &UpstairsState::Active,
+            None
+        ));
+        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Active);
+        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
+
+        // Verify we can ack this work, then ack it.
+        assert_eq!(ds.ackable_work().len(), 1);
+        ds.ack(next_id);
+
+        // Now, do a read.
+        let (request, iblocks) = generic_read_request();
+
+        let next_id = {
+            let next_id = ds.next_id();
+            let op =
+                ds.create_read_eob(next_id, iblocks, 10, vec![request.clone()]);
+
+            ds.enqueue(op);
+
+            // As this DS is failed, it should return none
+            assert_eq!(ds.in_progress(next_id, ClientId::new(0)), None);
+
+            assert!(ds.in_progress(next_id, ClientId::new(1)).is_some());
+            assert!(ds.in_progress(next_id, ClientId::new(2)).is_some());
+
+            // We should have one job on the skipped job list for failed DS
+            assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
+            assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
+            assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
+
+            next_id
+        };
+
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+
+        // Process the operation for client 1 this should return true
+        assert!(ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            response.clone(),
+            &UpstairsState::Active,
+            None,
+        ));
+
+        // Process the operation for client 2 this should return false
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            response,
+            &UpstairsState::Active,
+            None
+        ));
+
+        // Verify we can ack this work, then ack it.
+        assert_eq!(ds.ackable_work().len(), 1);
+        ds.ack(next_id);
+
+        // Perform the flush.
+        let next_id = {
+            let next_id = ds.next_id();
+            let dep = ds.ds_active.deps_for_flush(next_id);
+            let op =
+                Downstairs::create_flush(next_id, dep, 10, 0, 0, None, None);
+            ds.enqueue(op);
+
+            // As this DS is failed, it should return none
+            assert_eq!(ds.in_progress(next_id, ClientId::new(0)), None);
+            assert!(ds.in_progress(next_id, ClientId::new(1)).is_some());
+            assert!(ds.in_progress(next_id, ClientId::new(2)).is_some());
+
+            next_id
+        };
+
+        let ok_response = Ok(vec![]);
+        // Process the operation for client 1
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            ok_response.clone(),
+            &UpstairsState::Active,
+            None,
+        ));
+
+        // process_ds_operation should return true after we process this.
+        assert!(ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            ok_response,
+            &UpstairsState::Active,
+            None
+        ));
+
+        // ACK the flush and let retire_check move things along.
+        assert_eq!(ds.ackable_work().len(), 1);
+        ds.ack(next_id);
+        ds.retire_check(next_id);
+
+        assert_eq!(ds.ackable_work().len(), 0);
+
+        // The write, the read, and now the flush should be completed.
+        assert_eq!(ds.completed().len(), 3);
+
+        // The last skipped flush should still be on the skipped list
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
+        assert!(ds.clients[ClientId::new(0)]
+            .skipped_jobs
+            .contains(&JobId(1002)));
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
     }
 }

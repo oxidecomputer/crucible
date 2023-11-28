@@ -82,6 +82,23 @@ pub struct ExtentInfo {
     pub dirty: bool,
 }
 
+/// Return values from `Upstairs::on_repair_check`
+///
+/// The values are never used during normal operation, but are checked in unit
+/// tests to make sure the state is as expected.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, PartialEq)]
+pub enum RepairCheck {
+    /// We started a repair task
+    RepairStarted,
+    /// No repair is needed
+    NoRepairNeeded,
+    /// We need repair, but a repair was already in progress
+    RepairInProgress,
+    /// Upstairs is not in a valid state for live repair
+    InvalidState,
+}
+
 #[cfg(feature = "TODO re-enable this")]
 pub mod repair_test {
     use super::*;

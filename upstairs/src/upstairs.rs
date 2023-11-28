@@ -5,6 +5,7 @@ use crate::{
     deadline_secs,
     downstairs::{Downstairs, DownstairsAction},
     extent_from_offset, integrity_hash,
+    live_repair::RepairCheck,
     stats::UpStatOuter,
     Block, BlockContext, BlockOp, BlockReq, Buffer, Bytes, ClientId, ClientMap,
     CrucibleOpts, DsState, EncryptionContext, GtoS, Guest, Message,
@@ -518,12 +519,12 @@ impl Upstairs {
         }
     }
 
-    async fn on_repair_check(&mut self) {
+    async fn on_repair_check(&mut self) -> RepairCheck {
         info!(self.log, "Checking if live repair is needed");
         if !matches!(self.state, UpstairsState::Active) {
             info!(self.log, "inactive, no live repair needed");
             self.repair_check_interval = None;
-            return;
+            return RepairCheck::InvalidState;
         }
 
         if self.cfg.read_only {
@@ -535,7 +536,7 @@ impl Upstairs {
                 c.skip_live_repair(&self.state);
             }
             self.repair_check_interval = None;
-            return;
+            return RepairCheck::NoRepairNeeded;
         }
 
         // Verify that all downstairs and the upstairs are in the proper state
@@ -554,27 +555,30 @@ impl Upstairs {
             .filter(|c| c.state() == DsState::LiveRepairReady)
             .count();
 
-        if repair_ready == 0 {
-            if repair > 0 {
-                info!(self.log, "Live Repair already running");
-            } else {
-                info!(self.log, "No Live Repair required at this time");
-            }
+        if repair > 0 {
+            info!(self.log, "Live Repair already running");
             self.repair_check_interval = None;
-        } else if repair > 0
-            || !self.downstairs.start_live_repair(
-                &self.state,
-                self.guest.guest_work.lock().await.deref_mut(),
-                self.ddef.get_def().unwrap().extent_count().into(),
-                self.generation,
-            )
-        {
+            return RepairCheck::RepairInProgress;
+        } else if repair_ready == 0 {
+            self.repair_check_interval = None;
+            info!(self.log, "No Live Repair required at this time");
+            return RepairCheck::NoRepairNeeded;
+        } else if !self.downstairs.start_live_repair(
+            &self.state,
+            self.guest.guest_work.lock().await.deref_mut(),
+            self.ddef.get_def().unwrap().extent_count().into(),
+            self.generation,
+        ) {
             // This also means repair_ready > 0
             // We can only have one live repair going at a time, so if a
             // downstairs has gone Faulted then to LiveRepairReady, it will have
             // to wait until the currently running LiveRepair has completed.
             warn!(self.log, "Upstairs already in repair, trying again later");
             self.repair_check_interval = Some(deadline_secs(60.0));
+            return RepairCheck::RepairInProgress;
+        } else {
+            // We started the repair in the call to start_live_repair above
+            return RepairCheck::RepairStarted;
         }
     }
 
