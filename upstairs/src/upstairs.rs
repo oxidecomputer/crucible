@@ -558,11 +558,11 @@ impl Upstairs {
         if repair > 0 {
             info!(self.log, "Live Repair already running");
             self.repair_check_interval = None;
-            return RepairCheck::RepairInProgress;
+            RepairCheck::RepairInProgress
         } else if repair_ready == 0 {
             self.repair_check_interval = None;
             info!(self.log, "No Live Repair required at this time");
-            return RepairCheck::NoRepairNeeded;
+            RepairCheck::NoRepairNeeded
         } else if !self.downstairs.start_live_repair(
             &self.state,
             self.guest.guest_work.lock().await.deref_mut(),
@@ -575,10 +575,10 @@ impl Upstairs {
             // to wait until the currently running LiveRepair has completed.
             warn!(self.log, "Upstairs already in repair, trying again later");
             self.repair_check_interval = Some(deadline_secs(60.0));
-            return RepairCheck::RepairInProgress;
+            RepairCheck::RepairInProgress
         } else {
             // We started the repair in the call to start_live_repair above
-            return RepairCheck::RepairStarted;
+            RepairCheck::RepairStarted
         }
     }
 
@@ -1712,17 +1712,20 @@ mod test {
         let mut up = Upstairs::test_default(None);
 
         let (ds_done_tx, ds_done_rx) = oneshot::channel();
-        up.set_deactivate(BlockReq::new(BlockOp::Deactivate, ds_done_tx));
+        up.set_deactivate(BlockReq::new(BlockOp::Deactivate, ds_done_tx))
+            .await;
         assert!(ds_done_rx.await.unwrap().is_err());
 
         up.force_active().unwrap();
 
         let (ds_done_tx, ds_done_rx) = oneshot::channel();
-        up.set_deactivate(BlockReq::new(BlockOp::Deactivate, ds_done_tx));
+        up.set_deactivate(BlockReq::new(BlockOp::Deactivate, ds_done_tx))
+            .await;
         assert!(ds_done_rx.await.unwrap().is_ok());
 
         let (ds_done_tx, ds_done_rx) = oneshot::channel();
-        up.set_deactivate(BlockReq::new(BlockOp::Deactivate, ds_done_tx));
+        up.set_deactivate(BlockReq::new(BlockOp::Deactivate, ds_done_tx))
+            .await;
         assert!(ds_done_rx.await.unwrap().is_err());
     }
 
@@ -1739,7 +1742,8 @@ mod test {
 
         // The deactivate message should happen immediately
         let (ds_done_tx, ds_done_rx) = oneshot::channel();
-        up.set_deactivate(BlockReq::new(BlockOp::Deactivate, ds_done_tx));
+        up.set_deactivate(BlockReq::new(BlockOp::Deactivate, ds_done_tx))
+            .await;
         assert!(ds_done_rx.await.unwrap().is_ok());
 
         // Verify we can deactivate as there is no work
@@ -3025,5 +3029,32 @@ mod test {
             // the second write should still depend on the first write!
             assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
         }
+    }
+
+    #[tokio::test]
+    async fn test_check_for_repair_normal() {
+        // No repair needed here.
+        // Verify we can't repair when the upstairs is not active.
+        // Verify we wont try to repair if it's not needed.
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(3));
+        ddef.set_extent_count(4);
+
+        let mut up = Upstairs::test_default(Some(ddef));
+
+        // Before we are active, we return InvalidState
+        assert_eq!(up.on_repair_check().await, RepairCheck::InvalidState);
+
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        assert_eq!(up.on_repair_check().await, RepairCheck::NoRepairNeeded);
+
+        // No downstairs should change state.
+        for c in up.downstairs.clients.iter() {
+            assert_eq!(c.state(), DsState::Active);
+        }
+        assert!(up.downstairs.repair().is_none());
     }
 }

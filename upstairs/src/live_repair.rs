@@ -87,7 +87,7 @@ pub struct ExtentInfo {
 /// The values are never used during normal operation, but are checked in unit
 /// tests to make sure the state is as expected.
 #[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum RepairCheck {
     /// We started a repair task
     RepairStarted,
@@ -275,44 +275,6 @@ pub mod repair_test {
             jobs = up.downstairs.lock().await.ds_active.len();
         }
         (up, repair_handle, ds_work_rx)
-    }
-
-    #[tokio::test]
-    async fn test_check_for_repair_normal() {
-        // No repair needed here.
-        // Verify we can't repair when the upstairs is not active.
-        // Verify we wont try to repair if it's not needed.
-        let (dst, _ds_work_rx) = create_test_dst_rx();
-        let mut ddef = RegionDefinition::default();
-        ddef.set_block_size(512);
-        ddef.set_extent_size(Block::new_512(3));
-        ddef.set_extent_count(4);
-
-        let up = Upstairs::test_default(Some(ddef));
-
-        // Before we are active, we return InvalidState
-        assert_eq!(
-            check_for_repair(&up, &dst).await,
-            RepairCheck::InvalidState
-        );
-
-        up.set_active().await.unwrap();
-        for cid in ClientId::iter() {
-            up.ds_transition(cid, DsState::WaitActive).await;
-            up.ds_transition(cid, DsState::WaitQuorum).await;
-            up.ds_transition(cid, DsState::Active).await;
-        }
-        assert_eq!(
-            check_for_repair(&up, &dst).await,
-            RepairCheck::NoRepairNeeded
-        );
-
-        // No downstairs should change state.
-        let ds = up.downstairs.lock().await;
-        for cid in ClientId::iter() {
-            assert_eq!(ds.clients[cid].state, DsState::Active);
-        }
-        assert!(ds.repair_min_id.is_none())
     }
 
     #[tokio::test]

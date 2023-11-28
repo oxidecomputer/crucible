@@ -209,7 +209,7 @@ impl std::fmt::Debug for LiveRepairState {
 }
 
 #[derive(Debug)]
-struct LiveRepairData {
+pub(crate) struct LiveRepairData {
     /// Total number of extents that need checking
     extent_count: u64,
 
@@ -3393,6 +3393,11 @@ impl Downstairs {
     #[cfg(test)]
     pub fn completed(&self) -> &AllocRingBuffer<JobId> {
         &self.completed
+    }
+
+    #[cfg(test)]
+    pub(crate) fn repair(&self) -> &Option<LiveRepairData> {
+        &self.repair
     }
 }
 
