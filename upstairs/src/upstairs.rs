@@ -1682,6 +1682,17 @@ impl Upstairs {
     pub(crate) fn get_region_definition(&self) -> RegionDefinition {
         self.ddef.get_def().unwrap()
     }
+
+    /// Helper function to do a checked state transition on the given client
+    #[cfg(test)]
+    pub(crate) fn ds_transition(
+        &mut self,
+        client_id: ClientId,
+        new_state: DsState,
+    ) {
+        self.downstairs.clients[client_id]
+            .checked_state_transition(&self.state, new_state);
+    }
 }
 
 #[cfg(test)]
@@ -1696,15 +1707,11 @@ mod test {
     async fn reconcile_not_ready() {
         // Verify reconcile returns false when a downstairs is not ready
         let mut up = Upstairs::test_default(None);
-        up.downstairs.clients[ClientId::new(0)]
-            .checked_state_transition(&up.state, DsState::WaitActive);
-        up.downstairs.clients[ClientId::new(0)]
-            .checked_state_transition(&up.state, DsState::WaitQuorum);
+        up.ds_transition(ClientId::new(0), DsState::WaitActive);
+        up.ds_transition(ClientId::new(0), DsState::WaitQuorum);
 
-        up.downstairs.clients[ClientId::new(1)]
-            .checked_state_transition(&up.state, DsState::WaitActive);
-        up.downstairs.clients[ClientId::new(1)]
-            .checked_state_transition(&up.state, DsState::WaitQuorum);
+        up.ds_transition(ClientId::new(1), DsState::WaitActive);
+        up.ds_transition(ClientId::new(1), DsState::WaitQuorum);
 
         let res = up.connect_region_set().await;
         assert!(!res);
@@ -3081,10 +3088,8 @@ mod test {
         set_all_active(&mut up.downstairs);
 
         // Force client 1 into LiveRepairReady
-        up.downstairs.clients[ClientId::new(1)]
-            .checked_state_transition(&up.state, DsState::Faulted);
-        up.downstairs.clients[ClientId::new(1)]
-            .checked_state_transition(&up.state, DsState::LiveRepairReady);
+        up.ds_transition(ClientId::new(1), DsState::Faulted);
+        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
         assert_eq!(up.on_repair_check().await, RepairCheck::RepairStarted);
         assert_eq!(
             up.downstairs.clients[ClientId::new(1)].state(),
@@ -3107,10 +3112,8 @@ mod test {
 
         for i in [1, 2].into_iter().map(ClientId::new) {
             // Force client 1 into LiveRepairReady
-            up.downstairs.clients[i]
-                .checked_state_transition(&up.state, DsState::Faulted);
-            up.downstairs.clients[i]
-                .checked_state_transition(&up.state, DsState::LiveRepairReady);
+            up.ds_transition(i, DsState::Faulted);
+            up.ds_transition(i, DsState::LiveRepairReady);
         }
         assert_eq!(up.on_repair_check().await, RepairCheck::RepairStarted);
 
@@ -3128,67 +3131,43 @@ mod test {
         );
         assert!(up.downstairs.repair().is_some())
     }
-    /*
 
     #[tokio::test]
     async fn test_check_for_repair_already_repair() {
         // No repair needed here.
-        let (dst, _ds_work_rx) = create_test_dst_rx();
         let mut ddef = RegionDefinition::default();
         ddef.set_block_size(512);
         ddef.set_extent_size(Block::new_512(3));
         ddef.set_extent_count(4);
 
-        let up = Upstairs::test_default(Some(ddef));
-        up.set_active().await.unwrap();
-        for cid in ClientId::iter() {
-            up.ds_transition(cid, DsState::WaitActive).await;
-            up.ds_transition(cid, DsState::WaitQuorum).await;
-            up.ds_transition(cid, DsState::Active).await;
-        }
-        up.ds_transition(ClientId::new(1), DsState::Faulted).await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady)
-            .await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepair)
-            .await;
+        let mut up = Upstairs::test_default(Some(ddef));
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+        up.ds_transition(ClientId::new(1), DsState::Faulted);
+        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
+        up.ds_transition(ClientId::new(1), DsState::LiveRepair);
         // Make ds 0 ready for repair.
-        up.ds_transition(ClientId::new(0), DsState::Faulted).await;
-        up.ds_transition(ClientId::new(0), DsState::LiveRepairReady)
-            .await;
-        assert_eq!(
-            check_for_repair(&up, &dst).await,
-            RepairCheck::RepairInProgress
-        );
+        up.ds_transition(ClientId::new(0), DsState::Faulted);
+        up.ds_transition(ClientId::new(0), DsState::LiveRepairReady);
+        assert_eq!(up.on_repair_check().await, RepairCheck::RepairInProgress);
     }
 
     #[tokio::test]
     async fn test_check_for_repair_task_running() {
-        let (dst, _ds_work_rx) = create_test_dst_rx();
         let mut ddef = RegionDefinition::default();
         ddef.set_block_size(512);
         ddef.set_extent_size(Block::new_512(3));
         ddef.set_extent_count(4);
 
-        let up = Upstairs::test_default(Some(ddef));
-        up.set_active().await.unwrap();
-        for cid in ClientId::iter() {
-            up.ds_transition(cid, DsState::WaitActive).await;
-            up.ds_transition(cid, DsState::WaitQuorum).await;
-            up.ds_transition(cid, DsState::Active).await;
-        }
-        up.ds_transition(ClientId::new(1), DsState::Faulted).await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady)
-            .await;
-        let mut ds = up.downstairs.lock().await;
-        ds.repair_min_id = Some(JobId(3));
-        drop(ds);
+        let mut up = Upstairs::test_default(Some(ddef));
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+        up.ds_transition(ClientId::new(1), DsState::Faulted);
+        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
 
-        assert_eq!(
-            check_for_repair(&up, &dst).await,
-            RepairCheck::RepairInProgress
-        );
+        assert_eq!(up.on_repair_check().await, RepairCheck::RepairStarted);
+        assert_eq!(up.on_repair_check().await, RepairCheck::RepairInProgress);
     }
-    */
 
     // Deactivate tests
     #[tokio::test]
