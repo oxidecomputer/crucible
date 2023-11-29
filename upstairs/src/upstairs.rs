@@ -3264,6 +3264,17 @@ mod test {
             .await;
         }
 
+        // Verify the deactivate is not done yet.
+        assert_eq!(
+            deactivate_done_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
+
+        // Make sure no DS have changed state.
+        for c in up.downstairs.clients.iter() {
+            assert_eq!(c.state(), DsState::Active);
+        }
+
         // Send the flush created for us when we set deactivated to
         // the two downstairs.
         for i in [0, 2] {

@@ -6775,4 +6775,86 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
     }
+
+    #[tokio::test]
+    async fn read_after_two_write_fail_is_alright() {
+        // Verify that if two writes fail, a read can still be acked.
+        let mut ds = Downstairs::test_default();
+        set_all_active(&mut ds);
+
+        // Create the write that fails on two DS
+        let next_id = ds.create_and_enqueue_generic_write_eob(false);
+        for i in ClientId::iter() {
+            ds.in_progress(next_id, i);
+        }
+
+        // Set the error that everyone will use.
+        let err_response = Err(CrucibleError::GenericError("bad".to_string()));
+
+        // Process the operation for client 0
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(0),
+            err_response.clone(),
+            &UpstairsState::Active,
+            None,
+        ));
+        // client 0 is failed, the others should be okay still
+        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Active);
+        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
+
+        // Process the operation for client 1
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            err_response,
+            &UpstairsState::Active,
+            None
+        ));
+        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
+
+        let ok_response = Ok(vec![]);
+        // Because we ACK writes, this op will always return false
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            ok_response,
+            &UpstairsState::Active,
+            None
+        ));
+        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
+
+        // Verify we can ack this work
+        assert_eq!(ds.ackable_work().len(), 1);
+
+        // Now, do a read.
+        let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
+
+        // As this DS is failed, it should return none
+        assert_eq!(ds.in_progress(next_id, ClientId::new(0)), None);
+        assert_eq!(ds.in_progress(next_id, ClientId::new(1)), None);
+        assert!(ds.in_progress(next_id, ClientId::new(2)).is_some());
+
+        // Two downstairs should have a skipped job on their lists.
+        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
+        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
+        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
+
+        let response =
+            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+
+        // Process the operation for client 2, which makes the job ackable
+        assert!(ds.process_ds_completion(
+            next_id,
+            ClientId::new(2),
+            response,
+            &UpstairsState::Active,
+            None
+        ));
+    }
 }
