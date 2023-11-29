@@ -1679,8 +1679,11 @@ impl Upstairs {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::downstairs::test::set_all_active;
-    use crate::test::make_upstairs;
+    use crate::{
+        downstairs::test::set_all_active,
+        test::{generic_write_request, make_upstairs},
+        DsState, JobId,
+    };
 
     #[tokio::test]
     async fn reconcile_not_ready() {
@@ -3179,4 +3182,172 @@ mod test {
         );
     }
     */
+
+    // Deactivate tests
+    #[tokio::test]
+    async fn deactivate_after_work_completed_write() {
+        deactivate_after_work_completed(false).await;
+    }
+
+    #[tokio::test]
+    async fn deactivate_after_work_completed_write_unwritten() {
+        deactivate_after_work_completed(true).await;
+    }
+
+    async fn deactivate_after_work_completed(is_write_unwritten: bool) {
+        // Verify that submitted IO will continue after a deactivate.
+        // Verify that the flush takes three completions.
+        // Verify that deactivate done returns the upstairs to init.
+
+        let mut up = make_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        // Build a write, put it on the work queue.
+        let (request, iblocks) = generic_write_request();
+        let id1 = up.downstairs.create_and_enqueue_write_eob(
+            iblocks,
+            10,
+            vec![request],
+            is_write_unwritten,
+        );
+
+        // Submit the writes by running the main loop
+        for client_id in ClientId::iter() {
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id,
+                action: ClientAction::Work,
+            }))
+            .await;
+        }
+
+        // Create and enqueue the flush by setting deactivate
+        let (deactivate_done_tx, mut deactivate_done_rx) = oneshot::channel();
+        up.set_deactivate(BlockReq::new(
+            BlockOp::Deactivate,
+            deactivate_done_tx,
+        ))
+        .await;
+
+        // The deactivate didn't return right away
+        assert_eq!(
+            deactivate_done_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
+
+        // We know that the deactivate created a flush operation, which was
+        // assigned the next available ID.
+        let flush_id = JobId(id1.0 + 1);
+
+        // Complete the writes
+        for client_id in ClientId::iter() {
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id,
+                action: ClientAction::Response(Message::WriteAck {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.upstairs_id,
+                    job_id: id1,
+                    result: Ok(()),
+                }),
+            }))
+            .await;
+        }
+
+        // Send the flush created for us when we set deactivated to
+        // the two downstairs.
+        for i in [0, 2] {
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: ClientId::new(i),
+                action: ClientAction::Work,
+            }))
+            .await;
+        }
+
+        // Complete the flush on two downstairs, at which point the deactivate
+        // is still pending.
+        for i in [0, 2] {
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: ClientId::new(i),
+                action: ClientAction::Response(Message::FlushAck {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.upstairs_id,
+                    job_id: flush_id,
+                    result: Ok(()),
+                }),
+            }))
+            .await;
+            assert_eq!(
+                deactivate_done_rx.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            );
+        }
+
+        // These downstairs should now be deactivated now
+        assert_eq!(
+            up.downstairs.clients[ClientId::new(0)].state(),
+            DsState::Deactivated
+        );
+        assert_eq!(
+            up.downstairs.clients[ClientId::new(2)].state(),
+            DsState::Deactivated
+        );
+
+        // Verify the remaining DS is still running
+        assert_eq!(
+            up.downstairs.clients[ClientId::new(1)].state(),
+            DsState::Active
+        );
+
+        // Verify the deactivate is not done yet.
+        assert_eq!(
+            deactivate_done_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        );
+        assert!(matches!(up.state, UpstairsState::Deactivating));
+
+        // Send and complete the flush on the remaining downstairs
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id: ClientId::new(1),
+            action: ClientAction::Work,
+        }))
+        .await;
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id: ClientId::new(1),
+            action: ClientAction::Response(Message::FlushAck {
+                upstairs_id: up.cfg.upstairs_id,
+                session_id: up.cfg.upstairs_id,
+                job_id: flush_id,
+                result: Ok(()),
+            }),
+        }))
+        .await;
+
+        assert_eq!(
+            up.downstairs.clients[ClientId::new(1)].state(),
+            DsState::Deactivated
+        );
+
+        // Report all three DS as missing, which moves them to New and finishes
+        // deactivation
+        for client_id in ClientId::iter() {
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id,
+                action: ClientAction::TaskStopped(
+                    ClientRunResult::RequestedStop(
+                        ClientStopReason::Deactivated,
+                    ),
+                ),
+            }))
+            .await;
+        }
+        assert_eq!(deactivate_done_rx.try_recv().unwrap(), Ok(()));
+
+        // Verify we have disconnected and can go back to init.
+        assert!(matches!(up.state, UpstairsState::Initializing));
+
+        // Verify after the ds_missing, all downstairs are New
+        for c in up.downstairs.clients.iter() {
+            assert_eq!(c.state(), DsState::New);
+        }
+    }
 }

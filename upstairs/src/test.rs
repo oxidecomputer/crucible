@@ -45,16 +45,6 @@ pub(crate) fn generic_write_request(
     (request, iblocks)
 }
 
-pub(crate) fn create_generic_read_eob(
-    ds: &mut Downstairs,
-    ds_id: JobId,
-) -> (ReadRequest, DownstairsIO) {
-    let (request, iblocks) = generic_read_request();
-    let op = ds.create_read_eob(ds_id, iblocks, 10, vec![request.clone()]);
-
-    (request, op)
-}
-
 /*
  * Beware, if you change these defaults, then you will have to change
  * all the hard coded tests below that use make_upstairs().
@@ -82,7 +72,7 @@ pub(crate) fn make_upstairs() -> crate::upstairs::Upstairs {
     )
 }
 
-#[cfg(feature = "LOLNO")]
+#[cfg(feature = "NO")]
 pub(crate) mod up_test {
     use super::*;
     use crate::{
@@ -751,165 +741,6 @@ pub(crate) mod up_test {
         Ok(())
     }
 
-    // Deactivate tests
-    #[tokio::test]
-    async fn deactivate_after_work_completed_write() {
-        deactivate_after_work_completed(false).await;
-    }
-
-    #[tokio::test]
-    async fn deactivate_after_work_completed_write_unwritten() {
-        deactivate_after_work_completed(true).await;
-    }
-
-    async fn deactivate_after_work_completed(is_write_unwritten: bool) {
-        // Verify that submitted IO will continue after a deactivate.
-        // Verify that the flush takes three completions.
-        // Verify that deactivate done returns the upstairs to init.
-
-        let up = make_upstairs();
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        up.force_active().unwrap();
-        let ds = &mut up.downstairs;
-        up.force_ds_state(ClientId::new(0), DsState::Active);
-        up.force_ds_state(ClientId::new(1), DsState::Active);
-        up.force_ds_state(ClientId::new(2), DsState::Active);
-
-        // Build a write, put it on the work queue.
-        let id1 = ds.next_id();
-
-        let (request, iblocks) = generic_write_request();
-        let op = create_write_eob(
-            &mut ds,
-            id1,
-            iblocks,
-            10,
-            vec![request],
-            is_write_unwritten,
-        );
-        ds.enqueue(op, ds_done_tx.clone()).await;
-
-        // Submit the writes
-        assert!(ds.in_progress(id1, ClientId::new(0)).is_some());
-        assert!(ds.in_progress(id1, ClientId::new(1)).is_some());
-        assert!(ds.in_progress(id1, ClientId::new(2)).is_some());
-
-        drop(ds);
-
-        // Create and enqueue the flush by setting deactivate
-        // The created flush should be the next ID
-        up.set_deactivate(None, ds_done_tx.clone()).await.unwrap();
-        let flush_id = JobId(id1.0 + 1);
-
-        ds = up.downstairs.lock().await;
-        // Complete the writes
-        ds.process_ds_completion(
-            id1,
-            ClientId::new(0),
-            Ok(vec![]),
-            &UpstairsState::Active,
-            None,
-        )
-        .unwrap();
-        ds.process_ds_completion(
-            id1,
-            ClientId::new(1),
-            Ok(vec![]),
-            &UpstairsState::Active,
-            None,
-        )
-        .unwrap();
-        ds.process_ds_completion(
-            id1,
-            ClientId::new(2),
-            Ok(vec![]),
-            &UpstairsState::Active,
-            None,
-        )
-        .unwrap();
-
-        // Ack the writes to the guest.
-        ds.ack(id1);
-
-        // Send the flush created for us when we set deactivated to
-        // the two downstairs.
-        ds.in_progress(flush_id, ClientId::new(0));
-        ds.in_progress(flush_id, ClientId::new(2));
-
-        // Complete the flush on those downstairs.
-        // One flush won't result in an ACK
-        assert!(!ds
-            .process_ds_completion(
-                flush_id,
-                ClientId::new(0),
-                Ok(vec![]),
-                &UpstairsState::Deactivating,
-                None
-            )
-            .unwrap());
-
-        // The 2nd ack when disconnecting still won't trigger an ack.
-        assert!(!ds
-            .process_ds_completion(
-                flush_id,
-                ClientId::new(2),
-                Ok(vec![]),
-                &UpstairsState::Deactivating,
-                None
-            )
-            .unwrap());
-
-        // Verify we can deactivate the completed DS
-        drop(ds);
-        assert!(up.ds_deactivate(ClientId::new(0)).await);
-        assert!(up.ds_deactivate(ClientId::new(2)).await);
-
-        // Verify the remaining DS can not deactivate
-        assert!(!up.ds_deactivate(ClientId::new(1)).await);
-
-        // Verify the deactivate is not done yet.
-        up.deactivate_transition_check().await;
-        assert!(up.is_deactivating().await);
-
-        ds = up.downstairs.lock().await;
-        // Make sure the correct DS have changed state.
-        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Deactivated);
-        assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Deactivated);
-        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Active);
-
-        // Send and complete the flush
-        ds.in_progress(flush_id, ClientId::new(1));
-        assert!(ds
-            .process_ds_completion(
-                flush_id,
-                ClientId::new(1),
-                Ok(vec![]),
-                &UpstairsState::Deactivating,
-                None
-            )
-            .unwrap());
-        // Ack the flush..
-        ds.ack(flush_id);
-
-        drop(ds);
-        assert!(up.ds_deactivate(ClientId::new(1)).await);
-
-        // Report all three DS as missing, which moves them to New
-        up.ds_missing(ClientId::new(0)).await;
-        up.ds_missing(ClientId::new(1)).await;
-        up.ds_missing(ClientId::new(2)).await;
-
-        // Verify we have disconnected and can go back to init.
-        up.deactivate_transition_check().await;
-        assert!(!up.is_deactivating().await);
-
-        // Verify after the ds_missing, all downstairs are New
-        let ds = &up.downstairs;
-        assert_eq!(ds.clients[ClientId::new(0)].state()(), DsState::New);
-        assert_eq!(ds.clients[ClientId::new(1)].state()(), DsState::New);
-        assert_eq!(ds.clients[ClientId::new(2)].state()(), DsState::New);
-    }
-
     #[tokio::test]
     async fn deactivate_not_without_flush_write() {
         deactivate_not_without_flush(false).await;
@@ -1473,16 +1304,8 @@ pub(crate) mod up_test {
         let next_id = {
             let ds = &mut up.downstairs;
 
-            let next_id = ds.next_id();
-            let op = create_read_eob(
-                &mut ds,
-                next_id,
-                iblocks,
-                10,
-                vec![request.clone()],
-            );
-
-            ds.enqueue(op, ds_done_tx.clone()).await;
+            let next_id =
+                ds.create_and_enqueue_read_eob(iblocks, 10, vec![request]);
 
             // As this DS is failed, it should return none
             assert_eq!(ds.in_progress(next_id, ClientId::new(0)), None);
@@ -1660,17 +1483,8 @@ pub(crate) mod up_test {
         let next_id = {
             let ds = &mut up.downstairs;
 
-            let next_id = ds.next_id();
-
-            let op = create_read_eob(
-                &mut ds,
-                next_id,
-                iblocks,
-                10,
-                vec![request.clone()],
-            );
-
-            ds.enqueue(op, ds_done_tx.clone()).await;
+            let next_id =
+                ds.create_and_enqueue_read_eob(iblocks, 10, vec![request]);
 
             // As this DS is failed, it should return none
             assert_eq!(ds.in_progress(next_id, ClientId::new(0)), None);
