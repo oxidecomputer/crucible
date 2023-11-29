@@ -1092,18 +1092,10 @@ pub(crate) mod up_test {
     // for that write.  If make_in_progress is true, move all three downstairs
     // jobs to InProgress.
     async fn enqueue_write(
-        up: &Arc<Upstairs>,
+        ds: &mut Downstairs,
         make_in_progress: bool,
-        ds_done_tx: mpsc::Sender<()>,
     ) -> JobId {
-        let ds = &mut up.downstairs;
-
-        let id = ds.next_id();
-
-        let (request, iblocks) = generic_write_request();
-        let op =
-            create_write_eob(&mut ds, id, iblocks, 10, vec![request], false);
-        ds.enqueue(op, ds_done_tx.clone()).await;
+        let id = ds.create_and_enqueue_generic_write_eob(false);
 
         if make_in_progress {
             ds.in_progress(id, ClientId::new(0));
@@ -1118,17 +1110,10 @@ pub(crate) mod up_test {
     // for that flush.  If make_in_progress is true, move all three downstairs
     // jobs to InProgress.
     async fn enqueue_flush(
-        up: &Arc<Upstairs>,
+        ds: &mut Downstairs,
         make_in_progress: bool,
-        ds_done_tx: mpsc::Sender<()>,
     ) -> JobId {
-        let ds = &mut up.downstairs;
-
-        let id = ds.next_id();
-
-        let deps = ds.ds_active.deps_for_flush(id);
-        let op = create_flush(id, deps, 10, 0, 0, None, None);
-        ds.enqueue(op, ds_done_tx.clone()).await;
+        let id = ds.create_and_enqueue_generic_flush(None);
 
         if make_in_progress {
             ds.in_progress(id, ClientId::new(0));
@@ -1142,20 +1127,13 @@ pub(crate) mod up_test {
     // Test function to create and enqueue a (provided) read request.
     // Return the ID of the job created.
     async fn enqueue_read(
-        up: &mut Upstairs,
+        ds: &mut Downstairs,
         request: ReadRequest,
         iblocks: ImpactedBlocks,
         make_in_progress: bool,
-        ds_done_tx: mpsc::Sender<()>,
     ) -> JobId {
-        let ds = &mut up.downstairs;
-
-        let read_id = ds.next_id();
-
-        let op = create_read_eob(&mut ds, read_id, iblocks, 10, vec![request]);
-
-        // Add the reads
-        ds.enqueue(op, ds_done_tx.clone()).await;
+        let read_id =
+            ds.create_and_enqueue_read_eob(iblocks, 10, vec![request]);
 
         if make_in_progress {
             ds.in_progress(read_id, ClientId::new(0));

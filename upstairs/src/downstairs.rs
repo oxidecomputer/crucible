@@ -2217,7 +2217,7 @@ impl Downstairs {
 
     /// Submits a generic flush for use in testing
     #[cfg(test)]
-    fn create_and_enqueue_generic_flush(
+    pub(crate) fn create_and_enqueue_generic_flush(
         &mut self,
         snap: Option<SnapshotDetails>,
     ) -> JobId {
