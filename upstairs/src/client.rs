@@ -833,7 +833,7 @@ impl DownstairsClient {
         self.restart_connection(up_state, ClientStopReason::FailedRepair)
     }
 
-    fn restart_connection(
+    pub(crate) fn restart_connection(
         &mut self,
         up_state: &UpstairsState,
         reason: ClientStopReason,

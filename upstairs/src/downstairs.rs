@@ -1198,6 +1198,7 @@ impl Downstairs {
             }
             Err(e) => {
                 error!(self.log, "got repair error {e} in {:?}", repair.state);
+
                 // We keep going here, because we need to submit no-op jobs to
                 // avoid things getting clogged up.
                 repair.aborting_repair = true;
@@ -2679,15 +2680,21 @@ impl Downstairs {
 
     /// Aborts an in-progress live-repair
     pub(crate) fn abort_repair(&mut self, up_state: &UpstairsState) {
-        assert!(self
-            .clients
-            .iter()
-            .any(|c| c.state() == DsState::LiveRepair));
+        assert!(self.clients.iter().any(|c| {
+            c.state() == DsState::LiveRepair ||
+                // If connection aborted, and restarted, then the re-negotiation
+                // could have won this race, and transitioned the reconnecting
+                // downstairs from LiveRepair to Faulted to LiveRepairReady.
+                c.state() == DsState::LiveRepairReady
+        }));
         self.repair = None;
         for i in ClientId::iter() {
             if self.clients[i].state() == DsState::LiveRepair {
                 self.skip_all_jobs(i);
                 self.clients[i].abort_repair(up_state);
+            }
+            if self.clients[i].state() == DsState::LiveRepairReady {
+                self.skip_all_jobs(i);
             }
         }
     }
@@ -3346,6 +3353,7 @@ impl Downstairs {
                 let Some(job) = self.ds_active.get(&ds_id) else {
                     panic!("I don't think we should be here");
                 };
+                let is_repair = job.work.is_repair();
                 if matches!(
                     job.work,
                     IOop::Write { .. }
@@ -3360,9 +3368,21 @@ impl Downstairs {
                     // Walk the active job list and mark any that were
                     // new or in progress to skipped.
                     self.skip_all_jobs(client_id);
-                    self.clients[client_id]
-                        .checked_state_transition(up_state, DsState::Faulted);
-                    // TODO should we restart the client task here?
+
+                    if is_repair {
+                        // Restart the client task, as the downstairs will have
+                        // aborted itself if a repair-related job had an error.
+                        self.clients[client_id].restart_connection(
+                            up_state,
+                            ClientStopReason::FailedLiveRepair,
+                        );
+                    } else {
+                        // Otherwise, simply set it to faulted.
+                        self.clients[client_id].checked_state_transition(
+                            up_state,
+                            DsState::Faulted,
+                        );
+                    }
                 }
             }
             None => {

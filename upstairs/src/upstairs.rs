@@ -578,11 +578,17 @@ impl Upstairs {
             self.generation,
         ) {
             // This also means repair_ready > 0
+
             // We can only have one live repair going at a time, so if a
             // downstairs has gone Faulted then to LiveRepairReady, it will have
             // to wait until the currently running LiveRepair has completed.
             warn!(self.log, "Upstairs already in repair, trying again later");
-            self.repair_check_interval = Some(deadline_secs(60.0));
+
+            // If a Downstairs has reconnected and is in LiveRepairReady,
+            // aggressively poll to see when existing repair stops so the next
+            // live repair attempt can be started.
+            self.repair_check_interval = Some(deadline_secs(1.0));
+
             RepairCheck::RepairInProgress
         } else {
             // We started the repair in the call to start_live_repair above
@@ -1283,6 +1289,7 @@ impl Upstairs {
                         // what we can do from here
                         match self.downstairs.clients[client_id].state() {
                             DsState::Active => (),
+
                             DsState::WaitQuorum => {
                                 // See if we have a quorum
                                 if self.connect_region_set().await {
@@ -1292,11 +1299,13 @@ impl Upstairs {
                                         Some(deadline_secs(1.0));
                                 }
                             }
+
                             DsState::LiveRepairReady => {
-                                // Immediately check for live-repair (?)
+                                // Immediately check for live-repair
                                 self.repair_check_interval =
                                     Some(deadline_secs(0.0));
                             }
+
                             s => panic!("bad state after negotiation: {s:?}"),
                         }
                     }
