@@ -1688,9 +1688,8 @@ impl Upstairs {
 mod test {
     use super::*;
     use crate::{
-        downstairs::test::set_all_active,
-        test::{generic_write_request, make_upstairs},
-        BlockReq, DsState, JobId,
+        downstairs::test::set_all_active, test::make_upstairs, BlockReq,
+        DsState, JobId,
     };
 
     #[tokio::test]

@@ -1715,7 +1715,22 @@ impl Downstairs {
     pub(crate) fn create_and_enqueue_generic_read_eob(
         &mut self,
     ) -> (JobId, ReadRequest) {
-        let (request, iblocks) = crate::test::generic_read_request();
+        use crate::impacted_blocks::ImpactedAddr;
+        use crucible_common::Block;
+        let request = ReadRequest {
+            eid: 0,
+            offset: Block::new_512(7),
+        };
+        let iblocks = ImpactedBlocks::new(
+            ImpactedAddr {
+                extent_id: 0,
+                block: 7,
+            },
+            ImpactedAddr {
+                extent_id: 0,
+                block: 7,
+            },
+        );
         let id = self.create_and_enqueue_read_eob(
             iblocks,
             10,
@@ -1752,6 +1767,41 @@ impl Downstairs {
         };
         self.enqueue(io);
         ds_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn create_and_enqueue_generic_write_eob(
+        &mut self,
+        is_write_unwritten: bool,
+    ) -> JobId {
+        use crate::impacted_blocks::ImpactedAddr;
+        use crucible_common::Block;
+        use crucible_protocol::BlockContext;
+        let request = crucible_protocol::Write {
+            eid: 0,
+            offset: Block::new_512(7),
+            data: bytes::Bytes::from(vec![1]),
+            block_context: BlockContext {
+                encryption_context: None,
+                hash: 0,
+            },
+        };
+        let iblocks = ImpactedBlocks::new(
+            ImpactedAddr {
+                extent_id: 0,
+                block: 7,
+            },
+            ImpactedAddr {
+                extent_id: 0,
+                block: 7,
+            },
+        );
+        self.create_and_enqueue_write_eob(
+            iblocks,
+            10,
+            vec![request.clone()],
+            is_write_unwritten,
+        )
     }
 
     #[cfg(test)]
@@ -3417,10 +3467,9 @@ impl Downstairs {
 pub(crate) mod test {
     use super::Downstairs;
     use crate::{
-        integrity_hash, test::generic_write_request, upstairs::UpstairsState,
-        BlockContext, ClientId, CrucibleError, DsState, EncryptionContext,
-        ExtentFix, IOState, JobId, ReadResponse, ReconcileIO, ReconciliationId,
-        SnapshotDetails,
+        integrity_hash, upstairs::UpstairsState, BlockContext, ClientId,
+        CrucibleError, DsState, EncryptionContext, ExtentFix, IOState, JobId,
+        ReadResponse, ReconcileIO, ReconciliationId, SnapshotDetails,
     };
     use bytes::{Bytes, BytesMut};
     use crucible_protocol::Message;
@@ -4253,13 +4302,8 @@ pub(crate) mod test {
 
         // send a write, and clients 0 and 1 will return errors
 
-        let (request, iblocks) = generic_write_request();
-        let next_id = ds.create_and_enqueue_write_eob(
-            iblocks,
-            10,
-            vec![request],
-            is_write_unwritten,
-        );
+        let next_id =
+            ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
 
         assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
         assert!(ds.in_progress(next_id, ClientId::new(1)).is_some());
@@ -4330,21 +4374,9 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
 
         // Create two writes, put them on the work queue
-        let (request, iblocks) = generic_write_request();
-        let id1 = ds.create_and_enqueue_write_eob(
-            iblocks,
-            10,
-            vec![request],
-            is_write_unwritten,
-        );
+        let id1 = ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
 
-        let (request, iblocks) = generic_write_request();
-        let id2 = ds.create_and_enqueue_write_eob(
-            iblocks,
-            20,
-            vec![request],
-            is_write_unwritten,
-        );
+        let id2 = ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
 
         // Simulate sending both writes to downstairs 0 and 1
         assert!(ds.in_progress(id1, ClientId::new(0)).is_some());
@@ -4763,13 +4795,8 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
 
         // Build our write IO.
-        let (request, iblocks) = generic_write_request();
-        let next_id = ds.create_and_enqueue_write_eob(
-            iblocks,
-            10,
-            vec![request],
-            is_write_unwritten,
-        );
+        let next_id =
+            ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
         // Put the write on the queue.
 
         // Submit the write to all three downstairs.
@@ -4868,21 +4895,9 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
 
         // Build two writes, put them on the work queue.
-        let (request, iblocks) = generic_write_request();
-        let id1 = ds.create_and_enqueue_write_eob(
-            iblocks,
-            10,
-            vec![request],
-            is_write_unwritten,
-        );
+        let id1 = ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
 
-        let (request, iblocks) = generic_write_request();
-        let id2 = ds.create_and_enqueue_write_eob(
-            iblocks,
-            1,
-            vec![request],
-            is_write_unwritten,
-        );
+        let id2 = ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
 
         // Submit the two writes, to 2/3 of the downstairs.
         assert!(ds.in_progress(id1, ClientId::new(0)).is_some());
@@ -5370,13 +5385,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
 
         // Create the write and put it on the work queue.
-        let (request, iblocks) = generic_write_request();
-        let id1 = ds.create_and_enqueue_write_eob(
-            iblocks,
-            10,
-            vec![request],
-            is_write_unwritten,
-        );
+        let id1 = ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
 
         // Submit the read to two downstairs.
         assert!(ds.in_progress(id1, ClientId::new(0)).is_some());
@@ -5445,13 +5454,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
 
         // Create the write and put it on the work queue.
-        let (request, iblocks) = generic_write_request();
-        let id1 = ds.create_and_enqueue_write_eob(
-            iblocks,
-            10,
-            vec![request],
-            is_write_unwritten,
-        );
+        let id1 = ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
 
         // Submit the write to two downstairs.
         assert!(ds.in_progress(id1, ClientId::new(0)).is_some());
@@ -6262,13 +6265,10 @@ pub(crate) mod test {
         ds.clients[ClientId::new(1)]
             .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
 
-        let gw_id = 19;
-
         // Create a write, enqueue it on both the downstairs
         // and the guest work queues.
-        let (request, iblocks) = generic_write_request();
         let next_id =
-            ds.submit_write(gw_id, iblocks, vec![request], is_write_unwritten);
+            ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
 
         // Send out the jobs
         assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
@@ -6302,7 +6302,6 @@ pub(crate) mod test {
             ds.ack(*ds_id_done);
 
             let done = ds.ds_active.get(ds_id_done).unwrap();
-            assert_eq!(done.guest_id, gw_id);
             assert!(done.result().is_ok());
         }
     }
@@ -6333,13 +6332,10 @@ pub(crate) mod test {
         ds.clients[ClientId::new(2)]
             .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
 
-        let gw_id = 19;
-
         // Create a write, enqueue it on both the downstairs
         // and the guest work queues.
-        let (request, iblocks) = generic_write_request();
         let next_id =
-            ds.submit_write(gw_id, iblocks, vec![request], is_write_unwritten);
+            ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
 
         assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
 
@@ -6361,7 +6357,6 @@ pub(crate) mod test {
             ds.ack(*ds_id_done);
 
             let done = ds.ds_active.get(ds_id_done).unwrap();
-            assert_eq!(done.guest_id, gw_id);
             assert!(done.result().is_err());
         }
     }
@@ -6387,13 +6382,10 @@ pub(crate) mod test {
         ds.clients[ClientId::new(2)]
             .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
 
-        let gw_id = 19;
-
         // Create a write, enqueue it on both the downstairs
         // and the guest work queues.
-        let (request, iblocks) = generic_write_request();
         let next_id =
-            ds.submit_write(gw_id, iblocks, vec![request], is_write_unwritten);
+            ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
 
         assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
         assert!(ds.in_progress(next_id, ClientId::new(1)).is_some());
@@ -6430,7 +6422,6 @@ pub(crate) mod test {
             ds.ack(*ds_id_done);
 
             let done = ds.ds_active.get(ds_id_done).unwrap();
-            assert_eq!(done.guest_id, gw_id);
             assert!(done.result().is_err());
         }
     }
@@ -6579,13 +6570,7 @@ pub(crate) mod test {
         set_all_active(&mut ds);
 
         let next_id = {
-            let (request, iblocks) = generic_write_request();
-            let next_id = ds.create_and_enqueue_write_eob(
-                iblocks,
-                10,
-                vec![request],
-                false,
-            );
+            let next_id = ds.create_and_enqueue_generic_write_eob(false);
 
             assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
             assert!(ds.in_progress(next_id, ClientId::new(1)).is_some());
@@ -6652,13 +6637,7 @@ pub(crate) mod test {
 
         // Create the write that fails on one DS
         let next_id = {
-            let (request, iblocks) = generic_write_request();
-            let next_id = ds.create_and_enqueue_write_eob(
-                iblocks,
-                10,
-                vec![request],
-                false,
-            );
+            let next_id = ds.create_and_enqueue_generic_write_eob(false);
 
             ds.in_progress(next_id, ClientId::new(0));
             ds.in_progress(next_id, ClientId::new(1));

@@ -3,48 +3,6 @@
 use crate::downstairs::Downstairs;
 use crate::*;
 
-pub(crate) fn generic_read_request() -> (ReadRequest, ImpactedBlocks) {
-    let request = ReadRequest {
-        eid: 0,
-        offset: Block::new_512(7),
-    };
-    let iblocks = ImpactedBlocks::new(
-        ImpactedAddr {
-            extent_id: 0,
-            block: 7,
-        },
-        ImpactedAddr {
-            extent_id: 0,
-            block: 7,
-        },
-    );
-    (request, iblocks)
-}
-
-pub(crate) fn generic_write_request(
-) -> (crucible_protocol::Write, ImpactedBlocks) {
-    let request = crucible_protocol::Write {
-        eid: 0,
-        offset: Block::new_512(7),
-        data: Bytes::from(vec![1]),
-        block_context: BlockContext {
-            encryption_context: None,
-            hash: 0,
-        },
-    };
-    let iblocks = ImpactedBlocks::new(
-        ImpactedAddr {
-            extent_id: 0,
-            block: 7,
-        },
-        ImpactedAddr {
-            extent_id: 0,
-            block: 7,
-        },
-    );
-    (request, iblocks)
-}
-
 /*
  * Beware, if you change these defaults, then you will have to change
  * all the hard coded tests below that use make_upstairs().
