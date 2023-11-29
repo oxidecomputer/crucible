@@ -7173,6 +7173,16 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
     }
 
+    #[tokio::test]
+    #[should_panic]
+    async fn deactivate_ds_not_when_initializing() {
+        // No deactivate of downstairs when upstairs not active.
+        let mut ds = Downstairs::test_default();
+
+        // This should panic, because `up` is in the wrong state
+        ds.try_deactivate(ClientId::new(0), &UpstairsState::Initializing);
+    }
+
     /*
     #[tokio::test]
     async fn write_fail_skips_many_jobs() {

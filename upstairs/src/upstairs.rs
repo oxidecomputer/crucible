@@ -1744,20 +1744,29 @@ mod test {
         let mut up = Upstairs::test_default(None);
 
         let (ds_done_tx, ds_done_rx) = oneshot::channel();
-        up.set_deactivate(BlockReq::new(BlockOp::Deactivate, ds_done_tx))
-            .await;
+        up.apply(UpstairsAction::Guest(BlockReq::new(
+            BlockOp::Deactivate,
+            ds_done_tx,
+        )))
+        .await;
         assert!(ds_done_rx.await.unwrap().is_err());
 
         up.force_active().unwrap();
 
         let (ds_done_tx, ds_done_rx) = oneshot::channel();
-        up.set_deactivate(BlockReq::new(BlockOp::Deactivate, ds_done_tx))
-            .await;
+        up.apply(UpstairsAction::Guest(BlockReq::new(
+            BlockOp::Deactivate,
+            ds_done_tx,
+        )))
+        .await;
         assert!(ds_done_rx.await.unwrap().is_ok());
 
         let (ds_done_tx, ds_done_rx) = oneshot::channel();
-        up.set_deactivate(BlockReq::new(BlockOp::Deactivate, ds_done_tx))
-            .await;
+        up.apply(UpstairsAction::Guest(BlockReq::new(
+            BlockOp::Deactivate,
+            ds_done_tx,
+        )))
+        .await;
         assert!(ds_done_rx.await.unwrap().is_err());
     }
 
@@ -1774,46 +1783,40 @@ mod test {
 
         // The deactivate message should happen immediately
         let (ds_done_tx, ds_done_rx) = oneshot::channel();
-        up.set_deactivate(BlockReq::new(BlockOp::Deactivate, ds_done_tx))
-            .await;
+        up.apply(UpstairsAction::Guest(BlockReq::new(
+            BlockOp::Deactivate,
+            ds_done_tx,
+        )))
+        .await;
         assert!(ds_done_rx.await.unwrap().is_ok());
 
-        // Verify we can deactivate as there is no work
-        assert!(up.downstairs.try_deactivate(ClientId::new(0), &up.state));
-        assert!(up.downstairs.try_deactivate(ClientId::new(1), &up.state));
-        assert!(up.downstairs.try_deactivate(ClientId::new(2), &up.state));
-
         // Make sure the correct DS have changed state.
-        for c in up.downstairs.clients.iter() {
-            assert_eq!(c.state(), DsState::Deactivated);
+        for client_id in ClientId::iter() {
+            // The downstairs is already deactivated
+            assert_eq!(up.ds_state(client_id), DsState::Deactivated);
+
+            // Push the event loop forward with the info that the IO task has
+            // now stopped.
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id,
+                action: ClientAction::TaskStopped(
+                    ClientRunResult::RequestedStop(
+                        ClientStopReason::Deactivated,
+                    ),
+                ),
+            }))
+            .await;
+
+            // This causes the downstairs state to be reinitialized
+            assert_eq!(up.ds_state(client_id), DsState::New);
+
+            if client_id.get() < 2 {
+                assert!(matches!(up.state, UpstairsState::Deactivating));
+            } else {
+                // Once the third task stops, we're back in initializing
+                assert!(matches!(up.state, UpstairsState::Initializing));
+            }
         }
-
-        // Mark all three DS IO tasks as done, which moves their state to New
-        let r =
-            || ClientRunResult::RequestedStop(ClientStopReason::Deactivated);
-        up.on_client_task_stopped(ClientId::new(0), r());
-        assert_eq!(up.ds_state(ClientId::new(0)), DsState::New);
-        assert!(matches!(up.state, UpstairsState::Deactivating));
-
-        up.on_client_task_stopped(ClientId::new(1), r());
-        assert_eq!(up.ds_state(ClientId::new(1)), DsState::New);
-        assert!(matches!(up.state, UpstairsState::Deactivating));
-
-        // Once the third task stops, we're back in initializing
-        up.on_client_task_stopped(ClientId::new(2), r());
-        assert_eq!(up.ds_state(ClientId::new(2)), DsState::New);
-        assert!(matches!(up.state, UpstairsState::Initializing));
-    }
-
-    #[tokio::test]
-    #[should_panic]
-    async fn deactivate_ds_not_when_initializing() {
-        // No deactivate of downstairs when upstairs not active.
-
-        let mut up = Upstairs::test_default(None);
-
-        // This should panic, because `up` is in the wrong state
-        up.downstairs.try_deactivate(ClientId::new(0), &up.state);
     }
 
     // Job dependency tests
@@ -3207,10 +3210,10 @@ mod test {
 
         // Create and enqueue the flush by setting deactivate
         let (deactivate_done_tx, mut deactivate_done_rx) = oneshot::channel();
-        up.set_deactivate(BlockReq::new(
+        up.apply(UpstairsAction::Guest(BlockReq::new(
             BlockOp::Deactivate,
             deactivate_done_tx,
-        ))
+        )))
         .await;
 
         // The deactivate didn't return right away
@@ -3250,9 +3253,9 @@ mod test {
 
         // Send the flush created for us when we set deactivated to
         // the two downstairs.
-        for i in [0, 2] {
+        for client_id in [0, 2].into_iter().map(ClientId::new) {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
-                client_id: ClientId::new(i),
+                client_id,
                 action: ClientAction::Work,
             }))
             .await;
@@ -3260,9 +3263,9 @@ mod test {
 
         // Complete the flush on two downstairs, at which point the deactivate
         // is still pending.
-        for i in [0, 2] {
+        for client_id in [0, 2].into_iter().map(ClientId::new) {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
-                client_id: ClientId::new(i),
+                client_id,
                 action: ClientAction::Response(Message::FlushAck {
                     upstairs_id: up.cfg.upstairs_id,
                     session_id: up.cfg.session_id,
