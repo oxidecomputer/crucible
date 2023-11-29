@@ -1,13 +1,12 @@
 // Copyright 2023 Oxide Computer Company
 
-#[cfg(feature = "TODO re-enable this")]
+#[cfg(test)]
 pub(crate) mod protocol_test {
     use core::fmt::Error;
     use core::fmt::Formatter;
     use std::sync::Arc;
     use std::time::Duration;
 
-    use crate::test::up_test::csl;
     use crate::up_main;
     use crate::BlockContext;
     use crate::BlockIO;
@@ -35,6 +34,8 @@ pub(crate) mod protocol_test {
     use slog::error;
     use slog::info;
     use slog::o;
+    use slog::warn;
+    use slog::Drain;
     use slog::Logger;
     use std::net::SocketAddr;
     use tokio::net::TcpListener;
@@ -45,6 +46,12 @@ pub(crate) mod protocol_test {
     use tokio_util::codec::FramedRead;
     use tokio_util::codec::FramedWrite;
     use uuid::Uuid;
+
+    // Create a simple logger
+    fn csl() -> Logger {
+        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
+        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
+    }
 
     macro_rules! bail_assert {
         ($cond:expr) => {
@@ -191,53 +198,72 @@ pub(crate) mod protocol_test {
         }
 
         pub async fn negotiate_start(&self) -> Result<()> {
-            let packet = self
-                .fr
-                .lock()
-                .await
-                .next()
-                .await
-                .transpose()
-                .unwrap()
-                .unwrap();
+            // We loop here as a way of ignoring ping (Ruok) packets while
+            // we wait for negotiation messages.
 
-            match &packet {
-                Message::HereIAm {
-                    version,
-                    upstairs_id: _,
-                    session_id: _,
-                    gen: _,
-                    read_only,
-                    encrypted: _,
-                    alternate_versions: _,
-                } => {
-                    info!(
-                        self.inner.log,
-                        "negotiate packet {:?} (upstairs read-only {})",
-                        packet,
-                        read_only
-                    );
+            loop {
+                let packet = self
+                    .fr
+                    .lock()
+                    .await
+                    .next()
+                    .await
+                    .transpose()
+                    .unwrap()
+                    .unwrap();
 
-                    if *read_only != self.inner.read_only {
-                        bail!("read only mismatch!");
+                match &packet {
+                    Message::HereIAm {
+                        version,
+                        upstairs_id: _,
+                        session_id: _,
+                        gen: _,
+                        read_only,
+                        encrypted: _,
+                        alternate_versions: _,
+                    } => {
+                        info!(
+                            self.inner.log,
+                            "negotiate packet {:?} (upstairs read-only {})",
+                            packet,
+                            read_only
+                        );
+
+                        if *read_only != self.inner.read_only {
+                            bail!("read only mismatch!");
+                        }
+
+                        self.fw
+                            .lock()
+                            .await
+                            .send(Message::YesItsMe {
+                                version: *version,
+                                repair_addr: self.inner.repair_addr,
+                            })
+                            .await
+                            .unwrap();
+
+                        break;
                     }
 
-                    self.fw
-                        .lock()
-                        .await
-                        .send(Message::YesItsMe {
-                            version: *version,
-                            repair_addr: self.inner.repair_addr,
-                        })
-                        .await
-                        .unwrap();
-                }
+                    Message::Ruok => {
+                        // Respond to pings right away
+                        if let Err(e) =
+                            self.fw.lock().await.send(Message::Imok).await
+                        {
+                            error!(self.inner.log, "negotiate_start could not send on fw due to {}", e);
+                        }
+                        info!(self.inner.log, "responded to ping");
 
-                x => bail!("wrong packet {:?}", x),
+                        continue;
+                    }
+
+                    x => {
+                        bail!("wrong packet {:?}, expected HereIAm or Ruok", x)
+                    }
+                }
             }
 
-            // We loop here as a way of ignoring ping (Ruok) packets while
-            // we wait for the PromoteToActive message.
             loop {
                 let packet = self
                     .fr
@@ -273,6 +299,7 @@ pub(crate) mod protocol_test {
                             })
                             .await
                             .unwrap();
+
                         break;
                     }
 
@@ -288,7 +315,10 @@ pub(crate) mod protocol_test {
                         continue;
                     }
 
-                    x => bail!("wrong packet {:?}", x),
+                    x => bail!(
+                        "wrong packet {:?}, expected PromoteToActive or Ruok",
+                        x
+                    ),
                 }
             }
 
@@ -330,7 +360,10 @@ pub(crate) mod protocol_test {
                         continue;
                     }
 
-                    x => bail!("wrong packet: {:?}", x),
+                    x => bail!(
+                        "wrong packet: {:?}, expected RegionInfoPlease or Ruok",
+                        x
+                    ),
                 }
             }
         }
@@ -364,7 +397,10 @@ pub(crate) mod protocol_test {
                         .unwrap();
                 }
 
-                _ => bail!("wrong packet"),
+                x => bail!(
+                    "wrong packet: {:?}, expected ExtentVersionsPlease",
+                    x
+                ),
             }
 
             Ok(())
@@ -396,7 +432,7 @@ pub(crate) mod protocol_test {
                         .unwrap();
                 }
 
-                _ => bail!("wrong packet"),
+                x => bail!("wrong packet: {:?}, expected LastFlush", x),
             }
 
             Ok(())
