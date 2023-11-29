@@ -369,7 +369,15 @@ impl Upstairs {
         if matches!(self.state, UpstairsState::Deactivating) {
             info!(self.log, "checking for deactivation");
             for i in ClientId::iter() {
-                if self.downstairs.try_deactivate(i, &self.state) {
+                // Clients become Deactivated, then New (when the IO task
+                // completes and the client is restarted).  We don't try to
+                // deactivate them _again_ in such cases.
+                if matches!(
+                    self.downstairs.clients[i].state(),
+                    DsState::Deactivated | DsState::New
+                ) {
+                    debug!(self.log, "already deactivated {i}");
+                } else if self.downstairs.try_deactivate(i, &self.state) {
                     info!(self.log, "deactivated client {i}");
                 } else {
                     info!(self.log, "not ready to deactivate client {i}");
@@ -1682,7 +1690,7 @@ mod test {
     use crate::{
         downstairs::test::set_all_active,
         test::{generic_write_request, make_upstairs},
-        DsState, JobId,
+        BlockReq, DsState, JobId,
     };
 
     #[tokio::test]
@@ -3204,15 +3212,19 @@ mod test {
         set_all_active(&mut up.downstairs);
 
         // Build a write, put it on the work queue.
-        let (request, iblocks) = generic_write_request();
-        let id1 = up.downstairs.create_and_enqueue_write_eob(
-            iblocks,
-            10,
-            vec![request],
-            is_write_unwritten,
-        );
+        let (write_tx, _write_rx) = oneshot::channel();
+        let offset = Block::new_512(7);
+        let data = Bytes::from(vec![1; 512]);
+        let op = if is_write_unwritten {
+            BlockOp::WriteUnwritten { offset, data }
+        } else {
+            BlockOp::Write { offset, data }
+        };
+        up.apply(UpstairsAction::Guest(BlockReq::new(op, write_tx)))
+            .await;
+        let id1 = JobId(1000); // We know that job IDs start at 1000
 
-        // Submit the writes by running the main loop
+        // Submit the writes to the clients by running the main loop
         for client_id in ClientId::iter() {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id,
