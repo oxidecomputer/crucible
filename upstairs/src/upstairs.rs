@@ -3245,7 +3245,7 @@ mod test {
                 client_id,
                 action: ClientAction::Response(Message::WriteAck {
                     upstairs_id: up.cfg.upstairs_id,
-                    session_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
                     job_id: id1,
                     result: Ok(()),
                 }),
@@ -3270,7 +3270,7 @@ mod test {
                 client_id: ClientId::new(i),
                 action: ClientAction::Response(Message::FlushAck {
                     upstairs_id: up.cfg.upstairs_id,
-                    session_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
                     job_id: flush_id,
                     result: Ok(()),
                 }),
@@ -3315,7 +3315,7 @@ mod test {
             client_id: ClientId::new(1),
             action: ClientAction::Response(Message::FlushAck {
                 upstairs_id: up.cfg.upstairs_id,
-                session_id: up.cfg.upstairs_id,
+                session_id: up.cfg.session_id,
                 job_id: flush_id,
                 result: Ok(()),
             }),
