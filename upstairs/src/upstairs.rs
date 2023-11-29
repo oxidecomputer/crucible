@@ -1693,6 +1693,12 @@ impl Upstairs {
         self.downstairs.clients[client_id]
             .checked_state_transition(&self.state, new_state);
     }
+
+    /// Helper function to get a downstairs client state
+    #[cfg(test)]
+    pub(crate) fn ds_state(&self, client_id: ClientId) -> DsState {
+        self.downstairs.clients[client_id].state()
+    }
 }
 
 #[cfg(test)]
@@ -1777,25 +1783,16 @@ mod test {
         let r =
             || ClientRunResult::RequestedStop(ClientStopReason::Deactivated);
         up.on_client_task_stopped(ClientId::new(0), r());
-        assert_eq!(
-            up.downstairs.clients[ClientId::new(0)].state(),
-            DsState::New
-        );
+        assert_eq!(up.ds_state(ClientId::new(0)), DsState::New);
         assert!(matches!(up.state, UpstairsState::Deactivating));
 
         up.on_client_task_stopped(ClientId::new(1), r());
-        assert_eq!(
-            up.downstairs.clients[ClientId::new(1)].state(),
-            DsState::New
-        );
+        assert_eq!(up.ds_state(ClientId::new(1)), DsState::New);
         assert!(matches!(up.state, UpstairsState::Deactivating));
 
         // Once the third task stops, we're back in initializing
         up.on_client_task_stopped(ClientId::new(2), r());
-        assert_eq!(
-            up.downstairs.clients[ClientId::new(2)].state(),
-            DsState::New
-        );
+        assert_eq!(up.ds_state(ClientId::new(2)), DsState::New);
         assert!(matches!(up.state, UpstairsState::Initializing));
     }
 
@@ -3091,10 +3088,7 @@ mod test {
         up.ds_transition(ClientId::new(1), DsState::Faulted);
         up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
         assert_eq!(up.on_repair_check().await, RepairCheck::RepairStarted);
-        assert_eq!(
-            up.downstairs.clients[ClientId::new(1)].state(),
-            DsState::LiveRepair
-        );
+        assert_eq!(up.ds_state(ClientId::new(1)), DsState::LiveRepair);
         assert!(up.downstairs.repair().is_some());
     }
 
@@ -3117,18 +3111,9 @@ mod test {
         }
         assert_eq!(up.on_repair_check().await, RepairCheck::RepairStarted);
 
-        assert_eq!(
-            up.downstairs.clients[ClientId::new(0)].state(),
-            DsState::Active
-        );
-        assert_eq!(
-            up.downstairs.clients[ClientId::new(1)].state(),
-            DsState::LiveRepair
-        );
-        assert_eq!(
-            up.downstairs.clients[ClientId::new(2)].state(),
-            DsState::LiveRepair
-        );
+        assert_eq!(up.ds_state(ClientId::new(0)), DsState::Active);
+        assert_eq!(up.ds_state(ClientId::new(1)), DsState::LiveRepair);
+        assert_eq!(up.ds_state(ClientId::new(2)), DsState::LiveRepair);
         assert!(up.downstairs.repair().is_some())
     }
 
@@ -3284,20 +3269,11 @@ mod test {
         }
 
         // These downstairs should now be deactivated now
-        assert_eq!(
-            up.downstairs.clients[ClientId::new(0)].state(),
-            DsState::Deactivated
-        );
-        assert_eq!(
-            up.downstairs.clients[ClientId::new(2)].state(),
-            DsState::Deactivated
-        );
+        assert_eq!(up.ds_state(ClientId::new(0)), DsState::Deactivated);
+        assert_eq!(up.ds_state(ClientId::new(2)), DsState::Deactivated);
 
         // Verify the remaining DS is still running
-        assert_eq!(
-            up.downstairs.clients[ClientId::new(1)].state(),
-            DsState::Active
-        );
+        assert_eq!(up.ds_state(ClientId::new(1)), DsState::Active);
 
         // Verify the deactivate is not done yet.
         assert_eq!(
@@ -3323,10 +3299,7 @@ mod test {
         }))
         .await;
 
-        assert_eq!(
-            up.downstairs.clients[ClientId::new(1)].state(),
-            DsState::Deactivated
-        );
+        assert_eq!(up.ds_state(ClientId::new(1)), DsState::Deactivated);
 
         // Report all three DS as missing, which moves them to New and finishes
         // deactivation
