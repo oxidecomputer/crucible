@@ -1,6 +1,5 @@
 // Copyright 2023 Oxide Computer Company
 
-use crate::downstairs::Downstairs;
 use crate::*;
 
 /*
@@ -30,7 +29,7 @@ pub(crate) fn make_upstairs() -> crate::upstairs::Upstairs {
     )
 }
 
-#[cfg(feature = "LOLNO")]
+#[cfg(test)]
 pub(crate) mod up_test {
     use super::*;
     use crate::{
@@ -38,18 +37,13 @@ pub(crate) mod up_test {
             validate_encrypted_read_response,
             validate_unencrypted_read_response,
         },
-        downstairs::Downstairs,
-        upstairs::{Upstairs, UpstairsState},
+        upstairs::Upstairs,
     };
     use rand::prelude::*;
 
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
     use base64::{engine, Engine};
-    use itertools::Itertools;
     use pseudo_file::IOSpan;
     use ringbuffer::RingBuffer;
-    use tokio::sync::watch;
 
     // Create a simple logger
     pub fn csl() -> Logger {
@@ -128,7 +122,7 @@ pub(crate) mod up_test {
      * Terrible wrapper, but it allows us to call extent_from_offset()
      * just like the program does.
      */
-    async fn up_efo(
+    fn up_efo(
         up: &Upstairs,
         offset: Block,
         num_blocks: u64,
@@ -146,19 +140,19 @@ pub(crate) mod up_test {
 
         for i in 0..100 {
             let exv = vec![extent_tuple(0, i)];
-            assert_eq!(up_efo(&up, Block::new_512(i), 1).await, exv);
+            assert_eq!(up_efo(&up, Block::new_512(i), 1), exv);
         }
 
         for i in 0..100 {
             let exv = vec![extent_tuple(1, i)];
-            assert_eq!(up_efo(&up, Block::new_512(100 + i), 1).await, exv);
+            assert_eq!(up_efo(&up, Block::new_512(100 + i), 1), exv);
         }
 
         let exv = vec![extent_tuple(2, 0)];
-        assert_eq!(up_efo(&up, Block::new_512(200), 1).await, exv);
+        assert_eq!(up_efo(&up, Block::new_512(200), 1), exv);
 
         let exv = vec![extent_tuple(9, 99)];
-        assert_eq!(up_efo(&up, Block::new_512(999), 1).await, exv);
+        assert_eq!(up_efo(&up, Block::new_512(999), 1), exv);
     }
 
     #[tokio::test]
@@ -167,25 +161,25 @@ pub(crate) mod up_test {
 
         for i in 0..99 {
             let exv = vec![extent_tuple(0, i), extent_tuple(0, i + 1)];
-            assert_eq!(up_efo(&up, Block::new_512(i), 2).await, exv);
+            assert_eq!(up_efo(&up, Block::new_512(i), 2), exv);
         }
 
         let exv = vec![extent_tuple(0, 99), extent_tuple(1, 0)];
-        assert_eq!(up_efo(&up, Block::new_512(99), 2).await, exv);
+        assert_eq!(up_efo(&up, Block::new_512(99), 2), exv);
 
         for i in 0..99 {
             let exv = vec![extent_tuple(1, i)];
-            assert_eq!(up_efo(&up, Block::new_512(100 + i), 1).await, exv);
+            assert_eq!(up_efo(&up, Block::new_512(100 + i), 1), exv);
         }
 
         let exv = vec![extent_tuple(1, 99), extent_tuple(2, 0)];
-        assert_eq!(up_efo(&up, Block::new_512(199), 2).await, exv);
+        assert_eq!(up_efo(&up, Block::new_512(199), 2), exv);
 
         let exv = vec![extent_tuple(2, 0), extent_tuple(2, 1)];
-        assert_eq!(up_efo(&up, Block::new_512(200), 2).await, exv);
+        assert_eq!(up_efo(&up, Block::new_512(200), 2), exv);
 
         let exv = vec![extent_tuple(9, 98), extent_tuple(9, 99)];
-        assert_eq!(up_efo(&up, Block::new_512(998), 2).await, exv);
+        assert_eq!(up_efo(&up, Block::new_512(998), 2), exv);
     }
 
     #[tokio::test]
@@ -199,11 +193,11 @@ pub(crate) mod up_test {
          * 1024 buffer
          */
         assert_eq!(
-            up_efo(&up, Block::new_512(99), 2).await,
+            up_efo(&up, Block::new_512(99), 2),
             vec![extent_tuple(0, 99), extent_tuple(1, 0)],
         );
         assert_eq!(
-            up_efo(&up, Block::new_512(98), 4).await,
+            up_efo(&up, Block::new_512(98), 4),
             vec![
                 extent_tuple(0, 98),
                 extent_tuple(0, 99),
@@ -219,10 +213,7 @@ pub(crate) mod up_test {
             let expected: Vec<(u64, Block)> = (0..100)
                 .map(|i| extent_tuple((offset + i) / 100, (offset + i) % 100))
                 .collect();
-            assert_eq!(
-                up_efo(&up, Block::new_512(offset), 100).await,
-                expected
-            );
+            assert_eq!(up_efo(&up, Block::new_512(offset), 100), expected);
         }
     }
 
@@ -232,40 +223,40 @@ pub(crate) mod up_test {
     #[tokio::test]
     async fn off_to_extent_length_zero() {
         let up = make_upstairs();
-        assert_eq!(up_efo(&up, Block::new_512(0), 0).await, vec![]);
+        assert_eq!(up_efo(&up, Block::new_512(0), 0), vec![]);
     }
 
     #[tokio::test]
     async fn off_to_extent_length_almost_too_big() {
         let up = make_upstairs();
-        up_efo(&up, Block::new_512(0), 1000).await;
+        up_efo(&up, Block::new_512(0), 1000);
     }
 
     #[tokio::test]
     #[should_panic]
     async fn off_to_extent_length_too_big() {
         let up = make_upstairs();
-        up_efo(&up, Block::new_512(0), 1001).await;
+        up_efo(&up, Block::new_512(0), 1001);
     }
 
     #[tokio::test]
     async fn off_to_extent_length_and_offset_almost_too_big() {
         let up = make_upstairs();
-        up_efo(&up, Block::new_512(900), 100).await;
+        up_efo(&up, Block::new_512(900), 100);
     }
 
     #[tokio::test]
     #[should_panic]
     async fn off_to_extent_length_and_offset_too_big() {
         let up = make_upstairs();
-        up_efo(&up, Block::new_512(1000), 1).await;
+        up_efo(&up, Block::new_512(1000), 1);
     }
 
     #[tokio::test]
     #[should_panic]
     async fn not_right_block_size() {
         let up = make_upstairs();
-        up_efo(&up, Block::new_4096(900), 1).await;
+        up_efo(&up, Block::new_4096(900), 1);
     }
 
     // key material made with `openssl rand -base64 32`
@@ -1088,62 +1079,6 @@ pub(crate) mod up_test {
         Ok(())
     }
 
-    // Test function to Create a write, enqueue it, return the next_id used
-    // for that write.  If make_in_progress is true, move all three downstairs
-    // jobs to InProgress.
-    async fn enqueue_write(
-        ds: &mut Downstairs,
-        make_in_progress: bool,
-    ) -> JobId {
-        let id = ds.create_and_enqueue_generic_write_eob(false);
-
-        if make_in_progress {
-            ds.in_progress(id, ClientId::new(0));
-            ds.in_progress(id, ClientId::new(1));
-            ds.in_progress(id, ClientId::new(2));
-        }
-
-        id
-    }
-
-    // Test function to create and enqueue a flush.  Return the next_id used
-    // for that flush.  If make_in_progress is true, move all three downstairs
-    // jobs to InProgress.
-    async fn enqueue_flush(
-        ds: &mut Downstairs,
-        make_in_progress: bool,
-    ) -> JobId {
-        let id = ds.create_and_enqueue_generic_flush(None);
-
-        if make_in_progress {
-            ds.in_progress(id, ClientId::new(0));
-            ds.in_progress(id, ClientId::new(1));
-            ds.in_progress(id, ClientId::new(2));
-        }
-
-        id
-    }
-
-    // Test function to create and enqueue a (provided) read request.
-    // Return the ID of the job created.
-    async fn enqueue_read(
-        ds: &mut Downstairs,
-        request: ReadRequest,
-        iblocks: ImpactedBlocks,
-        make_in_progress: bool,
-    ) -> JobId {
-        let read_id =
-            ds.create_and_enqueue_read_eob(iblocks, 10, vec![request]);
-
-        if make_in_progress {
-            ds.in_progress(read_id, ClientId::new(0));
-            ds.in_progress(read_id, ClientId::new(1));
-            ds.in_progress(read_id, ClientId::new(2));
-        }
-
-        read_id
-    }
-
     #[tokio::test]
     async fn send_io_live_repair_read() {
         // Check the send_io_live_repair for a read below extent limit,
@@ -1255,1176 +1190,12 @@ pub(crate) mod up_test {
         assert!(wr.send_io_live_repair(Some(3)));
     }
 
-    #[tokio::test]
-    async fn write_after_write_fail_is_alright() {
-        // Verify that if a single write fails on a downstairs, a second
-        // write can still be acked.
-        // Then, send a flush and verify the work queue is cleared.
-        let up = Upstairs::test_default(None);
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::WaitActive);
-            up.force_ds_state(cid, DsState::WaitQuorum);
-            up.force_ds_state(cid, DsState::Active);
-        }
-        up.force_active().unwrap();
-
-        // Create the write that fails on one DS
-        let next_id = enqueue_write(&up, true, ds_done_tx.clone()).await;
-
-        // Make the error and ok responses
-        let err_response = Err(CrucibleError::GenericError("bad".to_string()));
-        let ok_response = Ok(vec![]);
-
-        // Process the operation for client 0
-        assert!(!up
-            .process_ds_operation(
-                next_id,
-                ClientId::new(0),
-                ok_response.clone(),
-                None
-            )
-            .await
-            .unwrap(),);
-
-        // Process the error for client 1
-        assert!(!up
-            .process_ds_operation(next_id, ClientId::new(1), err_response, None)
-            .await
-            .unwrap());
-
-        // process_ds_operation should return true after we process this.
-        assert!(up
-            .process_ds_operation(
-                next_id,
-                ClientId::new(2),
-                ok_response.clone(),
-                None
-            )
-            .await
-            .unwrap(),);
-
-        // Verify client states
-        assert_eq!(up.ds_state(ClientId::new(0)).await, DsState::Active);
-        assert_eq!(up.ds_state(ClientId::new(1)).await, DsState::Faulted);
-        assert_eq!(up.ds_state(ClientId::new(2)).await, DsState::Active);
-
-        // A faulted write won't change skipped job count.
-        let ds = &up.downstairs;
-        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
-        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
-        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
-        drop(ds);
-
-        // Verify we can ack this work
-        assert_eq!(up.downstairs.lock().await.ackable_work().len(), 1);
-
-        let first_id = next_id;
-        // Now, do another write.
-        let next_id = enqueue_write(&up, false, ds_done_tx.clone()).await;
-        let ds = &mut up.downstairs;
-        ds.in_progress(next_id, ClientId::new(0));
-        assert_eq!(ds.in_progress(next_id, ClientId::new(1)), None);
-        ds.in_progress(next_id, ClientId::new(2));
-        drop(ds);
-
-        // Process the operation for client 0, re-use ok_response from above.
-        // This will return false as we don't have enough work done yet.
-        assert!(!up
-            .process_ds_operation(
-                next_id,
-                ClientId::new(0),
-                ok_response.clone(),
-                None
-            )
-            .await
-            .unwrap());
-
-        // We don't process client 1, it had failed
-
-        // process_ds_operation should return true after we process this.
-        assert!(up
-            .process_ds_operation(next_id, ClientId::new(2), ok_response, None)
-            .await
-            .unwrap());
-
-        // Verify we can ack this work, the total is now 2 jobs to ack
-        assert_eq!(up.downstairs.lock().await.ackable_work().len(), 2);
-
-        // One downstairs should have a skipped job on its list.
-        let ds = &up.downstairs;
-        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
-        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
-        assert!(ds.clients[ClientId::new(1)]
-            .skipped_jobs
-            .contains(&JobId(1001)));
-        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
-        drop(ds);
-
-        // Enqueue the flush.
-        let flush_id = {
-            let ds = &mut up.downstairs;
-
-            let next_id = ds.next_id();
-            let dep = ds.ds_active.deps_for_flush(next_id);
-            let op = create_flush(next_id, dep, 10, 0, 0, None, None);
-            ds.enqueue(op, ds_done_tx.clone()).await;
-
-            assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
-            // As this DS is failed, it should return none
-            assert_eq!(ds.in_progress(next_id, ClientId::new(1)), None);
-            assert!(ds.in_progress(next_id, ClientId::new(2)).is_some());
-
-            next_id
-        };
-
-        let ok_response = Ok(vec![]);
-        // Process the operation for client 0
-        assert!(!up
-            .process_ds_operation(
-                flush_id,
-                ClientId::new(0),
-                ok_response.clone(),
-                None
-            )
-            .await
-            .unwrap());
-
-        // process_ds_operation should return true after we process client 2.
-        assert!(up
-            .process_ds_operation(flush_id, ClientId::new(2), ok_response, None)
-            .await
-            .unwrap());
-
-        // ACK all the jobs and let retire_check move things along.
-        let ds = &mut up.downstairs;
-        assert_eq!(ds.ackable_work().len(), 3);
-        ds.ack(first_id);
-        ds.ack(next_id);
-        ds.ack(flush_id);
-        ds.retire_check(flush_id);
-
-        assert_eq!(ds.ackable_work().len(), 0);
-
-        // The two writes and the flush should be completed.
-        assert_eq!(ds.completed().len(), 3);
-
-        // Only the skipped flush should remain.
-        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
-        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
-        assert!(ds.clients[ClientId::new(1)]
-            .skipped_jobs
-            .contains(&JobId(1002)));
-        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
-    }
-
-    #[tokio::test]
-    async fn write_fail_skips_new_jobs() {
-        // Verify that if a single write fails on a downstairs, any
-        // work that was IOState::New for that downstairs will change
-        // to IOState::Skipped.  This also verifies that the list of
-        // skipped jobs for each downstairs has the inflight job added
-        // to it.
-        let up = Upstairs::test_default(None);
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::WaitActive);
-            up.force_ds_state(cid, DsState::WaitQuorum);
-            up.force_ds_state(cid, DsState::Active);
-        }
-        up.force_active().unwrap();
-
-        // Create the write that fails on one DS
-        let write_id = enqueue_write(&up, true, ds_done_tx.clone()).await;
-
-        // Now, add a read.  Don't move it to InProgress yet.
-        let (request, iblocks) = generic_read_request();
-        let read_id = enqueue_read(
-            &up,
-            request.clone(),
-            iblocks,
-            false,
-            ds_done_tx.clone(),
-        )
-        .await;
-
-        // Verify the read is all new still
-        let ds = &up.downstairs;
-        let job = ds.ds_active.get(&read_id).unwrap();
-
-        assert_eq!(job.state[ClientId::new(0)], IOState::New);
-        assert_eq!(job.state[ClientId::new(1)], IOState::New);
-        assert_eq!(job.state[ClientId::new(2)], IOState::New);
-
-        drop(ds);
-
-        // Make the error and ok responses
-        let err_response = Err(CrucibleError::GenericError("bad".to_string()));
-
-        // Process the operation for client 0
-        assert!(!up
-            .process_ds_operation(write_id, ClientId::new(0), Ok(vec![]), None)
-            .await
-            .unwrap());
-
-        // Process the error for client 1
-        assert!(!up
-            .process_ds_operation(
-                write_id,
-                ClientId::new(1),
-                err_response,
-                None
-            )
-            .await
-            .unwrap());
-
-        // process_ds_operation should return true after we process this.
-        assert!(up
-            .process_ds_operation(write_id, ClientId::new(2), Ok(vec![]), None)
-            .await
-            .unwrap(),);
-
-        // Verify client states
-        assert_eq!(up.ds_state(ClientId::new(0)).await, DsState::Active);
-        assert_eq!(up.ds_state(ClientId::new(1)).await, DsState::Faulted);
-        assert_eq!(up.ds_state(ClientId::new(2)).await, DsState::Active);
-
-        // Verify we can ack this work
-        assert_eq!(up.downstairs.lock().await.ackable_work().len(), 1);
-
-        // Verify the read switched from new to skipped
-        let ds = &up.downstairs;
-        let job = ds.ds_active.get(&read_id).unwrap();
-
-        assert_eq!(job.state[ClientId::new(0)], IOState::New);
-        assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(2)], IOState::New);
-
-        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
-        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
-        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
-
-        drop(ds);
-    }
-
-    #[tokio::test]
-    async fn write_fail_skips_inprogress_jobs() {
-        // Verify that if a single write fails on a downstairs, any
-        // work that was IOState::InProgress for that downstairs will change
-        // to IOState::Skipped.
-        let up = Upstairs::test_default(None);
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::WaitActive);
-            up.force_ds_state(cid, DsState::WaitQuorum);
-            up.force_ds_state(cid, DsState::Active);
-        }
-        up.force_active().unwrap();
-
-        // Create the write that fails on one DS
-        let write_id = enqueue_write(&up, true, ds_done_tx.clone()).await;
-
-        // Now, add a read.
-        let (request, iblocks) = generic_read_request();
-        let read_id = enqueue_read(
-            &up,
-            request.clone(),
-            iblocks,
-            true,
-            ds_done_tx.clone(),
-        )
-        .await;
-
-        // Make the error and ok responses
-        let err_response = Err(CrucibleError::GenericError("bad".to_string()));
-        let ok_res = Ok(vec![]);
-
-        // Process the operation for client 0
-        up.process_ds_operation(
-            write_id,
-            ClientId::new(0),
-            ok_res.clone(),
-            None,
-        )
-        .await
-        .unwrap();
-
-        // Process the error for client 1
-        up.process_ds_operation(write_id, ClientId::new(1), err_response, None)
-            .await
-            .unwrap();
-
-        // process_ds_operation should return true after we process this.
-        assert!(up
-            .process_ds_operation(write_id, ClientId::new(2), ok_res, None)
-            .await
-            .unwrap());
-
-        // Verify client states
-        assert_eq!(up.ds_state(ClientId::new(0)).await, DsState::Active);
-        assert_eq!(up.ds_state(ClientId::new(1)).await, DsState::Faulted);
-        assert_eq!(up.ds_state(ClientId::new(2)).await, DsState::Active);
-
-        // Verify we can ack this work
-        assert_eq!(up.downstairs.lock().await.ackable_work().len(), 1);
-
-        // Verify the read switched from new to skipped
-        let ds = &up.downstairs;
-        let job = ds.ds_active.get(&read_id).unwrap();
-
-        assert_eq!(job.state[ClientId::new(0)], IOState::InProgress);
-        assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
-
-        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
-        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
-        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
-        drop(ds);
-    }
-
-    #[tokio::test]
-    async fn write_fail_skips_many_jobs() {
-        // Create a bunch of jobs, do some, then encounter a write error.
-        // Make sure that older jobs are still okay, and failed job was
-        // skipped.
-        let up = Upstairs::test_default(None);
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::WaitActive);
-            up.force_ds_state(cid, DsState::WaitQuorum);
-            up.force_ds_state(cid, DsState::Active);
-        }
-        up.force_active().unwrap();
-        let write_one = enqueue_write(&up, true, ds_done_tx.clone()).await;
-
-        // Now, add a read.
-        let (request, iblocks) = generic_read_request();
-        let read_one = enqueue_read(
-            &up,
-            request.clone(),
-            iblocks,
-            true,
-            ds_done_tx.clone(),
-        )
-        .await;
-
-        // Make the read ok response
-        let rr = Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
-
-        for cid in ClientId::iter() {
-            up.process_ds_operation(write_one, cid, Ok(vec![]), None)
-                .await
-                .unwrap();
-            up.process_ds_operation(read_one, cid, rr.clone(), None)
-                .await
-                .unwrap();
-        }
-
-        // Verify two jobs can be acked.
-        assert_eq!(up.downstairs.lock().await.ackable_work().len(), 2);
-
-        // Verify all IOs are done
-        let ds = &up.downstairs;
-        for cid in ClientId::iter() {
-            let job = ds.ds_active.get(&read_one).unwrap();
-            assert_eq!(job.state[cid], IOState::Done);
-            let job = ds.ds_active.get(&write_one).unwrap();
-            assert_eq!(job.state[cid], IOState::Done);
-        }
-        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
-        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
-        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
-        drop(ds);
-
-        // New write, this one will have a failure
-        // Create a write
-        let write_fail = enqueue_write(&up, true, ds_done_tx.clone()).await;
-
-        let err_response = Err(CrucibleError::GenericError("bad".to_string()));
-
-        // Process the operation for client 0, 1
-        up.process_ds_operation(write_fail, ClientId::new(0), Ok(vec![]), None)
-            .await
-            .unwrap();
-        up.process_ds_operation(write_fail, ClientId::new(1), Ok(vec![]), None)
-            .await
-            .unwrap();
-        up.process_ds_operation(
-            write_fail,
-            ClientId::new(2),
-            err_response,
-            None,
-        )
-        .await
-        .unwrap();
-
-        // Verify client states
-        assert_eq!(up.ds_state(ClientId::new(0)).await, DsState::Active);
-        assert_eq!(up.ds_state(ClientId::new(1)).await, DsState::Active);
-        assert_eq!(up.ds_state(ClientId::new(2)).await, DsState::Faulted);
-
-        // Verify we can ack this work plus the previous two
-        assert_eq!(up.downstairs.lock().await.ackable_work().len(), 3);
-
-        // Verify all IOs are done
-        let ds = &up.downstairs;
-        for cid in ClientId::iter() {
-            let job = ds.ds_active.get(&read_one).unwrap();
-            assert_eq!(job.state[cid], IOState::Done);
-            let job = ds.ds_active.get(&write_one).unwrap();
-            assert_eq!(job.state[cid], IOState::Done);
-        }
-        let job = ds.ds_active.get(&write_fail).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::Done);
-        assert_eq!(job.state[ClientId::new(1)], IOState::Done);
-        assert_eq!(
-            job.state[ClientId::new(2)],
-            IOState::Error(CrucibleError::GenericError("bad".to_string()))
-        );
-
-        // A failed job does not change the skipped count.
-        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
-        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
-        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
-        drop(ds);
-    }
-
-    #[tokio::test]
-    async fn write_fail_past_present_future() {
-        // Create a bunch of jobs, finish some, then encounter a write error.
-        // Make sure that older jobs are still okay, failed job was error,
-        // and jobs not yet started on the faulted downstairs have
-        // transitioned to skipped.
-        let up = Upstairs::test_default(None);
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::WaitActive);
-            up.force_ds_state(cid, DsState::WaitQuorum);
-            up.force_ds_state(cid, DsState::Active);
-        }
-        up.force_active().unwrap();
-
-        // Create a write
-        let write_one = enqueue_write(&up, true, ds_done_tx.clone()).await;
-
-        // Now, add a read.
-        let (request, iblocks) = generic_read_request();
-        let read_one = enqueue_read(
-            &up,
-            request.clone(),
-            iblocks,
-            true,
-            ds_done_tx.clone(),
-        )
-        .await;
-
-        // Make the read ok response
-        let rr = Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
-
-        for cid in ClientId::iter() {
-            up.process_ds_operation(write_one, cid, Ok(vec![]), None)
-                .await
-                .unwrap();
-            up.process_ds_operation(read_one, cid, rr.clone(), None)
-                .await
-                .unwrap();
-        }
-
-        // Verify two jobs can be acked.
-        assert_eq!(up.downstairs.lock().await.ackable_work().len(), 2);
-
-        // Verify all IOs are done
-        let ds = &up.downstairs;
-        for cid in ClientId::iter() {
-            let job = ds.ds_active.get(&read_one).unwrap();
-            assert_eq!(job.state[cid], IOState::Done);
-            let job = ds.ds_active.get(&write_one).unwrap();
-            assert_eq!(job.state[cid], IOState::Done);
-        }
-        drop(ds);
-
-        // Create a New write, this one will fail on one downstairs
-        let write_fail = enqueue_write(&up, true, ds_done_tx.clone()).await;
-        // Response for the write failure
-        let err_response = Err(CrucibleError::GenericError("bad".to_string()));
-
-        // Create some reads as well that will be InProgress
-        let read_two = enqueue_read(
-            &up,
-            request.clone(),
-            iblocks,
-            true,
-            ds_done_tx.clone(),
-        )
-        .await;
-
-        // Process the write operation for downstairs 0, 1
-        up.process_ds_operation(write_fail, ClientId::new(0), Ok(vec![]), None)
-            .await
-            .unwrap();
-        up.process_ds_operation(write_fail, ClientId::new(1), Ok(vec![]), None)
-            .await
-            .unwrap();
-        // Have downstairs 2 return error.
-        up.process_ds_operation(
-            write_fail,
-            ClientId::new(2),
-            err_response,
-            None,
-        )
-        .await
-        .unwrap();
-
-        // Verify client states
-        assert_eq!(up.ds_state(ClientId::new(0)).await, DsState::Active);
-        assert_eq!(up.ds_state(ClientId::new(1)).await, DsState::Active);
-        assert_eq!(up.ds_state(ClientId::new(2)).await, DsState::Faulted);
-
-        // Verify we can ack this work plus the previous two
-        assert_eq!(up.downstairs.lock().await.ackable_work().len(), 3);
-
-        // Verify all IOs are done
-        let ds = &up.downstairs;
-        for cid in ClientId::iter() {
-            // First read, still Done
-            let job = ds.ds_active.get(&read_one).unwrap();
-            assert_eq!(job.state[cid], IOState::Done);
-            // First write, still Done
-            let job = ds.ds_active.get(&write_one).unwrap();
-            assert_eq!(job.state[cid], IOState::Done);
-        }
-        // The failing write, done on 0,1
-        let job = ds.ds_active.get(&write_fail).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::Done);
-        assert_eq!(job.state[ClientId::new(1)], IOState::Done);
-        // The failing write, error on 2
-        assert_eq!(
-            job.state[ClientId::new(2)],
-            IOState::Error(CrucibleError::GenericError("bad".to_string()))
-        );
-
-        // The reads that were in progress
-        let job = ds.ds_active.get(&read_two).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::InProgress);
-        assert_eq!(job.state[ClientId::new(1)], IOState::InProgress);
-        assert_eq!(job.state[ClientId::new(2)], IOState::Skipped);
-
-        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
-        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
-        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 1);
-        drop(ds);
-    }
-
-    #[tokio::test]
-    async fn faulted_downstairs_skips_work() {
-        // Verify that any job submitted with a faulted downstairs is
-        // automatically moved to skipped.
-        let up = Upstairs::test_default(None);
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::WaitActive);
-            up.force_ds_state(cid, DsState::WaitQuorum);
-            up.force_ds_state(cid, DsState::Active);
-        }
-        up.force_active().unwrap();
-        up.force_ds_state(ClientId::new(0), DsState::Faulted);
-
-        // Create a write
-        let write_one = enqueue_write(&up, false, ds_done_tx.clone()).await;
-
-        // Now, add a read.
-        let (request, iblocks) = generic_read_request();
-
-        let read_one = enqueue_read(
-            &up,
-            request.clone(),
-            iblocks,
-            false,
-            ds_done_tx.clone(),
-        )
-        .await;
-
-        let flush_one = enqueue_flush(&up, false, ds_done_tx.clone()).await;
-
-        let ds = &up.downstairs;
-        let job = ds.ds_active.get(&write_one).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(1)], IOState::New);
-        assert_eq!(job.state[ClientId::new(2)], IOState::New);
-
-        let job = ds.ds_active.get(&read_one).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(1)], IOState::New);
-        assert_eq!(job.state[ClientId::new(2)], IOState::New);
-
-        let job = ds.ds_active.get(&flush_one).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(1)], IOState::New);
-        assert_eq!(job.state[ClientId::new(2)], IOState::New);
-
-        // Three skipped jobs for downstairs zero
-        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 3);
-        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
-        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
-        drop(ds);
-    }
-
-    #[tokio::test]
-    async fn faulted_downstairs_skips_but_still_does_work() {
-        // Verify work can progress through the work queue even when one
-        // downstairs has failed. One write, one read, and one flush.
-        let up = Upstairs::test_default(None);
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::WaitActive);
-            up.force_ds_state(cid, DsState::WaitQuorum);
-            up.force_ds_state(cid, DsState::Active);
-        }
-        up.force_active().unwrap();
-        up.force_ds_state(ClientId::new(0), DsState::Faulted);
-
-        // Create a write
-        let write_one = enqueue_write(&up, true, ds_done_tx.clone()).await;
-
-        // Now, add a read.
-        let (request, iblocks) = generic_read_request();
-
-        let read_one = enqueue_read(
-            &up,
-            request.clone(),
-            iblocks,
-            true,
-            ds_done_tx.clone(),
-        )
-        .await;
-
-        // Finally, add a flush
-        let flush_one = enqueue_flush(&up, true, ds_done_tx.clone()).await;
-
-        let ds = &up.downstairs;
-        let job = ds.ds_active.get(&write_one).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(1)], IOState::InProgress);
-        assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
-
-        let job = ds.ds_active.get(&read_one).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(1)], IOState::InProgress);
-        assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
-
-        let job = ds.ds_active.get(&flush_one).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(1)], IOState::InProgress);
-        assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
-
-        // Three skipped jobs on downstairs client 0
-        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 3);
-        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
-        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
-        drop(ds);
-
-        // Do the write
-        up.process_ds_operation(write_one, ClientId::new(1), Ok(vec![]), None)
-            .await
-            .unwrap();
-        up.process_ds_operation(write_one, ClientId::new(2), Ok(vec![]), None)
-            .await
-            .unwrap();
-
-        // Make the read ok response, do the read
-        let rr = Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
-
-        up.process_ds_operation(read_one, ClientId::new(1), rr.clone(), None)
-            .await
-            .unwrap();
-        up.process_ds_operation(read_one, ClientId::new(2), rr.clone(), None)
-            .await
-            .unwrap();
-
-        // Do the flush
-        up.process_ds_operation(flush_one, ClientId::new(1), Ok(vec![]), None)
-            .await
-            .unwrap();
-        up.process_ds_operation(flush_one, ClientId::new(2), Ok(vec![]), None)
-            .await
-            .unwrap();
-
-        // Verify three jobs can be acked.
-        assert_eq!(up.downstairs.lock().await.ackable_work().len(), 3);
-
-        // Verify all IOs are done
-        let ds = &mut up.downstairs;
-
-        let job = ds.ds_active.get(&read_one).unwrap();
-        assert_eq!(job.state[ClientId::new(1)], IOState::Done);
-        assert_eq!(job.state[ClientId::new(2)], IOState::Done);
-        let job = ds.ds_active.get(&write_one).unwrap();
-        assert_eq!(job.state[ClientId::new(1)], IOState::Done);
-        assert_eq!(job.state[ClientId::new(2)], IOState::Done);
-        let job = ds.ds_active.get(&flush_one).unwrap();
-        assert_eq!(job.state[ClientId::new(1)], IOState::Done);
-        assert_eq!(job.state[ClientId::new(2)], IOState::Done);
-
-        ds.ack(read_one);
-        ds.ack(write_one);
-        ds.ack(flush_one);
-        ds.retire_check(flush_one);
-
-        // Skipped jobs just has the flush
-        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
-        assert!(ds.clients[ClientId::new(0)]
-            .skipped_jobs
-            .contains(&JobId(1002)));
-        assert_eq!(ds.ackable_work().len(), 0);
-
-        // The writes, the read, and the flush should be completed.
-        assert_eq!(ds.completed().len(), 3);
-        // No more ackable work
-        assert_eq!(ds.ackable_work().len(), 0);
-        // No more jobs on the queue
-        assert_eq!(ds.active_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn two_faulted_downstairs_can_still_read() {
-        // Verify we can still read (and clear the work queue) with only
-        // one downstairs.
-        let up = Upstairs::test_default(None);
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::WaitActive);
-            up.force_ds_state(cid, DsState::WaitQuorum);
-            up.force_ds_state(cid, DsState::Active);
-        }
-        up.force_active().unwrap();
-        up.force_ds_state(ClientId::new(0), DsState::Faulted);
-        up.force_ds_state(ClientId::new(2), DsState::Faulted);
-
-        // Create a write
-        let write_one = enqueue_write(&up, true, ds_done_tx.clone()).await;
-
-        // Now, add a read.
-        let (request, iblocks) = generic_read_request();
-
-        let read_one = enqueue_read(
-            &up,
-            request.clone(),
-            iblocks,
-            true,
-            ds_done_tx.clone(),
-        )
-        .await;
-
-        // Finally, add a flush
-        let flush_one = enqueue_flush(&up, true, ds_done_tx.clone()).await;
-
-        let ds = &up.downstairs;
-        let job = ds.ds_active.get(&write_one).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(1)], IOState::InProgress);
-        assert_eq!(job.state[ClientId::new(2)], IOState::Skipped);
-
-        let job = ds.ds_active.get(&read_one).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(1)], IOState::InProgress);
-        assert_eq!(job.state[ClientId::new(2)], IOState::Skipped);
-
-        let job = ds.ds_active.get(&flush_one).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(1)], IOState::InProgress);
-        assert_eq!(job.state[ClientId::new(2)], IOState::Skipped);
-
-        // Skipped jobs added on downstairs client 0
-        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 3);
-        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
-        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 3);
-        drop(ds);
-
-        // Do the write
-        up.process_ds_operation(write_one, ClientId::new(1), Ok(vec![]), None)
-            .await
-            .unwrap();
-
-        // Make the read ok response, do the read
-        let rr = Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
-
-        up.process_ds_operation(read_one, ClientId::new(1), rr.clone(), None)
-            .await
-            .unwrap();
-
-        // Do the flush
-        up.process_ds_operation(flush_one, ClientId::new(1), Ok(vec![]), None)
-            .await
-            .unwrap();
-
-        // Verify three jobs can be acked.
-        assert_eq!(up.downstairs.lock().await.ackable_work().len(), 3);
-
-        // Verify all IOs are done
-        let ds = &mut up.downstairs;
-
-        let job = ds.ds_active.get(&read_one).unwrap();
-        assert_eq!(job.state[ClientId::new(1)], IOState::Done);
-        let job = ds.ds_active.get(&write_one).unwrap();
-        assert_eq!(job.state[ClientId::new(1)], IOState::Done);
-        let job = ds.ds_active.get(&flush_one).unwrap();
-        assert_eq!(job.state[ClientId::new(1)], IOState::Done);
-
-        ds.ack(read_one);
-        ds.ack(write_one);
-        ds.ack(flush_one);
-        ds.retire_check(flush_one);
-
-        // Skipped jobs now just have the flush.
-        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
-        assert!(ds.clients[ClientId::new(0)]
-            .skipped_jobs
-            .contains(&JobId(1002)));
-        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 1);
-        assert!(ds.clients[ClientId::new(2)]
-            .skipped_jobs
-            .contains(&JobId(1002)));
-        assert_eq!(ds.ackable_work().len(), 0);
-
-        // The writes, the read, and the flush should be completed.
-        assert_eq!(ds.completed().len(), 3);
-        // No more ackable work
-        assert_eq!(ds.ackable_work().len(), 0);
-        // No more jobs on the queue
-        assert_eq!(ds.active_count(), 0);
-    }
-
-    #[tokio::test]
-    async fn three_faulted_enqueue_will_handle_read() {
-        // When three downstairs are faulted, verify that enqueue will move
-        // work through the queue for us.
-        let up = Upstairs::test_default(None);
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::WaitActive);
-            up.force_ds_state(cid, DsState::WaitQuorum);
-            up.force_ds_state(cid, DsState::Active);
-        }
-        up.force_active().unwrap();
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::Faulted);
-        }
-
-        // Create a read.
-        let (request, iblocks) = generic_read_request();
-
-        let read_one = enqueue_read(
-            &up,
-            request.clone(),
-            iblocks,
-            false,
-            ds_done_tx.clone(),
-        )
-        .await;
-
-        let ds = &up.downstairs;
-        let job = ds.ds_active.get(&read_one).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(2)], IOState::Skipped);
-
-        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
-        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
-        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 1);
-        drop(ds);
-
-        // Verify jobs can be acked.
-        assert_eq!(up.downstairs.lock().await.ackable_work().len(), 1);
-
-        // Verify all IOs are done
-        // We are simulating what would happen here by the up_ds_listen
-        // task, after it receives a notification from the ds_done_tx.
-        let ds = &mut up.downstairs;
-        ds.ack(read_one);
-
-        ds.retire_check(read_one);
-
-        // Our skipped jobs have not yet been cleared.
-        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
-        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
-        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 1);
-        assert_eq!(ds.ackable_work().len(), 0);
-    }
-
-    #[tokio::test]
-    async fn three_faulted_enqueue_will_handle_write() {
-        // When three downstairs are faulted, verify that enqueue will move
-        // work through the queue for us.
-        let up = Upstairs::test_default(None);
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::WaitActive);
-            up.force_ds_state(cid, DsState::WaitQuorum);
-            up.force_ds_state(cid, DsState::Active);
-        }
-        up.force_active().unwrap();
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::Faulted);
-        }
-
-        // Create a write.
-        let write_one = enqueue_write(&up, true, ds_done_tx.clone()).await;
-
-        let ds = &up.downstairs;
-        let job = ds.ds_active.get(&write_one).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(2)], IOState::Skipped);
-
-        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
-        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
-        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 1);
-        drop(ds);
-
-        // Verify jobs can be acked.
-        assert_eq!(up.downstairs.lock().await.ackable_work().len(), 1);
-
-        // Verify all IOs are done
-        // We are simulating what would happen here by the up_ds_listen
-        // task, after it receives a notification from the ds_done_tx.
-        let ds = &mut up.downstairs;
-        ds.ack(write_one);
-
-        ds.retire_check(write_one);
-        // No flush, no change in skipped jobs.
-        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
-        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
-        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 1);
-
-        assert_eq!(ds.ackable_work().len(), 0);
-    }
-
-    #[tokio::test]
-    async fn three_faulted_enqueue_will_handle_flush() {
-        // When three downstairs are faulted, verify that enqueue will move
-        // work through the queue for us.
-        let up = Upstairs::test_default(None);
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::WaitActive);
-            up.force_ds_state(cid, DsState::WaitQuorum);
-            up.force_ds_state(cid, DsState::Active);
-        }
-        up.force_active().unwrap();
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::Faulted);
-        }
-
-        // Create a flush.
-        let flush_one = enqueue_flush(&up, false, ds_done_tx.clone()).await;
-
-        let ds = &up.downstairs;
-        let job = ds.ds_active.get(&flush_one).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(2)], IOState::Skipped);
-        for cid in ClientId::iter() {
-            assert_eq!(ds.clients[cid].skipped_jobs.len(), 1);
-            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1000)));
-        }
-        drop(ds);
-
-        // Verify jobs can be acked.
-        assert_eq!(up.downstairs.lock().await.ackable_work().len(), 1);
-
-        let ds = &mut up.downstairs;
-        ds.ack(flush_one);
-
-        ds.retire_check(flush_one);
-
-        assert_eq!(ds.ackable_work().len(), 0);
-
-        // The flush should remove all work from the ds queue.
-        assert_eq!(ds.completed().len(), 1);
-        // No more ackable work
-        assert_eq!(ds.ackable_work().len(), 0);
-        // No more jobs on the queue
-        assert_eq!(ds.active_count(), 0);
-
-        // Skipped jobs still has the flush.
-        for cid in ClientId::iter() {
-            assert_eq!(ds.clients[cid].skipped_jobs.len(), 1);
-            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1000)));
-        }
-        drop(ds);
-    }
-
-    #[tokio::test]
-    async fn three_faulted_enqueue_will_handle_many_ios() {
-        // When three downstairs are faulted, verify that enqueue will move
-        // work through the queue for us. Several jobs are submitted and
-        // a final flush should clean them out.
-        let up = Upstairs::test_default(None);
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::WaitActive);
-            up.force_ds_state(cid, DsState::WaitQuorum);
-            up.force_ds_state(cid, DsState::Active);
-        }
-        up.force_active().unwrap();
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::Faulted);
-        }
-
-        // Create a read.
-        let (request, iblocks) = generic_read_request();
-
-        let read_one = enqueue_read(
-            &up,
-            request.clone(),
-            iblocks,
-            false,
-            ds_done_tx.clone(),
-        )
-        .await;
-        // Create a write.
-        let write_one = enqueue_write(&up, true, ds_done_tx.clone()).await;
-        let flush_one = enqueue_flush(&up, false, ds_done_tx.clone()).await;
-
-        let ds = &mut up.downstairs;
-
-        // Verify all jobs can be acked.
-        assert_eq!(ds.ackable_work().len(), 3);
-
-        // Skipped jobs are not yet cleared.
-        for cid in ClientId::iter() {
-            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1000)));
-            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1001)));
-            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1002)));
-            assert_eq!(ds.clients[cid].skipped_jobs.len(), 3);
-        }
-
-        // Verify all IOs are done
-        // We are simulating what would happen here by the up_ds_listen
-        // task, after it receives a notification from the ds_done_tx.
-        ds.ack(read_one);
-        ds.ack(write_one);
-        ds.ack(flush_one);
-
-        // Don't bother with retire check for read/write, just flush
-        ds.retire_check(flush_one);
-
-        assert_eq!(ds.ackable_work().len(), 0);
-
-        // The flush should remove all work from the ds queue.
-        assert_eq!(ds.completed().len(), 3);
-        // No more ackable work
-        assert_eq!(ds.ackable_work().len(), 0);
-        // No more jobs on the queue
-        assert_eq!(ds.active_count(), 0);
-
-        // Skipped jobs now just has the flush
-        for cid in ClientId::iter() {
-            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1002)));
-            assert_eq!(ds.clients[cid].skipped_jobs.len(), 1);
-        }
-    }
-
-    #[tokio::test]
-    async fn three_faulted_retire_skipped_some_leave_some() {
-        // When three downstairs are faulted, verify that enqueue will move
-        // work through the queue for us. Several jobs are submitted and
-        // a flush, then several more jobs. Verify the jobs after the flush
-        // stay on the ds_skipped_jobs list.
-
-        let up = Upstairs::test_default(None);
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::WaitActive);
-            up.force_ds_state(cid, DsState::WaitQuorum);
-            up.force_ds_state(cid, DsState::Active);
-        }
-        up.force_active().unwrap();
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::Faulted);
-        }
-
-        // Create a read.
-        let (request, iblocks) = generic_read_request();
-
-        let read_one = enqueue_read(
-            &up,
-            request.clone(),
-            iblocks,
-            false,
-            ds_done_tx.clone(),
-        )
-        .await;
-        let write_one = enqueue_write(&up, true, ds_done_tx.clone()).await;
-        let flush_one = enqueue_flush(&up, false, ds_done_tx.clone()).await;
-
-        // Create more IOs.
-        let (request, iblocks) = generic_read_request();
-
-        let _read_two = enqueue_read(
-            &up,
-            request.clone(),
-            iblocks,
-            false,
-            ds_done_tx.clone(),
-        )
-        .await;
-        let _write_two = enqueue_write(&up, true, ds_done_tx.clone()).await;
-        let _flush_two = enqueue_flush(&up, false, ds_done_tx.clone()).await;
-
-        let ds = &mut up.downstairs;
-
-        // Six jobs have been skipped.
-        for cid in ClientId::iter() {
-            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1000)));
-            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1001)));
-            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1002)));
-            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1003)));
-            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1004)));
-            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1005)));
-            assert_eq!(ds.clients[cid].skipped_jobs.len(), 6);
-        }
-
-        // Ack the first 3 jobs
-        ds.ack(read_one);
-        ds.ack(write_one);
-        ds.ack(flush_one);
-
-        assert_eq!(ds.ackable_work().len(), 3);
-        // Don't bother with retire check for read/write, just flush
-        ds.retire_check(flush_one);
-
-        // The first two skipped jobs are now cleared and the non-acked
-        // jobs remain on the list, as well as the last flush.
-        for cid in ClientId::iter() {
-            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1002)));
-            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1003)));
-            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1004)));
-            assert!(ds.clients[cid].skipped_jobs.contains(&JobId(1005)));
-            assert_eq!(ds.clients[cid].skipped_jobs.len(), 4);
-        }
-    }
-
-    // verify new work can progress with one failed downstairs.
-    // two failed downstairs, what to do?  All writes will fail, all flushes
-    // will fail, so, what?
-
     // Test that multiple GtoS downstairs jobs work
     #[tokio::test]
     async fn test_multiple_gtos_bulk_read_read() {
-        let up = Upstairs::test_default(None);
+        let mut up = Upstairs::test_default(None);
         up.force_active().unwrap();
-        for cid in ClientId::iter() {
-            up.force_ds_state(cid, DsState::WaitActive);
-            up.force_ds_state(cid, DsState::WaitQuorum);
-            up.force_ds_state(cid, DsState::Active);
-        }
+        crate::downstairs::test::set_all_active(&mut up.downstairs);
 
         let mut gw = up.guest.guest_work.lock().await;
 
