@@ -235,6 +235,21 @@ impl DownstairsClient {
         out
     }
 
+    /// Return true if more work can be sent.
+    ///
+    /// If `io_send` can send more work, return true, otherwise return false.
+    /// Because this is used on a `select!` branch that returns
+    /// `futures::future::ready(())`, a short-circuit can be created if no more
+    /// work can actually be done.
+    pub(crate) fn should_do_more_work(&self) -> bool {
+        self.client_task.is_some()
+            && !self.new_jobs.is_empty()
+            && matches!(self.state, DsState::Active | DsState::LiveRepair)
+            && (crate::MAX_ACTIVE_COUNT
+                - self.io_state_count.in_progress as usize)
+                > 0
+    }
+
     /// Choose which `ClientAction` to apply
     ///
     /// This function is called from within a top-level `select!`, so not only
@@ -273,11 +288,7 @@ impl DownstairsClient {
             _ = sleep_until(self.timeout_deadline) => {
                 ClientAction::Timeout
             }
-            _ = futures::future::ready(()),
-                if self.client_task.is_some() && !self.new_jobs.is_empty()
-                    && matches!(
-                        self.state, DsState::Active | DsState::LiveRepair) =>
-            {
+            _ = futures::future::ready(()), if self.should_do_more_work() => {
                 ClientAction::Work
             }
             _ = async {
