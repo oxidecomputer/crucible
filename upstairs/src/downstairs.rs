@@ -1805,8 +1805,7 @@ impl Downstairs {
         )
     }
 
-    #[cfg(test)]
-    pub(crate) fn create_and_enqueue_write_eob(
+    fn create_and_enqueue_write_eob(
         &mut self,
         blocks: ImpactedBlocks,
         gw_id: u64,
@@ -2352,38 +2351,12 @@ impl Downstairs {
         // then reserve job IDs for those jobs.
         self.check_repair_ids_for_range(blocks);
 
-        // TODO delegate to `create_write_eob` here?
-        let ds_id = self.next_id();
-        let dependencies = self.ds_active.deps_for_write(ds_id, blocks);
-        cdt::gw__write__deps!(|| (
-            self.ds_active.len() as u64,
-            dependencies.len() as u64
-        ));
-        debug!(self.log, "IO Write {} has deps {:?}", ds_id, dependencies);
-
-        let awrite = if is_write_unwritten {
-            IOop::WriteUnwritten {
-                dependencies,
-                writes,
-            }
-        } else {
-            IOop::Write {
-                dependencies,
-                writes,
-            }
-        };
-        let io = DownstairsIO {
-            ds_id,
+        self.create_and_enqueue_write_eob(
+            blocks,
             guest_id,
-            work: awrite,
-            state: ClientData::new(IOState::New),
-            acked: false,
-            replay: false,
-            data: None,
-            read_response_hashes: Vec::new(),
-        };
-        self.enqueue(io);
-        ds_id
+            writes,
+            is_write_unwritten,
+        )
     }
 
     /// Returns the most recent extent under repair, or `None`
