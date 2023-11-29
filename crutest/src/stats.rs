@@ -32,7 +32,7 @@ pub async fn client_oximeter(
 
     let server_info = ProducerEndpoint {
         id: Uuid::new_v4(),
-        kind: Some(ProducerKind::Service),
+        kind: ProducerKind::Service,
         address: my_address,
         base_route: "/collect".to_string(),
         interval: tokio::time::Duration::from_secs(10),
