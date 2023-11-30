@@ -521,11 +521,6 @@ impl Downstairs {
         }
     }
 
-    pub(crate) async fn perform_work(&mut self, client_id: ClientId) {
-        let more = self.io_send(client_id).await;
-        self.clients[client_id].set_more_work(more);
-    }
-
     pub(crate) async fn io_send(&mut self, client_id: ClientId) -> bool {
         /*
          * Build ourselves a list of all the jobs on the work hashmap that

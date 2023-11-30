@@ -21,7 +21,6 @@ use uuid::Uuid;
 
 const TIMEOUT_SECS: f32 = 50.0;
 const PING_INTERVAL_SECS: f32 = 5.0;
-const MORE_WORK_INTERVAL_SECS: f32 = 1.0;
 
 /// Handle to a running I/O task
 ///
@@ -142,9 +141,6 @@ pub(crate) struct DownstairsClient {
     /// Ping every 10 seconds if things are idle
     ping_count: u64,
 
-    /// Marks whether we should call `io_send` again due to work remaining
-    more_work: Option<Instant>,
-
     /// Accumulated statistics
     pub(crate) stats: DownstairsStats,
 
@@ -171,7 +167,6 @@ impl DownstairsClient {
             negotiation_state: NegotiationState::Start,
             ping_count: 0,
             ping_interval: deadline_secs(PING_INTERVAL_SECS),
-            more_work: None,
             tls_context,
             promote_state: None,
             timeout_deadline: deadline_secs(TIMEOUT_SECS),
@@ -214,7 +209,6 @@ impl DownstairsClient {
             negotiation_state: NegotiationState::Start,
             ping_count: 0,
             ping_interval: deadline_secs(PING_INTERVAL_SECS),
-            more_work: None,
             tls_context: None,
             promote_state: None,
             timeout_deadline: deadline_secs(TIMEOUT_SECS),
@@ -287,22 +281,6 @@ impl DownstairsClient {
             }
             _ = sleep_until(self.timeout_deadline) => {
                 ClientAction::Timeout
-            }
-            _ = futures::future::ready(()), if self.should_do_more_work() => {
-                ClientAction::Work
-            }
-            _ = async {
-                    if let Some(m) = self.more_work {
-                        sleep_until(m).await
-                    } else {
-                        futures::future::pending().await
-                    }
-                },
-                if self.client_task.is_some()
-                    && matches!(
-                        self.state, DsState::Active | DsState::LiveRepair) =>
-            {
-                ClientAction::MoreWork
             }
         }
     }
@@ -554,21 +532,6 @@ impl DownstairsClient {
         );
         deps.retain(|x| x >= &repair_min_id);
         info!(self.log, " {} final dependency list {:?}", ds_id, deps);
-    }
-
-    /// Called after `io_send` to set the `self.more_work` timer
-    pub(crate) fn set_more_work(&mut self, more: bool) {
-        if more {
-            if self.more_work.is_none() {
-                warn!(self.log, "flow control start");
-            }
-            self.more_work = Some(deadline_secs(MORE_WORK_INTERVAL_SECS));
-        } else {
-            if self.more_work.is_some() {
-                warn!(self.log, "flow control end");
-            }
-            self.more_work = None;
-        }
     }
 
     /// When the downstairs is marked as missing, handle its state transition
@@ -2251,12 +2214,6 @@ pub(crate) enum ClientAction {
 
     /// The client has hit a (Crucible) timeout
     Timeout,
-
-    /// We need to perform work for this client
-    Work,
-
-    /// We need to perform more work for this client
-    MoreWork,
 }
 
 #[derive(Debug, Default)]

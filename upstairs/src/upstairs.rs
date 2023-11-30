@@ -126,7 +126,7 @@ pub(crate) struct Upstairs {
 }
 
 #[derive(Debug)]
-enum UpstairsAction {
+pub(crate) enum UpstairsAction {
     Downstairs(DownstairsAction),
     Guest(BlockReq),
     LeakCheck,
@@ -315,7 +315,7 @@ impl Upstairs {
     }
 
     /// Apply an action returned from [`Upstairs::select`]
-    async fn apply(&mut self, action: UpstairsAction) {
+    pub(crate) async fn apply(&mut self, action: UpstairsAction) {
         match action {
             UpstairsAction::Downstairs(d) => {
                 self.apply_downstairs_action(d).await
@@ -358,6 +358,14 @@ impl Upstairs {
                 self.on_control_req(c).await;
             }
         }
+
+        // Send jobs as they become available
+        for i in ClientId::iter() {
+            if self.downstairs.clients[i].should_do_more_work() {
+                self.downstairs.io_send(i).await;
+            }
+        }
+
         // For now, check backpressure after every event.  We may want to make
         // this more nuanced in the future.
         self.set_backpressure();
@@ -1225,9 +1233,6 @@ impl Upstairs {
             }
             ClientAction::TaskStopped(r) => {
                 self.on_client_task_stopped(client_id, r);
-            }
-            ClientAction::Work | ClientAction::MoreWork => {
-                self.downstairs.perform_work(client_id).await;
             }
         }
     }
@@ -3203,15 +3208,6 @@ mod test {
             .await;
         let id1 = JobId(1000); // We know that job IDs start at 1000
 
-        // Submit the writes to the clients by running the main loop
-        for client_id in ClientId::iter() {
-            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
-                client_id,
-                action: ClientAction::Work,
-            }))
-            .await;
-        }
-
         // Create and enqueue the flush by setting deactivate
         let (deactivate_done_tx, mut deactivate_done_rx) = oneshot::channel();
         up.apply(UpstairsAction::Guest(BlockReq::new(
@@ -3255,16 +3251,6 @@ mod test {
             assert_eq!(c.state(), DsState::Active);
         }
 
-        // Send the flush created for us when we set deactivated to
-        // the two downstairs.
-        for client_id in [0, 2].into_iter().map(ClientId::new) {
-            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
-                client_id,
-                action: ClientAction::Work,
-            }))
-            .await;
-        }
-
         // Complete the flush on two downstairs, at which point the deactivate
         // is still pending.
         for client_id in [0, 2].into_iter().map(ClientId::new) {
@@ -3298,12 +3284,7 @@ mod test {
         );
         assert!(matches!(up.state, UpstairsState::Deactivating));
 
-        // Send and complete the flush on the remaining downstairs
-        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
-            client_id: ClientId::new(1),
-            action: ClientAction::Work,
-        }))
-        .await;
+        // Complete the flush on the remaining downstairs
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
             client_id: ClientId::new(1),
             action: ClientAction::Response(Message::FlushAck {
