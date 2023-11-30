@@ -7857,7 +7857,7 @@ pub(crate) mod test {
         let flush_one = ds.create_and_enqueue_generic_flush(None);
 
         // Create more IOs.
-        let (read_two, _request) = ds.create_and_enqueue_generic_read_eob();
+        let (_read_two, _request) = ds.create_and_enqueue_generic_read_eob();
 
         let write_two = ds.create_and_enqueue_generic_write_eob(false);
         for i in ClientId::iter() {
