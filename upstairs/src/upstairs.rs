@@ -363,17 +363,10 @@ impl Upstairs {
             }
         }
 
-        // Send jobs as they become available
-        for i in ClientId::iter() {
-            if self.downstairs.clients[i].should_do_more_work() {
-                self.downstairs.io_send(i).await;
-            }
-        }
-
-        // For now, check backpressure after every event.  We may want to make
-        // this more nuanced in the future.
-        self.set_backpressure();
-
+        // Check to see whether live-repair can continue
+        //
+        // This must be called before acking jobs, because it looks in
+        // `Downstairs::ackable_jobs` to see which jobs are done.
         if let Some(job_id) = self.downstairs.check_live_repair() {
             let mut gw = self.guest.guest_work.lock().await;
             self.downstairs.continue_live_repair(
@@ -384,8 +377,19 @@ impl Upstairs {
             );
         }
 
+        // Send jobs downstairs as they become available.  This must be called
+        // after `continue_live_repair`, which may enqueue jobs.
+        for i in ClientId::iter() {
+            if self.downstairs.clients[i].should_do_more_work() {
+                self.downstairs.io_send(i).await;
+            }
+        }
+
         // Handle any jobs that have become ready for acks
-        self.ack_ready().await;
+        if self.downstairs.has_ackable_jobs() {
+            let mut gw = self.guest.guest_work.lock().await;
+            self.downstairs.ack_jobs(&mut gw, &self.stats).await;
+        }
 
         // Check for client-side deactivation
         if matches!(self.state, UpstairsState::Deactivating) {
@@ -406,6 +410,10 @@ impl Upstairs {
                 }
             }
         }
+
+        // For now, check backpressure after every event.  We may want to make
+        // this more nuanced in the future.
+        self.set_backpressure();
     }
 
     /// Check outstanding IOops for each downstairs.
@@ -503,7 +511,16 @@ impl Upstairs {
                     .collect_stats(|c| c.stats.extents_confirmed);
                 let extent_limit = self
                     .downstairs
-                    .collect_stats(|c| c.extent_limit.map(|v| v as usize));
+                    .collect_stats(|c| matches!(c.state(), DsState::LiveRepair))
+                    .map(|b| {
+                        if b {
+                            self.downstairs
+                                .active_repair_extent()
+                                .map(|v| v as usize)
+                        } else {
+                            None
+                        }
+                    });
                 let live_repair_completed = self
                     .downstairs
                     .collect_stats(|c| c.stats.live_repair_completed);
@@ -1201,13 +1218,6 @@ impl Upstairs {
             DownstairsAction::Client { client_id, action } => {
                 self.apply_client_action(client_id, action).await;
             }
-        }
-    }
-
-    async fn ack_ready(&mut self) {
-        if self.downstairs.has_ackable_jobs() {
-            let mut gw = self.guest.guest_work.lock().await;
-            self.downstairs.ack_jobs(&mut gw, &self.stats).await;
         }
     }
 

@@ -1044,8 +1044,6 @@ impl Downstairs {
         }
 
         // Begin setting up live-repair state
-        assert!(self.clients.iter().all(|c| c.extent_limit.is_none()));
-
         let mut repair_downstairs = vec![];
         let mut source_downstairs = None;
         for cid in ClientId::iter() {
@@ -1178,6 +1176,7 @@ impl Downstairs {
 
         // TODO check Downstairs state here?
 
+        let mut needs_flush = false;
         repair.state = match repair.state {
             LiveRepairState::Closing {
                 close_id,
@@ -1256,34 +1255,29 @@ impl Downstairs {
                 // The reopen job was already queued!
                 LiveRepairState::Reopening { reopen_id }
             }
-            LiveRepairState::Reopening { .. } => {
-                // We've finished this extent, prepare to start the next one
-                repair.active_extent += 1;
-
+            prev @ LiveRepairState::Reopening { .. } => {
                 // It's possible that we've reached the end of our extents!
-                let finished = repair.active_extent == repair.extent_count;
+                let next_extent = repair.active_extent + 1;
+                let finished = next_extent == repair.extent_count;
 
                 // If we have reserved jobs for this extent, then we have to
                 // keep doing (sending no-ops) because otherwise dependencies
                 // will never be resolved.
                 let have_reserved_jobs =
-                    repair.repair_job_ids.contains_key(&repair.active_extent);
+                    repair.repair_job_ids.contains_key(&next_extent);
 
                 if finished || (repair.aborting_repair && !have_reserved_jobs) {
-                    // We're done, submit a final flush!
-                    let gw_id: u64 = gw.next_gw_id();
-                    cdt::gw__flush__start!(|| (gw_id));
-
-                    let flush_id = self.submit_flush(gw_id, generation, None);
-                    info!(self.log, "LiveRepair final flush submitted");
-
-                    let new_gtos = GtoS::new(flush_id, None, None);
-                    gw.active.insert(gw_id, new_gtos);
-
-                    cdt::up__to__ds__flush__start!(|| (gw_id));
-
-                    LiveRepairState::FinalFlush { flush_id }
+                    // This is a bit awkward, but we need to replace
+                    // `self.repair` before submitting the final flush (because
+                    // parts of `submit_flush` and `enqueue` check it).  Other
+                    // ways of organizing this code will make the borrow-checker
+                    // mad, because we'd need to borrow / mutate `self.repair`
+                    // while simultaneously calling functions on `&mut self`.
+                    needs_flush = true;
+                    prev
                 } else {
+                    // Keep going!
+                    repair.active_extent = next_extent;
                     self.begin_repair_for(
                         repair.active_extent,
                         repair.aborting_repair,
@@ -1314,6 +1308,24 @@ impl Downstairs {
         };
 
         self.repair = Some(repair);
+
+        // Handle the final flush, now that `self.repair` is back in place
+        if needs_flush {
+            // We're done, submit a final flush!
+            let gw_id: u64 = gw.next_gw_id();
+            cdt::gw__flush__start!(|| (gw_id));
+
+            let flush_id = self.submit_flush(gw_id, generation, None);
+            info!(self.log, "LiveRepair final flush submitted");
+
+            let new_gtos = GtoS::new(flush_id, None, None);
+            gw.active.insert(gw_id, new_gtos);
+
+            cdt::up__to__ds__flush__start!(|| (gw_id));
+
+            self.repair.as_mut().unwrap().state =
+                LiveRepairState::FinalFlush { flush_id };
+        }
     }
 
     pub(crate) fn create_and_enqueue_noop_io(
@@ -1504,17 +1516,6 @@ impl Downstairs {
         assert_eq!(self.clients[source_downstairs].state(), DsState::Active);
         for &c in repair_downstairs {
             assert_eq!(self.clients[c].state(), DsState::LiveRepair);
-            // We should be walking up the extents one at a time
-            if extent > 0 {
-                assert_eq!(self.clients[c].extent_limit, Some(extent - 1));
-            } else {
-                assert!(self.clients[c].extent_limit.is_none());
-            }
-        }
-
-        // TODO: track this in LiveRepairState, since it's always the same?
-        for &c in repair_downstairs {
-            self.clients[c].extent_limit = Some(extent);
         }
 
         let gw_close_id: u64 = gw.next_gw_id();
@@ -2107,8 +2108,8 @@ impl Downstairs {
          * and make sure it matches.
          */
 
-        let extent_under_repair =
-            self.get_extent_under_repair().map(|v| *v.end() as usize);
+        // Find the farthest extent under repair
+        let extent_under_repair = self.last_repair_extent();
 
         /*
          * Build the flush request, and take note of the request ID that
@@ -2119,7 +2120,7 @@ impl Downstairs {
             flush_number: flush_id,
             gen_number: gen,
             snapshot_details,
-            extent_limit: extent_under_repair,
+            extent_limit: extent_under_repair.map(|v| v as usize),
         };
 
         let fl = DownstairsIO {
@@ -2281,11 +2282,38 @@ impl Downstairs {
         )
     }
 
+    /// Returns the currently-active repair extent
+    ///
+    /// Note that this isn't the _last_ extent for which we've reserved repair
+    /// IDs; it's simply the extent being repaired right now.  See
+    /// [`Downstairs::last_repair_extent`] for another perspective.
+    pub(crate) fn active_repair_extent(&self) -> Option<u64> {
+        self.repair.as_ref().map(|r| r.active_extent)
+    }
+
     /// Returns the most recent extent under repair, or `None`
+    ///
+    /// This includes extents for which repairs have been reserved but not yet
+    /// started, because job dependency tracking should maintain proper
+    /// dependencies for reserved jobs.
     pub(crate) fn last_repair_extent(&self) -> Option<u64> {
         self.repair
             .as_ref()
             .and_then(|r| r.repair_job_ids.last_key_value().map(|(k, _)| *k))
+            .or(self.active_repair_extent())
+    }
+
+    /// Returns the range of extents under repair
+    ///
+    /// This range spans from the currently-under-repair extent to the last
+    /// extent for which we have reserved job IDs.
+    fn get_extent_under_repair(&self) -> Option<std::ops::RangeInclusive<u64>> {
+        if let Some(eur) = self.active_repair_extent() {
+            let end = self.last_repair_extent().unwrap();
+            Some(eur..=end)
+        } else {
+            None
+        }
     }
 
     fn enqueue(&mut self, mut io: DownstairsIO) {
@@ -2368,31 +2396,6 @@ impl Downstairs {
         let ds_id = io.ds_id;
         debug!(self.log, "Enqueue repair job {}", ds_id);
         self.ds_active.insert(ds_id, io);
-    }
-
-    /// Returns the current extent under repair (from `self.extent_limit`)
-    ///
-    /// # Panics
-    /// If the different downstairs have different extents under repair (which
-    /// is not allowed)
-    fn get_extent_under_repair(&self) -> Option<std::ops::RangeInclusive<u64>> {
-        let mut extent_under_repair = None;
-        for cid in ClientId::iter() {
-            if let Some(eur) = self.clients[cid].extent_limit {
-                if extent_under_repair.is_none() {
-                    extent_under_repair = Some(eur);
-                } else {
-                    // We only support one extent being repaired at a time
-                    assert_eq!(Some(eur), extent_under_repair);
-                }
-            }
-        }
-        if let Some(eur) = extent_under_repair {
-            let end = self.last_repair_extent().unwrap_or(eur);
-            Some(eur..=end)
-        } else {
-            None
-        }
     }
 
     pub(crate) fn replace(
@@ -2568,9 +2571,6 @@ impl Downstairs {
         // We have eliminated all of our jobs in IOState::New above; flush
         // our cache to reflect that.
         self.clients[client_id].clear_new_jobs();
-
-        // As this downstairs is now faulted, we clear the extent_limit.
-        self.clients[client_id].extent_limit = None;
     }
 
     /// Aborts an in-progress live-repair

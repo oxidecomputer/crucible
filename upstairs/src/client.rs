@@ -112,26 +112,6 @@ pub(crate) struct DownstairsClient {
      */
     pub(crate) repair_info: Option<ExtentInfo>,
 
-    /// If set, marks how far live repair has proceeded for this downstairs
-    ///
-    /// Extent limit, if set, indicates the extent where LiveRepair has already
-    /// submitted, or possibly even already finished the LiveRepair of this
-    /// extent. If you are changing this value, it must happen at the same
-    /// time the repair IOs are enqueued on the work list for the extent under
-    /// repair.
-    ///
-    /// This limit, if used in a flush, indicates that extents <= this
-    /// value should be issued a flush, and extents > this value should
-    /// not be flushed (because they're about to be repaired)
-    ///
-    /// When deciding to skip an IO on a downstairs in LiveRepair, any
-    /// IO at or below this extent should go ahead and be submitted.  Any IO
-    /// above this extent should still be skipped.
-    ///
-    /// This is only used during live repair, and will only ever be
-    /// set on a downstairs that is undergoing live repair.
-    pub(crate) extent_limit: Option<u64>,
-
     /// Deadline for the next ping
     ping_interval: Instant,
 
@@ -180,7 +160,6 @@ impl DownstairsClient {
             skipped_jobs: BTreeSet::new(),
             region_metadata: None,
             repair_info: None,
-            extent_limit: None,
             io_state_count: ClientIOStateCount::new(),
         };
 
@@ -223,7 +202,6 @@ impl DownstairsClient {
             skipped_jobs: BTreeSet::new(),
             region_metadata: None,
             repair_info: None,
-            extent_limit: None,
             io_state_count: ClientIOStateCount::new(),
         };
         out.start_dummy_task();
@@ -868,10 +846,9 @@ impl DownstairsClient {
                 // Pick the latest repair limit that's relevant for this
                 // downstairs.  This is either the extent under repair (if
                 // there are no reserved repair jobs), or the last extent
-                // for which we have reserved a repair job ID.
-                let my_limit = last_repair_extent.or(self.extent_limit);
-
-                if io.work.send_io_live_repair(my_limit) {
+                // for which we have reserved a repair job ID; either way, the
+                // caller has provided it to us.
+                if io.work.send_io_live_repair(last_repair_extent) {
                     // Leave this IO as New, the downstairs will receive it.
                     self.new_jobs.insert(io.ds_id);
                     IOState::New
@@ -1109,7 +1086,6 @@ impl DownstairsClient {
         self.checked_state_transition(up_state, DsState::Faulted);
         self.halt_io_task(ClientStopReason::FailedLiveRepair);
         self.repair_info = None;
-        self.extent_limit = None;
         self.stats.live_repair_aborted += 1;
     }
 
@@ -1131,7 +1107,6 @@ impl DownstairsClient {
         assert_eq!(self.state, DsState::LiveRepair);
         self.checked_state_transition(up_state, DsState::Active);
         self.repair_info = None;
-        self.extent_limit = None;
         self.stats.live_repair_completed += 1;
     }
 
