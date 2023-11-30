@@ -171,7 +171,7 @@ checksum = "a4668cab20f66d8d020e1fbc0ebe47217433c1b6c8f2040faf858554e394ace6"
 [[package]]
 name = "api_identity"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=main#08041d6c30c183692bdc28e9ed4e9df558140892"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#75ccdad5cbe7213c4be70c56376dac95a424d882"
 dependencies = [
  "omicron-workspace-hack",
  "proc-macro2",
@@ -1317,7 +1317,7 @@ dependencies = [
 [[package]]
 name = "dropshot"
 version = "0.9.1-dev"
-source = "git+https://github.com/oxidecomputer/dropshot?branch=main#1e187aff50fc8559330c63e6693cc4deade22e28"
+source = "git+https://github.com/oxidecomputer/dropshot?branch=main#98f311ef1ad63e4c22589bcff3e02c9fe736b8d5"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -1363,7 +1363,7 @@ dependencies = [
 [[package]]
 name = "dropshot_endpoint"
 version = "0.9.1-dev"
-source = "git+https://github.com/oxidecomputer/dropshot?branch=main#1e187aff50fc8559330c63e6693cc4deade22e28"
+source = "git+https://github.com/oxidecomputer/dropshot?branch=main#98f311ef1ad63e4c22589bcff3e02c9fe736b8d5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2357,7 +2357,7 @@ dependencies = [
 [[package]]
 name = "nexus-client"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=main#08041d6c30c183692bdc28e9ed4e9df558140892"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#75ccdad5cbe7213c4be70c56376dac95a424d882"
 dependencies = [
  "chrono",
  "futures",
@@ -2597,7 +2597,7 @@ dependencies = [
 [[package]]
 name = "omicron-common"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=main#08041d6c30c183692bdc28e9ed4e9df558140892"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#75ccdad5cbe7213c4be70c56376dac95a424d882"
 dependencies = [
  "anyhow",
  "api_identity",
@@ -2635,7 +2635,7 @@ dependencies = [
 [[package]]
 name = "omicron-passwords"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=main#08041d6c30c183692bdc28e9ed4e9df558140892"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#75ccdad5cbe7213c4be70c56376dac95a424d882"
 dependencies = [
  "argon2",
  "omicron-workspace-hack",
@@ -2862,7 +2862,7 @@ checksum = "b15813163c1d831bf4a13c3610c05c0d03b39feb07f7e09fa234dac9b15aaf39"
 [[package]]
 name = "oximeter"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=main#08041d6c30c183692bdc28e9ed4e9df558140892"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#75ccdad5cbe7213c4be70c56376dac95a424d882"
 dependencies = [
  "bytes",
  "chrono",
@@ -2880,7 +2880,7 @@ dependencies = [
 [[package]]
 name = "oximeter-macro-impl"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=main#08041d6c30c183692bdc28e9ed4e9df558140892"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#75ccdad5cbe7213c4be70c56376dac95a424d882"
 dependencies = [
  "omicron-workspace-hack",
  "proc-macro2",
@@ -2891,7 +2891,7 @@ dependencies = [
 [[package]]
 name = "oximeter-producer"
 version = "0.1.0"
-source = "git+https://github.com/oxidecomputer/omicron?branch=main#08041d6c30c183692bdc28e9ed4e9df558140892"
+source = "git+https://github.com/oxidecomputer/omicron?branch=main#75ccdad5cbe7213c4be70c56376dac95a424d882"
 dependencies = [
  "chrono",
  "dropshot",
@@ -5023,9 +5023,9 @@ checksum = "711b9620af191e0cdc7468a8d14e709c3dcdb115b36f838e601583af800a370a"
 
 [[package]]
 name = "uuid"
-version = "1.5.0"
+version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88ad59a7560b41a70d191093a945f0b87bc1deeda46fb237479708a1d6b6cdfc"
+checksum = "5e395fcf16a7a3d8127ec99782007af141946b4795001f876d54fb0d55978560"
 dependencies = [
  "getrandom",
  "serde",
