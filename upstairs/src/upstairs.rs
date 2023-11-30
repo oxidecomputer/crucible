@@ -374,6 +374,16 @@ impl Upstairs {
         // this more nuanced in the future.
         self.set_backpressure();
 
+        if let Some(job_id) = self.downstairs.check_live_repair() {
+            let mut gw = self.guest.guest_work.lock().await;
+            self.downstairs.continue_live_repair(
+                job_id,
+                &mut gw,
+                &self.state,
+                self.generation,
+            );
+        }
+
         // Handle any jobs that have become ready for acks
         self.ack_ready().await;
 
@@ -1190,15 +1200,6 @@ impl Upstairs {
         match d {
             DownstairsAction::Client { client_id, action } => {
                 self.apply_client_action(client_id, action).await;
-            }
-            DownstairsAction::LiveRepair(r) => {
-                let mut gw = self.guest.guest_work.lock().await;
-                self.downstairs.on_live_repair(
-                    r,
-                    &mut gw,
-                    &self.state,
-                    self.generation,
-                );
             }
         }
     }

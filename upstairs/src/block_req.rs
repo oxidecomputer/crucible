@@ -75,21 +75,6 @@ impl BlockReqWaiter {
         }
     }
 
-    /// Awaits the receiver from a mutable reference
-    ///
-    /// This is useful in the context of `select!`, where the `BlockReqWaiter`
-    /// may be one of many possible sources.  If the future is selected, then it
-    /// is the caller's responsibility to never call this again.
-    ///
-    /// # Panics
-    /// If you call this after it has already been called and yielded.
-    pub async fn wait_mut(&mut self) -> Result<(), CrucibleError> {
-        match (&mut self.recv).await {
-            Ok(v) => v,
-            Err(_) => crucible_bail!(RecvDisconnected),
-        }
-    }
-
     #[allow(dead_code)]
     pub fn try_wait(&mut self) -> Option<Result<(), CrucibleError>> {
         match self.recv.try_recv() {

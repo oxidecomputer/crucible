@@ -10,19 +10,18 @@ use crate::{
     live_repair::ExtentInfo,
     stats::UpStatOuter,
     upstairs::{UpstairsConfig, UpstairsState},
-    AckStatus, ActiveJobs, AllocRingBuffer, BlockOp, BlockReq, BlockReqWaiter,
-    ClientData, ClientIOStateCount, ClientId, ClientMap, CrucibleError,
-    DownstairsIO, DownstairsMend, DsState, ExtentFix, ExtentRepairIDs, GtoS,
-    GuestWork, IOState, IOStateCount, IOop, ImpactedBlocks, JobId, Message,
-    ReadRequest, ReadResponse, ReconcileIO, ReconciliationId, RegionDefinition,
-    ReplaceResult, SnapshotDetails, WorkSummary,
+    AckStatus, ActiveJobs, AllocRingBuffer, ClientData, ClientIOStateCount,
+    ClientId, ClientMap, CrucibleError, DownstairsIO, DownstairsMend, DsState,
+    ExtentFix, ExtentRepairIDs, GtoS, GuestWork, IOState, IOStateCount, IOop,
+    ImpactedBlocks, JobId, Message, ReadRequest, ReadResponse, ReconcileIO,
+    ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
+    WorkSummary,
 };
 use crucible_common::MAX_ACTIVE_COUNT;
 
 use rand::prelude::*;
 use ringbuffer::RingBuffer;
 use slog::{debug, error, info, o, warn, Logger};
-use tokio::sync::oneshot;
 use uuid::Uuid;
 
 /*
@@ -105,11 +104,8 @@ pub(crate) struct Downstairs {
 ///
 /// Early states carry around reserved IDs (both `JobId` and guest work IDs), as
 /// well as a reserved `BlockReqWaiter` for the final flush.
+#[derive(Copy, Clone, Debug)]
 pub(crate) enum LiveRepairState {
-    // TODO remove the BlockReqWaiters here, since we can handle the
-    // `ExtentLive*Ack*` messages as they come in?
-    //
-    // Right now, they're handled in `process_io_completion`
     Closing {
         close_id: JobId,
         repair_id: JobId,
@@ -118,9 +114,6 @@ pub(crate) enum LiveRepairState {
 
         gw_repair_id: u64,
         gw_noop_id: u64,
-
-        close_brw: BlockReqWaiter,
-        reopen_brw: BlockReqWaiter,
     },
     Repairing {
         repair_id: JobId,
@@ -128,82 +121,28 @@ pub(crate) enum LiveRepairState {
         reopen_id: JobId,
 
         gw_noop_id: u64,
-
-        repair_brw: BlockReqWaiter,
-        reopen_brw: BlockReqWaiter,
     },
     Noop {
         noop_id: JobId,
         reopen_id: JobId,
-
-        noop_brw: BlockReqWaiter,
-        reopen_brw: BlockReqWaiter,
     },
     Reopening {
         reopen_id: JobId,
-        reopen_brw: BlockReqWaiter,
     },
     FinalFlush {
         flush_id: JobId,
-        flush_brw: BlockReqWaiter,
     },
-
-    /// Placeholder value when we're in the process of modifying the state
-    ///
-    /// This is needed because `BlockReqWaiter` isn't `Clone`.
-    Swapping,
 }
 
-// For this `Debug` implementation, we skip the `BlockReqWaiter`s
-impl std::fmt::Debug for LiveRepairState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl LiveRepairState {
+    /// Returns the job ID that we're waiting on at the moment
+    fn active_job_id(&self) -> JobId {
         match self {
-            LiveRepairState::Closing {
-                close_id,
-                repair_id,
-                noop_id,
-                reopen_id,
-                gw_repair_id,
-                gw_noop_id,
-                ..
-            } => f
-                .debug_struct("LiveRepairState::Closing")
-                .field("close_id", close_id)
-                .field("repair_id", repair_id)
-                .field("noop_id", noop_id)
-                .field("reopen_id", reopen_id)
-                .field("gw_repair_id", gw_repair_id)
-                .field("gw_noop_id", gw_noop_id)
-                .finish(),
-            LiveRepairState::Repairing {
-                repair_id,
-                noop_id,
-                reopen_id,
-                gw_noop_id,
-                ..
-            } => f
-                .debug_struct("LiveRepairState::Repairing")
-                .field("repair_id", repair_id)
-                .field("noop_id", noop_id)
-                .field("reopen_id", reopen_id)
-                .field("gw_noop_id", gw_noop_id)
-                .finish(),
-            LiveRepairState::Noop {
-                noop_id, reopen_id, ..
-            } => f
-                .debug_struct("LiveRepairState::Noop")
-                .field("noop_id", noop_id)
-                .field("reopen_id", reopen_id)
-                .finish(),
-            LiveRepairState::Reopening { reopen_id, .. } => f
-                .debug_struct("LiveRepairState::Reopening")
-                .field("reopen_id", reopen_id)
-                .finish(),
-            LiveRepairState::FinalFlush { flush_id, .. } => f
-                .debug_struct("LiveRepairState::FinalFlush")
-                .field("flush_id", flush_id)
-                .finish(),
-            LiveRepairState::Swapping => panic!("saw transient state"),
+            LiveRepairState::Closing { close_id, .. } => *close_id,
+            LiveRepairState::Repairing { repair_id, .. } => *repair_id,
+            LiveRepairState::Noop { noop_id, .. } => *noop_id,
+            LiveRepairState::Reopening { reopen_id, .. } => *reopen_id,
+            LiveRepairState::FinalFlush { flush_id } => *flush_id,
         }
     }
 }
@@ -270,9 +209,6 @@ pub(crate) enum DownstairsAction {
         client_id: ClientId,
         action: ClientAction,
     },
-
-    /// The currently-awaited `LiveRepair` job has returned a result
-    LiveRepair(Result<(), CrucibleError>),
 }
 
 impl Downstairs {
@@ -358,26 +294,6 @@ impl Downstairs {
                     client_id: ClientId::new(2),
                     action
                 }
-            }
-            r = async {
-                if let Some(r) = self.repair.as_mut() {
-                    // Each repair task is waiting on a single BlockReqWaiter,
-                    // which is handled by the `process_io_completion` pipeline
-                    match &mut r.state {
-                        LiveRepairState::Closing { close_brw: brw, .. }
-                        | LiveRepairState::Repairing { repair_brw: brw, .. }
-                        | LiveRepairState::Noop { noop_brw: brw, .. }
-                        | LiveRepairState::Reopening { reopen_brw: brw, .. }
-                        | LiveRepairState::FinalFlush { flush_brw: brw, .. } =>
-                            brw.wait_mut().await,
-                        LiveRepairState::Swapping =>
-                            panic!("invalid transient state"),
-                    }
-                } else {
-                    futures::future::pending().await
-                }
-            } => {
-                DownstairsAction::LiveRepair(r)
             }
         }
     }
@@ -1193,18 +1109,53 @@ impl Downstairs {
         true
     }
 
-    pub(crate) fn on_live_repair(
+    /// Checks whether live-repair can continue
+    ///
+    /// If live-repair can continue, returns the relevant `JobId`, which should
+    /// be passed into `self.continue_live_repair(..)`
+    ///
+    /// This must be called before `Downstairs::ack_jobs`, because it looks for
+    /// the repair job in `self.ackable_work` to decide if it's done.
+    pub(crate) fn check_live_repair(&mut self) -> Option<JobId> {
+        if let Some(repair) = &self.repair {
+            let ds_id = repair.state.active_job_id();
+            if self.ackable_work.contains(&ds_id) {
+                Some(ds_id)
+            } else {
+                // The job that live-repair is waiting on isn't yet ackable
+                None
+            }
+        } else {
+            // No live-repair in progress, nothing to do
+            None
+        }
+    }
+
+    /// Pushes live-repair forward for the given job
+    ///
+    /// `self.repair` must be waiting on the job given by `ds_id`, and that job
+    /// must be (1) in `self.ackable_work` and (2) not yet acked.
+    ///
+    /// As such, this function should only be called after
+    /// `self.check_live_repair` provides the value for `ds_id`; they're broken
+    /// into separate functions to avoid locking the `GuestWork` structure if
+    /// live-repair can't continue.
+    pub(crate) fn continue_live_repair(
         &mut self,
-        r: Result<(), CrucibleError>,
+        ds_id: JobId,
         gw: &mut GuestWork,
         up_state: &UpstairsState,
         generation: u64,
     ) {
+        let done = self.ds_active.get(&ds_id).unwrap();
+        assert!(!done.acked);
+        assert!(self.ackable_work.contains(&ds_id));
+        let r = done.result();
+
         // Take the value out of `self.repair` to simplify borrow-checking
         // later.  Remember to put it back!
         let Some(mut repair) = self.repair.take() else {
-            warn!(self.log, "ignoring repair result when out of LiveRepair");
-            return;
+            panic!("cannot continue live-repair without self.repair");
         };
 
         match &r {
@@ -1227,10 +1178,7 @@ impl Downstairs {
 
         // TODO check Downstairs state here?
 
-        repair.state = match std::mem::replace(
-            &mut repair.state,
-            LiveRepairState::Swapping,
-        ) {
+        repair.state = match repair.state {
             LiveRepairState::Closing {
                 close_id,
                 repair_id,
@@ -1239,18 +1187,14 @@ impl Downstairs {
 
                 gw_repair_id,
                 gw_noop_id,
-
-                close_brw: _, // already consumed!
-                reopen_brw,
             } => {
-                // TODO check that the job is done?
-                let repair_brw = if repair.aborting_repair {
+                if repair.aborting_repair {
                     self.create_and_enqueue_noop_io(
                         gw,
                         vec![close_id],
                         repair_id,
                         gw_repair_id,
-                    )
+                    );
                 } else {
                     self.create_and_enqueue_repair_io(
                         gw,
@@ -1260,8 +1204,8 @@ impl Downstairs {
                         gw_repair_id,
                         repair.source_downstairs,
                         &repair.repair_downstairs,
-                    )
-                };
+                    );
+                }
 
                 info!(
                     self.log,
@@ -1276,9 +1220,6 @@ impl Downstairs {
                     reopen_id,
 
                     gw_noop_id,
-
-                    repair_brw,
-                    reopen_brw,
                 }
             }
             LiveRepairState::Repairing {
@@ -1286,10 +1227,8 @@ impl Downstairs {
                 noop_id,
                 reopen_id,
                 gw_noop_id,
-                repair_brw: _,
-                reopen_brw,
             } => {
-                let noop_brw = self.create_and_enqueue_noop_io(
+                self.create_and_enqueue_noop_io(
                     gw,
                     vec![repair_id],
                     noop_id,
@@ -1302,18 +1241,11 @@ impl Downstairs {
                     noop_id,
                     gw_noop_id
                 );
-                LiveRepairState::Noop {
-                    noop_id,
-                    reopen_id,
-                    noop_brw,
-                    reopen_brw,
-                }
+                LiveRepairState::Noop { noop_id, reopen_id }
             }
             LiveRepairState::Noop {
                 noop_id: _,
                 reopen_id,
-                noop_brw: _,
-                reopen_brw,
             } => {
                 info!(
                     self.log,
@@ -1321,10 +1253,8 @@ impl Downstairs {
                     repair.active_extent,
                     reopen_id,
                 );
-                LiveRepairState::Reopening {
-                    reopen_id,
-                    reopen_brw,
-                }
+                // The reopen job was already queued!
+                LiveRepairState::Reopening { reopen_id }
             }
             LiveRepairState::Reopening { .. } => {
                 // We've finished this extent, prepare to start the next one
@@ -1341,28 +1271,18 @@ impl Downstairs {
 
                 if finished || (repair.aborting_repair && !have_reserved_jobs) {
                     // We're done, submit a final flush!
-                    let (send, recv) = oneshot::channel();
-                    let op = BlockOp::Flush {
-                        snapshot_details: None,
-                    };
-                    let flush_br = BlockReq::new(op, send);
-                    let flush_brw = BlockReqWaiter::new(recv);
-
                     let gw_id: u64 = gw.next_gw_id();
                     cdt::gw__flush__start!(|| (gw_id));
 
                     let flush_id = self.submit_flush(gw_id, generation, None);
                     info!(self.log, "LiveRepair final flush submitted");
 
-                    let new_gtos = GtoS::new(flush_id, None, Some(flush_br));
+                    let new_gtos = GtoS::new(flush_id, None, None);
                     gw.active.insert(gw_id, new_gtos);
 
                     cdt::up__to__ds__flush__start!(|| (gw_id));
 
-                    LiveRepairState::FinalFlush {
-                        flush_id,
-                        flush_brw,
-                    }
+                    LiveRepairState::FinalFlush { flush_id }
                 } else {
                     self.begin_repair_for(
                         repair.active_extent,
@@ -1378,17 +1298,19 @@ impl Downstairs {
             LiveRepairState::FinalFlush { .. } => {
                 info!(self.log, "LiveRepair final flush returned {r:?}");
                 if repair.aborting_repair {
-                    return;
+                    info!(self.log, "live-repair aborted");
+                    // Clients were already cleaned up when we first set
+                    // `repair.aborting_repair = true`, so no cleanup here
                 } else {
                     info!(self.log, "live-repair completed successfully");
                     for c in repair.repair_downstairs {
                         self.clients[c].finish_repair(up_state);
                     }
-                    return;
                 }
+                // Note that we're returning early here, leaving `self.repair`
+                // as `None` (because repair is done, one way or the other)
+                return;
             }
-
-            LiveRepairState::Swapping => panic!("saw intermediate state"),
         };
 
         self.repair = Some(repair);
@@ -1400,18 +1322,13 @@ impl Downstairs {
         deps: Vec<JobId>,
         noop_id: JobId,
         gw_noop_id: u64,
-    ) -> BlockReqWaiter {
+    ) {
         let nio = Self::create_noop_io(noop_id, deps, gw_noop_id);
 
         cdt::gw__noop__start!(|| (gw_noop_id));
-        let (send, recv) = oneshot::channel();
-        let op = BlockOp::RepairOp;
-        let noop_br = BlockReq::new(op, send);
-        let noop_brw = BlockReqWaiter::new(recv);
-        let new_gtos = GtoS::new(noop_id, None, Some(noop_br));
+        let new_gtos = GtoS::new(noop_id, None, None);
         gw.active.insert(gw_noop_id, new_gtos);
         self.enqueue_repair(nio);
-        noop_brw
     }
 
     fn create_noop_io(
@@ -1443,7 +1360,7 @@ impl Downstairs {
         gw_repair_id: u64,
         source: ClientId,
         repair: &[ClientId],
-    ) -> BlockReqWaiter {
+    ) {
         let repair_io = self.repair_or_noop(
             eid as usize,
             repair_id,
@@ -1454,14 +1371,10 @@ impl Downstairs {
         );
 
         cdt::gw__repair__start!(|| (gw_repair_id, eid));
-        let (send, recv) = oneshot::channel();
-        let op = BlockOp::RepairOp;
-        let repair_br = BlockReq::new(op, send);
-        let repair_brw = BlockReqWaiter::new(recv);
-        let new_gtos = GtoS::new(repair_id, None, Some(repair_br));
+
+        let new_gtos = GtoS::new(repair_id, None, None);
         gw.active.insert(gw_repair_id, new_gtos);
         self.enqueue_repair(repair_io);
-        repair_brw
     }
 
     fn repair_or_noop(
@@ -1634,7 +1547,7 @@ impl Downstairs {
             close_deps,
         );
 
-        let reopen_brw = if aborting {
+        if aborting {
             self.create_and_enqueue_noop_io(
                 gw,
                 vec![noop_id],
@@ -1651,7 +1564,7 @@ impl Downstairs {
             )
         };
 
-        let close_brw = if aborting {
+        if aborting {
             self.create_and_enqueue_noop_io(
                 gw,
                 close_deps,
@@ -1679,9 +1592,6 @@ impl Downstairs {
 
             gw_noop_id,
             gw_repair_id,
-
-            close_brw,
-            reopen_brw,
         }
     }
 
@@ -1715,19 +1625,15 @@ impl Downstairs {
         deps: Vec<JobId>,
         reopen_id: JobId,
         gw_reopen_id: u64,
-    ) -> BlockReqWaiter {
+    ) {
         let reopen_io =
             Self::create_reopen_io(eid as usize, reopen_id, deps, gw_reopen_id);
 
         cdt::gw__reopen__start!(|| (gw_reopen_id, eid));
-        let (send, recv) = oneshot::channel();
-        let op = BlockOp::RepairOp;
-        let reopen_br = BlockReq::new(op, send);
-        let reopen_brw = BlockReqWaiter::new(recv);
-        let new_gtos = GtoS::new(reopen_id, None, Some(reopen_br));
+
+        let new_gtos = GtoS::new(reopen_id, None, None);
         gw.active.insert(gw_reopen_id, new_gtos);
         self.enqueue_repair(reopen_io);
-        reopen_brw
     }
 
     #[cfg(test)]
@@ -1907,7 +1813,7 @@ impl Downstairs {
         gw_close_id: u64,
         source: ClientId,
         repair: &[ClientId],
-    ) -> BlockReqWaiter {
+    ) {
         let close_io = self.create_close_io(
             eid as usize,
             close_id,
@@ -1919,14 +1825,9 @@ impl Downstairs {
         );
 
         cdt::gw__close__start!(|| (gw_close_id, eid));
-        let (send, recv) = oneshot::channel();
-        let op = BlockOp::RepairOp;
-        let close_br = BlockReq::new(op, send);
-        let close_brw = BlockReqWaiter::new(recv);
-        let new_gtos = GtoS::new(close_id, None, Some(close_br));
+        let new_gtos = GtoS::new(close_id, None, None);
         gw.active.insert(gw_close_id, new_gtos);
         self.enqueue_repair(close_io);
-        close_brw
     }
 
     /// Get the repair IDs and dependencies for this extent.

@@ -159,19 +159,19 @@ pub mod repair_test {
         result: Result<(), CrucibleError>,
     ) {
         let mut gw = up.guest.guest_work.lock().await;
+
+        // Manually drive the upstairs state forward, because the job is now
+        // ackable.
+        up.downstairs.continue_live_repair(
+            ds_id,
+            &mut gw,
+            &up.state,
+            up.generation,
+        );
         up.downstairs.ack(ds_id);
         gw.gw_ds_complete(gw_id, ds_id, None, result.clone(), &up.log)
             .await;
         drop(gw);
-
-        // Manually drive the upstairs state forward, because the job is now
-        // acked.
-        up.downstairs.on_live_repair(
-            result,
-            up.guest.guest_work.lock().await.deref_mut(),
-            &up.state,
-            up.generation,
-        );
     }
 
     // A function that does some setup that other tests can use to avoid
