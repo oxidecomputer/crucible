@@ -321,10 +321,11 @@ impl Downstairs {
         let log = crucible_common::build_logger();
         let cfg = Arc::new(UpstairsConfig {
             upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            gen: 0,
             read_only: false,
             encryption_context: None,
             lossy: false,
-            session_id: Uuid::new_v4(),
         });
 
         Self::new(cfg, ClientMap::new(), None, log)

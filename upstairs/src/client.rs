@@ -198,6 +198,7 @@ impl DownstairsClient {
             encryption_context: None,
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
+            gen: 0,
             read_only: false,
             lossy: false,
         });
@@ -296,7 +297,7 @@ impl DownstairsClient {
                     version: CRUCIBLE_MESSAGE_VERSION,
                     upstairs_id: self.cfg.upstairs_id,
                     session_id: self.cfg.session_id,
-                    gen: 0, // IGNORED
+                    gen: self.cfg.gen,
                     read_only: self.cfg.read_only,
                     encrypted: self.cfg.encrypted(),
                     alternate_versions: vec![],

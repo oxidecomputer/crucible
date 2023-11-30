@@ -144,6 +144,9 @@ pub(crate) struct UpstairsConfig {
     /// Unique session ID
     pub session_id: Uuid,
 
+    /// Generation number
+    pub gen: u64,
+
     pub read_only: bool,
 
     /// Encryption context, if present
@@ -217,6 +220,7 @@ impl Upstairs {
             encryption_context,
             upstairs_id: uuid,
             session_id,
+            gen,
             read_only: opt.read_only,
             lossy: opt.lossy,
         });
