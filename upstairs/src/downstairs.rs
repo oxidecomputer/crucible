@@ -1201,7 +1201,11 @@ impl Downstairs {
 
                 // We keep going here, because we need to submit no-op jobs to
                 // avoid things getting clogged up.
-                repair.aborting_repair = true;
+                if !repair.aborting_repair {
+                    warn!(self.log, "aborting live-repair");
+                    repair.aborting_repair = true;
+                    self.abort_repair(up_state);
+                }
             }
         }
 
@@ -1358,8 +1362,6 @@ impl Downstairs {
             LiveRepairState::FinalFlush { .. } => {
                 info!(self.log, "LiveRepair final flush returned {r:?}");
                 if repair.aborting_repair {
-                    warn!(self.log, "aborting live-repair");
-                    self.abort_repair(up_state);
                     return;
                 } else {
                     info!(self.log, "live-repair completed successfully");
@@ -1915,7 +1917,10 @@ impl Downstairs {
     ///
     /// If they were already reserved, then use those values (removing them from
     /// the list of reserved IDs), otherwise, go get the next set of job IDs.
-    fn get_repair_ids(&mut self, eid: u64) -> (ExtentRepairIDs, Vec<JobId>) {
+    pub(crate) fn get_repair_ids(
+        &mut self,
+        eid: u64,
+    ) -> (ExtentRepairIDs, Vec<JobId>) {
         if let Some((eri, deps)) = self
             .repair
             .as_mut()
@@ -2360,7 +2365,7 @@ impl Downstairs {
     }
 
     /// Returns the most recent extent under repair, or `None`
-    fn last_repair_extent(&self) -> Option<u64> {
+    pub(crate) fn last_repair_extent(&self) -> Option<u64> {
         self.repair
             .as_ref()
             .and_then(|r| r.repair_job_ids.last_key_value().map(|(k, _)| *k))
@@ -2658,7 +2663,11 @@ impl Downstairs {
                 // If connection aborted, and restarted, then the re-negotiation
                 // could have won this race, and transitioned the reconnecting
                 // downstairs from LiveRepair to Faulted to LiveRepairReady.
-                c.state() == DsState::LiveRepairReady
+                c.state() == DsState::LiveRepairReady ||
+                // If just a single IO reported failure, we will fault this
+                // downstairs and it won't yet have had a chance to move back
+                // around to LiveRepairReady yet.
+                c.state() == DsState::Faulted
         }));
         self.repair = None;
         for i in ClientId::iter() {
@@ -2781,6 +2790,11 @@ impl Downstairs {
 
     /// Prints a summary of active work to `stdout`
     pub(crate) fn show_all_work(&self) {
+        print!("States:");
+        for cid in ClientId::iter() {
+            print!(" {}", self.clients[cid].state());
+        }
+        println!("");
         println!(
             "{0:>5} {1:>8} {2:>5} {3:>7} {4:>7} {5:>5} {6:>5} {7:>5} {8:>7}",
             "GW_ID",
@@ -3341,6 +3355,8 @@ impl Downstairs {
                     // Walk the active job list and mark any that were
                     // new or in progress to skipped.
                     self.skip_all_jobs(client_id);
+                    self.clients[client_id]
+                        .checked_state_transition(up_state, DsState::Faulted);
 
                     if is_repair {
                         // Restart the client task, as the downstairs will have
@@ -3348,12 +3364,6 @@ impl Downstairs {
                         self.clients[client_id].restart_connection(
                             up_state,
                             ClientStopReason::FailedLiveRepair,
-                        );
-                    } else {
-                        // Otherwise, simply set it to faulted.
-                        self.clients[client_id].checked_state_transition(
-                            up_state,
-                            DsState::Faulted,
                         );
                     }
                 }

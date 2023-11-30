@@ -110,9 +110,7 @@ pub mod repair_test {
     use std::ops::DerefMut;
 
     // Test function to create just enough of an Upstairs for our needs.
-    // The caller will indicate which downstairs client it wished to be
-    // moved to LiveRepair.
-    async fn create_test_upstairs(fail_id: ClientId) -> Upstairs {
+    async fn create_test_upstairs() -> Upstairs {
         let mut ddef = RegionDefinition::default();
         ddef.set_block_size(512);
         ddef.set_extent_size(Block::new_512(3));
@@ -125,21 +123,8 @@ pub mod repair_test {
             c.repair_addr = Some("0.0.0.0:1".parse().unwrap());
         }
 
-        // Move our downstairs client fail_id to LiveRepair.
         up.force_active().unwrap();
-
-        let client = &mut up.downstairs.clients[fail_id];
-        client.checked_state_transition(&up.state, DsState::Faulted);
-        client.checked_state_transition(&up.state, DsState::LiveRepairReady);
-
-        assert_eq!(up.on_repair_check().await, RepairCheck::RepairStarted);
-
         up
-    }
-
-    fn csl() -> Logger {
-        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
-        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
     }
 
     // Test function to move a job to in_progress, then complete it.
@@ -175,13 +160,14 @@ pub mod repair_test {
     ) {
         let mut gw = up.guest.guest_work.lock().await;
         up.downstairs.ack(ds_id);
-        gw.gw_ds_complete(gw_id, ds_id, None, result, &up.log).await;
+        gw.gw_ds_complete(gw_id, ds_id, None, result.clone(), &up.log)
+            .await;
         drop(gw);
 
         // Manually drive the upstairs state forward, because the job is now
         // acked.
         up.downstairs.on_live_repair(
-            Ok(()),
+            result,
             up.guest.guest_work.lock().await.deref_mut(),
             &up.state,
             up.generation,
@@ -192,24 +178,17 @@ pub mod repair_test {
     // having the same boilerplate code all over the place, and allows the
     // test to make clear what it's actually testing.
     //
-    // Here we create an upstairs, then spawn off a task for the
-    // repair_extent function that will start repairing an extent.
-    //
-    // We then wait for that spawned task to create the first two jobs
-    // that are created when we start repairing.
-    //
-    // We create the channels required so we can behave as if we are the
-    // different tasks that the real Upstairs will create to process IO
-    // from the downstairs.  By returning these to the caller here, we
-    // prevent them from being dropped and channels being closed that
-    // we need to appear as if they are working.
-    //
-    // The join handle for the task we spawn is also returned.
-    // The result of the repair_extent is unwrapped and this result is
-    // returned. Callers expecting error from repair_extent should expect
-    // this unwrap will fail.
+    // The caller will indicate which downstairs client it wished to be
+    // moved to LiveRepair.
     async fn start_up_and_repair(or_ds: ClientId) -> Upstairs {
-        let up = create_test_upstairs(or_ds).await;
+        let mut up = create_test_upstairs().await;
+
+        // Move our downstairs client fail_id to LiveRepair.
+        let client = &mut up.downstairs.clients[or_ds];
+        client.checked_state_transition(&up.state, DsState::Faulted);
+        client.checked_state_transition(&up.state, DsState::LiveRepairReady);
+
+        assert_eq!(up.on_repair_check().await, RepairCheck::RepairStarted);
 
         // The first thing that should happen after we start repair_exetnt
         // is two jobs show up on the work queue, one for close and one for
@@ -245,7 +224,6 @@ pub mod repair_test {
         // of jobs are issued at the proper times.
 
         let mut up = start_up_and_repair(or_ds).await;
-        info!(up.log, "started up");
 
         // By default, the job IDs always start at 1000 and the gw IDs
         // always start at 1. Take advantage of that and knowing that we
@@ -354,19 +332,6 @@ pub mod repair_test {
         }
         assert_eq!(job.state_count().done, 3);
     }
-}
-
-#[cfg(feature = "NOPE")]
-mod nope {
-    // Test function to create a downstairs.
-    fn create_test_downstairs() -> Downstairs {
-        let mut ds = Downstairs::new(csl(), ClientMap::new());
-        for cid in ClientId::iter() {
-            ds.clients[cid].repair_addr =
-                Some("127.0.0.1:1234".parse().unwrap());
-        }
-        ds
-    }
 
     // Loop over the possible downstairs to be in LiveRepair and
     // run through the do_repair code path.
@@ -391,7 +356,8 @@ mod nope {
         // we don't check all possible results and assume that the other
         // flow tests cover those cases.
 
-        let (up, re_handle, _ds_work_vec) = start_up_and_repair(or_ds).await;
+        let mut up = start_up_and_repair(or_ds).await;
+        info!(up.log, "started up");
 
         // By default, the job IDs always start at 1000 and the gw IDs
         // always start at 1. Take advantage of that and knowing that we
@@ -420,84 +386,67 @@ mod nope {
         };
 
         for cid in ClientId::iter() {
-            up.downstairs.lock().await.in_progress(ds_close_id, cid);
+            up.downstairs.in_progress(ds_close_id, cid);
             if cid == or_ds {
-                up.process_ds_operation(
+                up.downstairs.process_ds_completion(
                     ds_close_id,
                     cid,
                     Ok(vec![]),
+                    &up.state,
                     Some(bad_ei),
-                )
-                .await
-                .unwrap();
+                );
             } else {
-                up.process_ds_operation(ds_close_id, cid, Ok(vec![]), Some(ei))
-                    .await
-                    .unwrap();
+                up.downstairs.process_ds_completion(
+                    ds_close_id,
+                    cid,
+                    Ok(vec![]),
+                    &up.state,
+                    Some(ei),
+                );
             }
         }
 
         info!(up.log, "Now ACK the close job");
-        ack_this_job(&up, gw_close_id, ds_close_id, Ok(())).await;
-
+        ack_this_job(&mut up, gw_close_id, ds_close_id, Ok(())).await;
         // Once we process the IO completion, and drop the lock, the task
         // doing extent repair should submit the next IO.
 
-        // Wait for this repair job to show up.
-        let mut jobs = up.downstairs.lock().await.ds_active.len();
-        while jobs != 3 {
-            info!(up.log, "Waiting for 3 jobs (currently {})", jobs);
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            jobs = up.downstairs.lock().await.ds_active.len();
-        }
+        let jobs = up.downstairs.active_count();
+        assert_eq!(jobs, 3);
 
         // The repair job has shown up.  Move it forward.
         // Because the "or_ds" in this case is not returning an
         // error, we don't pass it to move_and_complete_job
-        move_and_complete_job(&up, ds_repair_id, vec![])
-            .await
-            .unwrap();
+        move_and_complete_job(&mut up, ds_repair_id, vec![]).unwrap();
 
         info!(up.log, "Now ACK the repair job");
-        ack_this_job(&up, gw_repair_id, ds_repair_id, Ok(())).await;
+        ack_this_job(&mut up, gw_repair_id, ds_repair_id, Ok(())).await;
 
         // When we completed the repair jobs, the repair_extent should
         // have gone ahead and issued the NoOp that should be issued
-        // next.  Loop here waiting for that job to arrive.
-        let mut jobs = up.downstairs.lock().await.ds_active.len();
-
-        // Wait for the NoOp jobs to show up.
-        while jobs != 4 {
-            info!(up.log, "Waiting for 4 jobs (currently {})", jobs);
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            jobs = up.downstairs.lock().await.ds_active.len();
-        }
-
+        // next.
         info!(up.log, "Now move the NoOp job forward");
-        move_and_complete_job(&up, ds_noop_id, vec![])
-            .await
-            .unwrap();
+        move_and_complete_job(&mut up, ds_noop_id, vec![]).unwrap();
 
         info!(up.log, "Now ACK the NoOp job");
-        ack_this_job(&up, gw_noop_id, ds_noop_id, Ok(())).await;
+        ack_this_job(&mut up, gw_noop_id, ds_noop_id, Ok(())).await;
 
         // The reopen job should already be on the queue, move it forward.
         info!(up.log, "Finally, move the ReOpen job forward");
-        move_and_complete_job(&up, ds_reopen_id, vec![])
-            .await
-            .unwrap();
+        move_and_complete_job(&mut up, ds_reopen_id, vec![]).unwrap();
 
         info!(up.log, "Now ACK the repair job");
-        ack_this_job(&up, gw_reopen_id, ds_reopen_id, Ok(())).await;
+        ack_this_job(&mut up, gw_reopen_id, ds_reopen_id, Ok(())).await;
 
         // The extent repair task should complete without error.
-        assert!(re_handle.await.is_ok());
+        assert_eq!(up.downstairs.repair().as_ref().unwrap().active_extent, 1);
 
-        // We should have 4 jobs on the queue.
-        let ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_active.len(), 4);
+        // We should have 6 jobs on the queue.
+        // Four from the first extent we just repaired, and two more for the
+        // next extent which starts when the prior extent repair finishes.
+        assert_eq!(up.downstairs.active_count(), 6);
 
-        let job = ds.ds_active.get(&ds_repair_id).unwrap();
+        let job = up.downstairs.get_job(&ds_repair_id).unwrap();
         match &job.work {
             IOop::ExtentLiveRepair { .. } => {}
             x => {
@@ -506,7 +455,7 @@ mod nope {
         }
         assert_eq!(job.state_count().done, 3);
 
-        let job = ds.ds_active.get(&ds_noop_id).unwrap();
+        let job = up.downstairs.get_job(&ds_noop_id).unwrap();
         match &job.work {
             IOop::ExtentLiveNoOp { .. } => {}
             x => {
@@ -515,16 +464,15 @@ mod nope {
         }
         assert_eq!(job.state_count().done, 3);
 
-        let job = ds.ds_active.get(&ds_reopen_id).unwrap();
+        let job = up.downstairs.get_job(&ds_reopen_id).unwrap();
         match &job.work {
             IOop::ExtentLiveReopen { .. } => {}
             x => {
                 panic!("Expected ExtentLiveReopen, got: {:?}", x);
             }
         }
-
         assert_eq!(job.state_count().done, 3);
-        assert_eq!(ds.clients[or_ds].state, DsState::LiveRepair);
+        assert_eq!(up.downstairs.clients[or_ds].state(), DsState::LiveRepair);
     }
 
     #[tokio::test]
@@ -532,9 +480,9 @@ mod nope {
         // Test all the permutations of
         // A downstairs that is in LiveRepair
         // A downstairs that returns error on the ExtentFlushClose operation.
-        for faild_ds in ClientId::iter() {
+        for failed_ds in ClientId::iter() {
             for err_ds in ClientId::iter() {
-                test_repair_extent_close_fails(faild_ds, err_ds).await;
+                test_repair_extent_close_fails(failed_ds, err_ds).await;
             }
         }
     }
@@ -548,8 +496,7 @@ mod nope {
         // downstairs that will return error for the ExtentClose operation.
         // They may be the same downstairs.
 
-        assert!(err_ds.get() < 3);
-        let (up, re_handle, _ds_work_vec) = start_up_and_repair(or_ds).await;
+        let mut up = start_up_and_repair(or_ds).await;
 
         // By default, the job IDs always start at 1000 and the gw IDs
         // always start at 1. Take advantage of that and knowing that we
@@ -570,90 +517,69 @@ mod nope {
             dirty: false,
         };
 
+        info!(up.log, "move the close jobs forward");
         // Move the close job forward, but report error on the err_ds
         for cid in ClientId::iter() {
-            up.downstairs.lock().await.in_progress(ds_close_id, cid);
+            up.downstairs.in_progress(ds_close_id, cid);
             if cid == err_ds {
-                up.process_ds_operation(
+                up.downstairs.process_ds_completion(
                     ds_close_id,
                     cid,
                     Err(CrucibleError::GenericError("bad".to_string())),
+                    &up.state,
                     None,
-                )
-                .await
-                .unwrap();
+                );
             } else {
-                up.process_ds_operation(ds_close_id, cid, Ok(vec![]), Some(ei))
-                    .await
-                    .unwrap();
+                up.downstairs.process_ds_completion(
+                    ds_close_id,
+                    cid,
+                    Ok(vec![]),
+                    &up.state,
+                    Some(ei),
+                );
             }
         }
 
-        // process_ds_operation should force the downstairs to fail
-        assert_eq!(
-            up.downstairs.lock().await.clients[err_ds].state,
-            DsState::Faulted
-        );
+        // process_ds_completion should force the downstairs to fail
+        assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
 
         let my_err = Err(CrucibleError::GenericError("bad".to_string()));
         info!(up.log, "Now ACK the close job");
-        ack_this_job(&up, gw_close_id, ds_close_id, my_err.clone()).await;
+        ack_this_job(&mut up, gw_close_id, ds_close_id, my_err.clone()).await;
 
-        // Once we process the IO completion, and drop the lock, the task
-        // doing extent repair should submit the next IO.
-
-        // Wait for this repair job (which will be a NoOp) to show up.
-        let mut jobs = up.downstairs.lock().await.ds_active.len();
-        while jobs != 3 {
-            info!(up.log, "Waiting for 3 jobs (currently {})", jobs);
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            jobs = up.downstairs.lock().await.ds_active.len();
-        }
-        // The repair (NoOp) job has shown up.  Move it forward.
-        move_and_complete_job(&up, ds_repair_id, vec![err_ds, or_ds])
-            .await
+        info!(up.log, "repair job should have got here, move it forward");
+        // The repair (NoOp) job should have shown up.  Move it forward.
+        move_and_complete_job(&mut up, ds_repair_id, vec![err_ds, or_ds])
             .unwrap();
 
-        ack_this_job(&up, gw_repair_id, ds_repair_id, my_err.clone()).await;
+        info!(up.log, "repair job completed, now ack_this_job");
+        ack_this_job(&mut up, gw_repair_id, ds_repair_id, my_err.clone()).await;
 
-        // When we completed the repair jobs, the repair_extent should
+        // When we completed the repair jobs, the main task should
         // have gone ahead and issued the NoOp that should be issued
-        // next.  Loop here waiting for that job to arrive.
-        let mut jobs = up.downstairs.lock().await.ds_active.len();
-
-        // Wait for the NoOp jobs to show up.
-        while jobs != 4 {
-            info!(up.log, "Waiting for 4 jobs (currently {})", jobs);
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            jobs = up.downstairs.lock().await.ds_active.len();
-        }
-
+        // next.
         info!(up.log, "Now move the NoOp job forward");
-        move_and_complete_job(&up, ds_noop_id, vec![err_ds, or_ds])
-            .await
+        move_and_complete_job(&mut up, ds_noop_id, vec![err_ds, or_ds])
             .unwrap();
 
         info!(up.log, "Now ACK the NoOp job");
-        ack_this_job(&up, gw_noop_id, ds_noop_id, my_err.clone()).await;
+        ack_this_job(&mut up, gw_noop_id, ds_noop_id, my_err.clone()).await;
 
         // The reopen job should already be on the queue, move it forward.
         info!(up.log, "Finally, move the ReOpen job forward");
-        move_and_complete_job(&up, ds_reopen_id, vec![err_ds, or_ds])
-            .await
+        move_and_complete_job(&mut up, ds_reopen_id, vec![err_ds, or_ds])
             .unwrap();
+
         info!(up.log, "Now ACK the Reopen job");
-        ack_this_job(&up, gw_reopen_id, ds_reopen_id, my_err.clone()).await;
+        ack_this_job(&mut up, gw_reopen_id, ds_reopen_id, my_err.clone()).await;
 
-        // repair_extent task should return to us an error.
-        assert!(re_handle.await.is_err());
-
-        show_all_work(&up).await;
-        // We should have 4 jobs on the queue.
-        let ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_active.len(), 4);
+        // We should have the four repair jobs on the queue, along with
+        // a final flush, as we should have ended this repair as failed and
+        // sent that final flush.
+        assert_eq!(up.downstairs.active_count(), 5);
 
         // Verify that the four jobs are the four we expect.
-        let job = ds.ds_active.get(&ds_close_id).unwrap();
+        let job = up.downstairs.get_job(&ds_close_id).unwrap();
         match &job.work {
             IOop::ExtentFlushClose { .. } => {}
             x => {
@@ -664,7 +590,7 @@ mod nope {
         assert_eq!(job.state_count().error, 1);
 
         // Because the close failed, we sent a NoOp instead of repair.
-        let job = ds.ds_active.get(&ds_repair_id).unwrap();
+        let job = up.downstairs.get_job(&ds_repair_id).unwrap();
         match &job.work {
             IOop::ExtentLiveNoOp { .. } => {}
             x => {
@@ -679,7 +605,7 @@ mod nope {
             assert_eq!(job.state_count().skipped, 2);
         }
 
-        let job = ds.ds_active.get(&ds_noop_id).unwrap();
+        let job = up.downstairs.get_job(&ds_noop_id).unwrap();
         match &job.work {
             IOop::ExtentLiveNoOp { .. } => {}
             x => {
@@ -694,7 +620,7 @@ mod nope {
             assert_eq!(job.state_count().skipped, 2);
         }
 
-        let job = ds.ds_active.get(&ds_reopen_id).unwrap();
+        let job = up.downstairs.get_job(&ds_reopen_id).unwrap();
         match &job.work {
             IOop::ExtentLiveReopen { .. } => {}
             x => {
@@ -709,18 +635,20 @@ mod nope {
             assert_eq!(job.state_count().skipped, 2);
         }
 
-        assert_eq!(ds.clients[err_ds].state, DsState::Faulted);
-        assert_eq!(ds.clients[or_ds].state, DsState::Faulted);
+        // Because the repair has failed, the extent that was under
+        // repair should also now be faulted.
+        assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
+        assert_eq!(up.downstairs.clients[or_ds].state(), DsState::Faulted);
     }
 
     #[tokio::test]
     async fn test_repair_extent_repair_fails_all() {
         // Test all the permutations of
         // A downstairs that is in LiveRepair
-        // A downstairs that returns error on the ExtentLiveRepair operation.
-        for or_ds in ClientId::iter() {
+        // A downstairs that returns error on the ExtentFlushClose operation.
+        for failed_ds in ClientId::iter() {
             for err_ds in ClientId::iter() {
-                test_repair_extent_repair_fails(or_ds, err_ds).await;
+                test_repair_extent_repair_fails(failed_ds, err_ds).await;
             }
         }
     }
@@ -737,8 +665,7 @@ mod nope {
         // downstairs that will return error for the ExtentLiveRepair
         // operation.  They may be the same downstairs.
 
-        assert!(err_ds.get() < 3);
-        let (up, re_handle, _ds_work_vec) = start_up_and_repair(or_ds).await;
+        let mut up = start_up_and_repair(or_ds).await;
 
         // By default, the job IDs always start at 1000 and the gw IDs
         // always start at 1. Take advantage of that and knowing that we
@@ -758,104 +685,75 @@ mod nope {
             flush_number: 3,
             dirty: false,
         };
-        let mut ds = up.downstairs.lock().await;
         for cid in ClientId::iter() {
-            ds.in_progress(ds_close_id, cid);
-            ds.process_ds_completion(
+            up.downstairs.in_progress(ds_close_id, cid);
+            up.downstairs.process_ds_completion(
                 ds_close_id,
                 cid,
                 Ok(vec![]),
-                UpState::Active,
+                &up.state,
                 Some(ei),
-            )
-            .unwrap();
+            );
         }
-        drop(ds);
 
         info!(up.log, "Now ACK the close job");
-        ack_this_job(&up, gw_close_id, ds_close_id, Ok(())).await;
+        ack_this_job(&mut up, gw_close_id, ds_close_id, Ok(())).await;
 
-        // Once we process the IO completion, and drop the lock, the task
+        // Once we process the IO completion the task
         // doing extent repair should submit the next IO.
-
-        // Wait for this repair job to show up.
-        let mut jobs = up.downstairs.lock().await.ds_active.len();
-        while jobs != 3 {
-            info!(up.log, "Waiting for 3 jobs (currently {})", jobs);
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            jobs = up.downstairs.lock().await.ds_active.len();
-        }
-
         // Move the repair job forward, but report error on the err_ds
         for cid in ClientId::iter() {
-            up.downstairs.lock().await.in_progress(ds_repair_id, cid);
+            up.downstairs.in_progress(ds_repair_id, cid);
             if cid == err_ds {
-                up.process_ds_operation(
+                up.downstairs.process_ds_completion(
                     ds_repair_id,
                     cid,
                     Err(CrucibleError::GenericError("bad".to_string())),
+                    &up.state,
                     None,
-                )
-                .await
-                .unwrap();
+                );
             } else {
-                up.process_ds_operation(
+                up.downstairs.process_ds_completion(
                     ds_repair_id,
                     cid,
                     Ok(vec![]),
+                    &up.state,
                     Some(ei),
-                )
-                .await
-                .unwrap();
+                );
             }
         }
         let my_err = Err(CrucibleError::GenericError("bad".to_string()));
-        ack_this_job(&up, gw_repair_id, ds_repair_id, my_err.clone()).await;
+        ack_this_job(&mut up, gw_repair_id, ds_repair_id, my_err.clone()).await;
 
         // process_ds_completion should force both the downstairs that
         // reported the error, and the downstairs that is under repair to
         // fail.
-        assert_eq!(
-            up.downstairs.lock().await.clients[err_ds].state,
-            DsState::Faulted
-        );
+        assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
+        assert_eq!(up.downstairs.clients[or_ds].state(), DsState::Faulted);
+
         // When we completed the repair jobs, the repair_extent should
-        // have gone ahead and issued the NoOp that should be issued
-        // next.  Loop here waiting for that job to arrive.
-        let mut jobs = up.downstairs.lock().await.ds_active.len();
-
-        // Wait for the NoOp jobs to show up.
-        while jobs != 4 {
-            info!(up.log, "Waiting for 4 jobs (currently {})", jobs);
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            jobs = up.downstairs.lock().await.ds_active.len();
-        }
-
+        // have gone ahead and issued the NoOp that should be issued next.
         info!(up.log, "Now move the NoOp job forward");
-        move_and_complete_job(&up, ds_noop_id, vec![err_ds, or_ds])
-            .await
+        move_and_complete_job(&mut up, ds_noop_id, vec![err_ds, or_ds])
             .unwrap();
 
         info!(up.log, "Now ACK the NoOp job");
-        ack_this_job(&up, gw_noop_id, ds_noop_id, my_err.clone()).await;
+        ack_this_job(&mut up, gw_noop_id, ds_noop_id, my_err.clone()).await;
 
         // The reopen job should already be on the queue, move it forward.
         info!(up.log, "Finally, move the ReOpen job forward");
-        move_and_complete_job(&up, ds_reopen_id, vec![err_ds, or_ds])
-            .await
+        move_and_complete_job(&mut up, ds_reopen_id, vec![err_ds, or_ds])
             .unwrap();
+
         info!(up.log, "Now ACK the Reopen job");
-        ack_this_job(&up, gw_reopen_id, ds_reopen_id, my_err.clone()).await;
+        ack_this_job(&mut up, gw_reopen_id, ds_reopen_id, my_err.clone()).await;
 
-        // repair_extent task should return to us an error.
-        assert!(re_handle.await.is_err());
+        // We should have four repair jobs on the queue along with the
+        // final flush.  We only have a final flush here because we have
+        // aborted the repair.
+        assert_eq!(up.downstairs.active_count(), 5);
 
-        // We should have 4 jobs on the queue.
-        let ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_active.len(), 4);
-
-        // Because the close failed, we expect a NoOp instead of repair.
-        let job = ds.ds_active.get(&ds_repair_id).unwrap();
+        let job = up.downstairs.get_job(&ds_repair_id).unwrap();
         match &job.work {
             IOop::ExtentLiveNoOp { .. } => {}
             x => {
@@ -866,7 +764,7 @@ mod nope {
         assert_eq!(job.state_count().done, 2);
         assert_eq!(job.state_count().error, 1);
 
-        let job = ds.ds_active.get(&ds_noop_id).unwrap();
+        let job = up.downstairs.get_job(&ds_noop_id).unwrap();
         match &job.work {
             IOop::ExtentLiveNoOp { .. } => {}
             x => {
@@ -884,7 +782,7 @@ mod nope {
             assert_eq!(job.state_count().skipped, 1);
         }
 
-        let job = ds.ds_active.get(&ds_reopen_id).unwrap();
+        let job = up.downstairs.get_job(&ds_reopen_id).unwrap();
         match &job.work {
             IOop::ExtentLiveReopen { .. } => {}
             x => {
@@ -899,8 +797,8 @@ mod nope {
             assert_eq!(job.state_count().skipped, 1);
         }
 
-        assert_eq!(ds.clients[err_ds].state, DsState::Faulted);
-        assert_eq!(ds.clients[or_ds].state, DsState::Faulted);
+        assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
+        assert_eq!(up.downstairs.clients[or_ds].state(), DsState::Faulted);
     }
 
     #[tokio::test]
@@ -920,8 +818,7 @@ mod nope {
         // We take input for both which downstairs is in LiveRepair, and
         // which downstairs will return error on the NoOp operation.
 
-        assert!(err_ds.get() < 3);
-        let (up, re_handle, _ds_work_vec) = start_up_and_repair(or_ds).await;
+        let mut up = start_up_and_repair(or_ds).await;
 
         // By default, the job IDs always start at 1000 and the gw IDs
         // always start at 1. Take advantage of that and knowing that we
@@ -941,92 +838,63 @@ mod nope {
             flush_number: 3,
             dirty: false,
         };
-        let mut ds = up.downstairs.lock().await;
         for cid in ClientId::iter() {
-            ds.in_progress(ds_close_id, cid);
-            ds.process_ds_completion(
+            up.downstairs.in_progress(ds_close_id, cid);
+            up.downstairs.process_ds_completion(
                 ds_close_id,
                 cid,
                 Ok(vec![]),
-                UpState::Active,
+                &up.state,
                 Some(ei),
-            )
-            .unwrap();
-        }
-        drop(ds);
-
-        ack_this_job(&up, gw_close_id, ds_close_id, Ok(())).await;
-        // Once we process the IO completion, and drop the lock, the task
-        // doing extent repair should submit the next IO.
-
-        // Wait for this repair job to show up.
-        let mut jobs = up.downstairs.lock().await.ds_active.len();
-        while jobs != 3 {
-            info!(up.log, "Waiting for 3 jobs (currently {})", jobs);
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            jobs = up.downstairs.lock().await.ds_active.len();
+            );
         }
 
-        // The repair job has shown up.  Move it forward.
-        move_and_complete_job(&up, ds_repair_id, vec![])
-            .await
-            .unwrap();
+        ack_this_job(&mut up, gw_close_id, ds_close_id, Ok(())).await;
+        // Once we process the IO completion, the task doing extent
+        // repair should submit the next IO.  Move that job forward.
+        move_and_complete_job(&mut up, ds_repair_id, vec![]).unwrap();
 
         // Now ACK the repair job
-        ack_this_job(&up, gw_repair_id, ds_repair_id, Ok(())).await;
+        ack_this_job(&mut up, gw_repair_id, ds_repair_id, Ok(())).await;
 
         // When we completed the repair jobs, the repair_extent should
         // have gone ahead and issued the NoOp that should be issued
-        // next.  Loop here waiting for that job to arrive.
-        let mut jobs = up.downstairs.lock().await.ds_active.len();
-
-        // Wait for the NoOp jobs to show up.
-        while jobs != 4 {
-            info!(up.log, "Waiting for 4 jobs (currently {})", jobs);
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            jobs = up.downstairs.lock().await.ds_active.len();
-        }
-
+        // next.
         info!(up.log, "Now move the NoOp job forward");
         for cid in ClientId::iter() {
-            up.downstairs.lock().await.in_progress(ds_noop_id, cid);
+            up.downstairs.in_progress(ds_noop_id, cid);
             if cid == err_ds {
-                up.process_ds_operation(
+                up.downstairs.process_ds_completion(
                     ds_noop_id,
                     cid,
                     Err(CrucibleError::GenericError("bad".to_string())),
+                    &up.state,
                     None,
-                )
-                .await
-                .unwrap();
+                );
             } else {
-                up.process_ds_operation(ds_noop_id, cid, Ok(vec![]), None)
-                    .await
-                    .unwrap();
+                up.downstairs.process_ds_completion(
+                    ds_noop_id,
+                    cid,
+                    Ok(vec![]),
+                    &up.state,
+                    None,
+                );
             }
         }
         let my_err = Err(CrucibleError::GenericError("bad".to_string()));
-        ack_this_job(&up, gw_noop_id, ds_noop_id, my_err.clone()).await;
+        ack_this_job(&mut up, gw_noop_id, ds_noop_id, my_err.clone()).await;
 
-        // Give repair_extent enough time to get the noop ACK and take
-        // action on it.
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
         info!(up.log, "Finally, move the ReOpen job forward");
-        move_and_complete_job(&up, ds_reopen_id, vec![err_ds, or_ds])
-            .await
-            .unwrap();
+        move_and_complete_job(&mut up, ds_reopen_id, vec![err_ds]).unwrap();
 
         info!(up.log, "Now ACK the reopen job");
-        ack_this_job(&up, gw_reopen_id, ds_reopen_id, Ok(())).await;
+        ack_this_job(&mut up, gw_reopen_id, ds_reopen_id, Ok(())).await;
 
-        // The extent repair task should return to us the error.
-        assert!(re_handle.await.is_err());
-        // We should have 4 jobs on the queue.
-        let ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_active.len(), 4);
+        // We should have five jobs on the queue.
+        assert_eq!(up.downstairs.active_count(), 5);
 
         // Differences from the usual path start here.
-        let job = ds.ds_active.get(&ds_noop_id).unwrap();
+        let job = up.downstairs.get_job(&ds_noop_id).unwrap();
         match &job.work {
             IOop::ExtentLiveNoOp { .. } => {}
             x => {
@@ -1036,7 +904,7 @@ mod nope {
         assert_eq!(job.state_count().done, 2);
         assert_eq!(job.state_count().error, 1);
 
-        let job = ds.ds_active.get(&ds_reopen_id).unwrap();
+        let job = up.downstairs.get_job(&ds_reopen_id).unwrap();
         match &job.work {
             IOop::ExtentLiveReopen { .. } => {}
             x => {
@@ -1052,10 +920,9 @@ mod nope {
             assert_eq!(job.state_count().skipped, 1);
         }
 
-        assert_eq!(ds.clients[err_ds].state, DsState::Faulted);
-        assert_eq!(ds.clients[or_ds].state, DsState::Faulted);
+        assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
+        assert_eq!(up.downstairs.clients[or_ds].state(), DsState::Faulted);
     }
-
     #[tokio::test]
     async fn test_repair_extent_fail_reopen_all() {
         // Test all the permutations of
@@ -1073,8 +940,7 @@ mod nope {
         // We take input for both which downstairs is in LiveRepair, and
         // which downstairs will return error on the NoOp operation.
 
-        assert!(err_ds.get() < 3);
-        let (up, re_handle, _ds_work_vec) = start_up_and_repair(or_ds).await;
+        let mut up = start_up_and_repair(or_ds).await;
 
         // By default, the job IDs always start at 1000 and the gw IDs
         // always start at 1. Take advantage of that and knowing that we
@@ -1094,138 +960,130 @@ mod nope {
             flush_number: 3,
             dirty: false,
         };
-        let mut ds = up.downstairs.lock().await;
         for cid in ClientId::iter() {
-            ds.in_progress(ds_close_id, cid);
-            ds.process_ds_completion(
+            up.downstairs.in_progress(ds_close_id, cid);
+            up.downstairs.process_ds_completion(
                 ds_close_id,
                 cid,
                 Ok(vec![]),
-                UpState::Active,
+                &up.state,
                 Some(ei),
-            )
-            .unwrap();
+            );
         }
-        drop(ds);
 
-        ack_this_job(&up, gw_close_id, ds_close_id, Ok(())).await;
+        ack_this_job(&mut up, gw_close_id, ds_close_id, Ok(())).await;
         // Once we process the IO completion, and drop the lock, the task
         // doing extent repair should submit the next IO.
 
-        // Wait for this repair job to show up.
-        let mut jobs = up.downstairs.lock().await.ds_active.len();
-        while jobs != 3 {
-            info!(up.log, "Waiting for 3 jobs (currently {})", jobs);
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            jobs = up.downstairs.lock().await.ds_active.len();
-        }
-
         // The repair job has shown up.  Move it forward.
-        move_and_complete_job(&up, ds_repair_id, vec![])
-            .await
-            .unwrap();
+        move_and_complete_job(&mut up, ds_repair_id, vec![]).unwrap();
 
         // Now ACK the repair job
-        ack_this_job(&up, gw_repair_id, ds_repair_id, Ok(())).await;
+        ack_this_job(&mut up, gw_repair_id, ds_repair_id, Ok(())).await;
 
-        // When we completed the repair jobs, the repair_extent should
-        // have gone ahead and issued the NoOp that should be issued
-        // next.  Loop here waiting for that job to arrive.
-        let mut jobs = up.downstairs.lock().await.ds_active.len();
-
-        // Wait for the NoOp jobs to show up.
-        while jobs != 4 {
-            info!(up.log, "Waiting for 4 jobs (currently {})", jobs);
-            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-            jobs = up.downstairs.lock().await.ds_active.len();
-        }
+        // When we completed the repair jobs, the main task should
+        // have gone ahead and issued the NoOp that should be issued next.
 
         info!(up.log, "Now move the NoOp job forward");
-        move_and_complete_job(&up, ds_noop_id, vec![])
-            .await
-            .unwrap();
-
-        ack_this_job(&up, gw_noop_id, ds_noop_id, Ok(())).await;
+        move_and_complete_job(&mut up, ds_noop_id, vec![]).unwrap();
+        ack_this_job(&mut up, gw_noop_id, ds_noop_id, Ok(())).await;
 
         // Move the reopen job forward
         for cid in ClientId::iter() {
-            up.downstairs.lock().await.in_progress(ds_reopen_id, cid);
+            up.downstairs.in_progress(ds_reopen_id, cid);
             if cid == err_ds {
-                up.process_ds_operation(
+                up.downstairs.process_ds_completion(
                     ds_reopen_id,
                     cid,
                     Err(CrucibleError::GenericError("bad".to_string())),
+                    &up.state,
                     None,
-                )
-                .await
-                .unwrap();
+                );
             } else {
-                up.process_ds_operation(ds_reopen_id, cid, Ok(vec![]), None)
-                    .await
-                    .unwrap();
+                up.downstairs.process_ds_completion(
+                    ds_reopen_id,
+                    cid,
+                    Ok(vec![]),
+                    &up.state,
+                    Some(ei),
+                );
             }
         }
         let my_err = Err(CrucibleError::GenericError("bad".to_string()));
-        ack_this_job(&up, gw_reopen_id, ds_reopen_id, my_err.clone()).await;
+        ack_this_job(&mut up, gw_reopen_id, ds_reopen_id, my_err.clone()).await;
 
-        // The extent repair task should give us an error back
-        assert!(re_handle.await.is_err());
-
-        // We should have 4 jobs on the queue.
-        let ds = up.downstairs.lock().await;
-        assert_eq!(ds.ds_active.len(), 4);
+        // We should have four repair jobs on the queue along with the
+        // final flush.  We only have a final flush here because we have
+        // aborted the repair.
+        assert_eq!(up.downstairs.active_count(), 5);
 
         // All that is different from the normal path is the results from
         // the reopen job, so that is all we need to check here.
-        let job = ds.ds_active.get(&ds_reopen_id).unwrap();
+        let job = up.downstairs.get_job(&ds_reopen_id).unwrap();
+        match &job.work {
+            IOop::ExtentLiveReopen { .. } => {}
+            x => {
+                panic!("Expected ExtentLiveReopen, got: {:?}", x);
+            }
+        }
         assert_eq!(job.state_count().done, 2);
         assert_eq!(job.state_count().error, 1);
 
-        assert_eq!(ds.clients[err_ds].state, DsState::Faulted);
-        assert_eq!(ds.clients[or_ds].state, DsState::Faulted);
+        assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
+        assert_eq!(up.downstairs.clients[or_ds].state(), DsState::Faulted);
+    }
+}
+
+#[cfg(feature = "NOPE")]
+mod nope {
+    fn csl() -> Logger {
+        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
+        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
     }
 
+    // Test function to create a downstairs.
+    fn create_test_downstairs() -> Downstairs {
+        let mut ds = Downstairs::new(csl(), ClientMap::new());
+        for cid in ClientId::iter() {
+            ds.clients[cid].repair_addr =
+                Some("127.0.0.1:1234".parse().unwrap());
+        }
+        ds
+    }
+
+    // ALAN: This one is close..
     #[tokio::test]
     async fn test_reserve_extent_repair_ids() {
         // Verify that we can reserve extent IDs for repair work, and they
         // are allocated as expected.
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let mut up = create_test_upstairs().await;
 
-        let mut ds = up.downstairs.lock().await;
-        assert!(!ds.query_repair_ids(0));
+        assert_eq!(up.downstairs.last_repair_extent(), None);
+        let client = &mut up.downstairs.clients[ClientId::new(1)];
+        client.checked_state_transition(&up.state, DsState::Faulted);
+        client.checked_state_transition(&up.state, DsState::LiveRepairReady);
+        assert_eq!(up.on_repair_check().await, RepairCheck::RepairStarted);
 
-        ds.reserve_repair_ids_for_extent(0);
-        let (reserved_ids, _deps) = ds.repair_job_ids.get(&0).unwrap();
+        assert_eq!(up.downstairs.last_repair_extent(), Some(0));
+        // By staring LiveRepair, we should have reserved job IDs
+        let (reserved_ids, _deps) = up.downstairs.get_repair_ids(0);
         assert_eq!(reserved_ids.close_id, JobId(1000));
         assert_eq!(reserved_ids.repair_id, JobId(1001));
         assert_eq!(reserved_ids.noop_id, JobId(1002));
         assert_eq!(reserved_ids.reopen_id, JobId(1003));
 
-        let next_id = ds.next_id();
+        let next_id = up.downstairs.next_id();
         assert_eq!(next_id, JobId(1004));
 
-        // IDs should now be present
-        assert!(ds.query_repair_ids(0));
-        // No IDs for extent 1
-        assert!(!ds.query_repair_ids(1));
-
         // Reserve the IDs again, make sure they are still the same.
-        ds.reserve_repair_ids_for_extent(0);
-        let (reserved_ids, _deps) = ds.repair_job_ids.get(&0).unwrap();
-        assert_eq!(reserved_ids.close_id, JobId(1000));
-        assert_eq!(reserved_ids.repair_id, JobId(1001));
-        assert_eq!(reserved_ids.noop_id, JobId(1002));
-        assert_eq!(reserved_ids.reopen_id, JobId(1003));
-
-        // Get the IDs again this time.
-        let (reserved_ids, _deps) = ds.get_repair_ids(0);
+        let (reserved_ids, _deps) = up.downstairs.get_repair_ids(0);
         assert_eq!(reserved_ids.close_id, JobId(1000));
         assert_eq!(reserved_ids.repair_id, JobId(1001));
         assert_eq!(reserved_ids.noop_id, JobId(1002));
         assert_eq!(reserved_ids.reopen_id, JobId(1003));
 
         // After the get, there should be no record any longer
-        assert!(!ds.query_repair_ids(0));
+        //assert!(!ds.query_repair_ids(0));
     }
 
     #[tokio::test]
@@ -2328,7 +2186,7 @@ mod nope {
 
         submit_one_source_two_repair(&mut ds, g_ei, b_ei);
     }
-
+    // ZZZ Alan above this point
     #[tokio::test]
     async fn test_live_repair_enqueue_reopen() {
         // Make sure the create_and_enqueue_reopen_io() function does

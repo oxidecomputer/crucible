@@ -1006,6 +1006,7 @@ impl DownstairsClient {
             DsState::Faulted => {
                 match old_state {
                     DsState::Active
+                    | DsState::Faulted
                     | DsState::Repair
                     | DsState::LiveRepair
                     | DsState::LiveRepairReady
@@ -1121,9 +1122,9 @@ impl DownstairsClient {
             );
             self.state = new_state;
         } else {
-            panic!(
-                "[{}] transition to same state: {}",
-                self.client_id, new_state
+            warn!(
+                self.log,
+                "[{}] transition to same state: {}", self.client_id, new_state
             );
         }
     }
@@ -1240,8 +1241,8 @@ impl DownstairsClient {
         if old_state != IOState::InProgress {
             // This job is in an unexpected state.
             panic!(
-                "[{}] Job completed while not InProgress: {:?}",
-                self.client_id, old_state
+                "[{}] Job {} completed while not InProgress: {:?}",
+                self.client_id, ds_id, old_state
             );
         }
 
