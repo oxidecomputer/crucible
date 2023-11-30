@@ -492,7 +492,7 @@ impl DownstairsClient {
     }
 
     /// Returns true if it's possible that we need to clean job dependencies
-    fn dependencies_need_cleanup(&self) -> bool {
+    pub(crate) fn dependencies_need_cleanup(&self) -> bool {
         matches!(self.state, DsState::LiveRepair)
             && !self.skipped_jobs.is_empty()
     }

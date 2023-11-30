@@ -333,6 +333,16 @@ pub mod repair_test {
         assert_eq!(job.state_count().done, 3);
     }
 
+    // Test function to create a downstairs.
+    fn create_test_downstairs() -> Downstairs {
+        let mut ds = Downstairs::new(csl(), ClientMap::new());
+        for cid in ClientId::iter() {
+            ds.clients[cid].repair_addr =
+                Some("127.0.0.1:1234".parse().unwrap());
+        }
+        ds
+    }
+
     // Loop over the possible downstairs to be in LiveRepair and
     // run through the do_repair code path.
     #[tokio::test]
@@ -1032,23 +1042,10 @@ pub mod repair_test {
         assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
         assert_eq!(up.downstairs.clients[or_ds].state(), DsState::Faulted);
     }
-}
 
-#[cfg(feature = "NOPE")]
-mod nope {
     fn csl() -> Logger {
         let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
         Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
-    }
-
-    // Test function to create a downstairs.
-    fn create_test_downstairs() -> Downstairs {
-        let mut ds = Downstairs::new(csl(), ClientMap::new());
-        for cid in ClientId::iter() {
-            ds.clients[cid].repair_addr =
-                Some("127.0.0.1:1234".parse().unwrap());
-        }
-        ds
     }
 
     // ALAN: This one is close..
@@ -2186,16 +2183,17 @@ mod nope {
 
         submit_one_source_two_repair(&mut ds, g_ei, b_ei);
     }
-    // ZZZ Alan above this point
+
+    // YYY artemis
     #[tokio::test]
     async fn test_live_repair_enqueue_reopen() {
         // Make sure the create_and_enqueue_reopen_io() function does
         // what we expect it to do, which also tests create_reopen_io()
         // function as well.
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let up = start_up_and_repair(ClientId::new(1)).await;
 
         let mut gw = up.guest.guest_work.lock().await;
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
 
         let eid = 1;
         ds.clients[ClientId::new(1)].extent_limit =
@@ -2213,8 +2211,7 @@ mod nope {
         // create final new_gtos job, but populate ids needed without
         // actually enqueue'ing the middle repair job.
 
-        let _reopen_brw = create_and_enqueue_reopen_io(
-            &mut ds,
+        let _reopen_brw = ds.create_and_enqueue_reopen_io(
             &mut gw,
             eid,
             deps,
@@ -2222,7 +2219,7 @@ mod nope {
             gw_r_id,
         );
 
-        let job = ds.ds_active.get(&repair_ids.reopen_id).unwrap();
+        let job = ds.ds_active().get(&repair_ids.reopen_id).unwrap();
 
         println!("Job is {:?}", job);
         match &job.work {
@@ -2240,7 +2237,7 @@ mod nope {
         for cid in ClientId::iter() {
             assert_eq!(job.state[cid], IOState::New);
         }
-        assert_eq!(job.ack_status, AckStatus::NotAcked);
+        assert_eq!(job.acked, false);
         assert!(!job.replay);
         assert!(job.data.is_none());
     }
@@ -2250,10 +2247,10 @@ mod nope {
         // Make sure the create_and_enqueue_close_io() function does
         // what we expect it to do, which also tests create_close_io()
         // function as well.
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let up = start_up_and_repair(ClientId::new(1)).await;
 
         let mut gw = up.guest.guest_work.lock().await;
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
 
         let eid = 1;
         ds.clients[ClientId::new(1)].extent_limit =
@@ -2275,11 +2272,9 @@ mod nope {
         let gen = 4;
         let source = ClientId::new(1);
         let repair = vec![ClientId::new(0), ClientId::new(2)];
-        let _reopen_brw = create_and_enqueue_close_io(
-            &mut ds,
+        let _reopen_brw = ds.create_and_enqueue_close_io(
             &mut gw,
             eid,
-            next_flush,
             gen,
             deps,
             repair_ids.close_id,
@@ -2288,7 +2283,7 @@ mod nope {
             &repair,
         );
 
-        let job = ds.ds_active.get(&repair_ids.close_id).unwrap();
+        let job = ds.ds_active().get(&repair_ids.close_id).unwrap();
 
         println!("Job is {:?}", job);
         match &job.work {
@@ -2317,7 +2312,7 @@ mod nope {
         for cid in ClientId::iter() {
             assert_eq!(job.state[cid], IOState::New);
         }
-        assert_eq!(job.ack_status, AckStatus::NotAcked);
+        assert_eq!(job.acked, false);
         assert!(!job.replay);
         assert!(job.data.is_none());
     }
@@ -2328,10 +2323,10 @@ mod nope {
         // what we expect it to do, which also tests create_repair_io()
         // function as well.  In this case we expect the job created to
         // be a no-op job.
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let up = start_up_and_repair(ClientId::new(1)).await;
 
         let mut gw = up.guest.guest_work.lock().await;
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
 
         let eid = 1;
         ds.clients[ClientId::new(1)].extent_limit =
@@ -2358,8 +2353,7 @@ mod nope {
             ds.clients[cid].repair_info = Some(ei);
         }
 
-        let _repair_brw = create_and_enqueue_repair_io(
-            &mut ds,
+        let _repair_brw = ds.create_and_enqueue_repair_io(
             &mut gw,
             eid,
             deps,
@@ -2369,7 +2363,7 @@ mod nope {
             &repair,
         );
 
-        let job = ds.ds_active.get(&repair_ids.repair_id).unwrap();
+        let job = ds.ds_active().get(&repair_ids.repair_id).unwrap();
 
         println!("Job is {:?}", job);
         match &job.work {
@@ -2386,7 +2380,7 @@ mod nope {
         for cid in ClientId::iter() {
             assert_eq!(job.state[cid], IOState::New);
         }
-        assert_eq!(job.ack_status, AckStatus::NotAcked);
+        assert_eq!(job.acked, false);
         assert!(!job.replay);
         assert!(job.data.is_none());
     }
@@ -2396,10 +2390,10 @@ mod nope {
         // Make sure the create_and_enqueue_repair_io() function does
         // what we expect it to do, which also tests create_repair_io()
         // function as well.
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let up = start_up_and_repair(ClientId::new(1)).await;
 
         let mut gw = up.guest.guest_work.lock().await;
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
 
         let eid = 1;
         ds.clients[ClientId::new(1)].extent_limit =
@@ -2435,8 +2429,7 @@ mod nope {
                 Some("127.0.0.1:1234".parse().unwrap());
         }
 
-        let _reopen_brw = create_and_enqueue_repair_io(
-            &mut ds,
+        let _reopen_brw = ds.create_and_enqueue_repair_io(
             &mut gw,
             eid,
             deps,
@@ -2446,7 +2439,7 @@ mod nope {
             &repair,
         );
 
-        let job = ds.ds_active.get(&repair_ids.repair_id).unwrap();
+        let job = ds.ds_active().get(&repair_ids.repair_id).unwrap();
 
         println!("Job is {:?}", job);
         match &job.work {
@@ -2478,7 +2471,7 @@ mod nope {
         for cid in ClientId::iter() {
             assert_eq!(job.state[cid], IOState::New);
         }
-        assert_eq!(job.ack_status, AckStatus::NotAcked);
+        assert_eq!(job.acked, false);
         assert!(!job.replay);
         assert!(job.data.is_none());
     }
@@ -2498,20 +2491,18 @@ mod nope {
     /// This function creates the same dependency chain as `repair_extent`,
     /// which is actually used in a real system, but it doesn't wait for repairs
     /// to complete before enqueuing stuff.
-    async fn create_and_enqueue_repair_ops(up: &Arc<Upstairs>, eid: u64) {
+    async fn create_and_enqueue_repair_ops(up: &mut Upstairs, eid: u64) {
         let mut gw = up.guest.guest_work.lock().await;
-        let mut ds = up.downstairs.lock().await;
+        let ds = &mut up.downstairs;
         ds.clients[ClientId::new(1)].extent_limit =
             Some(eid.try_into().unwrap());
 
         let (extent_repair_ids, deps) = ds.get_repair_ids(eid);
 
         let gw_close_id = gw.next_gw_id();
-        let _close_brw = create_and_enqueue_close_io(
-            &mut ds,
+        let _close_brw = ds.create_and_enqueue_close_io(
             &mut gw,
             eid,
-            2, // next_flush
             4, // gen
             deps,
             extent_repair_ids.close_id,
@@ -2520,24 +2511,21 @@ mod nope {
             &[ClientId::new(1)], // repair downstairs
         );
         let gw_repair_id = gw.next_gw_id();
-        let _repair_brw = create_and_enqueue_noop_io(
-            &mut ds,
+        let _repair_brw = ds.create_and_enqueue_noop_io(
             &mut gw,
             vec![extent_repair_ids.close_id],
             extent_repair_ids.repair_id,
             gw_repair_id,
         );
         let gw_noop_id = gw.next_gw_id();
-        let _noop_brw = create_and_enqueue_noop_io(
-            &mut ds,
+        let _noop_brw = ds.create_and_enqueue_noop_io(
             &mut gw,
             vec![extent_repair_ids.repair_id],
             extent_repair_ids.noop_id,
             gw_noop_id,
         );
         let gw_reopen_id = gw.next_gw_id();
-        let _reopen_brw = create_and_enqueue_reopen_io(
-            &mut ds,
+        let _reopen_brw = ds.create_and_enqueue_reopen_io(
             &mut gw,
             eid,
             vec![extent_repair_ids.noop_id],
@@ -2568,33 +2556,28 @@ mod nope {
         //   5 | RpRpRp| 4
         //   6 | RpRpRp| 5
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
+        let up = start_up_and_repair(ClientId::new(1)).await;
         // Write operations 0 to 2
         for i in 0..3 {
-            up.submit_write(
+            up.submit_dummy_write(
                 Block::new_512(i),
                 Bytes::from(vec![0xff; 512]),
-                None,
                 false,
-                ds_done_tx.clone(),
             )
-            .await
-            .unwrap();
+            .await;
         }
 
         // Repair IO functions assume you have the locks
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
         let eid = 0;
         ds.clients[ClientId::new(1)].extent_limit =
             Some(eid.try_into().unwrap());
         drop(ds);
 
-        create_and_enqueue_repair_ops(&up, eid).await;
+        create_and_enqueue_repair_ops(&mut up, eid).await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 7);
 
@@ -2625,32 +2608,25 @@ mod nope {
         //   5 | RpRpRp| 4
         //   6 | RpRpRp| 5
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        let up = start_up_and_repair(ClientId::new(1)).await;
 
         // Create read operations 0 to 2
         for i in 0..3 {
-            up.submit_read(
-                Block::new_512(i),
-                Buffer::new(512),
-                None,
-                ds_done_tx.clone(),
-            )
-            .await
-            .unwrap();
+            up.submit_dummy_read(Block::new_512(i), Buffer::new(512))
+                .await;
         }
 
         // Repair IO functions assume you have the locks already
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
         let eid = 0;
         ds.clients[ClientId::new(1)].extent_limit =
             Some(eid.try_into().unwrap());
         drop(ds);
 
-        create_and_enqueue_repair_ops(&up, eid).await;
+        create_and_enqueue_repair_ops(&mut up, eid).await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 7);
 
@@ -2681,43 +2657,30 @@ mod nope {
         //   5 |RpRpRp |
         //   6 |RpRpRp |
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        let up = start_up_and_repair(ClientId::new(1)).await;
+        up.submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .await;
 
-        up.submit_read(
-            Block::new_512(0),
-            Buffer::new(512),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
-
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(1),
             Bytes::from(vec![0xff; 512]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
-        up.submit_flush(None, None, ds_done_tx.clone())
-            .await
-            .unwrap();
+        up.submit_flush(None, None).await;
 
         // Repair IO functions assume you have the locks already
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
         let eid = 0;
         ds.clients[ClientId::new(1)].extent_limit =
             Some(eid.try_into().unwrap());
         drop(ds);
 
-        create_and_enqueue_repair_ops(&up, eid).await;
+        create_and_enqueue_repair_ops(&mut up, eid).await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 7);
 
@@ -2745,12 +2708,12 @@ mod nope {
         //   1 | RpRpRp| 0
         //   2 | RpRpRp| 1
         //   3 | RpRpRp| 2
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let up = start_up_and_repair(ClientId::new(1)).await;
         let eid = 0;
-        create_and_enqueue_repair_ops(&up, eid).await;
+        create_and_enqueue_repair_ops(&mut up, eid).await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 4);
 
@@ -2776,31 +2739,26 @@ mod nope {
         //   3 | RpRpRp| 2
         //   4 |     W | 3
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
+        let up = start_up_and_repair(ClientId::new(1)).await;
         // Repair IO functions assume you have the locks
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
         let eid = 0;
         ds.clients[ClientId::new(1)].extent_limit =
             Some(eid.try_into().unwrap());
 
         drop(ds);
 
-        create_and_enqueue_repair_ops(&up, eid).await;
+        create_and_enqueue_repair_ops(&mut up, eid).await;
 
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(2),
             Bytes::from(vec![0xff; 512]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -2822,30 +2780,22 @@ mod nope {
         //   2 | RpRpRp|
         //   3 | RpRpRp|
         //   4 | R     | 3
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
+        let up = start_up_and_repair(ClientId::new(1)).await;
         // Repair IO functions assume you have the locks already
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
         let eid = 0;
         ds.clients[ClientId::new(1)].extent_limit =
             Some(eid.try_into().unwrap());
         drop(ds);
 
-        create_and_enqueue_repair_ops(&up, eid).await;
+        create_and_enqueue_repair_ops(&mut up, eid).await;
 
-        up.submit_read(
-            Block::new_512(0),
-            Buffer::new(512),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
+        up.submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .await;
 
-        let ds = up.downstairs.lock().await;
+        let ds = up.downstairs;
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -2867,25 +2817,21 @@ mod nope {
         //   2 | RpRpRp|
         //   3 | RpRpRp|
         //   4 | F F F | 3
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
+        let up = start_up_and_repair(ClientId::new(1)).await;
         // Repair IO functions assume you have the locks already
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
         let eid = 0;
         ds.clients[ClientId::new(1)].extent_limit =
             Some(eid.try_into().unwrap());
         drop(ds);
 
-        create_and_enqueue_repair_ops(&up, eid).await;
+        create_and_enqueue_repair_ops(&mut up, eid).await;
 
-        up.submit_flush(None, None, ds_done_tx.clone())
-            .await
-            .unwrap();
+        up.submit_flush(None, None).await;
 
-        let ds = up.downstairs.lock().await;
+        let ds = up.downstairs;
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -2908,32 +2854,21 @@ mod nope {
         //   3 |       | RpRpRp|       |
         //   4 |       | RpRpRp|       |
         //   5 |       | RpRpRp|       |
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        up.submit_write(
+        let up = start_up_and_repair(ClientId::new(1)).await;
+        up.submit_dummy_write(
             Block::new_512(2),
             Bytes::from(vec![0xff; 512]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
-        up.submit_read(
-            Block::new_512(6),
-            Buffer::new(512),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
+        up.submit_dummy_read(Block::new_512(6), Buffer::new(512))
+            .await;
 
-        create_and_enqueue_repair_ops(&up, 1).await;
+        create_and_enqueue_repair_ops(&mut up, 1).await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 6);
 
@@ -2955,32 +2890,21 @@ mod nope {
         //   3 |       | RpRpRp|       |
         //   4 |       |       |   R   |
         //   5 |  W    |       |       |
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        let up = start_up_and_repair(ClientId::new(1)).await;
+        create_and_enqueue_repair_ops(&mut up, 1).await;
 
-        create_and_enqueue_repair_ops(&up, 1).await;
-
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(2),
             Bytes::from(vec![0xff; 512]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
-        up.submit_read(
-            Block::new_512(6),
-            Buffer::new(512),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
+        up.submit_dummy_read(Block::new_512(6), Buffer::new(512))
+            .await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 6);
 
@@ -3002,21 +2926,15 @@ mod nope {
         //   3 |       | RpRpRp|
         //   4 |       | RpRpRp|
         //   5 | F F F | F F F | 0,4
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        let up = start_up_and_repair(ClientId::new(1)).await;
+        up.submit_flush(None, None).await;
 
-        up.submit_flush(None, None, ds_done_tx.clone())
-            .await
-            .unwrap();
+        create_and_enqueue_repair_ops(&mut up, 1).await;
 
-        create_and_enqueue_repair_ops(&up, 1).await;
+        up.submit_flush(None, None).await;
 
-        up.submit_flush(None, None, ds_done_tx.clone())
-            .await
-            .unwrap();
-
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 6);
 
@@ -3045,19 +2963,15 @@ mod nope {
         //   6 |       | RpRpRp|
         //   7 |       | RpRpRp|
         //   8 |       | RpRpRp|
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        let up = start_up_and_repair(ClientId::new(1)).await;
+        create_and_enqueue_repair_ops(&mut up, 0).await;
 
-        create_and_enqueue_repair_ops(&up, 0).await;
+        up.submit_flush(None, None).await;
 
-        up.submit_flush(None, None, ds_done_tx.clone())
-            .await
-            .unwrap();
+        create_and_enqueue_repair_ops(&mut up, 1).await;
 
-        create_and_enqueue_repair_ops(&up, 1).await;
-
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 9);
 
@@ -3081,24 +2995,19 @@ mod nope {
         //   3 |       | RpRpRp| 0
         //   4 |       | RpRpRp| 0
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
+        let up = start_up_and_repair(ClientId::new(1)).await;
         // A write of blocks 1,2 and 3 which spans the extent.
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(1),
             Bytes::from(vec![0xff; 512 * 3]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
-        create_and_enqueue_repair_ops(&up, 1).await;
+        create_and_enqueue_repair_ops(&mut up, 1).await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -3118,24 +3027,19 @@ mod nope {
         //   3 | RpRpRp|       |
         //   4 | RpRpRp|       |
         //
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
+        let up = start_up_and_repair(ClientId::new(1)).await;
         // A write of blocks 2,3 and 4 which spans the extent.
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(2),
             Bytes::from(vec![0xff; 512 * 3]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
-        create_and_enqueue_repair_ops(&up, 0).await;
+        create_and_enqueue_repair_ops(&mut up, 0).await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -3157,22 +3061,14 @@ mod nope {
         //   3 |       | RpRpRp|
         //   4 |       | RpRpRp|
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
+        let up = start_up_and_repair(ClientId::new(1)).await;
         // A read of blocks 1,2 and 3 which spans the extent.
-        up.submit_read(
-            Block::new_512(1),
-            Buffer::new(512 * 3),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
+        up.submit_dummy_read(Block::new_512(1), Buffer::new(512 * 3))
+            .await;
 
-        create_and_enqueue_repair_ops(&up, 1).await;
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        create_and_enqueue_repair_ops(&mut up, 1).await;
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -3193,23 +3089,15 @@ mod nope {
         //   3 | RpRpRp|       |
         //   4 | RpRpRp|       |
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
+        let up = start_up_and_repair(ClientId::new(1)).await;
         // A read of blocks 2,3 and 4 which spans the extent.
-        up.submit_read(
-            Block::new_512(2),
-            Buffer::new(512 * 3),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
+        up.submit_dummy_read(Block::new_512(2), Buffer::new(512 * 3))
+            .await;
 
-        create_and_enqueue_repair_ops(&up, 0).await;
+        create_and_enqueue_repair_ops(&mut up, 0).await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -3236,25 +3124,20 @@ mod nope {
         //   7 |       | RpRpRp| 6
         //   8 |       | RpRpRp| 6
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
+        let up = start_up_and_repair(ClientId::new(1)).await;
         // A write of blocks 2 and 3 which spans the extent.
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(2),
             Bytes::from(vec![0xff; 512 * 2]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
-        create_and_enqueue_repair_ops(&up, 0).await;
-        create_and_enqueue_repair_ops(&up, 1).await;
+        create_and_enqueue_repair_ops(&mut up, 0).await;
+        create_and_enqueue_repair_ops(&mut up, 1).await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 9);
 
@@ -3275,23 +3158,15 @@ mod nope {
         //   3 |       | RpRpRp|       |
         //   4 |       | RpRpRp|       |
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
+        let up = start_up_and_repair(ClientId::new(1)).await;
         // A read of blocks 0-8, spans three extents.
-        up.submit_read(
-            Block::new_512(0),
-            Buffer::new(512 * 9),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
+        up.submit_dummy_read(Block::new_512(0), Buffer::new(512 * 9))
+            .await;
 
-        create_and_enqueue_repair_ops(&up, 1).await;
+        create_and_enqueue_repair_ops(&mut up, 1).await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -3343,24 +3218,19 @@ mod nope {
         // We also verify that the job IDs make sense for our repair id
         // reservation that happens when we need to insert a job like this.
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        create_and_enqueue_repair_ops(&up, 0).await;
+        let up = start_up_and_repair(ClientId::new(1)).await;
+        create_and_enqueue_repair_ops(&mut up, 0).await;
 
         // A write of blocks 2,3,4 which spans extent 0 and extent 1.
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(2),
             Bytes::from(vec![0xff; 512 * 3]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 5);
         assert!(jobs[0].work.deps().is_empty());
@@ -3387,22 +3257,14 @@ mod nope {
         //   3 |       | RpRpRp| 2
         //   4 |   R R | R     | 3
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        let up = start_up_and_repair(ClientId::new(1)).await;
+        create_and_enqueue_repair_ops(&mut up, 1).await;
 
-        create_and_enqueue_repair_ops(&up, 1).await;
+        up.submit_dummy_read(Block::new_512(1), Buffer::new(512 * 3))
+            .await;
 
-        up.submit_read(
-            Block::new_512(1),
-            Buffer::new(512 * 3),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
-
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -3425,34 +3287,23 @@ mod nope {
         //   4 |       | RpRpRp|       |
         //   5 |       | RpRpRp|       |
         //
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        up.submit_read(
-            Block::new_512(0),
-            Buffer::new(512 * 4),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
+        let up = start_up_and_repair(ClientId::new(1)).await;
+        up.submit_dummy_read(Block::new_512(0), Buffer::new(512 * 4))
+            .await;
 
         // A write of blocks 5,6,7,8 which spans two extents.
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(5),
             Bytes::from(vec![0xff; 512 * 4]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
         // The final repair command
-        create_and_enqueue_repair_ops(&up, 1).await;
+        create_and_enqueue_repair_ops(&mut up, 1).await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 6);
 
@@ -3486,59 +3337,42 @@ mod nope {
         //  13 |       |       | RpRpRp| 12
         //  14 |       |       | RpRpRp| 13
         //  15 |       |       | RpRpRp| 14
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        up.submit_write(
+        let up = start_up_and_repair(ClientId::new(1)).await;
+        up.submit_dummy_write(
             Block::new_512(7),
             Bytes::from(vec![0xff; 512]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
         // The first repair command
-        create_and_enqueue_repair_ops(&up, 0).await;
+        create_and_enqueue_repair_ops(&mut up, 0).await;
 
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(4),
             Bytes::from(vec![0xff; 512]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
-        up.submit_read(
-            Block::new_512(2),
-            Buffer::new(512),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
+        up.submit_dummy_read(Block::new_512(2), Buffer::new(512))
+            .await;
 
         // The second repair command
-        create_and_enqueue_repair_ops(&up, 1).await;
+        create_and_enqueue_repair_ops(&mut up, 1).await;
 
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(5),
             Bytes::from(vec![0xff; 512]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
         // The third repair command
-        create_and_enqueue_repair_ops(&up, 2).await;
+        create_and_enqueue_repair_ops(&mut up, 2).await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 16);
 
@@ -3579,36 +3413,23 @@ mod nope {
         //   0 |   R   |       |
         //   0 | F F F | F F F | 0,1
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
+        let up = start_up_and_repair(ClientId::new(1)).await;
         // A write of blocks 2,3,4 which spans the extent.
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(2),
             Bytes::from(vec![0xff; 512 * 3]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
         // A read of block 1.
-        up.submit_read(
-            Block::new_512(1),
-            Buffer::new(512),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
+        up.submit_dummy_read(Block::new_512(1), Buffer::new(512))
+            .await;
 
-        up.submit_flush(None, None, ds_done_tx.clone())
-            .await
-            .unwrap();
+        up.submit_flush(None, None).await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 3);
 
@@ -3649,26 +3470,21 @@ mod nope {
         //   3 |       | RpRpRp|
         //   4 |     W | W W   | 3
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        let mut ds = up.downstairs.lock().await;
+        let up = start_up_and_repair(ClientId::new(1)).await;
+        let mut ds = up.downstairs;
         ds.clients[ClientId::new(1)].extent_limit = Some(0);
         drop(ds);
 
         // A write of blocks 2,3,4 which spans extents.
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(2),
             Bytes::from(vec![0xff; 512 * 3]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 1);
 
@@ -3704,28 +3520,20 @@ mod nope {
         //   3 |       | RpRpRp| 2
         //  *4 |     R | R R   | 3
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        let mut ds = up.downstairs.lock().await;
+        let up = start_up_and_repair(ClientId::new(1)).await;
+        let mut ds = up.downstairs;
         ds.clients[ClientId::new(1)].extent_limit = Some(0);
         drop(ds);
 
         // A read of blocks 2,3,4 which spans extents.
-        up.submit_read(
-            Block::new_512(2),
-            Buffer::new(512 * 3),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
+        up.submit_dummy_read(Block::new_512(2), Buffer::new(512 * 3))
+            .await;
 
         // Now enqueue the repair on extent 1, it should populate one of the
         // empty job slots.
-        create_and_enqueue_repair_ops(&up, 1).await;
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        create_and_enqueue_repair_ops(&mut up, 1).await;
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -3756,19 +3564,15 @@ mod nope {
         // ----|-------|-------|-----
         //   0 | F F F | F F F |
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        let mut ds = up.downstairs.lock().await;
+        let up = start_up_and_repair(ClientId::new(1)).await;
+        let mut ds = up.downstairs;
         ds.clients[ClientId::new(1)].extent_limit = Some(0);
         drop(ds);
 
-        up.submit_flush(None, None, ds_done_tx.clone())
-            .await
-            .unwrap();
+        up.submit_flush(None, None).await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 1);
         assert!(jobs[0].work.deps().is_empty());
@@ -3778,69 +3582,49 @@ mod nope {
     async fn test_live_repair_send_io_write_below() {
         // Verify that we will send a write during LiveRepair when
         // the IO is an extent that is already repaired.
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        let mut ds = up.downstairs.lock().await;
+        let up = start_up_and_repair(ClientId::new(1)).await;
+        let mut ds = up.downstairs;
         ds.clients[ClientId::new(1)].extent_limit = Some(1);
         drop(ds);
 
         let job_id = JobId(1000);
         // A write of block 1 extents 0 (already repaired).
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(1),
             Bytes::from(vec![0xff; 512]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
         // submit_write will call enqueue, so let's see where our
         // job is now.
-        show_all_work(&up).await;
+        up.show_all_work().await;
 
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
         assert!(ds.in_progress(job_id, ClientId::new(0)).is_some());
         assert!(ds.in_progress(job_id, ClientId::new(1)).is_some());
         assert!(ds.in_progress(job_id, ClientId::new(2)).is_some());
     }
 
     // Test function to put some work on the work queues.
-    async fn submit_three_ios(
-        up: &Arc<Upstairs>,
-        ds_done_tx: &mpsc::Sender<()>,
-    ) {
-        up.submit_write(
+    async fn submit_three_ios(up: &mut Upstairs) {
+        up.submit_dummy_write(
             Block::new_512(0),
             Bytes::from(vec![0xff; 512]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
-        up.submit_read(
-            Block::new_512(0),
-            Buffer::new(512),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
+        up.submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .await;
 
         // WriteUnwritten
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(0),
             Bytes::from(vec![0xff; 512]),
-            None,
             true,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
     }
 
     #[tokio::test]
@@ -3851,28 +3635,26 @@ mod nope {
         // Move the LiveRepair downstairs to Faulted.
         // Move all IO for that downstairs to skipped.
         // Clear the extent_limit setting for that downstairs.
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
+        let up = start_up_and_repair(ClientId::new(1)).await;
         let eid = 0u64;
-        let mut ds = up.downstairs.lock().await;
-        ds.clients[ClientId::new(1)].extent_limit = Some(eid as usize);
+        let mut ds = up.downstairs;
+        ds.clients[ClientId::new(1)].extent_limit = Some(eid);
         drop(ds);
 
-        submit_three_ios(&up, &ds_done_tx).await;
+        submit_three_ios(&mut up).await;
 
         let mut gw = up.guest.guest_work.lock().await;
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
 
-        up.abort_repair_ds(&mut ds, UpState::Active, &ds_done_tx);
+        up.abort_repair_ds(&mut ds, UpState::Active);
         up.abort_repair_extent(&mut gw, &mut ds, eid);
 
-        assert_eq!(ds.clients[ClientId::new(0)].state, DsState::Active);
-        assert_eq!(ds.clients[ClientId::new(1)].state, DsState::Faulted);
-        assert_eq!(ds.clients[ClientId::new(0)].state, DsState::Active);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Active);
+        assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
+        assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Active);
 
         // Check all three IOs again, downstairs 1 will be skipped..
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         for job in jobs.iter().take(3) {
             assert_eq!(job.state[ClientId::new(0)], IOState::New);
@@ -3888,29 +3670,32 @@ mod nope {
         // Starting with one downstairs in LiveRepair state and future
         // repair job IDs reserved (but not created yet). The functions
         // will verify that four noop repair jobs will be queued.
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
+        let up = start_up_and_repair(ClientId::new(1)).await;
         let eid = 0u64;
-        let mut ds = up.downstairs.lock().await;
-        ds.clients[ClientId::new(1)].extent_limit = Some(eid as usize);
+        let mut ds = up.downstairs;
+        ds.clients[ClientId::new(1)].extent_limit = Some(eid);
         drop(ds);
 
-        submit_three_ios(&up, &ds_done_tx).await;
+        submit_three_ios(&mut up).await;
 
         let mut gw = up.guest.guest_work.lock().await;
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
 
         // Reserve some repair IDs
         ds.reserve_repair_ids_for_extent(eid);
-        let (reserved_ids, _deps) =
-            ds.repair_job_ids.get(&eid).unwrap().clone();
+        let (reserved_ids, _deps) = ds
+            .repair()
+            .unwrap()
+            .repair_job_ids()
+            .get(&eid)
+            .unwrap()
+            .clone();
 
-        up.abort_repair_ds(&mut ds, UpState::Active, &ds_done_tx);
+        up.abort_repair_ds(&mut ds, UpState::Active);
         up.abort_repair_extent(&mut gw, &mut ds, eid);
 
         // Check all three IOs again, downstairs 1 will be skipped..
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 7);
         for job in jobs.iter().take(7) {
@@ -3934,31 +3719,29 @@ mod nope {
         // have been reserved (but not created yet). The functions will
         // clear the reserved repair jobs, but not bother to submit them
         // as once a downstairs has failed, it's not doing any more work.
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        up.ds_transition(ClientId::new(0), DsState::Faulted).await;
-        up.ds_transition(ClientId::new(2), DsState::Faulted).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
+        let up = start_up_and_repair(ClientId::new(1)).await;
+        up.ds_transition(ClientId::new(0), DsState::Faulted);
+        up.ds_transition(ClientId::new(2), DsState::Faulted);
         let eid = 0u64;
-        let mut ds = up.downstairs.lock().await;
-        ds.clients[ClientId::new(0)].extent_limit = Some(eid as usize);
-        ds.clients[ClientId::new(1)].extent_limit = Some(eid as usize);
-        ds.clients[ClientId::new(2)].extent_limit = Some(eid as usize);
+        let mut ds = up.downstairs;
+        ds.clients[ClientId::new(0)].extent_limit = Some(eid);
+        ds.clients[ClientId::new(1)].extent_limit = Some(eid);
+        ds.clients[ClientId::new(2)].extent_limit = Some(eid);
         drop(ds);
 
-        submit_three_ios(&up, &ds_done_tx).await;
+        submit_three_ios(&mut up).await;
 
         let mut gw = up.guest.guest_work.lock().await;
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
 
         // Reserve some repair IDs
         ds.reserve_repair_ids_for_extent(eid);
 
-        up.abort_repair_ds(&mut ds, UpState::Active, &ds_done_tx);
+        up.abort_repair_ds(&mut ds, UpState::Active);
         up.abort_repair_extent(&mut gw, &mut ds, eid);
 
         // Check all three IOs again, all downstairs will be skipped..
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         for job in jobs.iter().take(3) {
             assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
@@ -3968,10 +3751,10 @@ mod nope {
 
         // No repair jobs should be submitted
         assert_eq!(jobs.len(), 3);
-        assert!(!ds.query_repair_ids(eid));
+        assert!(!ds.repair().unwrap().repair_job_ids().contains_key(&eid));
     }
 
-    async fn test_upstairs_okay() -> Arc<Upstairs> {
+    async fn test_upstairs_okay() -> Upstairs {
         // Build an upstairs without a faulted downstairs.
         let mut ddef = RegionDefinition::default();
         ddef.set_block_size(512);
@@ -3981,15 +3764,15 @@ mod nope {
         let up = Upstairs::test_default(Some(ddef));
 
         for cid in ClientId::iter() {
-            up.ds_transition(cid, DsState::WaitActive).await;
+            up.ds_transition(cid, DsState::WaitActive);
             let dsr = RegionMetadata {
                 generation: vec![1, 1, 1, 1],
                 flush_numbers: vec![2, 2, 2, 2],
                 dirty: vec![false, false, false, false],
             };
-            up.downstairs.lock().await.clients[cid].region_metadata = Some(dsr);
-            up.ds_transition(cid, DsState::WaitQuorum).await;
-            up.ds_transition(cid, DsState::Active).await;
+            up.downstairs.clients[cid].region_metadata = Some(dsr);
+            up.ds_transition(cid, DsState::WaitQuorum);
+            up.ds_transition(cid, DsState::Active);
         }
 
         up.set_active().await.unwrap();
@@ -4005,36 +3788,33 @@ mod nope {
 
         let up = test_upstairs_okay().await;
         // Channels we want to appear to be working
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         // Now, send some IOs.
-        submit_three_ios(&up, &ds_done_tx).await;
+        submit_three_ios(&mut up).await;
 
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
         // Manually move all these jobs to done.
         for job_id in (1000..1003).map(JobId) {
-            let mut handle = ds.ds_active.get_mut(&job_id).unwrap();
-            let job = handle.job();
+            let mut handle = ds.ds_active().get_mut(&job_id).unwrap();
             for cid in ClientId::iter() {
-                job.state.insert(cid, IOState::Done);
+                handle.state[cid] = IOState::Done;
             }
         }
         drop(ds);
 
         // Fault the downstairs
-        up.ds_transition(ClientId::new(1), DsState::Faulted).await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady)
-            .await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepair)
-            .await;
+        up.ds_transition(ClientId::new(1), DsState::Faulted);
+        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
+        up.ds_transition(ClientId::new(1), DsState::LiveRepair);
 
-        let mut ds = up.downstairs.lock().await;
-        ds.repair_min_id = Some(ds.peek_next_id());
+        let mut ds = up.downstairs;
+        let next_id = ds.peek_next_id();
+        *ds.repair_mut().unwrap().min_id_mut() = next_id;
         drop(ds);
         // New jobs will go -> Skipped for the downstairs in repair.
-        submit_three_ios(&up, &ds_done_tx).await;
+        submit_three_ios(&mut up).await;
 
-        show_all_work(&up).await;
-        let mut ds = up.downstairs.lock().await;
+        up.show_all_work().await;
+        let mut ds = up.downstairs;
         // Good downstairs don't need changes
         assert!(!ds.clients[ClientId::new(0)].dependencies_need_cleanup());
         assert!(!ds.clients[ClientId::new(2)].dependencies_need_cleanup());
@@ -4042,7 +3822,7 @@ mod nope {
         // LiveRepair downstairs might need a change
         assert!(ds.clients[ClientId::new(1)].dependencies_need_cleanup());
         for job_id in (1003..1006).map(JobId) {
-            let job = ds.ds_active.get(&job_id).unwrap();
+            let job = ds.ds_active().get(&job_id).unwrap();
             // jobs 3,4,5 will be skipped for our LiveRepair downstairs.
             assert_eq!(job.state[ClientId::new(0)], IOState::New);
             assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
@@ -4052,7 +3832,7 @@ mod nope {
         // Walk the three new jobs, verify that the dependencies will be
         // updated for our downstairs under repair.
         // Make the empty dep list for comparison
-        let job = ds.ds_active.get(&JobId(1003)).unwrap();
+        let job = ds.ds_active().get(&JobId(1003)).unwrap();
         let mut current_deps = job.work.deps().clone();
 
         assert_eq!(current_deps, &[JobId(1002)]);
@@ -4064,7 +3844,7 @@ mod nope {
         );
         assert!(current_deps.is_empty());
 
-        let job = ds.ds_active.get(&JobId(1004)).unwrap();
+        let job = ds.ds_active().get(&JobId(1004)).unwrap();
         let mut current_deps = job.work.deps().clone();
 
         // Job 1001 is not a dep for 1004
@@ -4076,7 +3856,7 @@ mod nope {
         );
         assert!(current_deps.is_empty());
 
-        let job = ds.ds_active.get(&JobId(1005)).unwrap();
+        let job = ds.ds_active().get(&JobId(1005)).unwrap();
         let mut current_deps = job.work.deps().clone();
 
         assert_eq!(current_deps, &[JobId(1004)]);
@@ -4101,42 +3881,39 @@ mod nope {
         let up = test_upstairs_okay().await;
 
         // Channels we want to appear to be working
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
         // Now, send some IOs.
-        submit_three_ios(&up, &ds_done_tx).await;
+        submit_three_ios(&mut up).await;
 
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
         // Manually move all these jobs to done.
         for job_id in (1000..1003).map(JobId) {
-            let mut handle = ds.ds_active.get_mut(&job_id).unwrap();
-            let job = handle.job();
+            let mut handle = ds.ds_active().get_mut(&job_id).unwrap();
             for cid in ClientId::iter() {
-                job.state.insert(cid, IOState::Done);
+                handle.state.insert(cid, IOState::Done);
             }
         }
 
         drop(ds);
         // Fault the downstairs
-        up.ds_transition(ClientId::new(1), DsState::Faulted).await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady)
-            .await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepair)
-            .await;
-        let mut ds = up.downstairs.lock().await;
-        ds.repair_min_id = Some(ds.peek_next_id());
+        up.ds_transition(ClientId::new(1), DsState::Faulted);
+        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
+        up.ds_transition(ClientId::new(1), DsState::LiveRepair);
+        let mut ds = up.downstairs;
+        let next_id = ds.peek_next_id();
+        *ds.repair_mut().unwrap().min_id_mut() = next_id;
         drop(ds);
 
         // New jobs will go -> Skipped for the downstairs in repair.
-        submit_three_ios(&up, &ds_done_tx).await;
+        submit_three_ios(&mut up).await;
 
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
         ds.clients[ClientId::new(1)].extent_limit = Some(1);
         drop(ds);
 
         // New jobs will go -> Skipped for the downstairs in repair.
-        submit_three_ios(&up, &ds_done_tx).await;
+        submit_three_ios(&mut up).await;
 
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
         // Good downstairs don't need changes
         assert!(!ds.clients[ClientId::new(0)].dependencies_need_cleanup());
         assert!(!ds.clients[ClientId::new(2)].dependencies_need_cleanup());
@@ -4147,7 +3924,7 @@ mod nope {
         // For the three latest jobs, they should be New as they are IOs that
         // are on an extent we "already repaired".
         for job_id in (1006..1009).map(JobId) {
-            let job = ds.ds_active.get(&job_id).unwrap();
+            let job = ds.ds_active().get(&job_id).unwrap();
             assert_eq!(job.state[ClientId::new(0)], IOState::New);
             assert_eq!(job.state[ClientId::new(1)], IOState::New);
             assert_eq!(job.state[ClientId::new(2)], IOState::New);
@@ -4156,7 +3933,7 @@ mod nope {
         // Walk the three final jobs, verify that the dependencies will be
         // updated for our downstairs under repair, but will still include
         // the jobs that came after the repair.
-        let job = ds.ds_active.get(&JobId(1006)).unwrap();
+        let job = ds.ds_active().get(&JobId(1006)).unwrap();
         let mut current_deps = job.work.deps().clone();
 
         assert_eq!(current_deps, &[JobId(1005)]);
@@ -4167,7 +3944,7 @@ mod nope {
         );
         assert!(current_deps.is_empty());
 
-        let job = ds.ds_active.get(&JobId(1007)).unwrap();
+        let job = ds.ds_active().get(&JobId(1007)).unwrap();
         let mut current_deps = job.work.deps().clone();
 
         assert_eq!(current_deps, &[JobId(1006)]);
@@ -4178,7 +3955,7 @@ mod nope {
         );
         assert_eq!(current_deps, &[JobId(1006)]);
 
-        let job = ds.ds_active.get(&JobId(1008)).unwrap();
+        let job = ds.ds_active().get(&JobId(1008)).unwrap();
         let mut current_deps = job.work.deps().clone();
 
         assert_eq!(current_deps, &[JobId(1007)]);
@@ -4215,81 +3992,65 @@ mod nope {
         //  13 |   W W | W     |
 
         let up = test_upstairs_okay().await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
         // Now, put three IOs on the queue
         for block in 1..4 {
-            up.submit_write(
+            up.submit_dummy_write(
                 Block::new_512(block),
                 Bytes::from(vec![0xff; 512 * 3]),
-                None,
                 false,
-                ds_done_tx.clone(),
             )
-            .await
-            .unwrap();
+            .await;
         }
 
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
         // Manually move all these jobs to done.
         for job_id in (1000..1003).map(JobId) {
-            let mut handle = ds.ds_active.get_mut(&job_id).unwrap();
-            let job = handle.job();
+            let mut handle = ds.ds_active().get_mut(&job_id).unwrap();
             for cid in ClientId::iter() {
-                job.state.insert(cid, IOState::Done);
+                handle.state.insert(cid, IOState::Done);
             }
         }
 
         drop(ds);
 
         // Fault the downstairs
-        up.ds_transition(ClientId::new(1), DsState::Faulted).await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady)
-            .await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepair)
-            .await;
-        let mut ds = up.downstairs.lock().await;
-        ds.repair_min_id = Some(ds.peek_next_id());
+        up.ds_transition(ClientId::new(1), DsState::Faulted);
+        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
+        up.ds_transition(ClientId::new(1), DsState::LiveRepair);
+        let mut ds = up.downstairs;
+        let next_id = ds.peek_next_id();
+        *ds.repair_mut().unwrap().min_id_mut() = next_id;
         drop(ds);
 
         // Put a repair job on the queue.
-        create_and_enqueue_repair_ops(&up, 0).await;
+        create_and_enqueue_repair_ops(&mut up, 0).await;
 
         // Create a write on extent 1 (not yet repaired)
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(3),
             Bytes::from(vec![0xff; 512 * 3]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
         // Now, submit another write, this one will be on the extent
         // that is under repair.
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(1),
             Bytes::from(vec![0xff; 512]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
         // Submit a final write.  This has a shadow that covers every
         // IO submitted so far, and will also require creation of
         // space for future repair work.
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(1),
             Bytes::from(vec![0xff; 512 * 3]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
         // Previous tests have verified what happens before job 1007
         // Starting with job 7, this is special because it will have
@@ -4299,8 +4060,8 @@ mod nope {
         // it will not depend on anything. This is okay, because the job
         // itself is Skipped there, so we won't actually send it.
 
-        let mut ds = up.downstairs.lock().await;
-        let job = ds.ds_active.get(&JobId(1007)).unwrap();
+        let mut ds = up.downstairs;
+        let job = ds.ds_active().get(&JobId(1007)).unwrap();
         assert_eq!(job.state[ClientId::new(0)], IOState::New);
         assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
         assert_eq!(job.state[ClientId::new(2)], IOState::New);
@@ -4322,7 +4083,7 @@ mod nope {
         // This second write after starting a repair should require job 6 (i.e.
         // the final job of the repair) on both the Active and LiveRepair
         // downstairs, since it masks job 0
-        let job = ds.ds_active.get(&JobId(1008)).unwrap();
+        let job = ds.ds_active().get(&JobId(1008)).unwrap();
         assert_eq!(job.state[ClientId::new(0)], IOState::New);
         assert_eq!(job.state[ClientId::new(1)], IOState::New);
         assert_eq!(job.state[ClientId::new(2)], IOState::New);
@@ -4340,7 +4101,7 @@ mod nope {
 
         // This final job depends on everything on Active downstairs, but
         // a smaller subset for the LiveRepair downstairs
-        let job = ds.ds_active.get(&JobId(1013)).unwrap();
+        let job = ds.ds_active().get(&JobId(1013)).unwrap();
         assert_eq!(job.state[ClientId::new(0)], IOState::New);
         assert_eq!(job.state[ClientId::new(1)], IOState::New);
         assert_eq!(job.state[ClientId::new(2)], IOState::New);
@@ -4382,25 +4143,19 @@ mod nope {
         //   5 |   W   |       |
 
         let up = test_upstairs_okay().await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
         // Put the first write on the queue
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(1),
             Bytes::from(vec![0xff; 512]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
-        let mut ds = up.downstairs.lock().await;
+        let mut ds = up.downstairs;
         // Manually move this jobs to done.
-        let mut handle = ds.ds_active.get_mut(&JobId(1000)).unwrap();
-        let job = handle.job();
+        let mut handle = ds.ds_active().get_mut(&JobId(1000)).unwrap();
         for cid in ClientId::iter() {
-            job.state.insert(cid, IOState::Done);
+            handle.state.insert(cid, IOState::Done);
         }
         drop(handle);
         drop(ds);
@@ -4408,21 +4163,20 @@ mod nope {
         let eid = 0;
 
         // Fault the downstairs
-        up.ds_transition(ClientId::new(1), DsState::Faulted).await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady)
-            .await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepair)
-            .await;
+        up.ds_transition(ClientId::new(1), DsState::Faulted);
+        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
+        up.ds_transition(ClientId::new(1), DsState::LiveRepair);
 
         // Simulate what happens when we first start repair
         // on extent 0
         let next_flush = up.next_flush_id();
-        let gen = up.get_generation();
+        let gen = up.generation;
 
         let mut gw = up.guest.guest_work.lock().await;
-        let mut ds = up.downstairs.lock().await;
-        ds.repair_min_id = Some(ds.peek_next_id());
-        ds.clients[ClientId::new(1)].extent_limit = Some(eid as usize);
+        let mut ds = up.downstairs;
+        let next_id = ds.peek_next_id();
+        *ds.repair_mut().unwrap().min_id_mut() = next_id;
+        ds.clients[ClientId::new(1)].extent_limit = Some(eid);
 
         // Upstairs "guest" work IDs.
         let gw_close_id: u64 = gw.next_gw_id();
@@ -4443,8 +4197,7 @@ mod nope {
         deps.push(noop_id);
         let reopen_deps = deps.clone();
 
-        let _reopen_brw = create_and_enqueue_reopen_io(
-            &mut ds,
+        let _reopen_brw = ds.create_and_enqueue_reopen_io(
             &mut gw,
             eid,
             reopen_deps,
@@ -4454,11 +4207,9 @@ mod nope {
 
         // Next we create and insert the close job on the work queue.
 
-        let _close_brw = create_and_enqueue_close_io(
-            &mut ds,
+        let _close_brw = ds.create_and_enqueue_close_io(
             &mut gw,
             eid,
-            next_flush,
             gen,
             close_deps,
             close_id,
@@ -4470,18 +4221,15 @@ mod nope {
         drop(ds);
         drop(gw);
         // Submit a write.
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(1),
             Bytes::from(vec![0xff; 512]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
-        let mut ds = up.downstairs.lock().await;
-        let job = ds.ds_active.get(&JobId(1004)).unwrap();
+        let mut ds = up.downstairs;
+        let job = ds.ds_active().get(&JobId(1004)).unwrap();
 
         let mut current_deps = job.work.deps().clone();
         // We start with repair jobs, plus the original jobs.
@@ -4502,7 +4250,7 @@ mod nope {
 
         // This second write after starting a repair should only require the
         // repair job on all downstairs
-        let job = ds.ds_active.get(&JobId(1005)).unwrap();
+        let job = ds.ds_active().get(&JobId(1005)).unwrap();
         assert_eq!(job.state[ClientId::new(0)], IOState::New);
         assert_eq!(job.state[ClientId::new(1)], IOState::New);
         assert_eq!(job.state[ClientId::new(2)], IOState::New);
@@ -4573,46 +4321,36 @@ mod nope {
         //   6 |       |     W | 3
         //
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let up = start_up_and_repair(ClientId::new(1)).await;
         // Make downstairs 1 in LiveRepair
-        up.ds_transition(ClientId::new(1), DsState::Faulted).await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady)
-            .await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepair)
-            .await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        let mut ds = up.downstairs.lock().await;
+        up.ds_transition(ClientId::new(1), DsState::Faulted);
+        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
+        up.ds_transition(ClientId::new(1), DsState::LiveRepair);
+        let mut ds = up.downstairs;
 
         // Make extent 0 under repair
         ds.clients[ClientId::new(1)].extent_limit = Some(0);
         drop(ds);
 
         // A write of blocks 2,3,4 which spans extents 0-1.
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(2),
             Bytes::from(vec![0xff; 512 * 3]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
         // A write of block 5 which is on extent 1, but does not
         // overlap with the previous write
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(5),
             Bytes::from(vec![0xff; 512]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 2);
 
@@ -4668,57 +4406,41 @@ mod nope {
         // read job in this example), then it needs reserved repair job IDs for
         // every extent that it touches.
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
+        let up = start_up_and_repair(ClientId::new(1)).await;
         // Make downstairs 1 in LiveRepair
-        up.ds_transition(ClientId::new(1), DsState::Faulted).await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady)
-            .await;
-        up.ds_transition(ClientId::new(1), DsState::LiveRepair)
-            .await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        let mut ds = up.downstairs.lock().await;
+        up.ds_transition(ClientId::new(1), DsState::Faulted);
+        up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
+        up.ds_transition(ClientId::new(1), DsState::LiveRepair);
+        let mut ds = up.downstairs;
 
         // Make extent 0 under repair
         ds.clients[ClientId::new(1)].extent_limit = Some(0);
         drop(ds);
 
         // A write of blocks 3,4,5,6 which spans extents 1-2.
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(3),
             Bytes::from(vec![0xff; 512 * 4]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
         // A write of block 2-3, which overlaps the previous write and should
         // also trigger a repair.
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(2),
             Bytes::from(vec![0xff; 512 * 2]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
         // A read of block 5-7, which overlaps the previous repair and should
         // also force waiting on a new repair.
-        up.submit_read(
-            Block::new_512(5),
-            Buffer::new(512 * 3),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
+        up.submit_dummy_read(Block::new_512(5), Buffer::new(512 * 3))
+            .await;
 
-        let ds = up.downstairs.lock().await;
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        let ds = up.downstairs;
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
 
         assert_eq!(jobs.len(), 3);
 

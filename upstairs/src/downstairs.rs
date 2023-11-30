@@ -38,7 +38,7 @@ pub(crate) struct Downstairs {
     pub(crate) clients: ClientData<DownstairsClient>,
 
     /// The active list of IO for the downstairs.
-    ds_active: ActiveJobs,
+    pub(crate) ds_active: ActiveJobs,
 
     /// The number of write bytes that haven't finished yet
     ///
@@ -247,6 +247,20 @@ pub(crate) struct LiveRepairData {
 
     /// Current state
     state: LiveRepairState,
+}
+
+/// Accessors for use in live_repair tests
+#[cfg(test)]
+impl LiveRepairData {
+    pub(crate) fn repair_job_ids(
+        &self,
+    ) -> &BTreeMap<u64, (ExtentRepairIDs, Vec<JobId>)> {
+        &self.repair_job_ids
+    }
+
+    pub(crate) fn min_id_mut(&mut self) -> &mut JobId {
+        &mut self.min_id
+    }
 }
 
 #[derive(Debug)]
@@ -895,6 +909,12 @@ impl Downstairs {
         id
     }
 
+    /// What would next_id return, if we called it?
+    #[cfg(test)]
+    pub(crate) fn peek_next_id(&self) -> JobId {
+        self.next_id
+    }
+
     /// Moves all pending jobs back to the `new_jobs` queue
     ///
     /// Jobs are pending if they have not yet been flushed by this client.
@@ -1378,7 +1398,7 @@ impl Downstairs {
         self.repair = Some(repair);
     }
 
-    fn create_and_enqueue_noop_io(
+    pub(crate) fn create_and_enqueue_noop_io(
         &mut self,
         gw: &mut GuestWork,
         deps: Vec<JobId>,
@@ -1418,7 +1438,7 @@ impl Downstairs {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn create_and_enqueue_repair_io(
+    pub(crate) fn create_and_enqueue_repair_io(
         &mut self,
         gw: &mut GuestWork,
         eid: u64,
@@ -1692,7 +1712,7 @@ impl Downstairs {
         }
     }
 
-    fn create_and_enqueue_reopen_io(
+    pub(crate) fn create_and_enqueue_reopen_io(
         &mut self,
         gw: &mut GuestWork,
         eid: u64,
@@ -1881,7 +1901,7 @@ impl Downstairs {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn create_and_enqueue_close_io(
+    pub(crate) fn create_and_enqueue_close_io(
         &mut self,
         gw: &mut GuestWork,
         eid: u64,
@@ -2252,7 +2272,7 @@ impl Downstairs {
     ///
     /// # Panics
     /// If we are not undergoing live-repair
-    fn reserve_repair_ids_for_extent(&mut self, eid: u64) {
+    pub(crate) fn reserve_repair_ids_for_extent(&mut self, eid: u64) {
         if self
             .repair
             .as_mut()
@@ -3458,6 +3478,16 @@ impl Downstairs {
     #[cfg(test)]
     pub(crate) fn repair(&self) -> &Option<LiveRepairData> {
         &self.repair
+    }
+
+    #[cfg(test)]
+    pub(crate) fn repair_mut(&mut self) -> &mut Option<LiveRepairData> {
+        &mut self.repair
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ds_active(&mut self) -> &mut ActiveJobs {
+        &mut self.ds_active
     }
 
     #[cfg(test)]

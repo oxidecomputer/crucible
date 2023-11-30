@@ -763,7 +763,7 @@ impl Upstairs {
         }
     }
 
-    async fn show_all_work(&self) -> WQCounts {
+    pub(crate) async fn show_all_work(&self) -> WQCounts {
         let gior = self.guest_io_ready();
         let up_count = self.guest.guest_work.lock().await.active.len();
 
@@ -878,7 +878,7 @@ impl Upstairs {
         }
     }
 
-    async fn submit_flush(
+    pub(crate) async fn submit_flush(
         &mut self,
         req: Option<BlockReq>,
         snapshot_details: Option<SnapshotDetails>,
@@ -927,7 +927,11 @@ impl Upstairs {
 
     /// Submits a dummy read (without associated `BlockReq`)
     #[cfg(test)]
-    async fn submit_dummy_read(&mut self, offset: Block, data: Buffer) {
+    pub(crate) async fn submit_dummy_read(
+        &mut self,
+        offset: Block,
+        data: Buffer,
+    ) {
         self.submit_read_inner(offset, data, None).await
     }
 
@@ -1015,7 +1019,7 @@ impl Upstairs {
 
     /// Submits a dummy write (without an associated `BlockReq`)
     #[cfg(test)]
-    async fn submit_dummy_write(
+    pub(crate) async fn submit_dummy_write(
         &mut self,
         offset: Block,
         data: Bytes,
