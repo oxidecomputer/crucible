@@ -2794,7 +2794,7 @@ impl Downstairs {
         for cid in ClientId::iter() {
             print!(" {}", self.clients[cid].state());
         }
-        println!("");
+        println!();
         println!(
             "{0:>5} {1:>8} {2:>5} {3:>7} {4:>7} {5:>5} {6:>5} {7:>5} {8:>7}",
             "GW_ID",
