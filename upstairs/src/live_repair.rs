@@ -103,11 +103,9 @@ pub enum RepairCheck {
 pub mod repair_test {
     use super::*;
     use crate::{
-        downstairs::{test::set_all_active, Downstairs},
+        downstairs::test::set_all_active,
         upstairs::Upstairs,
     };
-    use slog::Drain;
-    use std::ops::DerefMut;
 
     // Test function to create just enough of an Upstairs for our needs.
     async fn create_test_upstairs() -> Upstairs {
@@ -1033,45 +1031,198 @@ pub mod repair_test {
         assert_eq!(up.downstairs.clients[or_ds].state(), DsState::Faulted);
     }
 
-    fn csl() -> Logger {
-        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
-        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
-    }
-
-    // ALAN: This one is close..
     #[tokio::test]
     async fn test_reserve_extent_repair_ids() {
         // Verify that we can reserve extent IDs for repair work, and they
         // are allocated as expected.
         let mut up = create_test_upstairs().await;
 
+        // Before repair has started, there should be nothing in repair
+        // or last_repair_extent.
         assert_eq!(up.downstairs.last_repair_extent(), None);
+        assert!(up.downstairs.repair().is_none());
+
+        // Start the LiveRepair
         let client = &mut up.downstairs.clients[ClientId::new(1)];
         client.checked_state_transition(&up.state, DsState::Faulted);
         client.checked_state_transition(&up.state, DsState::LiveRepairReady);
         assert_eq!(up.on_repair_check().await, RepairCheck::RepairStarted);
 
+        tokio::time::sleep(Duration::from_secs(1)).await;
         assert_eq!(up.downstairs.last_repair_extent(), Some(0));
-        // By staring LiveRepair, we should have reserved job IDs
-        let (reserved_ids, _deps) = up.downstairs.get_repair_ids(0);
-        assert_eq!(reserved_ids.close_id, JobId(1000));
-        assert_eq!(reserved_ids.repair_id, JobId(1001));
-        assert_eq!(reserved_ids.noop_id, JobId(1002));
-        assert_eq!(reserved_ids.reopen_id, JobId(1003));
 
-        let next_id = up.downstairs.next_id();
-        assert_eq!(next_id, JobId(1004));
+        // We should have reserved ids 1000 -> 1003
+        assert_eq!(up.downstairs.peek_next_id(), JobId(1004));
 
-        // Reserve the IDs again, make sure they are still the same.
-        let (reserved_ids, _deps) = up.downstairs.get_repair_ids(0);
-        assert_eq!(reserved_ids.close_id, JobId(1000));
-        assert_eq!(reserved_ids.repair_id, JobId(1001));
-        assert_eq!(reserved_ids.noop_id, JobId(1002));
-        assert_eq!(reserved_ids.reopen_id, JobId(1003));
-
-        // After the get, there should be no record any longer
-        //assert!(!ds.query_repair_ids(0));
+        // Now, reserve IDs for extent 1
+        up.downstairs.reserve_repair_ids_for_extent(1);
+        // The reservation should have taken 1004 -> 1007
+        assert_eq!(up.downstairs.peek_next_id(), JobId(1008));
     }
+
+    // Test function to complete a LiveRepair.
+    // This assumes a LiveRepair has been started and the first two repair
+    // jobs have been issued.  We will use the starting job ID default of 1000.
+    async fn finish_live_repair(up: &mut Upstairs) {
+        // By default, the job IDs always start at 1000 and the gw IDs
+        // always start at 1. Take advantage of that and knowing that we
+        // start from a clean slate to predict what the IDs are for jobs
+        // we expect the work queues to have.
+        let ds_close_id = JobId(1000);
+        let ds_repair_id = JobId(1001);
+        let ds_noop_id = JobId(1002);
+        let ds_reopen_id = JobId(1003);
+        let gw_close_id = 1;
+        let gw_repair_id = 2;
+        let gw_noop_id = 3;
+        let gw_reopen_id = 4;
+
+        let ei = ExtentInfo {
+            generation: 5,
+            flush_number: 3,
+            dirty: false,
+        };
+        for cid in ClientId::iter() {
+            up.downstairs.in_progress(ds_close_id, cid);
+            up.downstairs.process_ds_completion(
+                ds_close_id,
+                cid,
+                Ok(vec![]),
+                &up.state,
+                Some(ei),
+            );
+        }
+        ack_this_job(up, gw_close_id, ds_close_id, Ok(())).await;
+
+        move_and_complete_job(up, ds_repair_id, vec![]).unwrap();
+        ack_this_job(up, gw_repair_id, ds_repair_id, Ok(())).await;
+
+        move_and_complete_job(up, ds_noop_id, vec![]).unwrap();
+        ack_this_job(up, gw_noop_id, ds_noop_id, Ok(())).await;
+
+        move_and_complete_job(up, ds_reopen_id, vec![]).unwrap();
+        ack_this_job(up, gw_reopen_id, ds_reopen_id, Ok(())).await;
+    }
+
+    #[tokio::test]
+    async fn test_repair_io_below_repair_extent() {
+        // Verify that io put on the queue when a downstairs is in LiveRepair
+        // and the IO is below the extent_limit will be sent to all downstairs
+        // for processing and not skipped.
+        let mut up = start_up_and_repair(ClientId::new(1)).await;
+
+        // Do something to finish extent 0
+        finish_live_repair(&mut up).await;
+
+        up.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512]),
+            false,
+        )
+        .await;
+
+        up.submit_dummy_read(
+            Block::new_512(0),
+            Buffer::new(512),
+        )
+        .await;
+
+        // WriteUnwritten
+        up.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512]),
+            true,
+        )
+        .await;
+
+        // All clients should send the jobs (no skipped)
+        for ids in [JobId(1007), JobId(1008), JobId(1009)] {
+            let job = up.downstairs.ds_active.get(&ids).unwrap();
+            for cid in ClientId::iter() {
+                assert_eq!(job.state[cid], IOState::New);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_repair_io_at_repair_extent() {
+        // Verify that io put on the queue when a downstairs is in LiveRepair
+        // and the IO is for the extent under repair will be sent to all
+        // downstairs for processing and not skipped.
+        let mut up = start_up_and_repair(ClientId::new(1)).await;
+
+        up.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512]),
+            false,
+        )
+        .await;
+
+        up.submit_dummy_read(
+            Block::new_512(0),
+            Buffer::new(512),
+        )
+        .await;
+
+        // WriteUnwritten
+        up.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512]),
+            true,
+        )
+        .await;
+
+        // All clients should send the jobs (no skipped)
+        for ids in [JobId(1004), JobId(1005), JobId(1006)] {
+            let job = up.downstairs.ds_active.get(&ids).unwrap();
+            for cid in ClientId::iter() {
+                assert_eq!(job.state[cid], IOState::New);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_repair_io_above_repair_extent() {
+        // Verify that an IO put on the queue when a downstairs is in
+        // LiveRepair and the IO is above the extent_limit will be skipped by
+        // the downstairs that is in LiveRepair.
+        let mut up = start_up_and_repair(ClientId::new(1)).await;
+
+        up.submit_dummy_write(
+            Block::new_512(3),
+            Bytes::from(vec![0xff; 512]),
+            false,
+        )
+        .await;
+
+        up.submit_dummy_read(
+            Block::new_512(3),
+            Buffer::new(512),
+        )
+        .await;
+
+        // WriteUnwritten
+        up.submit_dummy_write(
+            Block::new_512(3),
+            Bytes::from(vec![0xff; 512]),
+            true,
+        )
+        .await;
+
+        // Client 0 and 2 will send the jobs
+        for ids in [JobId(1004), JobId(1005), JobId(1006)] {
+            let job = up.downstairs.ds_active.get(&ids).unwrap();
+            assert_eq!(job.state[ClientId::new(0)], IOState::New);
+            assert_eq!(job.state[ClientId::new(2)], IOState::New);
+        }
+
+        // Client 1 will skip the jobs
+        for ids in [JobId(1004), JobId(1005), JobId(1006)] {
+            let job = up.downstairs.ds_active.get(&ids).unwrap();
+            assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
+        }
+    }
+
 }
 
 #[cfg(feature = "NOT WORKING YET")]
@@ -1086,214 +1237,9 @@ mod more_tests {
         ds
     }
 
-    #[tokio::test]
-    async fn test_repair_io_no_el_skipped() {
-        // Verify that IOs put on the queue when a downstairs is
-        // in LiveRepair and extent_limit is still None will be skipped
-        // only by the downstairs that is in LiveRepair..
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        up.submit_write(
-            Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
-            None,
-            false,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
-
-        up.submit_read(
-            Block::new_512(0),
-            Buffer::new(512),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
-
-        // WriteUnwritten
-        up.submit_write(
-            Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
-            None,
-            true,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
-
-        let id = 1000;
-
-        let mut ds = up.downstairs.lock().await;
-        assert!(ds.clients[ClientId::new(1)].extent_limit.is_none());
-        // Check all three IOs.
-        for job_id in (id..id + 3).map(JobId) {
-            assert!(ds.in_progress(job_id, ClientId::new(0)).is_some());
-            assert!(ds.in_progress(job_id, ClientId::new(1)).is_none());
-            assert!(ds.in_progress(job_id, ClientId::new(2)).is_some());
-        }
-    }
-
-    #[tokio::test]
-    async fn test_repair_io_below_el_sent() {
-        // Verify that io put on the queue when a downstairs is
-        // in LiveRepair and the IO is below the extent_limit
-        // will be sent to all downstairs for processing.
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        let mut ds = up.downstairs.lock().await;
-        ds.clients[ClientId::new(1)].extent_limit = Some(1);
-        drop(ds);
-
-        // Our default extent size is 3, so block 3 will be on extent 1
-        up.submit_write(
-            Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
-            None,
-            false,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
-
-        up.submit_read(
-            Block::new_512(0),
-            Buffer::new(512),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
-
-        // WriteUnwritten
-        up.submit_write(
-            Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
-            None,
-            true,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
-
-        let id = 1000;
-        let mut ds = up.downstairs.lock().await;
-        // Check all three IOs.
-        for job_id in (id..id + 3).map(JobId) {
-            assert!(ds.in_progress(job_id, ClientId::new(0)).is_some());
-            assert!(ds.in_progress(job_id, ClientId::new(1)).is_some());
-            assert!(ds.in_progress(job_id, ClientId::new(2)).is_some());
-        }
-    }
-
-    #[tokio::test]
-    async fn test_repair_io_at_el_sent() {
-        // Verify that IOs put on the queue when a downstairs is
-        // in LiveRepair and extent_limit is at the IO location
-        // will be sent to all downstairs for processing.
-        // For this situation, we are relying on the submit_write method
-        // of the Upstairs to correctly add the dependencies for the
-        // in flight or soon to be in flight repair jobs.
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        let mut ds = up.downstairs.lock().await;
-        ds.clients[ClientId::new(1)].extent_limit = Some(0);
-        drop(ds);
-
-        up.submit_write(
-            Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
-            None,
-            false,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
-
-        up.submit_read(
-            Block::new_512(0),
-            Buffer::new(512),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
-
-        // WriteUnwritten
-        up.submit_write(
-            Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
-            None,
-            true,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
-
-        let id = 1000;
-        let mut ds = up.downstairs.lock().await;
-        // Check all three IOs.
-        for job_id in (id..id + 3).map(JobId) {
-            assert!(ds.in_progress(job_id, ClientId::new(0)).is_some());
-            assert!(ds.in_progress(job_id, ClientId::new(1)).is_some());
-            assert!(ds.in_progress(job_id, ClientId::new(2)).is_some());
-        }
-    }
-
-    #[tokio::test]
-    async fn test_repair_io_above_el_skipped() {
-        // Verify that an IO put on the queue when a downstairs is
-        // in LiveRepair and the IO is above the extent_limit will
-        // be skipped by the downstairs that is in LiveRepair..
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
-
-        let mut ds = up.downstairs.lock().await;
-        ds.clients[ClientId::new(1)].extent_limit = Some(1);
-        drop(ds);
-
-        up.submit_write(
-            Block::new_512(6),
-            Bytes::from(vec![0xff; 512]),
-            None,
-            false,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
-
-        up.submit_read(
-            Block::new_512(6),
-            Buffer::new(512),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
-
-        // WriteUnwritten
-        up.submit_write(
-            Block::new_512(6),
-            Bytes::from(vec![0xff; 512]),
-            None,
-            true,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
-
-        let id = 1000;
-        let mut ds = up.downstairs.lock().await;
-        // Check all three IOs.
-        for job_id in (id..id + 3).map(JobId) {
-            assert!(ds.in_progress(job_id, ClientId::new(0)).is_some());
-            assert!(ds.in_progress(job_id, ClientId::new(1)).is_none());
-            assert!(ds.in_progress(job_id, ClientId::new(2)).is_some());
-        }
+    fn csl() -> Logger {
+        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
+        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
     }
 
     #[tokio::test]

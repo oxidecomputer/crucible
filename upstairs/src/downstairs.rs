@@ -1513,6 +1513,9 @@ impl Downstairs {
             matches!(up_state, UpstairsState::Active),
             "bad upstairs state: {up_state:?}"
         );
+        // Alan: I think this assertion is not correct if we are
+        // aborting a repair, as some/all of the downstairs may change
+        // state and we are trying to clean up reserved jobs.
         assert_eq!(self.clients[source_downstairs].state(), DsState::Active);
         for &c in repair_downstairs {
             assert_eq!(self.clients[c].state(), DsState::LiveRepair);
