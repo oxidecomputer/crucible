@@ -105,7 +105,7 @@ pub mod repair_test {
     use crate::{downstairs::test::set_all_active, upstairs::Upstairs};
 
     // Test function to create just enough of an Upstairs for our needs.
-    async fn create_test_upstairs() -> Upstairs {
+    fn create_test_upstairs() -> Upstairs {
         let mut ddef = RegionDefinition::default();
         ddef.set_block_size(512);
         ddef.set_extent_size(Block::new_512(3));
@@ -176,7 +176,7 @@ pub mod repair_test {
     // The caller will indicate which downstairs client it wished to be
     // moved to LiveRepair.
     async fn start_up_and_repair(or_ds: ClientId) -> Upstairs {
-        let mut up = create_test_upstairs().await;
+        let mut up = create_test_upstairs();
 
         // Move our downstairs client fail_id to LiveRepair.
         let client = &mut up.downstairs.clients[or_ds];
@@ -1032,7 +1032,7 @@ pub mod repair_test {
     async fn test_reserve_extent_repair_ids() {
         // Verify that we can reserve extent IDs for repair work, and they
         // are allocated as expected.
-        let mut up = create_test_upstairs().await;
+        let mut up = create_test_upstairs();
 
         // Before repair has started, there should be nothing in repair
         // or last_repair_extent.
@@ -1060,19 +1060,23 @@ pub mod repair_test {
     // Test function to complete a LiveRepair.
     // This assumes a LiveRepair has been started and the first two repair
     // jobs have been issued.  We will use the starting job ID default of 1000.
-    async fn finish_live_repair(up: &mut Upstairs) {
+    async fn finish_live_repair(
+        up: &mut Upstairs,
+        ds_start: u64,
+        gw_start: u64,
+    ) {
         // By default, the job IDs always start at 1000 and the gw IDs
         // always start at 1. Take advantage of that and knowing that we
         // start from a clean slate to predict what the IDs are for jobs
         // we expect the work queues to have.
-        let ds_close_id = JobId(1000);
-        let ds_repair_id = JobId(1001);
-        let ds_noop_id = JobId(1002);
-        let ds_reopen_id = JobId(1003);
-        let gw_close_id = 1;
-        let gw_repair_id = 2;
-        let gw_noop_id = 3;
-        let gw_reopen_id = 4;
+        let ds_close_id = JobId(ds_start);
+        let ds_repair_id = JobId(ds_start + 1);
+        let ds_noop_id = JobId(ds_start + 2);
+        let ds_reopen_id = JobId(ds_start + 3);
+        let gw_close_id = gw_start;
+        let gw_repair_id = gw_start + 1;
+        let gw_noop_id = gw_start + 2;
+        let gw_reopen_id = gw_start + 3;
 
         let ei = ExtentInfo {
             generation: 5,
@@ -1109,7 +1113,7 @@ pub mod repair_test {
         let mut up = start_up_and_repair(ClientId::new(1)).await;
 
         // Do something to finish extent 0
-        finish_live_repair(&mut up).await;
+        finish_live_repair(&mut up, 1000, 1).await;
 
         up.submit_dummy_write(
             Block::new_512(0),
@@ -1210,25 +1214,6 @@ pub mod repair_test {
             assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
         }
     }
-}
-
-#[cfg(feature = "NOT WORKING YET")]
-mod more_tests {
-    // Test function to create a downstairs.
-    fn create_test_downstairs() -> Downstairs {
-        let mut ds = Downstairs::new(csl(), ClientMap::new());
-        for cid in ClientId::iter() {
-            ds.clients[cid].repair_addr =
-                Some("127.0.0.1:1234".parse().unwrap());
-        }
-        ds
-    }
-
-    fn csl() -> Logger {
-        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
-        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
-    }
-
     #[tokio::test]
     async fn test_repair_io_span_el_sent() {
         // Verify that IOs put on the queue when a downstairs is
@@ -1274,60 +1259,42 @@ mod more_tests {
         //   4 | W W W | W W W | W W W | 3
         //   5 | R R R | R R R | R R R | 4
         //   6 | WuWuWu| WuWuWu| WuWuWu| 5
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        let mut up = start_up_and_repair(ClientId::new(1)).await;
 
-        let mut ds = up.downstairs.lock().await;
-        ds.clients[ClientId::new(1)].extent_limit = Some(1);
-        drop(ds);
+        // Extent 0 repair has jobs 1000 -> 1003.
+        // This will finish the repair on extent 0 and start the repair
+        // on extent 1.
+        // Extent 1 repair will have jobs 1004 -> 1007.
+        finish_live_repair(&mut up, 1000, 1).await;
 
-        // Our default extent size is 3, so block 3 will be on extent 1
-        up.submit_write(
+        // Our default extent size is 3, so 9 blocks will span 3 extents
+        up.submit_dummy_write(
             Block::new_512(0),
             Bytes::from(vec![0xff; 512 * 9]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
-        up.submit_read(
-            Block::new_512(0),
-            Buffer::new(512 * 9),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
+        up.submit_dummy_read(Block::new_512(0), Buffer::new(512 * 9))
+            .await;
 
         // WriteUnwritten
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(0),
             Bytes::from(vec![0xff; 512 * 9]),
-            None,
             true,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
-        let id = 1004;
-        let mut ds = up.downstairs.lock().await;
-        // Check all three IOs.
-        for job_id in (id..id + 3).map(JobId) {
-            assert!(ds.in_progress(job_id, ClientId::new(0)).is_some());
-            assert!(ds.in_progress(job_id, ClientId::new(1)).is_some());
-            assert!(ds.in_progress(job_id, ClientId::new(2)).is_some());
+        // All clients should send the jobs (no skipped)
+        // The future repair we had to reserve for extent 2 will have
+        // taken jobs 1008 -> 1011, so our new IOs will start at 1012
+        for ids in [JobId(1012), JobId(1013), JobId(1014)] {
+            let job = up.downstairs.ds_active.get(&ids).unwrap();
+            for cid in ClientId::iter() {
+                assert_eq!(job.state[cid], IOState::New);
+            }
         }
-
-        // Verify that the future repair jobs were added to our IOs
-        // dependency list.
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
-
-        assert_eq!(jobs[0].work.deps(), &[JobId(1003)]);
-        assert_eq!(jobs[1].work.deps(), &[JobId(1004)]);
-        assert_eq!(jobs[2].work.deps(), &[JobId(1005)]);
     }
 
     #[tokio::test]
@@ -1362,37 +1329,32 @@ mod more_tests {
         //   3 |       |       | RpRpRp|
         //   4 | R R R | R R R | R R R | 3
         //
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        let mut up = start_up_and_repair(ClientId::new(1)).await;
 
-        let mut ds = up.downstairs.lock().await;
-        ds.clients[ClientId::new(1)].extent_limit = Some(1);
-        drop(ds);
+        // Extent 0 repair has jobs 1000 -> 1003.
+        // This will finish the repair on extent 0 and start the repair
+        // on extent 1.
+        // Extent 1 repair will have jobs 1004 -> 1007.
+        finish_live_repair(&mut up, 1000, 1).await;
 
-        // Our default extent size is 3, so block 3 will be on extent 1
-        up.submit_read(
-            Block::new_512(0),
-            Buffer::new(512 * 9),
-            None,
-            ds_done_tx.clone(),
-        )
-        .await
-        .unwrap();
+        // Our default extent size is 3, so 9 blocks will span 3 extents
+        up.submit_dummy_read(Block::new_512(0), Buffer::new(512 * 9))
+            .await;
 
-        let job_id = JobId(1004);
-        let mut ds = up.downstairs.lock().await;
-        assert!(ds.in_progress(job_id, ClientId::new(0)).is_some());
-        assert!(ds.in_progress(job_id, ClientId::new(1)).is_some());
-        assert!(ds.in_progress(job_id, ClientId::new(2)).is_some());
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        up.show_all_work().await;
 
-        // Verify that the future repair jobs were added to our IOs
-        // dependency list.
-        //
-        // These future jobs are not actually created yet, so they
-        // won't show up in the work queue.
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        // All clients should send the jobs (no skipped)
+        // The future repair we had to reserve for extent 2 will have
+        // taken jobs 1008 -> 1011, so our new IO will start at 1012
+        let job = up.downstairs.ds_active.get(&JobId(1012)).unwrap();
+        for cid in ClientId::iter() {
+            assert_eq!(job.state[cid], IOState::New);
+        }
 
-        assert_eq!(jobs[0].work.deps(), &[JobId(1003)]);
+        // Verify that the future final repair job were added to our IOs
+        // dependency list.  We will also see the final repair jobs
+        assert_eq!(job.work.deps(), &[JobId(1003), JobId(1007), JobId(1011)]);
     }
 
     #[tokio::test]
@@ -1428,35 +1390,33 @@ mod more_tests {
         //   3 |       |       | RpRpRp|
         //   4 | W W W | W W W | W W W | 3
 
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
+        let mut up = start_up_and_repair(ClientId::new(1)).await;
 
-        let mut ds = up.downstairs.lock().await;
-        ds.clients[ClientId::new(1)].extent_limit = Some(1);
-        drop(ds);
+        // Extent 0 repair has jobs 1000 -> 1003.
+        // This will finish the repair on extent 0 and start the repair
+        // on extent 1.
+        // Extent 1 repair will have jobs 1004 -> 1007.
+        finish_live_repair(&mut up, 1000, 1).await;
 
-        // Our default extent size is 3, so block 3 will be on extent 1
-        up.submit_write(
+        // Our default extent size is 3, so 9 blocks will span 3 extents
+        up.submit_dummy_write(
             Block::new_512(0),
             Bytes::from(vec![0xff; 512 * 9]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
+        .await;
 
-        let id = JobId(1004);
-        let mut ds = up.downstairs.lock().await;
-        assert!(ds.in_progress(id, ClientId::new(0)).is_some());
-        assert!(ds.in_progress(id, ClientId::new(1)).is_some());
-        assert!(ds.in_progress(id, ClientId::new(2)).is_some());
+        // All clients should send the jobs (no skipped)
+        // The future repair we had to reserve for extent 2 will have
+        // taken jobs 1008 -> 1011, so our new IO will start at 1012
+        let job = up.downstairs.ds_active.get(&JobId(1012)).unwrap();
+        for cid in ClientId::iter() {
+            assert_eq!(job.state[cid], IOState::New);
+        }
 
-        // Verify that the future repair jobs were added to our IOs
-        // dependency list.
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
-
-        assert_eq!(jobs[0].work.deps(), &[JobId(1003)]);
+        // Verify that the future final repair job were added to our IOs
+        // dependency list.  We will also see the final repair jobs
+        assert_eq!(job.work.deps(), &[JobId(1003), JobId(1007), JobId(1011)]);
     }
 
     #[tokio::test]
@@ -1500,145 +1460,127 @@ mod more_tests {
         //   7 |       |       | RpRpRp|
         //   8 | W W W | W W W | W W W | 3,7
         //
-        let up = create_test_upstairs(ClientId::new(1)).await;
-        let (ds_done_tx, _ds_done_rx) = mpsc::channel(500);
 
-        let mut ds = up.downstairs.lock().await;
-        ds.clients[ClientId::new(1)].extent_limit = Some(0);
-        drop(ds);
+        let mut up = start_up_and_repair(ClientId::new(1)).await;
 
         // Our default extent size is 3, so block 3 will be on extent 1
-        up.submit_write(
+        up.submit_dummy_write(
             Block::new_512(0),
             Bytes::from(vec![0xff; 512 * 9]),
-            None,
             false,
-            ds_done_tx.clone(),
         )
-        .await
-        .unwrap();
-
-        let id = JobId(1008);
-        let mut ds = up.downstairs.lock().await;
-        assert!(ds.in_progress(id, ClientId::new(0)).is_some());
-        assert!(ds.in_progress(id, ClientId::new(1)).is_some());
-        assert!(ds.in_progress(id, ClientId::new(2)).is_some());
+        .await;
 
         // Verify that the future repair jobs were added to our IOs
         // dependency list.
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        // All clients should send the jobs (no skipped)
+        // The future repairs we had to reserve for extents 1,2 will have
+        // taken jobs 1004 -> 1011, so our new IO will start at 1012
+        let job = up.downstairs.ds_active.get(&JobId(1012)).unwrap();
+        for cid in ClientId::iter() {
+            assert_eq!(job.state[cid], IOState::New);
+        }
 
-        assert_eq!(jobs[0].work.deps(), &[JobId(1003), JobId(1007)]);
+        // Verify that the future final repair job were added to our IOs
+        // dependency list.  We will also see the final repair jobs
+        assert_eq!(job.work.deps(), &[JobId(1003), JobId(1007), JobId(1011)]);
     }
 
     #[tokio::test]
     async fn test_live_repair_update() {
         // Make sure that process_ds_completion() will take extent info
-        // result and put it on the live repair hashmap.
+        // result and put it on the live repair repair_info.
         // As we don't have an actual downstairs here, we "fake it" by
         // feeding the responses we expect back from the downstairs.
-        let up = create_test_upstairs(ClientId::new(1)).await;
 
-        let mut gw = up.guest.guest_work.lock().await;
-        let mut ds = up.downstairs.lock().await;
-        let eid = 1;
-        ds.clients[ClientId::new(1)].extent_limit =
-            Some(eid.try_into().unwrap());
+        let mut up = start_up_and_repair(ClientId::new(1)).await;
 
-        let gw_close_id = 1;
-        let (repair_ids, deps) = ds.get_repair_ids(eid);
-        // Create and insert the close job on the work queue.
-        let close_io = create_close_io(
-            eid as usize,
-            repair_ids.close_id,
-            deps,
-            gw_close_id,
-            3,                      // flush
-            2,                      // gen
-            ClientId::new(0),       // source
-            vec![ClientId::new(1)], // repair
-        );
+        let ds_close_id = JobId(1000);
 
-        let (send, recv) = oneshot::channel();
-        let op = BlockOp::RepairOp;
-        let close_br = BlockReq::new(op, send);
-        let _close_brw = BlockReqWaiter::new(recv);
-        let new_gtos = GtoS::new(repair_ids.close_id, None, Some(close_br));
-        {
-            gw.active.insert(gw_close_id, new_gtos);
-        }
-
-        ds.enqueue_repair(close_io);
-
-        ds.in_progress(repair_ids.close_id, ClientId::new(0));
-        ds.in_progress(repair_ids.close_id, ClientId::new(1));
-        ds.in_progress(repair_ids.close_id, ClientId::new(2));
-
+        // Client 0
         let ei = ExtentInfo {
             generation: 5,
             flush_number: 3,
             dirty: false,
         };
-        // First two are false, final job will return true
-        assert!(!ds
-            .process_ds_completion(
-                repair_ids.close_id,
-                ClientId::new(0),
-                Ok(vec![]),
-                UpState::Active,
-                Some(ei)
-            )
-            .unwrap());
-
+        let cid = ClientId::new(0);
+        up.downstairs.in_progress(ds_close_id, cid);
+        up.downstairs.process_ds_completion(
+            ds_close_id,
+            cid,
+            Ok(vec![]),
+            &up.state,
+            Some(ei),
+        );
+        let new_ei = up.downstairs.clients[cid].repair_info.unwrap();
         // Verify the extent information has been added to the repair info
-        // hashmap for client 0
-        let new_ei = ds.clients[ClientId::new(0)].repair_info.unwrap();
         assert_eq!(new_ei.generation, 5);
         assert_eq!(new_ei.flush_number, 3);
         assert!(!new_ei.dirty);
-        assert!(ds.clients[ClientId::new(1)].repair_info.is_none());
-        assert!(ds.clients[ClientId::new(2)].repair_info.is_none());
 
-        // Verify the extent information has been added to the repair info
-        // hashmap for client 1
+        // Client 1
         let ei = ExtentInfo {
             generation: 2,
             flush_number: 4,
             dirty: true,
         };
-        assert!(!ds
-            .process_ds_completion(
-                repair_ids.close_id,
-                ClientId::new(1),
-                Ok(vec![]),
-                UpState::Active,
-                Some(ei)
-            )
-            .unwrap());
-        let new_ei = ds.clients[ClientId::new(1)].repair_info.unwrap();
+        let cid = ClientId::new(1);
+        up.downstairs.in_progress(ds_close_id, cid);
+        up.downstairs.process_ds_completion(
+            ds_close_id,
+            cid,
+            Ok(vec![]),
+            &up.state,
+            Some(ei),
+        );
+
+        // Verify the extent information has been added to the repair info
+        // for client 1
+        let new_ei = up.downstairs.clients[cid].repair_info.unwrap();
         assert_eq!(new_ei.generation, 2);
         assert_eq!(new_ei.flush_number, 4);
         assert!(new_ei.dirty);
-        assert!(ds.clients[ClientId::new(2)].repair_info.is_none());
 
+        // Client 2
         let ei = ExtentInfo {
             generation: 29,
             flush_number: 444,
             dirty: false,
         };
-        assert!(ds
-            .process_ds_completion(
-                repair_ids.close_id,
-                ClientId::new(2),
-                Ok(vec![]),
-                UpState::Active,
-                Some(ei)
-            )
-            .unwrap());
-        let new_ei = ds.clients[ClientId::new(2)].repair_info.unwrap();
+
+        let cid = ClientId::new(2);
+        up.downstairs.in_progress(ds_close_id, cid);
+        up.downstairs.process_ds_completion(
+            ds_close_id,
+            cid,
+            Ok(vec![]),
+            &up.state,
+            Some(ei),
+        );
+        // Verify the extent information has been added to the repair info
+        // for client 2
+        let new_ei = up.downstairs.clients[cid].repair_info.unwrap();
         assert_eq!(new_ei.generation, 29);
         assert_eq!(new_ei.flush_number, 444);
         assert!(!new_ei.dirty);
+    }
+}
+
+#[cfg(feature = "NOT WORKING YET")]
+mod more_tests {
+    // Test function to create a downstairs.
+    fn create_test_downstairs() -> Downstairs {
+        let mut ds = Downstairs::new(csl(), ClientMap::new());
+        for cid in ClientId::iter() {
+            ds.clients[cid].repair_addr =
+                Some("127.0.0.1:1234".parse().unwrap());
+        }
+        ds
+    }
+
+    fn csl() -> Logger {
+        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
+        Logger::root(slog_term::FullFormat::new(plain).build().fuse(), o!())
     }
 
     // What follows is a number of tests for the repair solver code,

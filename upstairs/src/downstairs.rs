@@ -7643,7 +7643,7 @@ pub(crate) mod test {
         }
 
         // Create a read, but don't move it to InProgress
-        let (read_one, request) = ds.create_and_enqueue_generic_read_eob();
+        let (read_one, _) = ds.create_and_enqueue_generic_read_eob();
 
         let job = ds.ds_active.get(&read_one).unwrap();
         assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);

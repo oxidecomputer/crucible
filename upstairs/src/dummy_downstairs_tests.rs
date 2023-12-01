@@ -34,7 +34,6 @@ pub(crate) mod protocol_test {
     use slog::error;
     use slog::info;
     use slog::o;
-    use slog::warn;
     use slog::Drain;
     use slog::Logger;
     use std::net::SocketAddr;
