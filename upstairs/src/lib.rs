@@ -59,6 +59,7 @@ mod stats;
 mod impacted_blocks;
 pub use impacted_blocks::*;
 
+mod deferred;
 mod live_repair;
 
 #[cfg(test)]

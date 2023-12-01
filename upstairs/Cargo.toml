@@ -31,6 +31,7 @@ omicron-common.workspace = true
 oximeter-producer.workspace = true
 oximeter.workspace = true
 rand.workspace = true
+rayon.workspace = true
 ringbuffer.workspace = true
 schemars.workspace = true
 serde.workspace = true
