@@ -102,10 +102,7 @@ pub enum RepairCheck {
 #[cfg(test)]
 pub mod repair_test {
     use super::*;
-    use crate::{
-        downstairs::test::set_all_active,
-        upstairs::Upstairs,
-    };
+    use crate::{downstairs::test::set_all_active, upstairs::Upstairs};
 
     // Test function to create just enough of an Upstairs for our needs.
     async fn create_test_upstairs() -> Upstairs {
@@ -1121,11 +1118,8 @@ pub mod repair_test {
         )
         .await;
 
-        up.submit_dummy_read(
-            Block::new_512(0),
-            Buffer::new(512),
-        )
-        .await;
+        up.submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .await;
 
         // WriteUnwritten
         up.submit_dummy_write(
@@ -1158,11 +1152,8 @@ pub mod repair_test {
         )
         .await;
 
-        up.submit_dummy_read(
-            Block::new_512(0),
-            Buffer::new(512),
-        )
-        .await;
+        up.submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .await;
 
         // WriteUnwritten
         up.submit_dummy_write(
@@ -1195,11 +1186,8 @@ pub mod repair_test {
         )
         .await;
 
-        up.submit_dummy_read(
-            Block::new_512(3),
-            Buffer::new(512),
-        )
-        .await;
+        up.submit_dummy_read(Block::new_512(3), Buffer::new(512))
+            .await;
 
         // WriteUnwritten
         up.submit_dummy_write(
@@ -1222,7 +1210,6 @@ pub mod repair_test {
             assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
         }
     }
-
 }
 
 #[cfg(feature = "NOT WORKING YET")]
