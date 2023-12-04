@@ -7907,3 +7907,485 @@ pub(crate) mod test {
     // two failed downstairs, what to do?  All writes will fail, all flushes
     // will fail, so, what?
 }
+
+#[cfg(feature = "NOT WORKING YET")]
+mod more_tests {
+    // What follows is a number of tests for the repair solver code,
+    // specifically the repair_or_noop() function.  This set of tests
+    // makes use of a few layers of boilerplate to avoid a bunch of
+    // code duplication and simplifies what the tests need to look like.
+    //
+    // The basic format of each test is.
+    // Generate a desired good and bad ExtentInfo struct.
+    // Decide what downstairs client should be the source for repair.
+    // Decide which downstairs clients should be the destination for repair.
+    //
+    // To test, we send the good EI, the bad EI and the source/dest client IDs
+    // and verify that the IOop::ExtentLiveRepair or IOop::ExtentNoOp is
+    // generated (and populated) correctly.
+    //
+    #[tokio::test]
+    async fn test_solver_no_work() {
+        // Make sure that the repair solver will return NoOp when a repair
+        // is not required.
+        let mut ds = create_test_downstairs();
+
+        for source in ClientId::iter() {
+            let ei = ExtentInfo {
+                generation: 5,
+                flush_number: 3,
+                dirty: false,
+            };
+            assert!(ds.clients[ClientId::new(0)]
+                .repair_info
+                .replace(ei)
+                .is_none());
+            assert!(ds.clients[ClientId::new(1)]
+                .repair_info
+                .replace(ei)
+                .is_none());
+            assert!(ds.clients[ClientId::new(2)]
+                .repair_info
+                .replace(ei)
+                .is_none());
+
+            let repair_extent = if source == ClientId::new(0) {
+                vec![ClientId::new(1), ClientId::new(2)]
+            } else if source == ClientId::new(1) {
+                vec![ClientId::new(0), ClientId::new(2)]
+            } else {
+                vec![ClientId::new(0), ClientId::new(1)]
+            };
+            let eid = 0;
+            let (repair_ids, deps) = ds.get_repair_ids(eid);
+
+            let repair_op = repair_or_noop(
+                &mut ds,
+                eid as usize,         // Extent
+                repair_ids.repair_id, // ds_id
+                deps,                 // Vec<u64>
+                1,                    // gw_id
+                source,               // Source extent
+                &repair_extent,       // Repair extent
+            );
+
+            println!("repair op: {:?}", repair_op);
+            match repair_op.work {
+                IOop::ExtentLiveNoOp { dependencies: _ } => {}
+                x => {
+                    panic!("Incorrect work type returned: {:?}", x);
+                }
+            }
+            assert_eq!(repair_op.ds_id, repair_ids.repair_id);
+            assert_eq!(repair_op.guest_id, 1);
+            println!("Passed for source {}", source);
+        }
+    }
+
+    // Sub-test that a ExtentLiveRepair IOop is returned from repair_or_noop,
+    // This sub-function allows us to try different source and repair clients
+    // and verifies the expected results.
+    //
+    // This function requires you have already populated the downstairs
+    // repair_info field with the desired extent info you wish to compare, and
+    // You are sending in the source and repair(Vec) the client IDs you
+    // expect to see in the resulting IOop::ExtentLiveRepair.
+    fn what_needs_repair(
+        ds: &mut Downstairs,
+        source: ClientId,
+        repair: Vec<ClientId>,
+    ) {
+        let (repair_ids, deps) = ds.get_repair_ids(0);
+        let repair_op = repair_or_noop(
+            ds,
+            0,                   // Extent
+            repair_ids.close_id, // ds_id
+            deps,                // Vec<u64>
+            1,                   // gw_id
+            source,
+            &repair,
+        );
+
+        println!("repair op: {:?}", repair_op);
+
+        match repair_op.work {
+            IOop::ExtentLiveRepair {
+                dependencies: _,
+                extent,
+                source_downstairs,
+                source_repair_address: _,
+                repair_downstairs,
+            } => {
+                assert_eq!(extent, 0);
+                assert_eq!(source_downstairs, source);
+                assert_eq!(repair_downstairs, repair);
+            }
+            x => {
+                panic!("Incorrect work type returned: {:?}", x);
+            }
+        }
+        assert_eq!(repair_op.ds_id, repair_ids.close_id);
+        assert_eq!(repair_op.guest_id, 1);
+    }
+
+    // Given a good ExtentInfo, and a bad ExtentInfo, generate all the
+    // possible combinations of downstairs clients with one source
+    // downstairs client, and one repair downstairs client.
+    //
+    // We manually submit the good ExtentInfo and the bad ExtentInfo
+    // into the downstairs hashmap at the proper place, then verify
+    // that, after repair_or_noop() has run, we have generated the
+    // expected IOop.
+    fn submit_one_source_one_repair(
+        ds: &mut Downstairs,
+        good_ei: ExtentInfo,
+        bad_ei: ExtentInfo,
+    ) {
+        for source in ClientId::iter() {
+            // Change what extent_info we set depending on which downstairs
+            // is the source.
+            // First try one source, one repair
+            let repair = if source == ClientId::new(0) {
+                assert!(ds.clients[ClientId::new(0)]
+                    .repair_info
+                    .replace(good_ei)
+                    .is_none());
+                assert!(ds.clients[ClientId::new(1)]
+                    .repair_info
+                    .replace(bad_ei)
+                    .is_none());
+                assert!(ds.clients[ClientId::new(2)]
+                    .repair_info
+                    .replace(good_ei)
+                    .is_none());
+                vec![ClientId::new(1)]
+            } else {
+                assert!(ds.clients[ClientId::new(0)]
+                    .repair_info
+                    .replace(bad_ei)
+                    .is_none());
+                assert!(ds.clients[ClientId::new(1)]
+                    .repair_info
+                    .replace(good_ei)
+                    .is_none());
+                assert!(ds.clients[ClientId::new(2)]
+                    .repair_info
+                    .replace(good_ei)
+                    .is_none());
+                vec![ClientId::new(0)]
+            };
+
+            println!("Testing repair with s:{} r:{:?}", source, repair);
+            what_needs_repair(ds, source, repair);
+
+            // Next try the other downstairs to repair.
+            let repair = if source == ClientId::new(2) {
+                assert!(ds.clients[ClientId::new(0)]
+                    .repair_info
+                    .replace(good_ei)
+                    .is_none());
+                assert!(ds.clients[ClientId::new(1)]
+                    .repair_info
+                    .replace(bad_ei)
+                    .is_none());
+                assert!(ds.clients[ClientId::new(2)]
+                    .repair_info
+                    .replace(good_ei)
+                    .is_none());
+                vec![ClientId::new(1)]
+            } else {
+                assert!(ds.clients[ClientId::new(0)]
+                    .repair_info
+                    .replace(good_ei)
+                    .is_none());
+                assert!(ds.clients[ClientId::new(1)]
+                    .repair_info
+                    .replace(good_ei)
+                    .is_none());
+                assert!(ds.clients[ClientId::new(2)]
+                    .repair_info
+                    .replace(bad_ei)
+                    .is_none());
+                vec![ClientId::new(2)]
+            };
+
+            println!("Testing repair with s:{} r:{:?}", source, repair);
+            what_needs_repair(ds, source, repair);
+        }
+    }
+
+    // Given a good ExtentInfo, and a bad ExtentInfo, generate all the
+    // possible combinations of downstairs clients with one source
+    // extent, and two repair extents.
+    //
+    // We manually submit the good ExtentInfo and the bad ExtentInfo
+    // into the downstairs hashmap at the proper place, then verify
+    // that, after repair_or_noop() has run, we have generated the
+    // expected IOop.
+    fn submit_one_source_two_repair(
+        ds: &mut Downstairs,
+        good_ei: ExtentInfo,
+        bad_ei: ExtentInfo,
+    ) {
+        for source in ClientId::iter() {
+            // Change what extent_info we set depending on which downstairs
+            // is the source.
+            // One source, two repair
+            let repair = if source == ClientId::new(0) {
+                assert!(ds.clients[ClientId::new(0)]
+                    .repair_info
+                    .replace(good_ei)
+                    .is_none());
+                assert!(ds.clients[ClientId::new(1)]
+                    .repair_info
+                    .replace(bad_ei)
+                    .is_none());
+                assert!(ds.clients[ClientId::new(2)]
+                    .repair_info
+                    .replace(bad_ei)
+                    .is_none());
+                vec![ClientId::new(1), ClientId::new(2)]
+            } else if source == ClientId::new(1) {
+                assert!(ds.clients[ClientId::new(0)]
+                    .repair_info
+                    .replace(bad_ei)
+                    .is_none());
+                assert!(ds.clients[ClientId::new(1)]
+                    .repair_info
+                    .replace(good_ei)
+                    .is_none());
+                assert!(ds.clients[ClientId::new(2)]
+                    .repair_info
+                    .replace(bad_ei)
+                    .is_none());
+                vec![ClientId::new(0), ClientId::new(2)]
+            } else {
+                assert!(ds.clients[ClientId::new(0)]
+                    .repair_info
+                    .replace(bad_ei)
+                    .is_none());
+                assert!(ds.clients[ClientId::new(1)]
+                    .repair_info
+                    .replace(bad_ei)
+                    .is_none());
+                assert!(ds.clients[ClientId::new(2)]
+                    .repair_info
+                    .replace(good_ei)
+                    .is_none());
+                vec![ClientId::new(0), ClientId::new(1)]
+            };
+
+            println!("Testing repair with s:{} r:{:?}", source, repair);
+            what_needs_repair(ds, source, repair);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_solver_dirty_needs_repair_two() {
+        // Make sure that the repair solver will see a dirty extent_info
+        // field is true and mark that downstairs for repair.
+        // We test with two downstairs to repair here.
+
+        let mut ds = create_test_downstairs();
+        let g_ei = ExtentInfo {
+            generation: 5,
+            flush_number: 3,
+            dirty: false,
+        };
+        let b_ei = ExtentInfo {
+            generation: 5,
+            flush_number: 3,
+            dirty: true,
+        };
+        submit_one_source_two_repair(&mut ds, g_ei, b_ei);
+    }
+
+    #[tokio::test]
+    async fn test_solver_dirty_needs_repair_one() {
+        // Make sure that the repair solver will see a dirty extent_info
+        // field is true and repair that downstairs.
+        // We test with just one downstairs to repair here.
+
+        let mut ds = create_test_downstairs();
+        let g_ei = ExtentInfo {
+            generation: 5,
+            flush_number: 3,
+            dirty: false,
+        };
+        let b_ei = ExtentInfo {
+            generation: 5,
+            flush_number: 3,
+            dirty: true,
+        };
+
+        submit_one_source_one_repair(&mut ds, g_ei, b_ei);
+    }
+
+    #[tokio::test]
+    async fn test_solver_gen_lower_needs_repair_one() {
+        // Make sure that the repair solver will see a generation extent_info
+        // field is lower on a downstairs client  and mark that downstairs
+        // for repair.  We test with one downstairs to repair here.
+
+        let mut ds = create_test_downstairs();
+        let g_ei = ExtentInfo {
+            generation: 5,
+            flush_number: 3,
+            dirty: false,
+        };
+        let b_ei = ExtentInfo {
+            generation: 4,
+            flush_number: 3,
+            dirty: false,
+        };
+
+        submit_one_source_one_repair(&mut ds, g_ei, b_ei);
+    }
+
+    #[tokio::test]
+    async fn test_solver_gen_lower_needs_repair_two() {
+        // Make sure that the repair solver will see a generation extent_info
+        // field is lower on a downstairs client  and mark that downstairs
+        // for repair.  We test with two downstairs to repair here.
+
+        let mut ds = create_test_downstairs();
+        let g_ei = ExtentInfo {
+            generation: 5,
+            flush_number: 3,
+            dirty: false,
+        };
+        let b_ei = ExtentInfo {
+            generation: 4,
+            flush_number: 3,
+            dirty: false,
+        };
+
+        submit_one_source_two_repair(&mut ds, g_ei, b_ei);
+    }
+
+    #[tokio::test]
+    async fn test_solver_gen_higher_needs_repair_one() {
+        // Make sure that the repair solver will see a generation extent_info
+        // field is higher on a downstairs client, and mark that downstairs
+        // for repair.  We test with one downstairs to repair here.
+
+        let mut ds = create_test_downstairs();
+        let g_ei = ExtentInfo {
+            generation: 2,
+            flush_number: 3,
+            dirty: false,
+        };
+        let b_ei = ExtentInfo {
+            generation: 4,
+            flush_number: 3,
+            dirty: false,
+        };
+
+        submit_one_source_one_repair(&mut ds, g_ei, b_ei);
+    }
+
+    #[tokio::test]
+    async fn test_solver_gen_higher_needs_repair_two() {
+        // Make sure that the repair solver will see a generation extent_info
+        // field is lower on a downstairs client  and mark that downstairs
+        // for repair.  We test with two downstairs to repair here.
+
+        let mut ds = create_test_downstairs();
+        let g_ei = ExtentInfo {
+            generation: 3,
+            flush_number: 3,
+            dirty: false,
+        };
+        let b_ei = ExtentInfo {
+            generation: 6,
+            flush_number: 3,
+            dirty: false,
+        };
+
+        submit_one_source_two_repair(&mut ds, g_ei, b_ei);
+    }
+
+    #[tokio::test]
+    async fn test_solver_flush_lower_needs_repair_one() {
+        // Make sure that the repair solver will see a flush extent_info
+        // field is lower on a downstairs client  and mark that downstairs
+        // for repair.  We test with one downstairs to repair here.
+
+        let mut ds = create_test_downstairs();
+        let g_ei = ExtentInfo {
+            generation: 4,
+            flush_number: 3,
+            dirty: false,
+        };
+        let b_ei = ExtentInfo {
+            generation: 4,
+            flush_number: 2,
+            dirty: false,
+        };
+
+        submit_one_source_one_repair(&mut ds, g_ei, b_ei);
+    }
+
+    #[tokio::test]
+    async fn test_solver_flush_lower_needs_repair_two() {
+        // Make sure that the repair solver will see a flush extent_info
+        // field is lower on a downstairs client  and mark that downstairs
+        // for repair.  We test with two downstairs to repair here.
+
+        let mut ds = create_test_downstairs();
+        let g_ei = ExtentInfo {
+            generation: 4,
+            flush_number: 3,
+            dirty: false,
+        };
+        let b_ei = ExtentInfo {
+            generation: 4,
+            flush_number: 1,
+            dirty: false,
+        };
+
+        submit_one_source_two_repair(&mut ds, g_ei, b_ei);
+    }
+
+    #[tokio::test]
+    async fn test_solver_flush_higher_needs_repair_one() {
+        // Make sure that the repair solver will see a flush extent_info
+        // field is higher on a downstairs client, and mark that downstairs
+        // for repair.  We test with one downstairs to repair here.
+
+        let mut ds = create_test_downstairs();
+        let g_ei = ExtentInfo {
+            generation: 9,
+            flush_number: 3,
+            dirty: false,
+        };
+        let b_ei = ExtentInfo {
+            generation: 9,
+            flush_number: 4,
+            dirty: false,
+        };
+
+        submit_one_source_one_repair(&mut ds, g_ei, b_ei);
+    }
+
+    #[tokio::test]
+    async fn test_solver_flush_higher_needs_repair_two() {
+        // Make sure that the repair solver will see a generation extent_info
+        // field is lower on a downstairs client  and mark that downstairs
+        // for repair.  We test with two downstairs to repair here.
+
+        let mut ds = create_test_downstairs();
+        let g_ei = ExtentInfo {
+            generation: 6,
+            flush_number: 8,
+            dirty: false,
+        };
+        let b_ei = ExtentInfo {
+            generation: 6,
+            flush_number: 9,
+            dirty: false,
+        };
+
+        submit_one_source_two_repair(&mut ds, g_ei, b_ei);
+    }
+}
