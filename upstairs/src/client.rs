@@ -527,9 +527,10 @@ impl DownstairsClient {
             | DsState::LiveRepair
             | DsState::LiveRepairReady => DsState::Faulted,
 
-            DsState::Deactivated | DsState::Repair | DsState::FailedRepair => {
-                DsState::New
-            }
+            DsState::New
+            | DsState::Deactivated
+            | DsState::Repair
+            | DsState::FailedRepair => DsState::New,
 
             DsState::Replacing => DsState::Replaced,
 
