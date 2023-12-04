@@ -264,7 +264,13 @@ impl Downstairs {
             lossy: false,
         });
 
-        Self::new(cfg, ClientMap::new(), None, log)
+        let mut ds = Self::new(cfg, ClientMap::new(), None, log);
+        // Create a fake repair address so this field is populated.
+        for cid in ClientId::iter() {
+            ds.clients[cid].repair_addr =
+                Some("127.0.0.1:1234".parse().unwrap());
+        }
+        ds
     }
 
     /// Choose which `DownstairsAction` to apply
@@ -3403,9 +3409,10 @@ impl Downstairs {
 pub(crate) mod test {
     use super::Downstairs;
     use crate::{
-        integrity_hash, upstairs::UpstairsState, BlockContext, ClientId,
-        CrucibleError, DsState, EncryptionContext, ExtentFix, IOState, JobId,
-        ReadResponse, ReconcileIO, ReconciliationId, SnapshotDetails,
+        integrity_hash, live_repair::ExtentInfo, upstairs::UpstairsState,
+        BlockContext, ClientId, CrucibleError, DsState, EncryptionContext,
+        ExtentFix, IOState, IOop, JobId, ReadResponse, ReconcileIO,
+        ReconciliationId, SnapshotDetails,
     };
     use bytes::{Bytes, BytesMut};
     use crucible_protocol::Message;
@@ -7906,10 +7913,7 @@ pub(crate) mod test {
     // verify new work can progress with one failed downstairs.
     // two failed downstairs, what to do?  All writes will fail, all flushes
     // will fail, so, what?
-}
 
-#[cfg(feature = "NOT WORKING YET")]
-mod more_tests {
     // What follows is a number of tests for the repair solver code,
     // specifically the repair_or_noop() function.  This set of tests
     // makes use of a few layers of boilerplate to avoid a bunch of
@@ -7928,8 +7932,10 @@ mod more_tests {
     async fn test_solver_no_work() {
         // Make sure that the repair solver will return NoOp when a repair
         // is not required.
-        let mut ds = create_test_downstairs();
+        let mut ds = Downstairs::test_default();
 
+        // We walk through all the possible choices for extent under
+        // repair to be sure they can all handle it.
         for source in ClientId::iter() {
             let ei = ExtentInfo {
                 generation: 5,
@@ -7959,8 +7965,7 @@ mod more_tests {
             let eid = 0;
             let (repair_ids, deps) = ds.get_repair_ids(eid);
 
-            let repair_op = repair_or_noop(
-                &mut ds,
+            let repair_op = ds.repair_or_noop(
                 eid as usize,         // Extent
                 repair_ids.repair_id, // ds_id
                 deps,                 // Vec<u64>
@@ -7996,8 +8001,7 @@ mod more_tests {
         repair: Vec<ClientId>,
     ) {
         let (repair_ids, deps) = ds.get_repair_ids(0);
-        let repair_op = repair_or_noop(
-            ds,
+        let repair_op = ds.repair_or_noop(
             0,                   // Extent
             repair_ids.close_id, // ds_id
             deps,                // Vec<u64>
@@ -8186,7 +8190,7 @@ mod more_tests {
         // field is true and mark that downstairs for repair.
         // We test with two downstairs to repair here.
 
-        let mut ds = create_test_downstairs();
+        let mut ds = Downstairs::test_default();
         let g_ei = ExtentInfo {
             generation: 5,
             flush_number: 3,
@@ -8206,7 +8210,7 @@ mod more_tests {
         // field is true and repair that downstairs.
         // We test with just one downstairs to repair here.
 
-        let mut ds = create_test_downstairs();
+        let mut ds = Downstairs::test_default();
         let g_ei = ExtentInfo {
             generation: 5,
             flush_number: 3,
@@ -8227,7 +8231,7 @@ mod more_tests {
         // field is lower on a downstairs client  and mark that downstairs
         // for repair.  We test with one downstairs to repair here.
 
-        let mut ds = create_test_downstairs();
+        let mut ds = Downstairs::test_default();
         let g_ei = ExtentInfo {
             generation: 5,
             flush_number: 3,
@@ -8248,7 +8252,7 @@ mod more_tests {
         // field is lower on a downstairs client  and mark that downstairs
         // for repair.  We test with two downstairs to repair here.
 
-        let mut ds = create_test_downstairs();
+        let mut ds = Downstairs::test_default();
         let g_ei = ExtentInfo {
             generation: 5,
             flush_number: 3,
@@ -8269,7 +8273,7 @@ mod more_tests {
         // field is higher on a downstairs client, and mark that downstairs
         // for repair.  We test with one downstairs to repair here.
 
-        let mut ds = create_test_downstairs();
+        let mut ds = Downstairs::test_default();
         let g_ei = ExtentInfo {
             generation: 2,
             flush_number: 3,
@@ -8290,7 +8294,7 @@ mod more_tests {
         // field is lower on a downstairs client  and mark that downstairs
         // for repair.  We test with two downstairs to repair here.
 
-        let mut ds = create_test_downstairs();
+        let mut ds = Downstairs::test_default();
         let g_ei = ExtentInfo {
             generation: 3,
             flush_number: 3,
@@ -8311,7 +8315,7 @@ mod more_tests {
         // field is lower on a downstairs client  and mark that downstairs
         // for repair.  We test with one downstairs to repair here.
 
-        let mut ds = create_test_downstairs();
+        let mut ds = Downstairs::test_default();
         let g_ei = ExtentInfo {
             generation: 4,
             flush_number: 3,
@@ -8332,7 +8336,7 @@ mod more_tests {
         // field is lower on a downstairs client  and mark that downstairs
         // for repair.  We test with two downstairs to repair here.
 
-        let mut ds = create_test_downstairs();
+        let mut ds = Downstairs::test_default();
         let g_ei = ExtentInfo {
             generation: 4,
             flush_number: 3,
@@ -8353,7 +8357,7 @@ mod more_tests {
         // field is higher on a downstairs client, and mark that downstairs
         // for repair.  We test with one downstairs to repair here.
 
-        let mut ds = create_test_downstairs();
+        let mut ds = Downstairs::test_default();
         let g_ei = ExtentInfo {
             generation: 9,
             flush_number: 3,
@@ -8374,7 +8378,7 @@ mod more_tests {
         // field is lower on a downstairs client  and mark that downstairs
         // for repair.  We test with two downstairs to repair here.
 
-        let mut ds = create_test_downstairs();
+        let mut ds = Downstairs::test_default();
         let g_ei = ExtentInfo {
             generation: 6,
             flush_number: 8,
