@@ -718,10 +718,13 @@ impl Downstairs {
         }
     }
 
-    /// Tries to deactivate all of the Downstairs clients
+    /// Returns true if we can deactivate immediately
     ///
-    /// Returns true if we succeeded; otherwise returns false
-    pub(crate) fn set_deactivate(&mut self) -> bool {
+    /// This is the case if there are no pending jobs in the queue.
+    ///
+    /// # Panics
+    /// If  any downstairs is offline
+    pub(crate) fn can_deactivate_immediately(&self) -> bool {
         /*
          * If any downstairs are currently offline, then we are going
          * to lock the door behind them and not let them back in until
@@ -764,7 +767,7 @@ impl Downstairs {
         up_state: &UpstairsState,
     ) -> bool {
         assert!(
-            matches!(up_state, UpstairsState::Deactivating),
+            matches!(up_state, UpstairsState::Deactivating { .. }),
             "up_state must be Deactivating, not {up_state:?}"
         );
         if self.ds_active.is_empty() {
@@ -3188,7 +3191,7 @@ impl Downstairs {
          * Assume we don't have enough completed jobs, and only change
          * it if we have the exact amount required
          */
-        let deactivate = matches!(up_state, UpstairsState::Deactivating);
+        let deactivate = matches!(up_state, UpstairsState::Deactivating { .. });
 
         let Some(job) = self.ds_active.get_mut(&ds_id) else {
             panic!("reqid {ds_id} is not active");

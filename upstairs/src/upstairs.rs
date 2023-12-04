@@ -49,8 +49,10 @@ pub(crate) enum UpstairsState {
     /// In-flight IO continues, but no new IO is allowed.  When all IO has been
     /// completed (including the final flush), the downstairs task should stop;
     /// when all three Downstairs have stopped, the upstairs should enter
-    /// `UpstairsState::Initializing`.
-    Deactivating,
+    /// `UpstairsState::Initializing` and reply on this channel.
+    Deactivating {
+        reply: oneshot::Sender<Result<(), CrucibleError>>,
+    },
 }
 
 pub(crate) struct Upstairs {
@@ -392,7 +394,7 @@ impl Upstairs {
         }
 
         // Check for client-side deactivation
-        if matches!(self.state, UpstairsState::Deactivating) {
+        if matches!(self.state, UpstairsState::Deactivating { .. }) {
             info!(self.log, "checking for deactivation");
             for i in ClientId::iter() {
                 // Clients become Deactivated, then New (when the IO task
@@ -407,6 +409,28 @@ impl Upstairs {
                     info!(self.log, "deactivated client {i}");
                 } else {
                     info!(self.log, "not ready to deactivate client {i}");
+                }
+            }
+            if self
+                .downstairs
+                .clients
+                .iter()
+                .all(|c| c.ready_to_deactivate())
+            {
+                info!(self.log, "All DS in the proper state! -> INIT");
+                let prev = std::mem::replace(
+                    &mut self.state,
+                    UpstairsState::Initializing,
+                );
+                let UpstairsState::Deactivating { reply } = prev else {
+                    panic!("invalid upstairs state {prev:?}"); // checked above
+                };
+                if let Err(e) = reply.send(Ok(())) {
+                    error!(
+                        self.log,
+                        "got error {e:?} while replying to \
+                             deactivation request"
+                    );
                 }
             }
         }
@@ -536,7 +560,9 @@ impl Upstairs {
                         crate::UpState::Initializing
                     }
                     UpstairsState::Active => crate::UpState::Active,
-                    UpstairsState::Deactivating => crate::UpState::Deactivating,
+                    UpstairsState::Deactivating { .. } => {
+                        crate::UpState::Deactivating
+                    }
                 };
 
                 let r = tx.send(crate::control::UpstairsStats {
@@ -863,7 +889,7 @@ impl Upstairs {
             UpstairsState::GoActive { .. } => {
                 panic!("set_active_request called while already going active");
             }
-            UpstairsState::Deactivating => {
+            UpstairsState::Deactivating { .. } => {
                 warn!(
                     self.log,
                     "{} active denied while Deactivating", self.cfg.upstairs_id
@@ -900,21 +926,24 @@ impl Upstairs {
                 req.send_err(CrucibleError::UpstairsInactive);
                 return;
             }
-            UpstairsState::Deactivating => {
+            UpstairsState::Deactivating { .. } => {
                 req.send_err(CrucibleError::UpstairsDeactivating);
                 return;
             }
             UpstairsState::Active => (),
         }
-        self.state = UpstairsState::Deactivating;
-
-        if self.downstairs.set_deactivate() {
-            debug!(self.log, "set_deactivate was successful");
-            req.send_ok();
-        } else {
+        if !self.downstairs.can_deactivate_immediately() {
             debug!(self.log, "not ready to deactivate; submitting final flush");
-            self.submit_flush(Some(req), None).await;
+            self.submit_flush(None, None).await;
+        } else {
+            debug!(self.log, "ready to deactivate right away");
+            // Deactivation is handled in the invariant-checking portion of
+            // Upstairs::apply.
         }
+
+        self.state = UpstairsState::Deactivating {
+            reply: req.take_sender(),
+        };
     }
 
     pub(crate) async fn submit_flush(
@@ -1625,7 +1654,7 @@ impl Upstairs {
             UpstairsState::Active | UpstairsState::GoActive { .. } => {
                 Err(CrucibleError::UpstairsAlreadyActive)
             }
-            UpstairsState::Deactivating => {
+            UpstairsState::Deactivating { .. } => {
                 /*
                  * We don't support deactivate interruption, so we have to
                  * let the currently running deactivation finish before we
@@ -1660,11 +1689,6 @@ impl Upstairs {
         // do that for us!
         self.downstairs.clients[client_id].on_missing();
 
-        // If we are deactivating, then check and see if this downstairs was the
-        // final one required to deactivate; if so, switch the upstairs back to
-        // initializing.
-        self.deactivate_transition_check();
-
         // Restart the downstairs task.  If the upstairs is already active, then
         // the downstairs should automatically call PromoteToActive when it
         // reaches the relevant state.
@@ -1673,24 +1697,10 @@ impl Upstairs {
                 // XXX is is correct to auto-promote if we're in GoActive?
                 Some(self.generation)
             }
-            UpstairsState::Initializing | UpstairsState::Deactivating => None,
+            UpstairsState::Initializing
+            | UpstairsState::Deactivating { .. } => None,
         };
         self.downstairs.reinitialize(client_id, auto_promote);
-    }
-
-    fn deactivate_transition_check(&mut self) {
-        if matches!(self.state, UpstairsState::Deactivating) {
-            info!(self.log, "deactivate transition checking...");
-            if self
-                .downstairs
-                .clients
-                .iter()
-                .all(|c| c.ready_to_deactivate())
-            {
-                info!(self.log, "All DS in the proper state! -> INIT");
-                self.state = UpstairsState::Initializing;
-            }
-        }
     }
 
     fn set_backpressure(&self) {
@@ -1812,7 +1822,6 @@ mod test {
             ds_done_tx,
         )))
         .await;
-        assert!(ds_done_rx.await.unwrap().is_ok());
 
         // Make sure the correct DS have changed state.
         for client_id in ClientId::iter() {
@@ -1835,12 +1844,13 @@ mod test {
             assert_eq!(up.ds_state(client_id), DsState::New);
 
             if client_id.get() < 2 {
-                assert!(matches!(up.state, UpstairsState::Deactivating));
+                assert!(matches!(up.state, UpstairsState::Deactivating { .. }));
             } else {
                 // Once the third task stops, we're back in initializing
                 assert!(matches!(up.state, UpstairsState::Initializing));
             }
         }
+        assert!(ds_done_rx.await.unwrap().is_ok());
     }
 
     // Job dependency tests
@@ -3297,7 +3307,7 @@ mod test {
             deactivate_done_rx.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         );
-        assert!(matches!(up.state, UpstairsState::Deactivating));
+        assert!(matches!(up.state, UpstairsState::Deactivating { .. }));
 
         // Complete the flush on the remaining downstairs
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
