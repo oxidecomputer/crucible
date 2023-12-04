@@ -235,16 +235,15 @@ impl DownstairsClient {
                 if let Some(c) = &mut self.client_task {
                     tokio::select! {
                         m = c.client_response_rx.recv() => {
-                            let m = m.expect(
-                                "client_response_rx closed unexpectedly"
-                            );
                             match m {
-                                ClientResponse::Connected =>
+                                Some(ClientResponse::Connected) =>
                                     ClientAction::Connected,
-                                ClientResponse::Message(m) =>
+                                Some(ClientResponse::Message(m)) =>
                                     ClientAction::Response(m),
-                                ClientResponse::Done(r) =>
+                                Some(ClientResponse::Done(r)) =>
                                     ClientAction::TaskStopped(r),
+                                None =>
+                                    ClientAction::ChannelClosed,
                             }
                         }
                     }
@@ -2191,6 +2190,19 @@ pub(crate) enum ClientAction {
 
     /// The client has hit a (Crucible) timeout
     Timeout,
+
+    /// The client IO channel has returned `None`
+    ///
+    /// This should never happen during normal operation, because
+    /// 1) the IO task continues to run until the main upstairs task tells it to
+    ///    stop (by dropping the `client_request_tx` handle), and
+    /// 2) we are running with `panic=abort`, so if the IO task panics, it
+    ///    should bring down the whole program
+    ///
+    /// However, this _may_ happen during shutdown, because the Tokio runtime
+    /// shuts down tasks in arbitrary order and it's possible for the IO channel
+    /// sender to be dropped before the main task stops.
+    ChannelClosed,
 }
 
 #[derive(Debug, Default)]

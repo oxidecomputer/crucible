@@ -1278,6 +1278,14 @@ impl Upstairs {
             ClientAction::TaskStopped(r) => {
                 self.on_client_task_stopped(client_id, r);
             }
+            ClientAction::ChannelClosed => {
+                // See docstring for `ClientAction::ChannelClosed`
+                warn!(
+                    self.log,
+                    "IO channel closed for {client_id}; \
+                     we are hopefully exiting"
+                );
+            }
         }
     }
 
