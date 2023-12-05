@@ -3431,7 +3431,7 @@ pub(crate) mod test {
     use crate::{
         integrity_hash, live_repair::ExtentInfo, upstairs::UpstairsState,
         BlockContext, ClientId, CrucibleError, DsState, EncryptionContext,
-        ExtentFix, IOState, IOop, JobId, ReadResponse, ReconcileIO,
+        ExtentFix, GuestWork, IOState, IOop, JobId, ReadResponse, ReconcileIO,
         ReconciliationId, SnapshotDetails,
     };
     use bytes::{Bytes, BytesMut};
@@ -8411,5 +8411,299 @@ pub(crate) mod test {
         };
 
         submit_one_source_two_repair(&mut ds, g_ei, b_ei);
+    }
+
+    #[tokio::test]
+    async fn test_live_repair_enqueue_reopen() {
+        // Make sure the create_and_enqueue_reopen_io() function does
+        // what we expect it to do, which also tests create_reopen_io()
+        // function as well.
+        let mut gw = GuestWork::default();
+        let mut ds = Downstairs::test_default();
+
+        let eid = 0;
+
+        // Upstairs "guest" work IDs.
+        let gw_reopen_id: u64 = gw.next_gw_id();
+        let (repair_ids, mut deps) = ds.get_repair_ids(eid);
+        assert!(deps.is_empty());
+
+        // deps for our reopen job
+        deps.push(repair_ids.close_id);
+        deps.push(repair_ids.repair_id);
+
+        // create close/fclose jobs first.
+        // create the reopen job second (but use final ID)
+        // create final new_gtos job, but populate ids needed without
+        // actually enqueue'ing the middle repair job.
+
+        let _reopen_brw = ds.create_and_enqueue_reopen_io(
+            &mut gw,
+            eid,
+            deps,
+            repair_ids.reopen_id,
+            gw_reopen_id,
+        );
+
+        let job = ds.ds_active().get(&repair_ids.reopen_id).unwrap();
+
+        println!("Job is {:?}", job);
+        match &job.work {
+            IOop::ExtentLiveReopen {
+                dependencies: d,
+                extent: e,
+            } => {
+                assert_eq!(*d, &[repair_ids.close_id, repair_ids.repair_id]);
+                assert_eq!(*e, eid as usize);
+            }
+            x => {
+                panic!("Bad DownstairsIO type returned: {:?}", x);
+            }
+        }
+        for cid in ClientId::iter() {
+            assert_eq!(job.state[cid], IOState::New);
+        }
+        assert_eq!(job.acked, false);
+        assert!(!job.replay);
+        assert!(job.data.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_live_repair_enqueue_close() {
+        // Make sure the create_and_enqueue_close_io() function does
+        // what we expect it to do, which also tests create_close_io()
+        // function as well.
+        let mut gw = GuestWork::default();
+        let mut ds = Downstairs::test_default();
+
+        let eid = 0;
+
+        // Upstairs "guest" work IDs.
+        let gw_close_id: u64 = gw.next_gw_id();
+        let (repair_ids, mut deps) = ds.get_repair_ids(eid);
+        assert!(deps.is_empty());
+
+        deps.push(repair_ids.close_id);
+        deps.push(repair_ids.repair_id);
+
+        // create close/fclose jobs first.
+        // create the reopen job second (but use final ID)j
+        // create final new_gtos job, but populate ids needed without
+        // actually enqueue'ing the middle repair job.
+
+        // Set flush to non-zero to make the test more likely to detect an
+        // incorrect flush number
+        ds.next_flush = 0x1DE;
+        let next_flush = ds.next_flush;
+        let gen = 4;
+        let source = ClientId::new(1);
+        let repair = vec![ClientId::new(0), ClientId::new(2)];
+        let _reopen_brw = ds.create_and_enqueue_close_io(
+            &mut gw,
+            eid,
+            gen,
+            deps,
+            repair_ids.close_id,
+            gw_close_id,
+            source,
+            &repair,
+        );
+
+        let job = ds.ds_active().get(&repair_ids.close_id).unwrap();
+
+        println!("Job is {:?}", job);
+        match &job.work {
+            IOop::ExtentFlushClose {
+                dependencies,
+                extent,
+                flush_number,
+                gen_number,
+                source_downstairs,
+                repair_downstairs,
+            } => {
+                assert_eq!(
+                    *dependencies,
+                    &[repair_ids.close_id, repair_ids.repair_id]
+                );
+                assert_eq!(*extent, eid as usize);
+                assert_eq!(*flush_number, next_flush);
+                assert_eq!(*gen_number, gen);
+                assert_eq!(*source_downstairs, source);
+                assert_eq!(*repair_downstairs, repair);
+            }
+            x => {
+                panic!(
+                    "Bad DownstairsIO Expecting. ExtentFlushClose, got: {:?}",
+                    x
+                );
+            }
+        }
+        for cid in ClientId::iter() {
+            assert_eq!(job.state[cid], IOState::New);
+        }
+        assert_eq!(job.acked, false);
+        assert!(!job.replay);
+        assert!(job.data.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_live_repair_enqueue_repair_noop() {
+        // Make sure the create_and_enqueue_repair_io() function does
+        // what we expect it to do, which also tests create_repair_io()
+        // function as well.  In this case we expect the job created to
+        // be a no-op job.
+
+        let mut gw = GuestWork::default();
+        let mut ds = Downstairs::test_default();
+
+        let eid = 0;
+
+        // Upstairs "guest" work IDs.
+        let gw_repair_id: u64 = gw.next_gw_id();
+        let (repair_ids, mut deps) = ds.get_repair_ids(eid);
+        assert!(deps.is_empty());
+
+        deps.push(repair_ids.repair_id);
+        deps.push(repair_ids.noop_id);
+
+        let source = ClientId::new(0);
+        let repair = vec![ClientId::new(1), ClientId::new(2)];
+
+        // To allow the repair to work, we fake the return data from a
+        // close operation so it has something to work with.
+        let ei = ExtentInfo {
+            generation: 5,
+            flush_number: 3,
+            dirty: false,
+        };
+        for cid in ClientId::iter() {
+            ds.clients[cid].repair_info = Some(ei);
+        }
+
+        let _repair_brw = ds.create_and_enqueue_repair_io(
+            &mut gw,
+            eid,
+            deps,
+            repair_ids.repair_id,
+            gw_repair_id,
+            source,
+            &repair,
+        );
+
+        let job = ds.ds_active().get(&repair_ids.repair_id).unwrap();
+
+        println!("Job is {:?}", job);
+        match &job.work {
+            IOop::ExtentLiveNoOp { dependencies } => {
+                assert_eq!(
+                    *dependencies,
+                    [repair_ids.repair_id, repair_ids.noop_id]
+                );
+            }
+            x => {
+                panic!(
+                    "Bad DownstairsIO Expecting. ExtentLiveNoOp, got: {:?}",
+                    x
+                );
+            }
+        }
+        for cid in ClientId::iter() {
+            assert_eq!(job.state[cid], IOState::New);
+        }
+        assert_eq!(job.acked, false);
+        assert!(!job.replay);
+        assert!(job.data.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_live_repair_enqueue_repair_repair() {
+        // Make sure the create_and_enqueue_repair_io() function does
+        // what we expect it to do, which also tests create_repair_io()
+        // function as well.
+        let mut gw = GuestWork::default();
+        let mut ds = Downstairs::test_default();
+
+        let eid = 0;
+
+        // Upstairs "guest" work IDs.
+        let gw_repair_id: u64 = gw.next_gw_id();
+        let (repair_ids, mut deps) = ds.get_repair_ids(eid);
+        assert!(deps.is_empty());
+
+        deps.push(repair_ids.repair_id);
+        deps.push(repair_ids.noop_id);
+
+        let source = ClientId::new(0);
+        let repair = vec![ClientId::new(1), ClientId::new(2)];
+
+        // To allow the repair to work, we fake the return data from a
+        // close operation so it has something to work with.
+        let ei = ExtentInfo {
+            generation: 5,
+            flush_number: 3,
+            dirty: false,
+        };
+        ds.clients[ClientId::new(0)].repair_info = Some(ei);
+        ds.clients[ClientId::new(1)].repair_info = Some(ei);
+        let bad_ei = ExtentInfo {
+            generation: 5,
+            flush_number: 2,
+            dirty: false,
+        };
+        ds.clients[ClientId::new(2)].repair_info = Some(bad_ei);
+        // We also need a fake repair address
+        for cid in ClientId::iter() {
+            ds.clients[cid].repair_addr =
+                Some("127.0.0.1:1234".parse().unwrap());
+        }
+
+        let _reopen_brw = ds.create_and_enqueue_repair_io(
+            &mut gw,
+            eid,
+            deps,
+            repair_ids.repair_id,
+            gw_repair_id,
+            source,
+            &repair,
+        );
+
+        let job = ds.ds_active().get(&repair_ids.repair_id).unwrap();
+
+        println!("Job is {:?}", job);
+        match &job.work {
+            IOop::ExtentLiveRepair {
+                dependencies,
+                extent,
+                source_downstairs,
+                source_repair_address,
+                repair_downstairs,
+            } => {
+                assert_eq!(
+                    *dependencies,
+                    [repair_ids.repair_id, repair_ids.noop_id]
+                );
+                assert_eq!(*extent, eid as usize);
+                assert_eq!(*source_downstairs, source);
+                assert_eq!(
+                    *source_repair_address,
+                    "127.0.0.1:1234".parse().unwrap()
+                );
+                // We are only repairing 2 because it had the different
+                // ExtentInfo.  0 and 1 were the same.
+                assert_eq!(*repair_downstairs, vec![ClientId::new(2)]);
+            }
+            x => {
+                panic!(
+                    "Bad DownstairsIO Expecting. ExtentLiveRepair, got: {:?}",
+                    x
+                );
+            }
+        }
+        for cid in ClientId::iter() {
+            assert_eq!(job.state[cid], IOState::New);
+        }
+        assert_eq!(job.acked, false);
+        assert!(!job.replay);
+        assert!(job.data.is_none());
     }
 }

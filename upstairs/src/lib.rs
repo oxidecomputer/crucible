@@ -2067,6 +2067,16 @@ impl GuestWork {
     }
 }
 
+impl Default for GuestWork {
+    fn default() -> Self {
+        Self {
+            active: HashMap::new(), // GtoS
+            next_gw_id: 1,
+            completed: AllocRingBuffer::new(2048),
+        }
+    }
+}
+
 /**
  * This is the structure we use to keep track of work passed into crucible
  * from the "Guest".
