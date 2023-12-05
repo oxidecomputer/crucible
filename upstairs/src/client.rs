@@ -543,10 +543,14 @@ impl DownstairsClient {
             }
         };
 
-        info!(
-            self.log,
-            "Gone missing, transition from {current:?} to {new_state:?}"
-        );
+        if *current != new_state {
+            info!(
+                self.log,
+                "Gone missing, transition from {current:?} to {new_state:?}"
+            );
+        } else {
+            info!(self.log, "Still missing, state is {current:?}");
+        }
 
         // Should we move jobs now?  When do we move work that has
         // been submitted over to "skipped"
