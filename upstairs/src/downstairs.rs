@@ -3236,6 +3236,10 @@ impl Downstairs {
         let deactivate = matches!(up_state, UpstairsState::Deactivating { .. });
 
         let Some(job) = self.ds_active.get_mut(&ds_id) else {
+            error!(
+                self.clients[client_id].log,
+                "IO completion error: missing {ds_id} "
+            );
             /*
              * This assertion is only true for a limited time after
              * the downstairs has failed.  An old in-flight IO
