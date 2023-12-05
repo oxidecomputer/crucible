@@ -1857,10 +1857,6 @@ impl Downstairs {
         &mut self,
         eid: u64,
     ) -> (ExtentRepairIDs, Vec<JobId>) {
-        info!(self.log, "HI THERE {}", self.repair.is_some());
-        if let Some(r) = &self.repair {
-            info!(self.log, "REPAIR JOB IDS: {:?}", r.repair_job_ids);
-        }
         if let Some((eri, deps)) = self
             .repair
             .as_mut()
