@@ -98,7 +98,7 @@ pub(crate) struct Upstairs {
     pub(crate) stats: UpStatOuter,
 
     /// Fixed configuration
-    cfg: Arc<UpstairsConfig>,
+    pub(crate) cfg: Arc<UpstairsConfig>,
 
     /// Logger used by the upstairs
     pub(crate) log: Logger,

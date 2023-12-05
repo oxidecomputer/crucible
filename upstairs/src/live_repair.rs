@@ -102,7 +102,11 @@ pub enum RepairCheck {
 #[cfg(test)]
 pub mod repair_test {
     use super::*;
-    use crate::{downstairs::test::set_all_active, upstairs::Upstairs};
+    use crate::{
+        client::ClientAction,
+        downstairs::{test::set_all_active, DownstairsAction},
+        upstairs::{Upstairs, UpstairsAction},
+    };
 
     // Test function to create just enough of an Upstairs for our needs.
     fn create_test_upstairs() -> Upstairs {
@@ -122,51 +126,71 @@ pub mod repair_test {
         up
     }
 
-    // Test function to move a job to in_progress, then complete it.
-    // We will skip processing the job ID on the downstairs client ids
-    // on the skip_ds vec.
-    fn move_and_complete_job(
+    /// Test function to send fake replies for the given job, completing it
+    ///
+    /// Fake replies are applied through `Upstairs::apply`, so the reply may
+    /// cause multiple things to happen:
+    ///
+    /// - Ackable jobs will be acked
+    /// - Live-repair will continue processing, e.g. moving on to the next
+    ///   extent automatically
+    async fn reply_to_repair_job(
         up: &mut Upstairs,
-        ds_id: JobId,
-        skip_ds: Vec<ClientId>,
-    ) -> Result<()> {
-        for cid in ClientId::iter() {
-            if skip_ds.contains(&cid) {
-                continue;
-            }
-            up.downstairs.in_progress(ds_id, cid);
-            up.downstairs.process_ds_completion(
-                ds_id,
-                cid,
-                Ok(vec![]),
-                &up.state,
-                None,
-            );
-        }
-        Ok(())
-    }
-
-    // Test function to ACK a job, given the ds_id and gw_id
-    async fn ack_this_job(
-        up: &mut Upstairs,
-        gw_id: u64,
-        ds_id: JobId,
+        job_id: JobId,
+        client_id: ClientId,
         result: Result<(), CrucibleError>,
+        ei: Option<ExtentInfo>,
     ) {
-        let mut gw = up.guest.guest_work.lock().await;
-
-        // Manually drive the upstairs state forward, because the job is now
-        // ackable.
-        up.downstairs.continue_live_repair(
-            ds_id,
-            &mut gw,
-            &up.state,
-            up.generation,
-        );
-        up.downstairs.ack(ds_id);
-        gw.gw_ds_complete(gw_id, ds_id, None, result.clone(), &up.log)
-            .await;
-        drop(gw);
+        let Some(job) = up.downstairs.get_job(&job_id) else {
+            panic!("no such job");
+        };
+        let session_id = up.cfg.session_id;
+        let upstairs_id = up.cfg.upstairs_id;
+        let m = match &job.work {
+            IOop::ExtentFlushClose { .. } => {
+                let ei = ei.unwrap();
+                Message::ExtentLiveCloseAck {
+                    job_id,
+                    session_id,
+                    upstairs_id,
+                    result: result
+                        .map(|_| (ei.generation, ei.flush_number, ei.dirty)),
+                }
+            }
+            IOop::ExtentLiveNoOp { .. } | IOop::ExtentLiveReopen { .. } => {
+                Message::ExtentLiveAckId {
+                    job_id,
+                    session_id,
+                    upstairs_id,
+                    result,
+                }
+            }
+            IOop::ExtentLiveRepair {
+                repair_downstairs, ..
+            } => {
+                if repair_downstairs.contains(&client_id) {
+                    Message::ExtentLiveRepairAckId {
+                        job_id,
+                        session_id,
+                        upstairs_id,
+                        result,
+                    }
+                } else {
+                    Message::ExtentLiveAckId {
+                        job_id,
+                        session_id,
+                        upstairs_id,
+                        result,
+                    }
+                }
+            }
+            m => panic!("don't know how to complete {m:?}"),
+        };
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id,
+            action: ClientAction::Response(m),
+        }))
+        .await;
     }
 
     // A function that does some setup that other tests can use to avoid
@@ -183,8 +207,11 @@ pub mod repair_test {
         client.checked_state_transition(&up.state, DsState::Faulted);
         client.checked_state_transition(&up.state, DsState::LiveRepairReady);
 
-        // Start repairing the downstairs
-        assert_eq!(up.on_repair_check().await, RepairCheck::RepairStarted);
+        // Start repairing the downstairs; this also enqueues the jobs
+        up.apply(UpstairsAction::RepairCheck).await;
+
+        // Assert that the repair started
+        assert_eq!(up.on_repair_check().await, RepairCheck::RepairInProgress);
 
         // The first thing that should happen after we start repair_exetnt
         // is two jobs show up on the work queue, one for close and one for
@@ -229,10 +256,6 @@ pub mod repair_test {
         let ds_repair_id = JobId(1001);
         let ds_noop_id = JobId(1002);
         let ds_reopen_id = JobId(1003);
-        let gw_close_id = 1;
-        let gw_repair_id = 2;
-        let gw_noop_id = 3;
-        let gw_reopen_id = 4;
 
         let ei = ExtentInfo {
             generation: 5,
@@ -240,19 +263,11 @@ pub mod repair_test {
             dirty: false,
         };
         for cid in ClientId::iter() {
-            up.downstairs.in_progress(ds_close_id, cid);
-            up.downstairs.process_ds_completion(
-                ds_close_id,
-                cid,
-                Ok(vec![]),
-                &up.state,
-                Some(ei),
-            );
+            reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei))
+                .await;
         }
 
-        info!(up.log, "acking job");
-        ack_this_job(&mut up, gw_close_id, ds_close_id, Ok(())).await;
-        info!(up.log, "acked job");
+        info!(up.log, "done replying to close job");
         // Once we process the IO completion, and drop the lock, the task
         // doing extent repair should submit the next IO.
 
@@ -260,10 +275,9 @@ pub mod repair_test {
         assert_eq!(jobs, 3);
 
         // The repair job has shown up.  Move it forward.
-        move_and_complete_job(&mut up, ds_repair_id, vec![]).unwrap();
-
-        // Now ACK the repair job
-        ack_this_job(&mut up, gw_repair_id, ds_repair_id, Ok(())).await;
+        for cid in ClientId::iter() {
+            reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), None).await;
+        }
 
         // When we completed the repair jobs, the repair_extent should
         // have gone ahead and issued the NoOp that should be issued
@@ -272,17 +286,14 @@ pub mod repair_test {
         assert_eq!(jobs, 4);
 
         info!(up.log, "Now move the NoOp job forward");
-        move_and_complete_job(&mut up, ds_noop_id, vec![]).unwrap();
-
-        ack_this_job(&mut up, gw_noop_id, ds_noop_id, Ok(())).await;
+        for cid in ClientId::iter() {
+            reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None).await;
+        }
 
         info!(up.log, "Finally, move the ReOpen job forward");
-        move_and_complete_job(&mut up, ds_reopen_id, vec![]).unwrap();
-
-        assert_eq!(up.downstairs.ackable_work().len(), 1);
-
-        info!(up.log, "Now ACK the reopen job");
-        ack_this_job(&mut up, gw_reopen_id, ds_reopen_id, Ok(())).await;
+        for cid in ClientId::iter() {
+            reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None).await;
+        }
 
         // The extent repair task should complete without error.
         assert_eq!(up.downstairs.repair().as_ref().unwrap().active_extent, 1);
@@ -363,10 +374,6 @@ pub mod repair_test {
         let ds_repair_id = JobId(1001);
         let ds_noop_id = JobId(1002);
         let ds_reopen_id = JobId(1003);
-        let gw_close_id = 1;
-        let gw_repair_id = 2;
-        let gw_noop_id = 3;
-        let gw_reopen_id = 4;
 
         // Create two different ExtentInfo structs so we will have
         // a downstairs that requires repair.
@@ -381,29 +388,18 @@ pub mod repair_test {
             dirty: false,
         };
 
+        info!(up.log, "reply to close job");
         for cid in ClientId::iter() {
-            up.downstairs.in_progress(ds_close_id, cid);
-            if cid == or_ds {
-                up.downstairs.process_ds_completion(
-                    ds_close_id,
-                    cid,
-                    Ok(vec![]),
-                    &up.state,
-                    Some(bad_ei),
-                );
-            } else {
-                up.downstairs.process_ds_completion(
-                    ds_close_id,
-                    cid,
-                    Ok(vec![]),
-                    &up.state,
-                    Some(ei),
-                );
-            }
+            reply_to_repair_job(
+                &mut up,
+                ds_close_id,
+                cid,
+                Ok(()),
+                Some(if cid == or_ds { bad_ei } else { ei }),
+            )
+            .await;
         }
 
-        info!(up.log, "Now ACK the close job");
-        ack_this_job(&mut up, gw_close_id, ds_close_id, Ok(())).await;
         // Once we process the IO completion, and drop the lock, the task
         // doing extent repair should submit the next IO.
 
@@ -413,26 +409,24 @@ pub mod repair_test {
         // The repair job has shown up.  Move it forward.
         // Because the "or_ds" in this case is not returning an
         // error, we don't pass it to move_and_complete_job
-        move_and_complete_job(&mut up, ds_repair_id, vec![]).unwrap();
-
-        info!(up.log, "Now ACK the repair job");
-        ack_this_job(&mut up, gw_repair_id, ds_repair_id, Ok(())).await;
+        info!(up.log, "Now reply to the repair job");
+        for cid in ClientId::iter() {
+            reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), None).await;
+        }
 
         // When we completed the repair jobs, the repair_extent should
         // have gone ahead and issued the NoOp that should be issued
         // next.
         info!(up.log, "Now move the NoOp job forward");
-        move_and_complete_job(&mut up, ds_noop_id, vec![]).unwrap();
-
-        info!(up.log, "Now ACK the NoOp job");
-        ack_this_job(&mut up, gw_noop_id, ds_noop_id, Ok(())).await;
+        for cid in ClientId::iter() {
+            reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None).await;
+        }
 
         // The reopen job should already be on the queue, move it forward.
         info!(up.log, "Finally, move the ReOpen job forward");
-        move_and_complete_job(&mut up, ds_reopen_id, vec![]).unwrap();
-
-        info!(up.log, "Now ACK the repair job");
-        ack_this_job(&mut up, gw_reopen_id, ds_reopen_id, Ok(())).await;
+        for cid in ClientId::iter() {
+            reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None).await;
+        }
 
         // The extent repair task should complete without error.
         assert_eq!(up.downstairs.repair().as_ref().unwrap().active_extent, 1);
@@ -502,10 +496,6 @@ pub mod repair_test {
         let ds_repair_id = JobId(1001);
         let ds_noop_id = JobId(1002);
         let ds_reopen_id = JobId(1003);
-        let gw_close_id = 1;
-        let gw_repair_id = 2;
-        let gw_noop_id = 3;
-        let gw_reopen_id = 4;
 
         let ei = ExtentInfo {
             generation: 5,
@@ -516,58 +506,61 @@ pub mod repair_test {
         info!(up.log, "move the close jobs forward");
         // Move the close job forward, but report error on the err_ds
         for cid in ClientId::iter() {
-            up.downstairs.in_progress(ds_close_id, cid);
             if cid == err_ds {
-                up.downstairs.process_ds_completion(
+                reply_to_repair_job(
+                    &mut up,
                     ds_close_id,
                     cid,
                     Err(CrucibleError::GenericError("bad".to_string())),
-                    &up.state,
-                    None,
-                );
+                    Some(ei), // Err takes precedence
+                )
+                .await;
             } else {
-                up.downstairs.process_ds_completion(
+                reply_to_repair_job(
+                    &mut up,
                     ds_close_id,
                     cid,
-                    Ok(vec![]),
-                    &up.state,
+                    Ok(()),
                     Some(ei),
-                );
+                )
+                .await;
             }
         }
 
         // process_ds_completion should force the downstairs to fail
         assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
 
-        let my_err = Err(CrucibleError::GenericError("bad".to_string()));
-        info!(up.log, "Now ACK the close job");
-        ack_this_job(&mut up, gw_close_id, ds_close_id, my_err.clone()).await;
-
         info!(up.log, "repair job should have got here, move it forward");
         // The repair (NoOp) job should have shown up.  Move it forward.
-        move_and_complete_job(&mut up, ds_repair_id, vec![err_ds, or_ds])
-            .unwrap();
-
-        info!(up.log, "repair job completed, now ack_this_job");
-        ack_this_job(&mut up, gw_repair_id, ds_repair_id, my_err.clone()).await;
+        for cid in ClientId::iter() {
+            if cid != err_ds {
+                info!(up.log, "replying to repair job on {cid}");
+                reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), None)
+                    .await;
+            }
+        }
 
         // When we completed the repair jobs, the main task should
         // have gone ahead and issued the NoOp that should be issued
         // next.
         info!(up.log, "Now move the NoOp job forward");
-        move_and_complete_job(&mut up, ds_noop_id, vec![err_ds, or_ds])
-            .unwrap();
-
-        info!(up.log, "Now ACK the NoOp job");
-        ack_this_job(&mut up, gw_noop_id, ds_noop_id, my_err.clone()).await;
+        for cid in ClientId::iter() {
+            if cid != err_ds {
+                info!(up.log, "replying to repair job on {cid}");
+                reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None)
+                    .await;
+            }
+        }
 
         // The reopen job should already be on the queue, move it forward.
         info!(up.log, "Finally, move the ReOpen job forward");
-        move_and_complete_job(&mut up, ds_reopen_id, vec![err_ds, or_ds])
-            .unwrap();
-
-        info!(up.log, "Now ACK the Reopen job");
-        ack_this_job(&mut up, gw_reopen_id, ds_reopen_id, my_err.clone()).await;
+        for cid in ClientId::iter() {
+            if cid != err_ds {
+                info!(up.log, "replying to repair job on {cid}");
+                reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None)
+                    .await;
+            }
+        }
 
         // We should have the four repair jobs on the queue, along with
         // a final flush, as we should have ended this repair as failed and
@@ -671,55 +664,29 @@ pub mod repair_test {
         let ds_repair_id = JobId(1001);
         let ds_noop_id = JobId(1002);
         let ds_reopen_id = JobId(1003);
-        let gw_close_id = 1;
-        let gw_repair_id = 2;
-        let gw_noop_id = 3;
-        let gw_reopen_id = 4;
 
         let ei = ExtentInfo {
             generation: 5,
             flush_number: 3,
             dirty: false,
         };
+        info!(up.log, "reply to the close job");
         for cid in ClientId::iter() {
-            up.downstairs.in_progress(ds_close_id, cid);
-            up.downstairs.process_ds_completion(
-                ds_close_id,
-                cid,
-                Ok(vec![]),
-                &up.state,
-                Some(ei),
-            );
+            reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei))
+                .await;
         }
-
-        info!(up.log, "Now ACK the close job");
-        ack_this_job(&mut up, gw_close_id, ds_close_id, Ok(())).await;
 
         // Once we process the IO completion the task
         // doing extent repair should submit the next IO.
         // Move the repair job forward, but report error on the err_ds
         for cid in ClientId::iter() {
-            up.downstairs.in_progress(ds_repair_id, cid);
-            if cid == err_ds {
-                up.downstairs.process_ds_completion(
-                    ds_repair_id,
-                    cid,
-                    Err(CrucibleError::GenericError("bad".to_string())),
-                    &up.state,
-                    None,
-                );
+            let r = if cid == err_ds {
+                Err(CrucibleError::GenericError("bad".to_string()))
             } else {
-                up.downstairs.process_ds_completion(
-                    ds_repair_id,
-                    cid,
-                    Ok(vec![]),
-                    &up.state,
-                    Some(ei),
-                );
-            }
+                Ok(())
+            };
+            reply_to_repair_job(&mut up, ds_repair_id, cid, r, None).await;
         }
-        let my_err = Err(CrucibleError::GenericError("bad".to_string()));
-        ack_this_job(&mut up, gw_repair_id, ds_repair_id, my_err.clone()).await;
 
         // process_ds_completion should force both the downstairs that
         // reported the error, and the downstairs that is under repair to
@@ -730,19 +697,21 @@ pub mod repair_test {
         // When we completed the repair jobs, the repair_extent should
         // have gone ahead and issued the NoOp that should be issued next.
         info!(up.log, "Now move the NoOp job forward");
-        move_and_complete_job(&mut up, ds_noop_id, vec![err_ds, or_ds])
-            .unwrap();
-
-        info!(up.log, "Now ACK the NoOp job");
-        ack_this_job(&mut up, gw_noop_id, ds_noop_id, my_err.clone()).await;
+        for cid in ClientId::iter() {
+            if cid != err_ds && cid != or_ds {
+                reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None)
+                    .await;
+            }
+        }
 
         // The reopen job should already be on the queue, move it forward.
         info!(up.log, "Finally, move the ReOpen job forward");
-        move_and_complete_job(&mut up, ds_reopen_id, vec![err_ds, or_ds])
-            .unwrap();
-
-        info!(up.log, "Now ACK the Reopen job");
-        ack_this_job(&mut up, gw_reopen_id, ds_reopen_id, my_err.clone()).await;
+        for cid in ClientId::iter() {
+            if cid != err_ds && cid != or_ds {
+                reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None)
+                    .await;
+            }
+        }
 
         // We should have four repair jobs on the queue along with the
         // final flush.  We only have a final flush here because we have
@@ -824,10 +793,6 @@ pub mod repair_test {
         let ds_repair_id = JobId(1001);
         let ds_noop_id = JobId(1002);
         let ds_reopen_id = JobId(1003);
-        let gw_close_id = 1;
-        let gw_repair_id = 2;
-        let gw_noop_id = 3;
-        let gw_reopen_id = 4;
 
         let ei = ExtentInfo {
             generation: 5,
@@ -835,56 +800,37 @@ pub mod repair_test {
             dirty: false,
         };
         for cid in ClientId::iter() {
-            up.downstairs.in_progress(ds_close_id, cid);
-            up.downstairs.process_ds_completion(
-                ds_close_id,
-                cid,
-                Ok(vec![]),
-                &up.state,
-                Some(ei),
-            );
+            reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei))
+                .await;
         }
 
-        ack_this_job(&mut up, gw_close_id, ds_close_id, Ok(())).await;
         // Once we process the IO completion, the task doing extent
         // repair should submit the next IO.  Move that job forward.
-        move_and_complete_job(&mut up, ds_repair_id, vec![]).unwrap();
-
-        // Now ACK the repair job
-        ack_this_job(&mut up, gw_repair_id, ds_repair_id, Ok(())).await;
+        for cid in ClientId::iter() {
+            reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), Some(ei))
+                .await;
+        }
 
         // When we completed the repair jobs, the repair_extent should
         // have gone ahead and issued the NoOp that should be issued
         // next.
         info!(up.log, "Now move the NoOp job forward");
         for cid in ClientId::iter() {
-            up.downstairs.in_progress(ds_noop_id, cid);
-            if cid == err_ds {
-                up.downstairs.process_ds_completion(
-                    ds_noop_id,
-                    cid,
-                    Err(CrucibleError::GenericError("bad".to_string())),
-                    &up.state,
-                    None,
-                );
+            let r = if cid == err_ds {
+                Err(CrucibleError::GenericError("bad".to_string()))
             } else {
-                up.downstairs.process_ds_completion(
-                    ds_noop_id,
-                    cid,
-                    Ok(vec![]),
-                    &up.state,
-                    None,
-                );
-            }
+                Ok(())
+            };
+            reply_to_repair_job(&mut up, ds_noop_id, cid, r, None).await;
         }
-        let my_err = Err(CrucibleError::GenericError("bad".to_string()));
-        ack_this_job(&mut up, gw_noop_id, ds_noop_id, my_err.clone()).await;
-
-        info!(up.log, "Finally, move the ReOpen job forward");
-        move_and_complete_job(&mut up, ds_reopen_id, vec![err_ds]).unwrap();
 
         info!(up.log, "Now ACK the reopen job");
-        ack_this_job(&mut up, gw_reopen_id, ds_reopen_id, Ok(())).await;
+        for cid in ClientId::iter() {
+            if cid != err_ds {
+                reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None)
+                    .await;
+            }
+        }
 
         // We should have five jobs on the queue.
         assert_eq!(up.downstairs.active_count(), 5);
@@ -946,10 +892,6 @@ pub mod repair_test {
         let ds_repair_id = JobId(1001);
         let ds_noop_id = JobId(1002);
         let ds_reopen_id = JobId(1003);
-        let gw_close_id = 1;
-        let gw_repair_id = 2;
-        let gw_noop_id = 3;
-        let gw_reopen_id = 4;
 
         let ei = ExtentInfo {
             generation: 5,
@@ -957,56 +899,35 @@ pub mod repair_test {
             dirty: false,
         };
         for cid in ClientId::iter() {
-            up.downstairs.in_progress(ds_close_id, cid);
-            up.downstairs.process_ds_completion(
-                ds_close_id,
-                cid,
-                Ok(vec![]),
-                &up.state,
-                Some(ei),
-            );
+            reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei))
+                .await;
         }
 
-        ack_this_job(&mut up, gw_close_id, ds_close_id, Ok(())).await;
         // Once we process the IO completion, and drop the lock, the task
         // doing extent repair should submit the next IO.
 
         // The repair job has shown up.  Move it forward.
-        move_and_complete_job(&mut up, ds_repair_id, vec![]).unwrap();
-
-        // Now ACK the repair job
-        ack_this_job(&mut up, gw_repair_id, ds_repair_id, Ok(())).await;
+        for cid in ClientId::iter() {
+            reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), None).await;
+        }
 
         // When we completed the repair jobs, the main task should
         // have gone ahead and issued the NoOp that should be issued next.
 
         info!(up.log, "Now move the NoOp job forward");
-        move_and_complete_job(&mut up, ds_noop_id, vec![]).unwrap();
-        ack_this_job(&mut up, gw_noop_id, ds_noop_id, Ok(())).await;
+        for cid in ClientId::iter() {
+            reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None).await;
+        }
 
         // Move the reopen job forward
         for cid in ClientId::iter() {
-            up.downstairs.in_progress(ds_reopen_id, cid);
-            if cid == err_ds {
-                up.downstairs.process_ds_completion(
-                    ds_reopen_id,
-                    cid,
-                    Err(CrucibleError::GenericError("bad".to_string())),
-                    &up.state,
-                    None,
-                );
+            let r = if cid == err_ds {
+                Err(CrucibleError::GenericError("bad".to_string()))
             } else {
-                up.downstairs.process_ds_completion(
-                    ds_reopen_id,
-                    cid,
-                    Ok(vec![]),
-                    &up.state,
-                    Some(ei),
-                );
-            }
+                Ok(())
+            };
+            reply_to_repair_job(&mut up, ds_reopen_id, cid, r, None).await;
         }
-        let my_err = Err(CrucibleError::GenericError("bad".to_string()));
-        ack_this_job(&mut up, gw_reopen_id, ds_reopen_id, my_err.clone()).await;
 
         // We should have four repair jobs on the queue along with the
         // final flush.  We only have a final flush here because we have
@@ -1061,11 +982,7 @@ pub mod repair_test {
     // Test function to complete a LiveRepair.
     // This assumes a LiveRepair has been started and the first two repair
     // jobs have been issued.  We will use the starting job ID default of 1000.
-    async fn finish_live_repair(
-        up: &mut Upstairs,
-        ds_start: u64,
-        gw_start: u64,
-    ) {
+    async fn finish_live_repair(up: &mut Upstairs, ds_start: u64) {
         // By default, the job IDs always start at 1000 and the gw IDs
         // always start at 1. Take advantage of that and knowing that we
         // start from a clean slate to predict what the IDs are for jobs
@@ -1074,10 +991,6 @@ pub mod repair_test {
         let ds_repair_id = JobId(ds_start + 1);
         let ds_noop_id = JobId(ds_start + 2);
         let ds_reopen_id = JobId(ds_start + 3);
-        let gw_close_id = gw_start;
-        let gw_repair_id = gw_start + 1;
-        let gw_noop_id = gw_start + 2;
-        let gw_reopen_id = gw_start + 3;
 
         let ei = ExtentInfo {
             generation: 5,
@@ -1085,25 +998,14 @@ pub mod repair_test {
             dirty: false,
         };
         for cid in ClientId::iter() {
-            up.downstairs.in_progress(ds_close_id, cid);
-            up.downstairs.process_ds_completion(
-                ds_close_id,
-                cid,
-                Ok(vec![]),
-                &up.state,
-                Some(ei),
-            );
+            reply_to_repair_job(up, ds_close_id, cid, Ok(()), Some(ei)).await;
         }
-        ack_this_job(up, gw_close_id, ds_close_id, Ok(())).await;
 
-        move_and_complete_job(up, ds_repair_id, vec![]).unwrap();
-        ack_this_job(up, gw_repair_id, ds_repair_id, Ok(())).await;
-
-        move_and_complete_job(up, ds_noop_id, vec![]).unwrap();
-        ack_this_job(up, gw_noop_id, ds_noop_id, Ok(())).await;
-
-        move_and_complete_job(up, ds_reopen_id, vec![]).unwrap();
-        ack_this_job(up, gw_reopen_id, ds_reopen_id, Ok(())).await;
+        for job in [ds_repair_id, ds_noop_id, ds_reopen_id] {
+            for cid in ClientId::iter() {
+                reply_to_repair_job(up, job, cid, Ok(()), None).await;
+            }
+        }
     }
 
     #[tokio::test]
@@ -1113,8 +1015,9 @@ pub mod repair_test {
         // for processing and not skipped.
         let mut up = start_up_and_repair(ClientId::new(1)).await;
 
-        // Do something to finish extent 0
-        finish_live_repair(&mut up, 1000, 1).await;
+        // Do something to finish extent 0.  This reserves IDs 1004-1007 for the
+        // next extent's repairs.
+        finish_live_repair(&mut up, 1000).await;
 
         up.submit_dummy_write(
             Block::new_512(0),
@@ -1135,10 +1038,14 @@ pub mod repair_test {
         .await;
 
         // All clients should send the jobs (no skipped)
-        for ids in [JobId(1007), JobId(1008), JobId(1009)] {
+        for ids in [JobId(1008), JobId(1009), JobId(1010)] {
             let job = up.downstairs.ds_active.get(&ids).unwrap();
             for cid in ClientId::iter() {
-                assert_eq!(job.state[cid], IOState::New);
+                assert_eq!(
+                    job.state[cid],
+                    IOState::New,
+                    "bad state for {ids:?} {cid}"
+                );
             }
         }
     }
@@ -1266,7 +1173,7 @@ pub mod repair_test {
         // This will finish the repair on extent 0 and start the repair
         // on extent 1.
         // Extent 1 repair will have jobs 1004 -> 1007.
-        finish_live_repair(&mut up, 1000, 1).await;
+        finish_live_repair(&mut up, 1000).await;
 
         // Our default extent size is 3, so 9 blocks will span 3 extents
         up.submit_dummy_write(
@@ -1336,7 +1243,7 @@ pub mod repair_test {
         // This will finish the repair on extent 0 and start the repair
         // on extent 1.
         // Extent 1 repair will have jobs 1004 -> 1007.
-        finish_live_repair(&mut up, 1000, 1).await;
+        finish_live_repair(&mut up, 1000).await;
 
         // Our default extent size is 3, so 9 blocks will span 3 extents
         up.submit_dummy_read(Block::new_512(0), Buffer::new(512 * 9))
@@ -1397,7 +1304,7 @@ pub mod repair_test {
         // This will finish the repair on extent 0 and start the repair
         // on extent 1.
         // Extent 1 repair will have jobs 1004 -> 1007.
-        finish_live_repair(&mut up, 1000, 1).await;
+        finish_live_repair(&mut up, 1000).await;
 
         // Our default extent size is 3, so 9 blocks will span 3 extents
         up.submit_dummy_write(
@@ -1505,14 +1412,7 @@ pub mod repair_test {
             dirty: false,
         };
         let cid = ClientId::new(0);
-        up.downstairs.in_progress(ds_close_id, cid);
-        up.downstairs.process_ds_completion(
-            ds_close_id,
-            cid,
-            Ok(vec![]),
-            &up.state,
-            Some(ei),
-        );
+        reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei)).await;
         let new_ei = up.downstairs.clients[cid].repair_info.unwrap();
         // Verify the extent information has been added to the repair info
         assert_eq!(new_ei.generation, 5);
@@ -1526,14 +1426,7 @@ pub mod repair_test {
             dirty: true,
         };
         let cid = ClientId::new(1);
-        up.downstairs.in_progress(ds_close_id, cid);
-        up.downstairs.process_ds_completion(
-            ds_close_id,
-            cid,
-            Ok(vec![]),
-            &up.state,
-            Some(ei),
-        );
+        reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei)).await;
 
         // Verify the extent information has been added to the repair info
         // for client 1
@@ -1550,20 +1443,12 @@ pub mod repair_test {
         };
 
         let cid = ClientId::new(2);
-        up.downstairs.in_progress(ds_close_id, cid);
-        up.downstairs.process_ds_completion(
-            ds_close_id,
-            cid,
-            Ok(vec![]),
-            &up.state,
-            Some(ei),
-        );
-        // Verify the extent information has been added to the repair info
-        // for client 2
-        let new_ei = up.downstairs.clients[cid].repair_info.unwrap();
-        assert_eq!(new_ei.generation, 29);
-        assert_eq!(new_ei.flush_number, 444);
-        assert!(!new_ei.dirty);
+        reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei)).await;
+
+        // The extent info is added to the repair info for client 2, but then we
+        // proceed with the live-repair and the `repair_info` field is taken
+        // (since it's used to decide whether to send a LiveRepair or NoOp).
+        assert!(up.downstairs.clients[cid].repair_info.is_none());
     }
 }
 

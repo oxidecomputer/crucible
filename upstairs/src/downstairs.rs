@@ -3009,10 +3009,12 @@ impl Downstairs {
                         })
                     }
                     Err(e) => {
-                        panic!(
-                            "[{}] ELC-Ack {} returned error {:?}",
-                            client_id, job_id, e
+                        error!(
+                            self.log,
+                            "ELC-Ack returned error {e:?}, \
+                             cannot get extent info"
                         );
+                        None
                     }
                 };
                 cdt::ds__close__done!(|| (job_id.0, client_id.get()));
