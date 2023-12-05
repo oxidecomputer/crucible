@@ -1159,9 +1159,7 @@ impl Downstairs {
         assert!(self.ackable_work.contains(&ds_id));
         let r = done.result();
 
-        // Take the value out of `self.repair` to simplify borrow-checking
-        // later.  Remember to put it back!
-        let Some(mut repair) = self.repair.take() else {
+        let Some(repair) = self.repair.as_mut() else {
             panic!("cannot continue live-repair without self.repair");
         };
 
@@ -1177,7 +1175,6 @@ impl Downstairs {
                 // avoid things getting clogged up.
                 if !repair.aborting_repair {
                     warn!(self.log, "aborting live-repair");
-                    repair.aborting_repair = true;
                     self.abort_repair(up_state);
                 }
             }
@@ -1185,8 +1182,16 @@ impl Downstairs {
 
         // TODO check Downstairs state here?
 
-        let mut needs_flush = false;
-        repair.state = match repair.state {
+        // Reborrow repair
+        let Some(repair) = self.repair.as_mut() else {
+            panic!("cannot continue live-repair without self.repair");
+        };
+        // Each of these branches should update `repair.state`, and may or may
+        // not call functions on `&mut self`.  This is somewhat awkward, because
+        // the borrow of `self.repair.as_mut().unwrap()` can't be held when
+        // calling such functions; we have to extract everything we want from
+        // the `LiveRepairData` before calling anything on `&mut self`.
+        match repair.state {
             LiveRepairState::Closing {
                 close_id,
                 repair_id,
@@ -1196,6 +1201,20 @@ impl Downstairs {
                 gw_repair_id,
                 gw_noop_id,
             } => {
+                info!(
+                    self.log,
+                    "RE:{} Wait for result from repair command {}:{}",
+                    repair.active_extent,
+                    repair_id,
+                    gw_repair_id
+                );
+                repair.state = LiveRepairState::Repairing {
+                    repair_id,
+                    noop_id,
+                    reopen_id,
+
+                    gw_noop_id,
+                };
                 if repair.aborting_repair {
                     self.create_and_enqueue_noop_io(
                         gw,
@@ -1204,31 +1223,19 @@ impl Downstairs {
                         gw_repair_id,
                     );
                 } else {
+                    let repair_downstairs = repair.repair_downstairs.clone();
+                    let active_extent = repair.active_extent;
+                    let source_downstairs = repair.source_downstairs;
                     self.create_and_enqueue_repair_io(
                         gw,
-                        repair.active_extent,
+                        active_extent,
                         vec![close_id],
                         repair_id,
                         gw_repair_id,
-                        repair.source_downstairs,
-                        &repair.repair_downstairs,
+                        source_downstairs,
+                        &repair_downstairs,
                     );
-                }
-
-                info!(
-                    self.log,
-                    "RE:{} Wait for result from repair command {}:{}",
-                    repair.active_extent,
-                    repair_id,
-                    gw_repair_id
-                );
-                LiveRepairState::Repairing {
-                    repair_id,
-                    noop_id,
-                    reopen_id,
-
-                    gw_noop_id,
-                }
+                };
             }
             LiveRepairState::Repairing {
                 repair_id,
@@ -1236,12 +1243,6 @@ impl Downstairs {
                 reopen_id,
                 gw_noop_id,
             } => {
-                self.create_and_enqueue_noop_io(
-                    gw,
-                    vec![repair_id],
-                    noop_id,
-                    gw_noop_id,
-                );
                 info!(
                     self.log,
                     "RE:{} Wait for result from NoOp command {}:{}",
@@ -1249,7 +1250,13 @@ impl Downstairs {
                     noop_id,
                     gw_noop_id
                 );
-                LiveRepairState::Noop { noop_id, reopen_id }
+                repair.state = LiveRepairState::Noop { noop_id, reopen_id };
+                self.create_and_enqueue_noop_io(
+                    gw,
+                    vec![repair_id],
+                    noop_id,
+                    gw_noop_id,
+                );
             }
             LiveRepairState::Noop {
                 noop_id: _,
@@ -1261,10 +1268,10 @@ impl Downstairs {
                     repair.active_extent,
                     reopen_id,
                 );
-                // The reopen job was already queued!
-                LiveRepairState::Reopening { reopen_id }
+                // The reopen job was already queued, so just change state
+                repair.state = LiveRepairState::Reopening { reopen_id };
             }
-            prev @ LiveRepairState::Reopening { .. } => {
+            LiveRepairState::Reopening { .. } => {
                 // It's possible that we've reached the end of our extents!
                 let next_extent = repair.active_extent + 1;
                 let finished = next_extent == repair.extent_count;
@@ -1275,28 +1282,44 @@ impl Downstairs {
                 let have_reserved_jobs =
                     repair.repair_job_ids.contains_key(&next_extent);
 
-                if finished || (repair.aborting_repair && !have_reserved_jobs) {
-                    // This is a bit awkward, but we need to replace
-                    // `self.repair` before submitting the final flush (because
-                    // parts of `submit_flush` and `enqueue` check it).  Other
-                    // ways of organizing this code will make the borrow-checker
-                    // mad, because we'd need to borrow / mutate `self.repair`
-                    // while simultaneously calling functions on `&mut self`.
-                    needs_flush = true;
-                    prev
+                // We return the previous state here, because the new state must
+                // be constructed by calling functions on `&mut self`.  The
+                // reassignment is handled below.
+                let next_state = if finished
+                    || (repair.aborting_repair && !have_reserved_jobs)
+                {
+                    // We're done, submit a final flush!
+                    let gw_id: u64 = gw.next_gw_id();
+                    cdt::gw__flush__start!(|| (gw_id));
+
+                    let flush_id = self.submit_flush(gw_id, generation, None);
+                    info!(self.log, "LiveRepair final flush submitted");
+
+                    let new_gtos = GtoS::new(flush_id, None, None);
+                    gw.active.insert(gw_id, new_gtos);
+
+                    cdt::up__to__ds__flush__start!(|| (gw_id));
+
+                    LiveRepairState::FinalFlush { flush_id }
                 } else {
                     // Keep going!
                     repair.active_extent = next_extent;
+                    let repair_downstairs = repair.repair_downstairs.clone();
+                    let active_extent = repair.active_extent;
+                    let aborting = repair.aborting_repair;
+                    let source_downstairs = repair.source_downstairs;
                     self.begin_repair_for(
-                        repair.active_extent,
-                        repair.aborting_repair,
-                        &repair.repair_downstairs,
-                        repair.source_downstairs,
+                        active_extent,
+                        aborting,
+                        &repair_downstairs,
+                        source_downstairs,
                         up_state,
                         gw,
                         generation,
                     )
-                }
+                };
+                // The borrow was dropped earlier, so reborrow `self.repair`
+                self.repair.as_mut().unwrap().state = next_state;
             }
             LiveRepairState::FinalFlush { .. } => {
                 info!(self.log, "LiveRepair final flush returned {r:?}");
@@ -1306,34 +1329,14 @@ impl Downstairs {
                     // `repair.aborting_repair = true`, so no cleanup here
                 } else {
                     info!(self.log, "live-repair completed successfully");
-                    for c in repair.repair_downstairs {
-                        self.clients[c].finish_repair(up_state);
+                    for c in &repair.repair_downstairs {
+                        self.clients[*c].finish_repair(up_state);
                     }
                 }
-                // Note that we're returning early here, leaving `self.repair`
-                // as `None` (because repair is done, one way or the other)
-                return;
+                // Set `self.repair` to `None` on our way out the door (because
+                // repair is done, one way or the other)
+                self.repair = None;
             }
-        };
-
-        self.repair = Some(repair);
-
-        // Handle the final flush, now that `self.repair` is back in place
-        if needs_flush {
-            // We're done, submit a final flush!
-            let gw_id: u64 = gw.next_gw_id();
-            cdt::gw__flush__start!(|| (gw_id));
-
-            let flush_id = self.submit_flush(gw_id, generation, None);
-            info!(self.log, "LiveRepair final flush submitted");
-
-            let new_gtos = GtoS::new(flush_id, None, None);
-            gw.active.insert(gw_id, new_gtos);
-
-            cdt::up__to__ds__flush__start!(|| (gw_id));
-
-            self.repair.as_mut().unwrap().state =
-                LiveRepairState::FinalFlush { flush_id };
         }
     }
 
@@ -1854,16 +1857,22 @@ impl Downstairs {
         &mut self,
         eid: u64,
     ) -> (ExtentRepairIDs, Vec<JobId>) {
+        info!(self.log, "HI THERE {}", self.repair.is_some());
+        if let Some(r) = &self.repair {
+            info!(self.log, "REPAIR JOB IDS: {:?}", r.repair_job_ids);
+        }
         if let Some((eri, deps)) = self
             .repair
             .as_mut()
             .map(|r| r.repair_job_ids.remove(&eid))
             .unwrap_or(None)
         {
-            debug!(self.log, "Return existing job ids for {} GG", eid);
+            info!(
+                self.log,
+                "Return existing job ids for {} GG: {eri:?} {deps:?}", eid
+            );
             (eri, deps)
         } else {
-            debug!(self.log, "Create new job ids for {}", eid);
             let close_id = self.next_id();
             let repair_id = self.next_id();
             let noop_id = self.next_id();
@@ -1874,6 +1883,7 @@ impl Downstairs {
                 noop_id,
                 reopen_id,
             };
+            info!(self.log, "Create new job ids for {}: {repair_ids:?}", eid);
 
             let deps = self.ds_active.deps_for_repair(repair_ids, eid);
             (repair_ids, deps)
@@ -2217,7 +2227,7 @@ impl Downstairs {
         let deps = self.ds_active.deps_for_repair(repair_ids, eid);
         info!(
             self.log,
-            "inserting repair IDs {repair_ids:?}; got dep {deps:?}"
+            "reserving repair IDs for {eid}: {repair_ids:?}; got dep {deps:?}"
         );
         self.repair
             .as_mut()
@@ -2606,6 +2616,9 @@ impl Downstairs {
     }
 
     /// Aborts an in-progress live-repair
+    ///
+    /// The live-repair may continue after this point to clean up reserved jobs,
+    /// to avoid blocking dependencies, but jobs are placed with no-ops.
     pub(crate) fn abort_repair(&mut self, up_state: &UpstairsState) {
         assert!(self.clients.iter().any(|c| {
             c.state() == DsState::LiveRepair ||
@@ -2618,7 +2631,6 @@ impl Downstairs {
                 // around to LiveRepairReady yet.
                 c.state() == DsState::Faulted
         }));
-        self.repair = None;
         for i in ClientId::iter() {
             if self.clients[i].state() == DsState::LiveRepair {
                 self.skip_all_jobs(i);
@@ -2627,6 +2639,10 @@ impl Downstairs {
             if self.clients[i].state() == DsState::LiveRepairReady {
                 self.skip_all_jobs(i);
             }
+        }
+
+        if let Some(repair) = &mut self.repair {
+            repair.aborting_repair = true;
         }
     }
 
@@ -3220,7 +3236,18 @@ impl Downstairs {
         let deactivate = matches!(up_state, UpstairsState::Deactivating { .. });
 
         let Some(job) = self.ds_active.get_mut(&ds_id) else {
-            panic!("reqid {ds_id} is not active");
+            /*
+             * This assertion is only true for a limited time after
+             * the downstairs has failed.  An old in-flight IO
+             * could, in theory, ack back to us at some time
+             * in the future after we cleared the completed.
+             * I also think this path could be  possible if we
+             * are in failure mode for LiveRepair, as we could
+             * get an ack back from a job after we failed the DS
+             * (from the upstairs side) and flushed the job away.
+             */
+            assert!(self.completed.contains(&ds_id));
+            return;
         };
 
         if self.clients[client_id].process_io_completion(

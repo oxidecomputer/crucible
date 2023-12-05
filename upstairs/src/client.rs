@@ -2072,9 +2072,9 @@ impl DownstairsClient {
                     dirty: dirty_bits,
                 };
 
-                let old_rm = self.region_metadata.replace(dsr);
-
-                warn!(self.log, "new RM replaced this: {:?}", old_rm,);
+                if let Some(old_rm) = self.region_metadata.replace(dsr) {
+                    warn!(self.log, "new RM replaced this: {:?}", old_rm);
+                }
                 self.negotiation_state = NegotiationState::Done;
             }
             m => panic!("invalid message in continue_negotiation: {m:?}"),
