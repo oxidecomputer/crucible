@@ -886,6 +886,22 @@ impl DownstairsClient {
 
     /// Sets `self.state` to `new_state`, with logging and validity checking
     ///
+    /// Conceptually, this function is a checked assignment to `self.state`.
+    /// Thinking in terms of the graph of all possible states, this function
+    /// will panic if there is not a valid state transition edge between the
+    /// current `self.state` and the requested `new_state`.
+    ///
+    /// For example, transitioning to a `new_state` of [DsState::Replacing] is
+    /// *always* possible, so this will never panic for that state transition.
+    /// On the other hand, [DsState::Replaced] can *only* follow
+    /// [DsState::Replacing], so if the current state is *anything else*, that
+    /// indicates a logic error happened in some other part of the code.
+    ///
+    /// If the state transition is valid, this function simply sets `self.state`
+    /// to the newly requested state. There's no magic here beyond that; this
+    /// function does not change anything about the state or any other internal
+    /// variables.
+    ///
     /// # Panics
     /// If the transition is not valid
     pub(crate) fn checked_state_transition(

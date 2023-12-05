@@ -1608,6 +1608,7 @@ impl Downstairs {
         }
     }
 
+    /// Creates a [DownstairsIO] job for an [IOop::ExtentLiveReopen]
     fn create_reopen_io(
         eid: usize,
         ds_id: JobId,
@@ -1631,6 +1632,8 @@ impl Downstairs {
         }
     }
 
+    /// Creates a [DownstairsIO] job for an [IOop::ExtentLiveReopen], and
+    /// adds it to the work queue.
     pub(crate) fn create_and_enqueue_reopen_io(
         &mut self,
         gw: &mut GuestWork,
@@ -2328,6 +2331,14 @@ impl Downstairs {
         }
     }
 
+    /// Enqueue a [DownstairsIO] job:
+    ///
+    /// - enqueue the job in each of [Self::clients] (clients may skip the job)
+    /// - add the job to [Self::ds_active]
+    /// - Mark the job as ackable if it's a write (fast-ack) or was skipped by
+    ///   all downstairs
+    /// - for Write/WriteUnwritten ops, add their size to the write byte
+    ///   counter for backpressure calculations
     fn enqueue(&mut self, mut io: DownstairsIO) {
         let mut skipped = 0;
         let last_repair_extent = self.last_repair_extent();
@@ -2368,9 +2379,18 @@ impl Downstairs {
         }
     }
 
-    /// Enqueue a new downstairs live repair request.
+    /// Enqueue a new downstairs live repair request. This enqueue variant will
+    /// sneakily bypass [DownstairsClient::enqueue] and insert the job's JobId
+    /// directly into the clients' [DownstairsClient::new_jobs] queues. This is
+    /// necessary because, under [DsState::LiveRepair], the normal
+    /// [DownstairsClient::enqueue] function will skip jobs for any extent which
+    /// hasn't been repaired yet. We need a way to queue up the repair work
+    /// without it being skipped!
+    ///
+    /// That's what this function provides. To ensure this function is only
+    /// used for that purpose, it will panic if [io] is not a repair-related
+    /// operation
     fn enqueue_repair(&mut self, mut io: DownstairsIO) {
-        // TODO explain why this is different from `enqueue`
         for cid in ClientId::iter() {
             assert_eq!(io.state[cid], IOState::New);
 
