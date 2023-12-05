@@ -684,7 +684,7 @@ impl DownstairsClient {
             )
             .await
         });
-
+        self.reset_timeout();
         self.client_task = Some(ClientTaskHandle {
             client_request_tx,
             client_stop_tx: Some(client_stop_tx),
