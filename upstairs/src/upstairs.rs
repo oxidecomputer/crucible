@@ -1278,8 +1278,12 @@ impl Upstairs {
                 //
                 // This will come back to `TaskStopped`, at which point we'll
                 // clear out the task and restart it.
-                self.downstairs.clients[client_id]
-                    .halt_io_task(ClientStopReason::Timeout);
+                //
+                // We need to reset the timeout, because otherwise it will keep
+                // firing and will monopolize the future.
+                let c = &mut self.downstairs.clients[client_id];
+                c.reset_timeout();
+                c.halt_io_task(ClientStopReason::Timeout);
             }
             ClientAction::Response(m) => {
                 self.on_client_message(client_id, m).await;
