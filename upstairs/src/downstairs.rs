@@ -2663,8 +2663,18 @@ impl Downstairs {
                 DsState::LiveRepairReady => {
                     // TODO I don't think this is necessary
                     self.skip_all_jobs(i);
+
+                    // Set repair_info to None, so that the next
+                    // ExtentFlushClose sees it empty (as expected). repair_info
+                    // is set on all clients, even those not directly
+                    // participating in live-repair, so we have to always clear
+                    // it; in the cases above, it's cleared in `abort_repair`.
+                    self.clients[i].repair_info = None;
                 }
-                _ => (),
+                _ => {
+                    // (see comment above)
+                    self.clients[i].repair_info = None;
+                }
             }
         }
 
