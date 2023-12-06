@@ -1715,11 +1715,15 @@ impl Upstairs {
         // happens when enough jobs build up in the queue).
         let prev_state = self.downstairs.clients[client_id].state();
         if matches!(prev_state, DsState::LiveRepair | DsState::Active) {
-            assert!(
-                !matches!(reason, ClientRunResult::RequestedStop(..)),
-                "caller must change state from {prev_state} \
-                 when requesting a stop"
-            );
+            if matches!(reason, ClientRunResult::RequestedStop(..)) {
+                // It's invalid for the upstairs to request that the IO task
+                // stop _without_ changing its state to something that causes
+                // jobs to be skipped.
+                panic!(
+                    "caller must change state from {prev_state} \
+                     when requesting a stop"
+                );
+            }
             self.downstairs.skip_all_jobs(client_id);
         }
 
