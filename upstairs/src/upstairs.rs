@@ -1708,13 +1708,25 @@ impl Upstairs {
         // TODO: consolidate skip_all_jobs, on_missing, and reinitialize into a
         // single function in Downstairs
 
-        // If the client stops autonomously, then under certain circumstances,
-        // we want to skip all of its jobs.  This is a bit tricky: for example,
-        // we don't want to skip all jobs if the client is Offline, because that
-        // would prevent the Offline -> Faulted transition (which otherwise
-        // happens when enough jobs build up in the queue).
         let prev_state = self.downstairs.clients[client_id].state();
-        if matches!(prev_state, DsState::LiveRepair | DsState::Active) {
+
+        // If the connection goes down here, we need to know what state we were
+        // in to decide what state to transition to.  The ds_missing method will
+        // do that for us!
+        self.downstairs.clients[client_id].on_missing();
+
+        // If the IO task stops on its own, then under certain circumstances,
+        // we want to skip all of its jobs.  (If we requested that the IO task
+        // stop, then whoever made that request is responsible for skipping jobs
+        // if necessary).
+        //
+        // Specifically, we want to skip jobs if the only path back online for
+        // that client goes through live-repair; if that client can come back
+        // through replay, then the jobs must remain live.
+        let new_state = self.downstairs.clients[client_id].state();
+        if matches!(prev_state, DsState::LiveRepair | DsState::Active)
+            && matches!(new_state, DsState::Faulted)
+        {
             if matches!(reason, ClientRunResult::RequestedStop(..)) {
                 // It's invalid for the upstairs to request that the IO task
                 // stop _without_ changing its state to something that causes
@@ -1726,11 +1738,6 @@ impl Upstairs {
             }
             self.downstairs.skip_all_jobs(client_id);
         }
-
-        // If the connection goes down here, we need to know what state we were
-        // in to decide what state to transition to.  The ds_missing method will
-        // do that for us!
-        self.downstairs.clients[client_id].on_missing();
 
         // Restart the downstairs task.  If the upstairs is already active, then
         // the downstairs should automatically call PromoteToActive when it
