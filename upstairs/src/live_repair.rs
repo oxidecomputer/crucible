@@ -506,25 +506,19 @@ pub mod repair_test {
         info!(up.log, "move the close jobs forward");
         // Move the close job forward, but report error on the err_ds
         for cid in ClientId::iter() {
-            if cid == err_ds {
-                reply_to_repair_job(
-                    &mut up,
-                    ds_close_id,
-                    cid,
-                    Err(CrucibleError::GenericError("bad".to_string())),
-                    Some(ei), // Err takes precedence
-                )
-                .await;
+            let r = if cid == err_ds {
+                Err(CrucibleError::GenericError("bad".to_string()))
             } else {
-                reply_to_repair_job(
-                    &mut up,
-                    ds_close_id,
-                    cid,
-                    Ok(()),
-                    Some(ei),
-                )
-                .await;
-            }
+                Ok(())
+            };
+            reply_to_repair_job(
+                &mut up,
+                ds_close_id,
+                cid,
+                r,
+                Some(ei), // Err takes precedence
+            )
+            .await;
         }
 
         // process_ds_completion should force the downstairs to fail
@@ -546,7 +540,7 @@ pub mod repair_test {
         info!(up.log, "Now move the NoOp job forward");
         for cid in ClientId::iter() {
             if cid != err_ds {
-                info!(up.log, "replying to repair job on {cid}");
+                info!(up.log, "replying to NoOp job on {cid}");
                 reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None)
                     .await;
             }
@@ -556,7 +550,7 @@ pub mod repair_test {
         info!(up.log, "Finally, move the ReOpen job forward");
         for cid in ClientId::iter() {
             if cid != err_ds {
-                info!(up.log, "replying to repair job on {cid}");
+                info!(up.log, "replying to ReOpen job on {cid}");
                 reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None)
                     .await;
             }
