@@ -1159,7 +1159,7 @@ impl Downstairs {
         assert!(self.ackable_work.contains(&ds_id));
         let r = done.result();
 
-        let Some(repair) = self.repair.as_mut() else {
+        let Some(repair) = &self.repair else {
             panic!("cannot continue live-repair without self.repair");
         };
 
@@ -1174,13 +1174,29 @@ impl Downstairs {
                 // We keep going here, because we need to submit no-op jobs to
                 // avoid things getting clogged up.
                 if !repair.aborting_repair {
-                    warn!(self.log, "aborting live-repair");
+                    warn!(self.log, "aborting live-repair due to IO error");
                     self.abort_repair(up_state);
                 }
             }
         }
 
-        // TODO check Downstairs state here?
+        // It's possible for the Downstairs to have changed state here, if it
+        // disconnected.  We'll check that as well and start aborting the repair
+        // if that's the case.
+        let Some(repair) = &self.repair else {
+            panic!("cannot continue live-repair without self.repair");
+        };
+        if !repair.aborting_repair
+            && (repair
+                .repair_downstairs
+                .iter()
+                .any(|&cid| self.clients[cid].state() != DsState::LiveRepair)
+                || self.clients[repair.source_downstairs].state()
+                    != DsState::Active)
+        {
+            warn!(self.log, "aborting live-repair due to invalid state");
+            self.abort_repair(up_state);
+        }
 
         // Reborrow repair
         let Some(repair) = self.repair.as_mut() else {
@@ -1506,8 +1522,9 @@ impl Downstairs {
     /// If `aborting` is true, then all of the submitted jobs are no-ops.
     ///
     /// # Panics
-    /// If the upstairs is not in `UpstairsState::Active`, the source downstairs
-    /// is not `DsState::Active`, or the repair downstairs are not all
+    /// If the upstairs is not in `UpstairsState::Active`, or we _are not_
+    /// aborting the repair but either (1) the source downstairs is not
+    /// `DsState::Active`, or (2) the repair downstairs are not all
     /// `DsState::LiveRepair`.
     #[allow(clippy::too_many_arguments)]
     fn begin_repair_for(
@@ -1525,12 +1542,17 @@ impl Downstairs {
             matches!(up_state, UpstairsState::Active),
             "bad upstairs state: {up_state:?}"
         );
-        // Alan: I think this assertion is not correct if we are
-        // aborting a repair, as some/all of the downstairs may change
-        // state and we are trying to clean up reserved jobs.
-        assert_eq!(self.clients[source_downstairs].state(), DsState::Active);
-        for &c in repair_downstairs {
-            assert_eq!(self.clients[c].state(), DsState::LiveRepair);
+        // These assertions are only valid if we aren't aborting a repair; if we
+        // *are* aborting a repair, some/all of the downstairs may change state
+        // but we may still pass through this function to clean up reserved jobs
+        if !aborting {
+            assert_eq!(
+                self.clients[source_downstairs].state(),
+                DsState::Active
+            );
+            for &c in repair_downstairs {
+                assert_eq!(self.clients[c].state(), DsState::LiveRepair);
+            }
         }
 
         let gw_close_id: u64 = gw.next_gw_id();
@@ -2559,7 +2581,7 @@ impl Downstairs {
     ///
     /// This may lead to jobs being marked as ackable, since a skipped job
     /// counts as complete in some circumstances.
-    fn skip_all_jobs(&mut self, client_id: ClientId) {
+    pub(crate) fn skip_all_jobs(&mut self, client_id: ClientId) {
         info!(
             self.log,
             "[{client_id}] client skip {} in process jobs because fault",
@@ -2628,12 +2650,21 @@ impl Downstairs {
                 c.state() == DsState::Faulted
         }));
         for i in ClientId::iter() {
-            if self.clients[i].state() == DsState::LiveRepair {
-                self.skip_all_jobs(i);
-                self.clients[i].abort_repair(up_state);
-            }
-            if self.clients[i].state() == DsState::LiveRepairReady {
-                self.skip_all_jobs(i);
+            match self.clients[i].state() {
+                DsState::LiveRepair => {
+                    self.skip_all_jobs(i);
+                    self.clients[i].abort_repair(up_state, true);
+                }
+                DsState::Faulted => {
+                    // Jobs were already skipped when we hit the IO error that
+                    // marked us as faulted
+                    self.clients[i].abort_repair(up_state, false);
+                }
+                DsState::LiveRepairReady => {
+                    // TODO I don't think this is necessary
+                    self.skip_all_jobs(i);
+                }
+                _ => (),
             }
         }
 

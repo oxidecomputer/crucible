@@ -1705,6 +1705,24 @@ impl Upstairs {
             "downstairs task for {client_id} stopped due to {reason:?}"
         );
 
+        // TODO: consolidate skip_all_jobs, on_missing, and reinitialize into a
+        // single function in Downstairs
+
+        // If the client stops autonomously, then under certain circumstances,
+        // we want to skip all of its jobs.  This is a bit tricky: for example,
+        // we don't want to skip all jobs if the client is Offline, because that
+        // would prevent the Offline -> Faulted transition (which otherwise
+        // happens when enough jobs build up in the queue).
+        let prev_state = self.downstairs.clients[client_id].state();
+        if matches!(prev_state, DsState::LiveRepair | DsState::Active) {
+            assert!(
+                !matches!(reason, ClientRunResult::RequestedStop(..)),
+                "caller must change state from {prev_state} \
+                 when requesting a stop"
+            );
+            self.downstairs.skip_all_jobs(client_id);
+        }
+
         // If the connection goes down here, we need to know what state we were
         // in to decide what state to transition to.  The ds_missing method will
         // do that for us!

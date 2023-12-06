@@ -1095,14 +1095,26 @@ impl DownstairsClient {
         self.new_jobs.clear()
     }
 
-    /// Aborts an in-progress live repair, restarting the task
+    /// Aborts an in-progress live repair, conditionally restarting the task
     ///
     /// # Panics
-    /// If this client is not in `DsState::LiveRepair`
-    pub(crate) fn abort_repair(&mut self, up_state: &UpstairsState) {
-        assert_eq!(self.state, DsState::LiveRepair);
-        self.checked_state_transition(up_state, DsState::Faulted);
-        self.halt_io_task(ClientStopReason::FailedLiveRepair);
+    /// If this client is not in `DsState::LiveRepair` and `restart_task` is
+    /// `true`, or vice versa.
+    pub(crate) fn abort_repair(
+        &mut self,
+        up_state: &UpstairsState,
+        restart_task: bool,
+    ) {
+        if restart_task {
+            assert_eq!(self.state, DsState::LiveRepair);
+            self.checked_state_transition(up_state, DsState::Faulted);
+            self.halt_io_task(ClientStopReason::FailedLiveRepair);
+        } else {
+            // Someone else (i.e. receiving an error upon IO completion) already
+            // restarted the IO task and kicked us out of the live-repair state,
+            // but we'll do further cleanup here.
+            assert_ne!(self.state, DsState::LiveRepair);
+        }
         self.repair_info = None;
         self.stats.live_repair_aborted += 1;
     }
