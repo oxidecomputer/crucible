@@ -3318,7 +3318,6 @@ impl Downstairs {
                 let Some(job) = self.ds_active.get(&ds_id) else {
                     panic!("I don't think we should be here");
                 };
-                let is_repair = job.work.is_repair();
                 if matches!(
                     job.work,
                     IOop::Write { .. }
@@ -3335,15 +3334,10 @@ impl Downstairs {
                     self.skip_all_jobs(client_id);
                     self.clients[client_id]
                         .checked_state_transition(up_state, DsState::Faulted);
-
-                    if is_repair {
-                        // Restart the client task, as the downstairs will have
-                        // aborted itself if a repair-related job had an error.
-                        self.clients[client_id].restart_connection(
-                            up_state,
-                            ClientStopReason::FailedLiveRepair,
-                        );
-                    }
+                    self.clients[client_id].restart_connection(
+                        up_state,
+                        ClientStopReason::IOError,
+                    );
                 }
             }
             None => {

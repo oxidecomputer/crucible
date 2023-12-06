@@ -2270,6 +2270,9 @@ pub(crate) enum ClientStopReason {
     /// Repair failed and we're restarting
     FailedRepair,
 
+    /// Received an error from some IO
+    IOError,
+
     /// Negotiation message received out of order
     BadNegotiationOrder,
 
