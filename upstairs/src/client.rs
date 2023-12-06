@@ -513,8 +513,6 @@ impl DownstairsClient {
     }
 
     /// When the downstairs is marked as missing, handle its state transition
-    ///
-    /// Returns `true` if we need to do replay work, `false` otherwise.
     pub(crate) fn on_missing(&mut self) {
         let current = &self.state;
         let new_state = match current {
