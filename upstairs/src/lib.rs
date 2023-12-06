@@ -986,9 +986,9 @@ impl DownstairsIO {
             num_blocks,
             deps,
             ack_status: if self.acked {
-                AckStatus::NotAcked
-            } else {
                 AckStatus::Acked
+            } else {
+                AckStatus::NotAcked
             },
             state,
         }
