@@ -4,6 +4,7 @@ use crate::{
     ClientId, CrucibleDecoder, CrucibleEncoder, CrucibleError, DownstairsIO,
     DsState, EncryptionContext, IOState, IOop, JobId, Message, ReadResponse,
     ReconcileIO, RegionDefinitionStatus, RegionMetadata, WrappedStream,
+    MAX_ACTIVE_COUNT,
 };
 use crucible_protocol::{ReconciliationId, CRUCIBLE_MESSAGE_VERSION};
 
@@ -625,8 +626,10 @@ impl DownstairsClient {
             self.client_task.is_none(),
             "cannot start task when it is already running"
         );
-        let (client_request_tx, client_request_rx) = mpsc::channel(500);
-        let (_client_response_tx, client_response_rx) = mpsc::channel(500);
+        let (client_request_tx, client_request_rx) =
+            mpsc::channel(MAX_ACTIVE_COUNT * 2);
+        let (_client_response_tx, client_response_rx) =
+            mpsc::channel(MAX_ACTIVE_COUNT * 2);
         let (client_stop_tx, client_stop_rx) = oneshot::channel();
 
         // Forget these without dropping them, so that we can send values into
@@ -666,8 +669,15 @@ impl DownstairsClient {
             "cannot start task when it is already running"
         );
         let target = self.target_addr.expect("socket address is not populated");
-        let (client_request_tx, client_request_rx) = mpsc::channel(500);
-        let (client_response_tx, client_response_rx) = mpsc::channel(500);
+
+        // These channels must support at least MAX_ACTIVE_COUNT messages;
+        // otherwise, we risk a deadlock if the IO task and main task
+        // simultaneously try sending each other data when the channels are
+        // full.
+        let (client_request_tx, client_request_rx) =
+            mpsc::channel(MAX_ACTIVE_COUNT * 2);
+        let (client_response_tx, client_response_rx) =
+            mpsc::channel(MAX_ACTIVE_COUNT * 2);
         let (client_stop_tx, client_stop_rx) = oneshot::channel();
 
         let tls_context = self.tls_context.clone();
