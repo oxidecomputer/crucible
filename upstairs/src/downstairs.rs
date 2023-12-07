@@ -2306,6 +2306,42 @@ impl Downstairs {
         ds_id
     }
 
+    #[cfg(test)]
+    /// Submit a read to this downstairs. Use when you don't care about what
+    /// the data you're read is, and only care about getting some read-jobs
+    /// enqueued. The read will be to a single extent, as specified by eid
+    pub(crate) fn submit_test_read(
+        &mut self,
+        gwid: u64,
+        eid: u64,
+        offset: u64,
+        length_in_blocks: u64,
+    ) -> JobId {
+        use crucible_common::Block;
+
+        use crate::ImpactedAddr;
+
+        let blocks = ImpactedBlocks::new(
+            ImpactedAddr {
+                extent_id: eid,
+                block: offset,
+            },
+            ImpactedAddr {
+                extent_id: eid,
+                block: offset + length_in_blocks - 1,
+            },
+        );
+
+        // ddef is used in submit_read for enumerating the individual blocks.
+        // values here dont matter as long as the ddef can contain
+        // all our reads to extend `eid`
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(offset + length_in_blocks));
+        ddef.set_extent_count(eid as u32 + 1);
+        self.submit_read(gwid, blocks, ddef)
+    }
+
     pub(crate) fn submit_write(
         &mut self,
         guest_id: u64,
@@ -2323,6 +2359,48 @@ impl Downstairs {
             writes,
             is_write_unwritten,
         )
+    }
+
+    #[cfg(test)]
+    /// Submit a write to this downstairs. Use when you don't care about what
+    /// the data you're writing is, and only care about getting some write-jobs
+    /// enqueued. The write will be to a single extent, as specified by eid
+    pub(crate) fn submit_test_write(
+        &mut self,
+        gwid: u64,
+        eid: u64,
+        offset: u64,
+        length_in_blocks: u64,
+        is_write_unwritten: bool,
+    ) -> JobId {
+        use bytes::Bytes;
+        use crucible_common::Block;
+        use crucible_protocol::{BlockContext, Write};
+
+        use crate::ImpactedAddr;
+
+        let blocks = ImpactedBlocks::new(
+            ImpactedAddr {
+                extent_id: eid,
+                block: offset,
+            },
+            ImpactedAddr {
+                extent_id: eid,
+                block: offset + length_in_blocks - 1,
+            },
+        );
+
+        let writes = (offset..offset + length_in_blocks).map(|b| Write {
+            eid,
+            offset: Block::new_512(b),
+            data: Bytes::from(vec![0xff; 512]),
+            block_context: BlockContext {
+                hash: crucible_common::integrity_hash(&[&vec![0xff; 512]]),
+                encryption_context: None,
+            },
+        });
+
+        self.submit_write(gwid, blocks, writes.collect(), is_write_unwritten)
     }
 
     /// Returns the currently-active repair extent
@@ -3494,9 +3572,9 @@ pub(crate) mod test {
     use super::Downstairs;
     use crate::{
         integrity_hash, live_repair::ExtentInfo, upstairs::UpstairsState,
-        BlockContext, ClientId, CrucibleError, DsState, EncryptionContext,
-        ExtentFix, GuestWork, IOState, IOop, JobId, ReadResponse, ReconcileIO,
-        ReconciliationId, SnapshotDetails,
+        BlockContext, ClientId, CrucibleError, DownstairsIO, DsState,
+        EncryptionContext, ExtentFix, GuestWork, IOState, IOop, JobId,
+        ReadResponse, ReconcileIO, ReconciliationId, SnapshotDetails,
     };
     use bytes::{Bytes, BytesMut};
     use crucible_protocol::Message;
@@ -8769,5 +8847,319 @@ pub(crate) mod test {
         assert_eq!(job.acked, false);
         assert!(!job.replay);
         assert!(job.data.is_none());
+    }
+
+    /// Create and enqueue a full set of repair functions
+    ///
+    /// This gets the required locks, determines the next job IDs, checks
+    /// dependencies, and enqueues all four jobs (close / repair / noop /
+    /// reopen).
+    ///
+    /// The repair job is **actually** enqueued as an `ExtentLiveNoop` as well
+    /// (instead of an `ExtentLiveRepair`, because the latter requires more
+    /// infrastructure to be set up in the `Downstairs`; specifically,
+    /// `create_and_enqueue_repair_io` expects `Downstairs::repair_info` to be
+    /// valid.
+    ///
+    /// This function creates the same dependency chain as `repair_extent`,
+    /// which is actually used in a real system, but it doesn't wait for repairs
+    /// to complete before enqueuing stuff.
+    fn create_and_enqueue_repair_ops(
+        gw: &mut GuestWork,
+        ds: &mut Downstairs,
+        eid: u64,
+    ) {
+        let (extent_repair_ids, deps) = ds.get_repair_ids(eid);
+
+        let gw_close_id = gw.next_gw_id();
+        let _close_brw = ds.create_and_enqueue_close_io(
+            gw,
+            eid,
+            4, // gen
+            deps,
+            extent_repair_ids.close_id,
+            gw_close_id,
+            ClientId::new(0),    // source downstairs
+            &[ClientId::new(1)], // repair downstairs
+        );
+        let gw_repair_id = gw.next_gw_id();
+        let _repair_brw = ds.create_and_enqueue_noop_io(
+            gw,
+            vec![extent_repair_ids.close_id],
+            extent_repair_ids.repair_id,
+            gw_repair_id,
+        );
+        let gw_noop_id = gw.next_gw_id();
+        let _noop_brw = ds.create_and_enqueue_noop_io(
+            gw,
+            vec![extent_repair_ids.repair_id],
+            extent_repair_ids.noop_id,
+            gw_noop_id,
+        );
+        let gw_reopen_id = gw.next_gw_id();
+        let _reopen_brw = ds.create_and_enqueue_reopen_io(
+            gw,
+            eid,
+            vec![extent_repair_ids.noop_id],
+            extent_repair_ids.reopen_id,
+            gw_reopen_id,
+        );
+    }
+
+    // The next section of tests verify repair dependencies are honored.
+
+    // W is Write
+    // R is read
+    // F is flush
+    // Rp is a Repair
+
+    #[tokio::test]
+    async fn test_live_repair_deps_writes() {
+        // Test that writes on different blocks in the extent are all
+        // captured by the repair at the end.
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | W     |
+        //   1 |   W   |
+        //   2 |     W |
+        //   3 | RpRpRp| 0,1,2
+        //   4 | RpRpRp| 3
+        //   5 | RpRpRp| 4
+        //   6 | RpRpRp| 5
+
+        let mut gw = GuestWork::default();
+        let mut ds = Downstairs::test_default();
+
+        let eid = 1;
+
+        // Write operations 0 to 2
+        for i in 0..3 {
+            ds.submit_test_write(gw.next_gw_id(), eid, i, 1, false);
+        }
+
+        // Repair IO functions assume you have the locks
+        create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
+
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+
+        assert_eq!(jobs.len(), 7);
+
+        // The three writes don't depend on anything
+        assert!(jobs[0].work.deps().is_empty());
+        assert!(jobs[1].work.deps().is_empty());
+        assert!(jobs[2].work.deps().is_empty());
+        // The repair will have all the previous jobs, as they all are on the
+        // same extent.
+        assert_eq!(
+            jobs[3].work.deps(),
+            &[jobs[0].ds_id, jobs[1].ds_id, jobs[2].ds_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_live_repair_deps_reads() {
+        // Test that the following job dependency graph is made:
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | R     |
+        //   1 |   R   |
+        //   2 |     R |
+        //   3 | RpRpRp| 0,1,2
+        //   4 | RpRpRp| 3
+        //   5 | RpRpRp| 4
+        //   6 | RpRpRp| 5
+
+        let mut gw = GuestWork::default();
+        let mut ds = Downstairs::test_default();
+
+        let eid = 1;
+
+        // Create read operations 0 to 2
+        for i in 0..3 {
+            ds.submit_test_read(gw.next_gw_id(), eid, i, 1);
+        }
+
+        create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
+
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+
+        assert_eq!(jobs.len(), 7);
+
+        // The three reads don't depend on anything
+        assert!(jobs[0].work.deps().is_empty());
+        assert!(jobs[1].work.deps().is_empty());
+        assert!(jobs[2].work.deps().is_empty());
+        // The repair will have all the previous jobs, as they all are on the
+        // same extent.
+        assert_eq!(
+            jobs[3].work.deps(),
+            &[jobs[0].ds_id, jobs[1].ds_id, jobs[2].ds_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_live_repair_deps_mix() {
+        // Test that the following job dependency graph is made:
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | R     |
+        //   1 |   W   |
+        //   2 | F F F | 0,1
+        //   3 |RpRpRp | 2
+        //   4 |RpRpRp |
+        //   5 |RpRpRp |
+        //   6 |RpRpRp |
+
+        let mut gw = GuestWork::default();
+        let mut ds = Downstairs::test_default();
+        let eid = 1;
+
+        ds.submit_test_read(gw.next_gw_id(), eid, 0, 1);
+        ds.submit_test_write(gw.next_gw_id(), eid, 1, 1, false);
+        ds.submit_flush(gw.next_gw_id(), 0, None);
+
+        create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
+
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+
+        assert_eq!(jobs.len(), 7);
+
+        // The read and the write don't depend on anything
+        assert!(jobs[0].work.deps().is_empty());
+        assert!(jobs[1].work.deps().is_empty());
+        // The flush requires the read and the write
+        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id, jobs[1].ds_id]);
+        // The repair will have just the flush
+        assert_eq!(jobs[3].work.deps(), &[jobs[2].ds_id]);
+    }
+
+    #[tokio::test]
+    async fn test_live_repair_deps_repair() {
+        // Basic test for inter-repair dependencies
+        //
+        // This only actually tests our test function
+        // (`create_and_enqueue_repair_ops`), not the actual `repair_extent`,
+        // but is still worthwhile
+        //
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | RpRpRp|
+        //   1 | RpRpRp| 0
+        //   2 | RpRpRp| 1
+        //   3 | RpRpRp| 2
+        let mut gw = GuestWork::default();
+        let mut ds = Downstairs::test_default();
+
+        let eid = 1;
+        create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
+
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+
+        assert_eq!(jobs.len(), 4);
+
+        assert_eq!(jobs[0].ds_id, JobId(1000));
+        assert!(jobs[0].work.deps().is_empty());
+        assert_eq!(jobs[1].ds_id, JobId(1001));
+        assert_eq!(jobs[1].work.deps(), &[JobId(1000)]);
+        assert_eq!(jobs[2].ds_id, JobId(1002));
+        assert_eq!(jobs[2].work.deps(), &[JobId(1001)]);
+        assert_eq!(jobs[3].ds_id, JobId(1003));
+        assert_eq!(jobs[3].work.deps(), &[JobId(1002)]);
+    }
+
+    #[tokio::test]
+    async fn test_live_repair_deps_repair_write() {
+        // Write after repair depends on the repair
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | RpRpRp|
+        //   1 | RpRpRp| 0
+        //   2 | RpRpRp| 1
+        //   3 | RpRpRp| 2
+        //   4 |     W | 3
+
+        let mut gw = GuestWork::default();
+        let mut ds = Downstairs::test_default();
+        let eid = 1;
+
+        create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
+
+        ds.submit_test_write(gw.next_gw_id(), eid, 2, 1, false);
+
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+
+        assert_eq!(jobs.len(), 5);
+
+        assert_eq!(jobs[0].ds_id, JobId(1000));
+        assert!(jobs[0].work.deps().is_empty());
+
+        assert_eq!(jobs[4].ds_id, JobId(1004));
+        assert_eq!(jobs[4].work.deps(), &[JobId(1003)]);
+    }
+
+    #[tokio::test]
+    async fn test_live_repair_deps_repair_read() {
+        // Read after repair requires the repair
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | RpRpRp|
+        //   1 | RpRpRp|
+        //   2 | RpRpRp|
+        //   3 | RpRpRp|
+        //   4 | R     | 3
+        let mut gw = GuestWork::default();
+        let mut ds = Downstairs::test_default();
+        let eid = 1;
+
+        create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
+
+        ds.submit_test_read(gw.next_gw_id(), eid, 0, 1);
+
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+
+        assert_eq!(jobs.len(), 5);
+
+        assert_eq!(jobs[0].ds_id, JobId(1000));
+        assert!(jobs[0].work.deps().is_empty());
+        // The read depends on the last item of the repair
+        assert_eq!(jobs[4].ds_id, JobId(1004));
+        assert_eq!(jobs[4].work.deps(), &[JobId(1003)]);
+    }
+
+    #[tokio::test]
+    async fn test_live_repair_deps_repair_flush() {
+        // Flush after repair requires the flush
+        //       block
+        // op# | 0 1 2 | deps
+        // ----|-------|-----
+        //   0 | RpRpRp|
+        //   1 | RpRpRp|
+        //   2 | RpRpRp|
+        //   3 | RpRpRp|
+        //   4 | F F F | 3
+        let mut gw = GuestWork::default();
+        let mut ds = Downstairs::test_default();
+        let eid = 1;
+
+        create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
+        ds.submit_flush(gw.next_gw_id(), 0, None);
+
+        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+
+        assert_eq!(jobs.len(), 5);
+
+        assert_eq!(jobs[0].ds_id, JobId(1000));
+        assert!(jobs[0].work.deps().is_empty());
+        // The flush depends on the repair close operation
+        assert_eq!(jobs[4].ds_id, JobId(1004));
+        assert_eq!(jobs[4].work.deps(), &[JobId(1003)]);
     }
 }
