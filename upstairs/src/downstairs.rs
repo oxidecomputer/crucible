@@ -1129,7 +1129,10 @@ impl Downstairs {
             if self.ackable_work.contains(&ds_id) {
                 Some(ds_id)
             } else {
-                // The job that live-repair is waiting on isn't yet ackable
+                // The job that live-repair is waiting on isn't yet ackable, and
+                // it better not have already been acked.
+                let job = self.ds_active.get(&ds_id).unwrap();
+                assert!(!job.acked);
                 None
             }
         } else {
@@ -1138,7 +1141,7 @@ impl Downstairs {
         }
     }
 
-    /// Pushes live-repair forward for the given job
+    /// Pushes live-repair forward, starting at the given job
     ///
     /// `self.repair` must be waiting on the job given by `ds_id`, and that job
     /// must be (1) in `self.ackable_work` and (2) not yet acked.
@@ -1147,7 +1150,25 @@ impl Downstairs {
     /// `self.check_live_repair` provides the value for `ds_id`; they're broken
     /// into separate functions to avoid locking the `GuestWork` structure if
     /// live-repair can't continue.
+    ///
+    /// It's possible that handling this job will make subsequent live-repair
+    /// jobs ackable immediately (`test_repair_extent_fail_noop_out_of_order`
+    /// exercises this case).  As such, this function will continue running
+    /// until the next live-repair job is not ready.
     pub(crate) fn continue_live_repair(
+        &mut self,
+        ds_id: JobId,
+        gw: &mut GuestWork,
+        up_state: &UpstairsState,
+        generation: u64,
+    ) {
+        self.continue_live_repair_inner(ds_id, gw, up_state, generation);
+        while let Some(ds_id) = self.check_live_repair() {
+            self.continue_live_repair_inner(ds_id, gw, up_state, generation);
+        }
+    }
+
+    fn continue_live_repair_inner(
         &mut self,
         ds_id: JobId,
         gw: &mut GuestWork,

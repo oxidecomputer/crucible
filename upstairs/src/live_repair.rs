@@ -931,6 +931,131 @@ pub mod repair_test {
     }
 
     #[tokio::test]
+    async fn test_repair_extent_fail_noop_out_of_order_all() {
+        // Test all the permutations of
+        // A downstairs that is in LiveRepair
+        // A downstairs that returns error on the ExtentLiveNoOp operation.
+        for or_ds in ClientId::iter() {
+            for err_ds in ClientId::iter() {
+                test_repair_extent_fail_noop_out_of_order(or_ds, err_ds).await;
+            }
+        }
+    }
+
+    async fn test_repair_extent_fail_noop_out_of_order(
+        or_ds: ClientId,
+        err_ds: ClientId,
+    ) {
+        // Test repair_extent when the noop job fails, but the other
+        // (non-failing) Downstairs have already replied to the final Reopen job
+
+        // We take input for both which downstairs is in LiveRepair, and
+        // which downstairs will return error on the NoOp operation.
+
+        let mut up = start_up_and_repair(or_ds).await;
+
+        // By default, the job IDs always start at 1000 and the gw IDs
+        // always start at 1. Take advantage of that and knowing that we
+        // start from a clean slate to predict what the IDs are for jobs
+        // we expect the work queues to have.
+        let ds_close_id = JobId(1000);
+        let ds_repair_id = JobId(1001);
+        let ds_noop_id = JobId(1002);
+        let ds_reopen_id = JobId(1003);
+        let ds_flush_id = JobId(1004);
+
+        let ei = ExtentInfo {
+            generation: 5,
+            flush_number: 3,
+            dirty: false,
+        };
+        for cid in ClientId::iter() {
+            reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei))
+                .await;
+        }
+
+        // Once we process the IO completion, the task doing extent
+        // repair should submit the next IO.  Move that job forward.
+        for cid in ClientId::iter() {
+            reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), Some(ei))
+                .await;
+        }
+
+        // When we completed the repair jobs, the repair_extent should
+        // have gone ahead and issued the NoOp that should be issued
+        // next.
+        info!(up.log, "Now move the NoOp job forward for working DS");
+        for cid in ClientId::iter() {
+            if cid != err_ds {
+                reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None)
+                    .await;
+            }
+        }
+
+        info!(up.log, "Now ACK the reopen job");
+        for cid in ClientId::iter() {
+            if cid != err_ds {
+                reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None)
+                    .await;
+            }
+        }
+
+        info!(up.log, "Now fail the NoOp job for broken DS");
+        reply_to_repair_job(
+            &mut up,
+            ds_noop_id,
+            err_ds,
+            Err(CrucibleError::GenericError("bad".to_string())),
+            None,
+        )
+        .await;
+
+        // We should have five jobs on the queue.
+        assert_eq!(up.downstairs.active_count(), 5);
+
+        // Differences from the usual path start here.
+        let job = up.downstairs.get_job(&ds_noop_id).unwrap();
+        match &job.work {
+            IOop::ExtentLiveNoOp { .. } => {}
+            x => {
+                panic!("Expected LiveNoOp, got: {:?}", x);
+            }
+        }
+        assert_eq!(job.state_count().done, 2);
+        assert_eq!(job.state_count().error, 1);
+
+        let job = up.downstairs.get_job(&ds_reopen_id).unwrap();
+        match &job.work {
+            IOop::ExtentLiveReopen { .. } => {}
+            x => {
+                panic!("Expected ExtentLiveReopen, got: {:?}", x);
+            }
+        }
+        // The Reopen jobs were completed before the error was reported, so we
+        // expect 2/3 of them to be done (and the error case to be skipped)
+        assert_eq!(job.state_count().done, 2);
+        assert_eq!(job.state_count().skipped, 1);
+
+        assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
+        assert_eq!(up.downstairs.clients[or_ds].state(), DsState::Faulted);
+
+        let job = up.downstairs.get_job(&ds_flush_id).unwrap();
+        match &job.work {
+            IOop::Flush { .. } => {}
+            x => {
+                panic!("Expected Flush, got: {:?}", x);
+            }
+        }
+        if err_ds != or_ds {
+            assert_eq!(job.state_count().active, 1);
+            assert_eq!(job.state_count().skipped, 2);
+        } else {
+            assert_eq!(job.state_count().active, 2);
+            assert_eq!(job.state_count().skipped, 1);
+        }
+    }
+
+    #[tokio::test]
     async fn test_repair_extent_fail_reopen_all() {
         // Test all the permutations of
         // A downstairs that is in LiveRepair
