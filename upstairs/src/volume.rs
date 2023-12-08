@@ -409,7 +409,7 @@ impl Volume {
                 // TODO: Nexus needs to know about this failure.
                 self.write_unwritten(
                     Block::new(offset, bs.trailing_zeros()),
-                    Bytes::from(buffer.as_vec().await.clone()),
+                    Bytes::from(buffer.into_vec().unwrap()),
                 )
                 .await?;
 
@@ -1831,7 +1831,7 @@ mod test {
         let buffer = Buffer::new(4096);
         disk.read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
-        assert_eq!(*buffer.as_vec().await, vec![0; 4096]);
+        assert_eq!(buffer.into_vec().unwrap(), vec![0; 4096]);
 
         // Write ones to second block
         disk.write(
@@ -1856,7 +1856,7 @@ mod test {
         let mut expected = vec![0; 512];
         expected.extend(vec![1; 512]);
         expected.extend(vec![0; 4096 - 1024]);
-        assert_eq!(*buffer.as_vec().await, expected);
+        assert_eq!(buffer.into_vec().unwrap(), expected);
 
         // Write twos to first block
         disk.write(
@@ -1873,7 +1873,7 @@ mod test {
         let mut expected = vec![2; 512];
         expected.extend(vec![1; 512]);
         expected.extend(vec![0; 4096 - 1024]);
-        assert_eq!(*buffer.as_vec().await, expected);
+        assert_eq!(buffer.into_vec().unwrap(), expected);
 
         // Write sevens to third and fourth blocks
         disk.write(
@@ -1899,7 +1899,7 @@ mod test {
         expected.extend(vec![7; 1024]);
         expected.extend(vec![8; 1024]);
         expected.extend(vec![0; 1024]);
-        assert_eq!(*buffer.as_vec().await, expected);
+        assert_eq!(buffer.into_vec().unwrap(), expected);
 
         Ok(())
     }
@@ -1939,7 +1939,7 @@ mod test {
         let mut expected = vec![read_only_parent_init_value; 512 * 4];
         expected.extend(vec![0x00; 512 * 4]);
 
-        assert_eq!(*buffer.as_vec().await, expected);
+        assert_eq!(buffer.into_vec().unwrap(), expected);
 
         // If the parent volume has data, it should be returned. Write ones to
         // the first block of the parent:
@@ -1964,7 +1964,7 @@ mod test {
         expected.extend(vec![read_only_parent_init_value; 512 * 3]);
         expected.extend(vec![0x00; 512 * 4]); // <- from subvolume, still "-"
 
-        assert_eq!(*buffer.as_vec().await, expected);
+        assert_eq!(buffer.into_vec().unwrap(), expected);
 
         // If the volume is written to and it doesn't overlap, still return the
         // parent data. Write twos to the volume:
@@ -1991,7 +1991,7 @@ mod test {
             let mut expected = vec![1; 512];
             expected.extend(vec![read_only_parent_init_value; 2048 - 512]);
 
-            assert_eq!(*buffer.as_vec().await, expected);
+            assert_eq!(buffer.into_vec().unwrap(), expected);
         }
 
         // Read whole volume and verify
@@ -2005,7 +2005,7 @@ mod test {
         expected.extend(vec![read_only_parent_init_value; 512]);
         expected.extend(vec![0x00; 512 * 4]); // <- from subvolume, still "-"
 
-        assert_eq!(*buffer.as_vec().await, expected);
+        assert_eq!(buffer.into_vec().unwrap(), expected);
 
         // If the volume is written to and it does overlap, return the volume
         // data. Write threes to the volume:
@@ -2032,7 +2032,7 @@ mod test {
             let mut expected = vec![1; 512];
             expected.extend(vec![read_only_parent_init_value; 2048 - 512]);
 
-            assert_eq!(*buffer.as_vec().await, expected);
+            assert_eq!(buffer.into_vec().unwrap(), expected);
         }
 
         // Read whole volume and verify
@@ -2046,7 +2046,7 @@ mod test {
         expected.extend(vec![read_only_parent_init_value; 512]);
         expected.extend(vec![0x00; 512 * 4]); // <- from subvolume, still "-"
 
-        assert_eq!(*buffer.as_vec().await, expected);
+        assert_eq!(buffer.into_vec().unwrap(), expected);
 
         // If the whole parent is now written to, only the last block should be
         // returned. Write fours to the parent
@@ -2071,7 +2071,7 @@ mod test {
         expected.extend(vec![4; 512]);
         expected.extend(vec![0x00; 512 * 4]); // <- from subvolume, still "-"
 
-        assert_eq!(*buffer.as_vec().await, expected);
+        assert_eq!(buffer.into_vec().unwrap(), expected);
 
         // If the parent goes away, then the sub volume data should still be
         // readable.
@@ -2088,7 +2088,7 @@ mod test {
         expected.extend(vec![0; 512]); // <- was previously from parent, now "-"
         expected.extend(vec![0x00; 512 * 4]); // <- from subvolume, still "-"
 
-        assert_eq!(*buffer.as_vec().await, expected);
+        assert_eq!(buffer.into_vec().unwrap(), expected);
 
         // Write to the whole volume. There's no more read-only parent (it was
         // dropped above)
@@ -2104,7 +2104,7 @@ mod test {
             .read(Block::new(0, block_size.trailing_zeros()), buffer.clone())
             .await?;
 
-        assert_eq!(*buffer.as_vec().await, vec![9; 4096]);
+        assert_eq!(buffer.into_vec().unwrap(), vec![9; 4096]);
 
         Ok(())
     }
@@ -2385,7 +2385,7 @@ mod test {
 
         let expected = vec![128; 2048];
 
-        assert_eq!(*buffer.as_vec().await, expected);
+        assert_eq!(buffer.into_vec().unwrap(), expected);
 
         Ok(())
     }
@@ -2499,7 +2499,7 @@ mod test {
                 )
                 .await?;
 
-            assert_eq!(vec![0x55; BLOCK_SIZE * 10], *buffer.as_vec().await);
+            assert_eq!(vec![0x55; BLOCK_SIZE * 10], buffer.into_vec().unwrap());
 
             volume
                 .write(
@@ -2516,7 +2516,7 @@ mod test {
                 )
                 .await?;
 
-            assert_eq!(vec![0xFF; BLOCK_SIZE * 10], *buffer.as_vec().await);
+            assert_eq!(vec![0xFF; BLOCK_SIZE * 10], buffer.into_vec().unwrap());
         }
 
         // Create the same volume, verify data was written
@@ -2530,7 +2530,7 @@ mod test {
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
 
-        assert_eq!(vec![0xFF; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0xFF; BLOCK_SIZE * 10], buffer.into_vec().unwrap());
 
         Ok(())
     }
@@ -2558,7 +2558,7 @@ mod test {
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
 
-        assert_eq!(vec![0x55; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0x55; BLOCK_SIZE * 10], buffer.into_vec().unwrap());
 
         let mut parent_volume = Volume::new(BLOCK_SIZE as u64, csl());
         parent_volume.add_subvolume(parent).await?;
@@ -2592,7 +2592,7 @@ mod test {
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
 
-        assert_eq!(vec![0x55; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0x55; BLOCK_SIZE * 10], buffer.into_vec().unwrap());
 
         // Write over whole volume
         volume
@@ -2608,7 +2608,7 @@ mod test {
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
 
-        assert_eq!(vec![0xFF; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0xFF; BLOCK_SIZE * 10], buffer.into_vec().unwrap());
 
         Ok(())
     }
@@ -2642,7 +2642,7 @@ mod test {
             .await
             .unwrap();
 
-        assert_eq!(vec![0x0; BLOCK_SIZE], *buffer.as_vec().await);
+        assert_eq!(vec![0x0; BLOCK_SIZE], buffer.into_vec().unwrap());
 
         let buffer = Buffer::new(BLOCK_SIZE);
         volume
@@ -2650,7 +2650,7 @@ mod test {
             .await
             .unwrap();
 
-        assert_eq!(vec![0x5; BLOCK_SIZE], *buffer.as_vec().await);
+        assert_eq!(vec![0x5; BLOCK_SIZE], buffer.into_vec().unwrap());
     }
 
     // Test that blocks are correctly returned during read-only parent +
@@ -2680,7 +2680,7 @@ mod test {
             .read(Block::new(0, block_size.trailing_zeros()), buffer.clone())
             .await?;
 
-        assert_eq!(vec![11; block_size * 5], *buffer.as_vec().await);
+        assert_eq!(vec![11; block_size * 5], buffer.into_vec().unwrap());
 
         // Create a volume out of this parent and the argument subvolume parts
         let mut volume = Volume::new(block_size as u64, csl());
@@ -2703,7 +2703,7 @@ mod test {
 
         let mut expected = vec![11; block_size * 5];
         expected.extend(vec![0x00; block_size * 5]);
-        assert_eq!(expected, *buffer.as_vec().await);
+        assert_eq!(expected, buffer.into_vec().unwrap());
 
         // One big write!
         volume
@@ -2719,7 +2719,7 @@ mod test {
             .read(Block::new(0, block_size.trailing_zeros()), buffer.clone())
             .await?;
 
-        assert_eq!(vec![55; block_size * 10], *buffer.as_vec().await);
+        assert_eq!(vec![55; block_size * 10], buffer.into_vec().unwrap());
 
         Ok(())
     }

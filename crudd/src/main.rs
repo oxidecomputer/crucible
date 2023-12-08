@@ -180,7 +180,7 @@ async fn cmd_read<T: BlockIO>(
         // So say we have an offset of 5. we're misaligned by 5 bytes, so we
         // read 5 bytes we don't need. we skip those 5 bytes then write
         // the rest to the output
-        let bytes = buffer.as_vec().await;
+        let bytes = buffer.into_vec().unwrap();
         output.write_all(
             &bytes[offset_misalignment as usize
                 ..(offset_misalignment + alignment_bytes) as usize],
@@ -314,7 +314,7 @@ async fn write_remainder_and_finalize<'a, T: BlockIO>(
         crucible.read(uflow_offset, uflow_r_buf.clone()).await?;
 
         // Copy it into w_buf
-        let r_bytes = uflow_r_buf.as_vec().await;
+        let r_bytes = uflow_r_buf.into_vec().unwrap();
         w_buf[n_read..n_read + uflow_backfill]
             .copy_from_slice(&r_bytes[uflow_remainder as usize..]);
 
@@ -400,7 +400,7 @@ async fn cmd_write<T: BlockIO>(
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
         crucible.read(offset, buffer.clone()).await?;
 
-        let mut w_vec = buffer.as_vec().await.clone();
+        let mut w_vec = buffer.into_vec().unwrap();
         // Write our data into the buffer
         let bytes_read = input.read(
             &mut w_vec[offset_misalignment as usize

@@ -298,8 +298,7 @@ impl PantryEntry {
             .read_from_byte_offset(offset, buffer.clone())
             .await?;
 
-        let response = buffer.as_vec().await;
-        Ok(response.clone())
+        Ok(buffer.into_vec().unwrap())
     }
 
     pub async fn scrub(&self) -> Result<(), CrucibleError> {
@@ -341,7 +340,7 @@ impl PantryEntry {
                 .read_from_byte_offset(start, data.clone())
                 .await?;
 
-            hasher.update(&*data.as_vec().await);
+            hasher.update(&data.into_vec().unwrap())
         }
 
         let digest = hex::encode(hasher.finalize());

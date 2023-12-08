@@ -1121,11 +1121,10 @@ async fn verify_volume(
         };
 
         let length: usize = next_io_blocks * ri.block_size as usize;
-        let vec: Vec<u8> = vec![255; length];
-        let data = crucible::Buffer::from_vec(vec);
+        let data = crucible::Buffer::from_vec(vec![255; length]);
         guest.read(offset, data.clone()).await?;
 
-        let dl = data.as_vec().await.to_vec();
+        let dl = data.into_vec().unwrap();
         match validate_vec(
             dl,
             block_index,
@@ -1361,11 +1360,10 @@ async fn balloon_workload(
             guest.flush(None).await?;
 
             let length: usize = size * ri.block_size as usize;
-            let vec: Vec<u8> = vec![255; length];
-            let data = crucible::Buffer::from_vec(vec);
+            let data = crucible::Buffer::from_vec(vec![255; length]);
             guest.read(offset, data.clone()).await?;
 
-            let dl = data.as_vec().await.to_vec();
+            let dl = data.into_vec().unwrap();
             match validate_vec(
                 dl,
                 block_index,
@@ -1579,8 +1577,7 @@ async fn generic_workload(
             } else {
                 // Read (+ verify)
                 let length: usize = size * ri.block_size as usize;
-                let vec: Vec<u8> = vec![255; length];
-                let data = crucible::Buffer::from_vec(vec);
+                let data = crucible::Buffer::from_vec(vec![255; length]);
                 if !quiet {
                     match wtq {
                         WhenToQuit::Count { count } => {
@@ -1605,7 +1602,7 @@ async fn generic_workload(
                 }
                 guest.read(offset, data.clone()).await?;
 
-                let dl = data.as_vec().await.to_vec();
+                let dl = data.into_vec().unwrap();
                 match validate_vec(
                     dl,
                     block_index,
@@ -2217,13 +2214,12 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     guest.write(offset, data).await?;
 
     let length: usize = size * ri.block_size as usize;
-    let vec: Vec<u8> = vec![255; length];
-    let data = crucible::Buffer::from_vec(vec);
+    let data = crucible::Buffer::from_vec(vec![255; length]);
 
     println!("Read  at block {:5}, len:{:7}", offset.value, data.len());
     guest.read(offset, data.clone()).await?;
 
-    let dl = data.as_vec().await.to_vec();
+    let dl = data.into_vec().unwrap();
     match validate_vec(dl, block_index, &mut ri.write_log, ri.block_size, false)
     {
         ValidateStatus::Bad | ValidateStatus::InRange => {
@@ -2372,11 +2368,10 @@ async fn write_flush_read_workload(
         guest.flush(None).await?;
 
         let length: usize = size * ri.block_size as usize;
-        let vec: Vec<u8> = vec![255; length];
-        let data = crucible::Buffer::from_vec(vec);
+        let data = crucible::Buffer::from_vec(vec![255; length]);
         guest.read(offset, data.clone()).await?;
 
-        let dl = data.as_vec().await.to_vec();
+        let dl = data.into_vec().unwrap();
         match validate_vec(
             dl,
             block_index,
@@ -2534,8 +2529,7 @@ async fn repair_workload(
             } else {
                 // Read
                 let length: usize = size * ri.block_size as usize;
-                let vec: Vec<u8> = vec![255; length];
-                let data = crucible::Buffer::from_vec(vec);
+                let data = crucible::Buffer::from_vec(vec![255; length]);
                 println!(
                     "{:>0width$}/{:>0width$} Read  \
                     block {:>bw$}  len {:>sw$}",
@@ -2547,7 +2541,7 @@ async fn repair_workload(
                     bw = block_width,
                     sw = size_width,
                 );
-                guest.read(offset, data.clone()).await?;
+                guest.read(offset, data).await?;
             }
         }
     }
@@ -2615,10 +2609,9 @@ async fn demo_workload(
             } else {
                 // Read
                 let length: usize = size * ri.block_size as usize;
-                let vec: Vec<u8> = vec![255; length];
-                let data = crucible::Buffer::from_vec(vec);
+                let data = crucible::Buffer::from_vec(vec![255; length]);
 
-                let future = guest.read(offset, data.clone());
+                let future = guest.read(offset, data);
                 futureslist.push(future);
             }
         }
@@ -2677,13 +2670,12 @@ async fn span_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     guest.flush(None).await?;
 
     let length: usize = 2 * ri.block_size as usize;
-    let vec: Vec<u8> = vec![99; length];
-    let data = crucible::Buffer::from_vec(vec);
+    let data = crucible::Buffer::from_vec(vec![99; length]);
 
     println!("Sending a read spanning two extents");
     guest.read(offset, data.clone()).await?;
 
-    let dl = data.as_vec().await.to_vec();
+    let dl = data.into_vec().unwrap();
     match validate_vec(dl, block_index, &mut ri.write_log, ri.block_size, false)
     {
         ValidateStatus::Bad | ValidateStatus::InRange => {
@@ -2718,11 +2710,10 @@ async fn big_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         guest.flush(None).await?;
 
         let length: usize = ri.block_size as usize;
-        let vec: Vec<u8> = vec![255; length];
-        let data = crucible::Buffer::from_vec(vec);
+        let data = crucible::Buffer::from_vec(vec![255; length]);
         guest.read(offset, data.clone()).await?;
 
-        let dl = data.as_vec().await.to_vec();
+        let dl = data.into_vec().unwrap();
         match validate_vec(
             dl,
             block_index,
@@ -2848,8 +2839,8 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
                 let future = guest.write_to_byte_offset(my_offset, data);
                 futureslist.push(future);
             } else {
-                let vec: Vec<u8> = vec![0; ri.block_size as usize];
-                let data = crucible::Buffer::from_vec(vec);
+                let data =
+                    crucible::Buffer::from_vec(vec![0; ri.block_size as usize]);
 
                 println!(
                     "Loop:{} send read  {} @ offset:{} len:{}",

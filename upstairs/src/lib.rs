@@ -8630,6 +8630,18 @@ impl Buffer {
         Buffer::from_vec(vec)
     }
 
+    /// Attempt to extract the underlying `Vec<u8>` bearing buffered data.
+    ///
+    /// Will succeed if no other references (clones) to the Buffer exist,
+    /// otherwise will return the Buffer as it still exists.
+    pub fn into_vec(self) -> Result<Vec<u8>, Self> {
+        let Buffer { len, data, owned } = self;
+        match Arc::try_unwrap(data) {
+            Ok(buf) => Ok(buf.into_inner()),
+            Err(data) => Err(Buffer { len, data, owned }),
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }
@@ -8924,7 +8936,7 @@ impl GtoS {
         assert!(!self.completed.is_empty());
 
         for ds_id in &self.completed {
-            if let Some(guest_buffer) = self.guest_buffers.get_mut(ds_id) {
+            if let Some(guest_buffer) = self.guest_buffers.remove(ds_id) {
                 let mut offset = 0;
                 let mut vec = guest_buffer.as_vec().await;
                 let mut owned_vec = guest_buffer.owned_vec().await;
