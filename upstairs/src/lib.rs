@@ -9265,7 +9265,7 @@ impl Guest {
             backpressure_config: BackpressureConfig {
                 bytes_start: 1024u64.pow(3), // Start at 1 GiB
                 bytes_scale: 9.3e-8,         // Delay of 10ms at 2 GiB in-flight
-                queue_start: 0.5,
+                queue_start: 0.05,
                 queue_max_delay: Duration::from_millis(5),
             },
             backpressure_lock: Mutex::new(()),
