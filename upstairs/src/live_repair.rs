@@ -256,6 +256,7 @@ pub mod repair_test {
         let ds_repair_id = JobId(1001);
         let ds_noop_id = JobId(1002);
         let ds_reopen_id = JobId(1003);
+        let ds_next_close_id = JobId(1004);
 
         let ei = ExtentInfo {
             generation: 5,
@@ -338,6 +339,16 @@ pub mod repair_test {
             }
         }
         assert_eq!(job.state_count().done, 3);
+
+        // Check that the subsequent job has started
+        let job = up.downstairs.get_job(&ds_next_close_id).unwrap();
+        match &job.work {
+            IOop::ExtentFlushClose { .. } => {}
+            x => {
+                panic!("Expected ExtentFlushClose, got: {:?}", x);
+            }
+        }
+        assert_eq!(job.state_count().active, 3);
     }
 
     // Loop over the possible downstairs to be in LiveRepair and
@@ -374,6 +385,7 @@ pub mod repair_test {
         let ds_repair_id = JobId(1001);
         let ds_noop_id = JobId(1002);
         let ds_reopen_id = JobId(1003);
+        let ds_next_close_id = JobId(1004);
 
         // Create two different ExtentInfo structs so we will have
         // a downstairs that requires repair.
@@ -463,6 +475,16 @@ pub mod repair_test {
         }
         assert_eq!(job.state_count().done, 3);
         assert_eq!(up.downstairs.clients[or_ds].state(), DsState::LiveRepair);
+
+        // Check that the subsequent job has started
+        let job = up.downstairs.get_job(&ds_next_close_id).unwrap();
+        match &job.work {
+            IOop::ExtentFlushClose { .. } => {}
+            x => {
+                panic!("Expected ExtentFlushClose, got: {:?}", x);
+            }
+        }
+        assert_eq!(job.state_count().active, 3);
     }
 
     #[tokio::test]
@@ -496,6 +518,7 @@ pub mod repair_test {
         let ds_repair_id = JobId(1001);
         let ds_noop_id = JobId(1002);
         let ds_reopen_id = JobId(1003);
+        let ds_flush_id = JobId(1004);
 
         let ei = ExtentInfo {
             generation: 5,
@@ -622,6 +645,21 @@ pub mod repair_test {
         // repair should also now be faulted.
         assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
         assert_eq!(up.downstairs.clients[or_ds].state(), DsState::Faulted);
+
+        let job = up.downstairs.get_job(&ds_flush_id).unwrap();
+        match &job.work {
+            IOop::Flush { .. } => {}
+            x => {
+                panic!("Expected Flush, got: {:?}", x);
+            }
+        }
+        if err_ds != or_ds {
+            assert_eq!(job.state_count().active, 1);
+            assert_eq!(job.state_count().skipped, 2);
+        } else {
+            assert_eq!(job.state_count().active, 2);
+            assert_eq!(job.state_count().skipped, 1);
+        }
     }
 
     #[tokio::test]
@@ -658,6 +696,7 @@ pub mod repair_test {
         let ds_repair_id = JobId(1001);
         let ds_noop_id = JobId(1002);
         let ds_reopen_id = JobId(1003);
+        let ds_flush_id = JobId(1004);
 
         let ei = ExtentInfo {
             generation: 5,
@@ -758,6 +797,21 @@ pub mod repair_test {
 
         assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
         assert_eq!(up.downstairs.clients[or_ds].state(), DsState::Faulted);
+
+        let job = up.downstairs.get_job(&ds_flush_id).unwrap();
+        match &job.work {
+            IOop::Flush { .. } => {}
+            x => {
+                panic!("Expected Flush, got: {:?}", x);
+            }
+        }
+        if err_ds != or_ds {
+            assert_eq!(job.state_count().active, 1);
+            assert_eq!(job.state_count().skipped, 2);
+        } else {
+            assert_eq!(job.state_count().active, 2);
+            assert_eq!(job.state_count().skipped, 1);
+        }
     }
 
     #[tokio::test]
@@ -787,6 +841,7 @@ pub mod repair_test {
         let ds_repair_id = JobId(1001);
         let ds_noop_id = JobId(1002);
         let ds_reopen_id = JobId(1003);
+        let ds_flush_id = JobId(1004);
 
         let ei = ExtentInfo {
             generation: 5,
@@ -858,7 +913,23 @@ pub mod repair_test {
 
         assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
         assert_eq!(up.downstairs.clients[or_ds].state(), DsState::Faulted);
+
+        let job = up.downstairs.get_job(&ds_flush_id).unwrap();
+        match &job.work {
+            IOop::Flush { .. } => {}
+            x => {
+                panic!("Expected Flush, got: {:?}", x);
+            }
+        }
+        if err_ds != or_ds {
+            assert_eq!(job.state_count().active, 1);
+            assert_eq!(job.state_count().skipped, 2);
+        } else {
+            assert_eq!(job.state_count().active, 2);
+            assert_eq!(job.state_count().skipped, 1);
+        }
     }
+
     #[tokio::test]
     async fn test_repair_extent_fail_reopen_all() {
         // Test all the permutations of
@@ -886,6 +957,7 @@ pub mod repair_test {
         let ds_repair_id = JobId(1001);
         let ds_noop_id = JobId(1002);
         let ds_reopen_id = JobId(1003);
+        let ds_flush_id = JobId(1004);
 
         let ei = ExtentInfo {
             generation: 5,
@@ -942,6 +1014,21 @@ pub mod repair_test {
 
         assert_eq!(up.downstairs.clients[err_ds].state(), DsState::Faulted);
         assert_eq!(up.downstairs.clients[or_ds].state(), DsState::Faulted);
+
+        let job = up.downstairs.get_job(&ds_flush_id).unwrap();
+        match &job.work {
+            IOop::Flush { .. } => {}
+            x => {
+                panic!("Expected Flush, got: {:?}", x);
+            }
+        }
+        if err_ds != or_ds {
+            assert_eq!(job.state_count().active, 1);
+            assert_eq!(job.state_count().skipped, 2);
+        } else {
+            assert_eq!(job.state_count().active, 2);
+            assert_eq!(job.state_count().skipped, 1);
+        }
     }
 
     #[tokio::test]
