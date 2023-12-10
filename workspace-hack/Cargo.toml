@@ -36,7 +36,7 @@ log = { version = "0.4", default-features = false, features = ["std"] }
 num-integer = { version = "0.1", default-features = false, features = ["i128", "std"] }
 num-iter = { version = "0.1", default-features = false, features = ["i128", "std"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
-openapiv3 = { version = "2.0.0-rc.1", default-features = false, features = ["skip_serializing_defaults"] }
+openapiv3 = { version = "2", default-features = false, features = ["skip_serializing_defaults"] }
 phf_shared = { version = "0.11" }
 rand = { version = "0.8", features = ["min_const_gen", "small_rng"] }
 rand_chacha = { version = "0.3" }
@@ -69,7 +69,7 @@ indexmap = { version = "2", features = ["serde"] }
 libc = { version = "0.2", features = ["extra_traits"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
-openapiv3 = { version = "2.0.0-rc.1", default-features = false, features = ["skip_serializing_defaults"] }
+openapiv3 = { version = "2", default-features = false, features = ["skip_serializing_defaults"] }
 phf_shared = { version = "0.11" }
 rand = { version = "0.8", features = ["min_const_gen", "small_rng"] }
 rand_chacha = { version = "0.3" }
