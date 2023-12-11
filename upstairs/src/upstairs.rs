@@ -8,8 +8,8 @@ use crate::{
     downstairs::{Downstairs, DownstairsAction},
     extent_from_offset, integrity_hash,
     stats::UpStatOuter,
-    Block, BlockContext, BlockOp, BlockReq, Buffer, Bytes, ClientId, ClientMap,
-    CrucibleOpts, DsState, EncryptionContext, GtoS, Guest, Message,
+    Block, BlockContext, BlockOp, BlockReq, BlockRes, Buffer, Bytes, ClientId,
+    ClientMap, CrucibleOpts, DsState, EncryptionContext, GtoS, Guest, Message,
     RegionDefinition, RegionDefinitionStatus, SnapshotDetails, WQCounts,
 };
 use crucible_common::CrucibleError;
@@ -25,7 +25,7 @@ use std::{
 use ringbuffer::RingBuffer;
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::mpsc,
     time::{sleep_until, Instant},
 };
 use uuid::Uuid;
@@ -45,9 +45,7 @@ pub(crate) enum UpstairsState {
     /// The guest has requested that the upstairs go active
     ///
     /// We should reply on the provided channel
-    GoActive {
-        reply: oneshot::Sender<Result<(), CrucibleError>>,
-    },
+    GoActive(BlockRes),
 
     /// The upstairs is fully online and accepting guest IO
     Active,
@@ -58,9 +56,7 @@ pub(crate) enum UpstairsState {
     /// completed (including the final flush), the downstairs task should stop;
     /// when all three Downstairs have stopped, the upstairs should enter
     /// `UpstairsState::Initializing` and reply on this channel.
-    Deactivating {
-        reply: oneshot::Sender<Result<(), CrucibleError>>,
-    },
+    Deactivating(BlockRes),
 }
 
 /// Crucible upstairs state
@@ -464,7 +460,7 @@ impl Upstairs {
         }
 
         // Check for client-side deactivation
-        if matches!(self.state, UpstairsState::Deactivating { .. }) {
+        if matches!(&self.state, UpstairsState::Deactivating(..)) {
             info!(self.log, "checking for deactivation");
             for i in ClientId::iter() {
                 // Clients become Deactivated, then New (when the IO task
@@ -492,16 +488,10 @@ impl Upstairs {
                     &mut self.state,
                     UpstairsState::Initializing,
                 );
-                let UpstairsState::Deactivating { reply } = prev else {
+                let UpstairsState::Deactivating(res) = prev else {
                     panic!("invalid upstairs state {prev:?}"); // checked above
                 };
-                if let Err(e) = reply.send(Ok(())) {
-                    error!(
-                        self.log,
-                        "got error {e:?} while replying to \
-                             deactivation request"
-                    );
-                }
+                res.send_ok();
             }
         }
 
@@ -626,11 +616,11 @@ impl Upstairs {
                 // TODO: remove this distinction?
                 let state = match &self.state {
                     UpstairsState::Initializing
-                    | UpstairsState::GoActive { .. } => {
+                    | UpstairsState::GoActive(..) => {
                         crate::UpState::Initializing
                     }
                     UpstairsState::Active => crate::UpState::Active,
-                    UpstairsState::Deactivating { .. } => {
+                    UpstairsState::Deactivating(..) => {
                         crate::UpState::Deactivating
                     }
                 };
@@ -744,29 +734,27 @@ impl Upstairs {
     async fn apply_guest_request(&mut self, req: BlockReq) {
         // If any of the submit_* functions fail to send to the downstairs, they
         // return an error.  These are reported to the Guest.
-        match req.op() {
+        let BlockReq { op, res } = req;
+        match op {
             // These three options can be handled by this task directly,
             // and don't require the upstairs to be fully online.
             BlockOp::GoActive => {
-                self.set_active_request(req.take_sender()).await;
+                self.set_active_request(res).await;
             }
             BlockOp::GoActiveWithGen { gen } => {
                 self.cfg.generation.store(gen, Ordering::Release);
-                self.set_active_request(req.take_sender()).await;
+                self.set_active_request(res).await;
             }
             BlockOp::QueryGuestIOReady { data } => {
                 *data.lock().await = self.guest_io_ready();
-                req.send_ok();
+                res.send_ok();
             }
             BlockOp::QueryUpstairsUuid { data } => {
                 *data.lock().await = self.cfg.upstairs_id;
-                req.send_ok();
+                res.send_ok();
             }
             BlockOp::Deactivate => {
-                self.set_deactivate(req).await;
-            }
-            BlockOp::RepairOp => {
-                warn!(self.log, "Ignoring external BlockOp::RepairOp");
+                self.set_deactivate(res).await;
             }
 
             // Query ops
@@ -774,7 +762,7 @@ impl Upstairs {
                 match self.ddef.get_def() {
                     Some(rd) => {
                         *data.lock().await = rd.block_size();
-                        req.send_ok();
+                        res.send_ok();
                     }
                     None => {
                         warn!(
@@ -782,7 +770,7 @@ impl Upstairs {
                             "Block size not available (active: {})",
                             self.guest_io_ready()
                         );
-                        req.send_err(CrucibleError::PropertyNotAvailable(
+                        res.send_err(CrucibleError::PropertyNotAvailable(
                             "block size".to_string(),
                         ));
                     }
@@ -792,7 +780,7 @@ impl Upstairs {
                 match self.ddef.get_def() {
                     Some(rd) => {
                         *data.lock().await = rd.total_size();
-                        req.send_ok();
+                        res.send_ok();
                     }
                     None => {
                         warn!(
@@ -800,7 +788,7 @@ impl Upstairs {
                             "Total size not available (active: {})",
                             self.guest_io_ready()
                         );
-                        req.send_err(CrucibleError::PropertyNotAvailable(
+                        res.send_err(CrucibleError::PropertyNotAvailable(
                             "total size".to_string(),
                         ));
                     }
@@ -812,7 +800,7 @@ impl Upstairs {
                 match self.ddef.get_def() {
                     Some(rd) => {
                         *data.lock().await = rd.extent_size();
-                        req.send_ok();
+                        res.send_ok();
                     }
                     None => {
                         warn!(
@@ -820,7 +808,7 @@ impl Upstairs {
                             "Extent size not available (active: {})",
                             self.guest_io_ready()
                         );
-                        req.send_err(CrucibleError::PropertyNotAvailable(
+                        res.send_err(CrucibleError::PropertyNotAvailable(
                             "extent size".to_string(),
                         ));
                     }
@@ -839,30 +827,30 @@ impl Upstairs {
                     ds_count: self.downstairs.active_count(),
                     active_count,
                 };
-                req.send_ok();
+                res.send_ok();
             }
 
             BlockOp::ShowWork { data } => {
                 // TODO should this first check if the Upstairs is active?
                 *data.lock().await = self.show_all_work().await;
-                req.send_ok();
+                res.send_ok();
             }
 
             BlockOp::Commit => {
                 if !self.guest_io_ready() {
-                    req.send_err(CrucibleError::UpstairsInactive);
+                    res.send_err(CrucibleError::UpstairsInactive);
                 }
                 // Nothing to do here; we always check for new work in `select!`
             }
 
             BlockOp::Read { offset, data } => {
-                self.submit_read(offset, data, req).await
+                self.submit_read(offset, data, res).await
             }
             BlockOp::Write { offset, data } => {
-                self.submit_write(offset, data, req, false).await
+                self.submit_write(offset, data, res, false).await
             }
             BlockOp::WriteUnwritten { offset, data } => {
-                self.submit_write(offset, data, req, true).await
+                self.submit_write(offset, data, res, true).await
             }
             BlockOp::Flush { snapshot_details } => {
                 /*
@@ -873,10 +861,10 @@ impl Upstairs {
                  * flush command.
                  */
                 if !self.guest_io_ready() {
-                    req.send_err(CrucibleError::UpstairsInactive);
+                    res.send_err(CrucibleError::UpstairsInactive);
                     return;
                 }
-                self.submit_flush(Some(req), snapshot_details).await;
+                self.submit_flush(Some(res), snapshot_details).await;
             }
             BlockOp::ReplaceDownstairs {
                 id,
@@ -886,9 +874,9 @@ impl Upstairs {
             } => match self.downstairs.replace(id, old, new, &self.state) {
                 Ok(v) => {
                     *result.lock().await = v;
-                    req.send_ok();
+                    res.send_ok();
                 }
-                Err(e) => req.send_err(e),
+                Err(e) => res.send_err(e),
             },
         }
     }
@@ -945,29 +933,26 @@ impl Upstairs {
     }
 
     /// Request that the Upstairs go active
-    async fn set_active_request(
-        &mut self,
-        reply: oneshot::Sender<Result<(), CrucibleError>>,
-    ) {
-        match self.state {
+    async fn set_active_request(&mut self, res: BlockRes) {
+        match &self.state {
             UpstairsState::Initializing => {
-                self.state = UpstairsState::GoActive { reply };
+                self.state = UpstairsState::GoActive(res);
                 info!(self.log, "{} active request set", self.cfg.upstairs_id);
             }
-            UpstairsState::GoActive { .. } => {
+            UpstairsState::GoActive(..) => {
                 info!(
                     self.log,
                     "{} request to activate upstairs already going active",
                     self.cfg.upstairs_id
                 );
-                let _ = reply.send(Err(CrucibleError::UpstairsAlreadyActive));
+                res.send_err(CrucibleError::UpstairsDeactivating);
             }
-            UpstairsState::Deactivating { .. } => {
+            UpstairsState::Deactivating(..) => {
                 warn!(
                     self.log,
                     "{} active denied while Deactivating", self.cfg.upstairs_id
                 );
-                let _ = reply.send(Err(CrucibleError::UpstairsDeactivating));
+                res.send_err(CrucibleError::UpstairsDeactivating);
             }
             UpstairsState::Active => {
                 info!(
@@ -975,7 +960,7 @@ impl Upstairs {
                     "{} Request to activate upstairs already active",
                     self.cfg.upstairs_id
                 );
-                let _ = reply.send(Err(CrucibleError::UpstairsAlreadyActive));
+                res.send_err(CrucibleError::UpstairsAlreadyActive);
             }
         }
         // Notify all clients that they should go active when they hit an
@@ -992,15 +977,15 @@ impl Upstairs {
     /// when complete.
     ///
     /// In either case, `self.state` is set to `UpstairsState::Deactivating`
-    async fn set_deactivate(&mut self, req: BlockReq) {
+    async fn set_deactivate(&mut self, res: BlockRes) {
         info!(self.log, "Request to deactivate this guest");
-        match self.state {
-            UpstairsState::Initializing | UpstairsState::GoActive { .. } => {
-                req.send_err(CrucibleError::UpstairsInactive);
+        match &self.state {
+            UpstairsState::Initializing | UpstairsState::GoActive(..) => {
+                res.send_err(CrucibleError::UpstairsInactive);
                 return;
             }
-            UpstairsState::Deactivating { .. } => {
-                req.send_err(CrucibleError::UpstairsDeactivating);
+            UpstairsState::Deactivating(..) => {
+                res.send_err(CrucibleError::UpstairsDeactivating);
                 return;
             }
             UpstairsState::Active => (),
@@ -1014,14 +999,12 @@ impl Upstairs {
             // Upstairs::apply.
         }
 
-        self.state = UpstairsState::Deactivating {
-            reply: req.take_sender(),
-        };
+        self.state = UpstairsState::Deactivating(res);
     }
 
     pub(crate) async fn submit_flush(
         &mut self,
-        req: Option<BlockReq>,
+        res: Option<BlockRes>,
         snapshot_details: Option<SnapshotDetails>,
     ) {
         // Notice that unlike submit_read and submit_write, we do not check for
@@ -1046,7 +1029,7 @@ impl Upstairs {
 
         let next_id = self.downstairs.submit_flush(gw_id, snapshot_details);
 
-        let new_gtos = GtoS::new(next_id, None, req);
+        let new_gtos = GtoS::new(next_id, None, res);
         gw.active.insert(gw_id, new_gtos);
 
         cdt::up__to__ds__flush__start!(|| (gw_id));
@@ -1057,9 +1040,9 @@ impl Upstairs {
         &mut self,
         offset: Block,
         data: Buffer,
-        req: BlockReq,
+        res: BlockRes,
     ) {
-        self.submit_read_inner(offset, data, Some(req)).await
+        self.submit_read_inner(offset, data, Some(res)).await
     }
 
     /// Submits a dummy read (without associated `BlockReq`)
@@ -1080,14 +1063,14 @@ impl Upstairs {
         &mut self,
         offset: Block,
         data: Buffer,
-        req: Option<BlockReq>,
+        res: Option<BlockRes>,
     ) {
         #[cfg(not(test))]
-        assert!(req.is_some());
+        assert!(res.is_some());
 
         if !self.guest_io_ready() {
-            if let Some(req) = req {
-                req.send_err(CrucibleError::UpstairsInactive);
+            if let Some(res) = res {
+                res.send_err(CrucibleError::UpstairsInactive);
             }
             return;
         }
@@ -1104,8 +1087,8 @@ impl Upstairs {
          * Verify IO is in range for our region
          */
         if let Err(e) = ddef.validate_io(offset, data.len()) {
-            if let Some(req) = req {
-                req.send_err(e);
+            if let Some(res) = res {
+                res.send_err(e);
             }
             return;
         }
@@ -1136,7 +1119,7 @@ impl Upstairs {
         // after submitting the job to the downstairs, because no one else is
         // modifying the Upstairs right now; even if the job finishes
         // instantaneously, it can't interrupt this function.
-        let new_gtos = GtoS::new(next_id, Some(data), req);
+        let new_gtos = GtoS::new(next_id, Some(data), res);
         gw.active.insert(gw_id, new_gtos);
 
         cdt::up__to__ds__read__start!(|| (gw_id));
@@ -1147,10 +1130,10 @@ impl Upstairs {
         &mut self,
         offset: Block,
         data: Bytes,
-        req: BlockReq,
+        res: BlockRes,
         is_write_unwritten: bool,
     ) {
-        self.submit_write_inner(offset, data, Some(req), is_write_unwritten)
+        self.submit_write_inner(offset, data, Some(res), is_write_unwritten)
             .await
     }
 
@@ -1174,21 +1157,21 @@ impl Upstairs {
         &mut self,
         offset: Block,
         data: Bytes,
-        req: Option<BlockReq>,
+        res: Option<BlockRes>,
         is_write_unwritten: bool,
     ) {
         #[cfg(not(test))]
-        assert!(req.is_some());
+        assert!(res.is_some());
 
         if !self.guest_io_ready() {
-            if let Some(req) = req {
-                req.send_err(CrucibleError::UpstairsInactive);
+            if let Some(res) = res {
+                res.send_err(CrucibleError::UpstairsInactive);
             }
             return;
         }
         if self.cfg.read_only {
-            if let Some(req) = req {
-                req.send_err(CrucibleError::ModifyingReadOnlyRegion);
+            if let Some(res) = res {
+                res.send_err(CrucibleError::ModifyingReadOnlyRegion);
             }
             return;
         }
@@ -1198,8 +1181,8 @@ impl Upstairs {
          */
         let ddef = self.ddef.get_def().unwrap();
         if let Err(e) = ddef.validate_io(offset, data.len()) {
-            if let Some(req) = req {
-                req.send_err(e);
+            if let Some(res) = res {
+                res.send_err(e);
             }
             return;
         }
@@ -1233,8 +1216,8 @@ impl Upstairs {
                 let (nonce, tag, hash) =
                     match context.encrypt_in_place(&mut mut_data[..]) {
                         Err(e) => {
-                            if let Some(req) = req {
-                                req.send_err(CrucibleError::EncryptionError(
+                            if let Some(res) = res {
+                                res.send_err(CrucibleError::EncryptionError(
                                     e.to_string(),
                                 ));
                             }
@@ -1300,7 +1283,7 @@ impl Upstairs {
         );
 
         // New work created, add to the guest_work HM
-        let new_gtos = GtoS::new(next_id, None, req);
+        let new_gtos = GtoS::new(next_id, None, res);
         gw.active.insert(gw_id, new_gtos);
 
         if is_write_unwritten {
@@ -1558,7 +1541,7 @@ impl Upstairs {
              * Determine the highest flush number and make sure our generation
              * is high enough.
              */
-            if !matches!(self.state, UpstairsState::GoActive { .. }) {
+            if !matches!(&self.state, UpstairsState::GoActive(..)) {
                 info!(
                     self.log,
                     "could not connect region set due to bad state: {:?}",
@@ -1631,7 +1614,7 @@ impl Upstairs {
         info!(self.log, "All required repair work is completed");
         info!(self.log, "Set Downstairs and Upstairs active after repairs");
 
-        if !matches!(self.state, UpstairsState::GoActive { .. }) {
+        if !matches!(self.state, UpstairsState::GoActive(..)) {
             error!(
                 self.log,
                 "reconciliation done, but upstairs is no longer GoActive: {:?}",
@@ -1641,12 +1624,12 @@ impl Upstairs {
         }
 
         // Swap out the state for UpstairsState::Active
-        let UpstairsState::GoActive { reply } =
+        let UpstairsState::GoActive(res) =
             std::mem::replace(&mut self.state, UpstairsState::Active)
         else {
             unreachable!(); // checked above
         };
-        reply.send(Ok(())).unwrap();
+        res.send_ok();
         info!(
             self.log,
             "{} is now active with session: {}",
@@ -1731,15 +1714,15 @@ impl Upstairs {
     /// wonky or unexpected; this is only allowed during unit tests.
     #[cfg(test)]
     pub(crate) fn force_active(&mut self) -> Result<(), CrucibleError> {
-        match self.state {
+        match &self.state {
             UpstairsState::Initializing => {
                 self.state = UpstairsState::Active;
                 Ok(())
             }
-            UpstairsState::Active | UpstairsState::GoActive { .. } => {
+            UpstairsState::Active | UpstairsState::GoActive(..) => {
                 Err(CrucibleError::UpstairsAlreadyActive)
             }
-            UpstairsState::Deactivating { .. } => {
+            UpstairsState::Deactivating(..) => {
                 /*
                  * We don't support deactivate interruption, so we have to
                  * let the currently running deactivation finish before we
@@ -1753,8 +1736,8 @@ impl Upstairs {
     fn set_inactive(&mut self, err: CrucibleError) {
         let prev =
             std::mem::replace(&mut self.state, UpstairsState::Initializing);
-        if let UpstairsState::GoActive { reply } = prev {
-            let _ = reply.send(Err(err));
+        if let UpstairsState::GoActive(res) = prev {
+            res.send_err(err);
         }
         info!(self.log, "setting inactive!");
     }
@@ -1772,7 +1755,7 @@ impl Upstairs {
         // downstairs should automatically call PromoteToActive when it reaches
         // the relevant state.
         let auto_promote = match self.state {
-            UpstairsState::Active | UpstairsState::GoActive { .. } => true,
+            UpstairsState::Active | UpstairsState::GoActive(..) => true,
             UpstairsState::Initializing
             | UpstairsState::Deactivating { .. } => false,
         };
@@ -1831,8 +1814,9 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         downstairs::test::set_all_active, test::make_upstairs, BlockReq,
-        DsState, JobId,
+        BlockReqWaiter, DsState, JobId,
     };
+    use tokio::sync::oneshot;
 
     // Test function to create just enough of an Upstairs for our needs.
     pub(crate) fn create_test_upstairs() -> Upstairs {
@@ -1908,31 +1892,31 @@ pub(crate) mod test {
 
         let mut up = Upstairs::test_default(None);
 
-        let (ds_done_tx, ds_done_rx) = oneshot::channel();
-        up.apply(UpstairsAction::Guest(BlockReq::new(
-            BlockOp::Deactivate,
-            ds_done_tx,
-        )))
+        let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Deactivate,
+            res: ds_done_res,
+        }))
         .await;
-        assert!(ds_done_rx.await.unwrap().is_err());
+        assert!(ds_done_brw.wait().await.is_err());
 
         up.force_active().unwrap();
 
-        let (ds_done_tx, ds_done_rx) = oneshot::channel();
-        up.apply(UpstairsAction::Guest(BlockReq::new(
-            BlockOp::Deactivate,
-            ds_done_tx,
-        )))
+        let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Deactivate,
+            res: ds_done_res,
+        }))
         .await;
-        assert!(ds_done_rx.await.unwrap().is_ok());
+        assert!(ds_done_brw.wait().await.is_ok());
 
-        let (ds_done_tx, ds_done_rx) = oneshot::channel();
-        up.apply(UpstairsAction::Guest(BlockReq::new(
-            BlockOp::Deactivate,
-            ds_done_tx,
-        )))
+        let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Deactivate,
+            res: ds_done_res,
+        }))
         .await;
-        assert!(ds_done_rx.await.unwrap().is_err());
+        assert!(ds_done_brw.wait().await.is_err())
     }
 
     #[tokio::test]
@@ -1947,11 +1931,11 @@ pub(crate) mod test {
         set_all_active(&mut up.downstairs);
 
         // The deactivate message should happen immediately
-        let (ds_done_tx, ds_done_rx) = oneshot::channel();
-        up.apply(UpstairsAction::Guest(BlockReq::new(
-            BlockOp::Deactivate,
-            ds_done_tx,
-        )))
+        let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Deactivate,
+            res: ds_done_res,
+        }))
         .await;
 
         // Make sure the correct DS have changed state.
@@ -1981,7 +1965,7 @@ pub(crate) mod test {
                 assert!(matches!(up.state, UpstairsState::Initializing));
             }
         }
-        assert!(ds_done_rx.await.unwrap().is_ok());
+        assert!(ds_done_brw.wait().await.is_ok());
     }
 
     // Job dependency tests
@@ -3379,7 +3363,6 @@ pub(crate) mod test {
         set_all_active(&mut up.downstairs);
 
         // Build a write, put it on the work queue.
-        let (write_tx, _write_rx) = oneshot::channel();
         let offset = Block::new_512(7);
         let data = Bytes::from(vec![1; 512]);
         let op = if is_write_unwritten {
@@ -3387,23 +3370,22 @@ pub(crate) mod test {
         } else {
             BlockOp::Write { offset, data }
         };
-        up.apply(UpstairsAction::Guest(BlockReq::new(op, write_tx)))
+        let (_write_brw, write_res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq { op, res: write_res }))
             .await;
         let id1 = JobId(1000); // We know that job IDs start at 1000
 
         // Create and enqueue the flush by setting deactivate
-        let (deactivate_done_tx, mut deactivate_done_rx) = oneshot::channel();
-        up.apply(UpstairsAction::Guest(BlockReq::new(
-            BlockOp::Deactivate,
-            deactivate_done_tx,
-        )))
+        let (mut deactivate_done_brw, deactivate_done_res) =
+            BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Deactivate,
+            res: deactivate_done_res,
+        }))
         .await;
 
         // The deactivate didn't return right away
-        assert_eq!(
-            deactivate_done_rx.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        );
+        assert_eq!(deactivate_done_brw.try_wait(), None);
 
         // We know that the deactivate created a flush operation, which was
         // assigned the next available ID.
@@ -3424,10 +3406,7 @@ pub(crate) mod test {
         }
 
         // Verify the deactivate is not done yet.
-        assert_eq!(
-            deactivate_done_rx.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        );
+        assert_eq!(deactivate_done_brw.try_wait(), None);
 
         // Make sure no DS have changed state.
         for c in up.downstairs.clients.iter() {
@@ -3447,10 +3426,7 @@ pub(crate) mod test {
                 }),
             }))
             .await;
-            assert_eq!(
-                deactivate_done_rx.try_recv(),
-                Err(oneshot::error::TryRecvError::Empty)
-            );
+            assert_eq!(deactivate_done_brw.try_wait(), None);
         }
 
         // These downstairs should now be deactivated now
@@ -3461,10 +3437,7 @@ pub(crate) mod test {
         assert_eq!(up.ds_state(ClientId::new(1)), DsState::Active);
 
         // Verify the deactivate is not done yet.
-        assert_eq!(
-            deactivate_done_rx.try_recv(),
-            Err(oneshot::error::TryRecvError::Empty)
-        );
+        assert_eq!(deactivate_done_brw.try_wait(), None);
         assert!(matches!(up.state, UpstairsState::Deactivating { .. }));
 
         // Complete the flush on the remaining downstairs
@@ -3494,7 +3467,7 @@ pub(crate) mod test {
             }))
             .await;
         }
-        assert_eq!(deactivate_done_rx.try_recv().unwrap(), Ok(()));
+        assert_eq!(deactivate_done_brw.try_wait(), Some(Ok(())));
 
         // Verify we have disconnected and can go back to init.
         assert!(matches!(up.state, UpstairsState::Initializing));

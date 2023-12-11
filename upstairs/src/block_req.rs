@@ -11,41 +11,34 @@ use tokio::sync::oneshot;
 #[derive(Debug)]
 pub(crate) struct BlockReq {
     pub op: BlockOp,
-    sender: oneshot::Sender<Result<(), CrucibleError>>,
+    pub res: BlockRes,
 }
 
-impl BlockReq {
-    pub fn new(
-        op: BlockOp,
-        sender: oneshot::Sender<Result<(), CrucibleError>>,
-    ) -> BlockReq {
-        Self { op, sender }
-    }
-
-    /// Return a copy of the block op
-    pub fn op(&self) -> BlockOp {
-        self.op.clone()
-    }
-
-    /// Consume this BlockReq and send Ok to the receiver
+#[must_use]
+#[derive(Debug)]
+pub(crate) struct BlockRes(Option<oneshot::Sender<Result<(), CrucibleError>>>);
+impl BlockRes {
+    /// Consume this BlockRes and send Ok to the receiver
     pub fn send_ok(self) {
         self.send_result(Ok(()))
     }
 
-    /// Consume this BlockReq and send an Err to the receiver
+    /// Consume this BlockRes and send an Err to the receiver
     pub fn send_err(self, e: CrucibleError) {
         self.send_result(Err(e))
     }
 
-    /// Consume this BlockReq and send a Result to the receiver
-    pub fn send_result(self, r: Result<(), CrucibleError>) {
+    /// Consume this BlockRes and send a Result to the receiver
+    fn send_result(mut self, r: Result<(), CrucibleError>) {
         // XXX this eats the result!
-        let _ = self.sender.send(r);
+        let _ = self.0.take().expect("sender was populated").send(r);
     }
-
-    /// Consume this BlockReq and return the inner oneshot sender
-    pub fn take_sender(self) -> oneshot::Sender<Result<(), CrucibleError>> {
-        self.sender
+}
+impl Drop for BlockRes {
+    fn drop(&mut self) {
+        // Dropping a BlockRes without issuing a completion would mean the
+        // associated waiter would be stuck waiting forever for a result.
+        assert!(self.0.is_none(), "result should be sent for BlockRes");
     }
 }
 
@@ -61,10 +54,10 @@ pub(crate) struct BlockReqWaiter {
 }
 
 impl BlockReqWaiter {
-    pub fn new(
-        recv: oneshot::Receiver<Result<(), CrucibleError>>,
-    ) -> BlockReqWaiter {
-        Self { recv }
+    /// Create associated `BlockReqWaiter`/`BlockRes` pair
+    pub fn pair() -> (BlockReqWaiter, BlockRes) {
+        let (send, recv) = oneshot::channel();
+        (Self { recv }, BlockRes(Some(send)))
     }
 
     /// Consume this BlockReqWaiter and wait on the message
@@ -75,7 +68,7 @@ impl BlockReqWaiter {
         }
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn try_wait(&mut self) -> Option<Result<(), CrucibleError>> {
         match self.recv.try_recv() {
             Ok(v) => Some(v),
@@ -94,41 +87,19 @@ mod test {
     use super::*;
 
     #[tokio::test]
-    async fn test_blockreqwaiter_send() {
-        let (send, recv) = oneshot::channel();
-        let brw = BlockReqWaiter::new(recv);
-
-        send.send(Ok(())).unwrap();
-
-        brw.wait().await.unwrap();
-    }
-
-    #[tokio::test]
     async fn test_blockreq_and_blockreqwaiter() {
-        let (send, recv) = oneshot::channel();
+        let (brw, res) = BlockReqWaiter::pair();
 
-        let op = BlockOp::Flush {
-            snapshot_details: None,
-        };
-        let br = BlockReq::new(op, send);
-        let brw = BlockReqWaiter::new(recv);
-
-        br.send_ok();
+        res.send_ok();
 
         brw.wait().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_blockreq_and_blockreqwaiter_err() {
-        let (send, recv) = oneshot::channel();
+        let (brw, res) = BlockReqWaiter::pair();
 
-        let op = BlockOp::Flush {
-            snapshot_details: None,
-        };
-        let br = BlockReq::new(op, send);
-        let brw = BlockReqWaiter::new(recv);
-
-        br.send_err(CrucibleError::UpstairsInactive);
+        res.send_err(CrucibleError::UpstairsInactive);
 
         assert!(brw.wait().await.is_err());
     }
