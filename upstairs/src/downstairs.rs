@@ -188,20 +188,6 @@ pub(crate) struct LiveRepairData {
     state: LiveRepairState,
 }
 
-/// Accessors for use in live_repair tests
-#[cfg(test)]
-impl LiveRepairData {
-    pub(crate) fn repair_job_ids(
-        &self,
-    ) -> &BTreeMap<u64, (ExtentRepairIDs, Vec<JobId>)> {
-        &self.repair_job_ids
-    }
-
-    pub(crate) fn min_id_mut(&mut self) -> &mut JobId {
-        &mut self.min_id
-    }
-}
-
 #[derive(Debug)]
 pub(crate) enum DownstairsAction {
     /// We received a client action from the given client
@@ -331,7 +317,7 @@ impl Downstairs {
     ///
     /// This is public for the sake of unit testing, but shouldn't be called
     /// outside of this module normally.
-    pub(crate) async fn ack_job(
+    async fn ack_job(
         &mut self,
         ds_id: JobId,
         gw: &mut GuestWork,
@@ -683,8 +669,9 @@ impl Downstairs {
     /// If the job state is already [`IOState::Skipped`], then this task
     /// has no work to do, so return `None`.
     ///
-    /// This should only be called directly from debug functions not be called directly
-    pub(crate) fn in_progress(
+    /// This should only be called directly from debug functions, and should not
+    /// be called directly from normal code.
+    fn in_progress(
         &mut self,
         ds_id: JobId,
         client_id: ClientId,
@@ -824,7 +811,7 @@ impl Downstairs {
     }
 
     /// Assign a new downstairs job ID.
-    pub(crate) fn next_id(&mut self) -> JobId {
+    fn next_id(&mut self) -> JobId {
         let id = self.next_id;
         self.next_id.0 += 1;
         id
@@ -1377,7 +1364,7 @@ impl Downstairs {
         }
     }
 
-    pub(crate) fn create_and_enqueue_noop_io(
+    fn create_and_enqueue_noop_io(
         &mut self,
         gw: &mut GuestWork,
         deps: Vec<JobId>,
@@ -1412,7 +1399,7 @@ impl Downstairs {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn create_and_enqueue_repair_io(
+    fn create_and_enqueue_repair_io(
         &mut self,
         gw: &mut GuestWork,
         eid: u64,
@@ -1680,7 +1667,7 @@ impl Downstairs {
 
     /// Creates a [DownstairsIO] job for an [IOop::ExtentLiveReopen], and
     /// adds it to the work queue.
-    pub(crate) fn create_and_enqueue_reopen_io(
+    fn create_and_enqueue_reopen_io(
         &mut self,
         gw: &mut GuestWork,
         eid: u64,
@@ -1699,9 +1686,7 @@ impl Downstairs {
     }
 
     #[cfg(test)]
-    pub(crate) fn create_and_enqueue_generic_read_eob(
-        &mut self,
-    ) -> (JobId, ReadRequest) {
+    fn create_and_enqueue_generic_read_eob(&mut self) -> (JobId, ReadRequest) {
         use crate::impacted_blocks::ImpactedAddr;
         use crucible_common::Block;
         let request = ReadRequest {
@@ -1727,7 +1712,7 @@ impl Downstairs {
     }
 
     #[cfg(test)]
-    pub(crate) fn create_and_enqueue_read_eob(
+    fn create_and_enqueue_read_eob(
         &mut self,
         blocks: ImpactedBlocks,
         gw_id: u64,
@@ -1757,7 +1742,7 @@ impl Downstairs {
     }
 
     #[cfg(test)]
-    pub(crate) fn create_and_enqueue_generic_write_eob(
+    fn create_and_enqueue_generic_write_eob(
         &mut self,
         is_write_unwritten: bool,
     ) -> JobId {
@@ -1865,7 +1850,7 @@ impl Downstairs {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn create_and_enqueue_close_io(
+    fn create_and_enqueue_close_io(
         &mut self,
         gw: &mut GuestWork,
         eid: u64,
@@ -1896,10 +1881,7 @@ impl Downstairs {
     ///
     /// If they were already reserved, then use those values (removing them from
     /// the list of reserved IDs), otherwise, go get the next set of job IDs.
-    pub(crate) fn get_repair_ids(
-        &mut self,
-        eid: u64,
-    ) -> (ExtentRepairIDs, Vec<JobId>) {
+    fn get_repair_ids(&mut self, eid: u64) -> (ExtentRepairIDs, Vec<JobId>) {
         if let Some((eri, deps)) = self
             .repair
             .as_mut()
@@ -1935,7 +1917,7 @@ impl Downstairs {
     /// must both go up together. We don't want a lower next_id
     /// with a higher flush_number to be possible, as that can introduce
     /// dependency deadlock.
-    pub(crate) fn next_flush_id(&mut self) -> u64 {
+    fn next_flush_id(&mut self) -> u64 {
         let out = self.next_flush;
         self.next_flush += 1;
         out
@@ -2204,7 +2186,7 @@ impl Downstairs {
 
     /// Submits a generic flush for use in testing
     #[cfg(test)]
-    pub(crate) fn create_and_enqueue_generic_flush(
+    fn create_and_enqueue_generic_flush(
         &mut self,
         snap: Option<SnapshotDetails>,
     ) -> JobId {
@@ -3444,7 +3426,7 @@ impl Downstairs {
     /// This is only useful in tests; in real code, we'd also want to reply to
     /// the guest when acking a job.
     #[cfg(test)]
-    pub(crate) fn ack(&mut self, ds_id: JobId) {
+    fn ack(&mut self, ds_id: JobId) {
         /*
          * Move AckReady to Acked.
          */
@@ -3495,16 +3477,6 @@ impl Downstairs {
     }
 
     #[cfg(test)]
-    pub(crate) fn repair_mut(&mut self) -> &mut Option<LiveRepairData> {
-        &mut self.repair
-    }
-
-    #[cfg(test)]
-    pub(crate) fn ds_active(&mut self) -> &mut ActiveJobs {
-        &mut self.ds_active
-    }
-
-    #[cfg(test)]
     pub(crate) fn get_job(&self, ds_id: &JobId) -> Option<&DownstairsIO> {
         self.ds_active.get(ds_id)
     }
@@ -3513,7 +3485,7 @@ impl Downstairs {
     /// Submit a write to this downstairs. Use when you don't care about what
     /// the data you're writing is, and only care about getting some write-jobs
     /// enqueued. The write will be to a single extent, as specified by eid
-    pub(crate) fn submit_test_write_block(
+    fn submit_test_write_block(
         &mut self,
         gwid: u64,
         eid: u64,
@@ -3541,7 +3513,7 @@ impl Downstairs {
     /// Submit a write to this downstairs. Use when you don't care about what
     /// the data you're writing is, and only care about getting some write-jobs
     /// enqueued. The write will be to a single extent, as specified by eid
-    pub(crate) fn submit_test_write(
+    fn submit_test_write(
         &mut self,
         gwid: u64,
         extent_size: u64,
@@ -3577,7 +3549,7 @@ impl Downstairs {
     /// Submit a read to this downstairs. Use when you don't care about what
     /// the data you're read is, and only care about getting some read-jobs
     /// enqueued. The read will be to a single extent, as specified by eid
-    pub(crate) fn submit_test_read_block(
+    fn submit_test_read_block(
         &mut self,
         gwid: u64,
         eid: u64,
@@ -3603,7 +3575,7 @@ impl Downstairs {
     /// Submit a read to this downstairs. Use when you don't care about what
     /// the data you're read is, and only care about getting some read-jobs
     /// enqueued. The read will be to a single extent, as specified by eid
-    pub(crate) fn submit_test_read(
+    fn submit_test_read(
         &mut self,
         gwid: u64,
         extent_size: u64,
@@ -8702,7 +8674,7 @@ pub(crate) mod test {
         // create final new_gtos job, but populate ids needed without
         // actually enqueue'ing the middle repair job.
 
-        let _reopen_brw = ds.create_and_enqueue_reopen_io(
+        ds.create_and_enqueue_reopen_io(
             &mut gw,
             eid,
             deps,
@@ -8710,7 +8682,7 @@ pub(crate) mod test {
             gw_reopen_id,
         );
 
-        let job = ds.ds_active().get(&repair_ids.reopen_id).unwrap();
+        let job = ds.ds_active.get(&repair_ids.reopen_id).unwrap();
 
         println!("Job is {:?}", job);
         match &job.work {
@@ -8728,7 +8700,7 @@ pub(crate) mod test {
         for cid in ClientId::iter() {
             assert_eq!(job.state[cid], IOState::New);
         }
-        assert_eq!(job.acked, false);
+        assert!(!job.acked);
         assert!(!job.replay);
         assert!(job.data.is_none());
     }
@@ -8762,7 +8734,7 @@ pub(crate) mod test {
         let gen = 4;
         let source = ClientId::new(1);
         let repair = vec![ClientId::new(0), ClientId::new(2)];
-        let _reopen_brw = ds.create_and_enqueue_close_io(
+        ds.create_and_enqueue_close_io(
             &mut gw,
             eid,
             gen,
@@ -8773,7 +8745,7 @@ pub(crate) mod test {
             &repair,
         );
 
-        let job = ds.ds_active().get(&repair_ids.close_id).unwrap();
+        let job = ds.ds_active.get(&repair_ids.close_id).unwrap();
 
         println!("Job is {:?}", job);
         match &job.work {
@@ -8805,7 +8777,7 @@ pub(crate) mod test {
         for cid in ClientId::iter() {
             assert_eq!(job.state[cid], IOState::New);
         }
-        assert_eq!(job.acked, false);
+        assert!(!job.acked);
         assert!(!job.replay);
         assert!(job.data.is_none());
     }
@@ -8843,7 +8815,7 @@ pub(crate) mod test {
             ds.clients[cid].repair_info = Some(ei);
         }
 
-        let _repair_brw = ds.create_and_enqueue_repair_io(
+        ds.create_and_enqueue_repair_io(
             &mut gw,
             eid,
             deps,
@@ -8853,7 +8825,7 @@ pub(crate) mod test {
             &repair,
         );
 
-        let job = ds.ds_active().get(&repair_ids.repair_id).unwrap();
+        let job = ds.ds_active.get(&repair_ids.repair_id).unwrap();
 
         println!("Job is {:?}", job);
         match &job.work {
@@ -8873,7 +8845,7 @@ pub(crate) mod test {
         for cid in ClientId::iter() {
             assert_eq!(job.state[cid], IOState::New);
         }
-        assert_eq!(job.acked, false);
+        assert!(!job.acked);
         assert!(!job.replay);
         assert!(job.data.is_none());
     }
@@ -8919,7 +8891,7 @@ pub(crate) mod test {
                 Some("127.0.0.1:1234".parse().unwrap());
         }
 
-        let _reopen_brw = ds.create_and_enqueue_repair_io(
+        ds.create_and_enqueue_repair_io(
             &mut gw,
             eid,
             deps,
@@ -8929,7 +8901,7 @@ pub(crate) mod test {
             &repair,
         );
 
-        let job = ds.ds_active().get(&repair_ids.repair_id).unwrap();
+        let job = ds.ds_active.get(&repair_ids.repair_id).unwrap();
 
         println!("Job is {:?}", job);
         match &job.work {
@@ -8964,7 +8936,7 @@ pub(crate) mod test {
         for cid in ClientId::iter() {
             assert_eq!(job.state[cid], IOState::New);
         }
-        assert_eq!(job.acked, false);
+        assert!(!job.acked);
         assert!(!job.replay);
         assert!(job.data.is_none());
     }
@@ -8992,7 +8964,7 @@ pub(crate) mod test {
         let (extent_repair_ids, deps) = ds.get_repair_ids(eid);
 
         let gw_close_id = gw.next_gw_id();
-        let _close_brw = ds.create_and_enqueue_close_io(
+        ds.create_and_enqueue_close_io(
             gw,
             eid,
             4, // gen
@@ -9003,21 +8975,21 @@ pub(crate) mod test {
             &[ClientId::new(1)], // repair downstairs
         );
         let gw_repair_id = gw.next_gw_id();
-        let _repair_brw = ds.create_and_enqueue_noop_io(
+        ds.create_and_enqueue_noop_io(
             gw,
             vec![extent_repair_ids.close_id],
             extent_repair_ids.repair_id,
             gw_repair_id,
         );
         let gw_noop_id = gw.next_gw_id();
-        let _noop_brw = ds.create_and_enqueue_noop_io(
+        ds.create_and_enqueue_noop_io(
             gw,
             vec![extent_repair_ids.repair_id],
             extent_repair_ids.noop_id,
             gw_noop_id,
         );
         let gw_reopen_id = gw.next_gw_id();
-        let _reopen_brw = ds.create_and_enqueue_reopen_io(
+        ds.create_and_enqueue_reopen_io(
             gw,
             eid,
             vec![extent_repair_ids.noop_id],
@@ -9060,7 +9032,7 @@ pub(crate) mod test {
         // Repair IO functions assume you have the locks
         create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 7);
 
@@ -9102,7 +9074,7 @@ pub(crate) mod test {
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 7);
 
@@ -9142,7 +9114,7 @@ pub(crate) mod test {
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 7);
 
@@ -9175,7 +9147,7 @@ pub(crate) mod test {
         let eid = 1;
         create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 4);
 
@@ -9208,7 +9180,7 @@ pub(crate) mod test {
 
         ds.submit_test_write_block(gw.next_gw_id(), eid, 2, false);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -9237,7 +9209,7 @@ pub(crate) mod test {
 
         ds.submit_test_read_block(gw.next_gw_id(), eid, 0);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -9265,7 +9237,7 @@ pub(crate) mod test {
         create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
         ds.submit_flush(gw.next_gw_id(), 0, None);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -9294,7 +9266,7 @@ pub(crate) mod test {
         ds.submit_test_read_block(gw.next_gw_id(), 2, 0);
         create_and_enqueue_repair_ops(&mut gw, &mut ds, 1);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 6);
 
@@ -9322,7 +9294,7 @@ pub(crate) mod test {
         ds.submit_test_write_block(gw.next_gw_id(), 0, 2, false);
         ds.submit_test_read_block(gw.next_gw_id(), 2, 1);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 6);
 
@@ -9353,7 +9325,7 @@ pub(crate) mod test {
 
         ds.submit_flush(gw.next_gw_id(), 1, None);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 6);
 
@@ -9390,7 +9362,7 @@ pub(crate) mod test {
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, 1);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 9);
 
@@ -9433,7 +9405,7 @@ pub(crate) mod test {
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, 1);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -9473,7 +9445,7 @@ pub(crate) mod test {
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, 0);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -9513,7 +9485,7 @@ pub(crate) mod test {
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, 1);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -9552,7 +9524,7 @@ pub(crate) mod test {
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, 0);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -9599,7 +9571,7 @@ pub(crate) mod test {
         create_and_enqueue_repair_ops(&mut gw, &mut ds, 0);
         create_and_enqueue_repair_ops(&mut gw, &mut ds, 1);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 9);
 
@@ -9638,7 +9610,7 @@ pub(crate) mod test {
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, 1);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -9731,7 +9703,7 @@ pub(crate) mod test {
             false,
         );
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 5);
         assert!(jobs[0].work.deps().is_empty());
@@ -9776,7 +9748,7 @@ pub(crate) mod test {
             ),
         );
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -9835,7 +9807,7 @@ pub(crate) mod test {
         // The final repair command
         create_and_enqueue_repair_ops(&mut gw, &mut ds, 1);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 6);
 
@@ -9888,7 +9860,7 @@ pub(crate) mod test {
         // The third repair command
         create_and_enqueue_repair_ops(&mut gw, &mut ds, 2);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 16);
 
@@ -9951,7 +9923,7 @@ pub(crate) mod test {
 
         ds.submit_flush(gw.next_gw_id(), 0, None);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 3);
 
@@ -10027,7 +9999,7 @@ pub(crate) mod test {
             ),
             false,
         );
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 1);
 
@@ -10101,7 +10073,7 @@ pub(crate) mod test {
         // Now enqueue the repair on extent 1, it should populate one of the
         // empty job slots.
         create_and_enqueue_repair_ops(&mut gw, &mut ds, 1);
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 5);
 
@@ -10153,7 +10125,7 @@ pub(crate) mod test {
 
         ds.submit_flush(gw.next_gw_id(), 0, None);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 1);
         assert!(jobs[0].work.deps().is_empty());
@@ -10284,7 +10256,7 @@ pub(crate) mod test {
         // For the three latest jobs, they should be New as they are IOs that
         // are on an extent we "already repaired".
         for job_id in (1006..1009).map(JobId) {
-            let job = ds.ds_active().get(&job_id).unwrap();
+            let job = ds.ds_active.get(&job_id).unwrap();
             assert_eq!(job.state[ClientId::new(0)], IOState::New);
             assert_eq!(job.state[ClientId::new(1)], IOState::New);
             assert_eq!(job.state[ClientId::new(2)], IOState::New);
@@ -10293,7 +10265,7 @@ pub(crate) mod test {
         // Walk the three final jobs, verify that the dependencies will be
         // updated for our downstairs under repair, but will still include
         // the jobs that came after the repair.
-        let job = ds.ds_active().get(&JobId(1006)).unwrap();
+        let job = ds.ds_active.get(&JobId(1006)).unwrap();
         let current_deps = job.work.deps().clone();
 
         assert_eq!(current_deps, &[JobId(1005)]);
@@ -10304,7 +10276,7 @@ pub(crate) mod test {
             &vec![]
         );
 
-        let job = ds.ds_active().get(&JobId(1007)).unwrap();
+        let job = ds.ds_active.get(&JobId(1007)).unwrap();
         let current_deps = job.work.deps().clone();
 
         assert_eq!(current_deps, &[JobId(1006)]);
@@ -10315,7 +10287,7 @@ pub(crate) mod test {
             &vec![JobId(1006)]
         );
 
-        let job = ds.ds_active().get(&JobId(1008)).unwrap();
+        let job = ds.ds_active.get(&JobId(1008)).unwrap();
         let current_deps = job.work.deps().clone();
 
         assert_eq!(current_deps, &[JobId(1007)]);
@@ -10484,7 +10456,7 @@ pub(crate) mod test {
         // it will not depend on anything. This is okay, because the job
         // itself is Skipped there, so we won't actually send it.
 
-        let job = ds.ds_active().get(&JobId(1007)).unwrap();
+        let job = ds.ds_active.get(&JobId(1007)).unwrap();
         assert_eq!(job.state[ClientId::new(0)], IOState::New);
         assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
         assert_eq!(job.state[ClientId::new(2)], IOState::New);
@@ -10498,7 +10470,7 @@ pub(crate) mod test {
         // This second write after starting a repair should require job 6 (i.e.
         // the final job of the repair) on both the Active and LiveRepair
         // downstairs, since it masks job 0
-        let job = ds.ds_active().get(&JobId(1008)).unwrap();
+        let job = ds.ds_active.get(&JobId(1008)).unwrap();
         assert_eq!(job.state[ClientId::new(0)], IOState::New);
         assert_eq!(job.state[ClientId::new(1)], IOState::New);
         assert_eq!(job.state[ClientId::new(2)], IOState::New);
@@ -10516,7 +10488,7 @@ pub(crate) mod test {
 
         // This final job depends on everything on Active downstairs, but
         // a smaller subset for the LiveRepair downstairs
-        let job = ds.ds_active().get(&JobId(1013)).unwrap();
+        let job = ds.ds_active.get(&JobId(1013)).unwrap();
         assert_eq!(job.state[ClientId::new(0)], IOState::New);
         assert_eq!(job.state[ClientId::new(1)], IOState::New);
         assert_eq!(job.state[ClientId::new(2)], IOState::New);
@@ -10581,7 +10553,7 @@ pub(crate) mod test {
 
         let flushclose_jobid = 1001;
         let flushclose_job =
-            ds.ds_active().get(&JobId(flushclose_jobid)).unwrap();
+            ds.ds_active.get(&JobId(flushclose_jobid)).unwrap();
         assert!(matches!(
             &flushclose_job.work,
             IOop::ExtentFlushClose { .. }
@@ -10614,7 +10586,7 @@ pub(crate) mod test {
 
         // The second write should depend on the reopen on all downstairs
         let write_jobid = JobId(1005);
-        let write_job = ds.ds_active().get(&write_jobid).unwrap();
+        let write_job = ds.ds_active.get(&write_jobid).unwrap();
         assert_eq!(write_job.state[ClientId::new(0)], IOState::New);
         assert_eq!(write_job.state[ClientId::new(1)], IOState::New);
         assert_eq!(write_job.state[ClientId::new(2)], IOState::New);
@@ -10727,7 +10699,7 @@ pub(crate) mod test {
         // overlap with the previous write
         ds.submit_test_write_block(gw.next_gw_id(), 1, 2, false);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 2);
 
@@ -10857,7 +10829,7 @@ pub(crate) mod test {
             ),
         );
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active().values().collect();
+        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
         assert_eq!(jobs.len(), 3);
 
