@@ -2657,8 +2657,8 @@ impl Downstairs {
     /// Aborts an in-progress live-repair
     ///
     /// The live-repair may continue after this point to clean up reserved jobs,
-    /// to avoid blocking dependencies, but jobs are placed with no-ops.
-    pub(crate) fn abort_repair(&mut self, up_state: &UpstairsState) {
+    /// to avoid blocking dependencies, but jobs are replaced with no-ops.
+    fn abort_repair(&mut self, up_state: &UpstairsState) {
         assert!(self.clients.iter().any(|c| {
             c.state() == DsState::LiveRepair ||
                 // If connection aborted, and restarted, then the re-negotiation
