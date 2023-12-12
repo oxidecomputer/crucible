@@ -523,23 +523,23 @@ impl DownstairsClient {
 
             DsState::Faulted
             | DsState::LiveRepair
-            | DsState::LiveRepairReady => DsState::Faulted,
+            | DsState::LiveRepairReady
+            | DsState::Replaced => DsState::Faulted,
 
             DsState::New
             | DsState::Deactivated
             | DsState::Repair
-            | DsState::FailedRepair => DsState::New,
+            | DsState::FailedRepair
+            | DsState::Disconnected
+            | DsState::BadVersion
+            | DsState::WaitQuorum
+            | DsState::BadRegion
+            | DsState::WaitActive
+            | DsState::Disabled => DsState::Disconnected,
 
             DsState::Replacing => DsState::Replaced,
 
-            _ => {
-                /*
-                 * Any other state means we had not yet enabled this
-                 * downstairs to receive IO, so we go to the back of the
-                 * line and have to re-verify it again.
-                 */
-                DsState::Disconnected
-            }
+            DsState::Migrating => panic!(),
         };
 
         if *current != new_state {
@@ -551,8 +551,8 @@ impl DownstairsClient {
             info!(self.log, "Still missing, state is {current:?}");
         }
 
-        // Jobs are skipped in `Upstairs::on_client_task_stopped`, and then
-        // replayed in `Downstairs::reinitialize` (which is called afterwards)
+        // Jobs are skipped and replayed in `Downstairs::reinitialize`, which is
+        // (probably) the caller of this function.
         self.state = new_state;
 
         // Mark the client task as absent
@@ -606,6 +606,12 @@ impl DownstairsClient {
             self.promote_state = None;
         }
         self.negotiation_state = NegotiationState::Start;
+
+        // TODO this is an awkward special case!
+        if self.state == DsState::Disconnected {
+            info!(self.log, "Disconnected -> New");
+            self.state = DsState::New;
+        }
 
         // Restart with a short delay
         self.start_task(true);

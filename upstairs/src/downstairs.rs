@@ -6,7 +6,9 @@ use std::{
 
 use crate::{
     cdt,
-    client::{ClientAction, ClientStopReason, DownstairsClient},
+    client::{
+        ClientAction, ClientRunResult, ClientStopReason, DownstairsClient,
+    },
     live_repair::ExtentInfo,
     stats::UpStatOuter,
     upstairs::{UpstairsConfig, UpstairsState},
@@ -700,9 +702,48 @@ impl Downstairs {
         &mut self,
         client_id: ClientId,
         auto_promote: Option<u64>,
+        reason: ClientRunResult,
+        up_state: &UpstairsState,
     ) {
-        // Restart the IO task
+        let prev_state = self.clients[client_id].state();
+
+        // If the connection goes down here, we need to know what state we were
+        // in to decide what state to transition to.  The ds_missing method will
+        // do that for us!
+        self.clients[client_id].on_missing();
+
+        // If the IO task stops on its own, then under certain circumstances,
+        // we want to skip all of its jobs.  (If we requested that the IO task
+        // stop, then whoever made that request is responsible for skipping jobs
+        // if necessary).
+        //
+        // Specifically, we want to skip jobs if the only path back online for
+        // that client goes through live-repair; if that client can come back
+        // through replay, then the jobs must remain live.
+        let new_state = self.clients[client_id].state();
+        if matches!(prev_state, DsState::LiveRepair | DsState::Active)
+            && matches!(new_state, DsState::Faulted)
+        {
+            if matches!(reason, ClientRunResult::RequestedStop(..)) {
+                // It's invalid for the upstairs to request that the IO task
+                // stop _without_ changing its state to something that causes
+                // jobs to be skipped.
+                panic!(
+                    "caller must change state from {prev_state} \
+                     when requesting a stop"
+                );
+            }
+            self.skip_all_jobs(client_id);
+        }
+
+        // Restart the IO task for that specific client
         self.clients[client_id].reinitialize(auto_promote);
+
+        // Special-case: if a Downstairs goes away midway through live repair,
+        // then we have to manually abort reconciliation.
+        if self.clients.iter().any(|c| c.state() == DsState::Repair) {
+            self.abort_reconciliation(up_state);
+        }
 
         // If this client is coming back from being offline, then replay all of
         // its jobs.
@@ -853,37 +894,16 @@ impl Downstairs {
     /// Decide if we need repair, and if so create the repair list
     ///
     /// Returns `true` if repair is needed, `false` otherwise
-    pub(crate) fn collate(
-        &mut self,
-        gen: u64,
-        up_state: &UpstairsState,
-    ) -> Result<bool, CrucibleError> {
+    pub(crate) fn collate(&mut self, gen: u64) -> Result<bool, CrucibleError> {
         let r = self.collate_inner(gen);
         if r.is_err() {
-            // While collating, downstairs should all be DsState::Repair.
-            //
-            // Any downstairs still repairing should be moved to
-            // failed repair.
+            // If we failed to begin the repair, then assert that nothing has
+            // changed and everything is empty.
             assert!(self.ds_active.is_empty());
             assert!(self.reconcile_task_list.is_empty());
 
-            for (i, c) in self.clients.iter_mut().enumerate() {
-                match c.state() {
-                    DsState::WaitQuorum => {
-                        // Set this task as FailedRepair then restart it
-                        c.set_failed_repair(up_state);
-                        warn!(
-                            self.log,
-                            "Mark {i} as FAILED Collate in final check"
-                        );
-                    }
-                    s => {
-                        warn!(
-                            self.log,
-                            "downstairs in state {s} after failed collate"
-                        );
-                    }
-                }
+            for c in self.clients.iter() {
+                assert_eq!(c.state(), DsState::WaitQuorum);
             }
         }
         r
@@ -2090,7 +2110,7 @@ impl Downstairs {
         self.abort_reconciliation(up_state);
     }
 
-    fn abort_reconciliation(&mut self, up_state: &UpstairsState) {
+    pub(crate) fn abort_reconciliation(&mut self, up_state: &UpstairsState) {
         warn!(self.log, "aborting reconciliation");
         // Something has changed, so abort this repair.
         // Mark any downstairs that have not changed as failed and disable

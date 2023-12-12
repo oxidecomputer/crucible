@@ -1519,9 +1519,8 @@ impl Upstairs {
                 .downstairs
                 .clients
                 .iter()
-                .filter(|c| c.state() != DsState::WaitQuorum)
-                .count();
-            if not_ready > 0 {
+                .any(|c| c.state() != DsState::WaitQuorum);
+            if not_ready {
                 info!(
                     self.log,
                     "Waiting for {} more clients to be ready", not_ready
@@ -1538,17 +1537,18 @@ impl Upstairs {
              * downstairs out, forget any activation requests, and the
              * upstairs goes back to waiting for another activation request.
              */
-            self.downstairs.collate(self.generation, &self.state)
+            self.downstairs.collate(self.generation)
         };
 
         match collate_status {
             Err(e) => {
                 error!(self.log, "Failed downstairs collate with: {}", e);
                 // We failed to collate the three downstairs, so we need
-                // to reset that activation request.  The downstairs were
-                // already set to FailedRepair in the call to
-                // `Downstairs::collate`
+                // to reset that activation request.  Call
+                // `abort_reconciliation` to abort reconciliation for all
+                // clients.
                 self.set_inactive(e);
+                self.downstairs.abort_reconciliation(&self.state);
                 false
             }
             Ok(true) => {
@@ -1704,44 +1704,9 @@ impl Upstairs {
             self.log,
             "downstairs task for {client_id} stopped due to {reason:?}"
         );
-
-        // TODO: consolidate skip_all_jobs, on_missing, and reinitialize into a
-        // single function in Downstairs
-
-        let prev_state = self.downstairs.clients[client_id].state();
-
-        // If the connection goes down here, we need to know what state we were
-        // in to decide what state to transition to.  The ds_missing method will
-        // do that for us!
-        self.downstairs.clients[client_id].on_missing();
-
-        // If the IO task stops on its own, then under certain circumstances,
-        // we want to skip all of its jobs.  (If we requested that the IO task
-        // stop, then whoever made that request is responsible for skipping jobs
-        // if necessary).
-        //
-        // Specifically, we want to skip jobs if the only path back online for
-        // that client goes through live-repair; if that client can come back
-        // through replay, then the jobs must remain live.
-        let new_state = self.downstairs.clients[client_id].state();
-        if matches!(prev_state, DsState::LiveRepair | DsState::Active)
-            && matches!(new_state, DsState::Faulted)
-        {
-            if matches!(reason, ClientRunResult::RequestedStop(..)) {
-                // It's invalid for the upstairs to request that the IO task
-                // stop _without_ changing its state to something that causes
-                // jobs to be skipped.
-                panic!(
-                    "caller must change state from {prev_state} \
-                     when requesting a stop"
-                );
-            }
-            self.downstairs.skip_all_jobs(client_id);
-        }
-
-        // Restart the downstairs task.  If the upstairs is already active, then
-        // the downstairs should automatically call PromoteToActive when it
-        // reaches the relevant state.
+        // If the upstairs is already active, then the downstairs should
+        // automatically call PromoteToActive when it reaches the relevant
+        // state.
         let auto_promote = match self.state {
             UpstairsState::Active | UpstairsState::GoActive { .. } => {
                 // XXX is is correct to auto-promote if we're in GoActive?
@@ -1750,7 +1715,13 @@ impl Upstairs {
             UpstairsState::Initializing
             | UpstairsState::Deactivating { .. } => None,
         };
-        self.downstairs.reinitialize(client_id, auto_promote);
+
+        self.downstairs.reinitialize(
+            client_id,
+            auto_promote,
+            reason,
+            &self.state,
+        );
     }
 
     fn set_backpressure(&self) {
