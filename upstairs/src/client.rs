@@ -551,8 +551,8 @@ impl DownstairsClient {
             info!(self.log, "Still missing, state is {current:?}");
         }
 
-        // Should we move jobs now?  When do we move work that has
-        // been submitted over to "skipped"
+        // Jobs are skipped in `Upstairs::on_client_task_stopped`, and then
+        // replayed in `Downstairs::reinitialize` (which is called afterwards)
         self.state = new_state;
 
         // Mark the client task as absent
