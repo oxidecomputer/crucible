@@ -231,28 +231,16 @@ impl DownstairsClient {
     /// be cancel-safe.  This is why we simply return a single value in the body
     /// of each statement.
     pub(crate) async fn select(&mut self) -> ClientAction {
+        use futures::future::{pending, Either};
         tokio::select! {
-            d = async {
-                if let Some(c) = &mut self.client_task {
-                    tokio::select! {
-                        m = c.client_response_rx.recv() => {
-                            match m {
-                                Some(ClientResponse::Connected) =>
-                                    ClientAction::Connected,
-                                Some(ClientResponse::Message(m)) =>
-                                    ClientAction::Response(m),
-                                Some(ClientResponse::Done(r)) =>
-                                    ClientAction::TaskStopped(r),
-                                None =>
-                                    ClientAction::ChannelClosed,
-                            }
-                        }
-                    }
-                } else {
-                    futures::future::pending().await
+            d = self.client_task.as_mut()
+                .map(|c| Either::Left(c.client_response_rx.recv()))
+                .unwrap_or(Either::Right(pending()))
+            => {
+                match d {
+                    Some(c) => c.into(),
+                    None => ClientAction::ChannelClosed,
                 }
-            } => {
-                d
             }
             _ = sleep_until(self.ping_interval), if self.client_task.is_some()
             => {
@@ -2326,6 +2314,16 @@ pub(crate) enum ClientResponse {
     Message(Message),
     /// The client task has stopped
     Done(ClientRunResult),
+}
+
+impl From<ClientResponse> for ClientAction {
+    fn from(c: ClientResponse) -> Self {
+        match c {
+            ClientResponse::Connected => ClientAction::Connected,
+            ClientResponse::Message(m) => ClientAction::Response(m),
+            ClientResponse::Done(r) => ClientAction::TaskStopped(r),
+        }
+    }
 }
 
 /// Value returned by the `client_run` task

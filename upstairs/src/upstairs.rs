@@ -287,6 +287,7 @@ impl Upstairs {
 
     /// Select an event from possible actions
     async fn select(&mut self) -> UpstairsAction {
+        use futures::future::{pending, Either};
         tokio::select! {
             d = self.downstairs.select() => {
                 UpstairsAction::Downstairs(d)
@@ -294,13 +295,10 @@ impl Upstairs {
             d = self.guest.recv() => {
                 UpstairsAction::Guest(d)
             }
-            _ = async {
-                if let Some(r) = self.repair_check_interval {
-                    sleep_until(r).await
-                } else {
-                    futures::future::pending().await
-                }
-            } => {
+            _ = self.repair_check_interval
+                .map(|r| Either::Left(sleep_until(r)))
+                .unwrap_or(Either::Right(pending()))
+            => {
                 UpstairsAction::RepairCheck
             }
             _ = sleep_until(self.leak_deadline) => {
