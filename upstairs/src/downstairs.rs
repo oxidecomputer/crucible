@@ -662,8 +662,8 @@ impl Downstairs {
     /// If the job state is already [`IOState::Skipped`], then this task
     /// has no work to do, so return `None`.
     ///
-    /// This should only be called directly from debug functions, and should not
-    /// be called directly from normal code.
+    /// This is normally called only from `io_send`, but is also used for unit
+    /// test which check how jobs flow through the system.
     fn in_progress(
         &mut self,
         ds_id: JobId,
@@ -3697,6 +3697,7 @@ pub(crate) mod test {
     ///
     /// This calls `Downstairs`-internal APIs and is therefore in the same
     /// module, but should not be used outside of test code.
+    #[cfg(test)]
     pub(crate) fn finish_job(ds: &mut Downstairs, ds_id: JobId) {
         for client_id in ClientId::iter() {
             ds.in_progress(ds_id, client_id);
