@@ -2435,45 +2435,73 @@ async fn cmd_loop<R, W>(
     log: &Logger,
 ) -> ClientRunResult
 where
-    R: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
+    R: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send + 'static,
     W: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
 {
     tx.send(ClientResponse::Connected)
         .await
         .expect("client_response_tx closed unexpectedly");
-    loop {
-        tokio::select! {
-            f = fr.next() => {
-                match f.transpose() {
-                    Err(e) => {
-                        warn!(log, "downstairs client error {e}");
-                        break ClientRunResult::ReadFailed(e);
-                    }
-                    Ok(None) => {
-                        // Downstairs disconnected
-                        warn!(log, "downstairs disconnected");
-                        break ClientRunResult::Finished;
-                    }
-                    Ok(Some(m)) => {
-                        tx.send(ClientResponse::Message(m))
-                            .await
-                            .expect("client_response_tx closed unexpectedly");
+
+    let recv_task = {
+        let tx = tx.clone();
+        let log = log.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    f = fr.next() => {
+                        match f.transpose() {
+                            Err(e) => {
+                                warn!(log, "downstairs client error {e}");
+                                break ClientRunResult::ReadFailed(e);
+                            }
+                            Ok(None) => {
+                                // Downstairs disconnected
+                                warn!(log, "downstairs disconnected");
+                                break ClientRunResult::Finished;
+                            }
+                            Ok(Some(m)) => {
+                                tx.send(ClientResponse::Message(m))
+                                    .await
+                                    .expect("client_response_tx closed unexpectedly");
+                            }
+                        }
                     }
                 }
             }
+        })
+    };
+
+    tokio::pin!(recv_task);
+
+    loop {
+        tokio::select! {
+            join_result = &mut recv_task => {
+                break match join_result {
+                    Ok(error) => error,
+                    Err(_join_error) => {
+                        panic!("join error on recv_task!");
+                    }
+                }
+            }
+
             m = rx.recv() => {
                 let Some(m) = m else {
                     panic!("client_request_tx closed unexpectedly");
                 };
+
                 if let Err(e) = fw.send(m).await {
                     break ClientRunResult::WriteFailed(e);
                 }
             }
+
             s = &mut *stop => {
                 match s {
                     Ok(s) => {
+                        recv_task.abort();
                         break ClientRunResult::RequestedStop(s);
                     }
+
                     Err(e) => {
                         panic!("client_stop_rx closed unexpectedly: {e:?}");
                     }
