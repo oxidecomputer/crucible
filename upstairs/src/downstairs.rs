@@ -1202,9 +1202,7 @@ impl Downstairs {
         // It's possible for the Downstairs to have changed state here, if it
         // disconnected.  We'll check that as well and start aborting the repair
         // if that's the case.
-        let Some(repair) = &self.repair else {
-            panic!("cannot continue live-repair without self.repair");
-        };
+        let repair = self.repair.as_ref().unwrap(); // reborrow
         if !repair.aborting_repair
             && (repair
                 .repair_downstairs
@@ -1217,15 +1215,12 @@ impl Downstairs {
             self.abort_repair(up_state);
         }
 
-        // Reborrow repair
-        let Some(repair) = self.repair.as_mut() else {
-            panic!("cannot continue live-repair without self.repair");
-        };
         // Each of these branches should update `repair.state`, and may or may
         // not call functions on `&mut self`.  This is somewhat awkward, because
         // the borrow of `self.repair.as_mut().unwrap()` can't be held when
         // calling such functions; we have to extract everything we want from
         // the `LiveRepairData` before calling anything on `&mut self`.
+        let repair = self.repair.as_mut().unwrap(); // reborrow
         match repair.state {
             LiveRepairState::Closing {
                 close_id,
