@@ -58,9 +58,9 @@ pub(crate) struct Downstairs {
 
     /// Current flush number
     ///
-    /// This is the highest flush number from all three downstairs on startup,
-    /// and increments by one each time the guest sends a flush (including
-    /// automatic flushes).
+    /// This starts as the highest flush number from all three downstairs on
+    /// startup, and increments by one each time the guest sends a flush
+    /// (including automatic flushes).
     next_flush: u64,
 
     /// Ringbuf of completed downstairs job IDs.
