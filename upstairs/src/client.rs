@@ -92,9 +92,10 @@ pub(crate) struct DownstairsClient {
     /// State of the downstairs connection
     state: DsState,
 
-    /// The last flush job ID that each downstairs has acked.
+    /// The `JobId` of the last flush that this downstairs has acked
     ///
-    /// Note that this is a job ID; not a flush ID!
+    /// Note that this is a job ID, not a downstairs flush index (contrast with
+    /// [`Downstairs::next_flush`], which is a flush index).
     pub(crate) last_flush: JobId,
 
     /// Cache of new jobs
