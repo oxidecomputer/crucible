@@ -31,7 +31,16 @@ const PING_INTERVAL_SECS: f32 = 5.0;
 #[derive(Debug)]
 struct ClientTaskHandle {
     /// Handle to send data to the I/O task
+    ///
+    /// The only thing that we send to the client is [`Message`], which is then
+    /// sent out over the network.
     client_request_tx: mpsc::Sender<Message>,
+
+    /// Handle to receive data from the I/O task
+    ///
+    /// The client has a variety of responses, which include [`Message`]
+    /// replies, but also things like "the I/O task has stopped"
+    client_response_rx: mpsc::Receiver<ClientResponse>,
 
     /// One-shot sender to stop the client
     ///
@@ -41,9 +50,6 @@ struct ClientTaskHandle {
     /// It is `None` if we have already requested that the client stop, but have
     /// not yet seen the task finished.
     client_stop_tx: Option<oneshot::Sender<ClientStopReason>>,
-
-    /// Handle to receive data from the I/O task
-    client_response_rx: mpsc::Receiver<ClientResponse>,
 }
 
 #[derive(Debug)]
