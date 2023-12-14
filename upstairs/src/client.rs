@@ -2442,47 +2442,34 @@ where
         .await
         .expect("client_response_tx closed unexpectedly");
 
-    let recv_task = {
+    let mut recv_task = {
         let tx = tx.clone();
         let log = log.clone();
 
         tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    f = fr.next() => {
-                        match f.transpose() {
-                            Err(e) => {
-                                warn!(log, "downstairs client error {e}");
-                                break ClientRunResult::ReadFailed(e);
-                            }
-                            Ok(None) => {
-                                // Downstairs disconnected
-                                warn!(log, "downstairs disconnected");
-                                break ClientRunResult::Finished;
-                            }
-                            Ok(Some(m)) => {
-                                tx.send(ClientResponse::Message(m))
-                                    .await
-                                    .expect("client_response_tx closed unexpectedly");
-                            }
-                        }
+            while let Some(f) = fr.next().await {
+                match f {
+                    Ok(m) => {
+                        tx.send(ClientResponse::Message(m))
+                            .await
+                            .expect("client_response_tx closed unexpectedly");
+                    }
+                    Err(e) => {
+                        warn!(log, "downstairs client error {e}");
+                        return ClientRunResult::ReadFailed(e);
                     }
                 }
             }
+            // Downstairs disconnected
+            warn!(log, "downstairs disconnected");
+            ClientRunResult::Finished
         })
     };
-
-    tokio::pin!(recv_task);
 
     loop {
         tokio::select! {
             join_result = &mut recv_task => {
-                break match join_result {
-                    Ok(error) => error,
-                    Err(_join_error) => {
-                        panic!("join error on recv_task!");
-                    }
-                }
+                break join_result.expect("join error on recv_task!");
             }
 
             m = rx.recv() => {
