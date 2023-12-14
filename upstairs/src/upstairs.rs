@@ -1265,6 +1265,7 @@ impl Upstairs {
     ) {
         match action {
             ClientAction::Connected => {
+                self.downstairs.clients[client_id].stats.connected += 1;
                 self.downstairs.clients[client_id].send_here_i_am().await;
             }
             ClientAction::Ping => {
