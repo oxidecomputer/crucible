@@ -425,17 +425,7 @@ impl DownstairsClient {
     /// # Panics
     /// If the previous state is not `DsState::WaitQuorum`
     pub(crate) fn begin_reconcile(&mut self) {
-        /*
-         * We transition all the downstairs to needing repair here
-         * while we have the downstairs lock.  This will insure that
-         * all downstairs enter the repair path.
-         */
         info!(self.log, "Transition from {} to Repair", self.state);
-        /*
-         * This is a panic and not an error because we should
-         * not call this method without already verifying the
-         * downstairs are in the proper state.
-         */
         assert_eq!(self.state, DsState::WaitQuorum);
         self.state = DsState::Repair;
     }
