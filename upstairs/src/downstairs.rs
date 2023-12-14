@@ -1,3 +1,4 @@
+// Copyright 2023 Oxide Computer Company
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     net::SocketAddr,

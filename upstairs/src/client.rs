@@ -1,3 +1,4 @@
+// Copyright 2023 Oxide Computer Company
 use crate::{
     cdt, deadline_secs, integrity_hash, live_repair::ExtentInfo,
     upstairs::UpstairsConfig, upstairs::UpstairsState, ClientIOStateCount,

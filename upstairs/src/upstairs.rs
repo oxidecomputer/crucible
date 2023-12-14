@@ -1,3 +1,4 @@
+// Copyright 2023 Oxide Computer Company
 use crate::{
     cdt,
     client::{ClientAction, ClientRunResult, ClientStopReason},
