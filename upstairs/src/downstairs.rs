@@ -434,21 +434,11 @@ impl Downstairs {
     }
 
     pub(crate) async fn io_send(&mut self, client_id: ClientId) -> bool {
-        /*
-         * Build ourselves a list of all the jobs on the work hashmap that
-         * have the job state for our client id in the IOState::New
-         *
-         * The length of this list (new work for a downstairs) can give us
-         * an idea of how that downstairs is doing. If the number of jobs
-         * to be submitted is too big (for some value of big) then there is
-         * a problem. All sorts of back pressure information can be
-         * gathered here. As (for the moment) the same task does both
-         * transmit and receive, we can starve the receive side by spending
-         * all our time sending work.
-         *
-         * This XXX is for coming back here and making a better job of
-         * flow control.
-         */
+        // Send as many jobs as possible to the downstairs, limited by
+        // `MAX_ACTIVE_COUNT`.
+        //
+        // This XXX is for coming back here and making a better job of
+        // flow control; see RFD 445 for details.
         let client = &mut self.clients[client_id];
         let (new_work, flow_control) = {
             let active_count = client.io_state_count.in_progress as usize;
