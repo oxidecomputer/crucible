@@ -7,17 +7,10 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-/// `ActiveJobs` tracks active jobs by ID
+/// `ActiveJobs` tracks active jobs (and associated metadata) by job ID
 ///
 /// It exposes an API that roughly matches a `BTreeMap<JobId, DownstairsIO>`,
 /// but leaves open the possibility for further optimization.
-///
-/// Notably, there is no way to directly modify a `DownstairsIO` contained in
-/// `ActiveJobs`.  Bulk modification can be done with `for_each`, and individual
-/// modification can be done with `get_mut`, which returns a
-/// `DownstairsIOHandle` instead of a raw `&mut DownstairsIO`.  All of this
-/// means that we can keep extra metadata in sync, e.g. a list of all ackable
-/// jobs.
 ///
 /// The `ActiveJobs` structure also includes a data structure ([`BlockMap`])
 /// which accelerates dependency tracking: it tracks the most recent blocking
