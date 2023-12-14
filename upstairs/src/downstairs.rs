@@ -699,7 +699,7 @@ impl Downstairs {
         let prev_state = self.clients[client_id].state();
 
         // If the connection goes down here, we need to know what state we were
-        // in to decide what state to transition to.  The ds_missing method will
+        // in to decide what state to transition to.  The on_missing method will
         // do that for us!
         self.clients[client_id].on_missing();
 
@@ -730,8 +730,8 @@ impl Downstairs {
         // Restart the IO task for that specific client
         self.clients[client_id].reinitialize(auto_promote);
 
-        // Special-case: if a Downstairs goes away midway through live repair,
-        // then we have to manually abort reconciliation.
+        // Special-case: if a Downstairs goes away midway through initial
+        // reconciliation, then we have to manually abort reconciliation.
         if self.clients.iter().any(|c| c.state() == DsState::Repair) {
             self.abort_reconciliation(up_state);
         }
