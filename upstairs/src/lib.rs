@@ -1011,12 +1011,16 @@ impl DownstairsIO {
     /// Verify that we have enough valid IO results when considering all
     /// downstairs results before we send back success to the guest.
     ///
-    /// During normal operations, reads can have two failures or skipps and
-    /// still return valid data.
+    /// During normal operations, reads can have two failures or skips and still
+    /// return valid data.
     ///
-    /// During normal operations, write, write_unwritten, and flush can have one
-    /// error or skip and still return success to the upstairs (though, the
-    /// downstairs normally will not return error to the upstairs on W/F).
+    /// Writes are acked to the host right away, before hearing back from the
+    /// Downstairs (the so-called "fast ack" optimization), so this function is
+    /// never called for them.
+    ///
+    /// During normal operations, write_unwritten and flush can have one error
+    /// or skip and still return success to the upstairs (though, the downstairs
+    /// normally will not return error to the upstairs on W/F).
     ///
     /// For repair, we don't permit any errors, but do allow and handle the
     /// "skipped" case for IOs.  This allows us to recover if we are repairing a
