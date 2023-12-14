@@ -181,10 +181,10 @@ pub(crate) struct LiveRepairData {
 
     /// Repair is being aborted
     ///
-    /// This means that operations are replaced with `LiveRepairNoOp` (so that
-    /// previously submitted reopen operations that depend on them will still
-    /// happen); we'll stop repairing after the current extent is handled and
-    /// jump straight to the final flush.
+    /// This means that new operations are replaced with `LiveRepairNoOp`, so
+    /// that previously submitted operations that depend on them will still
+    /// happen.  We'll stop repairing after the current extent (and all reserved
+    /// jobs) are handled, then send a final flush.
     aborting_repair: bool,
 
     /// Current state
