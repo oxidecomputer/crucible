@@ -216,12 +216,7 @@ impl DownstairsClient {
         out
     }
 
-    /// Return true if more work can be sent.
-    ///
-    /// If `io_send` can send more work, return true, otherwise return false.
-    /// Because this is used on a `select!` branch that returns
-    /// `futures::future::ready(())`, a short-circuit can be created if no more
-    /// work can actually be done.
+    /// Return true if `io_send` can send more work, otherwise return false
     pub(crate) fn should_do_more_work(&self) -> bool {
         self.client_task.is_some()
             && !self.new_jobs.is_empty()
