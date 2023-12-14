@@ -6,6 +6,7 @@ use crate::{
     ReconcileIO, RegionDefinitionStatus, RegionMetadata, WrappedStream,
     MAX_ACTIVE_COUNT,
 };
+use crucible_common::x509::TLSContext;
 use crucible_protocol::{ReconciliationId, CRUCIBLE_MESSAGE_VERSION};
 
 use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
@@ -63,8 +64,11 @@ pub(crate) struct DownstairsClient {
     /// Per-client log
     pub(crate) log: Logger,
 
-    /// Client task, if one is running
-    client_task: Option<ClientTaskHandle>,
+    /// Client task IO
+    ///
+    /// The client task always sends `ClientResponse::Done` before stopping;
+    /// this handle should never be dropped before that point.
+    client_task: ClientTaskHandle,
 
     /// IO state counters
     pub(crate) io_state_count: ClientIOStateCount,
@@ -147,9 +151,15 @@ impl DownstairsClient {
         log: Logger,
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     ) -> Self {
-        let mut out = Self {
+        Self {
             cfg,
-            client_task: None, // started up below
+            client_task: Self::new_io_task(
+                target_addr,
+                false,
+                client_id,
+                tls_context.clone(),
+                &log,
+            ),
             client_id,
             region_uuid: None,
             negotiation_state: NegotiationState::Start,
@@ -169,10 +179,7 @@ impl DownstairsClient {
             region_metadata: None,
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
-        };
-
-        out.start_task(false);
-        out
+        }
     }
 
     /// Builds a minimal `DownstairsClient` for testing
@@ -189,9 +196,9 @@ impl DownstairsClient {
             read_only: false,
             lossy: false,
         });
-        let mut out = Self {
+        Self {
             cfg,
-            client_task: None, // started up below
+            client_task: Self::new_dummy_task(),
             client_id: ClientId::new(0),
             region_uuid: None,
             negotiation_state: NegotiationState::Start,
@@ -211,15 +218,12 @@ impl DownstairsClient {
             region_metadata: None,
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
-        };
-        out.start_dummy_task();
-        out
+        }
     }
 
     /// Return true if `io_send` can send more work, otherwise return false
     pub(crate) fn should_do_more_work(&self) -> bool {
-        self.client_task.is_some()
-            && !self.new_jobs.is_empty()
+        !self.new_jobs.is_empty()
             && matches!(self.state, DsState::Active | DsState::LiveRepair)
             && (crate::MAX_ACTIVE_COUNT
                 - self.io_state_count.in_progress as usize)
@@ -233,19 +237,14 @@ impl DownstairsClient {
     /// be cancel-safe.  This is why we simply return a single value in the body
     /// of each statement.
     pub(crate) async fn select(&mut self) -> ClientAction {
-        use futures::future::{pending, Either};
         tokio::select! {
-            d = self.client_task.as_mut()
-                .map(|c| Either::Left(c.client_response_rx.recv()))
-                .unwrap_or(Either::Right(pending()))
-            => {
+            d = self.client_task.client_response_rx.recv() => {
                 match d {
                     Some(c) => c.into(),
                     None => ClientAction::ChannelClosed,
                 }
             }
-            _ = sleep_until(self.ping_interval), if self.client_task.is_some()
-            => {
+            _ = sleep_until(self.ping_interval) => {
                 ClientAction::Ping
             }
             _ = sleep_until(self.timeout_deadline) => {
@@ -258,28 +257,16 @@ impl DownstairsClient {
     ///
     /// If the client task is **not** running, log a warning to that effect.
     pub(crate) async fn send_here_i_am(&mut self) {
-        if let Some(task) = &self.client_task {
-            if let Err(e) = task
-                .client_request_tx
-                .send(Message::HereIAm {
-                    version: CRUCIBLE_MESSAGE_VERSION,
-                    upstairs_id: self.cfg.upstairs_id,
-                    session_id: self.cfg.session_id,
-                    gen: self.cfg.gen,
-                    read_only: self.cfg.read_only,
-                    encrypted: self.cfg.encrypted(),
-                    alternate_versions: vec![],
-                })
-                .await
-            {
-                warn!(self.log, "failed to send HereIAm: {e}");
-                // TODO we should probably fail more loudly here?
-            }
-        } else {
-            panic!(
-                "send_here_i_am should not be called when client task is stopped"
-            );
-        }
+        self.send(Message::HereIAm {
+            version: CRUCIBLE_MESSAGE_VERSION,
+            upstairs_id: self.cfg.upstairs_id,
+            session_id: self.cfg.session_id,
+            gen: self.cfg.gen,
+            read_only: self.cfg.read_only,
+            encrypted: self.cfg.encrypted(),
+            alternate_versions: vec![],
+        })
+        .await;
     }
 
     /// If the client task is running, send a `Message::Ruok`
@@ -290,35 +277,18 @@ impl DownstairsClient {
         // It's possible for the client task to have stopped after we requested
         // the ping.  If that's the case, then we'll catch it on the next
         // go-around, and should just log an error here.
-        if let Some(task) = &self.client_task {
-            if let Err(e) = task.client_request_tx.send(Message::Ruok).await {
-                warn!(self.log, "failed to send ping: {e}");
-            }
-            self.ping_count += 1;
-            cdt::ds__ping__sent!(|| (self.ping_count, self.client_id.get()));
-        } else {
-            // This, on the other hand, should not be possible, because we only
-            // give the Ping action if the client task is Some, and we do not
-            // clear it autonomously.
-            panic!(
-                "send_ping should not be called when client task is stopped"
-            );
-        }
+        self.send(Message::Ruok).await;
+        self.ping_count += 1;
+        cdt::ds__ping__sent!(|| (self.ping_count, self.client_id.get()));
     }
 
     pub(crate) fn halt_io_task(&mut self, r: ClientStopReason) {
-        if let Some(task) = &mut self.client_task {
-            if let Some(t) = std::mem::take(&mut task.client_stop_tx) {
-                if let Err(_e) = t.send(r) {
-                    warn!(self.log, "failed to send stop request")
-                }
-            } else {
-                warn!(self.log, "client task is already stopping")
+        if let Some(t) = std::mem::take(&mut self.client_task.client_stop_tx) {
+            if let Err(_e) = t.send(r) {
+                warn!(self.log, "failed to send stop request")
             }
         } else {
-            panic!(
-                "halt_io_task should not be called when client task is stopped"
-            );
+            warn!(self.log, "client task is already stopping")
         }
     }
 
@@ -353,12 +323,18 @@ impl DownstairsClient {
     }
 
     pub(crate) async fn send(&mut self, m: Message) {
-        if let Some(task) = &self.client_task {
-            if let Err(e) = task.client_request_tx.send(m).await {
-                warn!(self.log, "failed to send message: {e}")
-            }
-        } else {
-            panic!("send should not be called when client task is stopped");
+        // Normally, the client task continues running until
+        // `self.client_task.client_request_tx` is dropped; as such, we should
+        // always be able to send it a message.
+        //
+        // However, during Tokio shutdown, tasks may stop in arbitrary order.
+        // We log an error but don't panic, because panicking is uncouth.
+        if let Err(e) = self.client_task.client_request_tx.send(m).await {
+            error!(
+                self.log,
+                "failed to send message: {e};
+                 this should only happen during shutdown"
+            )
         }
     }
 
@@ -544,10 +520,6 @@ impl DownstairsClient {
         // Jobs are skipped and replayed in `Downstairs::reinitialize`, which is
         // (probably) the caller of this function.
         self.state = new_state;
-
-        // Mark the client task as absent
-        assert!(self.client_task.is_some());
-        self.client_task = None;
     }
 
     /// Checks whether this Downstairs is ready for the upstairs to deactivate
@@ -612,33 +584,6 @@ impl DownstairsClient {
         self.last_flush
     }
 
-    /// Starts a dummy IO task, saving the handle in `self.client_task`
-    ///
-    /// # Panics
-    /// If `self.client_task` is not `None`
-    #[cfg(test)]
-    fn start_dummy_task(&mut self) {
-        assert!(
-            self.client_task.is_none(),
-            "cannot start task when it is already running"
-        );
-        let (client_request_tx, client_request_rx) =
-            mpsc::channel(MAX_ACTIVE_COUNT * 2);
-        let (_client_response_tx, client_response_rx) =
-            mpsc::channel(MAX_ACTIVE_COUNT * 2);
-        let (client_stop_tx, client_stop_rx) = oneshot::channel();
-
-        // Forget these without dropping them, so that we can send values into
-        // the void!
-        std::mem::forget(client_request_rx);
-        std::mem::forget(client_stop_rx);
-
-        self.client_task = Some(ClientTaskHandle {
-            client_request_tx,
-            client_stop_tx: Some(client_stop_tx),
-            client_response_rx,
-        });
-    }
     /// Starts a client IO task, saving the handle in `self.client_task`
     ///
     /// If we are running unit tests and `self.target_addr` is not populated, we
@@ -648,24 +593,47 @@ impl DownstairsClient {
     /// If `self.client_task` is not `None`, or `self.target_addr` is `None` and
     /// this isn't running in test mode
     fn start_task(&mut self, delay: bool) {
+        self.client_task = Self::new_io_task(
+            self.target_addr,
+            delay,
+            self.client_id,
+            self.tls_context.clone(),
+            &self.log,
+        );
+        self.reset_timeout();
+    }
+
+    fn new_io_task(
+        target: Option<SocketAddr>,
+        delay: bool,
+        client_id: ClientId,
+        tls_context: Option<Arc<TLSContext>>,
+        log: &Logger,
+    ) -> ClientTaskHandle {
         #[cfg(test)]
-        if self.target_addr.is_none() {
-            self.start_dummy_task();
+        if let Some(target) = target {
+            Self::new_network_task(target, delay, client_id, tls_context, log)
         } else {
-            self.start_network_task(delay);
+            Self::new_dummy_task()
         }
 
         #[cfg(not(test))]
-        self.start_network_task(delay);
+        Self::new_network_task(
+            target.expect("must provide socketaddr"),
+            delay,
+            client_id,
+            tls_context,
+            log,
+        )
     }
 
-    fn start_network_task(&mut self, delay: bool) {
-        assert!(
-            self.client_task.is_none(),
-            "cannot start task when it is already running"
-        );
-        let target = self.target_addr.expect("socket address is not populated");
-
+    fn new_network_task(
+        target: SocketAddr,
+        delay: bool,
+        client_id: ClientId,
+        tls_context: Option<Arc<TLSContext>>,
+        log: &Logger,
+    ) -> ClientTaskHandle {
         // These channels must support at least MAX_ACTIVE_COUNT messages;
         // otherwise, we risk a deadlock if the IO task and main task
         // simultaneously try sending each other data when the channels are
@@ -676,9 +644,7 @@ impl DownstairsClient {
             mpsc::channel(MAX_ACTIVE_COUNT * 2);
         let (client_stop_tx, client_stop_rx) = oneshot::channel();
 
-        let tls_context = self.tls_context.clone();
-        let log = self.log.new(o!("" => "io task"));
-        let client_id = self.client_id;
+        let log = log.new(o!("" => "io task"));
         tokio::spawn(async move {
             client_run(
                 client_id,
@@ -692,12 +658,32 @@ impl DownstairsClient {
             )
             .await
         });
-        self.reset_timeout();
-        self.client_task = Some(ClientTaskHandle {
+        ClientTaskHandle {
             client_request_tx,
             client_stop_tx: Some(client_stop_tx),
             client_response_rx,
-        });
+        }
+    }
+
+    /// Starts a dummy IO task, returning its IO handle
+    #[cfg(test)]
+    fn new_dummy_task() -> ClientTaskHandle {
+        let (client_request_tx, client_request_rx) =
+            mpsc::channel(MAX_ACTIVE_COUNT * 2);
+        let (_client_response_tx, client_response_rx) =
+            mpsc::channel(MAX_ACTIVE_COUNT * 2);
+        let (client_stop_tx, client_stop_rx) = oneshot::channel();
+
+        // Forget these without dropping them, so that we can send values into
+        // the void!
+        std::mem::forget(client_request_rx);
+        std::mem::forget(client_stop_rx);
+
+        ClientTaskHandle {
+            client_request_tx,
+            client_stop_tx: Some(client_stop_tx),
+            client_response_rx,
+        }
     }
 
     /// Indicate that the upstairs has requested that we go active
@@ -735,27 +721,16 @@ impl DownstairsClient {
                     "client set_active_request while in WaitActive \
                  -> WaitForPromote"
                 );
-                let r = self
-                    .client_task
-                    .as_ref()
-                    .unwrap()
-                    .client_request_tx
-                    .send(Message::PromoteToActive {
-                        upstairs_id: self.cfg.upstairs_id,
-                        session_id: self.cfg.session_id,
-                        gen,
-                    })
-                    .await;
-
                 // If the client task has stopped, then print a warning but
                 // otherwise continue (because we'll be cleaned up by the
                 // JoinHandle watcher).
-                if let Err(e) = r {
-                    warn!(
-                        self.log,
-                        "failed to sent PromoteToActive client request: {e}"
-                    );
-                }
+                self.send(Message::PromoteToActive {
+                    upstairs_id: self.cfg.upstairs_id,
+                    session_id: self.cfg.session_id,
+                    gen,
+                })
+                .await;
+
                 self.promote_state = Some(PromoteState::Sent(gen));
                 // TODO: negotiation / promotion state is spread across
                 // DsState, PromoteState, and NegotiationState.  We should
@@ -1515,21 +1490,6 @@ impl DownstairsClient {
         self.halt_io_task(ClientStopReason::Disabled);
     }
 
-    /// Helper function to send a message to the client
-    ///
-    /// # Panics
-    /// If the client task isn't running or the handle has been closed
-    async fn send_client_message(&mut self, m: Message) {
-        // send promotion message
-        self.client_task
-            .as_ref()
-            .expect("can't send message without client task")
-            .client_request_tx
-            .send(m)
-            .await
-            .unwrap() // TODO is this okay?
-    }
-
     /// Skips from `LiveRepairRead` to `Active`; a no-op otherwise
     ///
     /// # Panics
@@ -1689,7 +1649,7 @@ impl DownstairsClient {
                 self.repair_addr = Some(repair_addr);
                 match self.promote_state {
                     Some(PromoteState::Waiting(gen)) => {
-                        self.send_client_message(Message::PromoteToActive {
+                        self.send(Message::PromoteToActive {
                             upstairs_id: self.cfg.upstairs_id,
                             session_id: self.cfg.session_id,
                             gen,
@@ -1827,7 +1787,7 @@ impl DownstairsClient {
                 }
 
                 self.negotiation_state = NegotiationState::WaitForRegionInfo;
-                self.send_client_message(Message::RegionInfoPlease).await;
+                self.send(Message::RegionInfoPlease).await;
             }
             Message::RegionInfo { region_def } => {
                 if self.negotiation_state != NegotiationState::WaitForRegionInfo
@@ -1958,7 +1918,7 @@ impl DownstairsClient {
                         );
                         self.negotiation_state = NegotiationState::GetLastFlush;
 
-                        self.send_client_message(Message::LastFlush {
+                        self.send(Message::LastFlush {
                             last_flush_number: lf,
                         })
                         .await;
@@ -1971,8 +1931,7 @@ impl DownstairsClient {
                          */
                         self.negotiation_state =
                             NegotiationState::GetExtentVersions;
-                        self.send_client_message(Message::ExtentVersionsPlease)
-                            .await;
+                        self.send(Message::ExtentVersionsPlease).await;
                     }
                     DsState::Replacing => {
                         warn!(
@@ -2129,7 +2088,7 @@ impl DownstairsClient {
                 assert!(!dest_clients.is_empty());
                 if dest_clients.iter().any(|d| *d == self.client_id) {
                     info!(self.log, "sending repair request {repair_id:?}");
-                    self.send_client_message(job.op.clone()).await;
+                    self.send(job.op.clone()).await;
                 } else {
                     // Skip this job for this Downstairs, since only the target
                     // clients need to do the repair.
@@ -2146,7 +2105,7 @@ impl DownstairsClient {
             } => {
                 if *client_id == self.client_id {
                     info!(self.log, "sending flush request {repair_id:?}");
-                    self.send_client_message(job.op.clone()).await;
+                    self.send(job.op.clone()).await;
                 } else {
                     info!(self.log, "skipping flush request {repair_id:?}");
                     // Skip this job for this Downstairs, since it's narrowly
@@ -2158,7 +2117,7 @@ impl DownstairsClient {
             }
             Message::ExtentReopen { .. } | Message::ExtentClose { .. } => {
                 // All other repair ops are sent as-is
-                self.send_client_message(job.op.clone()).await;
+                self.send(job.op.clone()).await;
             }
             m => panic!("invalid reconciliation request {m:?}"),
         }
