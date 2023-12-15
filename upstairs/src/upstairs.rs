@@ -89,7 +89,7 @@ pub(crate) enum UpstairsState {
 ///   - Live-repair checks
 ///   - IOPS leaking
 ///   - Automatic flushes
-///   - DTrace loggingo f stats
+///   - DTrace logging of stats
 /// - Control requests from the controller server
 ///
 /// It returns a strongly-typed [`UpstairsAction`], which is then handled by
