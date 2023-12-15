@@ -6,7 +6,6 @@ use crate::{
     deadline_secs,
     downstairs::{Downstairs, DownstairsAction},
     extent_from_offset, integrity_hash,
-    live_repair::RepairCheck,
     stats::UpStatOuter,
     Block, BlockContext, BlockOp, BlockReq, Buffer, Bytes, ClientId, ClientMap,
     CrucibleOpts, DsState, EncryptionContext, GtoS, Guest, Message,
@@ -600,12 +599,12 @@ impl Upstairs {
     /// If this Upstairs is [UpstairsConfig::read_only], this function will move
     /// any Downstairs from [DsState::LiveRepairReady] back to [DsState::Active]
     /// without actually performing any repair.
-    pub(crate) async fn on_repair_check(&mut self) -> RepairCheck {
+    pub(crate) async fn on_repair_check(&mut self) {
         info!(self.log, "Checking if live repair is needed");
         if !matches!(self.state, UpstairsState::Active) {
             info!(self.log, "inactive, no live repair needed");
             self.repair_check_interval = None;
-            return RepairCheck::InvalidState;
+            return;
         }
 
         if self.cfg.read_only {
@@ -617,55 +616,42 @@ impl Upstairs {
                 c.skip_live_repair(&self.state);
             }
             self.repair_check_interval = None;
-            return RepairCheck::NoRepairNeeded;
+            return;
         }
 
         // Verify that all downstairs and the upstairs are in the proper state
         // before we begin a live repair.
-        let repair = self
+        let repair_in_progress = self.downstairs.live_repair_in_progress();
+
+        let any_in_repair_ready = self
             .downstairs
             .clients
             .iter()
-            .filter(|c| c.state() == DsState::LiveRepair)
-            .count();
+            .any(|c| c.state() == DsState::LiveRepairReady);
 
-        let repair_ready = self
-            .downstairs
-            .clients
-            .iter()
-            .filter(|c| c.state() == DsState::LiveRepairReady)
-            .count();
-
-        if repair > 0 {
+        if repair_in_progress {
             info!(self.log, "Live Repair already running");
-            self.repair_check_interval = None;
-            RepairCheck::RepairInProgress
-        } else if repair_ready == 0 {
+            // Queue up a later check if we need it
+            if any_in_repair_ready {
+                self.repair_check_interval = Some(deadline_secs(1.0));
+            } else {
+                self.repair_check_interval = None;
+            }
+        } else if !any_in_repair_ready {
             self.repair_check_interval = None;
             info!(self.log, "No Live Repair required at this time");
-            RepairCheck::NoRepairNeeded
         } else if !self.downstairs.start_live_repair(
             &self.state,
             self.guest.guest_work.lock().await.deref_mut(),
             self.ddef.get_def().unwrap().extent_count().into(),
             self.generation,
         ) {
-            // This also means repair_ready > 0
-
-            // We can only have one live repair going at a time, so if a
-            // downstairs has gone Faulted then to LiveRepairReady, it will have
-            // to wait until the currently running LiveRepair has completed.
-            warn!(self.log, "Upstairs already in repair, trying again later");
-
-            // If a Downstairs has reconnected and is in LiveRepairReady,
-            // aggressively poll to see when existing repair stops so the next
-            // live repair attempt can be started.
-            self.repair_check_interval = Some(deadline_secs(1.0));
-
-            RepairCheck::RepairInProgress
+            // It's hard to hit this condition; we need a Downstairs to be in
+            // LiveRepairReady, but for no other downstairs to be in Active.
+            warn!(self.log, "Could not start live repair, trying again later");
+            self.repair_check_interval = Some(deadline_secs(10.0));
         } else {
             // We started the repair in the call to start_live_repair above
-            RepairCheck::RepairStarted
         }
     }
 
@@ -1766,12 +1752,61 @@ impl Upstairs {
 }
 
 #[cfg(test)]
-mod test {
+pub(crate) mod test {
     use super::*;
     use crate::{
         downstairs::test::set_all_active, test::make_upstairs, BlockReq,
         DsState, JobId,
     };
+
+    // Test function to create just enough of an Upstairs for our needs.
+    pub(crate) fn create_test_upstairs() -> Upstairs {
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(3));
+        ddef.set_extent_count(4);
+
+        let mut up = Upstairs::test_default(Some(ddef));
+        set_all_active(&mut up.downstairs);
+        for c in up.downstairs.clients.iter_mut() {
+            // Give all downstairs a repair address
+            c.repair_addr = Some("0.0.0.0:1".parse().unwrap());
+        }
+
+        up.force_active().unwrap();
+        up
+    }
+
+    // A function that does some setup that other tests can use to avoid
+    // having the same boilerplate code all over the place, and allows the
+    // test to make clear what it's actually testing.
+    //
+    // The caller will indicate which downstairs client it wished to be
+    // moved to LiveRepair.
+    pub(crate) async fn start_up_and_repair(or_ds: ClientId) -> Upstairs {
+        let mut up = create_test_upstairs();
+
+        // Move our downstairs client fail_id to LiveRepair.
+        let client = &mut up.downstairs.clients[or_ds];
+        client.checked_state_transition(&up.state, DsState::Faulted);
+        client.checked_state_transition(&up.state, DsState::LiveRepairReady);
+
+        // Start repairing the downstairs; this also enqueues the jobs
+        up.apply(UpstairsAction::RepairCheck).await;
+
+        // Assert that the repair started
+        up.on_repair_check().await;
+        assert!(up.repair_check_interval.is_none());
+        assert!(up.downstairs.live_repair_in_progress());
+
+        // The first thing that should happen after we start repair_exetnt
+        // is two jobs show up on the work queue, one for close and one for
+        // the eventual re-open.  Wait here for those jobs to show up on the
+        // work queue before returning.
+        let jobs = up.downstairs.active_count();
+        assert_eq!(jobs, 2);
+        up
+    }
 
     #[tokio::test]
     async fn reconcile_not_ready() {
@@ -3124,13 +3159,19 @@ mod test {
 
         let mut up = Upstairs::test_default(Some(ddef));
 
-        // Before we are active, we return InvalidState
-        assert_eq!(up.on_repair_check().await, RepairCheck::InvalidState);
+        // Before we are active, we have no need to repair or check for future
+        // repairs.
+        up.on_repair_check().await;
+        assert!(up.repair_check_interval.is_none());
+        assert!(!up.downstairs.live_repair_in_progress());
 
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        assert_eq!(up.on_repair_check().await, RepairCheck::NoRepairNeeded);
+        // No need to repair or check for future repairs here either
+        up.on_repair_check().await;
+        assert!(up.repair_check_interval.is_none());
+        assert!(!up.downstairs.live_repair_in_progress());
 
         // No downstairs should change state.
         for c in up.downstairs.clients.iter() {
@@ -3154,7 +3195,9 @@ mod test {
         // Force client 1 into LiveRepairReady
         up.ds_transition(ClientId::new(1), DsState::Faulted);
         up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
-        assert_eq!(up.on_repair_check().await, RepairCheck::RepairStarted);
+        up.on_repair_check().await;
+        assert!(up.repair_check_interval.is_none());
+        assert!(up.downstairs.live_repair_in_progress());
         assert_eq!(up.ds_state(ClientId::new(1)), DsState::LiveRepair);
         assert!(up.downstairs.repair().is_some());
     }
@@ -3176,7 +3219,9 @@ mod test {
             up.ds_transition(i, DsState::Faulted);
             up.ds_transition(i, DsState::LiveRepairReady);
         }
-        assert_eq!(up.on_repair_check().await, RepairCheck::RepairStarted);
+        up.on_repair_check().await;
+        assert!(up.repair_check_interval.is_none());
+        assert!(up.downstairs.live_repair_in_progress());
 
         assert_eq!(up.ds_state(ClientId::new(0)), DsState::Active);
         assert_eq!(up.ds_state(ClientId::new(1)), DsState::LiveRepair);
@@ -3198,10 +3243,21 @@ mod test {
         up.ds_transition(ClientId::new(1), DsState::Faulted);
         up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
         up.ds_transition(ClientId::new(1), DsState::LiveRepair);
-        // Make ds 0 ready for repair.
+
+        // Start the live-repair
+        up.on_repair_check().await;
+        assert!(up.downstairs.live_repair_in_progress());
+        assert!(up.repair_check_interval.is_none());
+
+        // Pretend that DS 0 faulted then came back through to LiveRepairReady;
+        // we won't halt the existing repair, but will configure
+        // repair_check_interval to check again in the future.
         up.ds_transition(ClientId::new(0), DsState::Faulted);
         up.ds_transition(ClientId::new(0), DsState::LiveRepairReady);
-        assert_eq!(up.on_repair_check().await, RepairCheck::RepairInProgress);
+
+        up.on_repair_check().await;
+        assert!(up.downstairs.live_repair_in_progress());
+        assert!(up.repair_check_interval.is_some());
     }
 
     #[tokio::test]
@@ -3217,8 +3273,14 @@ mod test {
         up.ds_transition(ClientId::new(1), DsState::Faulted);
         up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
 
-        assert_eq!(up.on_repair_check().await, RepairCheck::RepairStarted);
-        assert_eq!(up.on_repair_check().await, RepairCheck::RepairInProgress);
+        up.on_repair_check().await;
+        assert!(up.repair_check_interval.is_none());
+        assert!(up.downstairs.live_repair_in_progress());
+
+        // Checking again is idempotent
+        up.on_repair_check().await;
+        assert!(up.repair_check_interval.is_none());
+        assert!(up.downstairs.live_repair_in_progress());
     }
 
     // Deactivate tests

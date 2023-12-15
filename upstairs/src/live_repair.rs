@@ -82,49 +82,17 @@ pub struct ExtentInfo {
     pub dirty: bool,
 }
 
-/// Return values from `Upstairs::on_repair_check`
-///
-/// The values are never used during normal operation, but are checked in unit
-/// tests to make sure the state is as expected.
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, PartialEq)]
-pub enum RepairCheck {
-    /// We started a repair task
-    RepairStarted,
-    /// No repair is needed
-    NoRepairNeeded,
-    /// We need repair, but a repair was already in progress
-    RepairInProgress,
-    /// Upstairs is not in a valid state for live repair
-    InvalidState,
-}
-
 #[cfg(test)]
 pub mod repair_test {
     use super::*;
     use crate::{
         client::ClientAction,
-        downstairs::{test::set_all_active, DownstairsAction},
-        upstairs::{Upstairs, UpstairsAction},
+        downstairs::DownstairsAction,
+        upstairs::{
+            test::{create_test_upstairs, start_up_and_repair},
+            Upstairs, UpstairsAction,
+        },
     };
-
-    // Test function to create just enough of an Upstairs for our needs.
-    fn create_test_upstairs() -> Upstairs {
-        let mut ddef = RegionDefinition::default();
-        ddef.set_block_size(512);
-        ddef.set_extent_size(Block::new_512(3));
-        ddef.set_extent_count(4);
-
-        let mut up = Upstairs::test_default(Some(ddef));
-        set_all_active(&mut up.downstairs);
-        for c in up.downstairs.clients.iter_mut() {
-            // Give all downstairs a repair address
-            c.repair_addr = Some("0.0.0.0:1".parse().unwrap());
-        }
-
-        up.force_active().unwrap();
-        up
-    }
 
     /// Test function to send fake replies for the given job, completing it
     ///
@@ -191,35 +159,6 @@ pub mod repair_test {
             action: ClientAction::Response(m),
         }))
         .await;
-    }
-
-    // A function that does some setup that other tests can use to avoid
-    // having the same boilerplate code all over the place, and allows the
-    // test to make clear what it's actually testing.
-    //
-    // The caller will indicate which downstairs client it wished to be
-    // moved to LiveRepair.
-    async fn start_up_and_repair(or_ds: ClientId) -> Upstairs {
-        let mut up = create_test_upstairs();
-
-        // Move our downstairs client fail_id to LiveRepair.
-        let client = &mut up.downstairs.clients[or_ds];
-        client.checked_state_transition(&up.state, DsState::Faulted);
-        client.checked_state_transition(&up.state, DsState::LiveRepairReady);
-
-        // Start repairing the downstairs; this also enqueues the jobs
-        up.apply(UpstairsAction::RepairCheck).await;
-
-        // Assert that the repair started
-        assert_eq!(up.on_repair_check().await, RepairCheck::RepairInProgress);
-
-        // The first thing that should happen after we start repair_exetnt
-        // is two jobs show up on the work queue, one for close and one for
-        // the eventual re-open.  Wait here for those jobs to show up on the
-        // work queue before returning.
-        let jobs = up.downstairs.active_count();
-        assert_eq!(jobs, 2);
-        up
     }
 
     // Test the permutations of calling repair_extent with each downstairs
@@ -1171,7 +1110,8 @@ pub mod repair_test {
         let client = &mut up.downstairs.clients[ClientId::new(1)];
         client.checked_state_transition(&up.state, DsState::Faulted);
         client.checked_state_transition(&up.state, DsState::LiveRepairReady);
-        assert_eq!(up.on_repair_check().await, RepairCheck::RepairStarted);
+        up.on_repair_check().await;
+        assert!(up.downstairs.live_repair_in_progress());
 
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert_eq!(up.downstairs.last_repair_extent(), Some(0));

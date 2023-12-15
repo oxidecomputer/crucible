@@ -1021,9 +1021,28 @@ impl Downstairs {
         }
     }
 
+    /// Checks whether a live-repair is in progress
+    pub(crate) fn live_repair_in_progress(&self) -> bool {
+        // A live-repair is in progress if any client is in the LiveRepair
+        // state, _or_ if `self.repair.is_some()`.  The latter is necessary
+        // because if a live-repair encountered an error, that downstairs will
+        // be marked as Faulted, but we still need to keep going through the
+        // existing live-repair before retrying.
+        self.clients
+            .iter()
+            .any(|c| c.state() == DsState::LiveRepair)
+            || self.repair.is_some()
+    }
+
     /// Tries to start live-repair
     ///
-    /// Returns true on success, false otherwise
+    /// Returns true on success, false otherwise; the only time it returns
+    /// `false` is if there are no clients in `DsState::Active` to serve as
+    /// sources for live-repair.
+    ///
+    /// # Panics
+    /// If `self.repair.is_some()` (because that means a repair is already in
+    /// progress), or if no clients are in `LiveRepairReady`
     pub(crate) fn start_live_repair(
         &mut self,
         up_state: &UpstairsState,
@@ -1031,16 +1050,7 @@ impl Downstairs {
         extent_count: u64,
         generation: u64,
     ) -> bool {
-        // If a live repair was in progress and encountered an error, that
-        // downstairs itself will be marked Faulted.  It is possible for
-        // that downstairs to reconnect and get back to LiveRepairReady
-        // and be requesting for a repair before the repair task has wrapped
-        // up the failed repair that this downstairs was part of.  For that
-        // situation, let the repair finish and retry this repair request.
-        if self.repair.is_some() {
-            // TODO should the return value be a Result<bool, ??> instead?
-            return false;
-        }
+        assert!(self.repair.is_none());
 
         // Move the upstairs that were LiveRepairReady to LiveRepair
         //
@@ -1079,11 +1089,7 @@ impl Downstairs {
             return false;
         };
 
-        if repair_downstairs.is_empty() {
-            error!(self.log, "failed to find a downstairs needing repair");
-            self.abort_repair(up_state);
-            return false;
-        }
+        assert!(!repair_downstairs.is_empty());
 
         // Submit the initial repair jobs, which kicks everything off
         let state = self.begin_repair_for(
@@ -3638,9 +3644,9 @@ impl Downstairs {
         );
 
         // At this point you might think it makes sense to run
-        //   `self.start_live_repair(&UpstairsState::Active, gw, 3, 0);``
+        //   `self.start_live_repair(&UpstairsState::Active, gw, 3, 0);`
         // But we don't actually want to start the repair here using
-        // `ds.start_live_repair`, because that submits some initial jobs too,
+        //   `ds.start_live_repair`, because that submits some initial jobs too,
         // which get in the way of the depenedency resolution checking we want
         // to do. Our tests want dispatch specific sets of jobs themselves to
         // see what the dependency tree looks like.
