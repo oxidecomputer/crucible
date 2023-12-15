@@ -1418,10 +1418,9 @@ impl Upstairs {
                             DsState::WaitQuorum => {
                                 // See if we have a quorum
                                 if self.connect_region_set().await {
-                                    // We connected, start periodic live-repair
-                                    // checking in the main loop.
-                                    self.repair_check_interval =
-                                        Some(deadline_secs(1.0));
+                                    // We connected normally, so there's no need
+                                    // to check for live-repair.
+                                    self.repair_check_interval = None;
                                 }
                             }
 
