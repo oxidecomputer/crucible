@@ -1758,12 +1758,11 @@ impl Upstairs {
             self.log,
             "downstairs task for {client_id} stopped due to {reason:?}"
         );
-        // If the upstairs is already active, then the downstairs should
-        // automatically call PromoteToActive when it reaches the relevant
-        // state.
+        // If the upstairs is already active (or trying to go active), then the
+        // downstairs should automatically call PromoteToActive when it reaches
+        // the relevant state.
         let auto_promote = match self.state {
             UpstairsState::Active | UpstairsState::GoActive { .. } => {
-                // XXX is is correct to auto-promote if we're in GoActive?
                 Some(self.generation)
             }
             UpstairsState::Initializing
