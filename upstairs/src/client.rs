@@ -197,7 +197,7 @@ impl DownstairsClient {
             encryption_context: None,
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 0,
+            generation: std::sync::atomic::AtomicU64::new(1),
             read_only: false,
             lossy: false,
         });
@@ -258,15 +258,13 @@ impl DownstairsClient {
         }
     }
 
-    /// If the client task is running, send a `Message::HereIAm`
-    ///
-    /// If the client task is **not** running, log a warning to that effect.
+    /// Send a `Message::HereIAm` via the client IO task
     pub(crate) async fn send_here_i_am(&mut self) {
         self.send(Message::HereIAm {
             version: CRUCIBLE_MESSAGE_VERSION,
             upstairs_id: self.cfg.upstairs_id,
             session_id: self.cfg.session_id,
-            gen: self.cfg.gen,
+            gen: self.cfg.generation(),
             read_only: self.cfg.read_only,
             encrypted: self.cfg.encrypted(),
             alternate_versions: vec![],
@@ -550,15 +548,15 @@ impl DownstairsClient {
     ///
     /// # Panics
     /// If `self.client_task` is not `None`, or `self.target_addr` is `None`
-    pub(crate) fn reinitialize(&mut self, auto_promote: Option<u64>) {
+    pub(crate) fn reinitialize(&mut self, auto_promote: bool) {
         // Clear this Downstair's repair address, and let the YesItsMe set it.
         // This works if this Downstairs is new, reconnecting, or was replaced
         // entirely; the repair address could have changed in any of these
         // cases.
         self.repair_addr = None;
 
-        if let Some(g) = auto_promote {
-            self.promote_state = Some(PromoteState::Waiting(g));
+        if auto_promote {
+            self.promote_state = Some(PromoteState::Waiting);
         } else {
             self.promote_state = None;
         }
@@ -689,12 +687,12 @@ impl DownstairsClient {
     /// # Panics
     /// If we already called this function (without `reinitialize` in between),
     /// or `self.state` is invalid for promotion.
-    pub(crate) async fn set_active_request(&mut self, gen: u64) {
+    pub(crate) async fn set_active_request(&mut self) {
         match self.promote_state {
-            Some(PromoteState::Waiting(..)) => {
+            Some(PromoteState::Waiting) => {
                 panic!("called set_active_request while already waiting")
             }
-            Some(PromoteState::Sent(..)) => {
+            Some(PromoteState::Sent) => {
                 panic!("called set_active_request after it was sent")
             }
             None => (),
@@ -708,7 +706,7 @@ impl DownstairsClient {
                     "client set_active_request while in {:?}; waiting...",
                     self.state,
                 );
-                self.promote_state = Some(PromoteState::Waiting(gen));
+                self.promote_state = Some(PromoteState::Waiting);
             }
             DsState::WaitActive => {
                 info!(
@@ -722,11 +720,11 @@ impl DownstairsClient {
                 self.send(Message::PromoteToActive {
                     upstairs_id: self.cfg.upstairs_id,
                     session_id: self.cfg.session_id,
-                    gen,
+                    gen: self.cfg.generation(),
                 })
                 .await;
 
-                self.promote_state = Some(PromoteState::Sent(gen));
+                self.promote_state = Some(PromoteState::Sent);
                 // TODO: negotiation / promotion state is spread across
                 // DsState, PromoteState, and NegotiationState.  We should
                 // consolidate into a single place
@@ -1516,7 +1514,6 @@ impl DownstairsClient {
         &mut self,
         m: Message,
         up_state: &UpstairsState,
-        upstairs_gen: u64,
         ddef: &mut RegionDefinitionStatus,
     ) -> Result<bool, CrucibleError> {
         /*
@@ -1643,14 +1640,14 @@ impl DownstairsClient {
                 self.negotiation_state = NegotiationState::WaitForPromote;
                 self.repair_addr = Some(repair_addr);
                 match self.promote_state {
-                    Some(PromoteState::Waiting(gen)) => {
+                    Some(PromoteState::Waiting) => {
                         self.send(Message::PromoteToActive {
                             upstairs_id: self.cfg.upstairs_id,
                             session_id: self.cfg.session_id,
-                            gen,
+                            gen: self.cfg.generation(),
                         })
                         .await;
-                        self.promote_state = Some(PromoteState::Sent(gen));
+                        self.promote_state = Some(PromoteState::Sent);
                         self.negotiation_state =
                             NegotiationState::WaitForPromote;
                         // TODO This is an unfortunate corner of the state
@@ -1663,7 +1660,7 @@ impl DownstairsClient {
                             );
                         }
                     }
-                    Some(PromoteState::Sent(_gen)) => {
+                    Some(PromoteState::Sent) => {
                         // We shouldn't be able to get here.
                         panic!("got YesItsMe with promote_state == Sent");
                     }
@@ -1730,6 +1727,7 @@ impl DownstairsClient {
 
                 let match_uuid = self.cfg.upstairs_id == upstairs_id;
                 let match_session = self.cfg.session_id == session_id;
+                let upstairs_gen = self.cfg.generation();
                 let match_gen = upstairs_gen == gen;
                 let matches_self = match_uuid && match_session && match_gen;
 
@@ -2143,9 +2141,9 @@ impl DownstairsClient {
 #[derive(Debug)]
 enum PromoteState {
     /// Send `PromoteToActive` when the state machine reaches `WaitForPromote`
-    Waiting(u64),
+    Waiting,
     /// We have already sent `PromoteToActive`
-    Sent(u64),
+    Sent,
 }
 
 /// Tracks client negotiation progress

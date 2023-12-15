@@ -30,7 +30,7 @@ use uuid::Uuid;
 /// Downstairs data
 ///
 /// This data structure is responsible for tracking outstanding jobs from the
-/// perspective of the (3x) downstairs.  It contaisn a list of all active jobs,
+/// perspective of the (3x) downstairs.  It contains a list of all active jobs,
 /// as well as three `DownstairsClient` with per-client data.
 #[derive(Debug)]
 pub(crate) struct Downstairs {
@@ -248,7 +248,7 @@ impl Downstairs {
         let cfg = Arc::new(UpstairsConfig {
             upstairs_id: Uuid::new_v4(),
             session_id: Uuid::new_v4(),
-            gen: 0,
+            generation: std::sync::atomic::AtomicU64::new(1),
             read_only: false,
             encryption_context: None,
             lossy: false,
@@ -693,7 +693,7 @@ impl Downstairs {
     pub(crate) fn reinitialize(
         &mut self,
         client_id: ClientId,
-        auto_promote: Option<u64>,
+        auto_promote: bool,
         reason: ClientRunResult,
         up_state: &UpstairsState,
     ) {
@@ -886,8 +886,8 @@ impl Downstairs {
     /// Decide if we need repair, and if so create the repair list
     ///
     /// Returns `true` if repair is needed, `false` otherwise
-    pub(crate) fn collate(&mut self, gen: u64) -> Result<bool, CrucibleError> {
-        let r = self.collate_inner(gen);
+    pub(crate) fn collate(&mut self) -> Result<bool, CrucibleError> {
+        let r = self.collate_inner();
         if r.is_err() {
             // If we failed to begin the repair, then assert that nothing has
             // changed and everything is empty.
@@ -901,7 +901,7 @@ impl Downstairs {
         r
     }
 
-    fn collate_inner(&mut self, gen: u64) -> Result<bool, CrucibleError> {
+    fn collate_inner(&mut self) -> Result<bool, CrucibleError> {
         /*
          * Show some (or all if small) of the info from each region.
          *
@@ -961,7 +961,7 @@ impl Downstairs {
          * Verify that the generation number that the guest has requested
          * is higher than what we have from the three downstairs.
          */
-        let requested_gen = gen;
+        let requested_gen = self.cfg.generation();
         if requested_gen == 0 {
             error!(self.log, "generation number should be at least 1");
             return Err(CrucibleError::GenerationNumberTooLow(
@@ -1049,7 +1049,6 @@ impl Downstairs {
         up_state: &UpstairsState,
         gw: &mut GuestWork,
         extent_count: u64,
-        generation: u64,
     ) -> bool {
         assert!(self.repair.is_none());
 
@@ -1100,7 +1099,6 @@ impl Downstairs {
             source_downstairs,
             up_state,
             gw,
-            generation,
         );
         let LiveRepairState::Closing { close_id, .. } = &state else {
             panic!("invalid response from `begin_repair_for`");
@@ -1165,11 +1163,10 @@ impl Downstairs {
         ds_id: JobId,
         gw: &mut GuestWork,
         up_state: &UpstairsState,
-        generation: u64,
     ) {
-        self.continue_live_repair_inner(ds_id, gw, up_state, generation);
+        self.continue_live_repair_inner(ds_id, gw, up_state);
         while let Some(ds_id) = self.check_live_repair() {
-            self.continue_live_repair_inner(ds_id, gw, up_state, generation);
+            self.continue_live_repair_inner(ds_id, gw, up_state);
         }
     }
 
@@ -1178,7 +1175,6 @@ impl Downstairs {
         ds_id: JobId,
         gw: &mut GuestWork,
         up_state: &UpstairsState,
-        generation: u64,
     ) {
         let done = self.ds_active.get(&ds_id).unwrap();
         assert!(!done.acked);
@@ -1329,7 +1325,7 @@ impl Downstairs {
                     let gw_id: u64 = gw.next_gw_id();
                     cdt::gw__flush__start!(|| (gw_id));
 
-                    let flush_id = self.submit_flush(gw_id, generation, None);
+                    let flush_id = self.submit_flush(gw_id, None);
                     info!(self.log, "LiveRepair final flush submitted");
 
                     let new_gtos = GtoS::new(flush_id, None, None);
@@ -1352,7 +1348,6 @@ impl Downstairs {
                         source_downstairs,
                         up_state,
                         gw,
-                        generation,
                     )
                 };
                 // The borrow was dropped earlier, so reborrow `self.repair`
@@ -1556,7 +1551,6 @@ impl Downstairs {
         source_downstairs: ClientId,
         up_state: &UpstairsState,
         gw: &mut GuestWork,
-        generation: u64,
     ) -> LiveRepairState {
         // Invariant checking to begin
         assert!(
@@ -1634,7 +1628,6 @@ impl Downstairs {
             self.create_and_enqueue_close_io(
                 gw,
                 extent,
-                generation,
                 close_deps,
                 close_id,
                 gw_close_id,
@@ -1837,7 +1830,6 @@ impl Downstairs {
         ds_id: JobId,
         dependencies: Vec<JobId>,
         gw_id: u64,
-        gen: u64,
         source: ClientId,
         repair: Vec<ClientId>,
     ) -> DownstairsIO {
@@ -1845,7 +1837,7 @@ impl Downstairs {
             dependencies,
             extent: eid,
             flush_number: self.next_flush_id(),
-            gen_number: gen,
+            gen_number: self.cfg.generation(),
             source_downstairs: source,
             repair_downstairs: repair,
         };
@@ -1867,7 +1859,6 @@ impl Downstairs {
         &mut self,
         gw: &mut GuestWork,
         eid: u64,
-        gen: u64,
         deps: Vec<JobId>,
         close_id: JobId,
         gw_close_id: u64,
@@ -1879,7 +1870,6 @@ impl Downstairs {
             close_id,
             deps,
             gw_close_id,
-            gen,
             source,
             repair.to_vec(),
         );
@@ -2154,7 +2144,6 @@ impl Downstairs {
     pub(crate) fn submit_flush(
         &mut self,
         gw_id: u64,
-        gen: u64,
         snapshot_details: Option<SnapshotDetails>,
     ) -> JobId {
         let next_id = self.next_id();
@@ -2177,7 +2166,7 @@ impl Downstairs {
         let flush = IOop::Flush {
             dependencies: dep,
             flush_number: flush_id,
-            gen_number: gen,
+            gen_number: self.cfg.generation(),
             snapshot_details,
             extent_limit: extent_under_repair.map(|v| v as usize),
         };
@@ -2203,7 +2192,7 @@ impl Downstairs {
         &mut self,
         snap: Option<SnapshotDetails>,
     ) -> JobId {
-        self.submit_flush(0, 0, snap)
+        self.submit_flush(0, snap)
     }
 
     /// Reserves repair IDs if impacted blocks overlap our extent under repair
@@ -8741,13 +8730,11 @@ pub(crate) mod test {
         // incorrect flush number
         ds.next_flush = 0x1DE;
         let next_flush = ds.next_flush;
-        let gen = 4;
         let source = ClientId::new(1);
         let repair = vec![ClientId::new(0), ClientId::new(2)];
         ds.create_and_enqueue_close_io(
             &mut gw,
             eid,
-            gen,
             deps,
             repair_ids.close_id,
             gw_close_id,
@@ -8773,7 +8760,7 @@ pub(crate) mod test {
                 );
                 assert_eq!(*extent, eid as usize);
                 assert_eq!(*flush_number, next_flush);
-                assert_eq!(*gen_number, gen);
+                assert_eq!(*gen_number, ds.cfg.generation());
                 assert_eq!(*source_downstairs, source);
                 assert_eq!(*repair_downstairs, repair);
             }
@@ -8977,7 +8964,6 @@ pub(crate) mod test {
         ds.create_and_enqueue_close_io(
             gw,
             eid,
-            4, // gen
             deps,
             extent_repair_ids.close_id,
             gw_close_id,
@@ -9120,7 +9106,7 @@ pub(crate) mod test {
 
         ds.submit_test_read_block(gw.next_gw_id(), eid, 0);
         ds.submit_test_write_block(gw.next_gw_id(), eid, 1, false);
-        ds.submit_flush(gw.next_gw_id(), 0, None);
+        ds.submit_flush(gw.next_gw_id(), None);
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
 
@@ -9245,7 +9231,7 @@ pub(crate) mod test {
         let eid = 1;
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
-        ds.submit_flush(gw.next_gw_id(), 0, None);
+        ds.submit_flush(gw.next_gw_id(), None);
 
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
@@ -9329,11 +9315,11 @@ pub(crate) mod test {
 
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_flush(gw.next_gw_id(), 0, None);
+        ds.submit_flush(gw.next_gw_id(), None);
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, 1);
 
-        ds.submit_flush(gw.next_gw_id(), 1, None);
+        ds.submit_flush(gw.next_gw_id(), None);
 
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
@@ -9368,7 +9354,7 @@ pub(crate) mod test {
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, 0);
 
-        ds.submit_flush(gw.next_gw_id(), 0, None);
+        ds.submit_flush(gw.next_gw_id(), None);
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, 1);
 
@@ -9931,7 +9917,7 @@ pub(crate) mod test {
 
         ds.submit_test_read_block(gw.next_gw_id(), 0, 1);
 
-        ds.submit_flush(gw.next_gw_id(), 0, None);
+        ds.submit_flush(gw.next_gw_id(), None);
 
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
@@ -10133,7 +10119,7 @@ pub(crate) mod test {
             },
         });
 
-        ds.submit_flush(gw.next_gw_id(), 0, None);
+        ds.submit_flush(gw.next_gw_id(), None);
 
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
@@ -10556,7 +10542,7 @@ pub(crate) mod test {
 
         // Start the repair normally. This enqueues the close & reopen jobs, and
         // reserves Job IDs for the repair/noop
-        assert!(ds.start_live_repair(&UpstairsState::Active, &mut gw, 3, 4));
+        assert!(ds.start_live_repair(&UpstairsState::Active, &mut gw, 3));
 
         // Submit a write.
         ds.submit_test_write_block(gw.next_gw_id(), 0, 1, false);

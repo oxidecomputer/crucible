@@ -14,7 +14,13 @@ use crate::{
 };
 use crucible_common::CrucibleError;
 
-use std::{ops::DerefMut, sync::Arc};
+use std::{
+    ops::DerefMut,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use ringbuffer::RingBuffer;
 use slog::{debug, error, info, o, warn, Logger};
@@ -129,11 +135,6 @@ pub(crate) struct Upstairs {
     /// Downstairs jobs and per-client state
     pub(crate) downstairs: Downstairs,
 
-    /// Upstairs generation number
-    ///
-    /// This increases each time an Upstairs starts
-    pub(crate) generation: u64,
-
     /// The guest struct keeps track of jobs accepted from the Guest
     ///
     /// A single job submitted can produce multiple downstairs requests.
@@ -215,7 +216,11 @@ pub(crate) struct UpstairsConfig {
     pub session_id: Uuid,
 
     /// Generation number
-    pub gen: u64,
+    ///
+    /// This is _mostly_ invariant, but we're allowing for interior mutability
+    /// so that `BlockOp::GoActiveWithGen` can work.  We may remove that
+    /// operation in the future, since it's only used in unit tests.
+    pub generation: AtomicU64,
 
     pub read_only: bool,
 
@@ -231,6 +236,10 @@ pub(crate) struct UpstairsConfig {
 impl UpstairsConfig {
     pub(crate) fn encrypted(&self) -> bool {
         self.encryption_context.is_some()
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 }
 
@@ -290,7 +299,7 @@ impl Upstairs {
             encryption_context,
             upstairs_id: uuid,
             session_id,
-            gen,
+            generation: AtomicU64::new(gen),
             read_only: opt.read_only,
             lossy: opt.lossy,
         });
@@ -307,7 +316,6 @@ impl Upstairs {
         Upstairs {
             state: UpstairsState::Initializing,
             cfg,
-            generation: gen,
             repair_check_interval: None,
             leak_deadline: deadline_secs(1.0),
             flush_deadline: deadline_secs(flush_timeout_secs),
@@ -437,12 +445,8 @@ impl Upstairs {
         // `Downstairs::ackable_jobs` to see which jobs are done.
         if let Some(job_id) = self.downstairs.check_live_repair() {
             let mut gw = self.guest.guest_work.lock().await;
-            self.downstairs.continue_live_repair(
-                job_id,
-                &mut gw,
-                &self.state,
-                self.generation,
-            );
+            self.downstairs
+                .continue_live_repair(job_id, &mut gw, &self.state);
         }
 
         // Send jobs downstairs as they become available.  This must be called
@@ -712,7 +716,6 @@ impl Upstairs {
             &self.state,
             self.guest.guest_work.lock().await.deref_mut(),
             self.ddef.get_def().unwrap().extent_count().into(),
-            self.generation,
         ) {
             // It's hard to hit this condition; we need a Downstairs to be in
             // LiveRepairReady, but for no other downstairs to be in Active.
@@ -748,7 +751,7 @@ impl Upstairs {
                 self.set_active_request(req.take_sender()).await;
             }
             BlockOp::GoActiveWithGen { gen } => {
-                self.generation = gen;
+                self.cfg.generation.store(gen, Ordering::Release);
                 self.set_active_request(req.take_sender()).await;
             }
             BlockOp::QueryGuestIOReady { data } => {
@@ -901,7 +904,10 @@ impl Upstairs {
         );
         println!(
             " Crucible gen:{} GIO:{} work queues:  Upstairs:{}  downstairs:{}",
-            self.generation, gior, up_count, ds_count,
+            self.cfg.generation(),
+            gior,
+            up_count,
+            ds_count,
         );
         if ds_count == 0 {
             if up_count != 0 {
@@ -970,7 +976,7 @@ impl Upstairs {
         // Notify all clients that they should go active when they hit an
         // appropriate state in their negotiation.
         for c in self.downstairs.clients.iter_mut() {
-            c.set_active_request(self.generation).await;
+            c.set_active_request().await;
         }
     }
 
@@ -1033,11 +1039,7 @@ impl Upstairs {
             info!(self.log, "flush with snap requested");
         }
 
-        let next_id = self.downstairs.submit_flush(
-            gw_id,
-            self.generation,
-            snapshot_details,
-        );
+        let next_id = self.downstairs.submit_flush(gw_id, snapshot_details);
 
         let new_gtos = GtoS::new(next_id, None, req);
         gw.active.insert(gw_id, new_gtos);
@@ -1399,12 +1401,7 @@ impl Upstairs {
             | Message::ExtentVersions { .. } => {
                 // negotiation and initial reconciliation
                 let r = self.downstairs.clients[client_id]
-                    .continue_negotiation(
-                        m,
-                        &self.state,
-                        self.generation,
-                        &mut self.ddef,
-                    )
+                    .continue_negotiation(m, &self.state, &mut self.ddef)
                     .await;
 
                 match r {
@@ -1591,7 +1588,7 @@ impl Upstairs {
              * downstairs out, forget any activation requests, and the
              * upstairs goes back to waiting for another activation request.
              */
-            self.downstairs.collate(self.generation)
+            self.downstairs.collate()
         };
 
         match collate_status {
@@ -1674,23 +1671,22 @@ impl Upstairs {
             format!("different upstairs UUID {new_upstairs_id:?}")
         };
 
-        if new_gen <= self.generation {
+        let our_gen = self.cfg.generation();
+        if new_gen <= our_gen {
             // Here, our generation number is greater than or equal to the newly
             // active Upstairs, which shares our UUID. We shouldn't have
             // received this message. The downstairs is confused.
             error!(
                 client_log,
-                "bad YouAreNoLongerActive with our gen {} >= {new_gen} \
+                "bad YouAreNoLongerActive with our gen {our_gen} >= {new_gen} \
                  and {uuid_desc}",
-                self.generation
             );
         } else {
             // The next generation of this Upstairs connected, which is fine.
             warn!(
                 client_log,
-                "saw YouAreNoLongerActive with our gen {} < {new_gen} and \
-                 {uuid_desc}",
-                self.generation
+                "saw YouAreNoLongerActive with our gen {our_gen} < {new_gen} \
+                 and {uuid_desc}",
             );
         };
 
@@ -1762,11 +1758,9 @@ impl Upstairs {
         // downstairs should automatically call PromoteToActive when it reaches
         // the relevant state.
         let auto_promote = match self.state {
-            UpstairsState::Active | UpstairsState::GoActive { .. } => {
-                Some(self.generation)
-            }
+            UpstairsState::Active | UpstairsState::GoActive { .. } => true,
             UpstairsState::Initializing
-            | UpstairsState::Deactivating { .. } => None,
+            | UpstairsState::Deactivating { .. } => false,
         };
 
         self.downstairs.reinitialize(
