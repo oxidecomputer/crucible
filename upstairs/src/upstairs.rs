@@ -705,7 +705,7 @@ impl Upstairs {
             info!(self.log, "Live Repair already running");
             // Queue up a later check if we need it
             if any_in_repair_ready {
-                self.repair_check_interval = Some(deadline_secs(1.0));
+                self.repair_check_interval = Some(deadline_secs(10.0));
             } else {
                 self.repair_check_interval = None;
             }
