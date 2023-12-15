@@ -6127,9 +6127,9 @@ pub(crate) mod test {
 
     #[tokio::test]
     async fn reconcile_repair_workflow_not_repair() {
-        // Verify that rep_in_progress will not give out work if a
-        // downstairs is not in the correct state, and that it will
-        // clear the work queue and mark other downstairs as failed.
+        // Verify that reconciliation will not give out work if a downstairs is
+        // not in the correct state, and that it will clear the work queue and
+        // mark other downstairs as failed.
         let mut ds = Downstairs::test_default();
 
         let close_id = ReconciliationId(0);
