@@ -1627,10 +1627,20 @@ impl Upstairs {
         info!(self.log, "All required repair work is completed");
         info!(self.log, "Set Downstairs and Upstairs active after repairs");
 
+        if !matches!(self.state, UpstairsState::GoActive { .. }) {
+            error!(
+                self.log,
+                "reconciliation done, but upstairs is no longer GoActive: {:?}",
+                self.state
+            );
+            return;
+        }
+
+        // Swap out the state for UpstairsState::Active
         let UpstairsState::GoActive { reply } =
             std::mem::replace(&mut self.state, UpstairsState::Active)
         else {
-            panic!("invalid state active state: {:?}", self.state);
+            unreachable!(); // checked above
         };
         reply.send(Ok(())).unwrap();
         info!(
