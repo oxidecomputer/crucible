@@ -1789,7 +1789,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn deactivate_not_when_active() {
+    async fn deactivate_not_while_deactivating() {
         // Verify that we can't set deactivate on the upstairs when
         // the upstairs is still in init.
         // Verify that we can't set deactivate on the upstairs when
