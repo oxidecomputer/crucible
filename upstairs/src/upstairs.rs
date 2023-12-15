@@ -65,7 +65,7 @@ pub(crate) enum UpstairsState {
 ///
 /// In normal operation, the `Upstairs` expects to run a simple loop forever in
 /// an async task:
-/// ```no_run
+/// ```ignore
 /// loop {
 ///     let action = self.select().await;
 ///     self.apply(action).await
