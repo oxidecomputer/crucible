@@ -27,10 +27,11 @@ use ringbuffer::RingBuffer;
 use slog::{debug, error, info, o, warn, Logger};
 use uuid::Uuid;
 
-/*
- * The structure that tracks information about the three downstairs
- * connections as well as the work that each is doing.
- */
+/// Downstairs data
+///
+/// This data structure is responsible for tracking outstanding jobs from the
+/// perspective of the (3x) downstairs.  It contaisn a list of all active jobs,
+/// as well as three `DownstairsClient` with per-client data.
 #[derive(Debug)]
 pub(crate) struct Downstairs {
     /// Shared configuration

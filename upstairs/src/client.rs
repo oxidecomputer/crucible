@@ -54,6 +54,10 @@ struct ClientTaskHandle {
     client_stop_tx: Option<oneshot::Sender<ClientStopReason>>,
 }
 
+/// Per-client data
+///
+/// This data structure contains client-specific state and manages communication
+/// with a per-client IO task (through the `ClientTaskHandle`).
 #[derive(Debug)]
 pub(crate) struct DownstairsClient {
     /// Shared (static) configuration

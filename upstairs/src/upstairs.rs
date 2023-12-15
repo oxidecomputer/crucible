@@ -1,4 +1,5 @@
 // Copyright 2023 Oxide Computer Company
+//! Data structures specific to Crucible's `struct Upstairs`
 use crate::{
     cdt,
     client::{ClientAction, ClientRunResult, ClientStopReason},
@@ -26,6 +27,7 @@ use uuid::Uuid;
 /// How often to log stats for DTrace
 const STAT_INTERVAL_SECS: f32 = 1.0;
 
+/// High-level upstairs state, from the perspective of the guest
 #[derive(Debug)]
 pub(crate) enum UpstairsState {
     /// The upstairs is just coming online
@@ -55,6 +57,71 @@ pub(crate) enum UpstairsState {
     },
 }
 
+/// Crucible upstairs state
+///
+/// This `struct` has exclusive ownership over (almost) everything that's needed
+/// to run the Crucible upstairs, and a shared handle to the [`Guest`] data
+/// structure (which is our main source of operations).
+///
+/// In normal operation, the `Upstairs` expects to run a simple loop forever in
+/// an async task:
+/// ```no_run
+/// loop {
+///     let action = self.select().await;
+///     self.apply(action).await
+/// }
+/// ```
+/// (this is implemented as [`Upstairs::run`])
+///
+/// Under the hood, [`Upstairs::select`] selects from **many** possible async
+/// events:
+/// - Messages from downstairs clients
+/// - [`BlockReq`] from the guest
+/// - Various timeouts
+///   - Client timeout
+///   - Client ping intervals
+///   - Live-repair checks
+///   - IOPS leaking
+///   - Automatic flushes
+///   - DTrace loggingo f stats
+/// - Control requests from the controller server
+///
+/// It returns a strongly-typed [`UpstairsAction`], which is then handled by
+/// [`Upstairs::apply`].
+///
+/// This means that only one thing is happening at a time, and it's easy to
+/// drive the `Upstairs` in tests by sending it a synthetic stream of events.
+/// In addition, the `Upstairs` always has exclusive ownership of its own data,
+/// so there are no locks to worry about.
+///
+/// The downside to this architecture is multi-step state machine have to be
+/// written out manually, rather than writing an `async` function and having the
+/// compiler to the `async`-to-state-machine transform. A notable example is
+/// live-repair, which keeps track of its state in `downstairs::LiveRepairState`
+/// and manually steps through that state machine in response to incoming
+/// events.
+///
+/// (This downside is necessary because we often have multiple state machines
+/// running simultaneously, so can't put them into independent async tasks while
+/// still maintaining a single point of ownership for all `Upstairs` data.  The
+/// previous architecture used multiple async tasks and a mutex around upstairs
+/// data, but that makes it tricky to reason about edge cases and invariants)
+///
+/// `Upstairs::apply` does two things on every event: specific handling of that
+/// event, and what we vaguely describe as "invariant maintenance".  The latter
+/// is a bunch of actions which are (1) cheap to check and (2) put the
+/// `Upstairs` into a known state afterwards.
+///
+/// For example, we _always_ do things like
+/// - Send all pending IO (limited by the downstairs' `MAX_ACTIVE_COUNT`)
+/// - Ack all ackable jobs to the guest
+/// - Step through the live-repair state machine (if it's running)
+/// - Check for client-side deactivation (if it's pending)
+/// - Set backpressure time in the guest
+///
+/// Keeping the `Upstairs` "clean" through this invariant maintenance makes it
+/// easier to think about its state, because it's guaranteed to be clean when we
+/// next call `Upstairs::apply`.
 pub(crate) struct Upstairs {
     /// Current state
     pub(crate) state: UpstairsState,
@@ -127,6 +194,7 @@ pub(crate) struct Upstairs {
     pub(crate) control_tx: mpsc::Sender<ControlRequest>,
 }
 
+/// Action to be taken which modifies the [`Upstairs`] state
 #[derive(Debug)]
 pub(crate) enum UpstairsAction {
     Downstairs(DownstairsAction),
