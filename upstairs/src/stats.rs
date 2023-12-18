@@ -115,6 +115,13 @@ pub struct UpStatOuter {
 }
 
 impl UpStatOuter {
+    pub fn new(uuid: Uuid) -> Self {
+        Self {
+            up_stat_wrap: Arc::new(std::sync::Mutex::new(UpCountStat::new(
+                uuid,
+            ))),
+        }
+    }
     // When an operation happens that we wish to record in Oximeter,
     // one of these methods will be called.  Each method will get the
     // correct field of UpCountStat to record the update.

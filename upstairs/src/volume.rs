@@ -1544,6 +1544,7 @@ mod test {
     use std::io::Write;
 
     use base64::{engine, Engine};
+    use rand::prelude::*;
     use slog::{o, Drain, Logger};
     use tempfile::tempdir;
 
