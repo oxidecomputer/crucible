@@ -955,7 +955,12 @@ impl Upstairs {
                 info!(self.log, "{} active request set", self.cfg.upstairs_id);
             }
             UpstairsState::GoActive { .. } => {
-                panic!("set_active_request called while already going active");
+                info!(
+                    self.log,
+                    "{} request to activate upstairs already going active",
+                    self.cfg.upstairs_id
+                );
+                let _ = reply.send(Err(CrucibleError::UpstairsAlreadyActive));
             }
             UpstairsState::Deactivating { .. } => {
                 warn!(
