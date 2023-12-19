@@ -1806,9 +1806,13 @@ impl Upstairs {
 pub(crate) mod test {
     use super::*;
     use crate::{
-        downstairs::test::set_all_active, test::make_upstairs, BlockReq,
-        BlockReqWaiter, DsState, JobId,
+        downstairs::test::set_all_active,
+        test::{make_encrypted_upstairs, make_upstairs},
+        BlockReq, BlockReqWaiter, DsState, JobId,
     };
+    use bytes::BytesMut;
+    use crucible_protocol::ReadResponse;
+    use futures::FutureExt;
 
     // Test function to create just enough of an Upstairs for our needs.
     pub(crate) fn create_test_upstairs() -> Upstairs {
@@ -3468,5 +3472,642 @@ pub(crate) mod test {
         for c in up.downstairs.clients.iter() {
             assert_eq!(c.state(), DsState::New);
         }
+    }
+
+    #[tokio::test]
+    async fn good_decryption() {
+        let mut up = make_encrypted_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        let data = Buffer::new(512);
+        let offset = Block::new_512(7);
+        let (_tx, res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Read { offset, data },
+            res,
+        }))
+        .await;
+
+        // fake read response from downstairs that will fail decryption
+        let mut data = Vec::from([1u8; 512]);
+
+        let (nonce, tag, hash) = up
+            .cfg
+            .encryption_context
+            .as_ref()
+            .unwrap()
+            .encrypt_in_place(&mut data)
+            .unwrap();
+
+        let responses = Ok(vec![ReadResponse {
+            eid: 0,
+            offset,
+
+            data: BytesMut::from(&data[..]),
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: nonce.into(),
+                        tag: tag.into(),
+                    },
+                ),
+                hash,
+            }],
+        }]);
+
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id: ClientId::new(0),
+            action: ClientAction::Response(Message::ReadResponse {
+                upstairs_id: up.cfg.upstairs_id,
+                session_id: up.cfg.session_id,
+                job_id: JobId(1000),
+                responses,
+            }),
+        }))
+        .await;
+        // no panic, great work everyone
+    }
+
+    #[tokio::test]
+    async fn bad_decryption_means_panic() {
+        let mut up = make_encrypted_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        let data = Buffer::new(512);
+        let offset = Block::new_512(7);
+        let (_tx, res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Read { offset, data },
+            res,
+        }))
+        .await;
+
+        // fake read response from downstairs that will fail decryption
+        let mut data = Vec::from([1u8; 512]);
+
+        let (nonce, tag, _) = up
+            .cfg
+            .encryption_context
+            .as_ref()
+            .unwrap()
+            .encrypt_in_place(&mut data)
+            .unwrap();
+
+        let nonce: [u8; 12] = nonce.into();
+        let mut tag: [u8; 16] = tag.into();
+
+        // alter tag
+        if tag[3] == 0xFF {
+            tag[3] = 0x00;
+        } else {
+            tag[3] = 0xFF;
+        }
+
+        // compute integrity hash after alteration above! It should still
+        // validate
+        let hash = integrity_hash(&[&nonce, &tag, &data]);
+
+        let responses = Ok(vec![ReadResponse {
+            eid: 0,
+            offset,
+
+            data: BytesMut::from(&data[..]),
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext { nonce, tag },
+                ),
+                hash,
+            }],
+        }]);
+
+        // Prepare to receive the message with an invalid tag
+        let fut =
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: ClientId::new(0),
+                action: ClientAction::Response(Message::ReadResponse {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
+                    job_id: JobId(1000),
+                    responses,
+                }),
+            }));
+
+        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+        assert!(result.is_err());
+        let r = result
+            .as_ref()
+            .unwrap_err()
+            .downcast_ref::<String>()
+            .unwrap();
+        assert!(
+            r.contains("DecryptionError"),
+            "panic for the wrong reason: {r}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bad_hash_on_encrypted_read_panic() {
+        let mut up = make_encrypted_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        let data = Buffer::new(512);
+        let offset = Block::new_512(7);
+        let (_tx, res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Read { offset, data },
+            res,
+        }))
+        .await;
+
+        // fake read response from downstairs that will fail integrity hash
+        // check
+        let mut data = Vec::from([1u8; 512]);
+
+        let (nonce, tag, _) = up
+            .cfg
+            .encryption_context
+            .as_ref()
+            .unwrap()
+            .encrypt_in_place(&mut data)
+            .unwrap();
+
+        let nonce: [u8; 12] = nonce.into();
+        let mut tag: [u8; 16] = tag.into();
+
+        // alter tag
+        if tag[3] == 0xFF {
+            tag[3] = 0x00;
+        } else {
+            tag[3] = 0xFF;
+        }
+
+        let responses = Ok(vec![ReadResponse {
+            eid: 0,
+            offset,
+
+            data: BytesMut::from(&data[..]),
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext { nonce, tag },
+                ),
+                hash: 10000, // junk hash
+            }],
+        }]);
+
+        // Prepare to receive the message with a junk hash
+        let fut =
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: ClientId::new(0),
+                action: ClientAction::Response(Message::ReadResponse {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
+                    job_id: JobId(1000),
+                    responses,
+                }),
+            }));
+
+        // Don't use `should_panic`, as the `unwrap` above could cause this test
+        // to pass for the wrong reason.
+        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+
+        assert!(result.is_err());
+        let r = result
+            .as_ref()
+            .unwrap_err()
+            .downcast_ref::<String>()
+            .unwrap();
+        assert!(r.contains("HashMismatch"));
+    }
+
+    #[tokio::test]
+    async fn bad_read_hash_makes_panic() {
+        let mut up = make_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        let data = Buffer::new(512);
+        let offset = Block::new_512(7);
+        let (_tx, res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Read { offset, data },
+            res,
+        }))
+        .await;
+
+        // fake read response from downstairs that will fail integrity hash
+        // check
+        let responses = Ok(vec![ReadResponse {
+            eid: 0,
+            offset,
+
+            data: BytesMut::from([1u8; 512].as_slice()),
+            block_contexts: vec![BlockContext {
+                encryption_context: None,
+                hash: 10000, // junk hash
+            }],
+        }]);
+
+        // Prepare to handle the response with a junk hash
+        let fut =
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: ClientId::new(0),
+                action: ClientAction::Response(Message::ReadResponse {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
+                    job_id: JobId(1000),
+                    responses,
+                }),
+            }));
+
+        // Don't use `should_panic`, as the `unwrap` above could cause this test
+        // to pass for the wrong reason.
+        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+
+        assert!(result.is_err());
+        let r = result
+            .as_ref()
+            .unwrap_err()
+            .downcast_ref::<String>()
+            .unwrap();
+        assert!(r.contains("HashMismatch"));
+    }
+
+    #[tokio::test]
+    async fn work_read_hash_mismatch() {
+        let mut up = make_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        let data = Buffer::new(512);
+        let offset = Block::new_512(7);
+        let (_tx, res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Read { offset, data },
+            res,
+        }))
+        .await;
+
+        let data = BytesMut::from([1u8; 512].as_slice());
+        let hash = integrity_hash(&[&data]);
+        let r1 = Ok(vec![ReadResponse {
+            eid: 0,
+            offset,
+
+            data: data.clone(),
+            block_contexts: vec![BlockContext {
+                encryption_context: None,
+                hash,
+            }],
+        }]);
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id: ClientId::new(1),
+            action: ClientAction::Response(Message::ReadResponse {
+                upstairs_id: up.cfg.upstairs_id,
+                session_id: up.cfg.session_id,
+                job_id: JobId(1000),
+                responses: r1,
+            }),
+        }))
+        .await;
+
+        // Send back a second response with different data and a hash that (1)
+        // is correct for that data, but (2) does not match the original hash.
+        //
+        // This distinguishes between a regular hash failure and a hash mismatch
+        // between multiple ReadResponse
+        let data = BytesMut::from([2u8; 512].as_slice());
+        let hash = integrity_hash(&[&data]);
+        let r2 = Ok(vec![ReadResponse {
+            eid: 0,
+            offset,
+
+            data: data.clone(),
+            block_contexts: vec![BlockContext {
+                encryption_context: None,
+                hash,
+            }],
+        }]);
+        let fut =
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: ClientId::new(2),
+                action: ClientAction::Response(Message::ReadResponse {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
+                    job_id: JobId(1000),
+                    responses: r2,
+                }),
+            }));
+        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+
+        assert!(result.is_err());
+        let r = result
+            .as_ref()
+            .unwrap_err()
+            .downcast_ref::<String>()
+            .unwrap();
+        assert!(!r.contains("HashMismatch")); // not the usual mismatch error
+        assert!(r.contains("read hash mismatch"));
+    }
+
+    #[tokio::test]
+    async fn work_read_hash_mismatch_third() {
+        // Test that a hash mismatch on the third response will trigger a panic.
+        let mut up = make_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        let data = Buffer::new(512);
+        let offset = Block::new_512(7);
+        let (_tx, res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Read { offset, data },
+            res,
+        }))
+        .await;
+
+        for client_id in [ClientId::new(0), ClientId::new(1)] {
+            let data = BytesMut::from([1u8; 512].as_slice());
+            let hash = integrity_hash(&[&data]);
+            let r = Ok(vec![ReadResponse {
+                eid: 0,
+                offset,
+
+                data: data.clone(),
+                block_contexts: vec![BlockContext {
+                    encryption_context: None,
+                    hash,
+                }],
+            }]);
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id,
+                action: ClientAction::Response(Message::ReadResponse {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
+                    job_id: JobId(1000),
+                    responses: r,
+                }),
+            }))
+            .await;
+        }
+
+        // Send back a second response with different data and a hash that (1)
+        // is correct for that data, but (2) does not match the original hash.
+        //
+        // This distinguishes between a regular hash failure and a hash mismatch
+        // between multiple ReadResponse
+        let data = BytesMut::from([2u8; 512].as_slice());
+        let hash = integrity_hash(&[&data]);
+        let r = Ok(vec![ReadResponse {
+            eid: 0,
+            offset,
+
+            data: data.clone(),
+            block_contexts: vec![BlockContext {
+                encryption_context: None,
+                hash,
+            }],
+        }]);
+        let fut =
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: ClientId::new(2),
+                action: ClientAction::Response(Message::ReadResponse {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
+                    job_id: JobId(1000),
+                    responses: r,
+                }),
+            }));
+        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+
+        assert!(result.is_err());
+        let r = result
+            .as_ref()
+            .unwrap_err()
+            .downcast_ref::<String>()
+            .unwrap();
+        assert!(!r.contains("HashMismatch")); // not the usual mismatch error
+        assert!(r.contains("read hash mismatch"));
+    }
+
+    #[tokio::test]
+    async fn work_read_hash_inside() {
+        // Test that a hash length mismatch will panic
+        let mut up = make_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        let data = Buffer::new(512);
+        let offset = Block::new_512(7);
+        let (_tx, res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Read { offset, data },
+            res,
+        }))
+        .await;
+
+        let data = BytesMut::from([1u8; 512].as_slice());
+        let hash = integrity_hash(&[&data]);
+        let r1 = Ok(vec![ReadResponse {
+            eid: 0,
+            offset,
+
+            data: data.clone(),
+            block_contexts: vec![BlockContext {
+                encryption_context: None,
+                hash,
+            }],
+        }]);
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id: ClientId::new(1),
+            action: ClientAction::Response(Message::ReadResponse {
+                upstairs_id: up.cfg.upstairs_id,
+                session_id: up.cfg.session_id,
+                job_id: JobId(1000),
+                responses: r1,
+            }),
+        }))
+        .await;
+
+        // Send back a second response with more data (2 blocks instead of 1);
+        // the first block matches.
+        let data = BytesMut::from([1u8; 512].as_slice());
+        let hash = integrity_hash(&[&data]);
+        let response = ReadResponse {
+            eid: 0,
+            offset,
+
+            data: data.clone(),
+            block_contexts: vec![BlockContext {
+                encryption_context: None,
+                hash,
+            }],
+        };
+        let r2 = Ok(vec![response.clone(), response.clone()]);
+        let fut =
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: ClientId::new(2),
+                action: ClientAction::Response(Message::ReadResponse {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
+                    job_id: JobId(1000),
+                    responses: r2,
+                }),
+            }));
+        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+
+        assert!(result.is_err());
+        let r = result
+            .as_ref()
+            .unwrap_err()
+            .downcast_ref::<String>()
+            .unwrap();
+        assert!(!r.contains("HashMismatch"));
+        assert!(r.contains("read hash mismatch"));
+    }
+
+    #[tokio::test]
+    async fn work_read_hash_mismatch_no_data() {
+        // Test that empty data first, then data later will trigger
+        // hash mismatch panic.
+        let mut up = make_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        let data = Buffer::new(512);
+        let offset = Block::new_512(7);
+        let (_tx, res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Read { offset, data },
+            res,
+        }))
+        .await;
+
+        // The first read has no block contexts, because it was unwritten
+        let data = BytesMut::from([0u8; 512].as_slice());
+        let r1 = Ok(vec![ReadResponse {
+            eid: 0,
+            offset,
+
+            data: data.clone(),
+            block_contexts: vec![],
+        }]);
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id: ClientId::new(1),
+            action: ClientAction::Response(Message::ReadResponse {
+                upstairs_id: up.cfg.upstairs_id,
+                session_id: up.cfg.session_id,
+                job_id: JobId(1000),
+                responses: r1,
+            }),
+        }))
+        .await;
+
+        // Send back a second response with actual block contexts (oh no!)
+        let hash = integrity_hash(&[&data]);
+        let r2 = Ok(vec![ReadResponse {
+            eid: 0,
+            offset,
+
+            data: data.clone(),
+            block_contexts: vec![BlockContext {
+                encryption_context: None,
+                hash,
+            }],
+        }]);
+        let fut =
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: ClientId::new(2),
+                action: ClientAction::Response(Message::ReadResponse {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
+                    job_id: JobId(1000),
+                    responses: r2,
+                }),
+            }));
+        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+
+        assert!(result.is_err());
+        let r = result
+            .as_ref()
+            .unwrap_err()
+            .downcast_ref::<String>()
+            .unwrap();
+        assert!(!r.contains("HashMismatch"));
+        assert!(r.contains("read hash mismatch"));
+    }
+
+    #[tokio::test]
+    async fn work_read_hash_mismatch_no_data_next() {
+        // Test that missing data on the 2nd read response will panic
+        let mut up = make_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        let data = Buffer::new(512);
+        let offset = Block::new_512(7);
+        let (_tx, res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Read { offset, data },
+            res,
+        }))
+        .await;
+
+        // The first read has no block contexts, because it was unwritten
+        let data = BytesMut::from([0u8; 512].as_slice());
+        let hash = integrity_hash(&[&data]);
+        let r1 = Ok(vec![ReadResponse {
+            eid: 0,
+            offset,
+
+            data: data.clone(),
+            block_contexts: vec![BlockContext {
+                encryption_context: None,
+                hash,
+            }],
+        }]);
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id: ClientId::new(1),
+            action: ClientAction::Response(Message::ReadResponse {
+                upstairs_id: up.cfg.upstairs_id,
+                session_id: up.cfg.session_id,
+                job_id: JobId(1000),
+                responses: r1,
+            }),
+        }))
+        .await;
+
+        // Send back a second response with actual data (oh no!)
+        let r2 = Ok(vec![ReadResponse {
+            eid: 0,
+            offset,
+
+            data: data.clone(),
+            block_contexts: vec![
+                // No block contexts!
+            ],
+        }]);
+        let fut =
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: ClientId::new(2),
+                action: ClientAction::Response(Message::ReadResponse {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
+                    job_id: JobId(1000),
+                    responses: r2,
+                }),
+            }));
+        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+
+        assert!(result.is_err());
+        let r = result
+            .as_ref()
+            .unwrap_err()
+            .downcast_ref::<String>()
+            .unwrap();
+        assert!(!r.contains("HashMismatch"));
+        assert!(r.contains("read hash mismatch"));
     }
 }

@@ -29,6 +29,29 @@ pub(crate) fn make_upstairs() -> crate::upstairs::Upstairs {
     )
 }
 
+pub(crate) fn make_encrypted_upstairs() -> crate::upstairs::Upstairs {
+    let mut def = RegionDefinition::default();
+    def.set_block_size(512);
+    def.set_extent_size(Block::new_512(100));
+    def.set_extent_count(10);
+
+    let opts = CrucibleOpts {
+        target: vec![],
+        lossy: false,
+        key: Some("tCw7zw0hAsPuxMOTWwnPEFYjBK9qJRtYyGdEXKEnrg0=".to_owned()),
+        ..Default::default()
+    };
+
+    crate::upstairs::Upstairs::new(
+        &opts,
+        0,
+        Some(def),
+        Arc::new(Guest::new()),
+        None,
+        crucible_common::build_logger(),
+    )
+}
+
 #[cfg(test)]
 pub(crate) mod up_test {
     use super::*;
