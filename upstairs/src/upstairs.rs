@@ -4097,7 +4097,7 @@ pub(crate) mod test {
         }))
         .await;
 
-        // Send back a second response with actual data (oh no!)
+        // Send back a second response with no actual data (oh no!)
         let r2 = Ok(vec![ReadResponse {
             eid: 0,
             offset,
