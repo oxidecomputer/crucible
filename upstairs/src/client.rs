@@ -1170,10 +1170,15 @@ impl DownstairsClient {
     /// Handles a single IO operation
     ///
     /// Returns `true` if the job is now ackable, `false` otherwise
+    ///
+    /// If this is a read response, then the values in `responses` must
+    /// _already_ be decrypted (with corresponding hashes stored in
+    /// `read_response_hashes`).
     pub(crate) fn process_io_completion(
         &mut self,
         job: &mut DownstairsIO,
-        mut responses: Result<Vec<ReadResponse>, CrucibleError>,
+        responses: Result<Vec<ReadResponse>, CrucibleError>,
+        read_response_hashes: Vec<Option<u64>>,
         deactivate: bool,
         extent_info: Option<ExtentInfo>,
     ) -> bool {
@@ -1189,26 +1194,9 @@ impl DownstairsClient {
         let mut jobs_completed_ok = job.state_count().completed_ok();
         let mut ackable = false;
 
-        // Validate integrity hashes and optionally authenticated decryption.
-        //
-        // With AE, responses can come back that are invalid given an encryption
-        // context. Test this here. If it fails, then something has gone
-        // irrecoverably wrong and we should panic.
-        let mut read_response_hashes = Vec::new();
-        let new_state = match &mut responses {
-            Ok(responses) => {
-                responses.iter_mut().for_each(|x| {
-                    let mh =
-                        if let Some(context) = &self.cfg.encryption_context {
-                            validate_encrypted_read_response(
-                                x, context, &self.log,
-                            )
-                        } else {
-                            validate_unencrypted_read_response(x, &self.log)
-                        }
-                        .expect("decryption failed");
-                    read_response_hashes.push(mh);
-                });
+        let new_state = match &responses {
+            Ok(..) => {
+                // Messages have already been decrypted out-of-band
                 jobs_completed_ok += 1;
                 IOState::Done
             }
@@ -2620,8 +2608,12 @@ pub(crate) fn validate_encrypted_read_response(
         // expect to see this case unless this is a blank block.
         //
         // XXX if it's not a blank block, we may be under attack?
-        assert!(response.data[..].iter().all(|&x| x == 0));
-        return Ok(None);
+        if response.data[..].iter().all(|&x| x == 0) {
+            return Ok(None);
+        } else {
+            error!(log, "got empty block context with non-blank block");
+            return Err(CrucibleError::DecryptionError);
+        }
     }
 
     let mut valid_hash = None;
@@ -2786,9 +2778,12 @@ pub(crate) fn validate_unencrypted_read_response(
         // this case unless this is a blank block.
         //
         // XXX if it's not a blank block, we may be under attack?
-        assert!(response.data[..].iter().all(|&x| x == 0));
-
-        Ok(None)
+        if response.data[..].iter().all(|&x| x == 0) {
+            Ok(None)
+        } else {
+            error!(log, "got empty block context with non-blank block");
+            Err(CrucibleError::HashMismatch)
+        }
     }
 }
 
