@@ -45,7 +45,7 @@ use region::Region;
 pub use admin::run_dropshot;
 pub use dump::dump_region;
 pub use dynamometer::*;
-pub use stats::*;
+pub use stats::{DsCountStat, DsStatOuter};
 
 fn deadline_secs(secs: u64) -> Instant {
     Instant::now()
