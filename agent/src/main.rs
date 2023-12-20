@@ -1820,7 +1820,9 @@ fn worker_region_create(
      * files (note region starts blank).
      */
     info!(log, "creating region {:?} at {:?}", region, dir);
-    let cmd = Command::new(prog)
+
+    let mut binding = Command::new(prog);
+    let mut cmd = binding
         .env_clear()
         .arg("create")
         .arg("--uuid")
@@ -1832,9 +1834,13 @@ fn worker_region_create(
         .arg("--extent-size")
         .arg(region.extent_size.to_string())
         .arg("--extent-count")
-        .arg(region.extent_count.to_string())
-        .arg(if region.encrypted { "--encrypted" } else { "" })
-        .output()?;
+        .arg(region.extent_count.to_string());
+
+    if region.encrypted {
+        cmd = cmd.arg("--encrypted");
+    }
+
+    let cmd = cmd.output()?;
 
     if cmd.status.success() {
         info!(log, "region files created ok");
