@@ -834,10 +834,17 @@ impl Encoder<Message> for CrucibleEncoder {
         dst: &mut BytesMut,
     ) -> Result<(), Self::Error> {
         let len = CrucibleEncoder::serialized_size(&m)?;
+        if len > MAX_FRM_LEN {
+            // Bail out before creating a frame that the decoder will refuse to
+            // deserialize
+            bail!("frame is {} bytes, more than maximum {}", len, MAX_FRM_LEN);
+        }
 
+        let before = dst.len();
         dst.reserve(len);
         dst.put_u32_le(len as u32);
         bincode::serialize_into(dst.writer(), &m)?;
+        debug_assert_eq!(dst.len() - before, len);
 
         Ok(())
     }
@@ -852,10 +859,17 @@ impl Encoder<&Message> for CrucibleEncoder {
         dst: &mut BytesMut,
     ) -> Result<(), Self::Error> {
         let len = CrucibleEncoder::serialized_size(m)?;
+        if len > MAX_FRM_LEN {
+            // Bail out before creating a frame that the decoder will refuse to
+            // deserialize
+            bail!("frame is {} bytes, more than maximum {}", len, MAX_FRM_LEN);
+        }
 
+        let before = dst.len();
         dst.reserve(len);
         dst.put_u32_le(len as u32);
         bincode::serialize_into(dst.writer(), &m)?;
+        debug_assert_eq!(dst.len() - before, len);
 
         Ok(())
     }
@@ -905,13 +919,16 @@ impl Decoder for CrucibleDecoder {
             /*
              * Wait for an entire frame.  Expand the buffer to fit.
              */
-            src.reserve(len);
+            src.reserve(len - src.len());
             return Ok(None);
         }
 
-        src.advance(4);
-
-        let message = bincode::deserialize_from(src.reader());
+        let message = bincode::deserialize_from(&src[4..len]);
+        if len == src.len() {
+            src.clear();
+        } else {
+            src.advance(len);
+        }
 
         Ok(Some(message?))
     }
