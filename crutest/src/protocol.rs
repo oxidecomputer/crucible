@@ -33,7 +33,7 @@ pub enum CliMessage {
     // Run the fill test.
     Fill(bool),
     Flush,
-    Generic(usize),
+    Generic(usize, bool),
     Info(u64, u64, u64),
     InfoPlease,
     IsActive,
@@ -296,7 +296,7 @@ mod tests {
 
     #[test]
     fn rt_generic() -> Result<()> {
-        let input = CliMessage::Generic(2);
+        let input = CliMessage::Generic(2, true);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }
