@@ -2505,8 +2505,8 @@ impl Drop for Guest {
     fn drop(&mut self) {
         // Any BlockReqs or GuestWork which remains pending on this Guest when
         // it is dropped should be issued an error completion.  This avoids
-        // dropping BlockRes BlockRes instances prior to completion (which
-        // results in a panic).
+        // dropping BlockRes instances prior to completion (which results in a
+        // panic).
 
         self.reqs.get_mut().drain(..).for_each(|req| {
             req.res.send_err(CrucibleError::GenericError(

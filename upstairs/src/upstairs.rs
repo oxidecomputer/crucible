@@ -945,7 +945,7 @@ impl Upstairs {
                     "{} request to activate upstairs already going active",
                     self.cfg.upstairs_id
                 );
-                res.send_err(CrucibleError::UpstairsDeactivating);
+                res.send_err(CrucibleError::UpstairsAlreadyActive);
             }
             UpstairsState::Deactivating(..) => {
                 warn!(
