@@ -230,9 +230,9 @@ async fn cli_read(
     let data = crucible::Buffer::from_vec(vec![255; length]);
 
     println!("Read  at block {:5}, len:{:7}", offset.value, data.len());
-    guest.read(offset, data.clone()).await?;
+    let data = guest.read(offset, data).await?;
 
-    let mut dl = data.into_vec().unwrap();
+    let mut dl = data.into_vec();
     match validate_vec(
         dl.clone(),
         block_index,

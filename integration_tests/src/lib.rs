@@ -398,11 +398,11 @@ mod test {
 
         // Verify contents are zero on init
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x00_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0x00_u8; BLOCK_SIZE * 10], buffer.into_vec());
 
         // Write data in
         volume
@@ -414,11 +414,11 @@ mod test {
 
         // Read parent, verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], buffer.into_vec());
 
         Ok(())
     }
@@ -450,8 +450,8 @@ mod test {
 
         // A read of zero length does not error.
         let buffer = Buffer::new(0);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let _buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
         // A write of zero length does not return error.
@@ -500,11 +500,11 @@ mod test {
             .await?;
 
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        in_memory_data
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = in_memory_data
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![11; BLOCK_SIZE * 10], &buffer[..]);
 
         let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
@@ -525,11 +525,11 @@ mod test {
 
         // Verify contents are 11 on init
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![11; BLOCK_SIZE * 10], &buffer[..]);
 
         // Write data in
         if is_write_unwritten {
@@ -550,19 +550,19 @@ mod test {
 
         // Verify parent wasn't written to
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        in_memory_data
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = in_memory_data
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![11; BLOCK_SIZE * 10], &buffer[..]);
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![55; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![55; BLOCK_SIZE * 10], &buffer[..]);
 
         Ok(())
     }
@@ -589,11 +589,11 @@ mod test {
             .await?;
 
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        in_memory_data
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = in_memory_data
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![11; BLOCK_SIZE * 10], &buffer[..]);
 
         // Create volume with read only parent
         let vcr: VolumeConstructionRequest =
@@ -625,11 +625,11 @@ mod test {
 
         // Verify contents are 11 on init
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![11; BLOCK_SIZE * 10], &buffer[..]);
 
         // Write data in
         volume
@@ -641,19 +641,19 @@ mod test {
 
         // Verify parent wasn't written to
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        in_memory_data
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = in_memory_data
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![11; BLOCK_SIZE * 10], &buffer[..]);
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![55; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![55; BLOCK_SIZE * 10], &buffer[..]);
 
         Ok(())
     }
@@ -710,11 +710,11 @@ mod test {
 
         // Read one block: should be all 0xff
         let buffer = Buffer::new(BLOCK_SIZE);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0xff; BLOCK_SIZE], *buffer.as_vec().await);
+        assert_eq!(vec![0xff; BLOCK_SIZE], &buffer[..]);
 
         // Write one block full of 0x01
         volume
@@ -726,11 +726,11 @@ mod test {
 
         // Read one block: should be all 0x01
         let buffer = Buffer::new(BLOCK_SIZE);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x01; BLOCK_SIZE], *buffer.as_vec().await);
+        assert_eq!(vec![0x01; BLOCK_SIZE], &buffer[..]);
         Ok(())
     }
 
@@ -763,11 +763,11 @@ mod test {
 
         // Read one block: should be all 0x00
         let buffer = Buffer::new(BLOCK_SIZE);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x00; BLOCK_SIZE], *buffer.as_vec().await);
+        assert_eq!(vec![0x00; BLOCK_SIZE], &buffer[..]);
 
         Ok(())
     }
@@ -819,11 +819,11 @@ mod test {
 
         // Read volume, verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
 
         // Write_unwritten data in, should not change anything
         volume
@@ -835,11 +835,11 @@ mod test {
 
         // Read volume, verify original contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
 
         Ok(())
     }
@@ -890,11 +890,11 @@ mod test {
 
         // Read parent, verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
 
         // A second Write_unwritten data, should not change anything
         volume
@@ -906,11 +906,11 @@ mod test {
 
         // Read volume, verify original contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
 
         Ok(())
     }
@@ -971,20 +971,17 @@ mod test {
 
         // Read and verify
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        // Get the data into a vec we can take slices of.
-        let dl = buffer.as_vec().await.to_vec();
-
         // Verify data in the first block is from the first write
-        assert_eq!(vec![0x33_u8; BLOCK_SIZE], dl[0..BLOCK_SIZE]);
+        assert_eq!(vec![0x33_u8; BLOCK_SIZE], &buffer[0..BLOCK_SIZE]);
 
         // Verify the remaining blocks have the write_unwritten data
         assert_eq!(
             vec![0x55_u8; BLOCK_SIZE * 9],
-            dl[BLOCK_SIZE..BLOCK_SIZE * 10]
+            &buffer[BLOCK_SIZE..BLOCK_SIZE * 10]
         );
 
         Ok(())
@@ -1049,11 +1046,11 @@ mod test {
 
         // Read parent, verify contents
         let buffer = Buffer::new(full_volume_size);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x55_u8; full_volume_size], *buffer.as_vec().await);
+        assert_eq!(vec![0x55_u8; full_volume_size], &buffer[..]);
 
         // A second Write_unwritten data, should not change anything
         volume
@@ -1065,11 +1062,11 @@ mod test {
 
         // Read volume, verify original contents
         let buffer = Buffer::new(full_volume_size);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x55_u8; full_volume_size], *buffer.as_vec().await);
+        assert_eq!(vec![0x55_u8; full_volume_size], &buffer[..]);
 
         Ok(())
     }
@@ -1136,11 +1133,11 @@ mod test {
 
         // Read parent, verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 2);
-        volume
-            .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 2], *buffer.as_vec().await);
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 2], &buffer[..]);
 
         // A second Write_unwritten data, should not change the previous
         // write_unwritten, but should change the remaining blocks that
@@ -1155,26 +1152,23 @@ mod test {
         // Read full volume, verify first write_unwritten still valid, but the
         // other blocks of the 2nd write_unwritten are updated.
         let buffer = Buffer::new(full_volume_size);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        // Get the data into a vec we can take slices of.
-        let dl = buffer.as_vec().await.to_vec();
-
         // Verify data in blocks 0-9 is the second write_unwritten
-        assert_eq!(vec![0x22_u8; BLOCK_SIZE * 9], dl[0..(BLOCK_SIZE * 9)]);
+        assert_eq!(vec![0x22_u8; BLOCK_SIZE * 9], &buffer[0..(BLOCK_SIZE * 9)]);
 
         // Verify data in blocks 10-11 is the first write_unwritten
         assert_eq!(
             vec![0x55_u8; BLOCK_SIZE * 2],
-            dl[(BLOCK_SIZE * 9)..(BLOCK_SIZE * 11)]
+            &buffer[(BLOCK_SIZE * 9)..(BLOCK_SIZE * 11)]
         );
 
         // Verify the remaining blocks have the second write_unwritten data
         assert_eq!(
             vec![0x22_u8; BLOCK_SIZE * 9],
-            dl[(BLOCK_SIZE * 11)..full_volume_size]
+            &buffer[(BLOCK_SIZE * 11)..full_volume_size]
         );
 
         Ok(())
@@ -1262,20 +1256,17 @@ mod test {
 
         // Read full volume
         let buffer = Buffer::new(full_volume_size);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        // Get the data into a vec we can take slices of.
-        let dl = buffer.as_vec().await.to_vec();
-
         // Verify data in blocks 0-7 is the second write_unwritten
-        assert_eq!(vec![0x22_u8; BLOCK_SIZE * 7], dl[0..(BLOCK_SIZE * 7)]);
+        assert_eq!(vec![0x22_u8; BLOCK_SIZE * 7], &buffer[0..(BLOCK_SIZE * 7)]);
 
         // Verify data in blocks 8-19 is the third write
         assert_eq!(
             vec![0x11_u8; BLOCK_SIZE * 13],
-            dl[(BLOCK_SIZE * 7)..full_volume_size]
+            &buffer[(BLOCK_SIZE * 7)..full_volume_size]
         );
 
         Ok(())
@@ -1321,11 +1312,11 @@ mod test {
 
         // Read back in_memory, verify 1s
         let buffer = Buffer::new(BLOCK_SIZE * 5);
-        in_memory_data
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = in_memory_data
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 5], *buffer.as_vec().await);
+        assert_eq!(vec![11; BLOCK_SIZE * 5], &buffer[..]);
 
         let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
@@ -1346,13 +1337,13 @@ mod test {
 
         // Verify parent contents in one read
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
         let mut expected = vec![11; BLOCK_SIZE * 5];
         expected.extend(vec![0x00; BLOCK_SIZE * 5]);
-        assert_eq!(expected, *buffer.as_vec().await);
+        assert_eq!(expected, &buffer[..]);
 
         // One big write!
         let write_offset = Block::new(0, BLOCK_SIZE.trailing_zeros());
@@ -1365,11 +1356,11 @@ mod test {
 
         // Verify volume contents in one read
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![55; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![55; BLOCK_SIZE * 10], &buffer[..]);
 
         Ok(())
     }
@@ -1426,11 +1417,11 @@ mod test {
 
         // Verify contents are 11 at startup
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![11; BLOCK_SIZE * 10], &buffer[..]);
 
         // Call the scrubber.  This should replace all data from the
         // RO parent into the main volume.
@@ -1447,11 +1438,11 @@ mod test {
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![11; BLOCK_SIZE * 10], &buffer[..]);
 
         Ok(())
     }
@@ -1509,19 +1500,19 @@ mod test {
 
         // Verify contents of RO parent are 1s at startup
         let buffer = Buffer::new(BLOCK_SIZE * 5);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 5], *buffer.as_vec().await);
+        assert_eq!(vec![11; BLOCK_SIZE * 5], &buffer[..]);
 
         // Verify contents of blocks 5-10 are zero.
         let buffer = Buffer::new(BLOCK_SIZE * 5);
-        volume
-            .read(Block::new(5, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(5, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![00; BLOCK_SIZE * 5], *buffer.as_vec().await);
+        assert_eq!(vec![00; BLOCK_SIZE * 5], &buffer[..]);
 
         // Call the scrubber.  This should replace all data from the
         // RO parent into the main volume.
@@ -1538,19 +1529,16 @@ mod test {
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        // Get the data into a vec we can take slices of.
-        let dl = buffer.as_vec().await.to_vec();
-
         // Verify data in the first half is from the RO parent
-        assert_eq!(vec![11; BLOCK_SIZE * 5], dl[0..BLOCK_SIZE * 5]);
+        assert_eq!(vec![11; BLOCK_SIZE * 5], &buffer[0..BLOCK_SIZE * 5]);
         // Verify data in the second half is from the write unwritten
         assert_eq!(
             vec![55; BLOCK_SIZE * 5],
-            dl[BLOCK_SIZE * 5..BLOCK_SIZE * 10]
+            &buffer[BLOCK_SIZE * 5..BLOCK_SIZE * 10]
         );
 
         Ok(())
@@ -1634,8 +1622,8 @@ mod test {
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
         // First blocks are 1s   |11--------|
@@ -1650,7 +1638,7 @@ mod test {
         expected.extend(vec![33; BLOCK_SIZE]);
         // Two final blocks of 0 |1121100300|
         expected.extend(vec![0; BLOCK_SIZE * 2]);
-        assert_eq!(expected, *buffer.as_vec().await);
+        assert_eq!(expected, &buffer[..]);
 
         Ok(())
     }
@@ -1708,11 +1696,11 @@ mod test {
 
         // Verify contents are 11 at startup
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![11; BLOCK_SIZE * 10], &buffer[..]);
 
         // Write to the whole volume
         volume
@@ -1727,11 +1715,11 @@ mod test {
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![55; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![55; BLOCK_SIZE * 10], &buffer[..]);
 
         Ok(())
     }
@@ -1824,11 +1812,11 @@ mod test {
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 2);
-        volume
-            .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![22; BLOCK_SIZE * 2], *buffer.as_vec().await);
+        assert_eq!(vec![22; BLOCK_SIZE * 2], &buffer[..]);
 
         // A second write
         volume
@@ -1843,8 +1831,8 @@ mod test {
 
         // Read full volume
         let buffer = Buffer::new(BLOCK_SIZE * 20);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
         // Build the expected vec to compare our read with.
@@ -1856,7 +1844,7 @@ mod test {
         expected.extend(vec![22; BLOCK_SIZE * 2]);
         // remaining final blocks of 0 |3311111112||2000000000|
         expected.extend(vec![0; BLOCK_SIZE * 9]);
-        assert_eq!(expected, *buffer.as_vec().await);
+        assert_eq!(expected, &buffer[..]);
 
         Ok(())
     }
@@ -1951,11 +1939,11 @@ mod test {
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 2);
-        volume
-            .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![22; BLOCK_SIZE * 2], *buffer.as_vec().await);
+        assert_eq!(vec![22; BLOCK_SIZE * 2], &buffer[..]);
 
         // Write B
         //     |33--------||----------|
@@ -1980,8 +1968,8 @@ mod test {
 
         // Read full volume
         let buffer = Buffer::new(BLOCK_SIZE * 20);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
         // Build the expected vec to compare our read with.
@@ -1997,7 +1985,7 @@ mod test {
         expected.extend(vec![44; BLOCK_SIZE * 2]);
         // remaining final blocks of 0 |3311111112||2111440000|
         expected.extend(vec![0; BLOCK_SIZE * 4]);
-        assert_eq!(expected, *buffer.as_vec().await);
+        assert_eq!(expected, &buffer[..]);
 
         Ok(())
     }
@@ -2054,18 +2042,18 @@ mod test {
 
         // Read one block: should be all 0x00
         let buffer = Buffer::new(BLOCK_SIZE);
-        volume1
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume1
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x00; BLOCK_SIZE], *buffer.as_vec().await);
+        assert_eq!(vec![0x00; BLOCK_SIZE], &buffer[..]);
 
         let buffer = Buffer::new(BLOCK_SIZE);
-        volume2
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume2
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x00; BLOCK_SIZE], *buffer.as_vec().await);
+        assert_eq!(vec![0x00; BLOCK_SIZE], &buffer[..]);
 
         Ok(())
     }
@@ -2107,11 +2095,11 @@ mod test {
 
         // Verify contents are 00 at startup
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0; BLOCK_SIZE * 10], &buffer[..]);
 
         // Write to half volume
         volume
@@ -2126,8 +2114,8 @@ mod test {
 
         // Read and verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
         // Build the expected vec to compare our read with.
@@ -2135,7 +2123,7 @@ mod test {
         let mut expected = vec![55; BLOCK_SIZE * 5];
         // Original 0s from unwritten blocks  |5555500000|
         expected.extend(vec![0; BLOCK_SIZE * 5]);
-        assert_eq!(expected, *buffer.as_vec().await);
+        assert_eq!(expected, &buffer[..]);
 
         Ok(())
     }
@@ -2207,14 +2195,11 @@ mod test {
             volume.activate().await?;
 
             let buffer = Buffer::new(volume.total_size().await? as usize);
-            volume
-                .read(
-                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    buffer.clone(),
-                )
+            let buffer = volume
+                .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
                 .await?;
 
-            assert_eq!(*buffer.as_vec().await, random_buffer);
+            assert_eq!(&buffer[..], random_buffer);
 
             assert!(volume
                 .write(
@@ -2267,14 +2252,11 @@ mod test {
         // Validate that source blocks originally come from the read-only parent
         {
             let buffer = Buffer::new(volume.total_size().await? as usize);
-            volume
-                .read(
-                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    buffer.clone(),
-                )
+            let buffer = volume
+                .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
                 .await?;
 
-            assert_eq!(*buffer.as_vec().await, random_buffer);
+            assert_eq!(&buffer[..], random_buffer);
         }
 
         // Validate a flush works
@@ -2290,17 +2272,12 @@ mod test {
 
         {
             let buffer = Buffer::new(volume.total_size().await? as usize);
-            volume
-                .read(
-                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    buffer.clone(),
-                )
+            let buffer = volume
+                .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
                 .await?;
 
-            let buffer_vec = buffer.as_vec().await;
-
-            assert_eq!(buffer_vec[..BLOCK_SIZE], vec![0u8; BLOCK_SIZE]);
-            assert_eq!(buffer_vec[BLOCK_SIZE..], random_buffer[BLOCK_SIZE..]);
+            assert_eq!(&buffer[..BLOCK_SIZE], vec![0u8; BLOCK_SIZE]);
+            assert_eq!(&buffer[BLOCK_SIZE..], &random_buffer[BLOCK_SIZE..]);
         }
 
         // Validate a flush still works
@@ -2319,6 +2296,7 @@ mod test {
         // read-only.
         let mut test_downstairs_set =
             TestDownstairsSet::small_sqlite(false).await?;
+
         // This must be a SQLite extent!
         assert!(test_downstairs_set
             .downstairs1
@@ -2362,6 +2340,7 @@ mod test {
         drop(volume);
 
         test_downstairs_set.reboot_read_only().await?;
+
         // This must still be a SQLite backend!
         assert!(test_downstairs_set
             .downstairs1
@@ -2390,14 +2369,11 @@ mod test {
             volume.activate().await?;
 
             let buffer = Buffer::new(volume.total_size().await? as usize);
-            volume
-                .read(
-                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    buffer.clone(),
-                )
+            let buffer = volume
+                .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
                 .await?;
 
-            assert_eq!(*buffer.as_vec().await, random_buffer);
+            assert_eq!(&buffer[..], random_buffer);
 
             assert!(volume
                 .write(
@@ -2415,6 +2391,7 @@ mod test {
         let top_layer_tds = TestDownstairsSet::small(false).await?;
         let top_layer_opts = top_layer_tds.opts();
         let bottom_layer_opts = test_downstairs_set.opts();
+
         // The new volume is **not** using the SQLite backend!
         assert!(!top_layer_tds
             .downstairs1
@@ -2457,14 +2434,11 @@ mod test {
         // Validate that source blocks originally come from the read-only parent
         {
             let buffer = Buffer::new(volume.total_size().await? as usize);
-            volume
-                .read(
-                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    buffer.clone(),
-                )
+            let buffer = volume
+                .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
                 .await?;
 
-            assert_eq!(*buffer.as_vec().await, random_buffer);
+            assert_eq!(&buffer[..], random_buffer);
         }
 
         // Validate a flush works
@@ -2480,17 +2454,12 @@ mod test {
 
         {
             let buffer = Buffer::new(volume.total_size().await? as usize);
-            volume
-                .read(
-                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    buffer.clone(),
-                )
+            let buffer = volume
+                .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
                 .await?;
 
-            let buffer_vec = buffer.as_vec().await;
-
-            assert_eq!(buffer_vec[..BLOCK_SIZE], vec![0u8; BLOCK_SIZE]);
-            assert_eq!(buffer_vec[BLOCK_SIZE..], random_buffer[BLOCK_SIZE..]);
+            assert_eq!(&buffer[..BLOCK_SIZE], vec![0u8; BLOCK_SIZE]);
+            assert_eq!(&buffer[BLOCK_SIZE..], &random_buffer[BLOCK_SIZE..]);
         }
 
         // Validate a flush still works
@@ -2575,11 +2544,11 @@ mod test {
         volume.activate().await?;
         // Validate that source blocks are the same
         let buffer = Buffer::new(volume.total_size().await? as usize);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(*buffer.as_vec().await, random_buffer);
+        assert_eq!(&buffer[..], random_buffer);
 
         Ok(())
     }
@@ -2665,12 +2634,11 @@ mod test {
 
         // Read back what we wrote.
         let buffer = Buffer::new(volume.total_size().await? as usize);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        let buffer_vec = buffer.as_vec().await;
-        assert_eq!(buffer_vec[BLOCK_SIZE..], random_buffer[BLOCK_SIZE..]);
+        assert_eq!(&buffer[BLOCK_SIZE..], &random_buffer[BLOCK_SIZE..]);
 
         Ok(())
     }
@@ -2974,12 +2942,11 @@ mod test {
 
         // Read back what we wrote.
         let buffer = Buffer::new(new_volume.total_size().await? as usize);
-        new_volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = new_volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        let buffer_vec = buffer.as_vec().await;
-        assert_eq!(buffer_vec[BLOCK_SIZE..], random_buffer[BLOCK_SIZE..]);
+        assert_eq!(&buffer[BLOCK_SIZE..], &random_buffer[BLOCK_SIZE..]);
 
         Ok(())
     }
@@ -3038,14 +3005,14 @@ mod test {
 
             for (i, random_buffer) in chunks {
                 let buffer = Buffer::new(CHUNK_SIZE);
-                volume
+                let buffer = volume
                     .read(
                         Block::new(i as u64, BLOCK_SIZE.trailing_zeros()),
-                        buffer.clone(),
+                        buffer,
                     )
                     .await?;
 
-                assert_eq!(random_buffer, *buffer.as_vec().await);
+                assert_eq!(random_buffer, &buffer[..]);
             }
         }
 
@@ -3078,11 +3045,11 @@ mod test {
 
         // Verify contents are zero on init
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x00_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0x00_u8; BLOCK_SIZE * 10], &buffer[..]);
 
         // Write data in
         guest
@@ -3094,11 +3061,11 @@ mod test {
 
         // Read parent, verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
 
         Ok(())
     }
@@ -3122,8 +3089,8 @@ mod test {
 
         // Read of length 0
         let buffer = Buffer::new(0);
-        guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let _buffer = guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
         // Write of length 0
@@ -3205,11 +3172,11 @@ mod test {
 
         // Read back our block post replacement, verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
 
         Ok(())
     }
@@ -3321,11 +3288,11 @@ mod test {
 
         // Read parent, verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
 
         // Write_unwritten again with different data
         guest
@@ -3337,12 +3304,12 @@ mod test {
 
         // Read back the same blocks.
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
         // Verify data is still the original contents.
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
 
         // Now, just write.  This should update our data.
         guest
@@ -3354,12 +3321,12 @@ mod test {
 
         // Read back the same blocks.
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
         // Verify data is now from the new write.
-        assert_eq!(vec![0x89_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0x89_u8; BLOCK_SIZE * 10], &buffer[..]);
 
         Ok(())
     }
@@ -3403,21 +3370,21 @@ mod test {
 
         // Read back the first block.
         let buffer = Buffer::new(BLOCK_SIZE);
-        guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
         // Verify data is still the original contents.
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE], *buffer.as_vec().await);
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE], &buffer[..]);
 
         // Read back the next two blocks.
         let buffer = Buffer::new(BLOCK_SIZE * 2);
-        guest
-            .read(Block::new(1, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = guest
+            .read(Block::new(1, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
         // Verify data is still the original contents.
-        assert_eq!(vec![0x99_u8; BLOCK_SIZE * 2], *buffer.as_vec().await);
+        assert_eq!(vec![0x99_u8; BLOCK_SIZE * 2], &buffer[..]);
 
         Ok(())
     }
@@ -3461,23 +3428,23 @@ mod test {
 
         // Read back the all three blocks.
         let buffer = Buffer::new(BLOCK_SIZE * 3);
-        guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        // Get the data into a vec we can take slices of.
-        let dl = buffer.as_vec().await.to_vec();
-
         // Verify data in the first block is from the second write_unwritten
-        assert_eq!(vec![0x99_u8; BLOCK_SIZE], dl[0..BLOCK_SIZE]);
+        assert_eq!(vec![0x99_u8; BLOCK_SIZE], &buffer[0..BLOCK_SIZE]);
 
         // Verify data in the second block is from the first write_unwritten
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE], dl[BLOCK_SIZE..(BLOCK_SIZE * 2)]);
+        assert_eq!(
+            vec![0x55_u8; BLOCK_SIZE],
+            &buffer[BLOCK_SIZE..(BLOCK_SIZE * 2)]
+        );
 
         // Verify data in the third block is from the second write_unwritten
         assert_eq!(
             vec![0x99_u8; BLOCK_SIZE],
-            dl[(BLOCK_SIZE * 2)..(BLOCK_SIZE * 2 + BLOCK_SIZE)]
+            &buffer[(BLOCK_SIZE * 2)..(BLOCK_SIZE * 2 + BLOCK_SIZE)]
         );
         Ok(())
     }
@@ -3520,21 +3487,18 @@ mod test {
 
         // Read back the all three blocks.
         let buffer = Buffer::new(BLOCK_SIZE * 3);
-        guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
-
-        // Get the data into a vec we can take slices of.
-        let dl = buffer.as_vec().await.to_vec();
 
         // Verify data in the first two blocks is the data from the
         // second write_unwritten
-        assert_eq!(vec![0x99_u8; BLOCK_SIZE * 2], dl[0..BLOCK_SIZE * 2]);
+        assert_eq!(vec![0x99_u8; BLOCK_SIZE * 2], &buffer[0..BLOCK_SIZE * 2]);
 
         // Verify data in the third block is from the first write_unwritten
         assert_eq!(
             vec![0x55_u8; BLOCK_SIZE],
-            dl[(BLOCK_SIZE * 2)..(BLOCK_SIZE * 2 + BLOCK_SIZE)]
+            &buffer[(BLOCK_SIZE * 2)..(BLOCK_SIZE * 2 + BLOCK_SIZE)]
         );
 
         Ok(())
@@ -3577,20 +3541,17 @@ mod test {
 
         // Read back both blocks
         let buffer = Buffer::new(BLOCK_SIZE * 2);
-        guest
-            .read(Block::new(4, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = guest
+            .read(Block::new(4, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        // Get the data into a vec we can take slices of.
-        let dl = buffer.as_vec().await.to_vec();
-
         // Verify data in the first block is the data from the first write.
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE], dl[0..BLOCK_SIZE]);
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE], &buffer[0..BLOCK_SIZE]);
 
         // Verify data in the second block is from the 2nd write
         assert_eq!(
             vec![0x99_u8; BLOCK_SIZE],
-            dl[(BLOCK_SIZE)..(BLOCK_SIZE * 2)]
+            &buffer[(BLOCK_SIZE)..(BLOCK_SIZE * 2)]
         );
 
         Ok(())
@@ -3634,20 +3595,17 @@ mod test {
 
         // Read back both blocks
         let buffer = Buffer::new(BLOCK_SIZE * 2);
-        guest
-            .read(Block::new(4, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = guest
+            .read(Block::new(4, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        // Get the data into a vec we can take slices of.
-        let dl = buffer.as_vec().await.to_vec();
-
         // Verify data in the first block is the data from the first write.
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE], dl[0..BLOCK_SIZE]);
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE], &buffer[0..BLOCK_SIZE]);
 
         // Verify data in the second block is from the 2nd write
         assert_eq!(
             vec![0x99_u8; BLOCK_SIZE],
-            dl[(BLOCK_SIZE)..(BLOCK_SIZE * 2)]
+            &buffer[(BLOCK_SIZE)..(BLOCK_SIZE * 2)]
         );
 
         Ok(())
@@ -3682,7 +3640,7 @@ mod test {
         // Read a block past the end of the extent
         let buffer = Buffer::new(BLOCK_SIZE);
         let res = guest
-            .read(Block::new(11, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .read(Block::new(11, BLOCK_SIZE.trailing_zeros()), buffer)
             .await;
 
         assert!(res.is_err());
@@ -3718,7 +3676,7 @@ mod test {
         // Read a block with buffer that extends past the end of the region
         let buffer = Buffer::new(BLOCK_SIZE * 2);
         let res = guest
-            .read(Block::new(10, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+            .read(Block::new(10, BLOCK_SIZE.trailing_zeros()), buffer)
             .await;
 
         assert!(res.is_err());
@@ -3869,8 +3827,8 @@ mod test {
         volume.activate().await.unwrap();
 
         let buffer = Buffer::new(bytes.len());
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await
             .unwrap();
 
@@ -3879,10 +3837,7 @@ mod test {
         for i in (0..bytes.len()).step_by(BLOCK_SIZE) {
             let start = i;
             let end = i + BLOCK_SIZE;
-            assert_eq!(
-                bytes[..][start..end],
-                buffer.as_vec().await[start..end]
-            );
+            assert_eq!(&bytes[..][start..end], &buffer[start..end]);
             eprintln!("{} {} ok", start, end);
         }
     }
@@ -3980,15 +3935,12 @@ mod test {
             volume.activate().await.unwrap();
 
             let buffer = Buffer::new(5120);
-            volume
-                .read(
-                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    buffer.clone(),
-                )
+            let buffer = volume
+                .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
                 .await
                 .unwrap();
 
-            assert_eq!(vec![0x00; 5120], *buffer.as_vec().await);
+            assert_eq!(vec![0x00; 5120], &buffer[..]);
 
             volume.deactivate().await.unwrap();
 
@@ -4035,12 +3987,12 @@ mod test {
         volume.activate().await.unwrap();
 
         let buffer = Buffer::new(5120);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await
             .unwrap();
 
-        assert_eq!(vec![0x55; 5120], *buffer.as_vec().await);
+        assert_eq!(vec![0x55; 5120], &buffer[..]);
     }
 
     #[tokio::test]
@@ -4113,12 +4065,12 @@ mod test {
         volume.activate().await.unwrap();
 
         let buffer = Buffer::new(5120);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await
             .unwrap();
 
-        let buffer_data = &*buffer.as_vec().await;
+        let buffer_data = &&buffer[..];
 
         for i in 0..10 {
             let start = i * 512;
@@ -4177,14 +4129,14 @@ mod test {
 
         let buffer =
             Buffer::new(crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await
             .unwrap();
 
         assert_eq!(
             vec![0x99; crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE],
-            *buffer.as_vec().await
+            &buffer[..]
         );
     }
 
@@ -4314,15 +4266,12 @@ mod test {
             volume.activate().await.unwrap();
 
             let buffer = Buffer::new(data.len());
-            volume
-                .read(
-                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    buffer.clone(),
-                )
+            let buffer = volume
+                .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
                 .await
                 .unwrap();
 
-            assert_eq!(data, *buffer.as_vec().await);
+            assert_eq!(data, &buffer[..]);
 
             volume.deactivate().await.unwrap();
 
@@ -4412,12 +4361,12 @@ mod test {
         volume.activate().await.unwrap();
 
         let buffer = Buffer::new(data.len());
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await
             .unwrap();
 
-        assert_eq!(data, *buffer.as_vec().await);
+        assert_eq!(data, &buffer[..]);
     }
 
     #[tokio::test]
@@ -4903,12 +4852,12 @@ mod test {
 
         // Read parent, verify contents
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await
             .unwrap();
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
 
         // Make one new downstairs
         let new_downstairs = tds.new_downstairs().await.unwrap();
@@ -4943,11 +4892,11 @@ mod test {
         volume.target_replace(original, replacement).await.unwrap();
         info!(log, "send read now");
         let buffer = Buffer::new(BLOCK_SIZE * 10);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await
             .unwrap();
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], *buffer.as_vec().await);
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
     }
 }

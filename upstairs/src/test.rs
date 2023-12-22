@@ -60,11 +60,9 @@ pub(crate) mod up_test {
         },
         upstairs::Upstairs,
     };
-    use rand::prelude::*;
 
     use base64::{engine, Engine};
     use pseudo_file::IOSpan;
-    use ringbuffer::RingBuffer;
 
     // Create a simple logger
     pub fn csl() -> Logger {
@@ -110,7 +108,7 @@ pub(crate) mod up_test {
 
     #[tokio::test]
     async fn test_iospan_buffer_read_write() {
-        let span = IOSpan::new(500, 64, 512);
+        let mut span = IOSpan::new(500, 64, 512);
         assert_eq!(span.affected_block_count(), 2);
         assert_eq!(span.affected_block_numbers(), &vec![0, 1]);
 
@@ -118,24 +116,23 @@ pub(crate) mod up_test {
             .await;
 
         for i in 0..500 {
-            assert_eq!(span.buffer().as_vec().await[i], 0);
+            assert_eq!(span.buffer()[i], 0);
         }
         for i in 500..512 {
-            assert_eq!(span.buffer().as_vec().await[i], 1);
+            assert_eq!(span.buffer()[i], 1);
         }
         for i in 512..(512 + 64 - 12) {
-            assert_eq!(span.buffer().as_vec().await[i], 1);
+            assert_eq!(span.buffer()[i], 1);
         }
         for i in (512 + 64 - 12)..1024 {
-            assert_eq!(span.buffer().as_vec().await[i], 0);
+            assert_eq!(span.buffer()[i], 0);
         }
 
-        let data = Buffer::new(64);
-        span.read_from_blocks_into_buffer(&mut data.as_vec().await[..])
-            .await;
+        let mut data = vec![0u8; 64];
+        span.read_from_blocks_into_buffer(&mut data[..]).await;
 
         for i in 0..64 {
-            assert_eq!(data.as_vec().await[i], 1);
+            assert_eq!(data[i], 1);
         }
     }
 
@@ -1230,82 +1227,5 @@ pub(crate) mod up_test {
 
         // Back to being below the limit
         assert!(wr.send_io_live_repair(Some(3)));
-    }
-
-    // Test that multiple GtoS downstairs jobs work
-    #[tokio::test]
-    async fn test_multiple_gtos_bulk_read_read() {
-        let mut up = Upstairs::test_default(None);
-        up.force_active().unwrap();
-        crate::downstairs::test::set_all_active(&mut up.downstairs);
-
-        let mut gw = up.guest.guest_work.lock().await;
-
-        let gw_id = GuestWorkId(12345);
-
-        // Create two reads
-        let first_id = JobId(1010);
-        let second_id = JobId(1011);
-
-        let mut data_buffers = HashMap::new();
-        data_buffers.insert(first_id, Buffer::new(512));
-        data_buffers.insert(second_id, Buffer::new(512));
-
-        let mut sub = HashSet::new();
-        sub.insert(first_id);
-        sub.insert(second_id);
-
-        let guest_job = GtoS::new_bulk(sub, data_buffers.clone(), None);
-
-        gw.active.insert(gw_id, guest_job);
-
-        let mut first_response_data = BytesMut::with_capacity(512);
-        first_response_data.resize(512, 0u8);
-        thread_rng().fill(&mut first_response_data[..]);
-        let first_read_response_hash =
-            integrity_hash(&[&first_response_data[..]]);
-
-        let mut second_response_data = BytesMut::with_capacity(512);
-        second_response_data.resize(512, 0u8);
-        thread_rng().fill(&mut second_response_data[..]);
-        let second_read_response_hash =
-            integrity_hash(&[&second_response_data[..]]);
-
-        let first_response = Some(vec![ReadResponse {
-            eid: 0,
-            offset: Block::new_512(0),
-            data: first_response_data.clone(),
-            block_contexts: vec![BlockContext {
-                hash: first_read_response_hash,
-                encryption_context: None,
-            }],
-        }]);
-
-        let second_response = Some(vec![ReadResponse {
-            eid: 0,
-            offset: Block::new_512(0),
-            data: second_response_data.clone(),
-            block_contexts: vec![BlockContext {
-                hash: second_read_response_hash,
-                encryption_context: None,
-            }],
-        }]);
-
-        gw.gw_ds_complete(gw_id, first_id, first_response, Ok(()), &up.log)
-            .await;
-        assert!(!gw.completed.contains(&gw_id));
-
-        gw.gw_ds_complete(gw_id, second_id, second_response, Ok(()), &up.log)
-            .await;
-        assert!(gw.completed.contains(&gw_id));
-
-        assert_eq!(
-            *data_buffers.get(&first_id).unwrap().as_vec().await,
-            first_response_data.to_vec()
-        );
-        assert_eq!(
-            *data_buffers.get(&second_id).unwrap().as_vec().await,
-            second_response_data.to_vec()
-        );
     }
 }

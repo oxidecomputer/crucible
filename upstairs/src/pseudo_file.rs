@@ -71,15 +71,19 @@ impl IOSpan {
         &mut self,
         block_io: &Arc<T>,
     ) -> Result<(), CrucibleError> {
-        block_io
+        let buffer = block_io
             .read(
                 Block::new(
                     self.affected_block_numbers[0],
                     self.block_size.trailing_zeros(),
                 ),
-                self.buffer.clone(),
+                Buffer::new(self.buffer.len()),
             )
-            .await
+            .await?;
+
+        self.buffer.eat(0, buffer);
+
+        Ok(())
     }
 
     #[instrument(skip(block_io))]
@@ -87,15 +91,13 @@ impl IOSpan {
         &self,
         block_io: &Arc<T>,
     ) -> Result<(), CrucibleError> {
-        let bytes = Bytes::from(self.buffer.as_vec().await.clone());
-
         block_io
             .write(
                 Block::new(
                     self.affected_block_numbers[0],
                     self.block_size.trailing_zeros(),
                 ),
-                bytes,
+                self.buffer.as_bytes(),
             )
             .await
     }
@@ -103,19 +105,13 @@ impl IOSpan {
     #[instrument]
     pub async fn read_from_blocks_into_buffer(&self, data: &mut [u8]) {
         assert_eq!(data.len(), self.sz as usize);
-
-        for (i, item) in data.iter_mut().enumerate() {
-            *item = self.buffer.as_vec().await[self.phase as usize + i];
-        }
+        self.buffer.read(self.phase as usize, data);
     }
 
     #[instrument]
-    pub async fn write_from_buffer_into_blocks(&self, data: &[u8]) {
+    pub async fn write_from_buffer_into_blocks(&mut self, data: &[u8]) {
         assert_eq!(data.len(), self.sz as usize);
-
-        for (i, item) in data.iter().enumerate() {
-            self.buffer.as_vec().await[self.phase as usize + i] = *item;
-        }
+        self.buffer.write(self.phase as usize, data);
     }
 }
 

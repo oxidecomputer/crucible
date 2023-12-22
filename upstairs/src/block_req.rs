@@ -16,11 +16,19 @@ pub(crate) struct BlockReq {
 
 #[must_use]
 #[derive(Debug)]
-pub(crate) struct BlockRes(Option<oneshot::Sender<Result<(), CrucibleError>>>);
+pub(crate) struct BlockRes(
+    Option<oneshot::Sender<Result<Option<Buffer>, CrucibleError>>>,
+);
+
 impl BlockRes {
     /// Consume this BlockRes and send Ok to the receiver
     pub fn send_ok(self) {
-        self.send_result(Ok(()))
+        self.send_result(Ok(None))
+    }
+
+    /// Consume this BlockRes and send Ok (with data) to the receiver
+    pub fn send_ok_with_buffer(self, buffer: Buffer) {
+        self.send_result(Ok(Some(buffer)))
     }
 
     /// Consume this BlockRes and send an Err to the receiver
@@ -29,11 +37,12 @@ impl BlockRes {
     }
 
     /// Consume this BlockRes and send a Result to the receiver
-    fn send_result(mut self, r: Result<(), CrucibleError>) {
+    fn send_result(mut self, r: Result<Option<Buffer>, CrucibleError>) {
         // XXX this eats the result!
         let _ = self.0.take().expect("sender was populated").send(r);
     }
 }
+
 impl Drop for BlockRes {
     fn drop(&mut self) {
         if self.0.is_some() {
@@ -52,7 +61,7 @@ impl Drop for BlockRes {
  */
 #[must_use]
 pub(crate) struct BlockReqWaiter {
-    recv: oneshot::Receiver<Result<(), CrucibleError>>,
+    recv: oneshot::Receiver<Result<Option<Buffer>, CrucibleError>>,
 }
 
 impl BlockReqWaiter {
@@ -65,7 +74,10 @@ impl BlockReqWaiter {
     /// Consume this BlockReqWaiter and wait on the message
     ///
     /// If the other side of the oneshot drops without a reply, log an error
-    pub async fn wait(self, log: &Logger) -> Result<(), CrucibleError> {
+    pub async fn wait(
+        self,
+        log: &Logger,
+    ) -> Result<Option<Buffer>, CrucibleError> {
         match self.recv.await {
             Ok(v) => v,
             Err(_) => {
@@ -80,7 +92,9 @@ impl BlockReqWaiter {
     }
 
     #[cfg(test)]
-    pub fn try_wait(&mut self) -> Option<Result<(), CrucibleError>> {
+    pub fn try_wait(
+        &mut self,
+    ) -> Option<Result<Option<Buffer>, CrucibleError>> {
         match self.recv.try_recv() {
             Ok(v) => Some(v),
             Err(e) => match e {

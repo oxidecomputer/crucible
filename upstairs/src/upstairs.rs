@@ -3562,7 +3562,8 @@ pub(crate) mod test {
             }))
             .await;
         }
-        assert_eq!(deactivate_done_brw.try_wait(), Some(Ok(())));
+
+        deactivate_done_brw.try_wait().unwrap().unwrap();
 
         // Verify we have disconnected and can go back to init.
         assert!(matches!(up.state, UpstairsState::Initializing));

@@ -294,11 +294,9 @@ impl PantryEntry {
 
         let buffer = crucible::Buffer::new(size);
 
-        self.volume
-            .read_from_byte_offset(offset, buffer.clone())
-            .await?;
+        let buffer = self.volume.read_from_byte_offset(offset, buffer).await?;
 
-        Ok(buffer.into_vec().unwrap())
+        Ok(buffer.into_vec())
     }
 
     pub async fn scrub(&self) -> Result<(), CrucibleError> {
@@ -336,11 +334,9 @@ impl PantryEntry {
 
             let data = crucible::Buffer::new((end - start) as usize);
 
-            self.volume
-                .read_from_byte_offset(start, data.clone())
-                .await?;
+            let data = self.volume.read_from_byte_offset(start, data).await?;
 
-            hasher.update(&data.into_vec().unwrap())
+            hasher.update(&data.into_vec())
         }
 
         let digest = hex::encode(hasher.finalize());
