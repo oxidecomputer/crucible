@@ -180,8 +180,7 @@ impl Volume {
             guest_clone,
             producer_registry,
             Some(self.log.clone()),
-        )
-        .await?;
+        )?;
 
         self.add_subvolume(guest).await
     }

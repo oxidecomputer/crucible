@@ -246,7 +246,7 @@ impl DataFile {
         if let Some(r) = inner
             .running_snapshots
             .entry(request.id.clone())
-            .or_insert_with(BTreeMap::default)
+            .or_default()
             .get(&request.name)
         {
             return Ok(r.clone());

@@ -699,7 +699,7 @@ async fn main() -> Result<()> {
     }
 
     let _join_handle =
-        up_main(crucible_opts, opt.gen, None, guest.clone(), pr, None).await?;
+        up_main(crucible_opts, opt.gen, None, guest.clone(), pr, None)?;
     println!("Crucible runtime is spawned");
 
     if let Workload::CliServer { listen, port } = opt.workload {

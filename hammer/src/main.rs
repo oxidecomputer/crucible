@@ -140,8 +140,7 @@ async fn main() -> Result<()> {
             guest.clone(),
             None,
             None,
-        )
-        .await?;
+        )?;
         println!("Crucible runtime is spawned");
 
         cpfs.push(crucible::CruciblePseudoFile::from(guest)?);

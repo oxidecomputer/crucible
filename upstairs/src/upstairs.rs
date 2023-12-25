@@ -1816,7 +1816,6 @@ pub(crate) mod test {
         downstairs::test::set_all_active, test::make_upstairs, BlockReq,
         BlockReqWaiter, DsState, JobId,
     };
-    use tokio::sync::oneshot;
 
     // Test function to create just enough of an Upstairs for our needs.
     pub(crate) fn create_test_upstairs() -> Upstairs {
