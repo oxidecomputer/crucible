@@ -1719,8 +1719,6 @@ pub enum BlockOp {
     QueryWorkQueue {
         data: Arc<Mutex<WQCounts>>,
     },
-    // Send an update to all tasks that there is work on the queue.
-    Commit,
     // Show internal work queue, return outstanding IO requests.
     ShowWork {
         data: Arc<Mutex<WQCounts>>,
@@ -2474,10 +2472,6 @@ impl Guest {
         Ok(*wc)
     }
 
-    pub async fn commit(&self) -> Result<(), CrucibleError> {
-        self.send(BlockOp::Commit).await.wait().await.unwrap();
-        Ok(())
-    }
     // Maybe this can just be a guest specific thing, not a BlockIO
     pub async fn activate_with_gen(
         &self,
