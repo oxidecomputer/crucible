@@ -65,7 +65,7 @@ num-traits = "0.2"
 omicron-zone-package = "0.9.1"
 openapiv3 = "2.0.0"
 opentelemetry = "0.21.0"
-opentelemetry-jaeger = { version = "0.17.0" }
+opentelemetry-jaeger = { version = "0.20.0" }
 percent-encoding = "2.3"
 proptest = "1.4.0"
 rand = { version = "0.8.5", features = ["min_const_gen", "small_rng"] }
