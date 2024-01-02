@@ -37,6 +37,8 @@ pub(crate) mod protocol_test {
     use slog::Drain;
     use slog::Logger;
     use std::net::SocketAddr;
+    use std::sync::atomic::AtomicU8;
+    use std::sync::atomic::Ordering;
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
     use tokio::sync::mpsc::error::TryRecvError;
@@ -543,10 +545,6 @@ pub(crate) mod protocol_test {
             )
             .unwrap();
 
-            let ds1 = Arc::new(ds1.into_connected_downstairs().await);
-            let ds2 = Arc::new(ds2.into_connected_downstairs().await);
-            let ds3 = Arc::new(ds3.into_connected_downstairs().await);
-
             let mut handles: Vec<JoinHandle<Result<()>>> = vec![];
 
             {
@@ -556,6 +554,11 @@ pub(crate) mod protocol_test {
                     Ok(())
                 }));
             }
+
+            let ds1 = Arc::new(ds1.into_connected_downstairs().await);
+            let ds2 = Arc::new(ds2.into_connected_downstairs().await);
+            let ds3 = Arc::new(ds3.into_connected_downstairs().await);
+
             {
                 let ds1 = ds1.clone();
                 handles.push(tokio::spawn(async move {
@@ -2950,6 +2953,208 @@ pub(crate) mod protocol_test {
             ds3_messages.recv().await.unwrap(),
             Message::ReadRequest { .. },
         ));
+
+        Ok(())
+    }
+
+    /// Test that deactivation doesn't fail if one client is slower than others
+    #[tokio::test]
+    async fn test_deactivate_slow() -> Result<()> {
+        let harness = Arc::new(TestHarness::new().await?);
+
+        let (jh1, mut ds1_messages) =
+            harness.ds1().await.spawn_message_receiver();
+        let (_jh2, mut ds2_messages) = harness.ds2.spawn_message_receiver();
+        let (_jh3, mut ds3_messages) = harness.ds3.spawn_message_receiver();
+
+        // Queue up a read, so that the deactivate requires a flush
+        {
+            let harness = harness.clone();
+
+            // We must tokio::spawn here because `read` will wait for the
+            // response to come back before returning
+            tokio::spawn(async move {
+                let buffer = Buffer::new(512);
+                harness.guest.read(Block::new_512(0), buffer).await.unwrap();
+            });
+        }
+
+        // Ensure that all three clients got the read request
+        let job_id = match ds1_messages.recv().await.unwrap() {
+            Message::ReadRequest { job_id, .. } => job_id,
+            _ => panic!("invalid request"),
+        };
+        bail_assert!(matches!(
+            ds2_messages.recv().await.unwrap(),
+            Message::ReadRequest { .. },
+        ));
+        bail_assert!(matches!(
+            ds3_messages.recv().await.unwrap(),
+            Message::ReadRequest { .. },
+        ));
+
+        let response = Message::ReadResponse {
+            upstairs_id: harness.guest.get_uuid().await.unwrap(),
+            session_id: harness
+                .ds1()
+                .await
+                .upstairs_session_id
+                .lock()
+                .await
+                .unwrap(),
+            job_id,
+            responses: Ok(vec![make_blank_read_response()]),
+        };
+        harness
+            .ds1()
+            .await
+            .fw
+            .lock()
+            .await
+            .send(response.clone())
+            .await
+            .unwrap();
+        harness
+            .ds2
+            .fw
+            .lock()
+            .await
+            .send(response.clone())
+            .await
+            .unwrap();
+        harness
+            .ds3
+            .fw
+            .lock()
+            .await
+            .send(response.clone())
+            .await
+            .unwrap();
+
+        let deactivate_handle = {
+            // Send a deactivate request.
+            let harness = harness.clone();
+            tokio::spawn(async move { harness.guest.deactivate().await })
+        };
+
+        let job_id = match ds1_messages.recv().await.unwrap() {
+            Message::Flush { job_id, .. } => job_id,
+            _ => panic!("invalid request"),
+        };
+        bail_assert!(matches!(
+            ds2_messages.recv().await.unwrap(),
+            Message::Flush { .. },
+        ));
+        bail_assert!(matches!(
+            ds3_messages.recv().await.unwrap(),
+            Message::Flush { .. },
+        ));
+
+        // Reply on ds1, which concludes the deactivation of this downstairs
+        let response = Message::FlushAck {
+            upstairs_id: harness.guest.get_uuid().await.unwrap(),
+            session_id: harness
+                .ds1()
+                .await
+                .upstairs_session_id
+                .lock()
+                .await
+                .unwrap(),
+            job_id,
+            result: Ok(()),
+        };
+        harness
+            .ds1()
+            .await
+            .fw
+            .lock()
+            .await
+            .send(response.clone())
+            .await
+            .unwrap();
+
+        // At this point, the upstairs sends YouAreNoLongerActive, but then
+        // drops the sender end, so we can't actually see it.
+        bail_assert!(ds1_messages.recv().await.is_none());
+
+        // Reconnect ds1, since the Downstairs always tries to reconnect
+        drop(ds1_messages);
+        jh1.abort();
+
+        // Restart ds1, in a task because this won't actually connect right away
+        const RECONNECT_NONE: u8 = 0;
+        const RECONNECT_TRYING: u8 = 1;
+        const RECONNECT_DONE: u8 = 2;
+        let reconnected = Arc::new(AtomicU8::new(RECONNECT_NONE));
+        let ds1_restart_handle = {
+            let harness = harness.clone();
+            let reconnected = reconnected.clone();
+            tokio::spawn(async move {
+                let ds1 = harness.take_ds1().await;
+                let ds1 = ds1.close();
+
+                reconnected.store(RECONNECT_TRYING, Ordering::Release);
+                let ds1 = ds1.into_connected_downstairs().await;
+                reconnected.store(RECONNECT_DONE, Ordering::Release);
+
+                ds1.negotiate_start().await.unwrap();
+                ds1.negotiate_step_extent_versions_please().await.unwrap();
+            })
+        };
+
+        // Give that task some time to try reconnecting.  It won't get anywhere,
+        // because we don't automatically reconnect in this case.  Activating
+        // will also fail, because we're still in deactivating.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        assert_eq!(reconnected.load(Ordering::Acquire), RECONNECT_TRYING);
+        println!("MATT activate 1");
+        assert!(harness.guest.activate().await.is_err());
+
+        // Finish deactivation on ds2 / ds3
+        harness
+            .ds2
+            .fw
+            .lock()
+            .await
+            .send(response.clone())
+            .await
+            .unwrap();
+        assert_eq!(reconnected.load(Ordering::Acquire), RECONNECT_TRYING);
+        println!("MATT activate call");
+        assert!(harness.guest.activate().await.is_err());
+        harness
+            .ds3
+            .fw
+            .lock()
+            .await
+            .send(response.clone())
+            .await
+            .unwrap();
+
+        // At this point, the upstairs should be Initializing, but we still
+        // won't connect because we don't automatically connect after being
+        // Deactivated.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        assert_eq!(reconnected.load(Ordering::Acquire), RECONNECT_TRYING);
+
+        // At this point, deactivation is done and we can join that handle
+        deactivate_handle.await.unwrap().unwrap();
+
+        // Now, we can try to reactivate the guest.
+        //
+        // This won't work, because we haven't restarted ds2 and ds3, but it
+        // will allow ds1 to reconnect.
+        {
+            let harness = harness.clone();
+            tokio::spawn(
+                async move { harness.guest.activate().await.unwrap() },
+            );
+        }
+
+        // At this point, ds1 should reconnect
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        ds1_restart_handle.await.unwrap();
+        assert_eq!(reconnected.load(Ordering::Acquire), RECONNECT_DONE);
 
         Ok(())
     }
