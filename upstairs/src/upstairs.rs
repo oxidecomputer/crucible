@@ -3507,7 +3507,7 @@ pub(crate) mod test {
         }))
         .await;
 
-        // fake read response from downstairs that will fail decryption
+        // fake read response from downstairs that will successfully decrypt
         let mut data = Vec::from([1u8; 512]);
 
         let (nonce, tag, hash) = up
@@ -3625,6 +3625,7 @@ pub(crate) mod test {
         );
     }
 
+    /// Confirms that the encrypted read hash checksum works
     #[tokio::test]
     async fn bad_hash_on_encrypted_read_panic() {
         let mut up = make_encrypted_upstairs();
@@ -3653,14 +3654,7 @@ pub(crate) mod test {
             .unwrap();
 
         let nonce: [u8; 12] = nonce.into();
-        let mut tag: [u8; 16] = tag.into();
-
-        // alter tag
-        if tag[3] == 0xFF {
-            tag[3] = 0x00;
-        } else {
-            tag[3] = 0xFF;
-        }
+        let tag: [u8; 16] = tag.into();
 
         let responses = Ok(vec![ReadResponse {
             eid: 0,
