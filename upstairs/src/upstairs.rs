@@ -836,13 +836,6 @@ impl Upstairs {
                 res.send_ok();
             }
 
-            BlockOp::Commit => {
-                if !self.guest_io_ready() {
-                    res.send_err(CrucibleError::UpstairsInactive);
-                }
-                // Nothing to do here; we always check for new work in `select!`
-            }
-
             BlockOp::Read { offset, data } => {
                 self.submit_read(offset, data, res).await
             }
