@@ -2295,6 +2295,11 @@ pub(crate) enum ClientRunResult {
     RequestedStop(ClientStopReason),
     /// The socket closed cleanly and the task exited
     Finished,
+    /// One of the queues used to communicate with the main task closed
+    ///
+    /// This should only occur during program exit, when tasks are destroyed in
+    /// arbitrary order.
+    QueueClosed,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2452,9 +2457,16 @@ where
             while let Some(f) = fr.next().await {
                 match f {
                     Ok(m) => {
-                        tx.send(ClientResponse::Message(m))
-                            .await
-                            .expect("client_response_tx closed unexpectedly");
+                        if let Err(e) =
+                            tx.send(ClientResponse::Message(m)).await
+                        {
+                            warn!(
+                                log,
+                                "client response queue closed unexpectedly: \
+                                 {e}; is the program exiting?"
+                            );
+                            return ClientRunResult::QueueClosed;
+                        }
                     }
                     Err(e) => {
                         warn!(log, "downstairs client error {e}");
@@ -2476,7 +2488,12 @@ where
 
             m = rx.recv() => {
                 let Some(m) = m else {
-                    panic!("client_request_tx closed unexpectedly");
+                    warn!(
+                        log,
+                        "client request queue closed unexpectedly; \
+                         is the program exiting?"
+                     );
+                    break ClientRunResult::QueueClosed;
                 };
 
                 if let Err(e) = fw.send(m).await {
