@@ -722,9 +722,8 @@ impl Region {
             HashMap::new();
 
         for write in writes {
-            let extent_vec = batched_writes
-                .entry(write.eid as usize)
-                .or_insert_with(Vec::new);
+            let extent_vec =
+                batched_writes.entry(write.eid as usize).or_default();
             extent_vec.push(write);
         }
 
@@ -4183,7 +4182,7 @@ pub(crate) mod test {
         let (_dir, mut region, mut data) = prepare_random_region().await?;
 
         // Call region_write with a multiple disjoint large contiguous ranges
-        let writes = vec![
+        let writes = [
             prepare_writes(1..4, &mut data),
             prepare_writes(15..24, &mut data),
             prepare_writes(27..28, &mut data),
@@ -4202,7 +4201,7 @@ pub(crate) mod test {
         let (_dir, mut region, mut data) = prepare_random_region().await?;
 
         // Call region_write with a multiple disjoint non-contiguous ranges
-        let writes = vec![
+        let writes = [
             prepare_writes(0..1, &mut data),
             prepare_writes(14..15, &mut data),
             prepare_writes(19..20, &mut data),
@@ -4282,7 +4281,7 @@ pub(crate) mod test {
         let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
 
         // Call region_write with a multiple disjoint large contiguous ranges
-        let writes = vec![
+        let writes = [
             prepare_writes(1..4, &mut data),
             prepare_writes(15..24, &mut data),
             prepare_writes(27..28, &mut data),
@@ -4312,7 +4311,7 @@ pub(crate) mod test {
         let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
 
         // Call region_write with a multiple disjoint non-contiguous ranges
-        let writes = vec![
+        let writes = [
             prepare_writes(0..1, &mut data),
             prepare_writes(14..15, &mut data),
             prepare_writes(19..20, &mut data),

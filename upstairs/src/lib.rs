@@ -2765,7 +2765,7 @@ pub struct Arg {
  * time is ready. It will return Ok with a join handle if every required task
  * was successfully launched, and Err otherwise.
  */
-pub async fn up_main(
+pub fn up_main(
     opt: CrucibleOpts,
     gen: u64,
     region_def: Option<RegionDefinition>,
