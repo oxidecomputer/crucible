@@ -1013,8 +1013,8 @@ impl Upstairs {
          * should be flushed at the next flush ID.
          */
         let mut gw = self.guest.guest_work.lock().await;
-        let gw_id: u64 = gw.next_gw_id();
-        cdt::gw__flush__start!(|| (gw_id));
+        let gw_id = gw.next_gw_id();
+        cdt::gw__flush__start!(|| (gw_id.0));
 
         if snapshot_details.is_some() {
             info!(self.log, "flush with snap requested");
@@ -1025,7 +1025,7 @@ impl Upstairs {
         let new_gtos = GtoS::new(next_id, None, res);
         gw.active.insert(gw_id, new_gtos);
 
-        cdt::up__to__ds__flush__start!(|| (gw_id));
+        cdt::up__to__ds__flush__start!(|| (gw_id.0));
     }
 
     /// Submits a read job to the downstairs
@@ -1103,8 +1103,8 @@ impl Upstairs {
          * Grab this ID after extent_from_offset: in case of Err we don't
          * want to create a gap in the IDs.
          */
-        let gw_id: u64 = gw.next_gw_id();
-        cdt::gw__read__start!(|| (gw_id));
+        let gw_id = gw.next_gw_id();
+        cdt::gw__read__start!(|| (gw_id.0));
 
         let next_id = self.downstairs.submit_read(gw_id, impacted_blocks, ddef);
 
@@ -1115,7 +1115,7 @@ impl Upstairs {
         let new_gtos = GtoS::new(next_id, Some(data), res);
         gw.active.insert(gw_id, new_gtos);
 
-        cdt::up__to__ds__read__start!(|| (gw_id));
+        cdt::up__to__ds__read__start!(|| (gw_id.0));
     }
 
     /// Submits a new write job to the upstairs
@@ -1261,11 +1261,11 @@ impl Upstairs {
          * Grab this ID after extent_from_offset: in case of Err we don't
          * want to create a gap in the IDs.
          */
-        let gw_id: u64 = gw.next_gw_id();
+        let gw_id = gw.next_gw_id();
         if is_write_unwritten {
-            cdt::gw__write__unwritten__start!(|| (gw_id));
+            cdt::gw__write__unwritten__start!(|| (gw_id.0));
         } else {
-            cdt::gw__write__start!(|| (gw_id));
+            cdt::gw__write__start!(|| (gw_id.0));
         }
 
         let next_id = self.downstairs.submit_write(
@@ -1280,9 +1280,9 @@ impl Upstairs {
         gw.active.insert(gw_id, new_gtos);
 
         if is_write_unwritten {
-            cdt::up__to__ds__write__unwritten__start!(|| (gw_id));
+            cdt::up__to__ds__write__unwritten__start!(|| (gw_id.0));
         } else {
-            cdt::up__to__ds__write__start!(|| (gw_id));
+            cdt::up__to__ds__write__start!(|| (gw_id.0));
         }
     }
 

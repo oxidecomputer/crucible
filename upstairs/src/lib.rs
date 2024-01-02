@@ -856,7 +856,7 @@ impl std::fmt::Display for DsState {
 struct DownstairsIO {
     ds_id: JobId, // This MUST match our hashmap index
 
-    guest_id: u64, // The hahsmap ID from the parent guest work.
+    guest_id: GuestWorkId, // The hashmap ID from the parent guest work.
     work: IOop,
 
     /// Map of work status, tracked on a per-client basis
@@ -1957,6 +1957,19 @@ impl GtoS {
     }
 }
 
+/// Strongly-typed ID for guest work (stored in the [`GuestWork`] map)
+#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct GuestWorkId(pub u64);
+
+impl std::fmt::Display for GuestWorkId {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> Result<(), std::fmt::Error> {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
 /**
  * This structure keeps track of work that Crucible has accepted from the
  * "Guest", aka, Propolis.
@@ -1973,16 +1986,16 @@ impl GtoS {
  */
 #[derive(Debug)]
 struct GuestWork {
-    active: HashMap<u64, GtoS>,
+    active: HashMap<GuestWorkId, GtoS>,
     next_gw_id: u64,
-    completed: AllocRingBuffer<u64>,
+    completed: AllocRingBuffer<GuestWorkId>,
 }
 
 impl GuestWork {
-    fn next_gw_id(&mut self) -> u64 {
+    fn next_gw_id(&mut self) -> GuestWorkId {
         let id = self.next_gw_id;
         self.next_gw_id += 1;
-        id
+        GuestWorkId(id)
     }
 
     /*
@@ -2002,7 +2015,7 @@ impl GuestWork {
     #[instrument]
     async fn gw_ds_complete(
         &mut self,
-        gw_id: u64,
+        gw_id: GuestWorkId,
         ds_id: JobId,
         data: Option<Vec<ReadResponse>>,
         result: Result<(), CrucibleError>,
@@ -2840,7 +2853,7 @@ pub fn up_main(
 async fn show_guest_work(guest: &Arc<Guest>) -> usize {
     println!("Guest work:  Active and Completed Jobs:");
     let gw = guest.guest_work.lock().await;
-    let mut kvec: Vec<u64> = gw.active.keys().cloned().collect::<Vec<u64>>();
+    let mut kvec: Vec<_> = gw.active.keys().cloned().collect();
     kvec.sort_unstable();
     for id in kvec.iter() {
         let job = gw.active.get(id).unwrap();
