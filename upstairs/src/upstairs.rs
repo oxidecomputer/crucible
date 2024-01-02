@@ -191,6 +191,21 @@ pub(crate) struct Upstairs {
     pub(crate) control_tx: mpsc::Sender<ControlRequest>,
 }
 
+impl Drop for Upstairs {
+    fn drop(&mut self) {
+        // Reply to any `BlockRes` that we might be holding in our
+        // `UpstairsState`; otherwise, their destructor will panic.
+        match std::mem::replace(&mut self.state, UpstairsState::Initializing) {
+            UpstairsState::GoActive(res) | UpstairsState::Deactivating(res) => {
+                res.send_err(CrucibleError::GenericError(
+                    "Upstairs purging BlockRes during drop()".to_string(),
+                ));
+            }
+            _ => (),
+        }
+    }
+}
+
 /// Action to be taken which modifies the [`Upstairs`] state
 #[derive(Debug)]
 pub(crate) enum UpstairsAction {
@@ -939,6 +954,7 @@ impl Upstairs {
                     self.cfg.upstairs_id
                 );
                 res.send_err(CrucibleError::UpstairsAlreadyActive);
+                return;
             }
             UpstairsState::Deactivating(..) => {
                 warn!(
@@ -946,6 +962,7 @@ impl Upstairs {
                     "{} active denied while Deactivating", self.cfg.upstairs_id
                 );
                 res.send_err(CrucibleError::UpstairsDeactivating);
+                return;
             }
             UpstairsState::Active => {
                 info!(
@@ -954,6 +971,7 @@ impl Upstairs {
                     self.cfg.upstairs_id
                 );
                 res.send_err(CrucibleError::UpstairsAlreadyActive);
+                return;
             }
         }
         // Notify all clients that they should go active when they hit an

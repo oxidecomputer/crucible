@@ -44,6 +44,12 @@ struct ClientTaskHandle {
     /// replies, but also things like "the I/O task has stopped"
     client_response_rx: mpsc::Receiver<ClientResponse>,
 
+    /// One-shot sender to ask the client to open its connection
+    ///
+    /// This is used to hold the client (without connecting) in cases where we
+    /// have deliberately deactivated this client.
+    client_connect_tx: Option<oneshot::Sender<()>>,
+
     /// One-shot sender to stop the client
     ///
     /// This is a oneshot so that functions which stop the client don't
@@ -160,7 +166,8 @@ impl DownstairsClient {
             cfg,
             client_task: Self::new_io_task(
                 target_addr,
-                false,
+                false, // do not delay in starting the task
+                false, // do not start the task until GoActive
                 client_id,
                 tls_context.clone(),
                 &log,
@@ -203,7 +210,7 @@ impl DownstairsClient {
         });
         Self {
             cfg,
-            client_task: Self::new_dummy_task(),
+            client_task: Self::new_dummy_task(false),
             client_id: ClientId::new(0),
             region_uuid: None,
             negotiation_state: NegotiationState::Start,
@@ -286,7 +293,7 @@ impl DownstairsClient {
     }
 
     pub(crate) fn halt_io_task(&mut self, r: ClientStopReason) {
-        if let Some(t) = std::mem::take(&mut self.client_task.client_stop_tx) {
+        if let Some(t) = self.client_task.client_stop_tx.take() {
             if let Err(_e) = t.send(r) {
                 warn!(self.log, "failed to send stop request")
             }
@@ -569,7 +576,7 @@ impl DownstairsClient {
         }
 
         // Restart with a short delay
-        self.start_task(true);
+        self.start_task(true, auto_promote);
     }
 
     /// Returns the last flush ID handled by this client
@@ -585,10 +592,11 @@ impl DownstairsClient {
     /// # Panics
     /// If `self.client_task` is not `None`, or `self.target_addr` is `None` and
     /// this isn't running in test mode
-    fn start_task(&mut self, delay: bool) {
+    fn start_task(&mut self, delay: bool, connect: bool) {
         self.client_task = Self::new_io_task(
             self.target_addr,
             delay,
+            connect,
             self.client_id,
             self.tls_context.clone(),
             &self.log,
@@ -599,21 +607,30 @@ impl DownstairsClient {
     fn new_io_task(
         target: Option<SocketAddr>,
         delay: bool,
+        connect: bool,
         client_id: ClientId,
         tls_context: Option<Arc<TLSContext>>,
         log: &Logger,
     ) -> ClientTaskHandle {
         #[cfg(test)]
         if let Some(target) = target {
-            Self::new_network_task(target, delay, client_id, tls_context, log)
+            Self::new_network_task(
+                target,
+                delay,
+                connect,
+                client_id,
+                tls_context,
+                log,
+            )
         } else {
-            Self::new_dummy_task()
+            Self::new_dummy_task(connect)
         }
 
         #[cfg(not(test))]
         Self::new_network_task(
             target.expect("must provide socketaddr"),
             delay,
+            connect,
             client_id,
             tls_context,
             log,
@@ -623,6 +640,7 @@ impl DownstairsClient {
     fn new_network_task(
         target: SocketAddr,
         delay: bool,
+        connect: bool,
         client_id: ClientId,
         tls_context: Option<Arc<TLSContext>>,
         log: &Logger,
@@ -636,6 +654,14 @@ impl DownstairsClient {
         let (client_response_tx, client_response_rx) =
             mpsc::channel(MAX_ACTIVE_COUNT * 2);
         let (client_stop_tx, client_stop_rx) = oneshot::channel();
+        let (client_connect_tx, client_connect_rx) = oneshot::channel();
+
+        let client_connect_tx = if connect {
+            client_connect_tx.send(()).unwrap();
+            None
+        } else {
+            Some(client_connect_tx)
+        };
 
         let log = log.new(o!("" => "io task"));
         tokio::spawn(async move {
@@ -644,6 +670,7 @@ impl DownstairsClient {
                 tls_context,
                 target,
                 client_request_rx,
+                client_connect_rx,
                 client_stop_rx,
                 client_response_tx,
                 delay,
@@ -653,6 +680,7 @@ impl DownstairsClient {
         });
         ClientTaskHandle {
             client_request_tx,
+            client_connect_tx,
             client_stop_tx: Some(client_stop_tx),
             client_response_rx,
         }
@@ -660,20 +688,27 @@ impl DownstairsClient {
 
     /// Starts a dummy IO task, returning its IO handle
     #[cfg(test)]
-    fn new_dummy_task() -> ClientTaskHandle {
+    fn new_dummy_task(connect: bool) -> ClientTaskHandle {
         let (client_request_tx, client_request_rx) =
             mpsc::channel(MAX_ACTIVE_COUNT * 2);
         let (_client_response_tx, client_response_rx) =
             mpsc::channel(MAX_ACTIVE_COUNT * 2);
         let (client_stop_tx, client_stop_rx) = oneshot::channel();
+        let (client_connect_tx, client_connect_rx) = oneshot::channel();
 
         // Forget these without dropping them, so that we can send values into
         // the void!
         std::mem::forget(client_request_rx);
         std::mem::forget(client_stop_rx);
+        std::mem::forget(client_connect_rx);
 
         ClientTaskHandle {
             client_request_tx,
+            client_connect_tx: if connect {
+                None
+            } else {
+                Some(client_connect_tx)
+            },
             client_stop_tx: Some(client_stop_tx),
             client_response_rx,
         }
@@ -688,6 +723,16 @@ impl DownstairsClient {
     /// If we already called this function (without `reinitialize` in between),
     /// or `self.state` is invalid for promotion.
     pub(crate) async fn set_active_request(&mut self) {
+        if let Some(t) = self.client_task.client_connect_tx.take() {
+            info!(self.log, "sending connect oneshot to client");
+            if let Err(e) = t.send(()) {
+                error!(
+                    self.log,
+                    "failed to set client as active {e:?};
+                     are we shutting down?"
+                );
+            }
+        }
         match self.promote_state {
             Some(PromoteState::Waiting) => {
                 panic!("called set_active_request while already waiting")
@@ -2308,6 +2353,7 @@ async fn client_run(
     tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     target: SocketAddr,
     mut rx: mpsc::Receiver<Message>,
+    mut start: oneshot::Receiver<()>,
     mut stop: oneshot::Receiver<ClientStopReason>,
     tx: mpsc::Sender<ClientResponse>,
     delay: bool,
@@ -2318,6 +2364,7 @@ async fn client_run(
         tls_context,
         target,
         &mut rx,
+        &mut start,
         &mut stop,
         &tx,
         delay,
@@ -2339,7 +2386,8 @@ async fn client_run_inner(
     tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     target: SocketAddr,
     rx: &mut mpsc::Receiver<Message>,
-    stop: &mut oneshot::Receiver<ClientStopReason>,
+    mut start: &mut oneshot::Receiver<()>,
+    mut stop: &mut oneshot::Receiver<ClientStopReason>,
     tx: &mpsc::Sender<ClientResponse>,
     delay: bool,
     log: &Logger,
@@ -2348,6 +2396,31 @@ async fn client_run_inner(
     // spinning (e.g. if something is fundamentally wrong with the Downstairs)
     if delay {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    // Wait for the start oneshot to fire.  This may happen immediately, but not
+    // necessarily (for example, if the client was deactivated).  We also wait
+    // for the stop oneshot here, in case someone decides to stop the IO task
+    // before it tries to connect.
+    tokio::select! {
+        s = &mut start => {
+            if let Err(e) = s {
+                warn!(log, "failed to await start oneshot: {e}");
+                return ClientRunResult::QueueClosed;
+            }
+            // Otherwise, continue as usual
+        }
+        s = &mut stop => {
+            warn!(log, "client IO task stopped before connecting");
+            return match s {
+                Ok(s) =>
+                    ClientRunResult::RequestedStop(s),
+                Err(e) => {
+                    warn!(log, "client_stop_rx closed unexpectedly: {e:?}");
+                    ClientRunResult::QueueClosed
+                }
+            }
+        }
     }
 
     // Make connection to this downstairs.
@@ -2509,7 +2582,8 @@ where
                     }
 
                     Err(e) => {
-                        panic!("client_stop_rx closed unexpectedly: {e:?}");
+                        warn!(log, "client_stop_rx closed unexpectedly: {e:?}");
+                        break ClientRunResult::QueueClosed;
                     }
                 }
             }
