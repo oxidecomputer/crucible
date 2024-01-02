@@ -15,10 +15,10 @@ use crate::{
     upstairs::{UpstairsConfig, UpstairsState},
     AckStatus, ActiveJobs, AllocRingBuffer, ClientData, ClientIOStateCount,
     ClientId, ClientMap, CrucibleError, DownstairsIO, DownstairsMend, DsState,
-    ExtentFix, ExtentRepairIDs, GtoS, GuestWork, IOState, IOStateCount, IOop,
-    ImpactedBlocks, JobId, Message, ReadRequest, ReadResponse, ReconcileIO,
-    ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
-    WorkSummary,
+    ExtentFix, ExtentRepairIDs, GtoS, GuestWork, GuestWorkId, IOState,
+    IOStateCount, IOop, ImpactedBlocks, JobId, Message, ReadRequest,
+    ReadResponse, ReconcileIO, ReconciliationId, RegionDefinition,
+    ReplaceResult, SnapshotDetails, WorkSummary,
 };
 use crucible_common::MAX_ACTIVE_COUNT;
 
@@ -116,15 +116,15 @@ pub(crate) enum LiveRepairState {
         noop_id: JobId,
         reopen_id: JobId,
 
-        gw_repair_id: u64,
-        gw_noop_id: u64,
+        gw_repair_id: GuestWorkId,
+        gw_noop_id: GuestWorkId,
     },
     Repairing {
         repair_id: JobId,
         noop_id: JobId,
         reopen_id: JobId,
 
-        gw_noop_id: u64,
+        gw_noop_id: GuestWorkId,
     },
     Noop {
         noop_id: JobId,
@@ -357,21 +357,21 @@ impl Downstairs {
                 dependencies: _,
                 requests: _,
             } => {
-                cdt::gw__read__done!(|| (gw_id));
+                cdt::gw__read__done!(|| (gw_id.0));
                 stats.add_read(io_size as i64);
             }
             IOop::Write {
                 dependencies: _,
                 writes: _,
             } => {
-                cdt::gw__write__done!(|| (gw_id));
+                cdt::gw__write__done!(|| (gw_id.0));
                 stats.add_write(io_size as i64);
             }
             IOop::WriteUnwritten {
                 dependencies: _,
                 writes: _,
             } => {
-                cdt::gw__write__unwritten__done!(|| (gw_id));
+                cdt::gw__write__unwritten__done!(|| (gw_id.0));
                 // We don't include WriteUnwritten operation in the
                 // metrics for this guest.
             }
@@ -382,7 +382,7 @@ impl Downstairs {
                 snapshot_details: _,
                 extent_limit: _,
             } => {
-                cdt::gw__flush__done!(|| (gw_id));
+                cdt::gw__flush__done!(|| (gw_id.0));
                 stats.add_flush();
             }
             IOop::ExtentClose {
@@ -407,7 +407,7 @@ impl Downstairs {
                 source_downstairs: _,
                 repair_downstairs: _,
             } => {
-                cdt::gw__close__done!(|| (gw_id, extent));
+                cdt::gw__close__done!(|| (gw_id.0, extent));
                 stats.add_flush_close();
             }
             IOop::ExtentLiveRepair {
@@ -417,18 +417,18 @@ impl Downstairs {
                 source_repair_address: _,
                 repair_downstairs: _,
             } => {
-                cdt::gw__repair__done!(|| (gw_id, extent));
+                cdt::gw__repair__done!(|| (gw_id.0, extent));
                 stats.add_extent_repair();
             }
             IOop::ExtentLiveNoOp { dependencies: _ } => {
-                cdt::gw__noop__done!(|| (gw_id));
+                cdt::gw__noop__done!(|| (gw_id.0));
                 stats.add_extent_noop();
             }
             IOop::ExtentLiveReopen {
                 dependencies: _,
                 extent,
             } => {
-                cdt::gw__reopen__done!(|| (gw_id, extent));
+                cdt::gw__reopen__done!(|| (gw_id.0, extent));
                 stats.add_extent_reopen();
             }
         }
@@ -1322,8 +1322,8 @@ impl Downstairs {
                     || (repair.aborting_repair && !have_reserved_jobs)
                 {
                     // We're done, submit a final flush!
-                    let gw_id: u64 = gw.next_gw_id();
-                    cdt::gw__flush__start!(|| (gw_id));
+                    let gw_id = gw.next_gw_id();
+                    cdt::gw__flush__start!(|| (gw_id.0));
 
                     let flush_id = self.submit_flush(gw_id, None);
                     info!(self.log, "LiveRepair final flush submitted");
@@ -1331,7 +1331,7 @@ impl Downstairs {
                     let new_gtos = GtoS::new(flush_id, None, None);
                     gw.active.insert(gw_id, new_gtos);
 
-                    cdt::up__to__ds__flush__start!(|| (gw_id));
+                    cdt::up__to__ds__flush__start!(|| (gw_id.0));
 
                     LiveRepairState::FinalFlush { flush_id }
                 } else {
@@ -1377,11 +1377,11 @@ impl Downstairs {
         gw: &mut GuestWork,
         deps: Vec<JobId>,
         noop_id: JobId,
-        gw_noop_id: u64,
+        gw_noop_id: GuestWorkId,
     ) {
         let nio = Self::create_noop_io(noop_id, deps, gw_noop_id);
 
-        cdt::gw__noop__start!(|| (gw_noop_id));
+        cdt::gw__noop__start!(|| (gw_noop_id.0));
         let new_gtos = GtoS::new(noop_id, None, None);
         gw.active.insert(gw_noop_id, new_gtos);
         self.enqueue_repair(nio);
@@ -1390,7 +1390,7 @@ impl Downstairs {
     fn create_noop_io(
         ds_id: JobId,
         dependencies: Vec<JobId>,
-        gw_id: u64,
+        gw_id: GuestWorkId,
     ) -> DownstairsIO {
         let noop_ioop = IOop::ExtentLiveNoOp { dependencies };
 
@@ -1413,7 +1413,7 @@ impl Downstairs {
         eid: u64,
         deps: Vec<JobId>,
         repair_id: JobId,
-        gw_repair_id: u64,
+        gw_repair_id: GuestWorkId,
         source: ClientId,
         repair: &[ClientId],
     ) {
@@ -1426,7 +1426,7 @@ impl Downstairs {
             repair,
         );
 
-        cdt::gw__repair__start!(|| (gw_repair_id, eid));
+        cdt::gw__repair__start!(|| (gw_repair_id.0, eid));
 
         let new_gtos = GtoS::new(repair_id, None, None);
         gw.active.insert(gw_repair_id, new_gtos);
@@ -1438,7 +1438,7 @@ impl Downstairs {
         extent: usize,
         repair_id: JobId,
         repair_deps: Vec<JobId>,
-        gw_repair_id: u64,
+        gw_repair_id: GuestWorkId,
         source: ClientId,
         repair: &[ClientId],
     ) -> DownstairsIO {
@@ -1504,7 +1504,7 @@ impl Downstairs {
     fn create_repair_io(
         ds_id: JobId,
         dependencies: Vec<JobId>,
-        gw_id: u64,
+        gw_id: GuestWorkId,
         extent: usize,
         repair_address: SocketAddr,
         source_downstairs: ClientId,
@@ -1570,10 +1570,10 @@ impl Downstairs {
             }
         }
 
-        let gw_close_id: u64 = gw.next_gw_id();
-        let gw_repair_id: u64 = gw.next_gw_id();
-        let gw_noop_id: u64 = gw.next_gw_id();
-        let gw_reopen_id: u64 = gw.next_gw_id();
+        let gw_close_id = gw.next_gw_id();
+        let gw_repair_id = gw.next_gw_id();
+        let gw_noop_id = gw.next_gw_id();
+        let gw_reopen_id = gw.next_gw_id();
 
         // The work IDs for the downstairs side of things.
         let (extent_repair_ids, close_deps) = self.get_repair_ids(extent);
@@ -1652,7 +1652,7 @@ impl Downstairs {
         eid: usize,
         ds_id: JobId,
         dependencies: Vec<JobId>,
-        gw_id: u64,
+        gw_id: GuestWorkId,
     ) -> DownstairsIO {
         let reopen_ioop = IOop::ExtentLiveReopen {
             dependencies,
@@ -1679,12 +1679,12 @@ impl Downstairs {
         eid: u64,
         deps: Vec<JobId>,
         reopen_id: JobId,
-        gw_reopen_id: u64,
+        gw_reopen_id: GuestWorkId,
     ) {
         let reopen_io =
             Self::create_reopen_io(eid as usize, reopen_id, deps, gw_reopen_id);
 
-        cdt::gw__reopen__start!(|| (gw_reopen_id, eid));
+        cdt::gw__reopen__start!(|| (gw_reopen_id.0, eid));
 
         let new_gtos = GtoS::new(reopen_id, None, None);
         gw.active.insert(gw_reopen_id, new_gtos);
@@ -1711,7 +1711,7 @@ impl Downstairs {
         );
         let id = self.create_and_enqueue_read_eob(
             iblocks,
-            10,
+            GuestWorkId(10),
             vec![request.clone()],
         );
         (id, request)
@@ -1721,7 +1721,7 @@ impl Downstairs {
     fn create_and_enqueue_read_eob(
         &mut self,
         blocks: ImpactedBlocks,
-        gw_id: u64,
+        gw_id: GuestWorkId,
         requests: Vec<ReadRequest>,
     ) -> JobId {
         let ds_id = self.next_id();
@@ -1776,7 +1776,7 @@ impl Downstairs {
         );
         self.create_and_enqueue_write_eob(
             iblocks,
-            10,
+            GuestWorkId(10),
             vec![request.clone()],
             is_write_unwritten,
         )
@@ -1785,7 +1785,7 @@ impl Downstairs {
     fn create_and_enqueue_write_eob(
         &mut self,
         blocks: ImpactedBlocks,
-        gw_id: u64,
+        gw_id: GuestWorkId,
         writes: Vec<crucible_protocol::Write>,
         is_write_unwritten: bool,
     ) -> JobId {
@@ -1829,7 +1829,7 @@ impl Downstairs {
         eid: usize,
         ds_id: JobId,
         dependencies: Vec<JobId>,
-        gw_id: u64,
+        gw_id: GuestWorkId,
         source: ClientId,
         repair: Vec<ClientId>,
     ) -> DownstairsIO {
@@ -1861,7 +1861,7 @@ impl Downstairs {
         eid: u64,
         deps: Vec<JobId>,
         close_id: JobId,
-        gw_close_id: u64,
+        gw_close_id: GuestWorkId,
         source: ClientId,
         repair: &[ClientId],
     ) {
@@ -1874,7 +1874,7 @@ impl Downstairs {
             repair.to_vec(),
         );
 
-        cdt::gw__close__start!(|| (gw_close_id, eid));
+        cdt::gw__close__start!(|| (gw_close_id.0, eid));
         let new_gtos = GtoS::new(close_id, None, None);
         gw.active.insert(gw_close_id, new_gtos);
         self.enqueue_repair(close_io);
@@ -2143,7 +2143,7 @@ impl Downstairs {
 
     pub(crate) fn submit_flush(
         &mut self,
-        gw_id: u64,
+        gw_id: GuestWorkId,
         snapshot_details: Option<SnapshotDetails>,
     ) -> JobId {
         let next_id = self.next_id();
@@ -2192,7 +2192,7 @@ impl Downstairs {
         &mut self,
         snap: Option<SnapshotDetails>,
     ) -> JobId {
-        self.submit_flush(0, snap)
+        self.submit_flush(GuestWorkId(0), snap)
     }
 
     /// Reserves repair IDs if impacted blocks overlap our extent under repair
@@ -2262,7 +2262,7 @@ impl Downstairs {
     /// Create and submit a read job to the three clients
     pub(crate) fn submit_read(
         &mut self,
-        guest_id: u64,
+        guest_id: GuestWorkId,
         blocks: ImpactedBlocks,
         ddef: RegionDefinition,
     ) -> JobId {
@@ -2313,7 +2313,7 @@ impl Downstairs {
 
     pub(crate) fn submit_write(
         &mut self,
-        guest_id: u64,
+        guest_id: GuestWorkId,
         blocks: ImpactedBlocks,
         writes: Vec<crucible_protocol::Write>,
         is_write_unwritten: bool,
@@ -3485,7 +3485,7 @@ impl Downstairs {
     /// enqueued. The write will be to a single extent, as specified by eid
     fn submit_test_write_block(
         &mut self,
-        gwid: u64,
+        gwid: GuestWorkId,
         eid: u64,
         block: u64,
         is_write_unwritten: bool,
@@ -3513,7 +3513,7 @@ impl Downstairs {
     /// enqueued. The write will be to a single extent, as specified by eid
     fn submit_test_write(
         &mut self,
-        gwid: u64,
+        gwid: GuestWorkId,
         extent_size: u64,
         blocks: ImpactedBlocks,
         is_write_unwritten: bool,
@@ -3549,7 +3549,7 @@ impl Downstairs {
     /// enqueued. The read will be to a single extent, as specified by eid
     fn submit_test_read_block(
         &mut self,
-        gwid: u64,
+        gwid: GuestWorkId,
         eid: u64,
         block: u64,
     ) -> JobId {
@@ -3575,7 +3575,7 @@ impl Downstairs {
     /// enqueued. The read will be to a single extent, as specified by eid
     fn submit_test_read(
         &mut self,
-        gwid: u64,
+        gwid: GuestWorkId,
         extent_size: u64,
         blocks: ImpactedBlocks,
     ) -> JobId {
@@ -3665,9 +3665,9 @@ pub(crate) mod test {
         live_repair::ExtentInfo,
         upstairs::UpstairsState,
         BlockContext, ClientId, CrucibleError, DownstairsIO, DsState,
-        EncryptionContext, ExtentFix, GuestWork, IOState, IOop, ImpactedAddr,
-        ImpactedBlocks, JobId, ReadResponse, ReconcileIO, ReconciliationId,
-        SnapshotDetails,
+        EncryptionContext, ExtentFix, GuestWork, GuestWorkId, IOState, IOop,
+        ImpactedAddr, ImpactedBlocks, JobId, ReadResponse, ReconcileIO,
+        ReconciliationId, SnapshotDetails,
     };
     use bytes::{Bytes, BytesMut};
 
@@ -8226,7 +8226,7 @@ pub(crate) mod test {
                 eid as usize,         // Extent
                 repair_ids.repair_id, // ds_id
                 deps,                 // Vec<u64>
-                1,                    // gw_id
+                GuestWorkId(1),       // gw_id
                 source,               // Source extent
                 &repair_extent,       // Repair extent
             );
@@ -8239,7 +8239,7 @@ pub(crate) mod test {
                 }
             }
             assert_eq!(repair_op.ds_id, repair_ids.repair_id);
-            assert_eq!(repair_op.guest_id, 1);
+            assert_eq!(repair_op.guest_id, GuestWorkId(1));
             println!("Passed for source {}", source);
         }
     }
@@ -8262,7 +8262,7 @@ pub(crate) mod test {
             0,                   // Extent
             repair_ids.close_id, // ds_id
             deps,                // Vec<u64>
-            1,                   // gw_id
+            GuestWorkId(1),      // gw_id
             source,
             &repair,
         );
@@ -8286,7 +8286,7 @@ pub(crate) mod test {
             }
         }
         assert_eq!(repair_op.ds_id, repair_ids.close_id);
-        assert_eq!(repair_op.guest_id, 1);
+        assert_eq!(repair_op.guest_id, GuestWorkId(1));
     }
 
     // Given a good ExtentInfo, and a bad ExtentInfo, generate all the
@@ -8660,7 +8660,7 @@ pub(crate) mod test {
         let eid = 0;
 
         // Upstairs "guest" work IDs.
-        let gw_reopen_id: u64 = gw.next_gw_id();
+        let gw_reopen_id = gw.next_gw_id();
         let (repair_ids, mut deps) = ds.get_repair_ids(eid);
         assert!(deps.is_empty());
 
@@ -8714,7 +8714,7 @@ pub(crate) mod test {
         let eid = 0;
 
         // Upstairs "guest" work IDs.
-        let gw_close_id: u64 = gw.next_gw_id();
+        let gw_close_id = gw.next_gw_id();
         let (repair_ids, mut deps) = ds.get_repair_ids(eid);
         assert!(deps.is_empty());
 
@@ -8791,7 +8791,7 @@ pub(crate) mod test {
         let eid = 0;
 
         // Upstairs "guest" work IDs.
-        let gw_repair_id: u64 = gw.next_gw_id();
+        let gw_repair_id = gw.next_gw_id();
         let (repair_ids, mut deps) = ds.get_repair_ids(eid);
         assert!(deps.is_empty());
 
@@ -8857,7 +8857,7 @@ pub(crate) mod test {
         let eid = 0;
 
         // Upstairs "guest" work IDs.
-        let gw_repair_id: u64 = gw.next_gw_id();
+        let gw_repair_id = gw.next_gw_id();
         let (repair_ids, mut deps) = ds.get_repair_ids(eid);
         assert!(deps.is_empty());
 

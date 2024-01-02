@@ -1353,8 +1353,8 @@ impl DownstairsClient {
                         job.read_response_hashes = read_response_hashes;
                         assert!(!job.acked);
                         ackable = true;
-                        debug!(self.log, "Read AckReady {}", job.ds_id);
-                        cdt::up__to__ds__read__done!(|| job.guest_id);
+                        debug!(self.log, "Read AckReady {}", job.ds_id.0);
+                        cdt::up__to__ds__read__done!(|| job.guest_id.0);
                     } else {
                         /*
                          * If another job has finished already, we can
@@ -1385,7 +1385,7 @@ impl DownstairsClient {
                     assert!(extent_info.is_none());
                     if jobs_completed_ok == 2 {
                         ackable = true;
-                        cdt::up__to__ds__write__done!(|| job.guest_id);
+                        cdt::up__to__ds__write__done!(|| job.guest_id.0);
                     }
                 }
                 IOop::WriteUnwritten { .. } => {
@@ -1393,9 +1393,9 @@ impl DownstairsClient {
                     assert!(extent_info.is_none());
                     if jobs_completed_ok == 2 {
                         ackable = true;
-                        cdt::up__to__ds__write__unwritten__done!(
-                            || job.guest_id
-                        );
+                        cdt::up__to__ds__write__unwritten__done!(|| job
+                            .guest_id
+                            .0);
                     }
                 }
                 IOop::Flush {
@@ -1420,7 +1420,7 @@ impl DownstairsClient {
 
                     if jobs_completed_ok == ack_at_num_jobs {
                         ackable = true;
-                        cdt::up__to__ds__flush__done!(|| job.guest_id);
+                        cdt::up__to__ds__flush__done!(|| job.guest_id.0);
                         if deactivate {
                             debug!(self.log, "deactivate flush {ds_id} done");
                         }

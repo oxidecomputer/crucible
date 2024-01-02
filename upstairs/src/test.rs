@@ -1220,7 +1220,7 @@ pub(crate) mod up_test {
 
         let mut gw = up.guest.guest_work.lock().await;
 
-        let gw_id = 12345;
+        let gw_id = GuestWorkId(12345);
 
         // Create two reads
         let first_id = JobId(1010);
@@ -1293,7 +1293,7 @@ pub(crate) mod up_test {
         // Regular happy path
         let job = DownstairsIO {
             ds_id: JobId(1),
-            guest_id: 1,
+            guest_id: GuestWorkId(1),
             work: IOop::Read {
                 dependencies: vec![],
                 requests: vec![],
@@ -1318,7 +1318,7 @@ pub(crate) mod up_test {
         // Mismatch!
         let job = DownstairsIO {
             ds_id: JobId(1),
-            guest_id: 1,
+            guest_id: GuestWorkId(1),
             work: IOop::Read {
                 dependencies: vec![],
                 requests: vec![],
@@ -1343,7 +1343,7 @@ pub(crate) mod up_test {
         // Length mismatch
         let job = DownstairsIO {
             ds_id: JobId(1),
-            guest_id: 1,
+            guest_id: GuestWorkId(1),
             work: IOop::Read {
                 dependencies: vec![],
                 requests: vec![],
@@ -1367,7 +1367,7 @@ pub(crate) mod up_test {
 
         let job = DownstairsIO {
             ds_id: JobId(1),
-            guest_id: 1,
+            guest_id: GuestWorkId(1),
             work: IOop::Read {
                 dependencies: vec![],
                 requests: vec![],
