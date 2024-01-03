@@ -168,7 +168,7 @@ impl Volume {
         producer_registry: Option<ProducerRegistry>,
     ) -> Result<(), CrucibleError> {
         let region_def = build_region_definition(&extent_info, &opts)?;
-        let guest = Arc::new(Guest::new());
+        let guest = Arc::new(Guest::new(Some(self.log.clone())));
 
         // Spawn crucible tasks
         let guest_clone = guest.clone();
@@ -179,7 +179,6 @@ impl Volume {
             Some(region_def),
             guest_clone,
             producer_registry,
-            Some(self.log.clone()),
         )?;
 
         self.add_subvolume(guest).await
@@ -1557,7 +1556,7 @@ mod test {
     fn test_single_block() -> Result<()> {
         let sub_volume = SubVolume {
             lba_range: 0..10,
-            block_io: Arc::new(Guest::new()),
+            block_io: Arc::new(Guest::new(Some(csl()))),
         };
 
         // Coverage inside region
@@ -1570,7 +1569,7 @@ mod test {
     fn test_single_sub_volume_lba_coverage() -> Result<()> {
         let sub_volume = SubVolume {
             lba_range: 0..2048,
-            block_io: Arc::new(Guest::new()),
+            block_io: Arc::new(Guest::new(Some(csl()))),
         };
 
         // Coverage inside region
@@ -1592,7 +1591,7 @@ mod test {
     fn test_single_sub_volume_lba_coverage_with_offset() -> Result<()> {
         let sub_volume = SubVolume {
             lba_range: 1024..2048,
-            block_io: Arc::new(Guest::new()),
+            block_io: Arc::new(Guest::new(Some(csl()))),
         };
 
         // No coverage before region

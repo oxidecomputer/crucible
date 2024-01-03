@@ -261,7 +261,6 @@ impl Upstairs {
         expected_region_def: Option<RegionDefinition>,
         guest: Arc<Guest>,
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
-        log: Logger,
     ) -> Self {
         /*
          * XXX Make sure we have three and only three downstairs
@@ -302,7 +301,7 @@ impl Upstairs {
         };
 
         let session_id = Uuid::new_v4();
-        let log = log.new(o!("session_id" => session_id.to_string()));
+        let log = guest.log.new(o!("session_id" => session_id.to_string()));
         info!(log, "Crucible {} has session id: {}", uuid, session_id);
         info!(log, "Upstairs opts: {}", opt);
 
@@ -361,7 +360,13 @@ impl Upstairs {
 
         let log = crucible_common::build_logger();
 
-        Self::new(&opts, 0, ddef, Arc::new(Guest::default()), None, log)
+        Self::new(
+            &opts,
+            0,
+            ddef,
+            Arc::new(Guest::new(Some(log.clone()))),
+            None,
+        )
     }
 
     /// Runs the upstairs (forever)
