@@ -1178,12 +1178,12 @@ pub(crate) mod up_test {
         if wu {
             IOop::WriteUnwritten {
                 dependencies: vec![],
-                writes,
+                data: SerializedWrite::from_writes(writes),
             }
         } else {
             IOop::Write {
                 dependencies: vec![],
-                writes,
+                data: SerializedWrite::from_writes(writes),
             }
         }
     }

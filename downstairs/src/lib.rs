@@ -53,6 +53,75 @@ fn deadline_secs(secs: u64) -> Instant {
         .unwrap()
 }
 
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Clone, PartialEq)]
+enum IOop {
+    Write {
+        dependencies: Vec<JobId>, // Jobs that must finish before this
+        writes: Vec<crucible_protocol::Write>,
+    },
+    WriteUnwritten {
+        dependencies: Vec<JobId>, // Jobs that must finish before this
+        writes: Vec<crucible_protocol::Write>,
+    },
+    Read {
+        dependencies: Vec<JobId>, // Jobs that must finish before this
+        requests: Vec<ReadRequest>,
+    },
+    Flush {
+        dependencies: Vec<JobId>, // Jobs that must finish before this
+        flush_number: u64,
+        gen_number: u64,
+        snapshot_details: Option<SnapshotDetails>,
+        extent_limit: Option<usize>,
+    },
+    /*
+     * These operations are for repairing a bad downstairs
+     */
+    ExtentClose {
+        dependencies: Vec<JobId>, // Jobs that must finish before this
+        extent: usize,
+    },
+    ExtentFlushClose {
+        dependencies: Vec<JobId>, // Jobs that must finish before this
+        extent: usize,
+        flush_number: u64,
+        gen_number: u64,
+        source_downstairs: ClientId,
+        repair_downstairs: Vec<ClientId>,
+    },
+    ExtentLiveRepair {
+        dependencies: Vec<JobId>, // Jobs that must finish before this
+        extent: usize,
+        source_downstairs: ClientId,
+        source_repair_address: SocketAddr,
+        repair_downstairs: Vec<ClientId>,
+    },
+    ExtentLiveReopen {
+        dependencies: Vec<JobId>, // Jobs that must finish before this
+        extent: usize,
+    },
+    ExtentLiveNoOp {
+        dependencies: Vec<JobId>, // Jobs that must finish before this
+    },
+}
+
+impl IOop {
+    fn deps(&self) -> &[JobId] {
+        match &self {
+            IOop::Write { dependencies, .. }
+            | IOop::Flush { dependencies, .. }
+            | IOop::Read { dependencies, .. }
+            | IOop::WriteUnwritten { dependencies, .. }
+            | IOop::ExtentClose { dependencies, .. }
+            | IOop::ExtentFlushClose { dependencies, .. }
+            | IOop::ExtentLiveRepair { dependencies, .. }
+            | IOop::ExtentLiveReopen { dependencies, .. }
+            | IOop::ExtentLiveNoOp { dependencies } => dependencies,
+        }
+    }
+}
+
 /*
  * Export the contents or partial contents of a Downstairs Region to
  * the file indicated.

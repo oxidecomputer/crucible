@@ -937,9 +937,8 @@ impl DownstairsIO {
      */
     pub fn io_size(&self) -> usize {
         match &self.work {
-            IOop::Write { writes, .. }
-            | IOop::WriteUnwritten { writes, .. } => {
-                writes.iter().map(|w| w.data.len()).sum()
+            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
+                data.io_size_bytes
             }
             IOop::Read { .. } => {
                 if self.data.is_some() {
@@ -950,7 +949,6 @@ impl DownstairsIO {
                 }
             }
             IOop::Flush { .. }
-            | IOop::ExtentClose { .. }
             | IOop::ExtentFlushClose { .. }
             | IOop::ExtentLiveRepair { .. }
             | IOop::ExtentLiveReopen { .. }
@@ -1021,12 +1019,6 @@ impl DownstairsIO {
             IOop::Write { .. }
             | IOop::WriteUnwritten { .. }
             | IOop::Flush { .. } => wc.skipped + wc.error > 1,
-            IOop::ExtentClose {
-                dependencies: _,
-                extent,
-            } => {
-                panic!("Received illegal IOop::ExtentClose: {}", extent);
-            }
             IOop::ExtentFlushClose { .. }
             | IOop::ExtentLiveRepair { .. }
             | IOop::ExtentLiveReopen { .. }
@@ -1074,19 +1066,102 @@ impl ReconcileIO {
         }
     }
 }
+
+/// Pre-serialized write, to avoid extra memory copies / allocation
+///
+/// The actual data to be written on the wire is in `self.data`; everything else
+/// is metadata used for logging, etc.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SerializedWrite {
+    /// Number of blocks written (used for logging)
+    num_blocks: usize,
+
+    /// Extents to be written
+    eids: Vec<u64>,
+
+    /// Number of bytes written
+    io_size_bytes: usize,
+
+    /// Pre-serialized write data, to avoid extra memcpys
+    data: bytes::Bytes,
+}
+
+impl SerializedWrite {
+    /// Helper function to build a `SerializedWrite` from a list of `Writes`
+    ///
+    /// This is only used during unit tests; normally, the conversion is
+    /// performed during the handling of the write request.
+    #[cfg(test)]
+    fn from_writes(writes: Vec<Write>) -> Self {
+        use bytes::BufMut;
+
+        let out = BytesMut::new();
+        let mut w = out.writer();
+        bincode::serialize_into(&mut w, &writes).unwrap();
+
+        let mut eids: Vec<_> = writes.iter().map(|w| w.eid).collect();
+        eids.dedup();
+
+        let num_blocks = writes.len();
+        let io_size_bytes = writes.iter().map(|w| w.data.len()).sum();
+
+        Self {
+            num_blocks,
+            io_size_bytes,
+            eids,
+            data: w.into_inner().freeze(),
+        }
+    }
+}
+
+/// Raw message header, which is used for zero-copy serialization
+///
+/// These variants must contain the same fields as their `Message` equivalents
+/// in the same order.
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+#[repr(u16)]
+enum RawMessage {
+    Write {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: JobId,
+        dependencies: Vec<JobId>,
+    },
+    WriteUnwritten {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: JobId,
+        dependencies: Vec<JobId>,
+    },
+}
+
+impl RawMessage {
+    /// Returns the discriminant used by the equivalent `Message`
+    ///
+    /// This is hard-coded and exhaustively checked by a unit test.
+    fn discriminant(&self) -> MessageDiscriminants {
+        match self {
+            RawMessage::Write { .. } => MessageDiscriminants::Write,
+            RawMessage::WriteUnwritten { .. } => {
+                MessageDiscriminants::WriteUnwritten
+            }
+        }
+    }
+}
+
 /*
  * Crucible to storage IO operations.
  */
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, PartialEq)]
-pub enum IOop {
+enum IOop {
     Write {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        writes: Vec<crucible_protocol::Write>,
+        data: SerializedWrite,
     },
     WriteUnwritten {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        writes: Vec<crucible_protocol::Write>,
+        data: SerializedWrite,
     },
     Read {
         dependencies: Vec<JobId>, // Jobs that must finish before this
@@ -1102,10 +1177,6 @@ pub enum IOop {
     /*
      * These operations are for repairing a bad downstairs
      */
-    ExtentClose {
-        dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
-    },
     ExtentFlushClose {
         dependencies: Vec<JobId>, // Jobs that must finish before this
         extent: usize,
@@ -1131,13 +1202,13 @@ pub enum IOop {
 }
 
 impl IOop {
-    pub fn deps(&self) -> &Vec<JobId> {
+    #[cfg(test)]
+    fn deps(&self) -> &Vec<JobId> {
         match &self {
             IOop::Write { dependencies, .. }
             | IOop::Flush { dependencies, .. }
             | IOop::Read { dependencies, .. }
             | IOop::WriteUnwritten { dependencies, .. }
-            | IOop::ExtentClose { dependencies, .. }
             | IOop::ExtentFlushClose { dependencies, .. }
             | IOop::ExtentLiveRepair { dependencies, .. }
             | IOop::ExtentLiveReopen { dependencies, .. }
@@ -1145,26 +1216,13 @@ impl IOop {
         }
     }
 
-    pub fn is_read(&self) -> bool {
-        matches!(self, IOop::Read { .. })
-    }
-
-    pub fn is_write(&self) -> bool {
-        matches!(self, IOop::Write { .. } | IOop::WriteUnwritten { .. })
-    }
-
-    pub fn is_flush(&self) -> bool {
-        matches!(self, IOop::Flush { .. })
-    }
-
     /*
      * Report if the IOop is one used during LiveRepair
      */
-    pub fn is_repair(&self) -> bool {
+    fn is_repair(&self) -> bool {
         matches!(
             self,
-            IOop::ExtentClose { .. }
-                | IOop::ExtentFlushClose { .. }
+            IOop::ExtentFlushClose { .. }
                 | IOop::ExtentLiveRepair { .. }
                 | IOop::ExtentLiveNoOp { .. }
                 | IOop::ExtentLiveReopen { .. }
@@ -1177,7 +1235,7 @@ impl IOop {
      * The size of the IO, or extent number if a repair operation.
      * A Vec of the dependencies.
      */
-    pub fn ioop_summary(&self) -> (String, usize, Vec<JobId>) {
+    fn ioop_summary(&self) -> (String, usize, Vec<JobId>) {
         let (job_type, num_blocks, deps) = match self {
             IOop::Read {
                 dependencies,
@@ -1187,31 +1245,13 @@ impl IOop {
                 let num_blocks = requests.len();
                 (job_type, num_blocks, dependencies.clone())
             }
-            IOop::Write {
-                dependencies,
-                writes,
-            } => {
+            IOop::Write { dependencies, data } => {
                 let job_type = "Write".to_string();
-                let mut num_blocks = 0;
-
-                for write in writes {
-                    let block_size = write.offset.block_size_in_bytes();
-                    num_blocks += write.data.len() / block_size as usize;
-                }
-                (job_type, num_blocks, dependencies.clone())
+                (job_type, data.num_blocks, dependencies.clone())
             }
-            IOop::WriteUnwritten {
-                dependencies,
-                writes,
-            } => {
+            IOop::WriteUnwritten { dependencies, data } => {
                 let job_type = "WriteU".to_string();
-                let mut num_blocks = 0;
-
-                for write in writes {
-                    let block_size = write.offset.block_size_in_bytes();
-                    num_blocks += write.data.len() / block_size as usize;
-                }
-                (job_type, num_blocks, dependencies.clone())
+                (job_type, data.num_blocks, dependencies.clone())
             }
             IOop::Flush {
                 dependencies,
@@ -1222,13 +1262,6 @@ impl IOop {
             } => {
                 let job_type = "Flush".to_string();
                 (job_type, 0, dependencies.clone())
-            }
-            IOop::ExtentClose {
-                dependencies,
-                extent,
-            } => {
-                let job_type = "EClose".to_string();
-                (job_type, *extent, dependencies.clone())
             }
             IOop::ExtentFlushClose {
                 dependencies,
@@ -1271,7 +1304,7 @@ impl IOop {
     // repair), and determine if this IO should be sent to the downstairs or not
     // (skipped).
     // Return true if we should send it.
-    pub fn send_io_live_repair(&self, extent_limit: Option<u64>) -> bool {
+    fn send_io_live_repair(&self, extent_limit: Option<u64>) -> bool {
         if let Some(extent_limit) = extent_limit {
             // The extent_limit has been set, so we have repair work in
             // progress.  If our IO touches an extent less than or equal
@@ -1281,9 +1314,9 @@ impl IOop {
             // repaired is handled with dependencies, and IOs should arrive
             // here with those dependencies already set.
             match &self {
-                IOop::Write { writes, .. }
-                | IOop::WriteUnwritten { writes, .. } => {
-                    writes.iter().any(|write| write.eid <= extent_limit)
+                IOop::Write { data, .. }
+                | IOop::WriteUnwritten { data, .. } => {
+                    data.eids.iter().any(|eid| *eid <= extent_limit)
                 }
                 IOop::Flush { .. } => {
                     // If we have set extent limit, then we go ahead and
