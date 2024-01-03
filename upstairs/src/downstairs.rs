@@ -353,42 +353,24 @@ impl Downstairs {
         let gw_id = job.guest_id;
         let io_size = job.io_size();
         match &job.work {
-            IOop::Read {
-                dependencies: _,
-                requests: _,
-            } => {
+            IOop::Read { .. } => {
                 cdt::gw__read__done!(|| (gw_id.0));
                 stats.add_read(io_size as i64);
             }
-            IOop::Write {
-                dependencies: _,
-                writes: _,
-            } => {
+            IOop::Write { .. } => {
                 cdt::gw__write__done!(|| (gw_id.0));
                 stats.add_write(io_size as i64);
             }
-            IOop::WriteUnwritten {
-                dependencies: _,
-                writes: _,
-            } => {
+            IOop::WriteUnwritten { .. } => {
                 cdt::gw__write__unwritten__done!(|| (gw_id.0));
                 // We don't include WriteUnwritten operation in the
                 // metrics for this guest.
             }
-            IOop::Flush {
-                dependencies: _,
-                flush_number: _,
-                gen_number: _,
-                snapshot_details: _,
-                extent_limit: _,
-            } => {
+            IOop::Flush { .. } => {
                 cdt::gw__flush__done!(|| (gw_id.0));
                 stats.add_flush();
             }
-            IOop::ExtentClose {
-                dependencies: _,
-                extent,
-            } => {
+            IOop::ExtentClose { extent, .. } => {
                 // The upstairs should never have an ExtentClose on the
                 // work queue.  We will always use ExtentFlushClose as the
                 // IOop, then convert to the proper Message to send to
@@ -399,35 +381,19 @@ impl Downstairs {
                     ds_id, gw_id, extent,
                 );
             }
-            IOop::ExtentFlushClose {
-                dependencies: _,
-                extent,
-                flush_number: _,
-                gen_number: _,
-                source_downstairs: _,
-                repair_downstairs: _,
-            } => {
+            IOop::ExtentFlushClose { extent, .. } => {
                 cdt::gw__close__done!(|| (gw_id.0, extent));
                 stats.add_flush_close();
             }
-            IOop::ExtentLiveRepair {
-                dependencies: _,
-                extent,
-                source_downstairs: _,
-                source_repair_address: _,
-                repair_downstairs: _,
-            } => {
+            IOop::ExtentLiveRepair { extent, .. } => {
                 cdt::gw__repair__done!(|| (gw_id.0, extent));
                 stats.add_extent_repair();
             }
-            IOop::ExtentLiveNoOp { dependencies: _ } => {
+            IOop::ExtentLiveNoOp { .. } => {
                 cdt::gw__noop__done!(|| (gw_id.0));
                 stats.add_extent_noop();
             }
-            IOop::ExtentLiveReopen {
-                dependencies: _,
-                extent,
-            } => {
+            IOop::ExtentLiveReopen { extent, .. } => {
                 cdt::gw__reopen__done!(|| (gw_id.0, extent));
                 stats.add_extent_reopen();
             }
@@ -2819,18 +2785,12 @@ impl Downstairs {
             };
 
             let (job_type, num_blocks): (String, usize) = match &job.work {
-                IOop::Read {
-                    dependencies: _dependencies,
-                    requests,
-                } => {
+                IOop::Read { requests, .. } => {
                     let job_type = "Read".to_string();
                     let num_blocks = requests.len();
                     (job_type, num_blocks)
                 }
-                IOop::Write {
-                    dependencies: _dependencies,
-                    writes,
-                } => {
+                IOop::Write { writes, .. } => {
                     let job_type = "Write".to_string();
                     let mut num_blocks = 0;
 
@@ -2841,10 +2801,7 @@ impl Downstairs {
 
                     (job_type, num_blocks)
                 }
-                IOop::WriteUnwritten {
-                    dependencies: _dependencies,
-                    writes,
-                } => {
+                IOop::WriteUnwritten { writes, .. } => {
                     let job_type = "WriteU".to_string();
                     let mut num_blocks = 0;
 
@@ -2855,52 +2812,27 @@ impl Downstairs {
 
                     (job_type, num_blocks)
                 }
-                IOop::Flush {
-                    dependencies: _dependencies,
-                    flush_number: _flush_number,
-                    gen_number: _gen_number,
-                    snapshot_details: _,
-                    extent_limit: _,
-                } => {
+                IOop::Flush { .. } => {
                     let job_type = "Flush".to_string();
                     (job_type, 0)
                 }
-                IOop::ExtentClose {
-                    dependencies: _,
-                    extent,
-                } => {
+                IOop::ExtentClose { extent, .. } => {
                     let job_type = "EClose".to_string();
                     (job_type, *extent)
                 }
-                IOop::ExtentFlushClose {
-                    dependencies: _,
-                    extent,
-                    flush_number: _,
-                    gen_number: _,
-                    source_downstairs: _,
-                    repair_downstairs: _,
-                } => {
+                IOop::ExtentFlushClose { extent, .. } => {
                     let job_type = "FClose".to_string();
                     (job_type, *extent)
                 }
-                IOop::ExtentLiveRepair {
-                    dependencies: _,
-                    extent,
-                    source_downstairs: _,
-                    source_repair_address: _,
-                    repair_downstairs: _,
-                } => {
+                IOop::ExtentLiveRepair { extent, .. } => {
                     let job_type = "Repair".to_string();
                     (job_type, *extent)
                 }
-                IOop::ExtentLiveReopen {
-                    dependencies: _,
-                    extent,
-                } => {
+                IOop::ExtentLiveReopen { extent, .. } => {
                     let job_type = "Reopen".to_string();
                     (job_type, *extent)
                 }
-                IOop::ExtentLiveNoOp { dependencies: _ } => {
+                IOop::ExtentLiveNoOp { .. } => {
                     let job_type = "NoOp".to_string();
                     (job_type, 0)
                 }

@@ -906,25 +906,11 @@ impl DownstairsIO {
      */
     pub fn io_size(&self) -> usize {
         match &self.work {
-            IOop::Write {
-                dependencies: _,
-                writes,
-            } => writes.iter().map(|w| w.data.len()).sum(),
-            IOop::WriteUnwritten {
-                dependencies: _,
-                writes,
-            } => writes.iter().map(|w| w.data.len()).sum(),
-            IOop::Flush {
-                dependencies: _,
-                flush_number: _flush_number,
-                gen_number: _,
-                snapshot_details: _,
-                extent_limit: _,
-            } => 0,
-            IOop::Read {
-                dependencies: _,
-                requests: _,
-            } => {
+            IOop::Write { writes, .. }
+            | IOop::WriteUnwritten { writes, .. } => {
+                writes.iter().map(|w| w.data.len()).sum()
+            }
+            IOop::Read { .. } => {
                 if self.data.is_some() {
                     let rrs = self.data.as_ref().unwrap();
                     rrs.iter().map(|r| r.data.len()).sum()
@@ -932,30 +918,12 @@ impl DownstairsIO {
                     0
                 }
             }
-            IOop::ExtentClose {
-                dependencies: _,
-                extent: _,
-            } => 0,
-            IOop::ExtentFlushClose {
-                dependencies: _,
-                extent: _,
-                flush_number: _,
-                gen_number: _,
-                source_downstairs: _,
-                repair_downstairs: _,
-            } => 0,
-            IOop::ExtentLiveRepair {
-                dependencies: _,
-                extent: _,
-                source_downstairs: _,
-                source_repair_address: _,
-                repair_downstairs: _,
-            } => 0,
-            IOop::ExtentLiveReopen {
-                dependencies: _,
-                extent: _,
-            } => 0,
-            IOop::ExtentLiveNoOp { dependencies: _ } => 0,
+            IOop::Flush { .. }
+            | IOop::ExtentClose { .. }
+            | IOop::ExtentFlushClose { .. }
+            | IOop::ExtentLiveRepair { .. }
+            | IOop::ExtentLiveReopen { .. }
+            | IOop::ExtentLiveNoOp { .. } => 0,
         }
     }
 
@@ -1033,19 +1001,19 @@ impl DownstairsIO {
 
         let bad_job = match &self.work {
             IOop::Read { .. } => wc.error == 3,
-            IOop::Write { .. } => wc.skipped + wc.error > 1,
-            IOop::WriteUnwritten { .. } => wc.skipped + wc.error > 1,
-            IOop::Flush { .. } => wc.skipped + wc.error > 1,
+            IOop::Write { .. }
+            | IOop::WriteUnwritten { .. }
+            | IOop::Flush { .. } => wc.skipped + wc.error > 1,
             IOop::ExtentClose {
                 dependencies: _,
                 extent,
             } => {
                 panic!("Received illegal IOop::ExtentClose: {}", extent);
             }
-            IOop::ExtentFlushClose { .. } => wc.error >= 1 || wc.skipped > 1,
-            IOop::ExtentLiveRepair { .. } => wc.error >= 1 || wc.skipped > 1,
-            IOop::ExtentLiveReopen { .. } => wc.error >= 1 || wc.skipped > 1,
-            IOop::ExtentLiveNoOp { .. } => wc.error >= 1 || wc.skipped > 1,
+            IOop::ExtentFlushClose { .. }
+            | IOop::ExtentLiveRepair { .. }
+            | IOop::ExtentLiveReopen { .. }
+            | IOop::ExtentLiveNoOp { .. } => wc.error >= 1 || wc.skipped > 1,
         };
 
         if bad_job {
@@ -1148,49 +1116,15 @@ pub enum IOop {
 impl IOop {
     pub fn deps(&self) -> &Vec<JobId> {
         match &self {
-            IOop::Write {
-                dependencies,
-                writes: _,
-            } => dependencies,
-            IOop::Flush {
-                dependencies,
-                flush_number: _,
-                gen_number: _,
-                snapshot_details: _,
-                extent_limit: _,
-            } => dependencies,
-            IOop::Read {
-                dependencies,
-                requests: _,
-            } => dependencies,
-            IOop::WriteUnwritten {
-                dependencies,
-                writes: _,
-            } => dependencies,
-            IOop::ExtentClose {
-                dependencies,
-                extent: _,
-            } => dependencies,
-            IOop::ExtentFlushClose {
-                dependencies,
-                extent: _,
-                flush_number: _,
-                gen_number: _,
-                source_downstairs: _,
-                repair_downstairs: _,
-            } => dependencies,
-            IOop::ExtentLiveRepair {
-                dependencies,
-                extent: _,
-                source_downstairs: _,
-                source_repair_address: _,
-                repair_downstairs: _,
-            } => dependencies,
-            IOop::ExtentLiveReopen {
-                dependencies,
-                extent: _,
-            } => dependencies,
-            IOop::ExtentLiveNoOp { dependencies } => dependencies,
+            IOop::Write { dependencies, .. }
+            | IOop::Flush { dependencies, .. }
+            | IOop::Read { dependencies, .. }
+            | IOop::WriteUnwritten { dependencies, .. }
+            | IOop::ExtentClose { dependencies, .. }
+            | IOop::ExtentFlushClose { dependencies, .. }
+            | IOop::ExtentLiveRepair { dependencies, .. }
+            | IOop::ExtentLiveReopen { dependencies, .. }
+            | IOop::ExtentLiveNoOp { dependencies } => dependencies,
         }
     }
 
@@ -1330,27 +1264,9 @@ impl IOop {
             // repaired is handled with dependencies, and IOs should arrive
             // here with those dependencies already set.
             match &self {
-                IOop::Write {
-                    dependencies: _,
-                    writes,
-                } => {
-                    for write in writes {
-                        if write.eid <= extent_limit {
-                            return true;
-                        }
-                    }
-                    false
-                }
-                IOop::WriteUnwritten {
-                    dependencies: _,
-                    writes,
-                } => {
-                    for write in writes {
-                        if write.eid <= extent_limit {
-                            return true;
-                        }
-                    }
-                    false
+                IOop::Write { writes, .. }
+                | IOop::WriteUnwritten { writes, .. } => {
+                    writes.iter().any(|write| write.eid <= extent_limit)
                 }
                 IOop::Flush { .. } => {
                     // If we have set extent limit, then we go ahead and
@@ -1358,16 +1274,8 @@ impl IOop {
                     // the downstairs to act based on that.
                     true
                 }
-                IOop::Read {
-                    dependencies: _,
-                    requests,
-                } => {
-                    for req in requests {
-                        if req.eid <= extent_limit {
-                            return true;
-                        }
-                    }
-                    false
+                IOop::Read { requests, .. } => {
+                    requests.iter().any(|req| req.eid <= extent_limit)
                 }
                 _ => {
                     panic!("Unsupported IO check {:?}", self);
