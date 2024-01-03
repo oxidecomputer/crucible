@@ -1158,7 +1158,7 @@ impl Upstairs {
     /// Submit a read job to the downstairs, optionally without a `BlockReq`
     ///
     /// # Panics
-    /// If `req` is `None` and this isn't the test suite
+    /// If `res` is `None` and this isn't the test suite
     async fn submit_read_inner(
         &mut self,
         offset: Block,
@@ -1263,10 +1263,10 @@ impl Upstairs {
         }
     }
 
-    /// Submits a new write job to the upstairs, optionally without a `BlockReq`
+    /// Submits a new write job to the upstairs, optionally without a `BlockRes`
     ///
     /// # Panics
-    /// If `req` is `None` and this isn't running in the test suite
+    /// If `res` is `None` and this isn't running in the test suite
     fn submit_deferred_write_inner(
         &mut self,
         offset: Block,
@@ -1275,7 +1275,7 @@ impl Upstairs {
         is_write_unwritten: bool,
     ) {
         // It's possible for the write to be invalid out of the gate, in which
-        // case `compute_deferred_write` replies to the `req` itself and returns
+        // case `compute_deferred_write` replies to the `res` itself and returns
         // `None`.  Otherwise, we have to store a future to process the write
         // result.
         if let Some(w) =
