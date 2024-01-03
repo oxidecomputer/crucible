@@ -2197,6 +2197,9 @@ pub struct Guest {
     /// could send arbitrarily many jobs at high speed by sending them from
     /// different tasks).
     backpressure_lock: Mutex<()>,
+
+    /// Logger for the guest
+    log: Logger,
 }
 
 /// Configuration for host-side backpressure
@@ -2227,7 +2230,8 @@ struct BackpressureConfig {
  * These methods are how to add or checking for new work on the Guest struct
  */
 impl Guest {
-    pub fn new() -> Guest {
+    pub fn new(log: Option<Logger>) -> Guest {
+        let log = log.unwrap_or_else(build_logger);
         Guest {
             /*
              * Incoming I/O requests are added to this queue.
@@ -2264,6 +2268,7 @@ impl Guest {
                 queue_max_delay: Duration::from_millis(5),
             },
             backpressure_lock: Mutex::new(()),
+            log,
         }
     }
 
@@ -2720,12 +2725,6 @@ pub struct WQCounts {
     pub active_count: usize,
 }
 
-impl Default for Guest {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /**
  * Stat counters struct used by DTrace
  */
@@ -2778,14 +2777,10 @@ pub fn up_main(
     region_def: Option<RegionDefinition>,
     guest: Arc<Guest>,
     producer_registry: Option<ProducerRegistry>,
-    upstairs_log: Option<Logger>,
 ) -> Result<tokio::task::JoinHandle<()>> {
     register_probes().unwrap();
+    let log = guest.log.clone();
 
-    let log = match upstairs_log {
-        Some(log) => log,
-        None => build_logger(),
-    };
     info!(log, "Upstairs starts");
     let info = crucible_common::BuildInfo::default();
     info!(log, "Crucible Version: {:#?}", info);
@@ -2818,7 +2813,7 @@ pub fn up_main(
      * the different async tasks
      */
     let mut up =
-        upstairs::Upstairs::new(&opt, gen, region_def, guest, tls_context, log);
+        upstairs::Upstairs::new(&opt, gen, region_def, guest, tls_context);
 
     if let Some(pr) = producer_registry {
         let ups = up.stats.clone();

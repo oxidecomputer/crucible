@@ -522,7 +522,7 @@ pub(crate) mod protocol_test {
 
             // Configure our guest without queue backpressure, to speed up tests
             // which require triggering a timeout
-            let mut g = Guest::new();
+            let mut g = Guest::new(Some(log.clone()));
             g.backpressure_config.queue_max_delay = Duration::ZERO;
             let guest = Arc::new(g);
 
@@ -535,15 +535,8 @@ pub(crate) mod protocol_test {
                 ..Default::default()
             };
 
-            let join_handle = up_main(
-                crucible_opts,
-                1,
-                None,
-                guest.clone(),
-                None,
-                Some(log.new(o!("upstairs" => 1))),
-            )
-            .unwrap();
+            let join_handle =
+                up_main(crucible_opts, 1, None, guest.clone(), None).unwrap();
 
             let mut handles: Vec<JoinHandle<Result<()>>> = vec![];
 

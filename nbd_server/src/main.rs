@@ -91,10 +91,10 @@ async fn main() -> Result<()> {
      * We create this here instead of inside up_main() so we can use
      * the methods provided by guest to interact with Crucible.
      */
-    let guest = Arc::new(Guest::new());
+    let guest = Arc::new(Guest::new(None));
 
     let _join_handle =
-        up_main(crucible_opts, opt.gen, None, guest.clone(), None, None)?;
+        up_main(crucible_opts, opt.gen, None, guest.clone(), None)?;
     println!("Crucible runtime is spawned");
 
     // NBD server
