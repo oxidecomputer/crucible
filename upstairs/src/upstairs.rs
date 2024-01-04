@@ -191,21 +191,6 @@ pub(crate) struct Upstairs {
     pub(crate) control_tx: mpsc::Sender<ControlRequest>,
 }
 
-impl Drop for Upstairs {
-    fn drop(&mut self) {
-        // Reply to any `BlockRes` that we might be holding in our
-        // `UpstairsState`; otherwise, their destructor will panic.
-        match std::mem::replace(&mut self.state, UpstairsState::Initializing) {
-            UpstairsState::GoActive(res) | UpstairsState::Deactivating(res) => {
-                res.send_err(CrucibleError::GenericError(
-                    "Upstairs purging BlockRes during drop()".to_string(),
-                ));
-            }
-            _ => (),
-        }
-    }
-}
-
 /// Action to be taken which modifies the [`Upstairs`] state
 #[derive(Debug)]
 pub(crate) enum UpstairsAction {
@@ -1917,7 +1902,7 @@ pub(crate) mod test {
             res: ds_done_res,
         }))
         .await;
-        assert!(ds_done_brw.wait().await.is_err());
+        assert!(ds_done_brw.wait(&up.log).await.is_err());
 
         up.force_active().unwrap();
 
@@ -1927,7 +1912,7 @@ pub(crate) mod test {
             res: ds_done_res,
         }))
         .await;
-        assert!(ds_done_brw.wait().await.is_ok());
+        assert!(ds_done_brw.wait(&up.log).await.is_ok());
 
         let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -1935,7 +1920,7 @@ pub(crate) mod test {
             res: ds_done_res,
         }))
         .await;
-        assert!(ds_done_brw.wait().await.is_err())
+        assert!(ds_done_brw.wait(&up.log).await.is_err())
     }
 
     #[tokio::test]
@@ -1984,7 +1969,7 @@ pub(crate) mod test {
                 assert!(matches!(up.state, UpstairsState::Initializing));
             }
         }
-        assert!(ds_done_brw.wait().await.is_ok());
+        assert!(ds_done_brw.wait(&up.log).await.is_ok());
     }
 
     // Job dependency tests
