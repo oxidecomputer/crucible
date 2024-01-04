@@ -1,4 +1,4 @@
-// Copyright 2023 Oxide Computer Company
+// Copyright 2024 Oxide Computer Company
 //! Tools to defer encryption work to a separate thread pool
 use std::sync::Arc;
 
