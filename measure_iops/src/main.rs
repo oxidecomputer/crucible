@@ -101,19 +101,19 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }));
 
-    let mut guest = Guest::new(None);
+    let (guest, mut io) = Guest::new(None);
+    let guest = Arc::new(guest);
 
     if let Some(iop_limit) = opt.iop_limit {
-        guest.set_iop_limit(16 * 1024 * 1024, iop_limit);
+        io.set_iop_limit(16 * 1024 * 1024, iop_limit);
     }
 
     if let Some(bw_limit) = opt.bw_limit_in_bytes {
-        guest.set_bw_limit(bw_limit);
+        io.set_bw_limit(bw_limit);
     }
 
     let guest = Arc::new(guest);
-    let _join_handle =
-        up_main(crucible_opts, opt.gen, None, guest.clone(), None)?;
+    let _join_handle = up_main(crucible_opts, opt.gen, None, io, None)?;
     println!("Crucible runtime is spawned");
 
     guest.activate().await?;

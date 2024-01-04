@@ -571,10 +571,10 @@ async fn main() -> Result<()> {
     };
 
     // TODO: volumes?
-    let guest = Arc::new(Guest::new(None));
+    let (guest, io) = Guest::new(None);
+    let guest = Arc::new(guest);
 
-    let _join_handle =
-        up_main(crucible_opts, opt.gen, None, guest.clone(), None)?;
+    let _join_handle = up_main(crucible_opts, opt.gen, None, io, None)?;
     eprintln!("Crucible runtime is spawned");
 
     // IO time

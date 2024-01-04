@@ -668,7 +668,8 @@ async fn main() -> Result<()> {
      * We create this here instead of inside up_main() so we can use
      * the methods provided by guest to interact with Crucible.
      */
-    let guest = Arc::new(Guest::new(None));
+    let (guest, io) = Guest::new(None);
+    let guest = Arc::new(guest);
 
     let pr;
     if opt.metrics {
@@ -698,8 +699,7 @@ async fn main() -> Result<()> {
         pr = None;
     }
 
-    let _join_handle =
-        up_main(crucible_opts, opt.gen, None, guest.clone(), pr)?;
+    let _join_handle = up_main(crucible_opts, opt.gen, None, io, pr)?;
     println!("Crucible runtime is spawned");
 
     if let Workload::CliServer { listen, port } = opt.workload {
