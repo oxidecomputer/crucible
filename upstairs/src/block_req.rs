@@ -36,9 +36,11 @@ impl BlockRes {
 }
 impl Drop for BlockRes {
     fn drop(&mut self) {
-        // Dropping a BlockRes without issuing a completion would mean the
-        // associated waiter would be stuck waiting forever for a result.
-        assert!(self.0.is_none(), "result should be sent for BlockRes");
+        if self.0.is_some() {
+            // During normal operation, we expect to reply to every BlockReq, so
+            // we'll fire a DTrace probe here.
+            cdt::up__block__req__dropped!();
+        }
     }
 }
 
@@ -61,10 +63,19 @@ impl BlockReqWaiter {
     }
 
     /// Consume this BlockReqWaiter and wait on the message
-    pub async fn wait(self) -> Result<(), CrucibleError> {
+    ///
+    /// If the other side of the oneshot drops without a reply, log an error
+    pub async fn wait(self, log: &Logger) -> Result<(), CrucibleError> {
         match self.recv.await {
             Ok(v) => v,
-            Err(_) => crucible_bail!(RecvDisconnected),
+            Err(_) => {
+                warn!(
+                    log,
+                    "BlockReqWaiter disconnected; \
+                     this should only happen at exit"
+                );
+                Err(CrucibleError::RecvDisconnected)
+            }
         }
     }
 
@@ -92,7 +103,7 @@ mod test {
 
         res.send_ok();
 
-        brw.wait().await.unwrap();
+        brw.wait(&crucible_common::build_logger()).await.unwrap();
     }
 
     #[tokio::test]
@@ -101,6 +112,6 @@ mod test {
 
         res.send_err(CrucibleError::UpstairsInactive);
 
-        assert!(brw.wait().await.is_err());
+        assert!(brw.wait(&crucible_common::build_logger()).await.is_err());
     }
 }
