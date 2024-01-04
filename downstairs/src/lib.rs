@@ -294,48 +294,24 @@ pub async fn show_work(ds: &mut Downstairs) {
             for id in kvec.iter() {
                 let dsw = work.active.get(id).unwrap();
                 let (dsw_type, dep_list) = match &dsw.work {
-                    IOop::Read {
-                        dependencies,
-                        requests: _,
-                    } => ("Read", dependencies),
-                    IOop::Write {
-                        dependencies,
-                        writes: _,
-                    } => ("Write", dependencies),
-                    IOop::Flush {
-                        dependencies,
-                        flush_number: _flush_number,
-                        gen_number: _gen_number,
-                        snapshot_details: _,
-                        extent_limit: _,
-                    } => ("Flush", dependencies),
-                    IOop::WriteUnwritten {
-                        dependencies,
-                        writes: _,
-                    } => ("WriteU", dependencies),
-                    IOop::ExtentClose {
-                        dependencies,
-                        extent: _,
-                    } => ("EClose", dependencies),
-                    IOop::ExtentFlushClose {
-                        dependencies,
-                        extent: _,
-                        flush_number: _flush_number,
-                        gen_number: _gen_number,
-                        source_downstairs: _,
-                        repair_downstairs: _,
-                    } => ("EFClose", dependencies),
-                    IOop::ExtentLiveRepair {
-                        dependencies,
-                        extent: _,
-                        source_downstairs: _,
-                        source_repair_address: _,
-                        repair_downstairs: _,
-                    } => ("Repair", dependencies),
-                    IOop::ExtentLiveReopen {
-                        dependencies,
-                        extent: _,
-                    } => ("ReOpen", dependencies),
+                    IOop::Read { dependencies, .. } => ("Read", dependencies),
+                    IOop::Write { dependencies, .. } => ("Write", dependencies),
+                    IOop::Flush { dependencies, .. } => ("Flush", dependencies),
+                    IOop::WriteUnwritten { dependencies, .. } => {
+                        ("WriteU", dependencies)
+                    }
+                    IOop::ExtentClose { dependencies, .. } => {
+                        ("EClose", dependencies)
+                    }
+                    IOop::ExtentFlushClose { dependencies, .. } => {
+                        ("EFClose", dependencies)
+                    }
+                    IOop::ExtentLiveRepair { dependencies, .. } => {
+                        ("Repair", dependencies)
+                    }
+                    IOop::ExtentLiveReopen { dependencies, .. } => {
+                        ("ReOpen", dependencies)
+                    }
                     IOop::ExtentLiveNoOp { dependencies } => {
                         ("NoOp", dependencies)
                     }
@@ -2077,10 +2053,7 @@ impl Downstairs {
                     responses,
                 }))
             }
-            IOop::WriteUnwritten {
-                dependencies: _dependencies,
-                writes,
-            } => {
+            IOop::WriteUnwritten { writes, .. } => {
                 /*
                  * Any error from an IO should be intercepted here and passed
                  * back to the upstairs.
@@ -2868,50 +2841,15 @@ impl Work {
                             "{} job {} for connection {:?} waiting on {} deps",
                             ds_id,
                             match &job.work {
-                                IOop::Write {
-                                    dependencies: _,
-                                    writes: _,
-                                } => "Write",
-                                IOop::WriteUnwritten {
-                                    dependencies: _,
-                                    writes: _,
-                                } => "WriteUnwritten",
-                                IOop::Flush {
-                                    dependencies: _,
-                                    flush_number: _flush_number,
-                                    gen_number: _gen_number,
-                                    snapshot_details: _,
-                                    extent_limit: _,
-                                } => "Flush",
-                                IOop::Read {
-                                    dependencies: _,
-                                    requests: _,
-                                } => "Read",
-                                IOop::ExtentClose {
-                                    dependencies: _,
-                                    extent: _,
-                                } => "ECLose",
-                                IOop::ExtentFlushClose {
-                                    dependencies: _,
-                                    extent: _,
-                                    flush_number: _flush_number,
-                                    gen_number: _gen_number,
-                                    source_downstairs: _,
-                                    repair_downstairs: _,
-                                } => "EFlushCLose",
-                                IOop::ExtentLiveRepair {
-                                    dependencies: _,
-                                    extent: _,
-                                    source_downstairs: _,
-                                    source_repair_address: _,
-                                    repair_downstairs: _,
-                                } => "ELiveRepair",
-                                IOop::ExtentLiveReopen {
-                                    dependencies: _,
-                                    extent: _,
-                                } => "ELiveReopen",
-                                IOop::ExtentLiveNoOp { dependencies: _ } =>
-                                    "NoOp",
+                                IOop::Write { .. } => "Write",
+                                IOop::WriteUnwritten { .. } => "WriteUnwritten",
+                                IOop::Flush { .. } => "Flush",
+                                IOop::Read { .. } => "Read",
+                                IOop::ExtentClose { .. } => "ECLose",
+                                IOop::ExtentFlushClose { .. } => "EFlushCLose",
+                                IOop::ExtentLiveRepair { .. } => "ELiveRepair",
+                                IOop::ExtentLiveReopen { .. } => "ELiveReopen",
+                                IOop::ExtentLiveNoOp { .. } => "NoOp",
                             },
                             job.upstairs_connection,
                             deps_outstanding.len(),
