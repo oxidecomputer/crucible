@@ -1458,21 +1458,46 @@ impl Upstairs {
                 // this particular client.
                 self.downstairs.clients[client_id].reset_timeout();
 
-                // Defer the message if it's a read that needs decryption, or
-                // there are other deferred messages in the queue (to preserve
-                // order).  Otherwise, handle it immediately.
-                if matches!(m, Message::ReadResponse { .. }) {
-                    let tx = self.deferred_msgs.push_oneshot();
+                // Defer the message if it's a (large) read that needs
+                // decryption, or there are other deferred messages in the queue
+                // (to preserve order).  Otherwise, handle it immediately.
+                if let Message::ReadResponse { responses, .. } = &m {
+                    // Any read larger than this constant should be deferred to
+                    // the worker pool; smaller reads can be processed in-thread
+                    // (since the overhead isn't worth it)
+                    const MIN_DEFER_SIZE_BYTES: u64 = 8192;
+                    let should_defer = !self.deferred_msgs.is_empty()
+                        || match responses {
+                            Ok(rs) => {
+                                // Find the number of bytes being decrypted
+                                let response_size = rs.len() as u64
+                                    * self
+                                        .ddef
+                                        .get_def()
+                                        .map(|b| b.block_size())
+                                        .unwrap_or(0);
+
+                                response_size > MIN_DEFER_SIZE_BYTES
+                            }
+                            Err(_) => false,
+                        };
+
                     let dr = DeferredRead {
                         message: m,
                         client_id,
                         cfg: self.cfg.clone(),
                         log: self.log.new(o!("job" => "decrypt")),
                     };
-                    rayon::spawn(move || {
-                        let out = dr.run();
-                        let _ = tx.send(out);
-                    });
+                    if should_defer {
+                        let tx = self.deferred_msgs.push_oneshot();
+                        rayon::spawn(move || {
+                            let out = dr.run();
+                            let _ = tx.send(out);
+                        });
+                    } else {
+                        // Do decryption right here!
+                        self.on_client_message(dr.run()).await;
+                    }
                 } else {
                     let dm = DeferredMessage {
                         message: m,
@@ -3696,8 +3721,7 @@ pub(crate) mod test {
             }],
         }]);
 
-        // This defers decryption to a separate thread.  This won't panic,
-        // because decryption failing just populates the message with an error.
+        // Because this read is small, it happens right away
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
             client_id: ClientId::new(0),
             action: ClientAction::Response(Message::ReadResponse {
@@ -3709,10 +3733,168 @@ pub(crate) mod test {
         }))
         .await;
 
-        up.await_deferred_msgs().await;
-        // no panic, great work everyone
+        // This was a small read and handled in-line
+        assert!(up.deferred_msgs.is_empty());
+        // No panic, great job everyone
     }
 
+    #[tokio::test]
+    async fn good_deferred_decryption() {
+        let mut up = make_encrypted_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        let blocks = 16384 / 512;
+        let data = Buffer::new(512 * blocks);
+        let offset = Block::new_512(7);
+        let (_tx, res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Read { offset, data },
+            res,
+        }))
+        .await;
+
+        let mut data = Vec::from([1u8; 512]);
+
+        let (nonce, tag, hash) = up
+            .cfg
+            .encryption_context
+            .as_ref()
+            .unwrap()
+            .encrypt_in_place(&mut data)
+            .unwrap();
+
+        let nonce: [u8; 12] = nonce.into();
+        let tag: [u8; 16] = tag.into();
+
+        // Build up the long read response, which should be long enough to
+        // trigger the deferred read path.
+        let mut responses = vec![];
+        for i in 0..blocks {
+            responses.push(ReadResponse {
+                eid: 0,
+                offset: Block::new_512(offset.value + i as u64),
+                data: BytesMut::from(&data[..]),
+                block_contexts: vec![BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext { nonce, tag },
+                    ),
+                    hash,
+                }],
+            });
+        }
+        let responses = Ok(responses);
+
+        // This defers decryption to a separate thread, because the read is
+        // large.  We'll check that the job is deferred below.
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id: ClientId::new(0),
+            action: ClientAction::Response(Message::ReadResponse {
+                upstairs_id: up.cfg.upstairs_id,
+                session_id: up.cfg.session_id,
+                job_id: JobId(1000),
+                responses,
+            }),
+        }))
+        .await;
+
+        // This was a large read and was deferred
+        assert!(!up.deferred_msgs.is_empty());
+
+        up.await_deferred_msgs().await;
+        // No panic, great job everyone
+    }
+
+    #[tokio::test]
+    async fn bad_deferred_decryption_means_panic() {
+        let mut up = make_encrypted_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        let blocks = 16384 / 512;
+        let data = Buffer::new(512 * blocks);
+        let offset = Block::new_512(7);
+        let (_tx, res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Read { offset, data },
+            res,
+        }))
+        .await;
+
+        // fake read response from downstairs that will fail decryption
+        let mut data = Vec::from([1u8; 512]);
+
+        let (nonce, tag, _) = up
+            .cfg
+            .encryption_context
+            .as_ref()
+            .unwrap()
+            .encrypt_in_place(&mut data)
+            .unwrap();
+
+        let nonce: [u8; 12] = nonce.into();
+        let mut tag: [u8; 16] = tag.into();
+
+        // alter tag
+        if tag[3] == 0xFF {
+            tag[3] = 0x00;
+        } else {
+            tag[3] = 0xFF;
+        }
+
+        // compute integrity hash after alteration above! It should still
+        // validate
+        let hash = integrity_hash(&[&nonce, &tag, &data]);
+
+        // Build up the long read response, which should be long enough to
+        // trigger the deferred read path.
+        let mut responses = vec![];
+        for i in 0..blocks {
+            responses.push(ReadResponse {
+                eid: 0,
+                offset: Block::new_512(offset.value + i as u64),
+                data: BytesMut::from(&data[..]),
+                block_contexts: vec![BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext { nonce, tag },
+                    ),
+                    hash,
+                }],
+            });
+        }
+        let responses = Ok(responses);
+
+        // This defers decryption to a separate thread, because the read is
+        // large.  This won't panic, because decryption failing just populates
+        // the message with an error.
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id: ClientId::new(0),
+            action: ClientAction::Response(Message::ReadResponse {
+                upstairs_id: up.cfg.upstairs_id,
+                session_id: up.cfg.session_id,
+                job_id: JobId(1000),
+                responses,
+            }),
+        }))
+        .await;
+
+        // Prepare to receive the message with an invalid tag
+        let fut = up.await_deferred_msgs();
+
+        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+        assert!(result.is_err());
+        let r = result
+            .as_ref()
+            .unwrap_err()
+            .downcast_ref::<String>()
+            .unwrap();
+        assert!(
+            r.contains("DecryptionError"),
+            "panic for the wrong reason: {r}"
+        );
+    }
+
+    /// Confirm that an offloaded decryption also panics (eventually)
     #[tokio::test]
     async fn bad_decryption_means_panic() {
         let mut up = make_encrypted_upstairs();
@@ -3766,21 +3948,18 @@ pub(crate) mod test {
             }],
         }]);
 
-        // This defers decryption to a separate thread.  This won't panic,
-        // because decryption failing just populates the message with an error.
-        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
-            client_id: ClientId::new(0),
-            action: ClientAction::Response(Message::ReadResponse {
-                upstairs_id: up.cfg.upstairs_id,
-                session_id: up.cfg.session_id,
-                job_id: JobId(1000),
-                responses,
-            }),
-        }))
-        .await;
-
         // Prepare to receive the message with an invalid tag
-        let fut = up.await_deferred_msgs();
+        let fut =
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: ClientId::new(0),
+                action: ClientAction::Response(Message::ReadResponse {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
+                    job_id: JobId(1000),
+                    responses,
+                }),
+            }));
+
         let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
         assert!(result.is_err());
         let r = result
@@ -3838,21 +4017,17 @@ pub(crate) mod test {
             }],
         }]);
 
-        // This defers decryption to a separate thread.  This won't panic,
-        // because decryption failing just populates the message with an error.
-        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
-            client_id: ClientId::new(0),
-            action: ClientAction::Response(Message::ReadResponse {
-                upstairs_id: up.cfg.upstairs_id,
-                session_id: up.cfg.session_id,
-                job_id: JobId(1000),
-                responses,
-            }),
-        }))
-        .await;
-
         // Prepare to receive the message with a junk hash
-        let fut = up.await_deferred_msgs();
+        let fut =
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: ClientId::new(0),
+                action: ClientAction::Response(Message::ReadResponse {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
+                    job_id: JobId(1000),
+                    responses,
+                }),
+            }));
 
         // Don't use `should_panic`, as the `unwrap` above could cause this test
         // to pass for the wrong reason.
@@ -3895,21 +4070,17 @@ pub(crate) mod test {
             }],
         }]);
 
-        // This defers hash checking to a separate thread.  This won't panic,
-        // because checking the hash just populates the Message with an error.
-        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
-            client_id: ClientId::new(0),
-            action: ClientAction::Response(Message::ReadResponse {
-                upstairs_id: up.cfg.upstairs_id,
-                session_id: up.cfg.session_id,
-                job_id: JobId(1000),
-                responses,
-            }),
-        }))
-        .await;
-
         // Prepare to handle the response with a junk hash
-        let fut = up.await_deferred_msgs();
+        let fut =
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: ClientId::new(0),
+                action: ClientAction::Response(Message::ReadResponse {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
+                    job_id: JobId(1000),
+                    responses,
+                }),
+            }));
 
         // Don't use `should_panic`, as the `unwrap` above could cause this test
         // to pass for the wrong reason.
@@ -3961,7 +4132,6 @@ pub(crate) mod test {
             }),
         }))
         .await;
-        up.await_deferred_msgs().await;
 
         // Send back a second response with different data and a hash that (1)
         // is correct for that data, but (2) does not match the original hash.
@@ -3980,19 +4150,16 @@ pub(crate) mod test {
                 hash,
             }],
         }]);
-
-        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
-            client_id: ClientId::new(2),
-            action: ClientAction::Response(Message::ReadResponse {
-                upstairs_id: up.cfg.upstairs_id,
-                session_id: up.cfg.session_id,
-                job_id: JobId(1000),
-                responses: r2,
-            }),
-        }))
-        .await;
-
-        let fut = up.await_deferred_msgs();
+        let fut =
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: ClientId::new(2),
+                action: ClientAction::Response(Message::ReadResponse {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
+                    job_id: JobId(1000),
+                    responses: r2,
+                }),
+            }));
         let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
 
         assert!(result.is_err());
@@ -4044,7 +4211,6 @@ pub(crate) mod test {
                 }),
             }))
             .await;
-            up.await_deferred_msgs().await;
         }
 
         // Send back a second response with different data and a hash that (1)
@@ -4064,18 +4230,16 @@ pub(crate) mod test {
                 hash,
             }],
         }]);
-        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
-            client_id: ClientId::new(2),
-            action: ClientAction::Response(Message::ReadResponse {
-                upstairs_id: up.cfg.upstairs_id,
-                session_id: up.cfg.session_id,
-                job_id: JobId(1000),
-                responses: r,
-            }),
-        }))
-        .await;
-
-        let fut = up.await_deferred_msgs();
+        let fut =
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: ClientId::new(2),
+                action: ClientAction::Response(Message::ReadResponse {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
+                    job_id: JobId(1000),
+                    responses: r,
+                }),
+            }));
         let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
 
         assert!(result.is_err());
@@ -4126,7 +4290,6 @@ pub(crate) mod test {
             }),
         }))
         .await;
-        up.await_deferred_msgs().await;
 
         // Send back a second response with more data (2 blocks instead of 1);
         // the first block matches.
@@ -4143,18 +4306,16 @@ pub(crate) mod test {
             }],
         };
         let r2 = Ok(vec![response.clone(), response.clone()]);
-        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
-            client_id: ClientId::new(2),
-            action: ClientAction::Response(Message::ReadResponse {
-                upstairs_id: up.cfg.upstairs_id,
-                session_id: up.cfg.session_id,
-                job_id: JobId(1000),
-                responses: r2,
-            }),
-        }))
-        .await;
-
-        let fut = up.await_deferred_msgs();
+        let fut =
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: ClientId::new(2),
+                action: ClientAction::Response(Message::ReadResponse {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
+                    job_id: JobId(1000),
+                    responses: r2,
+                }),
+            }));
         let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
 
         assert!(result.is_err());
@@ -4203,7 +4364,6 @@ pub(crate) mod test {
             }),
         }))
         .await;
-        up.await_deferred_msgs().await;
 
         // Send back a second response with actual block contexts (oh no!)
         let hash = integrity_hash(&[&data]);
@@ -4217,18 +4377,16 @@ pub(crate) mod test {
                 hash,
             }],
         }]);
-        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
-            client_id: ClientId::new(2),
-            action: ClientAction::Response(Message::ReadResponse {
-                upstairs_id: up.cfg.upstairs_id,
-                session_id: up.cfg.session_id,
-                job_id: JobId(1000),
-                responses: r2,
-            }),
-        }))
-        .await;
-
-        let fut = up.await_deferred_msgs();
+        let fut =
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: ClientId::new(2),
+                action: ClientAction::Response(Message::ReadResponse {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
+                    job_id: JobId(1000),
+                    responses: r2,
+                }),
+            }));
         let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
 
         assert!(result.is_err());
@@ -4280,7 +4438,6 @@ pub(crate) mod test {
             }),
         }))
         .await;
-        up.await_deferred_msgs().await;
 
         // Send back a second response with no actual data (oh no!)
         let r2 = Ok(vec![ReadResponse {
@@ -4292,18 +4449,16 @@ pub(crate) mod test {
                 // No block contexts!
             ],
         }]);
-        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
-            client_id: ClientId::new(2),
-            action: ClientAction::Response(Message::ReadResponse {
-                upstairs_id: up.cfg.upstairs_id,
-                session_id: up.cfg.session_id,
-                job_id: JobId(1000),
-                responses: r2,
-            }),
-        }))
-        .await;
-
-        let fut = up.await_deferred_msgs();
+        let fut =
+            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+                client_id: ClientId::new(2),
+                action: ClientAction::Response(Message::ReadResponse {
+                    upstairs_id: up.cfg.upstairs_id,
+                    session_id: up.cfg.session_id,
+                    job_id: JobId(1000),
+                    responses: r2,
+                }),
+            }));
         let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
 
         assert!(result.is_err());
