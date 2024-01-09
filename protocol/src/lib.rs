@@ -1063,4 +1063,31 @@ mod tests {
             <MessageVersion as Into<u32>>::into(cur)
         );
     }
+
+    #[test]
+    fn encoding_max_frame_length_bails() {
+        let mut encoder = CrucibleEncoder::new();
+
+        let data = bytes::Bytes::from(vec![7u8; MAX_FRM_LEN]);
+        let hash = crucible_common::integrity_hash(&[&data]);
+
+        let input = Message::Write {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            job_id: JobId(1),
+            dependencies: vec![],
+            writes: vec![Write {
+                eid: 0,
+                offset: Block::new_512(0),
+                data,
+                block_context: BlockContext {
+                    hash,
+                    encryption_context: None,
+                },
+            }],
+        };
+
+        let mut buffer = BytesMut::new();
+        assert!(encoder.encode(input, &mut buffer).is_err());
+    }
 }
