@@ -126,6 +126,9 @@ enum CliCommand {
         /// Number of IOs to execute
         #[clap(long, short, default_value = "5000", action)]
         count: usize,
+        /// Print out IOs as we send them
+        #[clap(long, short, default_value = "false", action)]
+        quiet: bool,
     },
     /// Request region information
     Info,
@@ -492,8 +495,8 @@ async fn cmd_to_msg(
         CliCommand::Flush => {
             fw.send(CliMessage::Flush).await?;
         }
-        CliCommand::Generic { count } => {
-            fw.send(CliMessage::Generic(count)).await?;
+        CliCommand::Generic { count, quiet } => {
+            fw.send(CliMessage::Generic(count, quiet)).await?;
         }
         CliCommand::IsActive => {
             fw.send(CliMessage::IsActive).await?;
@@ -810,7 +813,7 @@ async fn process_cli_command(
                 .await
             }
         }
-        CliMessage::Generic(count) => {
+        CliMessage::Generic(count, quiet) => {
             if ri.write_log.is_empty() {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Info not initialized".to_string(),
@@ -818,7 +821,7 @@ async fn process_cli_command(
                 .await
             } else {
                 let mut wtq = WhenToQuit::Count { count };
-                match generic_workload(guest, &mut wtq, ri, false).await {
+                match generic_workload(guest, &mut wtq, ri, quiet).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => {
                         let msg = format!("{}", e);
