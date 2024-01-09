@@ -65,6 +65,7 @@ impl BlockIO for FileBlockIO {
         offset: Block,
         data: Buffer,
     ) -> Result<(), CrucibleError> {
+        self.check_data_size(data.len()).await?;
         let mut data_vec = data.as_vec().await;
         let mut owned_vec = data.owned_vec().await;
 
@@ -86,6 +87,7 @@ impl BlockIO for FileBlockIO {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
+        self.check_data_size(data.len()).await?;
         let start = offset.value * self.block_size;
 
         let mut file = self.file.lock().await;
@@ -211,13 +213,7 @@ impl BlockIO for ReqwestBlockIO {
         offset: Block,
         data: Buffer,
     ) -> Result<(), CrucibleError> {
-        if data.len() as u64 % self.block_size != 0 {
-            return Err(CrucibleError::InvalidNumberOfBlocks(format!(
-                "data length {} is not divisible by block size {}",
-                data.len(),
-                self.block_size
-            )));
-        }
+        self.check_data_size(data.len()).await?;
         let cc = self.next_count();
         cdt::reqwest__read__start!(|| (cc, self.uuid));
 

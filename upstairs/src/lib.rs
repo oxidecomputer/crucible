@@ -196,6 +196,18 @@ pub trait BlockIO: Sync {
 
         self.activate().await
     }
+
+    /// Checks that the data length is a multiple of block size
+    ///
+    /// Returns block size on success, since we have to look it up anyways.
+    async fn check_data_size(&self, len: usize) -> Result<u64, CrucibleError> {
+        let block_size = self.get_block_size().await?;
+        if len as u64 % block_size == 0 {
+            Ok(block_size)
+        } else {
+            Err(CrucibleError::DataLenUnaligned)
+        }
+    }
 }
 
 pub type CrucibleBlockIOFuture<'a> = Pin<
@@ -2514,11 +2526,7 @@ impl BlockIO for Guest {
         offset: Block,
         data: Buffer,
     ) -> Result<(), CrucibleError> {
-        let bs = self.get_block_size().await?;
-
-        if (data.len() % bs as usize) != 0 {
-            crucible_bail!(DataLenUnaligned);
-        }
+        let bs = self.check_data_size(data.len()).await?;
 
         if offset.block_size_in_bytes() as u64 != bs {
             crucible_bail!(BlockSizeMismatch);
@@ -2536,11 +2544,7 @@ impl BlockIO for Guest {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
-        let bs = self.get_block_size().await?;
-
-        if (data.len() % bs as usize) != 0 {
-            crucible_bail!(DataLenUnaligned);
-        }
+        let bs = self.check_data_size(data.len()).await?;
 
         if offset.block_size_in_bytes() as u64 != bs {
             crucible_bail!(BlockSizeMismatch);
@@ -2560,11 +2564,7 @@ impl BlockIO for Guest {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
-        let bs = self.get_block_size().await?;
-
-        if (data.len() % bs as usize) != 0 {
-            crucible_bail!(DataLenUnaligned);
-        }
+        let bs = self.check_data_size(data.len()).await?;
 
         if offset.block_size_in_bytes() as u64 != bs {
             crucible_bail!(BlockSizeMismatch);

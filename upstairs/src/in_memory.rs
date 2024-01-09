@@ -25,17 +25,6 @@ impl InMemoryBlockIO {
             }),
         }
     }
-
-    fn check_size(&self, size: usize) -> Result<(), CrucibleError> {
-        if size as u64 % self.block_size == 0 {
-            Ok(())
-        } else {
-            Err(CrucibleError::InvalidNumberOfBlocks(format!(
-                "data length {} is not divisible by block size {}",
-                size, self.block_size
-            )))
-        }
-    }
 }
 
 #[async_trait]
@@ -70,7 +59,8 @@ impl BlockIO for InMemoryBlockIO {
         offset: Block,
         data: Buffer,
     ) -> Result<(), CrucibleError> {
-        self.check_size(data.len())?;
+        self.check_data_size(data.len()).await?;
+
         let inner = self.inner.lock().await;
 
         let mut data_vec = data.as_vec().await;
@@ -95,7 +85,7 @@ impl BlockIO for InMemoryBlockIO {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
-        self.check_size(data.len())?;
+        self.check_data_size(data.len()).await?;
 
         let mut inner = self.inner.lock().await;
 
@@ -115,7 +105,7 @@ impl BlockIO for InMemoryBlockIO {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
-        self.check_size(data.len())?;
+        self.check_data_size(data.len()).await?;
 
         let mut inner = self.inner.lock().await;
 
