@@ -372,7 +372,7 @@ impl Volume {
                 }
                 assert!(offset + block_count as u64 <= end);
                 let block = Block::new(offset, bs.trailing_zeros());
-                let buffer = Buffer::new(block_count * bs);
+                let buffer = Buffer::new(block_count * bs, bs);
 
                 // The read will first try to establish a connection to
                 // the remote side before returning something we can await
@@ -665,7 +665,7 @@ impl BlockIO for Volume {
             // 0..10 would be size 10
             let sz = (coverage.end - coverage.start) as usize
                 * self.block_size as usize;
-            let sub_buffer = Buffer::new(sz);
+            let sub_buffer = Buffer::new(sz, self.block_size as usize);
 
             sub_volume.read(sub_offset, sub_buffer.clone()).await?;
 
@@ -684,7 +684,8 @@ impl BlockIO for Volume {
                 let sub_sz = self.block_size as usize
                     * (parent_coverage.end - parent_coverage.start) as usize;
 
-                let parent_buffer = Buffer::new(sub_sz);
+                let parent_buffer =
+                    Buffer::new(sub_sz, self.block_size as usize);
                 self.read_only_parent
                     .as_ref()
                     .unwrap()
@@ -707,7 +708,11 @@ impl BlockIO for Volume {
                 for i in 0..(sub_sz as u64 / self.block_size) {
                     let start_of_block = (i * self.block_size) as usize;
 
-                    if sub_owned_vec[start_of_block] {
+                    let sub_owned_index = i as usize;
+                    let owned_index =
+                        sub_owned_index + data_index / self.block_size as usize;
+
+                    if sub_owned_vec[sub_owned_index] {
                         // sub volume has written to this block, use it
                         for block_offset in 0..self.block_size {
                             let inside_block =
@@ -715,11 +720,10 @@ impl BlockIO for Volume {
 
                             data_vec[data_index + inside_block] =
                                 sub_data_vec[inside_block];
-
-                            // this layer of the volume does own this
-                            // block, it was written to the subvolume
-                            owned_vec[data_index + inside_block] = true;
                         }
+                        // this layer of the volume does own this block, it was
+                        // written to the subvolume
+                        owned_vec[owned_index] = true;
                     } else {
                         // sub volume hasn't written to this block, use the
                         // parent
@@ -729,14 +733,12 @@ impl BlockIO for Volume {
 
                             data_vec[data_index + inside_block] =
                                 parent_data_vec[inside_block];
-
-                            // this layer of the volume doesn't own this
-                            // block, it came from the read only parent. Note
-                            // this doesn't depend if the block was owned by
-                            // the read only parent, just that the subvolume
-                            // doesn't own it.
-                            owned_vec[data_index + inside_block] = false;
                         }
+                        // this layer of the volume doesn't own this block, it
+                        // came from the read only parent. Note this doesn't
+                        // depend if the block was owned by the read only
+                        // parent, just that the subvolume doesn't own it.
+                        owned_vec[owned_index] = false;
                     }
                 }
 
@@ -752,12 +754,14 @@ impl BlockIO for Volume {
 
                         data_vec[data_index + inside_block] =
                             sub_data_vec[inside_block];
-
-                        // this layer of the volume does own this block, it came
-                        // from the subvolume's LBA - the read-only parent
-                        // cannot own this block because it's outside their LBA.
-                        owned_vec[data_index + inside_block] = true;
                     }
+
+                    // this layer of the volume does own this block, it came
+                    // from the subvolume's LBA - the read-only parent
+                    // cannot own this block because it's outside their LBA.
+                    let owned_index =
+                        i as usize + data_index / self.block_size as usize;
+                    owned_vec[owned_index] = true;
                 }
             } else {
                 let mut data_vec = data.as_vec().await;
@@ -767,7 +771,10 @@ impl BlockIO for Volume {
                 // propagate the sub volume information up.
                 data_vec[data_index..(data_index + sz)]
                     .copy_from_slice(&sub_buffer.as_vec().await);
-                owned_vec[data_index..(data_index + sz)]
+
+                let owned_index = data_index / self.block_size as usize;
+                owned_vec[owned_index
+                    ..(owned_index + sz / self.block_size as usize)]
                     .copy_from_slice(&sub_buffer.owned_vec().await);
             }
 
@@ -1827,7 +1834,7 @@ mod test {
         let disk = InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 4096);
 
         // Initial read should come back all zeroes
-        let buffer = Buffer::new(4096);
+        let buffer = Buffer::new(4096, BLOCK_SIZE as usize);
         disk.read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
         assert_eq!(buffer.into_vec().unwrap(), vec![0; 4096]);
@@ -1848,7 +1855,7 @@ mod test {
         .await?;
 
         // Read and verify the data is from the first write
-        let buffer = Buffer::new(4096);
+        let buffer = Buffer::new(4096, BLOCK_SIZE as usize);
         disk.read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
 
@@ -1865,7 +1872,7 @@ mod test {
         .await?;
 
         // Read and verify
-        let buffer = Buffer::new(4096);
+        let buffer = Buffer::new(4096, BLOCK_SIZE as usize);
         disk.read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
 
@@ -1889,7 +1896,7 @@ mod test {
         .await?;
 
         // Read and verify
-        let buffer = Buffer::new(4096);
+        let buffer = Buffer::new(4096, BLOCK_SIZE as usize);
         disk.read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
 
@@ -1930,7 +1937,7 @@ mod test {
         // The first 2048b of the initial read should come only from the parent
         // (aka read_only_parent_init_value), and the second 2048b should come
         // from the subvolume(s) (aka be uninitialized).
-        let buffer = Buffer::new(4096);
+        let buffer = Buffer::new(4096, block_size as usize);
         volume
             .read(Block::new(0, block_size.trailing_zeros()), buffer.clone())
             .await?;
@@ -1954,7 +1961,7 @@ mod test {
             .await?;
 
         // Read whole volume and verify
-        let buffer = Buffer::new(4096);
+        let buffer = Buffer::new(4096, block_size as usize);
         volume
             .read(Block::new(0, block_size.trailing_zeros()), buffer.clone())
             .await?;
@@ -1979,7 +1986,7 @@ mod test {
 
         // Make sure the parent data hasn't changed!
         {
-            let buffer = Buffer::new(2048);
+            let buffer = Buffer::new(2048, block_size as usize);
             parent
                 .read(
                     Block::new(0, block_size.trailing_zeros()),
@@ -1994,7 +2001,7 @@ mod test {
         }
 
         // Read whole volume and verify
-        let buffer = Buffer::new(4096);
+        let buffer = Buffer::new(4096, block_size as usize);
         volume
             .read(Block::new(0, block_size.trailing_zeros()), buffer.clone())
             .await?;
@@ -2020,7 +2027,7 @@ mod test {
 
         // Make sure the parent data hasn't changed!
         {
-            let buffer = Buffer::new(2048);
+            let buffer = Buffer::new(2048, block_size as usize);
             parent
                 .read(
                     Block::new(0, block_size.trailing_zeros()),
@@ -2035,7 +2042,7 @@ mod test {
         }
 
         // Read whole volume and verify
-        let buffer = Buffer::new(4096);
+        let buffer = Buffer::new(4096, block_size as usize);
         volume
             .read(Block::new(0, block_size.trailing_zeros()), buffer.clone())
             .await?;
@@ -2060,7 +2067,7 @@ mod test {
             .await?;
 
         // Read whole volume and verify
-        let buffer = Buffer::new(4096);
+        let buffer = Buffer::new(4096, block_size as usize);
         volume
             .read(Block::new(0, block_size.trailing_zeros()), buffer.clone())
             .await?;
@@ -2077,7 +2084,7 @@ mod test {
         volume.read_only_parent = None;
 
         // Read whole volume and verify
-        let buffer = Buffer::new(4096);
+        let buffer = Buffer::new(4096, block_size as usize);
         volume
             .read(Block::new(0, block_size.trailing_zeros()), buffer.clone())
             .await?;
@@ -2098,7 +2105,7 @@ mod test {
             )
             .await?;
 
-        let buffer = Buffer::new(4096);
+        let buffer = Buffer::new(4096, block_size as usize);
         volume
             .read(Block::new(0, block_size.trailing_zeros()), buffer.clone())
             .await?;
@@ -2377,7 +2384,7 @@ mod test {
         assert_eq!(volume.total_size().await?, 2048);
 
         // Read volume and verify contents
-        let buffer = Buffer::new(2048);
+        let buffer = Buffer::new(2048, BLOCK_SIZE as usize);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -2490,7 +2497,7 @@ mod test {
             volume.add_subvolume(overlay.clone()).await?;
             volume.add_read_only_parent(parent.clone()).await?;
 
-            let buffer = Buffer::new(BLOCK_SIZE * 10);
+            let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
             volume
                 .read(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
@@ -2507,7 +2514,7 @@ mod test {
                 )
                 .await?;
 
-            let buffer = Buffer::new(BLOCK_SIZE * 10);
+            let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
             volume
                 .read(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
@@ -2524,7 +2531,7 @@ mod test {
         volume.add_read_only_parent(parent).await?;
         volume.add_subvolume(overlay).await?;
 
-        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -2552,7 +2559,7 @@ mod test {
             .await?;
 
         // Read parent, verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
         parent
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -2586,7 +2593,7 @@ mod test {
         // }
 
         // Read whole volume, verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -2602,7 +2609,7 @@ mod test {
             .await?;
 
         // Read whole volume, verify new contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10);
+        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -2635,7 +2642,7 @@ mod test {
         };
         let volume = Volume::construct(request, None, csl()).await.unwrap();
 
-        let buffer = Buffer::new(BLOCK_SIZE);
+        let buffer = Buffer::new(BLOCK_SIZE, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await
@@ -2643,7 +2650,7 @@ mod test {
 
         assert_eq!(vec![0x0; BLOCK_SIZE], buffer.into_vec().unwrap());
 
-        let buffer = Buffer::new(BLOCK_SIZE);
+        let buffer = Buffer::new(BLOCK_SIZE, BLOCK_SIZE);
         volume
             .read(Block::new(1, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await
@@ -2674,7 +2681,7 @@ mod test {
             .await?;
 
         // Read back parent, verify 1s
-        let buffer = Buffer::new(block_size * 5);
+        let buffer = Buffer::new(block_size * 5, block_size);
         parent
             .read(Block::new(0, block_size.trailing_zeros()), buffer.clone())
             .await?;
@@ -2695,7 +2702,7 @@ mod test {
         assert_eq!(volume.total_size().await?, block_size as u64 * 10);
 
         // Verify parent contents in one read
-        let buffer = Buffer::new(block_size * 10);
+        let buffer = Buffer::new(block_size * 10, block_size);
         volume
             .read(Block::new(0, block_size.trailing_zeros()), buffer.clone())
             .await?;
@@ -2713,7 +2720,7 @@ mod test {
             .await?;
 
         // Verify volume contents in one read
-        let buffer = Buffer::new(block_size * 10);
+        let buffer = Buffer::new(block_size * 10, block_size);
         volume
             .read(Block::new(0, block_size.trailing_zeros()), buffer.clone())
             .await?;
@@ -3055,7 +3062,7 @@ mod test {
 
         let out_of_bounds = volume.total_size().await.unwrap() * BLOCK_SIZE;
 
-        let buffer = Buffer::new(BLOCK_SIZE as usize);
+        let buffer = Buffer::new(BLOCK_SIZE as usize, BLOCK_SIZE as usize);
         let res = volume
             .read(
                 Block::new(

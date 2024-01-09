@@ -292,7 +292,8 @@ impl PantryEntry {
             );
         }
 
-        let buffer = crucible::Buffer::new(size);
+        let volume_block_size = self.volume.get_block_size().await?;
+        let buffer = crucible::Buffer::new(size, volume_block_size as usize);
 
         self.volume
             .read_from_byte_offset(offset, buffer.clone())
@@ -334,7 +335,10 @@ impl PantryEntry {
                 size_to_validate,
             );
 
-            let data = crucible::Buffer::new((end - start) as usize);
+            let data = crucible::Buffer::new(
+                (end - start) as usize,
+                block_size as usize,
+            );
 
             self.volume
                 .read_from_byte_offset(start, data.clone())

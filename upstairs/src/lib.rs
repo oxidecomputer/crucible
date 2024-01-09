@@ -1459,45 +1459,50 @@ impl fmt::Display for AckStatus {
     }
 }
 
-/*
- * Provides a shared Buffer that Read operations will write into.
- *
- * Originally BytesMut was used here, but it didn't guarantee that memory
- * was shared between cloned BytesMut objects. Additionally, we added the
- * idea of ownership and that necessitated another field.
- */
+/// A shared buffer used as a target for `Read` operations
+///
+/// Originally, [`BytesMut`] was used here, but it didn't guarantee that memory
+/// was shared between cloned `BytesMut` objects.  Additionally, we added the
+/// idea of ownership, which required another field.
 #[derive(Clone, Debug)]
 pub struct Buffer {
+    /// Length of `self.data`, in bytes
     len: usize,
+
+    /// Block size (in bytes)
+    block_size: usize,
+
+    /// Raw data
     data: Arc<Mutex<Vec<u8>>>,
+
+    /// Ownership mask, on a per-block basis
     owned: Arc<Mutex<Vec<bool>>>,
 }
 
 impl Buffer {
-    pub fn from_vec(vec: Vec<u8>) -> Buffer {
+    pub fn from_vec(vec: Vec<u8>, block_size: usize) -> Buffer {
         let len = vec.len();
+        let owned_len = len.div_ceil(block_size);
         Buffer {
             len,
+            block_size,
             data: Arc::new(Mutex::new(vec)),
-            owned: Arc::new(Mutex::new(vec![false; len])),
+            owned: Arc::new(Mutex::new(vec![false; owned_len])),
         }
     }
 
-    pub fn new(len: usize) -> Buffer {
+    pub fn new(len: usize, block_size: usize) -> Buffer {
+        let owned_len = len.div_ceil(block_size);
         Buffer {
             len,
+            block_size,
             data: Arc::new(Mutex::new(vec![0; len])),
-            owned: Arc::new(Mutex::new(vec![false; len])),
+            owned: Arc::new(Mutex::new(vec![false; owned_len])),
         }
     }
 
-    pub fn from_slice(buf: &[u8]) -> Buffer {
-        let mut vec = Vec::<u8>::with_capacity(buf.len());
-        for item in buf {
-            vec.push(*item);
-        }
-
-        Buffer::from_vec(vec)
+    pub fn from_slice(buf: &[u8], block_size: usize) -> Buffer {
+        Self::from_vec(buf.to_vec(), block_size)
     }
 
     /// Attempt to extract the underlying `Vec<u8>` bearing buffered data.
@@ -1505,10 +1510,20 @@ impl Buffer {
     /// Will succeed if no other references (clones) to the Buffer exist,
     /// otherwise will return the Buffer as it still exists.
     pub fn into_vec(self) -> Result<Vec<u8>, Self> {
-        let Buffer { len, data, owned } = self;
+        let Buffer {
+            len,
+            data,
+            owned,
+            block_size,
+        } = self;
         match Arc::try_unwrap(data) {
             Ok(buf) => Ok(buf.into_inner()),
-            Err(data) => Err(Buffer { len, data, owned }),
+            Err(data) => Err(Buffer {
+                len,
+                block_size,
+                data,
+                owned,
+            }),
         }
     }
 
@@ -1532,14 +1547,14 @@ impl Buffer {
 #[tokio::test]
 async fn test_buffer_len() {
     const READ_SIZE: usize = 512;
-    let data = Buffer::from_slice(&[0x99; READ_SIZE]);
+    let data = Buffer::from_slice(&[0x99; READ_SIZE], 512);
     assert_eq!(data.len(), READ_SIZE);
 }
 
 #[tokio::test]
 async fn test_buffer_len_after_clone() {
     const READ_SIZE: usize = 512;
-    let data = Buffer::from_slice(&[0x99; READ_SIZE]);
+    let data = Buffer::from_slice(&[0x99; READ_SIZE], 512);
     assert_eq!(data.len(), READ_SIZE);
 
     #[allow(clippy::redundant_clone)]
@@ -1554,7 +1569,7 @@ async fn test_buffer_len_after_clone() {
 )]
 async fn test_buffer_len_index_overflow() {
     const READ_SIZE: usize = 512;
-    let data = Buffer::from_slice(&[0x99; READ_SIZE]);
+    let data = Buffer::from_slice(&[0x99; READ_SIZE], 512);
     assert_eq!(data.len(), READ_SIZE);
 
     let mut vec = data.as_vec().await;
@@ -1568,7 +1583,7 @@ async fn test_buffer_len_index_overflow() {
 #[tokio::test]
 async fn test_buffer_len_over_block_size() {
     const READ_SIZE: usize = 600;
-    let data = Buffer::from_slice(&[0x99; READ_SIZE]);
+    let data = Buffer::from_slice(&[0x99; READ_SIZE], 512);
     assert_eq!(data.len(), READ_SIZE);
 }
 
@@ -1691,25 +1706,25 @@ async fn test_return_iops() {
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
-        data: Buffer::new(1),
+        data: Buffer::new(1, 512),
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
-        data: Buffer::new(8000),
+        data: Buffer::new(8000, 512),
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
-        data: Buffer::new(16000),
+        data: Buffer::new(16000, 512),
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
-        data: Buffer::new(16001),
+        data: Buffer::new(16001, 512),
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 2);
 }
@@ -1817,7 +1832,11 @@ impl GtoS {
                 let responses =
                     self.downstairs_responses.remove(ds_id).unwrap();
 
-                for response in responses {
+                for (i, response) in responses.into_iter().enumerate() {
+                    // Set the ownership flag.  We assume that read responses
+                    // are contiguous and represent one block per response.
+                    owned_vec[i] = !response.block_contexts.is_empty();
+
                     // Copy over into guest memory.
                     {
                         let _ignored =
@@ -1826,8 +1845,6 @@ impl GtoS {
 
                         for i in &response.data {
                             vec[offset] = *i;
-                            owned_vec[offset] =
-                                !response.block_contexts.is_empty();
                             offset += 1;
                         }
                     }

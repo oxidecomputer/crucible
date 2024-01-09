@@ -655,7 +655,7 @@ pub(crate) mod protocol_test {
             // We must tokio::spawn here because `read` will wait for the
             // response to come back before returning
             tokio::spawn(async move {
-                let buffer = Buffer::new(512);
+                let buffer = Buffer::new(512, 512);
                 harness.guest.read(Block::new_512(0), buffer).await.unwrap();
             });
         }
@@ -705,7 +705,7 @@ pub(crate) mod protocol_test {
             let harness = harness.clone();
 
             tokio::spawn(async move {
-                let buffer = Buffer::new(512);
+                let buffer = Buffer::new(512, 512);
                 harness.guest.read(Block::new_512(0), buffer).await.unwrap();
             });
         }
@@ -859,7 +859,7 @@ pub(crate) mod protocol_test {
             // We must tokio::spawn here because `read` will wait for the
             // response to come back before returning
             tokio::spawn(async move {
-                let buffer = Buffer::new(512);
+                let buffer = Buffer::new(512, 512);
                 harness.guest.read(Block::new_512(0), buffer).await.unwrap();
             });
         }
@@ -939,7 +939,7 @@ pub(crate) mod protocol_test {
                 // We must tokio::spawn here because `read` will wait for the
                 // response to come back before returning
                 tokio::spawn(async move {
-                    let buffer = Buffer::new(512);
+                    let buffer = Buffer::new(512, 512);
                     harness
                         .guest
                         .read(Block::new_512(0), buffer)
@@ -1243,7 +1243,7 @@ pub(crate) mod protocol_test {
                 {
                     let harness = harness.clone();
                     tokio::spawn(async move {
-                        let buffer = Buffer::new(512);
+                        let buffer = Buffer::new(512, 512);
                         harness
                             .guest
                             .read(Block::new_512(io_eid as u64 * 10), buffer)
@@ -1921,7 +1921,7 @@ pub(crate) mod protocol_test {
                 // We must tokio::spawn here because `read` will wait for the
                 // response to come back before returning
                 tokio::spawn(async move {
-                    let buffer = Buffer::new(512);
+                    let buffer = Buffer::new(512, 512);
                     harness
                         .guest
                         .read(Block::new_512(0), buffer)
@@ -1975,7 +1975,7 @@ pub(crate) mod protocol_test {
                 // We must tokio::spawn here because `read` will wait for the
                 // response to come back before returning
                 tokio::spawn(async move {
-                    let buffer = Buffer::new(512);
+                    let buffer = Buffer::new(512, 512);
                     harness
                         .guest
                         .read(Block::new_512(0), buffer)
@@ -2679,7 +2679,7 @@ pub(crate) mod protocol_test {
                 // We must tokio::spawn here because `read` will wait for the
                 // response to come back before returning
                 tokio::spawn(async move {
-                    let buffer = Buffer::new(512);
+                    let buffer = Buffer::new(512, 512);
                     harness
                         .guest
                         .read(Block::new_512(0), buffer)
@@ -2928,7 +2928,7 @@ pub(crate) mod protocol_test {
         // We must tokio::spawn here because `read` will wait for the
         // response to come back before returning
         tokio::spawn(async move {
-            let buffer = Buffer::new(512);
+            let buffer = Buffer::new(512, 512);
             harness.guest.read(Block::new_512(0), buffer).await.unwrap();
         });
 
@@ -2967,7 +2967,7 @@ pub(crate) mod protocol_test {
             // We must tokio::spawn here because `read` will wait for the
             // response to come back before returning
             tokio::spawn(async move {
-                let buffer = Buffer::new(512);
+                let buffer = Buffer::new(512, 512);
                 harness.guest.read(Block::new_512(0), buffer).await.unwrap();
             });
         }

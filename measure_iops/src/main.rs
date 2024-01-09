@@ -135,8 +135,9 @@ async fn main() -> Result<()> {
         1
     };
 
-    let read_buffers: Vec<Buffer> =
-        (0..io_depth).map(|_| Buffer::new(io_size)).collect();
+    let read_buffers: Vec<Buffer> = (0..io_depth)
+        .map(|_| Buffer::new(io_size, bsz as usize))
+        .collect();
 
     let mut io_operations_sent = 0;
     let mut bw_consumed = 0;

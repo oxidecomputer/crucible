@@ -25,6 +25,17 @@ impl InMemoryBlockIO {
             }),
         }
     }
+
+    fn check_size(&self, size: usize) -> Result<(), CrucibleError> {
+        if size as u64 % self.block_size == 0 {
+            Ok(())
+        } else {
+            Err(CrucibleError::InvalidNumberOfBlocks(format!(
+                "data length {} is not divisible by block size {}",
+                size, self.block_size
+            )))
+        }
+    }
 }
 
 #[async_trait]
@@ -59,17 +70,22 @@ impl BlockIO for InMemoryBlockIO {
         offset: Block,
         data: Buffer,
     ) -> Result<(), CrucibleError> {
+        self.check_size(data.len())?;
         let inner = self.inner.lock().await;
 
         let mut data_vec = data.as_vec().await;
         let mut owned_vec = data.owned_vec().await;
 
-        let start = offset.value as usize * self.block_size as usize;
+        let data_start = offset.value as usize * self.block_size as usize;
+        let data_len = data_vec.len();
+        data_vec
+            .copy_from_slice(&inner.bytes[data_start..data_start + data_len]);
 
-        for i in 0..data_vec.len() {
-            data_vec[i] = inner.bytes[start + i];
-            owned_vec[i] = inner.owned[start + i];
-        }
+        let owned_start = offset.value as usize;
+        let owned_len = owned_vec.len();
+        owned_vec.copy_from_slice(
+            &inner.owned[owned_start..owned_start + owned_len],
+        );
 
         Ok(())
     }
@@ -79,14 +95,17 @@ impl BlockIO for InMemoryBlockIO {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
+        self.check_size(data.len())?;
+
         let mut inner = self.inner.lock().await;
 
-        let start = offset.value as usize * self.block_size as usize;
+        let data_start = offset.value as usize * self.block_size as usize;
+        let data_len = data.len();
+        inner.bytes[data_start..data_start + data_len].copy_from_slice(&data);
 
-        for i in 0..data.len() {
-            inner.bytes[start + i] = data[i];
-            inner.owned[start + i] = true;
-        }
+        let owned_start = offset.value as usize;
+        let owned_len = data_len / self.block_size as usize;
+        inner.owned[owned_start..owned_start + owned_len].fill(true);
 
         Ok(())
     }
@@ -96,13 +115,17 @@ impl BlockIO for InMemoryBlockIO {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
+        self.check_size(data.len())?;
+
         let mut inner = self.inner.lock().await;
 
-        let start = offset.value as usize * self.block_size as usize;
+        let start = offset.value as usize;
 
-        for i in 0..data.len() {
+        let bs = self.block_size as usize;
+        for i in 0..data.len() / bs {
             if !inner.owned[start + i] {
-                inner.bytes[start + i] = data[i];
+                inner.bytes[(start + i) * bs..(start + i + 1) * bs]
+                    .copy_from_slice(&data[i * bs..(i + 1) * bs]);
                 inner.owned[start + i] = true;
             }
         }

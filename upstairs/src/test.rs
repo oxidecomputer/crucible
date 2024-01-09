@@ -130,7 +130,7 @@ pub(crate) mod up_test {
             assert_eq!(span.buffer().as_vec().await[i], 0);
         }
 
-        let data = Buffer::new(64);
+        let data = Buffer::new(64, 512);
         span.read_from_blocks_into_buffer(&mut data.as_vec().await[..])
             .await;
 
@@ -738,19 +738,19 @@ pub(crate) mod up_test {
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(1),
+                data: Buffer::new(1, 512),
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(8000),
+                data: Buffer::new(8000, 512),
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(16000),
+                data: Buffer::new(16000, 512),
             })
             .await;
 
@@ -779,19 +779,19 @@ pub(crate) mod up_test {
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(1),
+                data: Buffer::new(1, 512),
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(8000),
+                data: Buffer::new(8000, 512),
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(16000),
+                data: Buffer::new(16000, 512),
             })
             .await;
 
@@ -867,19 +867,19 @@ pub(crate) mod up_test {
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(1024 * 1024 / 2),
+                data: Buffer::new(1024 * 1024 / 2, 512),
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(1024 * 1024 / 2),
+                data: Buffer::new(1024 * 1024 / 2, 512),
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(1024 * 1024 / 2),
+                data: Buffer::new(1024 * 1024 / 2, 512),
             })
             .await;
 
@@ -960,13 +960,13 @@ pub(crate) mod up_test {
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(7000 * 1024),
+                data: Buffer::new(7000 * 1024, 512),
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(7000 * 1024),
+                data: Buffer::new(7000 * 1024, 512),
             })
             .await;
 
@@ -995,7 +995,7 @@ pub(crate) mod up_test {
             let _ = guest
                 .send(BlockOp::Read {
                     offset: Block::new_512(0),
-                    data: Buffer::new(1024),
+                    data: Buffer::new(1024, 512),
                 })
                 .await;
             assert_consumed!(&guest);
@@ -1004,7 +1004,7 @@ pub(crate) mod up_test {
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(1024),
+                data: Buffer::new(1024, 512),
             })
             .await;
         assert_none_consumed!(&guest);
@@ -1047,7 +1047,7 @@ pub(crate) mod up_test {
             let _ = guest
                 .send(BlockOp::Read {
                     offset: Block::new_512(0),
-                    data: Buffer::new(optimal_io_size),
+                    data: Buffer::new(optimal_io_size, 512),
                 })
                 .await;
 
@@ -1074,13 +1074,13 @@ pub(crate) mod up_test {
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(10 * 1024 * 1024),
+                data: Buffer::new(10 * 1024 * 1024, 512),
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(0),
+                data: Buffer::new(0, 512),
             })
             .await;
 
@@ -1248,8 +1248,8 @@ pub(crate) mod up_test {
         let second_id = JobId(1011);
 
         let mut data_buffers = HashMap::new();
-        data_buffers.insert(first_id, Buffer::new(512));
-        data_buffers.insert(second_id, Buffer::new(512));
+        data_buffers.insert(first_id, Buffer::new(512, 512));
+        data_buffers.insert(second_id, Buffer::new(512, 512));
 
         let mut sub = HashSet::new();
         sub.insert(first_id);
