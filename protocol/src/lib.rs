@@ -834,10 +834,17 @@ impl Encoder<Message> for CrucibleEncoder {
         dst: &mut BytesMut,
     ) -> Result<(), Self::Error> {
         let len = CrucibleEncoder::serialized_size(&m)?;
+        if len > MAX_FRM_LEN {
+            // Bail out before creating a frame that the decoder will refuse to
+            // deserialize
+            bail!("frame is {} bytes, more than maximum {}", len, MAX_FRM_LEN);
+        }
 
+        let before = dst.len();
         dst.reserve(len);
         dst.put_u32_le(len as u32);
         bincode::serialize_into(dst.writer(), &m)?;
+        debug_assert_eq!(dst.len() - before, len);
 
         Ok(())
     }
@@ -852,10 +859,17 @@ impl Encoder<&Message> for CrucibleEncoder {
         dst: &mut BytesMut,
     ) -> Result<(), Self::Error> {
         let len = CrucibleEncoder::serialized_size(m)?;
+        if len > MAX_FRM_LEN {
+            // Bail out before creating a frame that the decoder will refuse to
+            // deserialize
+            bail!("frame is {} bytes, more than maximum {}", len, MAX_FRM_LEN);
+        }
 
+        let before = dst.len();
         dst.reserve(len);
         dst.put_u32_le(len as u32);
         bincode::serialize_into(dst.writer(), &m)?;
+        debug_assert_eq!(dst.len() - before, len);
 
         Ok(())
     }
@@ -905,13 +919,16 @@ impl Decoder for CrucibleDecoder {
             /*
              * Wait for an entire frame.  Expand the buffer to fit.
              */
-            src.reserve(len);
+            src.reserve(len - src.len());
             return Ok(None);
         }
 
-        src.advance(4);
-
-        let message = bincode::deserialize_from(src.reader());
+        let message = bincode::deserialize_from(&src[4..len]);
+        if len == src.len() {
+            src.clear();
+        } else {
+            src.advance(len);
+        }
 
         Ok(Some(message?))
     }
@@ -1045,5 +1062,32 @@ mod tests {
             CRUCIBLE_MESSAGE_VERSION,
             <MessageVersion as Into<u32>>::into(cur)
         );
+    }
+
+    #[test]
+    fn encoding_max_frame_length_bails() {
+        let mut encoder = CrucibleEncoder::new();
+
+        let data = bytes::Bytes::from(vec![7u8; MAX_FRM_LEN]);
+        let hash = crucible_common::integrity_hash(&[&data]);
+
+        let input = Message::Write {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            job_id: JobId(1),
+            dependencies: vec![],
+            writes: vec![Write {
+                eid: 0,
+                offset: Block::new_512(0),
+                data,
+                block_context: BlockContext {
+                    hash,
+                    encryption_context: None,
+                },
+            }],
+        };
+
+        let mut buffer = BytesMut::new();
+        assert!(encoder.encode(input, &mut buffer).is_err());
     }
 }
