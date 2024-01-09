@@ -964,20 +964,6 @@ impl DownstairsIO {
         }
     }
 
-    /// Compare this struct's read_response_hashes to the hashes in a list of
-    /// ReadResponses, returning false if there is a mismatch.
-    #[cfg(test)]
-    pub fn check_read_response_hashes(
-        &self,
-        read_data: &[ReadResponse],
-    ) -> bool {
-        std::iter::zip(
-            self.read_response_hashes.iter(),
-            read_data.iter().map(|response| response.first_hash()),
-        )
-        .all(|(l, r)| *l == r)
-    }
-
     /// Verify that we have enough valid IO results when considering all
     /// downstairs results before we send back success to the guest.
     ///
