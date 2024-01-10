@@ -242,8 +242,8 @@ async fn cmd_read<T: BlockIO>(
     // Drain the outstanding commands
     if !futures.is_empty() {
         // drain the buffer to the output file
-        while !futures.is_empty() {
-            let r_buf = futures.pop_front().unwrap().await?;
+        for f in futures.drain(..) {
+            let r_buf = f.await?;
             output.write_all(&r_buf)?;
         }
     }
