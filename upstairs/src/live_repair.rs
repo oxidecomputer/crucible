@@ -1172,7 +1172,7 @@ pub mod repair_test {
         )
         .await;
 
-        up.submit_dummy_read(Block::new_512(0), Buffer::new(512, 512))
+        up.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512))
             .await;
 
         // WriteUnwritten
@@ -1210,7 +1210,7 @@ pub mod repair_test {
         )
         .await;
 
-        up.submit_dummy_read(Block::new_512(0), Buffer::new(512, 512))
+        up.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512))
             .await;
 
         // WriteUnwritten
@@ -1244,7 +1244,7 @@ pub mod repair_test {
         )
         .await;
 
-        up.submit_dummy_read(Block::new_512(3), Buffer::new(512, 512))
+        up.submit_dummy_read(Block::new_512(3), Buffer::new(1, 512))
             .await;
 
         // WriteUnwritten
@@ -1329,7 +1329,7 @@ pub mod repair_test {
         )
         .await;
 
-        up.submit_dummy_read(Block::new_512(0), Buffer::new(512 * 9, 512))
+        up.submit_dummy_read(Block::new_512(0), Buffer::new(9, 512))
             .await;
 
         // WriteUnwritten
@@ -1392,7 +1392,7 @@ pub mod repair_test {
         finish_live_repair(&mut up, 1000).await;
 
         // Our default extent size is 3, so 9 blocks will span 3 extents
-        up.submit_dummy_read(Block::new_512(0), Buffer::new(512 * 9, 512))
+        up.submit_dummy_read(Block::new_512(0), Buffer::new(9, 512))
             .await;
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;

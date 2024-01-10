@@ -292,8 +292,12 @@ impl PantryEntry {
             );
         }
 
-        let volume_block_size = self.volume.get_block_size().await?;
-        let buffer = crucible::Buffer::new(size, volume_block_size as usize);
+        let volume_block_size = self.volume.get_block_size().await? as usize;
+        if size % volume_block_size != 0 {
+            return Err(CrucibleError::DataLenUnaligned);
+        }
+        let buffer =
+            crucible::Buffer::new(size / volume_block_size, volume_block_size);
 
         self.volume
             .read_from_byte_offset(offset, buffer.clone())
@@ -327,6 +331,14 @@ impl PantryEntry {
                 block_size,
             );
         }
+        if Self::MAX_CHUNK_SIZE % block_size as usize != 0 {
+            crucible_bail!(
+                InvalidNumberOfBlocks,
+                "chunk size {} not divisible by block size {}!",
+                Self::MAX_CHUNK_SIZE,
+                block_size,
+            );
+        }
 
         for chunk in (0..size_to_validate).step_by(Self::MAX_CHUNK_SIZE) {
             let start = chunk;
@@ -336,7 +348,7 @@ impl PantryEntry {
             );
 
             let data = crucible::Buffer::new(
-                (end - start) as usize,
+                ((end - start) / block_size) as usize,
                 block_size as usize,
             );
 

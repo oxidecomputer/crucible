@@ -397,7 +397,7 @@ mod test {
         volume.activate().await?;
 
         // Verify contents are zero on init
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -413,7 +413,7 @@ mod test {
             .await?;
 
         // Read parent, verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -499,7 +499,7 @@ mod test {
             )
             .await?;
 
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         in_memory_data
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -524,7 +524,7 @@ mod test {
         volume.activate().await?;
 
         // Verify contents are 11 on init
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -549,7 +549,7 @@ mod test {
         }
 
         // Verify parent wasn't written to
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         in_memory_data
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -557,7 +557,7 @@ mod test {
         assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         // Read and verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -588,7 +588,7 @@ mod test {
             )
             .await?;
 
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         in_memory_data
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -624,7 +624,7 @@ mod test {
         volume.activate().await?;
 
         // Verify contents are 11 on init
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -640,7 +640,7 @@ mod test {
             .await?;
 
         // Verify parent wasn't written to
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         in_memory_data
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -648,7 +648,7 @@ mod test {
         assert_eq!(vec![11; BLOCK_SIZE * 10], *buffer.as_vec().await);
 
         // Read and verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -709,7 +709,7 @@ mod test {
         volume.activate().await?;
 
         // Read one block: should be all 0xff
-        let buffer = Buffer::new(BLOCK_SIZE, BLOCK_SIZE);
+        let buffer = Buffer::new(1, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -725,7 +725,7 @@ mod test {
             .await?;
 
         // Read one block: should be all 0x01
-        let buffer = Buffer::new(BLOCK_SIZE, BLOCK_SIZE);
+        let buffer = Buffer::new(1, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -762,7 +762,7 @@ mod test {
         volume.activate().await?;
 
         // Read one block: should be all 0x00
-        let buffer = Buffer::new(BLOCK_SIZE, BLOCK_SIZE);
+        let buffer = Buffer::new(1, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -818,7 +818,7 @@ mod test {
             .await?;
 
         // Read volume, verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -834,7 +834,7 @@ mod test {
             .await?;
 
         // Read volume, verify original contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -889,7 +889,7 @@ mod test {
             .await?;
 
         // Read parent, verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -905,7 +905,7 @@ mod test {
             .await?;
 
         // Read volume, verify original contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -970,7 +970,7 @@ mod test {
             .await?;
 
         // Read and verify
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1038,7 +1038,8 @@ mod test {
 
         volume.activate().await?;
 
-        let full_volume_size = BLOCK_SIZE * 20;
+        let full_volume_blocks = 20;
+        let full_volume_size = BLOCK_SIZE * full_volume_blocks;
         // Write data in
         volume
             .write_unwritten(
@@ -1048,7 +1049,7 @@ mod test {
             .await?;
 
         // Read parent, verify contents
-        let buffer = Buffer::new(full_volume_size, BLOCK_SIZE);
+        let buffer = Buffer::new(full_volume_blocks, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1064,7 +1065,7 @@ mod test {
             .await?;
 
         // Read volume, verify original contents
-        let buffer = Buffer::new(full_volume_size, BLOCK_SIZE);
+        let buffer = Buffer::new(full_volume_blocks, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1123,7 +1124,8 @@ mod test {
         let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
         volume.activate().await?;
-        let full_volume_size = BLOCK_SIZE * 20;
+        let full_volume_blocks = 20;
+        let full_volume_size = BLOCK_SIZE * full_volume_blocks;
 
         // Write data to last block of first vol, and first block of
         // second vol.
@@ -1135,7 +1137,7 @@ mod test {
             .await?;
 
         // Read parent, verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 2, BLOCK_SIZE);
+        let buffer = Buffer::new(2, BLOCK_SIZE);
         volume
             .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1154,7 +1156,7 @@ mod test {
 
         // Read full volume, verify first write_unwritten still valid, but the
         // other blocks of the 2nd write_unwritten are updated.
-        let buffer = Buffer::new(full_volume_size, BLOCK_SIZE);
+        let buffer = Buffer::new(full_volume_blocks, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1231,7 +1233,8 @@ mod test {
         let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
         volume.activate().await?;
-        let full_volume_size = BLOCK_SIZE * 20;
+        let full_volume_blocks = 20;
+        let full_volume_size = BLOCK_SIZE * full_volume_blocks;
 
         // Write data to last block of first vol, and first block of
         // second vol.
@@ -1261,7 +1264,7 @@ mod test {
             .await?;
 
         // Read full volume
-        let buffer = Buffer::new(full_volume_size, BLOCK_SIZE);
+        let buffer = Buffer::new(full_volume_blocks, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1320,7 +1323,7 @@ mod test {
             .await?;
 
         // Read back in_memory, verify 1s
-        let buffer = Buffer::new(BLOCK_SIZE * 5, BLOCK_SIZE);
+        let buffer = Buffer::new(5, BLOCK_SIZE);
         in_memory_data
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1345,7 +1348,7 @@ mod test {
         volume.activate().await?;
 
         // Verify parent contents in one read
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1364,7 +1367,7 @@ mod test {
         }
 
         // Verify volume contents in one read
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1425,7 +1428,7 @@ mod test {
         volume.activate().await?;
 
         // Verify contents are 11 at startup
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1446,7 +1449,7 @@ mod test {
             .await?;
 
         // Read and verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1508,7 +1511,7 @@ mod test {
         volume.activate().await?;
 
         // Verify contents of RO parent are 1s at startup
-        let buffer = Buffer::new(BLOCK_SIZE * 5, BLOCK_SIZE);
+        let buffer = Buffer::new(5, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1516,7 +1519,7 @@ mod test {
         assert_eq!(vec![11; BLOCK_SIZE * 5], *buffer.as_vec().await);
 
         // Verify contents of blocks 5-10 are zero.
-        let buffer = Buffer::new(BLOCK_SIZE * 5, BLOCK_SIZE);
+        let buffer = Buffer::new(5, BLOCK_SIZE);
         volume
             .read(Block::new(5, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1537,7 +1540,7 @@ mod test {
             .await?;
 
         // Read and verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1633,7 +1636,7 @@ mod test {
         volume.scrub(None, None).await.unwrap();
 
         // Read and verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1707,7 +1710,7 @@ mod test {
         volume.activate().await?;
 
         // Verify contents are 11 at startup
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1726,7 +1729,7 @@ mod test {
         volume.scrub(None, None).await.unwrap();
 
         // Read and verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1823,7 +1826,7 @@ mod test {
             .await?;
 
         // Read and verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 2, BLOCK_SIZE);
+        let buffer = Buffer::new(2, BLOCK_SIZE);
         volume
             .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1842,7 +1845,7 @@ mod test {
         volume.scrub(None, None).await.unwrap();
 
         // Read full volume
-        let buffer = Buffer::new(BLOCK_SIZE * 20, BLOCK_SIZE);
+        let buffer = Buffer::new(20, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1950,7 +1953,7 @@ mod test {
             .await?;
 
         // Read and verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 2, BLOCK_SIZE);
+        let buffer = Buffer::new(2, BLOCK_SIZE);
         volume
             .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -1979,7 +1982,7 @@ mod test {
         volume.scrub(None, None).await.unwrap();
 
         // Read full volume
-        let buffer = Buffer::new(BLOCK_SIZE * 20, BLOCK_SIZE);
+        let buffer = Buffer::new(20, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -2053,14 +2056,14 @@ mod test {
         volume2.activate().await?;
 
         // Read one block: should be all 0x00
-        let buffer = Buffer::new(BLOCK_SIZE, BLOCK_SIZE);
+        let buffer = Buffer::new(1, BLOCK_SIZE);
         volume1
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
 
         assert_eq!(vec![0x00; BLOCK_SIZE], *buffer.as_vec().await);
 
-        let buffer = Buffer::new(BLOCK_SIZE, BLOCK_SIZE);
+        let buffer = Buffer::new(1, BLOCK_SIZE);
         volume2
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -2106,7 +2109,7 @@ mod test {
         volume.activate().await?;
 
         // Verify contents are 00 at startup
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -2125,7 +2128,7 @@ mod test {
         volume.scrub(None, None).await.unwrap();
 
         // Read and verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -2205,9 +2208,10 @@ mod test {
                 .await?;
 
             volume.activate().await?;
+            let volume_blocks =
+                volume.total_size().await? as usize / BLOCK_SIZE;
 
-            let buffer =
-                Buffer::new(volume.total_size().await? as usize, BLOCK_SIZE);
+            let buffer = Buffer::new(volume_blocks, BLOCK_SIZE);
             volume
                 .read(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
@@ -2264,11 +2268,11 @@ mod test {
 
         let volume = Volume::construct(vcr, None, csl()).await?;
         volume.activate().await?;
+        let volume_blocks = volume.total_size().await? as usize / BLOCK_SIZE;
 
         // Validate that source blocks originally come from the read-only parent
         {
-            let buffer =
-                Buffer::new(volume.total_size().await? as usize, BLOCK_SIZE);
+            let buffer = Buffer::new(volume_blocks, BLOCK_SIZE);
             volume
                 .read(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
@@ -2291,8 +2295,7 @@ mod test {
             .await?;
 
         {
-            let buffer =
-                Buffer::new(volume.total_size().await? as usize, BLOCK_SIZE);
+            let buffer = Buffer::new(volume_blocks, BLOCK_SIZE);
             volume
                 .read(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
@@ -2391,9 +2394,10 @@ mod test {
                 .await?;
 
             volume.activate().await?;
+            let volume_blocks =
+                volume.total_size().await? as usize / BLOCK_SIZE;
 
-            let buffer =
-                Buffer::new(volume.total_size().await? as usize, BLOCK_SIZE);
+            let buffer = Buffer::new(volume_blocks, BLOCK_SIZE);
             volume
                 .read(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
@@ -2457,11 +2461,11 @@ mod test {
 
         let volume = Volume::construct(vcr, None, csl()).await?;
         volume.activate().await?;
+        let volume_blocks = volume.total_size().await? as usize / BLOCK_SIZE;
 
         // Validate that source blocks originally come from the read-only parent
         {
-            let buffer =
-                Buffer::new(volume.total_size().await? as usize, BLOCK_SIZE);
+            let buffer = Buffer::new(volume_blocks, BLOCK_SIZE);
             volume
                 .read(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
@@ -2484,8 +2488,7 @@ mod test {
             .await?;
 
         {
-            let buffer =
-                Buffer::new(volume.total_size().await? as usize, BLOCK_SIZE);
+            let buffer = Buffer::new(volume_blocks, BLOCK_SIZE);
             volume
                 .read(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
@@ -2579,9 +2582,9 @@ mod test {
             .await?;
 
         volume.activate().await?;
+        let volume_blocks = volume.total_size().await? as usize / BLOCK_SIZE;
         // Validate that source blocks are the same
-        let buffer =
-            Buffer::new(volume.total_size().await? as usize, BLOCK_SIZE);
+        let buffer = Buffer::new(volume_blocks, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -2614,6 +2617,7 @@ mod test {
             .await?;
 
         volume.activate().await?;
+        let volume_blocks = volume.total_size().await? as usize / BLOCK_SIZE;
 
         let random_buffer = {
             let mut random_buffer =
@@ -2671,8 +2675,7 @@ mod test {
         }
 
         // Read back what we wrote.
-        let buffer =
-            Buffer::new(volume.total_size().await? as usize, BLOCK_SIZE);
+        let buffer = Buffer::new(volume_blocks, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -2897,6 +2900,7 @@ mod test {
             .await?;
 
         volume.activate().await?;
+        let volume_blocks = volume.total_size().await? as usize / BLOCK_SIZE;
 
         let random_buffer = {
             let mut random_buffer =
@@ -2981,8 +2985,7 @@ mod test {
         }
 
         // Read back what we wrote.
-        let buffer =
-            Buffer::new(new_volume.total_size().await? as usize, BLOCK_SIZE);
+        let buffer = Buffer::new(volume_blocks, BLOCK_SIZE);
         new_volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -3020,6 +3023,7 @@ mod test {
         // Write three times, read three times, for a total of 150M
         let total_size = volume.total_size().await? as usize;
         const CHUNK_SIZE: usize = 1048576; // 1M
+        assert_eq!(CHUNK_SIZE % BLOCK_SIZE, 0);
 
         for _ in 0..3 {
             let chunks: Vec<(usize, Vec<u8>)> = (0..total_size)
@@ -3046,7 +3050,7 @@ mod test {
             }
 
             for (i, random_buffer) in chunks {
-                let buffer = Buffer::new(CHUNK_SIZE, BLOCK_SIZE);
+                let buffer = Buffer::new(CHUNK_SIZE / BLOCK_SIZE, BLOCK_SIZE);
                 volume
                     .read(
                         Block::new(i as u64, BLOCK_SIZE.trailing_zeros()),
@@ -3086,7 +3090,7 @@ mod test {
         guest.query_work_queue().await?;
 
         // Verify contents are zero on init
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -3102,7 +3106,7 @@ mod test {
             .await?;
 
         // Read parent, verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -3213,7 +3217,7 @@ mod test {
         }
 
         // Read back our block post replacement, verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -3329,7 +3333,7 @@ mod test {
             .await?;
 
         // Read parent, verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -3345,7 +3349,7 @@ mod test {
             .await?;
 
         // Read back the same blocks.
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -3362,7 +3366,7 @@ mod test {
             .await?;
 
         // Read back the same blocks.
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -3411,7 +3415,7 @@ mod test {
             .await?;
 
         // Read back the first block.
-        let buffer = Buffer::new(BLOCK_SIZE, BLOCK_SIZE);
+        let buffer = Buffer::new(1, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -3420,7 +3424,7 @@ mod test {
         assert_eq!(vec![0x55_u8; BLOCK_SIZE], *buffer.as_vec().await);
 
         // Read back the next two blocks.
-        let buffer = Buffer::new(BLOCK_SIZE * 2, BLOCK_SIZE);
+        let buffer = Buffer::new(2, BLOCK_SIZE);
         guest
             .read(Block::new(1, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -3469,7 +3473,7 @@ mod test {
             .await?;
 
         // Read back the all three blocks.
-        let buffer = Buffer::new(BLOCK_SIZE * 3, BLOCK_SIZE);
+        let buffer = Buffer::new(3, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -3528,7 +3532,7 @@ mod test {
             .await?;
 
         // Read back the all three blocks.
-        let buffer = Buffer::new(BLOCK_SIZE * 3, BLOCK_SIZE);
+        let buffer = Buffer::new(3, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -3585,7 +3589,7 @@ mod test {
             .await?;
 
         // Read back both blocks
-        let buffer = Buffer::new(BLOCK_SIZE * 2, BLOCK_SIZE);
+        let buffer = Buffer::new(2, BLOCK_SIZE);
         guest
             .read(Block::new(4, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -3642,7 +3646,7 @@ mod test {
             .await?;
 
         // Read back both blocks
-        let buffer = Buffer::new(BLOCK_SIZE * 2, BLOCK_SIZE);
+        let buffer = Buffer::new(2, BLOCK_SIZE);
         guest
             .read(Block::new(4, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await?;
@@ -3689,7 +3693,7 @@ mod test {
         assert!(res.is_err());
 
         // Read a block past the end of the extent
-        let buffer = Buffer::new(BLOCK_SIZE, BLOCK_SIZE);
+        let buffer = Buffer::new(1, BLOCK_SIZE);
         let res = guest
             .read(Block::new(11, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await;
@@ -3725,7 +3729,7 @@ mod test {
         assert!(res.is_err());
 
         // Read a block with buffer that extends past the end of the region
-        let buffer = Buffer::new(BLOCK_SIZE * 2, BLOCK_SIZE);
+        let buffer = Buffer::new(2, BLOCK_SIZE);
         let res = guest
             .read(Block::new(10, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await;
@@ -3877,7 +3881,8 @@ mod test {
         let volume = Volume::construct(vcr, None, csl()).await.unwrap();
         volume.activate().await.unwrap();
 
-        let buffer = Buffer::new(bytes.len(), BLOCK_SIZE);
+        assert_eq!(bytes.len() % BLOCK_SIZE, 0);
+        let buffer = Buffer::new(bytes.len() / BLOCK_SIZE, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await
@@ -3988,7 +3993,7 @@ mod test {
                 .unwrap();
             volume.activate().await.unwrap();
 
-            let buffer = Buffer::new(5120, BLOCK_SIZE);
+            let buffer = Buffer::new(10, BLOCK_SIZE);
             volume
                 .read(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
@@ -4043,7 +4048,7 @@ mod test {
         let volume = Volume::construct(vcr, None, log.clone()).await.unwrap();
         volume.activate().await.unwrap();
 
-        let buffer = Buffer::new(5120, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await
@@ -4121,7 +4126,7 @@ mod test {
         let volume = Volume::construct(vcr, None, csl()).await.unwrap();
         volume.activate().await.unwrap();
 
-        let buffer = Buffer::new(5120, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await
@@ -4184,8 +4189,12 @@ mod test {
         let volume = Volume::construct(vcr, None, csl()).await.unwrap();
         volume.activate().await.unwrap();
 
+        assert_eq!(
+            crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE % BLOCK_SIZE,
+            0
+        );
         let buffer = Buffer::new(
-            crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE,
+            crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE / BLOCK_SIZE,
             BLOCK_SIZE,
         );
         volume
@@ -4324,7 +4333,8 @@ mod test {
             let volume = Volume::construct(vcr, None, csl()).await.unwrap();
             volume.activate().await.unwrap();
 
-            let buffer = Buffer::new(data.len(), BLOCK_SIZE);
+            assert_eq!(data.len() % BLOCK_SIZE, 0);
+            let buffer = Buffer::new(data.len() / BLOCK_SIZE, BLOCK_SIZE);
             volume
                 .read(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
@@ -4422,7 +4432,8 @@ mod test {
         let volume = Volume::construct(vcr, None, log.clone()).await.unwrap();
         volume.activate().await.unwrap();
 
-        let buffer = Buffer::new(data.len(), BLOCK_SIZE);
+        assert_eq!(data.len() % BLOCK_SIZE, 0);
+        let buffer = Buffer::new(data.len() / BLOCK_SIZE, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await
@@ -4913,7 +4924,7 @@ mod test {
             .unwrap();
 
         // Read parent, verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await
@@ -4953,7 +4964,7 @@ mod test {
         info!(log, "Replace VCR now: {:?}", replacement);
         volume.target_replace(original, replacement).await.unwrap();
         info!(log, "send read now");
-        let buffer = Buffer::new(BLOCK_SIZE * 10, BLOCK_SIZE);
+        let buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer.clone())
             .await

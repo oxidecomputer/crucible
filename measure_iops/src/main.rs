@@ -135,8 +135,12 @@ async fn main() -> Result<()> {
         1
     };
 
+    if io_size % bsz as usize != 0 {
+        bail!("io size ({io_size}) must be a multiple of block size ({bsz})");
+    }
+
     let read_buffers: Vec<Buffer> = (0..io_depth)
-        .map(|_| Buffer::new(io_size, bsz as usize))
+        .map(|_| Buffer::new(io_size / bsz as usize, bsz as usize))
         .collect();
 
     let mut io_operations_sent = 0;

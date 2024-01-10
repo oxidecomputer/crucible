@@ -1479,6 +1479,9 @@ impl fmt::Display for AckStatus {
 #[derive(Clone, Debug)]
 pub struct Buffer {
     /// Length of `self.data`, in bytes
+    ///
+    /// This must be a multiple of `self.block_size`; this constraint is
+    /// enforced by the constructors.
     len: usize,
 
     /// Block size (in bytes)
@@ -1492,29 +1495,20 @@ pub struct Buffer {
 }
 
 impl Buffer {
-    pub fn from_vec(vec: Vec<u8>, block_size: usize) -> Buffer {
-        let len = vec.len();
-        let owned_len = len.div_ceil(block_size);
+    /// Builds a new empty buffer
+    pub fn new(block_count: usize, block_size: usize) -> Buffer {
+        Self::repeat(0, block_count, block_size)
+    }
+
+    /// Builds a new buffer that repeats the given value
+    pub fn repeat(v: u8, block_count: usize, block_size: usize) -> Self {
+        let len = block_count * block_size;
         Buffer {
             len,
             block_size,
-            data: Arc::new(Mutex::new(vec)),
-            owned: Arc::new(Mutex::new(vec![false; owned_len])),
+            data: Arc::new(Mutex::new(vec![v; len])),
+            owned: Arc::new(Mutex::new(vec![false; block_count])),
         }
-    }
-
-    pub fn new(len: usize, block_size: usize) -> Buffer {
-        let owned_len = len.div_ceil(block_size);
-        Buffer {
-            len,
-            block_size,
-            data: Arc::new(Mutex::new(vec![0; len])),
-            owned: Arc::new(Mutex::new(vec![false; owned_len])),
-        }
-    }
-
-    pub fn from_slice(buf: &[u8], block_size: usize) -> Buffer {
-        Self::from_vec(buf.to_vec(), block_size)
     }
 
     /// Attempt to extract the underlying `Vec<u8>` bearing buffered data.
@@ -1556,17 +1550,19 @@ impl Buffer {
     }
 }
 
-#[tokio::test]
-async fn test_buffer_len() {
+#[test]
+fn test_buffer_len() {
     const READ_SIZE: usize = 512;
-    let data = Buffer::from_slice(&[0x99; READ_SIZE], 512);
+    const BLOCK_SIZE: usize = 512;
+    let data = Buffer::repeat(0x99, READ_SIZE / BLOCK_SIZE, BLOCK_SIZE);
     assert_eq!(data.len(), READ_SIZE);
 }
 
-#[tokio::test]
-async fn test_buffer_len_after_clone() {
+#[test]
+fn test_buffer_len_after_clone() {
     const READ_SIZE: usize = 512;
-    let data = Buffer::from_slice(&[0x99; READ_SIZE], 512);
+    const BLOCK_SIZE: usize = 512;
+    let data = Buffer::repeat(0x99, READ_SIZE / BLOCK_SIZE, BLOCK_SIZE);
     assert_eq!(data.len(), READ_SIZE);
 
     #[allow(clippy::redundant_clone)]
@@ -1581,7 +1577,8 @@ async fn test_buffer_len_after_clone() {
 )]
 async fn test_buffer_len_index_overflow() {
     const READ_SIZE: usize = 512;
-    let data = Buffer::from_slice(&[0x99; READ_SIZE], 512);
+    const BLOCK_SIZE: usize = 512;
+    let data = Buffer::repeat(0x99, READ_SIZE / BLOCK_SIZE, BLOCK_SIZE);
     assert_eq!(data.len(), READ_SIZE);
 
     let mut vec = data.as_vec().await;
@@ -1592,10 +1589,11 @@ async fn test_buffer_len_index_overflow() {
     }
 }
 
-#[tokio::test]
-async fn test_buffer_len_over_block_size() {
-    const READ_SIZE: usize = 600;
-    let data = Buffer::from_slice(&[0x99; READ_SIZE], 512);
+#[test]
+fn test_buffer_len_over_block_size() {
+    const READ_SIZE: usize = 1024;
+    const BLOCK_SIZE: usize = 512;
+    let data = Buffer::repeat(0x99, READ_SIZE / BLOCK_SIZE, BLOCK_SIZE);
     assert_eq!(data.len(), READ_SIZE);
 }
 
@@ -1718,25 +1716,25 @@ async fn test_return_iops() {
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
-        data: Buffer::new(1, 512),
+        data: Buffer::new(1, 512), // 512 bytes
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
-        data: Buffer::new(8000, 512),
+        data: Buffer::new(8, 512), // 4096 bytes
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
-        data: Buffer::new(16000, 512),
+        data: Buffer::new(31, 512), // 15872 bytes < 16000
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
-        data: Buffer::new(16001, 512),
+        data: Buffer::new(32, 512), // 16384 bytes > 16000
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 2);
 }

@@ -74,10 +74,7 @@ impl BlockIO for FileBlockIO {
         let mut file = self.file.lock().await;
         file.seek(SeekFrom::Start(start))?;
         file.read_exact(&mut data_vec[..])?;
-
-        for i in 0..data_vec.len().div_ceil(self.block_size as usize) {
-            owned_vec[i] = true;
-        }
+        owned_vec.fill(true);
 
         Ok(())
     }

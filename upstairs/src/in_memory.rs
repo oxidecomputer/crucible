@@ -16,12 +16,13 @@ pub struct InMemoryBlockIO {
 
 impl InMemoryBlockIO {
     pub fn new(id: Uuid, block_size: u64, total_size: usize) -> Self {
+        // TODO make this stricter about total_size % block_size == 0?
         Self {
             uuid: id,
             block_size,
             inner: Mutex::new(Inner {
                 bytes: vec![0; total_size],
-                owned: vec![false; total_size],
+                owned: vec![false; total_size.div_ceil(block_size as usize)],
             }),
         }
     }
@@ -114,8 +115,8 @@ impl BlockIO for InMemoryBlockIO {
         let bs = self.block_size as usize;
         for i in 0..data.len() / bs {
             if !inner.owned[start + i] {
-                inner.bytes[(start + i) * bs..(start + i + 1) * bs]
-                    .copy_from_slice(&data[i * bs..(i + 1) * bs]);
+                inner.bytes[(start + i) * bs..][..bs]
+                    .copy_from_slice(&data[i * bs..][..bs]);
                 inner.owned[start + i] = true;
             }
         }

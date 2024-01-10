@@ -171,8 +171,7 @@ async fn cmd_read<T: BlockIO>(
         cmp::min(num_bytes, native_block_size - offset_misalignment);
     if offset_misalignment != 0 {
         // Read the full block
-        let bs = native_block_size as usize;
-        let buffer = Buffer::new(bs, bs);
+        let buffer = Buffer::new(1, native_block_size as usize);
         let block_idx = opt.byte_offset / native_block_size;
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
         crucible.read(offset, buffer.clone()).await?;
@@ -217,7 +216,7 @@ async fn cmd_read<T: BlockIO>(
         // Send the read command with whichever buffer is at the back of the
         // queue. We re-use the buffers to avoid lots of allocations
         let w_buf = Buffer::new(
-            (opt.iocmd_block_count * native_block_size) as usize,
+            opt.iocmd_block_count as usize,
             native_block_size as usize,
         );
         let w_future = crucible.read(offset, w_buf.clone());
@@ -259,10 +258,7 @@ async fn cmd_read<T: BlockIO>(
         // let block_remainder = remainder % native_block_size;
         // round up
         let blocks = (remainder + native_block_size - 1) / native_block_size;
-        let buffer = Buffer::new(
-            (blocks * native_block_size) as usize,
-            native_block_size as usize,
-        );
+        let buffer = Buffer::new(blocks, native_block_size as usize);
         let block_idx = (cmd_count * opt.iocmd_block_count) + block_offset;
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
         crucible.read(offset, buffer.clone()).await?;
@@ -316,8 +312,7 @@ async fn write_remainder_and_finalize<'a, T: BlockIO>(
             offset.value + uflow_blocks,
             native_block_size.trailing_zeros(),
         );
-        let bs = native_block_size as usize;
-        let uflow_r_buf = Buffer::new(bs, bs);
+        let uflow_r_buf = Buffer::new(1, native_block_size as usize);
         crucible.read(uflow_offset, uflow_r_buf.clone()).await?;
 
         // Copy it into w_buf
@@ -402,8 +397,7 @@ async fn cmd_write<T: BlockIO>(
         // We need to read-modify-write here.
 
         // Read the full block
-        let bs = native_block_size as usize;
-        let buffer = Buffer::new(bs, bs);
+        let buffer = Buffer::new(1, native_block_size as usize);
         let block_idx = opt.byte_offset / native_block_size;
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
         crucible.read(offset, buffer.clone()).await?;
