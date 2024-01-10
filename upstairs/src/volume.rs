@@ -2616,16 +2616,14 @@ mod test {
         assert_eq!(volume.total_size().await?, block_size as u64 * 10);
 
         // Verify volume contents in one read
-        let buffer = Buffer::new(block_size * 1);
+        let buffer = Buffer::new(block_size * 10);
         let buffer = volume
             .read(Block::new(0, block_size.trailing_zeros()), buffer)
             .await?;
 
-        //let mut expected = vec![11; block_size * 5];
-        //expected.extend(vec![0x00; block_size * 5]);
-        //assert_eq!(expected, buffer.into_vec());
-
-        assert_eq!(vec![11; block_size], buffer.into_vec());
+        let mut expected = vec![11; block_size * 5];
+        expected.extend(vec![0x00; block_size * 5]);
+        assert_eq!(expected, buffer.into_vec());
 
         // One big write!
         volume
