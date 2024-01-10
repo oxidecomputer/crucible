@@ -791,7 +791,7 @@ pub(crate) mod up_test {
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(32, 512),
+                data: Buffer::new(31, 512),
             })
             .await;
 
@@ -1034,6 +1034,9 @@ pub(crate) mod up_test {
         // equation: throughput / number of IOPS = optimal I/O size.
 
         let optimal_io_size: usize = 6400 * 1024 / 500;
+
+        // Round down to the nearest size in blocks
+        let optimal_io_size = (optimal_io_size / 512) * 512;
 
         // Make sure this is <= an IOP size
         assert!(optimal_io_size <= 16384);
