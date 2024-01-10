@@ -54,32 +54,31 @@ impl BlockIO for InMemoryBlockIO {
         Ok(self.uuid)
     }
 
+    /// Read from `self` into `data`, setting ownership accordingly
     async fn read(
         &self,
         offset: Block,
         mut data: Buffer,
     ) -> Result<Buffer, CrucibleError> {
-        // Read from self into Buffer
         let inner = self.inner.lock().await;
 
         let start = offset.value as usize * self.block_size as usize;
 
         data.write_with_ownership(
             0,
-            &inner.bytes[start..(start + data.len())],
-            &inner.owned[start..(start + data.len())],
+            &inner.bytes[start..][..data.len()],
+            &inner.owned[start..][..data.len()],
         );
 
         Ok(data)
     }
 
+    /// Write from `data` into `self`, setting all owned bits to `true`
     async fn write(
         &self,
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
-        // Write from Buffer into self
-
         let mut inner = self.inner.lock().await;
 
         let start = offset.value as usize * self.block_size as usize;
