@@ -1538,10 +1538,9 @@ impl Buffer {
     ) {
         assert!(offset + response.data.len() <= self.data.len());
         if !response.block_contexts.is_empty() {
-            for i in 0..response.data.len() {
-                self.data[offset + i] = response.data[i];
-                self.owned[offset + i] = true;
-            }
+            self.data[offset..][..response.data.len()]
+                .copy_from_slice(&response.data);
+            self.owned[offset..][..response.data.len()].fill(true);
         }
     }
 
