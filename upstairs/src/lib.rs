@@ -2378,7 +2378,9 @@ impl Guest {
     pub async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
         let data = Arc::new(Mutex::new(Block::new(0, 9)));
         let extent_query = BlockOp::QueryExtentSize { data: data.clone() };
-        self.send_and_wait(extent_query).await?;
+
+        let maybe_buffer = self.send_and_wait(extent_query).await?;
+        assert!(maybe_buffer.is_none());
 
         let result = *data.lock().await;
         Ok(result)
@@ -2393,7 +2395,9 @@ impl Guest {
 
         let data = Arc::new(Mutex::new(wc));
         let qwq = BlockOp::QueryWorkQueue { data: data.clone() };
-        self.send_and_wait(qwq).await?;
+
+        let maybe_buffer = self.send_and_wait(qwq).await?;
+        assert!(maybe_buffer.is_none());
 
         let wc = data.lock().await;
         Ok(*wc)
@@ -2409,7 +2413,8 @@ impl Guest {
             self.log,
             "The guest has requested activation with gen:{}", gen
         );
-        waiter.wait(&self.log).await?;
+        let maybe_buffer: Option<Buffer> = waiter.wait(&self.log).await?;
+        assert!(maybe_buffer.is_none());
         info!(
             self.log,
             "The guest has finished waiting for activation with:{}", gen
@@ -2433,21 +2438,25 @@ impl BlockIO for Guest {
     async fn activate(&self) -> Result<(), CrucibleError> {
         let waiter = self.send(BlockOp::GoActive).await;
         info!(self.log, "The guest has requested activation");
-        waiter.wait(&self.log).await?;
+        let maybe_buffer = waiter.wait(&self.log).await?;
+        assert!(maybe_buffer.is_none());
         info!(self.log, "The guest has finished waiting for activation");
         Ok(())
     }
 
     /// Disable any more IO from this guest and deactivate the downstairs.
     async fn deactivate(&self) -> Result<(), CrucibleError> {
-        let _ = self.send_and_wait(BlockOp::Deactivate).await?;
+        let maybe_buffer = self.send_and_wait(BlockOp::Deactivate).await?;
+        assert!(maybe_buffer.is_none());
         Ok(())
     }
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
         let data = Arc::new(Mutex::new(false));
         let active_query = BlockOp::QueryGuestIOReady { data: data.clone() };
-        self.send_and_wait(active_query).await?;
+
+        let maybe_buffer = self.send_and_wait(active_query).await?;
+        assert!(maybe_buffer.is_none());
 
         let result = *data.lock().await;
         Ok(result)
@@ -2456,7 +2465,9 @@ impl BlockIO for Guest {
     async fn total_size(&self) -> Result<u64, CrucibleError> {
         let data = Arc::new(Mutex::new(0));
         let size_query = BlockOp::QueryTotalSize { data: data.clone() };
-        self.send_and_wait(size_query).await?;
+
+        let maybe_buffer = self.send_and_wait(size_query).await?;
+        assert!(maybe_buffer.is_none());
 
         let result = *data.lock().await;
         Ok(result)
@@ -2467,7 +2478,9 @@ impl BlockIO for Guest {
         if bs == 0 {
             let data = Arc::new(Mutex::new(0));
             let size_query = BlockOp::QueryBlockSize { data: data.clone() };
-            self.send_and_wait(size_query).await?;
+
+            let maybe_buffer = self.send_and_wait(size_query).await?;
+            assert!(maybe_buffer.is_none());
 
             let result = *data.lock().await;
             self.block_size
@@ -2481,7 +2494,9 @@ impl BlockIO for Guest {
     async fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
         let data = Arc::new(Mutex::new(Uuid::default()));
         let uuid_query = BlockOp::QueryUpstairsUuid { data: data.clone() };
-        self.send_and_wait(uuid_query).await?;
+
+        let maybe_buffer = self.send_and_wait(uuid_query).await?;
+        assert!(maybe_buffer.is_none());
 
         let result = *data.lock().await;
         Ok(result)
@@ -2532,7 +2547,10 @@ impl BlockIO for Guest {
         let wio = BlockOp::Write { offset, data };
 
         self.backpressure_sleep().await;
-        let _ = self.send_and_wait(wio).await?;
+
+        let maybe_buffer = self.send_and_wait(wio).await?;
+        assert!(maybe_buffer.is_none());
+
         Ok(())
     }
 
@@ -2557,7 +2575,8 @@ impl BlockIO for Guest {
         let wio = BlockOp::WriteUnwritten { offset, data };
 
         self.backpressure_sleep().await;
-        let _ = self.send_and_wait(wio).await?;
+        let maybe_buffer = self.send_and_wait(wio).await?;
+        assert!(maybe_buffer.is_none());
         Ok(())
     }
 
@@ -2565,9 +2584,10 @@ impl BlockIO for Guest {
         &self,
         snapshot_details: Option<SnapshotDetails>,
     ) -> Result<(), CrucibleError> {
-        let _ = self
+        let maybe_buffer = self
             .send_and_wait(BlockOp::Flush { snapshot_details })
             .await?;
+        assert!(maybe_buffer.is_none());
         Ok(())
     }
 
@@ -2582,7 +2602,9 @@ impl BlockIO for Guest {
 
         let data = Arc::new(Mutex::new(wc));
         let sw = BlockOp::ShowWork { data: data.clone() };
-        self.send_and_wait(sw).await?;
+
+        let maybe_buffer = self.send_and_wait(sw).await?;
+        assert!(maybe_buffer.is_none());
 
         let wc = data.lock().await;
         Ok(*wc)
@@ -2602,7 +2624,9 @@ impl BlockIO for Guest {
             result: data.clone(),
         };
 
-        self.send_and_wait(sw).await?;
+        let maybe_buffer = self.send_and_wait(sw).await?;
+        assert!(maybe_buffer.is_none());
+
         let result = data.lock().await;
         Ok(*result)
     }
