@@ -881,13 +881,6 @@ impl DownstairsClient {
                     IOState::Skipped
                 }
             }
-            DsState::Offline => {
-                error!(
-                    self.log,
-                    "[{}] enqueues job {:?} when offline", self.client_id, io,
-                );
-                IOState::New
-            }
             _ => {
                 self.new_jobs.insert(io.ds_id);
                 IOState::New

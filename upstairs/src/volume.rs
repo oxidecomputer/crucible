@@ -274,6 +274,7 @@ impl Volume {
         sv_vec
     }
 
+    #[allow(clippy::if_same_then_else)]
     pub fn read_only_parent_for_lba_range(
         &self,
         start: u64,
@@ -283,12 +284,7 @@ impl Volume {
             // Check if the scrubber has passed this offset
             let scrub_point = self.scrub_point.load(Ordering::SeqCst);
             if scrub_point >= read_only_parent.lba_range.end {
-                error!(
-                    self.log,
-                    "ZZZ Scrub is done, end:{}  sp:{}",
-                    read_only_parent.lba_range.end,
-                    scrub_point,
-                );
+                // No need to check ROP, the scrub is done.
                 None
             } else if start + length <= scrub_point {
                 None
@@ -313,7 +309,7 @@ impl Volume {
         start_delay: Option<u64>,
         scrub_pause: Option<u64>,
     ) -> Result<(), CrucibleError> {
-        info!(self.log, "ZZZ Scrub check for {}", self.uuid);
+        info!(self.log, "Scrub check for {}", self.uuid);
         // XXX Can we assert volume is activated?
 
         if let Some(ref read_only_parent) = self.read_only_parent {
@@ -427,7 +423,7 @@ impl Volume {
                 if offset > showat {
                     info!(
                         self.log,
-                        "ZZZ Scrub at offset {}/{} sp:{:?}",
+                        "Scrub at offset {}/{} sp:{:?}",
                         offset,
                         end,
                         self.scrub_point
@@ -442,7 +438,7 @@ impl Volume {
             let total_time = scrub_start.elapsed();
             info!(
                 self.log,
-                "ZZZ Scrub {} done in {} seconds. Retries:{} scrub_size:{} size:{} pause_milli:{}",
+                "Scrub {} done in {} seconds. Retries:{} scrub_size:{} size:{} pause_milli:{}",
                 self.uuid,
                 total_time.as_secs(),
                 retries,
