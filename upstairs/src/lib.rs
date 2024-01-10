@@ -1496,6 +1496,7 @@ impl Buffer {
     }
 
     /// Extract the underlying `Vec<u8>` bearing buffered data.
+    #[must_use]
     pub fn into_vec(self) -> Vec<u8> {
         self.data
     }
