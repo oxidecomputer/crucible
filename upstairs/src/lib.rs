@@ -1511,10 +1511,9 @@ impl Buffer {
 
     pub fn write(&mut self, offset: usize, data: &[u8]) {
         assert!(offset + data.len() <= self.data.len());
-        for i in 0..data.len() {
-            self.data[offset + i] = data[i];
-            self.owned[offset + i] = true;
-        }
+
+        self.data[offset..][..data.len()].copy_from_slice(data);
+        self.owned[offset..][..data.len()].fill(true);
     }
 
     pub fn write_with_ownership(
@@ -1578,6 +1577,20 @@ impl std::ops::Deref for Buffer {
     fn deref(&self) -> &Self::Target {
         &self.data
     }
+}
+
+#[test]
+fn test_buffer_sane() {
+    const BLOCK_SIZE: usize = 512;
+    let mut data = Buffer::new(1024);
+
+    data.write(0, &[99u8; BLOCK_SIZE]);
+
+    let mut read_data = vec![0u8; BLOCK_SIZE];
+    data.read(0, &mut read_data);
+
+    assert_eq!(&read_data[..], &data[..BLOCK_SIZE]);
+    assert_eq!(&data[..BLOCK_SIZE], &[99u8; BLOCK_SIZE]);
 }
 
 #[test]
