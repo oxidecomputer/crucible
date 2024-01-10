@@ -884,9 +884,7 @@ impl DownstairsClient {
             DsState::Offline => {
                 error!(
                     self.log,
-                    "[{}] enqueues job {:?} when offline",
-                    self.client_id,
-                    io,
+                    "[{}] enqueues job {:?} when offline", self.client_id, io,
                 );
                 IOState::New
             }
