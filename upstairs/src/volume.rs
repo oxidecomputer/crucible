@@ -274,6 +274,7 @@ impl Volume {
         sv_vec
     }
 
+    #[allow(clippy::if_same_then_else)]
     pub fn read_only_parent_for_lba_range(
         &self,
         start: u64,
@@ -282,7 +283,10 @@ impl Volume {
         if let Some(ref read_only_parent) = self.read_only_parent {
             // Check if the scrubber has passed this offset
             let scrub_point = self.scrub_point.load(Ordering::SeqCst);
-            if start + length <= scrub_point {
+            if scrub_point >= read_only_parent.lba_range.end {
+                // No need to check ROP, the scrub is done.
+                None
+            } else if start + length <= scrub_point {
                 None
             } else {
                 read_only_parent.lba_range_coverage(start, length)
@@ -3007,6 +3011,14 @@ mod test {
                         println!(
                             "block {}+{} <= scrub_point {}. No parent check",
                             block, size, scrub_point,
+                        );
+                        assert!(r.is_none());
+                    } else if scrub_point >= parent_blocks {
+                        // We have completed the scrub of the ROP, so we
+                        // go directly to the SubVolume
+                        println!(
+                            "scrub_point {} >= size {}, scrub done. No check",
+                            scrub_point, parent_blocks
                         );
                         assert!(r.is_none());
                     } else {
