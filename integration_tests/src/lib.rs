@@ -402,7 +402,7 @@ mod test {
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x00_u8; BLOCK_SIZE * 10], buffer.into_vec());
+        assert_eq!(vec![0x00_u8; BLOCK_SIZE * 10], &buffer[..]);
 
         // Write data in
         volume
@@ -418,7 +418,7 @@ mod test {
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
             .await?;
 
-        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], buffer.into_vec());
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
 
         Ok(())
     }
