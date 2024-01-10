@@ -112,8 +112,7 @@ pub(crate) mod up_test {
         assert_eq!(span.affected_block_count(), 2);
         assert_eq!(span.affected_block_numbers(), &vec![0, 1]);
 
-        span.write_from_buffer_into_blocks(&Bytes::from(vec![1; 64]))
-            .await;
+        span.write_from_buffer_into_blocks(&Bytes::from(vec![1; 64]));
 
         for i in 0..500 {
             assert_eq!(span.buffer()[i], 0);
@@ -129,7 +128,7 @@ pub(crate) mod up_test {
         }
 
         let mut data = vec![0u8; 64];
-        span.read_from_blocks_into_buffer(&mut data[..]).await;
+        span.read_from_blocks_into_buffer(&mut data[..]);
 
         for i in 0..64 {
             assert_eq!(data[i], 1);

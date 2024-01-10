@@ -103,13 +103,13 @@ impl IOSpan {
     }
 
     #[instrument]
-    pub async fn read_from_blocks_into_buffer(&self, data: &mut [u8]) {
+    pub fn read_from_blocks_into_buffer(&self, data: &mut [u8]) {
         assert_eq!(data.len(), self.sz as usize);
         self.buffer.read(self.phase as usize, data);
     }
 
     #[instrument]
-    pub async fn write_from_buffer_into_blocks(&mut self, data: &[u8]) {
+    pub fn write_from_buffer_into_blocks(&mut self, data: &[u8]) {
         assert_eq!(data.len(), self.sz as usize);
         self.buffer.write(self.phase as usize, data);
     }
@@ -275,7 +275,7 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
         span.read_affected_blocks_from_volume(&self.block_io)
             .await?;
 
-        span.read_from_blocks_into_buffer(buf).await;
+        span.read_from_blocks_into_buffer(buf);
 
         // TODO: for block devices, we can't increment offset past the
         // device size but we're supposed to be pretending to be a proper
@@ -305,7 +305,7 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
             span.read_affected_blocks_from_volume(&self.block_io)
                 .await?;
 
-            span.write_from_buffer_into_blocks(buf).await;
+            span.write_from_buffer_into_blocks(buf);
 
             span.write_affected_blocks_to_volume(&self.block_io).await?;
         } else {
