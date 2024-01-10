@@ -1190,7 +1190,7 @@ async fn loop_create_test(
  * Return a formatted string of the region size in SI units.
  */
 fn region_si(es: u64, ec: u64, bs: u32) -> String {
-    let sz = Byte::from_u64((bs as u64 * es * ec).into());
+    let sz = Byte::from_u64(bs as u64 * es * ec);
     format!("{sz:#>11}")
 }
 
@@ -1198,7 +1198,7 @@ fn region_si(es: u64, ec: u64, bs: u32) -> String {
  * Return a formatted string of the extent file size in SI units
  */
 fn efile_si(es: u64, bs: u32) -> String {
-    let sz = Byte::from_u64((bs as u64 * es).into());
+    let sz = Byte::from_u64(bs as u64 * es);
     format!("{sz:#>11}")
 }
 
