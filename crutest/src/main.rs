@@ -2544,7 +2544,7 @@ async fn repair_workload(
                     bw = block_width,
                     sw = size_width,
                 );
-                guest.read(offset, data).await?;
+                let _data = guest.read(offset, data).await?;
             }
         }
     }

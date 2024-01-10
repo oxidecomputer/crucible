@@ -1460,6 +1460,7 @@ impl fmt::Display for AckStatus {
  * was shared between cloned BytesMut objects. Additionally, we added the
  * idea of ownership and that necessitated another field.
  */
+#[must_use]
 #[derive(Debug, PartialEq)]
 pub struct Buffer {
     len: usize,

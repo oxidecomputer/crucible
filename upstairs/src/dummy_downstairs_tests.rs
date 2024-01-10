@@ -656,7 +656,11 @@ pub(crate) mod protocol_test {
             // response to come back before returning
             tokio::spawn(async move {
                 let buffer = Buffer::new(512);
-                harness.guest.read(Block::new_512(0), buffer).await.unwrap();
+                let _buffer = harness
+                    .guest
+                    .read(Block::new_512(0), buffer)
+                    .await
+                    .unwrap();
             });
         }
 
@@ -706,7 +710,11 @@ pub(crate) mod protocol_test {
 
             tokio::spawn(async move {
                 let buffer = Buffer::new(512);
-                harness.guest.read(Block::new_512(0), buffer).await.unwrap();
+                let _buffer = harness
+                    .guest
+                    .read(Block::new_512(0), buffer)
+                    .await
+                    .unwrap();
             });
         }
 
@@ -860,7 +868,11 @@ pub(crate) mod protocol_test {
             // response to come back before returning
             tokio::spawn(async move {
                 let buffer = Buffer::new(512);
-                harness.guest.read(Block::new_512(0), buffer).await.unwrap();
+                let _buffer = harness
+                    .guest
+                    .read(Block::new_512(0), buffer)
+                    .await
+                    .unwrap();
             });
         }
 
@@ -940,7 +952,7 @@ pub(crate) mod protocol_test {
                 // response to come back before returning
                 tokio::spawn(async move {
                     let buffer = Buffer::new(512);
-                    harness
+                    let _buffer = harness
                         .guest
                         .read(Block::new_512(0), buffer)
                         .await
@@ -1244,7 +1256,7 @@ pub(crate) mod protocol_test {
                     let harness = harness.clone();
                     tokio::spawn(async move {
                         let buffer = Buffer::new(512);
-                        harness
+                        let _buffer = harness
                             .guest
                             .read(Block::new_512(io_eid as u64 * 10), buffer)
                             .await
@@ -1922,7 +1934,7 @@ pub(crate) mod protocol_test {
                 // response to come back before returning
                 tokio::spawn(async move {
                     let buffer = Buffer::new(512);
-                    harness
+                    let _buffer = harness
                         .guest
                         .read(Block::new_512(0), buffer)
                         .await
@@ -1976,7 +1988,7 @@ pub(crate) mod protocol_test {
                 // response to come back before returning
                 tokio::spawn(async move {
                     let buffer = Buffer::new(512);
-                    harness
+                    let _buffer = harness
                         .guest
                         .read(Block::new_512(0), buffer)
                         .await
@@ -2680,7 +2692,7 @@ pub(crate) mod protocol_test {
                 // response to come back before returning
                 tokio::spawn(async move {
                     let buffer = Buffer::new(512);
-                    harness
+                    let _buffer = harness
                         .guest
                         .read(Block::new_512(0), buffer)
                         .await
@@ -2929,7 +2941,8 @@ pub(crate) mod protocol_test {
         // response to come back before returning
         tokio::spawn(async move {
             let buffer = Buffer::new(512);
-            harness.guest.read(Block::new_512(0), buffer).await.unwrap();
+            let _buffer =
+                harness.guest.read(Block::new_512(0), buffer).await.unwrap();
         });
 
         // All downstairs should see it
@@ -2968,7 +2981,11 @@ pub(crate) mod protocol_test {
             // response to come back before returning
             tokio::spawn(async move {
                 let buffer = Buffer::new(512);
-                harness.guest.read(Block::new_512(0), buffer).await.unwrap();
+                let _buffer = harness
+                    .guest
+                    .read(Block::new_512(0), buffer)
+                    .await
+                    .unwrap();
             });
         }
 

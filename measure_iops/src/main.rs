@@ -190,7 +190,7 @@ async fn main() -> Result<()> {
         }
 
         for future in read_futures {
-            future.await??;
+            let _buffer = future.await??;
         }
         for future in write_futures {
             future.await??;
