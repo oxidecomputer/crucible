@@ -258,7 +258,7 @@ async fn cmd_read<T: BlockIO>(
         // let block_remainder = remainder % native_block_size;
         // round up
         let blocks = (remainder + native_block_size - 1) / native_block_size;
-        let buffer = Buffer::new(blocks, native_block_size as usize);
+        let buffer = Buffer::new(blocks as usize, native_block_size as usize);
         let block_idx = (cmd_count * opt.iocmd_block_count) + block_offset;
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
         crucible.read(offset, buffer.clone()).await?;
