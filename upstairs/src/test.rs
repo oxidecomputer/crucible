@@ -131,7 +131,7 @@ pub(crate) mod up_test {
         }
 
         let data = Buffer::new(span.affected_block_count(), 512);
-        span.read_from_blocks_into_buffer(&mut data.as_vec().await[..])
+        span.read_from_blocks_into_buffer(&mut data.as_vec().await[..64])
             .await;
 
         for i in 0..64 {
