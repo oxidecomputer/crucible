@@ -411,7 +411,7 @@ impl Volume {
                 // TODO: Nexus needs to know about this failure.
                 self.write_unwritten(
                     Block::new(offset, bs.trailing_zeros()),
-                    buffer.as_bytes(),
+                    buffer.into_bytes(),
                 )
                 .await?;
 

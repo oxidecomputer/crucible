@@ -1553,8 +1553,8 @@ impl Buffer {
         }
     }
 
-    pub fn as_bytes(&self) -> Bytes {
-        Bytes::from(self.data.clone())
+    pub fn into_bytes(self) -> Bytes {
+        Bytes::from(self.data)
     }
 
     /// Consume and layer buffer contents on top of this one

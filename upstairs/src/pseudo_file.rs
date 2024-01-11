@@ -88,7 +88,7 @@ impl IOSpan {
 
     #[instrument(skip(block_io))]
     pub async fn write_affected_blocks_to_volume<T: BlockIO>(
-        &self,
+        self,
         block_io: &Arc<T>,
     ) -> Result<(), CrucibleError> {
         block_io
@@ -97,7 +97,7 @@ impl IOSpan {
                     self.affected_block_numbers[0],
                     self.block_size.trailing_zeros(),
                 ),
-                self.buffer.as_bytes(),
+                self.buffer.into_bytes(),
             )
             .await
     }
