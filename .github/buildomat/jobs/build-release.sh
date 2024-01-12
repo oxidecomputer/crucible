@@ -86,7 +86,9 @@ ptime -m cargo run --bin crucible-package
 banner contents
 tar tvfz out/crucible.tar.gz
 tar tvfz out/crucible-pantry.tar.gz
-mv out/crucible.tar.gz out/crucible-pantry.tar.gz /out/
+tar tvfz out/crucible-svc.tar.gz
+tar tvfz out/crucible-pantry-svc.tar.gz
+mv out/crucible.tar.gz out/crucible-pantry.tar.gz out/crucible-svc.tar.gz out/crucible-pantry-svc.tar.gz /out/
 
 # Build the nightly archive file which should include all the scripts
 # and binaries needed to run the nightly test.
