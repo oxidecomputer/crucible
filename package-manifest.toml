@@ -1,10 +1,3 @@
-[package.crucible]
-service_name = "crucible"
-only_for_targets.image = "standard"
-source.type = "composite"
-source.packages = [ "crucible-svc.tar.gz", "zone-network-setup.tar.gz" ]
-output.type = "zone"
-
 [package.crucible-svc]
 service_name = "crucible-svc"
 source.type = "local"
@@ -17,11 +10,11 @@ source.paths = [
 output.type = "zone"
 output.intermediate_only = true
 
-[package.crucible-pantry]
-service_name = "crucible-pantry"
+[package.crucible]
+service_name = "crucible"
 only_for_targets.image = "standard"
 source.type = "composite"
-source.packages = [ "crucible-pantry-svc.tar.gz", "zone-network-setup.tar.gz" ]
+source.packages = [ "crucible-svc.tar.gz", "zone-network-setup.tar.gz" ]
 output.type = "zone"
 
 [package.crucible-pantry-svc]
@@ -34,3 +27,10 @@ source.paths = [
 ]
 output.type = "zone"
 output.intermediate_only = true
+
+[package.crucible-pantry]
+service_name = "crucible-pantry"
+only_for_targets.image = "standard"
+source.type = "composite"
+source.packages = [ "crucible-pantry-svc.tar.gz", "zone-network-setup.tar.gz" ]
+output.type = "zone"
