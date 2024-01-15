@@ -7,5 +7,4 @@ edition = "2021"
 anyhow.workspace = true
 omicron-zone-package.workspace = true
 tokio.workspace = true
-topological-sort.workspace = true
 crucible-workspace-hack.workspace = true
