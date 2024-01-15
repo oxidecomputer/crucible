@@ -1035,7 +1035,6 @@ dependencies = [
  "crucible-workspace-hack",
  "omicron-zone-package",
  "tokio",
- "topological-sort",
 ]
 
 [[package]]
@@ -2753,9 +2752,9 @@ checksum = "e22821954cca73148cdd1547a540ac79a3f27b6d55b518490437bb9867212828"
 
 [[package]]
 name = "omicron-zone-package"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "620c53207d39a385f298444337d575690e0d9e793561d471ba7a614dc213e372"
+checksum = "35e0b92149236c16677cda6e1efb8bde8f7b5f838344c65c621888f8251170ce"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2774,6 +2773,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "toml 0.7.8",
+ "topological-sort",
  "walkdir",
 ]
 
