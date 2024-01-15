@@ -14,13 +14,13 @@ async fn main() -> Result<()> {
     create_dir_all(output_dir)?;
 
     let packages = cfg.packages_to_deploy(&Target::default());
-    let mut package_iter = packages.build_order();
+    let package_iter = packages.build_order();
 
-    while let Some(batch) = package_iter.next() {
+    for batch in package_iter {
         for (name, package) in &batch {
             println!("Building '{name}'");
             package
-                .create_for_target(&Target::default(), &name, output_dir)
+                .create_for_target(&Target::default(), name, output_dir)
                 .await?;
         }
     }
