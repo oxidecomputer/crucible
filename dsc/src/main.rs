@@ -185,6 +185,10 @@ enum Action {
         #[clap(long, default_value = "15", action)]
         extent_count: u64,
 
+        /// Downstairs will all be started read only (default: false)
+        #[clap(long, action, default_value = "false")]
+        read_only: bool,
+
         /// default output directory
         #[clap(long, global = true, default_value = "/tmp/dsc", action)]
         output_dir: PathBuf,
@@ -225,6 +229,7 @@ struct DownstairsInfo {
     _create_output: String,
     output_file: PathBuf,
     client_id: usize,
+    read_only: bool,
 }
 
 impl DownstairsInfo {
@@ -235,6 +240,7 @@ impl DownstairsInfo {
         _create_output: String,
         output_file: PathBuf,
         client_id: usize,
+        read_only: bool,
     ) -> DownstairsInfo {
         DownstairsInfo {
             ds_bin,
@@ -243,6 +249,7 @@ impl DownstairsInfo {
             _create_output,
             output_file,
             client_id,
+            read_only,
         }
     }
 
@@ -254,9 +261,23 @@ impl DownstairsInfo {
 
         let port_value = format!("{}", self.port);
 
+        let mode = if self.read_only {
+            "ro".to_string()
+        } else {
+            "rw".to_string()
+        };
+
         let region_dir = self.region_dir.clone();
         let cmd = Command::new(self.ds_bin.clone())
-            .args(["run", "-p", &port_value, "-d", &region_dir])
+            .args([
+                "run",
+                "-p",
+                &port_value,
+                "-d",
+                &region_dir,
+                "--mode",
+                &mode,
+            ])
             .stdout(Stdio::from(outputs))
             .stderr(Stdio::from(errors))
             .spawn()
@@ -293,9 +314,12 @@ pub struct DscInfo {
     rs: Mutex<RegionSet>,
     /// Work for the dsc to do, what downstairs to start/stop/etc
     work: Mutex<DscWork>,
+    /// If the downstairs are started read only
+    read_only: bool,
 }
 
 impl DscInfo {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         downstairs_bin: String,
         output_dir: PathBuf,
@@ -304,6 +328,7 @@ impl DscInfo {
         create: bool,
         port_base: u32,
         region_count: usize,
+        read_only: bool,
     ) -> Result<Arc<Self>> {
         // Verify the downstairs binary exists as is a file
         if !Path::new(&downstairs_bin).exists() {
@@ -418,6 +443,7 @@ impl DscInfo {
             output_dir,
             rs: mrs,
             work,
+            read_only,
         }))
     }
 
@@ -532,6 +558,7 @@ impl DscInfo {
             String::from_utf8(output.stdout).unwrap(),
             output_path,
             ds_id,
+            self.read_only,
         );
         rs.ds.push(Arc::new(dsi));
         Ok(time_f)
@@ -582,6 +609,7 @@ impl DscInfo {
                 "/dev/null".to_string(),
                 output_path,
                 ds_id,
+                self.read_only,
             );
             rs.ds.push(Arc::new(dsi));
             port += rs.port_step;
@@ -1387,6 +1415,7 @@ fn main() -> Result<()> {
                 true,
                 port_base,
                 region_count,
+                false,
             )?;
 
             runtime.block_on(dsci.create_region_set(
@@ -1405,7 +1434,7 @@ fn main() -> Result<()> {
             region_dir,
         } => {
             let dsci = DscInfo::new(
-                ds_bin, output_dir, region_dir, notify_tx, true, 8810, 3,
+                ds_bin, output_dir, region_dir, notify_tx, true, 8810, 3, false,
             )?;
             runtime.block_on(region_create_test(&dsci, long, csv_out))
         }
@@ -1420,6 +1449,7 @@ fn main() -> Result<()> {
             extent_count,
             output_dir,
             port_base,
+            read_only,
             region_dir,
             region_count,
         } => {
@@ -1443,6 +1473,7 @@ fn main() -> Result<()> {
                 create,
                 port_base,
                 region_count,
+                read_only,
             )?;
 
             if create {
@@ -1489,8 +1520,16 @@ mod test {
         let dir = tempdir().unwrap().as_ref().to_path_buf();
         let (tx, _) = watch::channel(0);
         let region_vec = vec![dir.clone()];
-        let res =
-            DscInfo::new(ds_bin, dir.clone(), region_vec, tx, true, 8810, 3);
+        let res = DscInfo::new(
+            ds_bin,
+            dir.clone(),
+            region_vec,
+            tx,
+            true,
+            8810,
+            3,
+            false,
+        );
         assert!(res.is_ok());
         assert!(Path::new(&dir).exists());
     }
@@ -1514,6 +1553,7 @@ mod test {
             true,
             8810,
             3,
+            false,
         );
         assert!(res.is_ok());
         assert!(Path::new(&dir).exists());
@@ -1533,7 +1573,8 @@ mod test {
         let r2 = tempdir().unwrap().as_ref().to_path_buf();
         let region_vec = vec![r1, r2];
         let (tx, _) = watch::channel(0);
-        let res = DscInfo::new(ds_bin, dir, region_vec, tx, true, 8810, 3);
+        let res =
+            DscInfo::new(ds_bin, dir, region_vec, tx, true, 8810, 3, false);
         assert!(res.is_err());
     }
 
@@ -1549,7 +1590,8 @@ mod test {
         let r3 = tempdir().unwrap().as_ref().to_path_buf();
         let region_vec = vec![r1, r2, r3];
         let (tx, _) = watch::channel(0);
-        let res = DscInfo::new(ds_bin, dir, region_vec, tx, true, 8810, 2);
+        let res =
+            DscInfo::new(ds_bin, dir, region_vec, tx, true, 8810, 2, false);
         assert!(res.is_err());
     }
 
@@ -1573,6 +1615,7 @@ mod test {
             true,
             8810,
             4,
+            false,
         );
         assert!(res.is_ok());
         assert!(Path::new(&dir).exists());
@@ -1597,6 +1640,7 @@ mod test {
             true,
             8810,
             3,
+            false,
         );
 
         assert!(res.is_err());
@@ -1621,13 +1665,15 @@ mod test {
             true,
             8810,
             3,
+            false,
         )
         .unwrap();
 
         // Now, create them again and expect an error.
         let (tx, _) = watch::channel(0);
-        let res =
-            DscInfo::new(ds_bin, output_dir, region_vec, tx, true, 8810, 3);
+        let res = DscInfo::new(
+            ds_bin, output_dir, region_vec, tx, true, 8810, 3, false,
+        );
         assert!(res.is_err());
     }
 
@@ -1640,7 +1686,8 @@ mod test {
         let region_vec = vec![dir.clone()];
         let (tx, _) = watch::channel(0);
         let dsci =
-            DscInfo::new(ds_bin, dir, region_vec, tx, true, 8810, 3).unwrap();
+            DscInfo::new(ds_bin, dir, region_vec, tx, true, 8810, 3, false)
+                .unwrap();
 
         let res = dsci.delete_ds_region(0).await;
         println!("res is {:?}", res);
@@ -1659,7 +1706,8 @@ mod test {
         let region_vec = vec![r1.clone(), r2, r3];
         let (tx, _) = watch::channel(0);
         let dsci =
-            DscInfo::new(ds_bin, dir, region_vec, tx, true, 8810, 3).unwrap();
+            DscInfo::new(ds_bin, dir, region_vec, tx, true, 8810, 3, false)
+                .unwrap();
 
         // Manually create the first region directory.
         let ds_region_dir =
@@ -1684,9 +1732,17 @@ mod test {
         let dir = tempdir().unwrap().as_ref().to_path_buf();
         let region_vec = vec![dir.clone()];
         let (tx, _) = watch::channel(0);
-        let dsci =
-            DscInfo::new(ds_bin, dir.clone(), region_vec, tx, true, 8810, 3)
-                .unwrap();
+        let dsci = DscInfo::new(
+            ds_bin,
+            dir.clone(),
+            region_vec,
+            tx,
+            true,
+            8810,
+            3,
+            false,
+        )
+        .unwrap();
 
         // Manually create the region directory.  We have to convert the
         // PathBuf back into a string.
@@ -1708,9 +1764,17 @@ mod test {
         let dir = tempdir().unwrap().as_ref().to_path_buf();
         let region_vec = vec![dir.clone()];
         let (tx, _) = watch::channel(0);
-        let dsci =
-            DscInfo::new(ds_bin, dir.clone(), region_vec, tx, true, 8810, 3)
-                .unwrap();
+        let dsci = DscInfo::new(
+            ds_bin,
+            dir.clone(),
+            region_vec,
+            tx,
+            true,
+            8810,
+            3,
+            false,
+        )
+        .unwrap();
         assert!(Path::new(&dir).exists());
 
         // Manually create the region set.  We have to convert the
@@ -1737,9 +1801,17 @@ mod test {
         let dir = tempdir().unwrap().as_ref().to_path_buf();
         let region_vec = vec![dir.clone()];
         let (tx, _) = watch::channel(0);
-        let dsci =
-            DscInfo::new(ds_bin, dir.clone(), region_vec, tx, true, 8810, 4)
-                .unwrap();
+        let dsci = DscInfo::new(
+            ds_bin,
+            dir.clone(),
+            region_vec,
+            tx,
+            true,
+            8810,
+            4,
+            false,
+        )
+        .unwrap();
         assert!(Path::new(&dir).exists());
 
         // Manually create the region set.  We have to convert the
@@ -1767,9 +1839,17 @@ mod test {
         let dir = tempdir().unwrap().as_ref().to_path_buf();
         let region_vec = vec![dir.clone()];
         let (tx, _) = watch::channel(0);
-        let dsci =
-            DscInfo::new(ds_bin, dir.clone(), region_vec, tx, true, 8810, 3)
-                .unwrap();
+        let dsci = DscInfo::new(
+            ds_bin,
+            dir.clone(),
+            region_vec,
+            tx,
+            true,
+            8810,
+            3,
+            false,
+        )
+        .unwrap();
         assert!(Path::new(&dir).exists());
 
         // Manually create the 2/3 of the region set.
@@ -1797,9 +1877,17 @@ mod test {
         let dir = tempdir().unwrap().as_ref().to_path_buf();
         let region_vec = vec![dir.clone()];
         let (tx, _) = watch::channel(0);
-        let dsci =
-            DscInfo::new(ds_bin, dir.clone(), region_vec, tx, true, 8810, 4)
-                .unwrap();
+        let dsci = DscInfo::new(
+            ds_bin,
+            dir.clone(),
+            region_vec,
+            tx,
+            true,
+            8810,
+            4,
+            false,
+        )
+        .unwrap();
         assert!(Path::new(&dir).exists());
 
         // Manually create the region set.  We have to convert the
