@@ -1568,6 +1568,10 @@ impl Buffer {
             }
         }
     }
+
+    pub fn owned_ref(&self) -> &[bool] {
+        &self.owned
+    }
 }
 
 impl std::ops::Deref for Buffer {
