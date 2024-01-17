@@ -71,17 +71,17 @@ impl IOSpan {
         &mut self,
         block_io: &Arc<T>,
     ) -> Result<(), CrucibleError> {
-        let buffer = block_io
+        let b = std::mem::take(&mut self.buffer);
+
+        self.buffer = block_io
             .read(
                 Block::new(
                     self.affected_block_numbers[0],
                     self.block_size.trailing_zeros(),
                 ),
-                Buffer::new(self.buffer.len()),
+                b,
             )
             .await?;
-
-        self.buffer.eat(0, buffer);
 
         Ok(())
     }
@@ -329,6 +329,91 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
         let _guard = self.rmw_lock.write().await;
 
         self.block_io.flush(None).await?;
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use rand::Rng;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_pseudo_file_sane() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        let in_memory = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            1024 * 1024,
+        ));
+        let mut cpf = CruciblePseudoFile::from(in_memory)?;
+        cpf.activate().await?;
+
+        // Should start as zeros (this will not read in anything due to
+        // `in_memory` having all ownership set as false
+        let mut buf = vec![0u8; 3000];
+        cpf.read_exact(&mut buf)?;
+
+        assert_eq!(&buf, &[0u8; 3000]);
+
+        // Writing and reading works
+        cpf.seek(SeekFrom::Start(777))?;
+
+        cpf.write_all(&[7u8; 100])?;
+        cpf.write_all(&[8u8; 100])?;
+        cpf.write_all(&[9u8; 100])?;
+
+        cpf.seek(SeekFrom::Start(877))?;
+
+        let mut buf = vec![99u8; 200];
+        cpf.read_exact(&mut buf)?;
+
+        assert_eq!(&buf[0..100], &[8u8; 100]);
+        assert_eq!(&buf[100..200], &[9u8; 100]);
+
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_pseudo_file_hammer() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        let in_memory = Arc::new(InMemoryBlockIO::new(
+            Uuid::new_v4(),
+            BLOCK_SIZE as u64,
+            1024 * 1024,
+        ));
+        let mut cpf = CruciblePseudoFile::from(in_memory)?;
+        cpf.activate().await?;
+
+        let mut rng = rand::thread_rng();
+        let sz = cpf.sz();
+
+        for _ in 0..1000 {
+            let mut offset: u64 = rng.gen::<u64>() % sz;
+            let mut bsz: usize = rng.gen::<usize>() % 4096;
+
+            while ((offset + bsz as u64) > sz) || (bsz == 0) {
+                offset = rng.gen::<u64>() % sz;
+                bsz = rng.gen::<usize>() % 4096;
+            }
+
+            let vec: Vec<u8> = (0..bsz)
+                .map(|_| rng.sample(rand::distributions::Standard))
+                .collect();
+
+            let mut vec2 = vec![0; bsz];
+
+            cpf.seek(SeekFrom::Start(offset))?;
+            cpf.write_all(&vec[..])?;
+
+            cpf.seek(SeekFrom::Start(offset))?;
+            cpf.read_exact(&mut vec2[..])?;
+
+            assert_eq!(&vec, &vec2);
+        }
 
         Ok(())
     }

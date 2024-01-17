@@ -1477,7 +1477,7 @@ impl fmt::Display for AckStatus {
  * information) and be propagated "up".
  */
 #[must_use]
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Default)]
 pub struct Buffer {
     len: usize,
     data: Vec<u8>,
