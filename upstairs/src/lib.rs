@@ -1456,9 +1456,25 @@ impl fmt::Display for AckStatus {
 /*
  * Provides a shared Buffer that Read operations will write into.
  *
- * Originally BytesMut was used here, but it didn't guarantee that memory
- * was shared between cloned BytesMut objects. Additionally, we added the
- * idea of ownership and that necessitated another field.
+ * Originally BytesMut was used here, but it didn't guarantee that memory was
+ * shared between cloned BytesMut objects. Additionally, we added the idea of
+ * ownership and that necessitated another field.
+ *
+ * Ownership of a block is defined as true if that block has been written to: we
+ * say a block is "owned" if the bytes were written to by something, rather than
+ * having been initialized to zero. For an Upstairs, a block is owned if it was
+ * returned with a non-zero number of block contexts, encrypted or not. This is
+ * important when using authenticated encryption to distinguish between zeroes
+ * that the Guest has written and blocks that were zero to begin with.
+ *
+ * It's safe to set ownership to `true` if there's no persistence of ownership
+ * information. Persistence is required otherwise: if a particular `BlockIO`
+ * implementation is dropped and recreated, the ownership should not be lost as
+ * a result.
+ *
+ * Because persistence is required, ownership will always come from the
+ * Downstairs (or other `BlockIO` implementations that persist ownership
+ * information) and be propagated "up".
  */
 #[must_use]
 #[derive(Debug, PartialEq)]
