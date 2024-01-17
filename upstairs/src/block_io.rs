@@ -243,7 +243,15 @@ impl BlockIO for ReqwestBlockIO {
         )
         .map_err(|e| CrucibleError::GenericError(e.to_string()))?;
 
-        assert_eq!(total_size, data.len() as u64);
+        // Did the HTTP server _not_ honour the Range request?
+        if total_size != data.len() as u64 {
+            crucible_bail!(
+                IoError,
+                "Requested {} bytes but HTTP server returned {}!",
+                data.len(),
+                total_size
+            );
+        }
 
         let bytes = response
             .bytes()
