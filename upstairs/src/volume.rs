@@ -2078,6 +2078,70 @@ mod test {
     }
 
     #[tokio::test]
+    async fn ownership_survives_through_volume() -> Result<()> {
+        const BLOCK_SIZE: u64 = 512;
+
+        let parent =
+            Arc::new(InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 2048));
+
+        // Ownership starts off false
+
+        let buffer = Buffer::new(1024);
+        let buffer = parent
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
+            .await?;
+
+        assert_eq!(buffer.owned_ref(), &[false; 1024]);
+
+        // Ownership is set by writing to blocks
+
+        parent
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(vec![9; 512]),
+            )
+            .await?;
+
+        // Ownership is returned by the downstairs
+
+        let buffer = Buffer::new(1024);
+        let buffer = parent
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
+            .await?;
+
+        let mut expected = vec![9u8; 512];
+        expected.extend(vec![0u8; 512]);
+
+        assert_eq!(&*buffer, &expected);
+
+        let mut expected_ownership = vec![true; 512];
+        expected_ownership.extend(vec![false; 512]);
+
+        assert_eq!(buffer.owned_ref(), &expected_ownership);
+
+        // Ownership through a volume should be the same!!
+
+        let disk =
+            Arc::new(InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 4096));
+
+        let mut volume = Volume::new(BLOCK_SIZE, csl());
+        volume.add_subvolume(disk).await?;
+        volume.add_read_only_parent(parent.clone()).await?;
+
+        // So is it?
+
+        let buffer = Buffer::new(1024);
+        let buffer = volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
+            .await?;
+
+        assert_eq!(&*buffer, &expected);
+        assert_eq!(&*buffer.owned_ref(), &expected_ownership);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_parent_uninitialized_read_only_region_one_subvolume(
     ) -> Result<()> {
         const BLOCK_SIZE: u64 = 512;
