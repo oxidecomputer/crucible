@@ -1502,6 +1502,17 @@ impl Buffer {
         }
     }
 
+    pub fn with_capacity(capacity: usize) -> Buffer {
+        let data = Vec::with_capacity(capacity);
+        let owned = Vec::with_capacity(capacity);
+
+        Buffer {
+            len: 0,
+            data,
+            owned,
+        }
+    }
+
     pub fn from_slice(buf: &[u8]) -> Buffer {
         let mut vec = Vec::<u8>::with_capacity(buf.len());
         for item in buf {
@@ -1574,19 +1585,31 @@ impl Buffer {
     }
 
     /// Consume and layer buffer contents on top of this one
-    pub fn eat(&mut self, offset: usize, buffer: Buffer) {
+    pub fn eat(&mut self, offset: usize, buffer: &mut Buffer) {
         for (i, (data, owned)) in
-            std::iter::zip(buffer.data, buffer.owned).enumerate()
+            std::iter::zip(&buffer.data, &buffer.owned).enumerate()
         {
-            if owned {
-                self.data[offset + i] = data;
+            if *owned {
+                self.data[offset + i] = *data;
                 self.owned[offset + i] = true;
             }
         }
+
+        buffer.reset(0);
     }
 
     pub fn owned_ref(&self) -> &[bool] {
         &self.owned
+    }
+
+    pub fn reset(&mut self, len: usize) {
+        self.data.clear();
+        self.owned.clear();
+
+        self.len = len;
+
+        self.data.resize(self.len, 0u8);
+        self.owned.resize(self.len, false);
     }
 }
 
@@ -1650,18 +1673,18 @@ fn test_buffer_writes() {
 #[test]
 fn test_buffer_eats() {
     const READ_SIZE: usize = 512;
-    let data = Buffer::new(READ_SIZE);
+    let mut data = Buffer::new(READ_SIZE);
 
     assert_eq!(&data[..], &vec![0u8; 512]);
 
     let mut buffer = Buffer::new(READ_SIZE);
-    buffer.eat(0, data);
+    buffer.eat(0, &mut data);
 
     assert_eq!(&buffer[..], &vec![0u8; 512]);
 
     let mut data = Buffer::new(READ_SIZE);
     data.write(64, &[1u8; 64]);
-    buffer.eat(0, data);
+    buffer.eat(0, &mut data);
 
     assert_eq!(&buffer[0..64], &vec![0u8; 64]);
     assert_eq!(&buffer[64..128], &vec![1u8; 64]);
@@ -1669,7 +1692,7 @@ fn test_buffer_eats() {
 
     let mut data = Buffer::new(READ_SIZE);
     data.write(128, &[7u8; 128]);
-    buffer.eat(0, data);
+    buffer.eat(0, &mut data);
 
     assert_eq!(&buffer[0..64], &vec![0u8; 64]);
     assert_eq!(&buffer[64..128], &vec![1u8; 64]);

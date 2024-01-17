@@ -661,6 +661,7 @@ impl BlockIO for Volume {
 
         // TODO parallel dispatch!
         let mut data_index = 0;
+        let mut read_buffer = Buffer::with_capacity(data.len());
 
         for (coverage, sub_volume) in affected_sub_volumes {
             // When performing a read, check the parent coverage: if it's
@@ -678,14 +679,15 @@ impl BlockIO for Volume {
                 let sub_sz = self.block_size as usize
                     * (parent_coverage.end - parent_coverage.start) as usize;
 
-                let parent_buffer = self
+                read_buffer.reset(sub_sz);
+                read_buffer = self
                     .read_only_parent
                     .as_ref()
                     .unwrap()
-                    .read(parent_offset, Buffer::new(sub_sz))
+                    .read(parent_offset, read_buffer)
                     .await?;
 
-                data.eat(data_index, parent_buffer);
+                data.eat(data_index, &mut read_buffer);
             }
 
             let sub_offset = Block::new(
@@ -695,10 +697,10 @@ impl BlockIO for Volume {
             let sz = (coverage.end - coverage.start) as usize
                 * self.block_size as usize;
 
-            let sub_buffer =
-                sub_volume.read(sub_offset, Buffer::new(sz)).await?;
+            read_buffer.reset(sz);
+            read_buffer = sub_volume.read(sub_offset, read_buffer).await?;
 
-            data.eat(data_index, sub_buffer);
+            data.eat(data_index, &mut read_buffer);
 
             data_index += sz;
         }
@@ -2136,7 +2138,7 @@ mod test {
             .await?;
 
         assert_eq!(&*buffer, &expected);
-        assert_eq!(&*buffer.owned_ref(), &expected_ownership);
+        assert_eq!(buffer.owned_ref(), &expected_ownership);
 
         Ok(())
     }
