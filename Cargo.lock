@@ -763,7 +763,6 @@ dependencies = [
  "expectorate",
  "futures",
  "futures-core",
- "httptest",
  "itertools 0.12.0",
  "libc",
  "omicron-common",

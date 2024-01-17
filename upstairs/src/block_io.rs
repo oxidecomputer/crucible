@@ -12,7 +12,6 @@ pub struct FileBlockIO {
     block_size: u64,
     total_size: u64,
     file: Mutex<File>,
-    owned: Mutex<Vec<bool>>,
 }
 
 impl FileBlockIO {
@@ -23,14 +22,12 @@ impl FileBlockIO {
             }
             Ok(f) => {
                 let total_size = f.metadata()?.len();
-                let owned = vec![false; total_size as usize];
 
                 Ok(Self {
                     uuid: id,
                     block_size,
                     total_size,
                     file: Mutex::new(f),
-                    owned: Mutex::new(owned),
                 })
             }
         }
@@ -75,9 +72,7 @@ impl BlockIO for FileBlockIO {
 
         let mut buf = vec![0u8; data.len()];
         file.read_exact(&mut buf)?;
-
-        let owned = self.owned.lock().await;
-        data.write_with_ownership(0, &buf, &owned[start..][..data.len()]);
+        data.write(0, &buf);
 
         Ok(data)
     }
@@ -92,9 +87,6 @@ impl BlockIO for FileBlockIO {
         let mut file = self.file.lock().await;
         file.seek(SeekFrom::Start(start))?;
         file.write_all(&data[..])?;
-
-        let mut owned = self.owned.lock().await;
-        owned[(start as usize)..][..data.len()].fill(true);
 
         Ok(())
     }
@@ -296,135 +288,5 @@ impl BlockIO for ReqwestBlockIO {
             ds_count: 0,
             active_count: 0,
         })
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    use httptest::{matchers::*, responders::*, Expectation, ServerBuilder};
-    use tempfile::tempdir;
-
-    const BLOCK_SIZE: usize = 512;
-
-    /// Test that `block_io`, which is at least of size 1024, has the proper
-    /// ownership behaviour.
-    async fn test_ownership(block_io: impl BlockIO) -> Result<()> {
-        // Ownership starts off false
-
-        let buffer = Buffer::new(1024);
-        let buffer = block_io
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
-            .await?;
-
-        assert_eq!(buffer.owned_ref(), &[false; 1024]);
-
-        // Ownership is set by writing to blocks
-
-        block_io
-            .write(
-                Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![9; 512]),
-            )
-            .await?;
-
-        // Ownership is returned properly
-
-        let buffer = Buffer::new(1024);
-        let buffer = block_io
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
-            .await?;
-
-        let mut expected = vec![9u8; 512];
-        expected.extend(vec![0u8; 512]);
-
-        assert_eq!(&*buffer, &expected);
-
-        let mut expected_ownership = vec![true; 512];
-        expected_ownership.extend(vec![false; 512]);
-
-        assert_eq!(buffer.owned_ref(), &expected_ownership);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_ownership_file() -> Result<()> {
-        let dir = tempdir()?;
-        let mut path = dir.path().to_path_buf();
-        path.push("downstairs");
-
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&path)?;
-        file.set_len(2048)?;
-        drop(file);
-
-        let block_io = FileBlockIO::new(
-            Uuid::new_v4(),
-            BLOCK_SIZE as u64,
-            path.into_os_string().into_string().unwrap(),
-        )?;
-
-        test_ownership(block_io).await?;
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_ownership_in_memory() -> Result<()> {
-        let block_io =
-            InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE as u64, 2048);
-
-        test_ownership(block_io).await?;
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_ownership_http() -> Result<()> {
-        // ReqwestBlockIO does not support write so we can't use the
-        // `test_ownership` helper. Also, httptest's server does not support
-        // Range requests, so we have to limit it to one block.
-
-        let server = ServerBuilder::new().run()?;
-
-        server.expect(
-            Expectation::matching(request::method_path("HEAD", "/image.raw"))
-                .times(1..)
-                .respond_with(
-                    status_code(200)
-                        .append_header("Content-Length", format!("{}", 512)),
-                ),
-        );
-
-        server.expect(
-            Expectation::matching(request::method_path("GET", "/image.raw"))
-                .times(1..)
-                .respond_with(status_code(200).body(vec![9; 512])),
-        );
-
-        let block_io = ReqwestBlockIO::new(
-            Uuid::new_v4(),
-            BLOCK_SIZE as u64,
-            server.url("/image.raw").to_string(),
-        )
-        .await?;
-
-        // Ownership from this will be true always, `ReqwestBlockIO` does not
-        // support writes.
-
-        let buffer = Buffer::new(512);
-        let buffer = block_io
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
-            .await?;
-
-        assert_eq!(&*buffer, &[9; 512]);
-        assert_eq!(buffer.owned_ref(), &[true; 512]);
-
-        Ok(())
     }
 }
