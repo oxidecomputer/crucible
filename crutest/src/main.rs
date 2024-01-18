@@ -2065,6 +2065,9 @@ async fn perf_workload(
         })
         .collect();
 
+    let mut read_buffers: Vec<Buffer> =
+        (0..io_depth).map(|_| Buffer::new(io_size)).collect();
+
     let es = ri.extent_size.value;
     let ec = ri.total_blocks as u64 / es;
 
@@ -2130,13 +2133,10 @@ async fn perf_workload(
     for _ in 0..read_loop {
         let big_start = Instant::now();
         for _ in 0..count {
-            let read_buffers: Vec<Buffer> =
-                (0..io_depth).map(|_| Buffer::new(io_size)).collect();
-
             let burst_start = Instant::now();
             let mut read_futures = Vec::with_capacity(io_depth);
 
-            for read_buffer in read_buffers.into_iter().take(io_depth) {
+            for read_buffer in read_buffers.drain(0..io_depth) {
                 let offset: u64 = rng.gen::<u64>() % offset_mod;
                 let future = guest
                     .read_from_byte_offset(offset * ri.block_size, read_buffer);
@@ -2144,7 +2144,8 @@ async fn perf_workload(
             }
 
             for future in read_futures {
-                let _read_buffer = future.await?;
+                let read_buffer = future.await?;
+                read_buffers.push(read_buffer);
             }
 
             rtime.push(burst_start.elapsed());
