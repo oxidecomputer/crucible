@@ -650,8 +650,8 @@ impl RegionDefinitionStatus {
  *   └───────┘      └────┬──────┘       └────┬───────┘ ║ ║
  *               ........▼..........         │         ║ ║
  *  ┌─────────┐  :  ┌────┴──────┐  :         ▲         ║ ║
- *  │ Failed  │  :  │  Repair   │  :         │       ╔═╝ ║
- *  │ Repair  ├─◄───┤           ├──►─────────┘       ║   ║
+ *  │ Failed  │  :  │ Reconcile │  :         │       ╔═╝ ║
+ *  │Reconcile├─◄───┤           ├──►─────────┘       ║   ║
  *  └─────────┘  :  └────┬──────┘  :                 ║   ║
  *  Not Active   :       │         :                 ▲   ▲  Not Active
  *  .............. . . . │. . . . ...................║...║............
@@ -727,11 +727,11 @@ pub enum DsState {
     /*
      * Initial startup, downstairs are repairing from each other.
      */
-    Repair,
+    Reconcile,
     /*
      * Failed when attempting to make consistent.
      */
-    FailedRepair,
+    FailedReconcile,
     /*
      * Ready for and/or currently receiving IO
      */
@@ -808,11 +808,11 @@ impl std::fmt::Display for DsState {
             DsState::Disconnected => {
                 write!(f, "Disconnected")
             }
-            DsState::Repair => {
-                write!(f, "Repair")
+            DsState::Reconcile => {
+                write!(f, "Reconcile")
             }
-            DsState::FailedRepair => {
-                write!(f, "FailedRepair")
+            DsState::FailedReconcile => {
+                write!(f, "FailedReconcile")
             }
             DsState::Active => {
                 write!(f, "Active")
@@ -2643,11 +2643,10 @@ pub struct Arg {
 }
 
 /*
- * This is the main upstairs task that starts all the other async tasks. The
- * final step is to call up_listen() which will coordinate the connection to
- * the downstairs and start listening for incoming IO from the guest when the
- * time is ready. It will return Ok with a join handle if every required task
- * was successfully launched, and Err otherwise.
+ * This is the main upstairs task that starts all the other async tasks.
+ *
+ * It will return Ok with a join handle if every required task was successfully
+ * launched, and Err otherwise.
  */
 pub fn up_main(
     opt: CrucibleOpts,

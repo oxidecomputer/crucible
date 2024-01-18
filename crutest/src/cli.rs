@@ -88,8 +88,7 @@ pub enum DscCommand {
 #[derive(Debug, Parser, PartialEq)]
 #[clap(name = "", term_width = 80, no_binary_name = true)]
 enum CliCommand {
-    /// Send an activation message to all the downstairs and block
-    /// until all the downstairs answer
+    /// Send an activation message and wait for an answer.
     Activate {
         /// Specify this generation number to use when requesting activation.
         #[clap(long, short, default_value = "1", action)]
