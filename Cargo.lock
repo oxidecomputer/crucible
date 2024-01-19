@@ -1182,6 +1182,7 @@ dependencies = [
  "crucible-workspace-hack",
  "futures",
  "futures-core",
+ "itertools 0.12.0",
  "ringbuffer",
  "serde",
  "serde_json",

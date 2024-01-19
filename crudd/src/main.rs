@@ -11,6 +11,7 @@ use std::{cmp, io};
 use anyhow::{bail, Result};
 use clap::Parser;
 use futures::stream::StreamExt;
+use itertools::Itertools;
 use signal_hook::consts::signal::*;
 use signal_hook_tokio::Signals;
 use tokio::sync::oneshot;
@@ -206,58 +207,43 @@ async fn cmd_read<T: BlockIO + std::marker::Send + 'static>(
     let cmd_count = num_bytes / (opt.iocmd_block_count * native_block_size);
     let remainder = num_bytes % (opt.iocmd_block_count * native_block_size);
 
+    let buffer_size = (opt.iocmd_block_count * native_block_size) as usize;
+    let mut buffers: Vec<Buffer> = (0..opt.pipeline_length)
+        .map(|_| Buffer::new(buffer_size))
+        .collect();
+
     // Issue all of our read commands
-    for i in 0..cmd_count {
-        // XXX issue opt.pipeline_length tokio::spawns at a time, reuse the
-        // buffers here!
+    for cmd_range in &(0..cmd_count as usize).chunks(opt.pipeline_length) {
+        for i in cmd_range {
+            // which blocks in the underlying store are we accessing?
+            let block_idx = block_offset + (i as u64 * opt.iocmd_block_count);
+            let offset =
+                Block::new(block_idx, native_block_size.trailing_zeros());
 
-        // which blocks in the underlying store are we accessing?
-        let block_idx = block_offset + (i * opt.iocmd_block_count);
-        let offset = Block::new(block_idx, native_block_size.trailing_zeros());
+            // Send the read command with whichever buffer is at the back of the
+            // queue. We re-use the buffers to avoid lots of allocations
+            for mut buffer in buffers.drain(..) {
+                let crucible = crucible.clone();
+                futures.push_back(tokio::spawn(async move {
+                    crucible.read(offset, &mut buffer).await?;
+                    Ok(buffer)
+                }));
+            }
 
-        // Send the read command with whichever buffer is at the back of the
-        // queue. We re-use the buffers to avoid lots of allocations
-        {
-            let crucible = crucible.clone();
-            let iocmd_block_count = opt.iocmd_block_count;
-            futures.push_back(tokio::spawn(async move {
-                let mut buf = Buffer::new(
-                    (iocmd_block_count * native_block_size) as usize,
-                );
-                crucible.read(offset, &mut buf).await?;
-                Ok(buf)
-            }));
+            total_bytes_read +=
+                (opt.iocmd_block_count * native_block_size) as usize;
         }
 
-        total_bytes_read +=
-            (opt.iocmd_block_count * native_block_size) as usize;
-
-        // If we have a queue of futures, drain the oldest one to output.
-        if futures.len() == opt.pipeline_length {
-            let result: Result<Buffer, CrucibleError> =
-                futures.pop_front().unwrap().await?;
+        for future in futures.drain(..) {
+            let result: Result<Buffer, CrucibleError> = future.await?;
             let r_buf = result?;
             output.write_all(&r_buf)?;
+            buffers.push(r_buf);
         }
 
         if early_shutdown.try_recv().is_ok() {
             eprintln!("shutting down early in response to SIGUSR1");
-
-            // Drain all read buffers
-            for future in futures {
-                let _r_buf = future.await?;
-            }
-
             return Ok(total_bytes_read);
-        }
-    }
-
-    // Drain the outstanding commands
-    if !futures.is_empty() {
-        // drain the buffer to the output file
-        for f in futures.drain(..) {
-            let r_buf = f.await??;
-            output.write_all(&r_buf)?;
         }
     }
 
