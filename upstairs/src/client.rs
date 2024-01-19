@@ -430,14 +430,14 @@ impl DownstairsClient {
             && !self.skipped_jobs.is_empty()
     }
 
-    /// Sets our state to `DsState::Repair`
+    /// Sets our state to `DsState::Reconcile`
     ///
     /// # Panics
     /// If the previous state is not `DsState::WaitQuorum`
     pub(crate) fn begin_reconcile(&mut self) {
-        info!(self.log, "Transition from {} to Repair", self.state);
+        info!(self.log, "Transition from {} to Reconcile", self.state);
         assert_eq!(self.state, DsState::WaitQuorum);
-        self.state = DsState::Repair;
+        self.state = DsState::Reconcile;
     }
 
     /// Go through the list of dependencies and remove any jobs that this
@@ -494,8 +494,8 @@ impl DownstairsClient {
 
             DsState::New
             | DsState::Deactivated
-            | DsState::Repair
-            | DsState::FailedRepair
+            | DsState::Reconcile
+            | DsState::FailedReconcile
             | DsState::Disconnected
             | DsState::BadVersion
             | DsState::WaitQuorum
@@ -789,11 +789,14 @@ impl DownstairsClient {
         self.state
     }
 
-    /// Sets the current state to `DsState::FailedRepair`
-    pub(crate) fn set_failed_repair(&mut self, up_state: &UpstairsState) {
-        info!(self.log, "Transition from {} to FailedRepair", self.state);
-        self.checked_state_transition(up_state, DsState::FailedRepair);
-        self.restart_connection(up_state, ClientStopReason::FailedRepair)
+    /// Sets the current state to `DsState::FailedReconcile`
+    pub(crate) fn set_failed_reconcile(&mut self, up_state: &UpstairsState) {
+        info!(
+            self.log,
+            "Transition from {} to FailedReconcile", self.state
+        );
+        self.checked_state_transition(up_state, DsState::FailedReconcile);
+        self.restart_connection(up_state, ClientStopReason::FailedReconcile)
     }
 
     pub(crate) fn restart_connection(
@@ -808,8 +811,8 @@ impl DownstairsClient {
             DsState::Migrating => DsState::Faulted,
             DsState::Faulted => DsState::Faulted,
             DsState::Deactivated => DsState::New,
-            DsState::Repair => DsState::New,
-            DsState::FailedRepair => DsState::New,
+            DsState::Reconcile => DsState::New,
+            DsState::FailedReconcile => DsState::New,
             DsState::LiveRepair => DsState::Faulted,
             DsState::LiveRepairReady => DsState::Faulted,
             DsState::Replacing => DsState::Replaced,
@@ -978,14 +981,14 @@ impl DownstairsClient {
             DsState::WaitQuorum => {
                 assert_eq!(old_state, DsState::WaitActive);
             }
-            DsState::FailedRepair => {
-                assert_eq!(old_state, DsState::Repair);
+            DsState::FailedReconcile => {
+                assert_eq!(old_state, DsState::Reconcile);
             }
             DsState::Faulted => {
                 match old_state {
                     DsState::Active
                     | DsState::Faulted
-                    | DsState::Repair
+                    | DsState::Reconcile
                     | DsState::LiveRepair
                     | DsState::LiveRepairReady
                     | DsState::Offline
@@ -995,7 +998,7 @@ impl DownstairsClient {
                     }
                 }
             }
-            DsState::Repair => {
+            DsState::Reconcile => {
                 assert!(!matches!(up_state, UpstairsState::Active));
                 assert_eq!(old_state, DsState::WaitQuorum);
             }
@@ -1007,7 +1010,7 @@ impl DownstairsClient {
                 match old_state {
                     DsState::WaitQuorum
                     | DsState::Replay
-                    | DsState::Repair
+                    | DsState::Reconcile
                     | DsState::LiveRepair => {} // Okay
 
                     DsState::LiveRepairReady if self.cfg.read_only => {} // Okay
@@ -1017,9 +1020,9 @@ impl DownstairsClient {
                     }
                 }
                 /*
-                 * Make sure repair happened when the upstairs is inactive.
+                 * Make sure reconcile happened when the upstairs is inactive.
                  */
-                if old_state == DsState::Repair {
+                if old_state == DsState::Reconcile {
                     assert!(!matches!(up_state, UpstairsState::Active));
                 }
             }
@@ -1034,7 +1037,7 @@ impl DownstairsClient {
                     | DsState::Replay
                     | DsState::LiveRepair
                     | DsState::LiveRepairReady
-                    | DsState::Repair => {} // Okay
+                    | DsState::Reconcile => {} // Okay
                     _ => {
                         panic_invalid();
                     }
@@ -1058,7 +1061,7 @@ impl DownstairsClient {
                     DsState::Active
                     | DsState::Deactivated
                     | DsState::Faulted
-                    | DsState::FailedRepair => {} // Okay
+                    | DsState::FailedReconcile => {} // Okay
                     _ => {
                         panic_invalid();
                     }
@@ -1246,8 +1249,8 @@ impl DownstairsClient {
                 }
                 _ => {
                     match job.work {
-                        // Mark this downstairs as bad if this was a write or flush
-                        // XXX: reconcilation, retries?
+                        // Mark this downstairs as bad if this was a write,
+                        // a write unwritten, or a flush
                         // XXX: Errors should be reported to nexus
                         IOop::Write { .. }
                         | IOop::WriteUnwritten { .. }
@@ -1261,12 +1264,6 @@ impl DownstairsClient {
                         | IOop::ExtentLiveRepair { .. }
                         | IOop::ExtentLiveReopen { .. }
                         | IOop::ExtentLiveNoOp { .. } => {
-                            // TODO: Figure out a plan on how to handle
-                            // errors during repair.  We must invalidate
-                            // any jobs dependent on the repair success as
-                            // well as throw out the whole repair and start
-                            // over as we can no longer trust results from
-                            // the downstairs under repair.
                             self.stats.downstairs_errors += 1;
                         }
 
@@ -1528,7 +1525,7 @@ impl DownstairsClient {
         self.halt_io_task(ClientStopReason::Disabled);
     }
 
-    /// Skips from `LiveRepairRead` to `Active`; a no-op otherwise
+    /// Skips from `LiveRepairReady` to `Active`; a no-op otherwise
     ///
     /// # Panics
     /// If this downstairs is not read-only
@@ -1857,7 +1854,7 @@ impl DownstairsClient {
 
                 /*
                  * TODO: Verify that a new downstairs does not share the same
-                 * UUID with an existing downstiars.
+                 * UUID with an existing downstairs.
                  *
                  * TODO(#551) Verify that `region_def` makes sense (valid,
                  * nonzero block size, etc.)
@@ -2107,9 +2104,9 @@ impl DownstairsClient {
         &mut self,
         job: &mut ReconcileIO,
     ) {
-        // If someone has moved us out of repair, this is a logic error
-        if self.state != DsState::Repair {
-            panic!("should still be in repair");
+        // If someone has moved us out of reconcile, this is a logic error
+        if self.state != DsState::Reconcile {
+            panic!("should still be in reconcile");
         }
         let prev_state = job.state.insert(self.client_id, IOState::InProgress);
         assert_eq!(prev_state, IOState::New);
@@ -2125,11 +2122,11 @@ impl DownstairsClient {
             } => {
                 assert!(!dest_clients.is_empty());
                 if dest_clients.iter().any(|d| *d == self.client_id) {
-                    info!(self.log, "sending repair request {repair_id:?}");
+                    info!(self.log, "sending reconcile request {repair_id:?}");
                     self.send(job.op.clone()).await;
                 } else {
                     // Skip this job for this Downstairs, since only the target
-                    // clients need to do the repair.
+                    // clients need to do the reconcile.
                     let prev_state =
                         job.state.insert(self.client_id, IOState::Skipped);
                     assert_eq!(prev_state, IOState::InProgress);
@@ -2154,7 +2151,7 @@ impl DownstairsClient {
                 }
             }
             Message::ExtentReopen { .. } | Message::ExtentClose { .. } => {
-                // All other repair ops are sent as-is
+                // All other reconcile ops are sent as-is
                 self.send(job.op.clone()).await;
             }
             m => panic!("invalid reconciliation request {m:?}"),
@@ -2166,12 +2163,12 @@ impl DownstairsClient {
     /// Returns `true` if the job is done for all clients
     pub(crate) fn on_reconciliation_job_done(
         &mut self,
-        repair_id: ReconciliationId,
+        reconcile_id: ReconciliationId,
         job: &mut ReconcileIO,
     ) -> bool {
         let old_state = job.state.insert(self.client_id, IOState::Done);
         assert_eq!(old_state, IOState::InProgress);
-        assert_eq!(job.id, repair_id);
+        assert_eq!(job.id, reconcile_id);
         job.state
             .iter()
             .all(|s| matches!(s, IOState::Done | IOState::Skipped))
@@ -2282,8 +2279,8 @@ pub(crate) enum ClientStopReason {
     /// (for example, we have received `Message::YouAreNoLongerActive`)
     Disabled,
 
-    /// Repair failed and we're restarting
-    FailedRepair,
+    /// Reconcile failed and we're restarting
+    FailedReconcile,
 
     /// Received an error from some IO
     IOError,

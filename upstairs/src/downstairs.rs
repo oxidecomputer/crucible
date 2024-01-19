@@ -699,7 +699,7 @@ impl Downstairs {
 
         // Special-case: if a Downstairs goes away midway through initial
         // reconciliation, then we have to manually abort reconciliation.
-        if self.clients.iter().any(|c| c.state() == DsState::Repair) {
+        if self.clients.iter().any(|c| c.state() == DsState::Reconcile) {
             self.abort_reconciliation(up_state);
         }
 
@@ -2014,7 +2014,7 @@ impl Downstairs {
         // If any client have dropped out of repair-readiness (e.g. due to
         // failed reconciliation, timeouts, etc), then we have to kick
         // everything else back to the beginning.
-        if self.clients.iter().any(|c| c.state() != DsState::Repair) {
+        if self.clients.iter().any(|c| c.state() != DsState::Reconcile) {
             // Something has changed, so abort this repair.
             // Mark any downstairs that have not changed as failed and disable
             // them so that they restart.
@@ -2065,10 +2065,10 @@ impl Downstairs {
         // Mark any downstairs that have not changed as failed and disable
         // them so that they restart.
         for (i, c) in self.clients.iter_mut().enumerate() {
-            if c.state() == DsState::Repair {
+            if c.state() == DsState::Reconcile {
                 // Restart the IO task.  This will cause the Upstairs to
                 // deactivate through a ClientAction::TaskStopped.
-                c.set_failed_repair(up_state);
+                c.set_failed_reconcile(up_state);
                 error!(self.log, "Mark {} as FAILED REPAIR", i);
             }
         }
@@ -3110,7 +3110,7 @@ impl Downstairs {
          */
         let ds_state = self.clients[client_id].state();
         match ds_state {
-            DsState::Active | DsState::Repair | DsState::LiveRepair => {}
+            DsState::Active | DsState::Reconcile | DsState::LiveRepair => {}
             DsState::Faulted => {
                 error!(
                     self.clients[client_id].log,
@@ -3548,7 +3548,8 @@ impl Downstairs {
     }
 
     #[cfg(test)]
-    /// Create a test downstiars which has one downstairs client transitioned to LiveRepair
+    /// Create a test downstairs which has one downstairs client transitioned to
+    /// LiveRepair
     fn repair_test_one_repair() -> (GuestWork, Self) {
         let (gw, mut ds) = Self::repair_test_all_active();
 
@@ -3629,7 +3630,7 @@ pub(crate) mod test {
         ds.ack(ds_id);
     }
 
-    fn set_all_repair(ds: &mut Downstairs) {
+    fn set_all_reconcile(ds: &mut Downstairs) {
         for i in ClientId::iter() {
             ds.clients[i].checked_state_transition(
                 &UpstairsState::Initializing,
@@ -3641,7 +3642,7 @@ pub(crate) mod test {
             );
             ds.clients[i].checked_state_transition(
                 &UpstairsState::Initializing,
-                DsState::Repair,
+                DsState::Reconcile,
             );
         }
     }
@@ -5578,7 +5579,7 @@ pub(crate) mod test {
     async fn send_next_reconciliation_req_none() {
         // No repairs on the queue, should return None
         let mut ds = Downstairs::test_default();
-        set_all_repair(&mut ds);
+        set_all_reconcile(&mut ds);
 
         let w = ds.send_next_reconciliation_req().await;
         assert!(w); // reconciliation is "done", because there's nothing there
@@ -5608,7 +5609,7 @@ pub(crate) mod test {
                 extent_id: 1,
             },
         ));
-        set_all_repair(&mut ds);
+        set_all_reconcile(&mut ds);
 
         // Send the first reconciliation req
         assert!(!ds.send_next_reconciliation_req().await);
@@ -5632,7 +5633,7 @@ pub(crate) mod test {
             .await;
         assert!(!nw);
 
-        // The two troublesome tasks will pass through DsState::RepairFailed and
+        // The two troublesome tasks will pass through DsState::ReconcileFailed and
         // end up in DsState::New.
         assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::New);
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
@@ -5647,10 +5648,10 @@ pub(crate) mod test {
     #[tokio::test]
     async fn reconcile_repair_workflow_not_repair_later() {
         // Verify that rep_done still works even after we have a downstairs
-        // in the FailedRepair state. Verify that attempts to get new work
+        // in the FailedReconcile state. Verify that attempts to get new work
         // after a failed repair now return none.
         let mut ds = Downstairs::test_default();
-        set_all_repair(&mut ds);
+        set_all_reconcile(&mut ds);
 
         let up_state = UpstairsState::Active;
         let rep_id = ReconciliationId(0);
@@ -5702,7 +5703,7 @@ pub(crate) mod test {
     async fn reconcile_rep_in_progress_bad1() {
         // Verify the same downstairs can't mark a job in progress twice
         let mut ds = Downstairs::test_default();
-        set_all_repair(&mut ds);
+        set_all_reconcile(&mut ds);
 
         let rep_id = ReconciliationId(0);
         ds.reconcile_task_list.push_back(ReconcileIO::new(
@@ -5721,7 +5722,7 @@ pub(crate) mod test {
     #[tokio::test]
     async fn reconcile_repair_workflow_1() {
         let mut ds = Downstairs::test_default();
-        set_all_repair(&mut ds);
+        set_all_reconcile(&mut ds);
 
         let up_state = UpstairsState::Active;
         let close_id = ReconciliationId(0);
@@ -5777,7 +5778,7 @@ pub(crate) mod test {
     async fn reconcile_repair_workflow_2() {
         // Verify Done or Skipped works when checking for a complete repair
         let mut ds = Downstairs::test_default();
-        set_all_repair(&mut ds);
+        set_all_reconcile(&mut ds);
 
         let up_state = UpstairsState::Active;
         let rep_id = ReconciliationId(1);
@@ -5826,7 +5827,7 @@ pub(crate) mod test {
     async fn reconcile_repair_inprogress_not_done() {
         // Verify Done or Skipped works when checking for a complete repair
         let mut ds = Downstairs::test_default();
-        set_all_repair(&mut ds);
+        set_all_reconcile(&mut ds);
 
         let up_state = UpstairsState::Active;
         let rep_id = ReconciliationId(1);
@@ -5865,7 +5866,7 @@ pub(crate) mod test {
         // Verify we can't start a new job before the old is finished.
         // Verify Done or Skipped works when checking for a complete repair
         let mut ds = Downstairs::test_default();
-        set_all_repair(&mut ds);
+        set_all_reconcile(&mut ds);
 
         let up_state = UpstairsState::Active;
         let close_id = ReconciliationId(0);

@@ -651,8 +651,9 @@ impl Upstairs {
                 let ds_state = self.downstairs.collect_stats(|c| c.state());
                 let up_jobs = self.guest.guest_work.lock().await.active.len();
                 let ds_jobs = self.downstairs.active_count();
-                let repair_done = self.downstairs.reconcile_repaired();
-                let repair_needed = self.downstairs.reconcile_repair_needed();
+                let reconcile_done = self.downstairs.reconcile_repaired();
+                let reconcile_needed =
+                    self.downstairs.reconcile_repair_needed();
                 let extents_repaired =
                     self.downstairs.collect_stats(|c| c.stats.extents_repaired);
                 let extents_confirmed = self
@@ -695,8 +696,8 @@ impl Upstairs {
                     ds_state: ds_state.to_vec(),
                     up_jobs,
                     ds_jobs,
-                    repair_done,
-                    repair_needed,
+                    reconcile_done,
+                    reconcile_needed,
                     extents_repaired: extents_repaired.to_vec(),
                     extents_confirmed: extents_confirmed.to_vec(),
                     extent_limit: extent_limit.to_vec(),
@@ -1528,7 +1529,7 @@ impl Upstairs {
                     .await
                 {
                     // reconciliation is done, great work everyone
-                    self.on_reconciliation_done(DsState::Repair);
+                    self.on_reconciliation_done(DsState::Reconcile);
                 }
             }
 
@@ -1578,10 +1579,10 @@ impl Upstairs {
     /// If we have a problem here, we can't activate the upstairs.
     async fn connect_region_set(&mut self) -> bool {
         /*
-         * If reconciliation (also called Repair in DsState) is required, it
-         * happens in three phases.  Typically an interruption of repair will
-         * result in things starting over, but if actual repair work to an
-         * extent is completed, that extent won't need to be repaired again.
+         * If reconciliation is required, it happens in three phases.
+         * Typically an interruption of reconciliation will result in things
+         * starting over, but if actual repair work to an extent is
+         * completed, that extent won't need to be repaired again.
          *
          * The three phases are:
          *
@@ -1687,9 +1688,9 @@ impl Upstairs {
                 true
             }
             Ok(false) => {
-                info!(self.log, "No downstairs repair required");
+                info!(self.log, "No downstairs reconciliation required");
                 self.on_reconciliation_done(DsState::WaitQuorum);
-                info!(self.log, "Set Active after no repair");
+                info!(self.log, "Set Active after no reconciliation");
                 true
             }
         }
@@ -1701,8 +1702,11 @@ impl Upstairs {
         // successfully; make some assertions to that effect.
         self.downstairs.on_reconciliation_done(from_state);
 
-        info!(self.log, "All required repair work is completed");
-        info!(self.log, "Set Downstairs and Upstairs active after repairs");
+        info!(self.log, "All required reconciliation work is completed");
+        info!(
+            self.log,
+            "Set Downstairs and Upstairs active after reconciliation"
+        );
 
         if !matches!(self.state, UpstairsState::GoActive(..)) {
             error!(

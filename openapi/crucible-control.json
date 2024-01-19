@@ -96,8 +96,8 @@
           "wait_quorum",
           "bad_region",
           "disconnected",
-          "repair",
-          "failed_repair",
+          "reconcile",
+          "failed_reconcile",
           "active",
           "faulted",
           "live_repair_ready",
@@ -194,12 +194,12 @@
               "minimum": 0
             }
           },
-          "repair_done": {
+          "reconcile_done": {
             "type": "integer",
             "format": "uint",
             "minimum": 0
           },
-          "repair_needed": {
+          "reconcile_needed": {
             "type": "integer",
             "format": "uint",
             "minimum": 0
@@ -221,8 +221,8 @@
           "extents_repaired",
           "live_repair_aborted",
           "live_repair_completed",
-          "repair_done",
-          "repair_needed",
+          "reconcile_done",
+          "reconcile_needed",
           "state",
           "up_jobs"
         ]
