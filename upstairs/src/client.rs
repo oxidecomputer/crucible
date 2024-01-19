@@ -1854,7 +1854,7 @@ impl DownstairsClient {
 
                 /*
                  * TODO: Verify that a new downstairs does not share the same
-                 * UUID with an existing downstiars.
+                 * UUID with an existing downstairs.
                  *
                  * TODO(#551) Verify that `region_def` makes sense (valid,
                  * nonzero block size, etc.)

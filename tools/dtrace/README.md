@@ -372,8 +372,8 @@ for each downstairs client.
 
 `CON` The number of times the upstairs has connected to downstairs.
 `LRC` The number of times this downstairs has completed a LiveRepair.
-`LRA` The number of times this downstiars aborted a LiveRepair.
-`REP` The number of times this downstairs was replaced. 
+`LRA` The number of times this downstairs aborted a LiveRepair.
+`REP` The number of times this downstairs was replaced.
 
 Here is an example of how it might look:
 ```

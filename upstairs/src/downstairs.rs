@@ -3548,7 +3548,7 @@ impl Downstairs {
     }
 
     #[cfg(test)]
-    /// Create a test downstiars which has one downstairs client transitioned to
+    /// Create a test downstairs which has one downstairs client transitioned to
     /// LiveRepair
     fn repair_test_one_repair() -> (GuestWork, Self) {
         let (gw, mut ds) = Self::repair_test_all_active();
