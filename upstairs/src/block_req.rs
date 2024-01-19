@@ -14,32 +14,37 @@ pub(crate) struct BlockReq {
     pub res: BlockRes,
 }
 
+type BlockResChannelType = (Option<Buffer>, Result<(), CrucibleError>);
+
 #[must_use]
 #[derive(Debug)]
-pub(crate) struct BlockRes(
-    Option<oneshot::Sender<Result<Option<Buffer>, CrucibleError>>>,
-);
+pub(crate) struct BlockRes(Option<oneshot::Sender<BlockResChannelType>>);
 
 impl BlockRes {
     /// Consume this BlockRes and send Ok to the receiver
     pub fn send_ok(self) {
-        self.send_result(Ok(None))
+        self.send_result(None, Ok(()))
     }
 
     /// Consume this BlockRes and send Ok (with data) to the receiver
     pub fn send_ok_with_buffer(self, buffer: Buffer) {
-        self.send_result(Ok(Some(buffer)))
+        self.send_result(Some(buffer), Ok(()))
     }
 
     /// Consume this BlockRes and send an Err to the receiver
     pub fn send_err(self, e: CrucibleError) {
-        self.send_result(Err(e))
+        self.send_result(None, Err(e))
+    }
+
+    /// Consume this BlockRes and send Err (with data) to the receiver
+    pub fn send_err_with_buffer(self, buffer: Buffer, e: CrucibleError) {
+        self.send_result(Some(buffer), Err(e))
     }
 
     /// Consume this BlockRes and send a Result to the receiver
-    fn send_result(mut self, r: Result<Option<Buffer>, CrucibleError>) {
+    fn send_result(mut self, b: Option<Buffer>, r: Result<(), CrucibleError>) {
         // XXX this eats the result!
-        let _ = self.0.take().expect("sender was populated").send(r);
+        let _ = self.0.take().expect("sender was populated").send((b, r));
     }
 }
 
@@ -61,7 +66,7 @@ impl Drop for BlockRes {
  */
 #[must_use]
 pub(crate) struct BlockReqWaiter {
-    recv: oneshot::Receiver<Result<Option<Buffer>, CrucibleError>>,
+    recv: oneshot::Receiver<BlockResChannelType>,
 }
 
 impl BlockReqWaiter {
@@ -77,16 +82,19 @@ impl BlockReqWaiter {
     pub async fn wait(
         self,
         log: &Logger,
-    ) -> Result<Option<Buffer>, CrucibleError> {
+    ) -> (Option<Buffer>, Result<(), CrucibleError>) {
         match self.recv.await {
-            Ok(v) => v,
+            Ok((maybe_buffer, result)) => (maybe_buffer, result),
             Err(_) => {
                 warn!(
                     log,
                     "BlockReqWaiter disconnected; \
                      this should only happen at exit"
                 );
-                Err(CrucibleError::RecvDisconnected)
+
+                // The Sender dropped without sending anything, the Buffer is
+                // gone in this case.
+                (None, Err(CrucibleError::RecvDisconnected))
             }
         }
     }
@@ -94,13 +102,13 @@ impl BlockReqWaiter {
     #[cfg(test)]
     pub fn try_wait(
         &mut self,
-    ) -> Option<Result<Option<Buffer>, CrucibleError>> {
+    ) -> Option<(Option<Buffer>, Result<(), CrucibleError>)> {
         match self.recv.try_recv() {
             Ok(v) => Some(v),
             Err(e) => match e {
                 oneshot::error::TryRecvError::Empty => None,
                 oneshot::error::TryRecvError::Closed => {
-                    Some(Err(CrucibleError::RecvDisconnected))
+                    Some((None, Err(CrucibleError::RecvDisconnected)))
                 }
             },
         }
@@ -117,7 +125,22 @@ mod test {
 
         res.send_ok();
 
-        brw.wait(&crucible_common::build_logger()).await.unwrap();
+        let (maybe_buffer, result) =
+            brw.wait(&crucible_common::build_logger()).await;
+        assert!(maybe_buffer.is_none());
+        result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_blockreq_and_blockreqwaiter_with_buffer() {
+        let (brw, res) = BlockReqWaiter::pair();
+
+        res.send_ok_with_buffer(Buffer::with_capacity(0));
+
+        let (maybe_buffer, result) =
+            brw.wait(&crucible_common::build_logger()).await;
+        assert!(maybe_buffer.is_some());
+        result.unwrap();
     }
 
     #[tokio::test]
@@ -126,6 +149,24 @@ mod test {
 
         res.send_err(CrucibleError::UpstairsInactive);
 
-        assert!(brw.wait(&crucible_common::build_logger()).await.is_err());
+        let (maybe_buffer, result) =
+            brw.wait(&crucible_common::build_logger()).await;
+        assert!(maybe_buffer.is_none());
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_blockreq_and_blockreqwaiter_err_with_buffer() {
+        let (brw, res) = BlockReqWaiter::pair();
+
+        res.send_err_with_buffer(
+            Buffer::with_capacity(0),
+            CrucibleError::UpstairsInactive,
+        );
+
+        let (maybe_buffer, result) =
+            brw.wait(&crucible_common::build_logger()).await;
+        assert!(maybe_buffer.is_some());
+        assert!(result.is_err());
     }
 }
