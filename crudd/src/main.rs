@@ -222,13 +222,12 @@ async fn cmd_read<T: BlockIO + std::marker::Send + 'static>(
 
             // Send the read command with whichever buffer is at the back of the
             // queue. We re-use the buffers to avoid lots of allocations
-            for mut buffer in buffers.drain(..) {
-                let crucible = crucible.clone();
-                futures.push_back(tokio::spawn(async move {
-                    crucible.read(offset, &mut buffer).await?;
-                    Ok(buffer)
-                }));
-            }
+            let mut buffer = buffers.pop().unwrap();
+            let crucible = crucible.clone();
+            futures.push_back(tokio::spawn(async move {
+                crucible.read(offset, &mut buffer).await?;
+                Ok(buffer)
+            }));
 
             total_bytes_read +=
                 (opt.iocmd_block_count * native_block_size) as usize;
@@ -246,6 +245,8 @@ async fn cmd_read<T: BlockIO + std::marker::Send + 'static>(
             return Ok(total_bytes_read);
         }
     }
+
+    assert!(futures.is_empty());
 
     // Issue our final read command, if any. This could be interleaved with
     // draining the outstanding commands but it's more complicated and
