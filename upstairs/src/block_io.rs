@@ -63,8 +63,8 @@ impl BlockIO for FileBlockIO {
     async fn read(
         &self,
         offset: Block,
-        mut data: Buffer,
-    ) -> Result<Buffer, CrucibleError> {
+        data: &mut Buffer,
+    ) -> Result<(), CrucibleError> {
         let start: usize = (offset.value * self.block_size) as usize;
 
         let mut file = self.file.lock().await;
@@ -74,7 +74,7 @@ impl BlockIO for FileBlockIO {
         file.read_exact(&mut buf)?;
         data.write(0, &buf);
 
-        Ok(data)
+        Ok(())
     }
 
     async fn write(
@@ -205,8 +205,8 @@ impl BlockIO for ReqwestBlockIO {
     async fn read(
         &self,
         offset: Block,
-        mut data: Buffer,
-    ) -> Result<Buffer, CrucibleError> {
+        data: &mut Buffer,
+    ) -> Result<(), CrucibleError> {
         let cc = self.next_count();
         cdt::reqwest__read__start!(|| (cc, self.uuid));
 
@@ -253,7 +253,7 @@ impl BlockIO for ReqwestBlockIO {
         data.write(0, &bytes);
 
         cdt::reqwest__read__done!(|| (cc, self.uuid));
-        Ok(data)
+        Ok(())
     }
 
     async fn write(

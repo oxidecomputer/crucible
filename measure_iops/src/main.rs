@@ -167,32 +167,30 @@ async fn main() -> Result<()> {
             }
         }
 
-        let mut read_futures = Vec::with_capacity(io_depth);
-        let mut write_futures = Vec::with_capacity(io_depth);
+        let mut futures = Vec::with_capacity(io_depth);
 
         let io_operation_time = Instant::now();
 
         for op in ops {
             let guest = guest.clone();
             match op {
-                RandomOp::Read(offset, buffer) => {
-                    read_futures.push(tokio::spawn(async move {
-                        guest.read_from_byte_offset(offset * bsz, buffer).await
+                RandomOp::Read(offset, mut buffer) => {
+                    futures.push(tokio::spawn(async move {
+                        guest
+                            .read_from_byte_offset(offset * bsz, &mut buffer)
+                            .await
                     }));
                 }
 
                 RandomOp::Write(offset, bytes) => {
-                    write_futures.push(tokio::spawn(async move {
+                    futures.push(tokio::spawn(async move {
                         guest.write_to_byte_offset(offset * bsz, bytes).await
                     }));
                 }
             }
         }
 
-        for future in read_futures {
-            let _buffer = future.await??;
-        }
-        for future in write_futures {
+        for future in futures {
             future.await??;
         }
 

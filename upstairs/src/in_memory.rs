@@ -58,8 +58,8 @@ impl BlockIO for InMemoryBlockIO {
     async fn read(
         &self,
         offset: Block,
-        mut data: Buffer,
-    ) -> Result<Buffer, CrucibleError> {
+        data: &mut Buffer,
+    ) -> Result<(), CrucibleError> {
         let inner = self.inner.lock().await;
 
         let start = offset.value as usize * self.block_size as usize;
@@ -70,7 +70,7 @@ impl BlockIO for InMemoryBlockIO {
             &inner.owned[start..][..data.len()],
         );
 
-        Ok(data)
+        Ok(())
     }
 
     /// Write from `data` into `self`, setting all owned bits to `true`

@@ -378,18 +378,18 @@ impl Volume {
                 // on. If that initial connection fails, we can retry.
                 let mut retry_count = 0;
 
-                let buffer = loop {
-                    let buffer = Buffer::new(block_count * bs);
+                let mut buffer = Buffer::new(block_count * bs);
 
-                    match read_only_parent.read(block, buffer).await {
-                        Ok(returned_buffer) => {
+                loop {
+                    match read_only_parent.read(block, &mut buffer).await {
+                        Ok(()) => {
                             if retry_count > 0 {
                                 // This counter indicates a retry was
                                 // eventually successful.
                                 retries += 1;
                             }
 
-                            break returned_buffer;
+                            break;
                         }
 
                         Err(e) => {
@@ -406,7 +406,7 @@ impl Volume {
                             offset
                         );
                     }
-                };
+                }
 
                 // TODO: Nexus needs to know about this failure.
                 self.write_unwritten(
@@ -619,8 +619,8 @@ impl BlockIO for Volume {
     async fn read(
         &self,
         offset: Block,
-        mut data: Buffer,
-    ) -> Result<Buffer, CrucibleError> {
+        data: &mut Buffer,
+    ) -> Result<(), CrucibleError> {
         // In the case that this volume only has a read only parent, serve
         // reads directly from that
         let cc = self.next_count();
@@ -628,7 +628,7 @@ impl BlockIO for Volume {
 
         if data.is_empty() {
             cdt::volume__read__done!(|| (cc, self.uuid));
-            return Ok(data);
+            return Ok(());
         }
 
         if self.sub_volumes.is_empty() {
@@ -680,11 +680,10 @@ impl BlockIO for Volume {
                     * (parent_coverage.end - parent_coverage.start) as usize;
 
                 read_buffer.reset(sub_sz);
-                read_buffer = self
-                    .read_only_parent
+                self.read_only_parent
                     .as_ref()
                     .unwrap()
-                    .read(parent_offset, read_buffer)
+                    .read(parent_offset, &mut read_buffer)
                     .await?;
 
                 data.eat(data_index, &mut read_buffer);
@@ -698,7 +697,7 @@ impl BlockIO for Volume {
                 * self.block_size as usize;
 
             read_buffer.reset(sz);
-            read_buffer = sub_volume.read(sub_offset, read_buffer).await?;
+            sub_volume.read(sub_offset, &mut read_buffer).await?;
 
             data.eat(data_index, &mut read_buffer);
 
@@ -708,7 +707,7 @@ impl BlockIO for Volume {
         assert_eq!(data.len(), data_index);
 
         cdt::volume__read__done!(|| (cc, self.uuid));
-        Ok(data)
+        Ok(())
     }
 
     async fn write(
@@ -919,8 +918,8 @@ impl BlockIO for SubVolume {
     async fn read(
         &self,
         offset: Block,
-        data: Buffer,
-    ) -> Result<Buffer, CrucibleError> {
+        data: &mut Buffer,
+    ) -> Result<(), CrucibleError> {
         self.block_io.read(offset, data).await
     }
 
@@ -1758,9 +1757,8 @@ mod test {
         let disk = InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 4096);
 
         // Initial read should come back all zeroes
-        let buffer = Buffer::new(4096);
-        let buffer = disk
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(4096);
+        disk.read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
         assert_eq!(buffer.into_vec(), vec![0; 4096]);
 
@@ -1780,9 +1778,8 @@ mod test {
         .await?;
 
         // Read and verify the data is from the first write
-        let buffer = Buffer::new(4096);
-        let buffer = disk
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(4096);
+        disk.read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
 
         let mut expected = vec![0; 512];
@@ -1798,9 +1795,8 @@ mod test {
         .await?;
 
         // Read and verify
-        let buffer = Buffer::new(4096);
-        let buffer = disk
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(4096);
+        disk.read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
 
         let mut expected = vec![2; 512];
@@ -1823,9 +1819,8 @@ mod test {
         .await?;
 
         // Read and verify
-        let buffer = Buffer::new(4096);
-        let buffer = disk
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(4096);
+        disk.read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
 
         let mut expected = vec![2; 512];
@@ -1865,9 +1860,9 @@ mod test {
         // The first 2048b of the initial read should come only from the parent
         // (aka read_only_parent_init_value), and the second 2048b should come
         // from the subvolume(s) (aka be uninitialized).
-        let buffer = Buffer::new(4096);
-        let buffer = volume
-            .read(Block::new(0, block_size.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(4096);
+        volume
+            .read(Block::new(0, block_size.trailing_zeros()), &mut buffer)
             .await?;
 
         let mut expected = vec![read_only_parent_init_value; 512 * 4];
@@ -1889,9 +1884,9 @@ mod test {
             .await?;
 
         // Read whole volume and verify
-        let buffer = Buffer::new(4096);
-        let buffer = volume
-            .read(Block::new(0, block_size.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(4096);
+        volume
+            .read(Block::new(0, block_size.trailing_zeros()), &mut buffer)
             .await?;
 
         let mut expected = vec![1; 512];
@@ -1914,9 +1909,9 @@ mod test {
 
         // Make sure the parent data hasn't changed!
         {
-            let buffer = Buffer::new(2048);
-            let buffer = parent
-                .read(Block::new(0, block_size.trailing_zeros()), buffer)
+            let mut buffer = Buffer::new(2048);
+            parent
+                .read(Block::new(0, block_size.trailing_zeros()), &mut buffer)
                 .await?;
 
             let mut expected = vec![1; 512];
@@ -1926,9 +1921,9 @@ mod test {
         }
 
         // Read whole volume and verify
-        let buffer = Buffer::new(4096);
-        let buffer = volume
-            .read(Block::new(0, block_size.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(4096);
+        volume
+            .read(Block::new(0, block_size.trailing_zeros()), &mut buffer)
             .await?;
 
         let mut expected = vec![1; 512];
@@ -1952,9 +1947,9 @@ mod test {
 
         // Make sure the parent data hasn't changed!
         {
-            let buffer = Buffer::new(2048);
-            let buffer = parent
-                .read(Block::new(0, block_size.trailing_zeros()), buffer)
+            let mut buffer = Buffer::new(2048);
+            parent
+                .read(Block::new(0, block_size.trailing_zeros()), &mut buffer)
                 .await?;
 
             let mut expected = vec![1; 512];
@@ -1964,9 +1959,9 @@ mod test {
         }
 
         // Read whole volume and verify
-        let buffer = Buffer::new(4096);
-        let buffer = volume
-            .read(Block::new(0, block_size.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(4096);
+        volume
+            .read(Block::new(0, block_size.trailing_zeros()), &mut buffer)
             .await?;
 
         let mut expected = vec![3; 512 * 2];
@@ -1989,9 +1984,9 @@ mod test {
             .await?;
 
         // Read whole volume and verify
-        let buffer = Buffer::new(4096);
-        let buffer = volume
-            .read(Block::new(0, block_size.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(4096);
+        volume
+            .read(Block::new(0, block_size.trailing_zeros()), &mut buffer)
             .await?;
 
         let mut expected = vec![3; 512 * 2];
@@ -2006,9 +2001,9 @@ mod test {
         volume.read_only_parent = None;
 
         // Read whole volume and verify
-        let buffer = Buffer::new(4096);
-        let buffer = volume
-            .read(Block::new(0, block_size.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(4096);
+        volume
+            .read(Block::new(0, block_size.trailing_zeros()), &mut buffer)
             .await?;
 
         let mut expected = vec![3; 512 * 2];
@@ -2027,9 +2022,9 @@ mod test {
             )
             .await?;
 
-        let buffer = Buffer::new(4096);
-        let buffer = volume
-            .read(Block::new(0, block_size.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(4096);
+        volume
+            .read(Block::new(0, block_size.trailing_zeros()), &mut buffer)
             .await?;
 
         assert_eq!(buffer.into_vec(), vec![9; 4096]);
@@ -2088,9 +2083,9 @@ mod test {
 
         // Ownership starts off false
 
-        let buffer = Buffer::new(1024);
-        let buffer = parent
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(1024);
+        parent
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
 
         assert_eq!(buffer.owned_ref(), &[false; 1024]);
@@ -2106,9 +2101,9 @@ mod test {
 
         // Ownership is returned by the downstairs
 
-        let buffer = Buffer::new(1024);
-        let buffer = parent
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(1024);
+        parent
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
 
         let mut expected = vec![9u8; 512];
@@ -2132,9 +2127,9 @@ mod test {
 
         // So is it?
 
-        let buffer = Buffer::new(1024);
-        let buffer = volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(1024);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
 
         assert_eq!(&*buffer, &expected);
@@ -2370,9 +2365,9 @@ mod test {
         assert_eq!(volume.total_size().await?, 2048);
 
         // Read volume and verify contents
-        let buffer = Buffer::new(2048);
-        let buffer = volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(2048);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
 
         let expected = vec![128; 2048];
@@ -2483,9 +2478,9 @@ mod test {
             volume.add_subvolume(overlay.clone()).await?;
             volume.add_read_only_parent(parent.clone()).await?;
 
-            let buffer = Buffer::new(BLOCK_SIZE * 10);
-            let buffer = volume
-                .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
+            let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+            volume
+                .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
                 .await?;
 
             assert_eq!(vec![0x55; BLOCK_SIZE * 10], buffer.into_vec());
@@ -2497,9 +2492,9 @@ mod test {
                 )
                 .await?;
 
-            let buffer = Buffer::new(BLOCK_SIZE * 10);
-            let buffer = volume
-                .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
+            let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+            volume
+                .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
                 .await?;
 
             assert_eq!(vec![0xFF; BLOCK_SIZE * 10], buffer.into_vec());
@@ -2511,9 +2506,9 @@ mod test {
         volume.add_read_only_parent(parent).await?;
         volume.add_subvolume(overlay).await?;
 
-        let buffer = Buffer::new(BLOCK_SIZE * 10);
-        let buffer = volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
 
         assert_eq!(vec![0xFF; BLOCK_SIZE * 10], buffer.into_vec());
@@ -2539,9 +2534,9 @@ mod test {
             .await?;
 
         // Read parent, verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10);
-        let buffer = parent
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        parent
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
 
         assert_eq!(vec![0x55; BLOCK_SIZE * 10], buffer.into_vec());
@@ -2573,9 +2568,9 @@ mod test {
         // }
 
         // Read whole volume, verify contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10);
-        let buffer = volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
 
         assert_eq!(vec![0x55; BLOCK_SIZE * 10], buffer.into_vec());
@@ -2589,9 +2584,9 @@ mod test {
             .await?;
 
         // Read whole volume, verify new contents
-        let buffer = Buffer::new(BLOCK_SIZE * 10);
-        let buffer = volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
 
         assert_eq!(vec![0xFF; BLOCK_SIZE * 10], buffer.into_vec());
@@ -2622,17 +2617,17 @@ mod test {
         };
         let volume = Volume::construct(request, None, csl()).await.unwrap();
 
-        let buffer = Buffer::new(BLOCK_SIZE);
-        let buffer = volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(BLOCK_SIZE);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await
             .unwrap();
 
         assert_eq!(vec![0x0; BLOCK_SIZE], buffer.into_vec());
 
-        let buffer = Buffer::new(BLOCK_SIZE);
-        let buffer = volume
-            .read(Block::new(1, BLOCK_SIZE.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(BLOCK_SIZE);
+        volume
+            .read(Block::new(1, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await
             .unwrap();
 
@@ -2661,9 +2656,9 @@ mod test {
             .await?;
 
         // Read back parent, verify 1s
-        let buffer = Buffer::new(block_size * 5);
-        let buffer = parent
-            .read(Block::new(0, block_size.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(block_size * 5);
+        parent
+            .read(Block::new(0, block_size.trailing_zeros()), &mut buffer)
             .await?;
 
         assert_eq!(vec![11; block_size * 5], buffer.into_vec());
@@ -2682,9 +2677,9 @@ mod test {
         assert_eq!(volume.total_size().await?, block_size as u64 * 10);
 
         // Verify volume contents in one read
-        let buffer = Buffer::new(block_size * 10);
-        let buffer = volume
-            .read(Block::new(0, block_size.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(block_size * 10);
+        volume
+            .read(Block::new(0, block_size.trailing_zeros()), &mut buffer)
             .await?;
 
         let mut expected = vec![11; block_size * 5];
@@ -2700,9 +2695,9 @@ mod test {
             .await?;
 
         // Verify volume contents in one read
-        let buffer = Buffer::new(block_size * 10);
-        let buffer = volume
-            .read(Block::new(0, block_size.trailing_zeros()), buffer)
+        let mut buffer = Buffer::new(block_size * 10);
+        volume
+            .read(Block::new(0, block_size.trailing_zeros()), &mut buffer)
             .await?;
 
         assert_eq!(vec![55; block_size * 10], buffer.into_vec());
@@ -3042,14 +3037,14 @@ mod test {
 
         let out_of_bounds = volume.total_size().await.unwrap() * BLOCK_SIZE;
 
-        let buffer = Buffer::new(BLOCK_SIZE as usize);
+        let mut buffer = Buffer::new(BLOCK_SIZE as usize);
         let res = volume
             .read(
                 Block::new(
                     out_of_bounds / BLOCK_SIZE,
                     BLOCK_SIZE.trailing_zeros(),
                 ),
-                buffer,
+                &mut buffer,
             )
             .await;
 

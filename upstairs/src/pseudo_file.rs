@@ -71,15 +71,13 @@ impl IOSpan {
         &mut self,
         block_io: &Arc<T>,
     ) -> Result<(), CrucibleError> {
-        let b = std::mem::take(&mut self.buffer);
-
-        self.buffer = block_io
+        block_io
             .read(
                 Block::new(
                     self.affected_block_numbers[0],
                     self.block_size.trailing_zeros(),
                 ),
-                b,
+                &mut self.buffer,
             )
             .await?;
 

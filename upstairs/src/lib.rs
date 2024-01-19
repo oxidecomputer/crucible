@@ -105,8 +105,8 @@ pub trait BlockIO: Sync {
     async fn read(
         &self,
         offset: Block,
-        mut data: Buffer,
-    ) -> Result<Buffer, CrucibleError>;
+        data: &mut Buffer,
+    ) -> Result<(), CrucibleError>;
 
     async fn write(
         &self,
@@ -165,8 +165,8 @@ pub trait BlockIO: Sync {
     async fn read_from_byte_offset(
         &self,
         offset: u64,
-        data: Buffer,
-    ) -> Result<Buffer, CrucibleError> {
+        data: &mut Buffer,
+    ) -> Result<(), CrucibleError> {
         if !self.query_is_active().await? {
             return Err(CrucibleError::UpstairsInactive);
         }
@@ -221,14 +221,6 @@ pub async fn join_all<'a>(
         .collect::<Result<Vec<()>, CrucibleError>>()
         .map(|_| ())
 }
-
-pub type CrucibleBlockIOReadFuture<'a> = Pin<
-    Box<
-        dyn futures::Future<Output = Result<Buffer, CrucibleError>>
-            + std::marker::Send
-            + 'a,
-    >,
->;
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum ReplaceResult {
@@ -2548,8 +2540,8 @@ impl BlockIO for Guest {
     async fn read(
         &self,
         offset: Block,
-        data: Buffer,
-    ) -> Result<Buffer, CrucibleError> {
+        data: &mut Buffer,
+    ) -> Result<(), CrucibleError> {
         let bs = self.get_block_size().await?;
 
         if (data.len() % bs as usize) != 0 {
@@ -2561,12 +2553,28 @@ impl BlockIO for Guest {
         }
 
         if data.is_empty() {
-            return Ok(data);
+            return Ok(());
         }
 
-        let rio = BlockOp::Read { offset, data };
-        let buffer = self.send_and_wait(rio).await?;
-        Ok(buffer.unwrap())
+        let buffer = std::mem::take(data);
+        let rio = BlockOp::Read {
+            offset,
+            data: buffer,
+        };
+
+        match self.send_and_wait(rio).await {
+            Ok(better_be_a_buffer_here) => {
+                *data = better_be_a_buffer_here.unwrap();
+                Ok(())
+            }
+
+            Err(e) => {
+                // XXX we've replaced `data` with a blank Buffer, and sent it
+                // over the channel. If there's an error, the original Buffer is
+                // not returned to us! The caller will have to reallocate.
+                Err(e)
+            }
+        }
     }
 
     async fn write(
