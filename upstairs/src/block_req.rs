@@ -14,11 +14,19 @@ pub(crate) struct BlockReq {
     pub res: BlockRes,
 }
 
-type BlockResChannelType = (Option<Buffer>, Result<(), CrucibleError>);
+#[must_use]
+#[derive(Debug, PartialEq)]
+pub(crate) struct BlockReqReply {
+    /// We return the buffer (if passed in) so the host can reuse it
+    pub buffer: Option<Buffer>,
+
+    /// Actual result of the Crucible operation
+    pub result: Result<(), CrucibleError>,
+}
 
 #[must_use]
 #[derive(Debug)]
-pub(crate) struct BlockRes(Option<oneshot::Sender<BlockResChannelType>>);
+pub(crate) struct BlockRes(Option<oneshot::Sender<BlockReqReply>>);
 
 impl BlockRes {
     /// Consume this BlockRes and send Ok to the receiver
@@ -42,9 +50,17 @@ impl BlockRes {
     }
 
     /// Consume this BlockRes and send a Result to the receiver
-    fn send_result(mut self, b: Option<Buffer>, r: Result<(), CrucibleError>) {
+    fn send_result(
+        mut self,
+        buffer: Option<Buffer>,
+        result: Result<(), CrucibleError>,
+    ) {
         // XXX this eats the result!
-        let _ = self.0.take().expect("sender was populated").send((b, r));
+        let _ = self
+            .0
+            .take()
+            .expect("sender was populated")
+            .send(BlockReqReply { buffer, result });
     }
 }
 
@@ -66,7 +82,7 @@ impl Drop for BlockRes {
  */
 #[must_use]
 pub(crate) struct BlockReqWaiter {
-    recv: oneshot::Receiver<BlockResChannelType>,
+    recv: oneshot::Receiver<BlockReqReply>,
 }
 
 impl BlockReqWaiter {
@@ -79,12 +95,9 @@ impl BlockReqWaiter {
     /// Consume this BlockReqWaiter and wait on the message
     ///
     /// If the other side of the oneshot drops without a reply, log an error
-    pub async fn wait(
-        self,
-        log: &Logger,
-    ) -> (Option<Buffer>, Result<(), CrucibleError>) {
+    pub async fn wait(self, log: &Logger) -> BlockReqReply {
         match self.recv.await {
-            Ok((maybe_buffer, result)) => (maybe_buffer, result),
+            Ok(reply) => reply,
             Err(_) => {
                 warn!(
                     log,
@@ -94,22 +107,24 @@ impl BlockReqWaiter {
 
                 // The Sender dropped without sending anything, the Buffer is
                 // gone in this case.
-                (None, Err(CrucibleError::RecvDisconnected))
+                BlockReqReply {
+                    buffer: None,
+                    result: Err(CrucibleError::RecvDisconnected),
+                }
             }
         }
     }
 
     #[cfg(test)]
-    pub fn try_wait(
-        &mut self,
-    ) -> Option<(Option<Buffer>, Result<(), CrucibleError>)> {
+    pub fn try_wait(&mut self) -> Option<BlockReqReply> {
         match self.recv.try_recv() {
-            Ok(v) => Some(v),
+            Ok(reply) => Some(reply),
             Err(e) => match e {
                 oneshot::error::TryRecvError::Empty => None,
-                oneshot::error::TryRecvError::Closed => {
-                    Some((None, Err(CrucibleError::RecvDisconnected)))
-                }
+                oneshot::error::TryRecvError::Closed => Some(BlockReqReply {
+                    buffer: None,
+                    result: Err(CrucibleError::RecvDisconnected),
+                }),
             },
         }
     }
@@ -125,10 +140,9 @@ mod test {
 
         res.send_ok();
 
-        let (maybe_buffer, result) =
-            brw.wait(&crucible_common::build_logger()).await;
-        assert!(maybe_buffer.is_none());
-        result.unwrap();
+        let reply = brw.wait(&crucible_common::build_logger()).await;
+        assert!(reply.buffer.is_none());
+        reply.result.unwrap();
     }
 
     #[tokio::test]
@@ -137,10 +151,9 @@ mod test {
 
         res.send_ok_with_buffer(Buffer::with_capacity(0));
 
-        let (maybe_buffer, result) =
-            brw.wait(&crucible_common::build_logger()).await;
-        assert!(maybe_buffer.is_some());
-        result.unwrap();
+        let reply = brw.wait(&crucible_common::build_logger()).await;
+        assert!(reply.buffer.is_some());
+        reply.result.unwrap();
     }
 
     #[tokio::test]
@@ -149,10 +162,9 @@ mod test {
 
         res.send_err(CrucibleError::UpstairsInactive);
 
-        let (maybe_buffer, result) =
-            brw.wait(&crucible_common::build_logger()).await;
-        assert!(maybe_buffer.is_none());
-        assert!(result.is_err());
+        let reply = brw.wait(&crucible_common::build_logger()).await;
+        assert!(reply.buffer.is_none());
+        assert!(reply.result.is_err());
     }
 
     #[tokio::test]
@@ -164,9 +176,8 @@ mod test {
             CrucibleError::UpstairsInactive,
         );
 
-        let (maybe_buffer, result) =
-            brw.wait(&crucible_common::build_logger()).await;
-        assert!(maybe_buffer.is_some());
-        assert!(result.is_err());
+        let reply = brw.wait(&crucible_common::build_logger()).await;
+        assert!(reply.buffer.is_some());
+        assert!(reply.result.is_err());
     }
 }

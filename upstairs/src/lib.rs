@@ -48,7 +48,7 @@ pub mod block_io;
 pub use block_io::{FileBlockIO, ReqwestBlockIO};
 
 pub mod block_req;
-pub(crate) use block_req::{BlockReq, BlockReqWaiter, BlockRes};
+pub(crate) use block_req::{BlockReq, BlockReqReply, BlockReqWaiter, BlockRes};
 
 mod mend;
 pub use mend::{DownstairsMend, ExtentFix, RegionMetadata};
@@ -2245,10 +2245,7 @@ impl Guest {
         brw
     }
 
-    async fn send_and_wait(
-        &self,
-        op: BlockOp,
-    ) -> (Option<Buffer>, Result<(), CrucibleError>) {
+    async fn send_and_wait(&self, op: BlockOp) -> BlockReqReply {
         let brw = self.send(op).await;
         brw.wait(&self.log).await
     }
@@ -2420,9 +2417,9 @@ impl Guest {
         let data = Arc::new(Mutex::new(Block::new(0, 9)));
         let extent_query = BlockOp::QueryExtentSize { data: data.clone() };
 
-        let (maybe_buffer, result) = self.send_and_wait(extent_query).await;
-        assert!(maybe_buffer.is_none());
-        result?;
+        let reply = self.send_and_wait(extent_query).await;
+        assert!(reply.buffer.is_none());
+        reply.result?;
 
         let es = *data.lock().await;
         Ok(es)
@@ -2438,9 +2435,9 @@ impl Guest {
         let data = Arc::new(Mutex::new(wc));
         let qwq = BlockOp::QueryWorkQueue { data: data.clone() };
 
-        let (maybe_buffer, result) = self.send_and_wait(qwq).await;
-        assert!(maybe_buffer.is_none());
-        result?;
+        let reply = self.send_and_wait(qwq).await;
+        assert!(reply.buffer.is_none());
+        reply.result?;
 
         let wc = data.lock().await;
         Ok(*wc)
@@ -2457,9 +2454,9 @@ impl Guest {
             "The guest has requested activation with gen:{}", gen
         );
 
-        let (maybe_buffer, result) = waiter.wait(&self.log).await;
-        assert!(maybe_buffer.is_none());
-        result?;
+        let reply = waiter.wait(&self.log).await;
+        assert!(reply.buffer.is_none());
+        reply.result?;
 
         info!(
             self.log,
@@ -2486,9 +2483,9 @@ impl BlockIO for Guest {
         let waiter = self.send(BlockOp::GoActive).await;
         info!(self.log, "The guest has requested activation");
 
-        let (maybe_buffer, result) = waiter.wait(&self.log).await;
-        assert!(maybe_buffer.is_none());
-        result?;
+        let reply = waiter.wait(&self.log).await;
+        assert!(reply.buffer.is_none());
+        reply.result?;
 
         info!(self.log, "The guest has finished waiting for activation");
         Ok(())
@@ -2496,19 +2493,18 @@ impl BlockIO for Guest {
 
     /// Disable any more IO from this guest and deactivate the downstairs.
     async fn deactivate(&self) -> Result<(), CrucibleError> {
-        let (maybe_buffer, result) =
-            self.send_and_wait(BlockOp::Deactivate).await;
-        assert!(maybe_buffer.is_none());
-        result
+        let reply = self.send_and_wait(BlockOp::Deactivate).await;
+        assert!(reply.buffer.is_none());
+        reply.result
     }
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
         let data = Arc::new(Mutex::new(false));
         let active_query = BlockOp::QueryGuestIOReady { data: data.clone() };
 
-        let (maybe_buffer, result) = self.send_and_wait(active_query).await;
-        assert!(maybe_buffer.is_none());
-        result?;
+        let reply = self.send_and_wait(active_query).await;
+        assert!(reply.buffer.is_none());
+        reply.result?;
 
         let is_active = *data.lock().await;
         Ok(is_active)
@@ -2518,9 +2514,9 @@ impl BlockIO for Guest {
         let data = Arc::new(Mutex::new(0));
         let size_query = BlockOp::QueryTotalSize { data: data.clone() };
 
-        let (maybe_buffer, result) = self.send_and_wait(size_query).await;
-        assert!(maybe_buffer.is_none());
-        result?;
+        let reply = self.send_and_wait(size_query).await;
+        assert!(reply.buffer.is_none());
+        reply.result?;
 
         let total_size = *data.lock().await;
         Ok(total_size)
@@ -2532,9 +2528,9 @@ impl BlockIO for Guest {
             let data = Arc::new(Mutex::new(0));
             let size_query = BlockOp::QueryBlockSize { data: data.clone() };
 
-            let (maybe_buffer, result) = self.send_and_wait(size_query).await;
-            assert!(maybe_buffer.is_none());
-            result?;
+            let reply = self.send_and_wait(size_query).await;
+            assert!(reply.buffer.is_none());
+            reply.result?;
 
             let bs = *data.lock().await;
             self.block_size
@@ -2549,9 +2545,9 @@ impl BlockIO for Guest {
         let data = Arc::new(Mutex::new(Uuid::default()));
         let uuid_query = BlockOp::QueryUpstairsUuid { data: data.clone() };
 
-        let (maybe_buffer, result) = self.send_and_wait(uuid_query).await;
-        assert!(maybe_buffer.is_none());
-        result?;
+        let reply = self.send_and_wait(uuid_query).await;
+        assert!(reply.buffer.is_none());
+        reply.result?;
 
         let uuid = *data.lock().await;
         Ok(uuid)
@@ -2585,10 +2581,10 @@ impl BlockIO for Guest {
         // We've replaced `data` with a blank Buffer, and sent it over the
         // channel. Replace it regardless of the outcome of the read so that the
         // caller will not have to reallocate it.
-        let (better_be_a_buffer_here, result) = self.send_and_wait(rio).await;
-        *data = better_be_a_buffer_here.unwrap();
+        let reply = self.send_and_wait(rio).await;
+        *data = reply.buffer.unwrap();
 
-        result
+        reply.result
     }
 
     async fn write(
@@ -2613,9 +2609,9 @@ impl BlockIO for Guest {
 
         self.backpressure_sleep().await;
 
-        let (maybe_buffer, result) = self.send_and_wait(wio).await;
-        assert!(maybe_buffer.is_none());
-        result
+        let reply = self.send_and_wait(wio).await;
+        assert!(reply.buffer.is_none());
+        reply.result
     }
 
     async fn write_unwritten(
@@ -2639,20 +2635,20 @@ impl BlockIO for Guest {
         let wio = BlockOp::WriteUnwritten { offset, data };
 
         self.backpressure_sleep().await;
-        let (maybe_buffer, result) = self.send_and_wait(wio).await;
-        assert!(maybe_buffer.is_none());
-        result
+        let reply = self.send_and_wait(wio).await;
+        assert!(reply.buffer.is_none());
+        reply.result
     }
 
     async fn flush(
         &self,
         snapshot_details: Option<SnapshotDetails>,
     ) -> Result<(), CrucibleError> {
-        let (maybe_buffer, result) = self
+        let reply = self
             .send_and_wait(BlockOp::Flush { snapshot_details })
             .await;
-        assert!(maybe_buffer.is_none());
-        result
+        assert!(reply.buffer.is_none());
+        reply.result
     }
 
     async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
@@ -2667,9 +2663,9 @@ impl BlockIO for Guest {
         let data = Arc::new(Mutex::new(wc));
         let sw = BlockOp::ShowWork { data: data.clone() };
 
-        let (maybe_buffer, result) = self.send_and_wait(sw).await;
-        assert!(maybe_buffer.is_none());
-        result?;
+        let reply = self.send_and_wait(sw).await;
+        assert!(reply.buffer.is_none());
+        reply.result?;
 
         let wc = data.lock().await;
         Ok(*wc)
@@ -2689,9 +2685,9 @@ impl BlockIO for Guest {
             result: data.clone(),
         };
 
-        let (maybe_buffer, result) = self.send_and_wait(sw).await;
-        assert!(maybe_buffer.is_none());
-        result?;
+        let reply = self.send_and_wait(sw).await;
+        assert!(reply.buffer.is_none());
+        reply.result?;
 
         let result = data.lock().await;
         Ok(*result)

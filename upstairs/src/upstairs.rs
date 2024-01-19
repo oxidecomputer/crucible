@@ -1993,9 +1993,9 @@ pub(crate) mod test {
         }))
         .await;
 
-        let (maybe_buffer, result) = ds_done_brw.wait(&up.log).await;
-        assert!(maybe_buffer.is_none());
-        assert!(result.is_err());
+        let reply = ds_done_brw.wait(&up.log).await;
+        assert!(reply.buffer.is_none());
+        assert!(reply.result.is_err());
 
         up.force_active().unwrap();
 
@@ -2006,9 +2006,9 @@ pub(crate) mod test {
         }))
         .await;
 
-        let (maybe_buffer, result) = ds_done_brw.wait(&up.log).await;
-        assert!(maybe_buffer.is_none());
-        assert!(result.is_ok());
+        let reply = ds_done_brw.wait(&up.log).await;
+        assert!(reply.buffer.is_none());
+        assert!(reply.result.is_ok());
 
         let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -2017,9 +2017,9 @@ pub(crate) mod test {
         }))
         .await;
 
-        let (maybe_buffer, result) = ds_done_brw.wait(&up.log).await;
-        assert!(maybe_buffer.is_none());
-        assert!(result.is_err());
+        let reply = ds_done_brw.wait(&up.log).await;
+        assert!(reply.buffer.is_none());
+        assert!(reply.result.is_err());
     }
 
     #[tokio::test]
@@ -2069,9 +2069,9 @@ pub(crate) mod test {
             }
         }
 
-        let (maybe_buffer, result) = ds_done_brw.wait(&up.log).await;
-        assert!(maybe_buffer.is_none());
-        assert!(result.is_ok());
+        let reply = ds_done_brw.wait(&up.log).await;
+        assert!(reply.buffer.is_none());
+        assert!(reply.result.is_ok());
     }
 
     // Job dependency tests
@@ -3575,10 +3575,9 @@ pub(crate) mod test {
             .await;
         }
 
-        let tuple = deactivate_done_brw.try_wait();
-        let (maybe_buffer, result) = tuple.unwrap();
-        assert!(maybe_buffer.is_none());
-        result.unwrap();
+        let reply = deactivate_done_brw.try_wait().unwrap();
+        assert!(reply.buffer.is_none());
+        reply.result.unwrap();
 
         // Verify we have disconnected and can go back to init.
         assert!(matches!(up.state, UpstairsState::Initializing));
