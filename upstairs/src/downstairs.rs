@@ -3183,11 +3183,18 @@ impl Downstairs {
         extent_info: Option<ExtentInfo>,
     ) -> bool {
         let was_ackable = self.ackable_work.contains(&ds_id);
+
+        // Make up dummy values for hashes, since they're not actually checked
+        // here (besides confirming that we have the correct number).
+        let hashes = match &responses {
+            Ok(r) => vec![Some(0); r.len()],
+            Err(..) => vec![],
+        };
         self.process_io_completion_inner(
             ds_id,
             client_id,
             responses,
-            vec![], // XXX this could lead to false matches; does it matter?
+            hashes,
             up_state,
             extent_info,
         );
@@ -3229,6 +3236,13 @@ impl Downstairs {
             assert!(self.completed.contains(&ds_id));
             return;
         };
+
+        // Sanity-checking for a programmer error during offloaded decryption.
+        // If we didn't get one hash per read block, then `responses` must
+        // have been converted into `Err(..)`.
+        if let Ok(reads) = &responses {
+            assert_eq!(reads.len(), read_response_hashes.len());
+        }
 
         if self.clients[client_id].process_io_completion(
             job,
