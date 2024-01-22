@@ -2782,7 +2782,7 @@ pub(crate) fn validate_unencrypted_read_response(
             Ok(None)
         } else {
             error!(log, "got empty block context with non-blank block");
-            Err(CrucibleError::HashMismatch)
+            Err(CrucibleError::MissingBlockContext)
         }
     }
 }
