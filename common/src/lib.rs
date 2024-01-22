@@ -155,6 +155,9 @@ pub enum CrucibleError {
 
     #[error("context slot deserialization failed: {0}")]
     BadContextSlot(String),
+
+    #[error("missing block context for non-empty block")]
+    MissingBlockContext,
 }
 
 impl From<std::io::Error> for CrucibleError {
@@ -398,7 +401,8 @@ impl From<CrucibleError> for dropshot::HttpError {
             | CrucibleError::UuidMismatch
             | CrucibleError::MissingContextSlot(..)
             | CrucibleError::BadMetadata(..)
-            | CrucibleError::BadContextSlot(..) => {
+            | CrucibleError::BadContextSlot(..)
+            | CrucibleError::MissingBlockContext => {
                 dropshot::HttpError::for_internal_error(e.to_string())
             }
         }

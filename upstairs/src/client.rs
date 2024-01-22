@@ -2612,7 +2612,7 @@ pub(crate) fn validate_encrypted_read_response(
             return Ok(None);
         } else {
             error!(log, "got empty block context with non-blank block");
-            return Err(CrucibleError::DecryptionError);
+            return Err(CrucibleError::MissingBlockContext);
         }
     }
 
