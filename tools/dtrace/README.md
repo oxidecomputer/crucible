@@ -300,6 +300,43 @@ Trace a downstairs IO and measure time for in in the following three parts:
 * 2nd report is OS time (for flush, to flush all extents)
 * 3rd report is OS done to downstairs sending the ACK back to upstairs
 
+## upstairs_action.d
+This is a dtrace script for printing the counts of the upstairs main action
+loop.
+```
+pfexec dtrace -s upstairs_action.d
+```
+
+You start crucible, then run the above script.  Output should start appearing
+within a few seconds.
+
+The output has several columns.  The first column is the total count of time
+the upstairs apply() was called in the main run loop.
+The other columns indicate counters for each UpstairsAction the apply loop
+has received.
+
+Here is how some sample output might look:
+```
+alan@atrium:crucible$ pfexec dtrace -Z -s tools/dtrace/upstairs_action.d
+    APPLY    DOWN_S     GUEST     DEFER  LEAK_CHK FLUSH_CHK  STAT_CHK  REPR_CHK  CTRL_CHK      NOOP
+     1801      1349       450         0         0         1         1         0         0         0
+     2438      1824       607         0         2         3         2         0         0         0
+     2442      1824       607         0         3         5         3         0         0         0
+     2446      1824       607         0         4         7         4         0         0         0
+     2455      1830       607         0         4         9         5         0         0         0
+    12708      7854      2619      1187         1         1         1         0         0      1045
+    25579     15796      5265      2413         1         3         2         0         0      2099
+    38948     24018      8006      3683         3         5         3         0         0      3230
+    52228     32214     10737      4927         4         7         4         0         0      4335
+    65089     40212     13400      6083         5         9         5         0         0      5375
+    76445     46243     16358      7274         6        11         6         0         0      6547
+    83166     49774     18121      7991         7        13         7         0         0      7253
+    88068     52365     19415      8498         8        15         8         0         0      7759
+    92955     54918     20691      9025         9        17         9         0         1      8285
+    97803     57430     21942      9579        10        19        10         0         1      8812
+   102601     59939     23197     10095        11        21        11         0         1      9326
+```
+
 ## upstairs_info.d
 This is a dtrace script for printing upstairs state and work queue info.
 If the upstairs is not yet running, add the -Z flag to dtrace so it will

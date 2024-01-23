@@ -17,6 +17,7 @@ use crate::{
     RegionDefinition, RegionDefinitionStatus, SnapshotDetails, WQCounts,
 };
 use crucible_common::CrucibleError;
+use serde::{Deserialize, Serialize};
 
 use std::{
     ops::DerefMut,
@@ -64,6 +65,39 @@ pub(crate) enum UpstairsState {
     Deactivating(BlockRes),
 }
 
+/// Crucible upstairs counters
+///
+/// Counters indicating the upstairs selects path.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct UpCounters {
+    apply: u64,
+    action_downstairs: u64,
+    action_guest: u64,
+    action_deferred: u64,
+    action_leak_check: u64,
+    action_flush_check: u64,
+    action_stat_check: u64,
+    action_repair_check: u64,
+    action_control_check: u64,
+    action_noop: u64,
+}
+
+impl UpCounters {
+    fn new() -> UpCounters {
+        UpCounters {
+            apply: 0,
+            action_downstairs: 0,
+            action_guest: 0,
+            action_deferred: 0,
+            action_leak_check: 0,
+            action_flush_check: 0,
+            action_stat_check: 0,
+            action_repair_check: 0,
+            action_control_check: 0,
+            action_noop: 0,
+        }
+    }
+}
 /// Crucible upstairs state
 ///
 /// This `struct` has exclusive ownership over (almost) everything that's needed
@@ -165,6 +199,8 @@ pub(crate) struct Upstairs {
     /// Shared with the metrics producer, so this `struct` wraps a
     /// `std::sync::Mutex`
     pub(crate) stats: UpStatOuter,
+    /// Some internal counters
+    pub(crate) counters: UpCounters,
 
     /// Fixed configuration
     pub(crate) cfg: Arc<UpstairsConfig>,
@@ -300,6 +336,7 @@ impl Upstairs {
 
         let uuid = opt.id;
         let stats = UpStatOuter::new(uuid);
+        let counters = UpCounters::new();
 
         let rd_status = match expected_region_def {
             None => RegionDefinitionStatus::WaitingForDownstairs,
@@ -342,6 +379,7 @@ impl Upstairs {
             ddef: rd_status,
             need_flush: false,
             stats,
+            counters,
             log,
             downstairs,
             control_rx,
@@ -382,6 +420,8 @@ impl Upstairs {
     pub(crate) async fn run(&mut self) {
         loop {
             let action = self.select().await;
+            self.counters.apply += 1;
+            cdt::up__apply!(|| (self.counters.apply));
             self.apply(action).await
         }
     }
@@ -455,18 +495,30 @@ impl Upstairs {
     pub(crate) async fn apply(&mut self, action: UpstairsAction) {
         match action {
             UpstairsAction::Downstairs(d) => {
+                self.counters.action_downstairs += 1;
+                cdt::up__action_downstairs!(|| (self
+                    .counters
+                    .action_downstairs));
                 self.apply_downstairs_action(d).await
             }
             UpstairsAction::Guest(b) => {
+                self.counters.action_guest += 1;
+                cdt::up__action_guest!(|| (self.counters.action_guest));
                 self.defer_guest_request(b).await;
             }
             UpstairsAction::DeferredBlockReq(req) => {
+                self.counters.action_deferred += 1;
+                cdt::up__action_deferred!(|| (self.counters.action_deferred));
                 self.apply_guest_request(req).await;
             }
             UpstairsAction::DeferredMessage(m) => {
                 self.on_client_message(m).await;
             }
             UpstairsAction::LeakCheck => {
+                self.counters.action_leak_check += 1;
+                cdt::up__action_leak_check!(|| (self
+                    .counters
+                    .action_leak_check));
                 const LEAK_MS: usize = 1000;
                 let leak_tick =
                     tokio::time::Duration::from_millis(LEAK_MS as u64);
@@ -484,22 +536,41 @@ impl Upstairs {
                     Instant::now().checked_add(leak_tick).unwrap();
             }
             UpstairsAction::FlushCheck => {
+                self.counters.action_flush_check += 1;
+                cdt::up__action_flush_check!(|| (self
+                    .counters
+                    .action_flush_check));
                 if self.need_flush {
                     self.submit_flush(None, None).await;
                 }
                 self.flush_deadline = deadline_secs(self.flush_timeout_secs);
             }
             UpstairsAction::StatUpdate => {
+                self.counters.action_stat_check += 1;
+                cdt::up__action_stat_check!(|| (self
+                    .counters
+                    .action_stat_check));
                 self.on_stat_update().await;
                 self.stat_deadline = deadline_secs(STAT_INTERVAL_SECS);
             }
             UpstairsAction::RepairCheck => {
+                self.counters.action_repair_check += 1;
+                cdt::up__action_repair_check!(|| (self
+                    .counters
+                    .action_repair_check));
                 self.on_repair_check().await;
             }
             UpstairsAction::Control(c) => {
+                self.counters.action_control_check += 1;
+                cdt::up__action_control_check!(|| (self
+                    .counters
+                    .action_control_check));
                 self.on_control_req(c).await;
             }
-            UpstairsAction::NoOp => (),
+            UpstairsAction::NoOp => {
+                self.counters.action_noop += 1;
+                cdt::up__action_noop!(|| (self.counters.action_noop));
+            }
         }
 
         // Check whether we need to mark a Downstairs as faulted because too
@@ -627,6 +698,7 @@ impl Upstairs {
     /// Fires the `up-status` DTrace probe
     async fn on_stat_update(&self) {
         let up_count = self.guest.guest_work.lock().await.active.len() as u32;
+        let up_counters = self.counters;
         let ds_count = self.downstairs.active_count() as u32;
         let ds_state = self.downstairs.collect_stats(|c| c.state());
 
@@ -659,6 +731,7 @@ impl Upstairs {
         cdt::up__status!(|| {
             let arg = Arg {
                 up_count,
+                up_counters,
                 up_backpressure,
                 write_bytes_out,
                 ds_count,

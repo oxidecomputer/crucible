@@ -73,6 +73,7 @@ use async_trait::async_trait;
 mod client;
 mod downstairs;
 mod upstairs;
+use crate::upstairs::UpCounters;
 
 // Max number of outstanding IOs between the upstairs and the downstairs
 // before we give up and mark that downstairs faulted.
@@ -254,6 +255,11 @@ impl Debug for ReplaceResult {
 /// as well as the work queue counts for the upstairs work queue and the
 /// downstairs work queue.
 ///
+/// up__apply: A count of times the upstairs main loop applies an action.
+///
+/// up_action_*: These probes record which path is taken when the
+/// upstairs apply select is triggered.
+///
 /// For each read/write/flush, we have a DTrace probe at specific
 /// points throughout its path through the upstairs.  Below is the basic
 /// order of probes an IO will hit as it works its way through the
@@ -304,6 +310,16 @@ mod cdt {
     use crate::Arg;
     fn up__status(_: String, arg: Arg) {}
     fn ds__ping__sent(_: u64, _: u8) {}
+    fn up__apply(_: u64) {}
+    fn up__action_downstairs(_: u64) {}
+    fn up__action_guest(_: u64) {}
+    fn up__action_deferred(_: u64) {}
+    fn up__action_leak_check(_: u64) {}
+    fn up__action_flush_check(_: u64) {}
+    fn up__action_stat_check(_: u64) {}
+    fn up__action_repair_check(_: u64) {}
+    fn up__action_control_check(_: u64) {}
+    fn up__action_noop(_: u64) {}
     fn volume__read__start(_: u32, _: Uuid) {}
     fn volume__write__start(_: u32, _: Uuid) {}
     fn volume__writeunwritten__start(_: u32, _: Uuid) {}
@@ -2711,6 +2727,8 @@ pub struct WQCounts {
 pub struct Arg {
     /// Jobs on the upstairs guest work queue.
     pub up_count: u32,
+    /// Apply loop counter
+    pub up_counters: UpCounters,
     /// Backpressure value
     pub up_backpressure: u64,
     /// Jobs on the downstairs work queue.

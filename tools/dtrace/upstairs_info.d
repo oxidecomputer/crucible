@@ -2,6 +2,7 @@
  * Display internal Upstairs status.
  */
 #pragma D option quiet
+#pragma D option strsize=1k
 /*
  * Print the header right away
  */
