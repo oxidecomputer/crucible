@@ -734,19 +734,19 @@ pub(crate) mod up_test {
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(1),
+                data: Buffer::new(1, 512),
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(8000),
+                data: Buffer::new(8, 512),
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(16000),
+                data: Buffer::new(32, 512),
             })
             .await;
 
@@ -775,19 +775,19 @@ pub(crate) mod up_test {
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(1),
+                data: Buffer::new(1, 512),
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(8000),
+                data: Buffer::new(8, 512),
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(16000),
+                data: Buffer::new(31, 512),
             })
             .await;
 
@@ -863,19 +863,19 @@ pub(crate) mod up_test {
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(1024 * 1024 / 2),
+                data: Buffer::new(1024, 512), // 512 KiB
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(1024 * 1024 / 2),
+                data: Buffer::new(1024, 512),
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(1024 * 1024 / 2),
+                data: Buffer::new(1024, 512),
             })
             .await;
 
@@ -956,13 +956,13 @@ pub(crate) mod up_test {
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(7000 * 1024),
+                data: Buffer::new(14000, 512), // 7000 KiB
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(7000 * 1024),
+                data: Buffer::new(14000, 512), // 7000 KiB
             })
             .await;
 
@@ -991,7 +991,7 @@ pub(crate) mod up_test {
             let _ = guest
                 .send(BlockOp::Read {
                     offset: Block::new_512(0),
-                    data: Buffer::new(1024),
+                    data: Buffer::new(2, 512),
                 })
                 .await;
             assert_consumed!(&guest);
@@ -1000,7 +1000,7 @@ pub(crate) mod up_test {
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(1024),
+                data: Buffer::new(2, 512),
             })
             .await;
         assert_none_consumed!(&guest);
@@ -1031,6 +1031,9 @@ pub(crate) mod up_test {
 
         let optimal_io_size: usize = 6400 * 1024 / 500;
 
+        // Round down to the nearest size in blocks
+        let optimal_io_size = (optimal_io_size / 512) * 512;
+
         // Make sure this is <= an IOP size
         assert!(optimal_io_size <= 16384);
 
@@ -1039,11 +1042,12 @@ pub(crate) mod up_test {
         for i in 0..500 {
             assert_eq!(*guest.iop_tokens.lock().unwrap(), i);
             assert_eq!(*guest.bw_tokens.lock().unwrap(), i * optimal_io_size);
+            assert_eq!(optimal_io_size % 512, 0);
 
             let _ = guest
                 .send(BlockOp::Read {
                     offset: Block::new_512(0),
-                    data: Buffer::new(optimal_io_size),
+                    data: Buffer::new(optimal_io_size / 512, 512),
                 })
                 .await;
 
@@ -1065,18 +1069,18 @@ pub(crate) mod up_test {
         guest.set_bw_limit(1024 * 1024); // 1 KiB
         assert_none_consumed!(&guest);
 
-        // Sending an IO of 10 KiB is larger than the bandwidth limit and
+        // Sending an IO of 10 MiB is larger than the bandwidth limit and
         // represents 20 IOPs, larger than the IOP limit.
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(10 * 1024 * 1024),
+                data: Buffer::new(20480, 512), // 10 MiB
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(0),
+                data: Buffer::new(0, 512),
             })
             .await;
 

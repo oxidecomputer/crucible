@@ -397,7 +397,7 @@ mod test {
         volume.activate().await?;
 
         // Verify contents are zero on init
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -413,7 +413,7 @@ mod test {
             .await?;
 
         // Read parent, verify contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -449,7 +449,7 @@ mod test {
         volume.activate().await?;
 
         // A read of zero length does not error.
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(0, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -499,7 +499,7 @@ mod test {
             )
             .await?;
 
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         in_memory_data
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -524,7 +524,7 @@ mod test {
         volume.activate().await?;
 
         // Verify contents are 11 on init
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -549,7 +549,7 @@ mod test {
         }
 
         // Verify parent wasn't written to
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         in_memory_data
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -557,7 +557,7 @@ mod test {
         assert_eq!(vec![11; BLOCK_SIZE * 10], &buffer[..]);
 
         // Read and verify contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -588,7 +588,7 @@ mod test {
             )
             .await?;
 
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         in_memory_data
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -624,7 +624,7 @@ mod test {
         volume.activate().await?;
 
         // Verify contents are 11 on init
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -640,7 +640,7 @@ mod test {
             .await?;
 
         // Verify parent wasn't written to
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         in_memory_data
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -648,7 +648,7 @@ mod test {
         assert_eq!(vec![11; BLOCK_SIZE * 10], &buffer[..]);
 
         // Read and verify contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -709,7 +709,7 @@ mod test {
         volume.activate().await?;
 
         // Read one block: should be all 0xff
-        let mut buffer = Buffer::new(BLOCK_SIZE);
+        let mut buffer = Buffer::new(1, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -725,7 +725,7 @@ mod test {
             .await?;
 
         // Read one block: should be all 0x01
-        let mut buffer = Buffer::new(BLOCK_SIZE);
+        let mut buffer = Buffer::new(1, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -762,7 +762,7 @@ mod test {
         volume.activate().await?;
 
         // Read one block: should be all 0x00
-        let mut buffer = Buffer::new(BLOCK_SIZE);
+        let mut buffer = Buffer::new(1, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -818,7 +818,7 @@ mod test {
             .await?;
 
         // Read volume, verify contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -834,7 +834,7 @@ mod test {
             .await?;
 
         // Read volume, verify original contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -889,7 +889,7 @@ mod test {
             .await?;
 
         // Read parent, verify contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -905,7 +905,7 @@ mod test {
             .await?;
 
         // Read volume, verify original contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -970,7 +970,7 @@ mod test {
             .await?;
 
         // Read and verify
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1035,7 +1035,8 @@ mod test {
 
         volume.activate().await?;
 
-        let full_volume_size = BLOCK_SIZE * 20;
+        let full_volume_blocks = 20;
+        let full_volume_size = BLOCK_SIZE * full_volume_blocks;
         // Write data in
         volume
             .write_unwritten(
@@ -1045,7 +1046,7 @@ mod test {
             .await?;
 
         // Read parent, verify contents
-        let mut buffer = Buffer::new(full_volume_size);
+        let mut buffer = Buffer::new(full_volume_blocks, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1061,7 +1062,7 @@ mod test {
             .await?;
 
         // Read volume, verify original contents
-        let mut buffer = Buffer::new(full_volume_size);
+        let mut buffer = Buffer::new(full_volume_blocks, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1120,7 +1121,8 @@ mod test {
         let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
         volume.activate().await?;
-        let full_volume_size = BLOCK_SIZE * 20;
+        let full_volume_blocks = 20;
+        let full_volume_size = BLOCK_SIZE * full_volume_blocks;
 
         // Write data to last block of first vol, and first block of
         // second vol.
@@ -1132,7 +1134,7 @@ mod test {
             .await?;
 
         // Read parent, verify contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 2);
+        let mut buffer = Buffer::new(2, BLOCK_SIZE);
         volume
             .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1151,7 +1153,7 @@ mod test {
 
         // Read full volume, verify first write_unwritten still valid, but the
         // other blocks of the 2nd write_unwritten are updated.
-        let mut buffer = Buffer::new(full_volume_size);
+        let mut buffer = Buffer::new(full_volume_blocks, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1225,7 +1227,8 @@ mod test {
         let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
         volume.activate().await?;
-        let full_volume_size = BLOCK_SIZE * 20;
+        let full_volume_blocks = 20;
+        let full_volume_size = BLOCK_SIZE * full_volume_blocks;
 
         // Write data to last block of first vol, and first block of
         // second vol.
@@ -1255,7 +1258,7 @@ mod test {
             .await?;
 
         // Read full volume
-        let mut buffer = Buffer::new(full_volume_size);
+        let mut buffer = Buffer::new(full_volume_blocks, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1311,7 +1314,7 @@ mod test {
             .await?;
 
         // Read back in_memory, verify 1s
-        let mut buffer = Buffer::new(BLOCK_SIZE * 5);
+        let mut buffer = Buffer::new(5, BLOCK_SIZE);
         in_memory_data
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1336,7 +1339,7 @@ mod test {
         volume.activate().await?;
 
         // Verify parent contents in one read
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1355,7 +1358,7 @@ mod test {
         }
 
         // Verify volume contents in one read
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1416,7 +1419,7 @@ mod test {
         volume.activate().await?;
 
         // Verify contents are 11 at startup
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1437,7 +1440,7 @@ mod test {
             .await?;
 
         // Read and verify contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1499,7 +1502,7 @@ mod test {
         volume.activate().await?;
 
         // Verify contents of RO parent are 1s at startup
-        let mut buffer = Buffer::new(BLOCK_SIZE * 5);
+        let mut buffer = Buffer::new(5, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1507,7 +1510,7 @@ mod test {
         assert_eq!(vec![11; BLOCK_SIZE * 5], &buffer[..]);
 
         // Verify contents of blocks 5-10 are zero.
-        let mut buffer = Buffer::new(BLOCK_SIZE * 5);
+        let mut buffer = Buffer::new(5, BLOCK_SIZE);
         volume
             .read(Block::new(5, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1528,7 +1531,7 @@ mod test {
             .await?;
 
         // Read and verify contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1621,7 +1624,7 @@ mod test {
         volume.scrub(None, None).await.unwrap();
 
         // Read and verify contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1695,7 +1698,7 @@ mod test {
         volume.activate().await?;
 
         // Verify contents are 11 at startup
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1714,7 +1717,7 @@ mod test {
         volume.scrub(None, None).await.unwrap();
 
         // Read and verify contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1811,7 +1814,7 @@ mod test {
             .await?;
 
         // Read and verify contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 2);
+        let mut buffer = Buffer::new(2, BLOCK_SIZE);
         volume
             .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1830,7 +1833,7 @@ mod test {
         volume.scrub(None, None).await.unwrap();
 
         // Read full volume
-        let mut buffer = Buffer::new(BLOCK_SIZE * 20);
+        let mut buffer = Buffer::new(20, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1938,7 +1941,7 @@ mod test {
             .await?;
 
         // Read and verify contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 2);
+        let mut buffer = Buffer::new(2, BLOCK_SIZE);
         volume
             .read(Block::new(9, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -1967,7 +1970,7 @@ mod test {
         volume.scrub(None, None).await.unwrap();
 
         // Read full volume
-        let mut buffer = Buffer::new(BLOCK_SIZE * 20);
+        let mut buffer = Buffer::new(20, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -2041,14 +2044,14 @@ mod test {
         volume2.activate().await?;
 
         // Read one block: should be all 0x00
-        let mut buffer = Buffer::new(BLOCK_SIZE);
+        let mut buffer = Buffer::new(1, BLOCK_SIZE);
         volume1
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
 
         assert_eq!(vec![0x00; BLOCK_SIZE], &buffer[..]);
 
-        let mut buffer = Buffer::new(BLOCK_SIZE);
+        let mut buffer = Buffer::new(1, BLOCK_SIZE);
         volume2
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -2094,7 +2097,7 @@ mod test {
         volume.activate().await?;
 
         // Verify contents are 00 at startup
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -2113,7 +2116,7 @@ mod test {
         volume.scrub(None, None).await.unwrap();
 
         // Read and verify contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -2194,7 +2197,9 @@ mod test {
 
             volume.activate().await?;
 
-            let mut buffer = Buffer::new(volume.total_size().await? as usize);
+            let volume_size = volume.total_size().await? as usize;
+            assert_eq!(volume_size % BLOCK_SIZE, 0);
+            let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
             volume
                 .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
                 .await?;
@@ -2251,7 +2256,9 @@ mod test {
 
         // Validate that source blocks originally come from the read-only parent
         {
-            let mut buffer = Buffer::new(volume.total_size().await? as usize);
+            let volume_size = volume.total_size().await? as usize;
+            assert_eq!(volume_size % BLOCK_SIZE, 0);
+            let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
             volume
                 .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
                 .await?;
@@ -2271,7 +2278,9 @@ mod test {
             .await?;
 
         {
-            let mut buffer = Buffer::new(volume.total_size().await? as usize);
+            let volume_size = volume.total_size().await? as usize;
+            assert_eq!(volume_size % BLOCK_SIZE, 0);
+            let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
             volume
                 .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
                 .await?;
@@ -2368,7 +2377,9 @@ mod test {
 
             volume.activate().await?;
 
-            let mut buffer = Buffer::new(volume.total_size().await? as usize);
+            let volume_size = volume.total_size().await? as usize;
+            assert_eq!(volume_size % BLOCK_SIZE, 0);
+            let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
             volume
                 .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
                 .await?;
@@ -2433,7 +2444,9 @@ mod test {
 
         // Validate that source blocks originally come from the read-only parent
         {
-            let mut buffer = Buffer::new(volume.total_size().await? as usize);
+            let volume_size = volume.total_size().await? as usize;
+            assert_eq!(volume_size % BLOCK_SIZE, 0);
+            let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
             volume
                 .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
                 .await?;
@@ -2453,7 +2466,9 @@ mod test {
             .await?;
 
         {
-            let mut buffer = Buffer::new(volume.total_size().await? as usize);
+            let volume_size = volume.total_size().await? as usize;
+            assert_eq!(volume_size % BLOCK_SIZE, 0);
+            let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
             volume
                 .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
                 .await?;
@@ -2543,7 +2558,9 @@ mod test {
 
         volume.activate().await?;
         // Validate that source blocks are the same
-        let mut buffer = Buffer::new(volume.total_size().await? as usize);
+        let volume_size = volume.total_size().await? as usize;
+        assert_eq!(volume_size % BLOCK_SIZE, 0);
+        let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -2633,7 +2650,9 @@ mod test {
         }
 
         // Read back what we wrote.
-        let mut buffer = Buffer::new(volume.total_size().await? as usize);
+        let volume_size = volume.total_size().await? as usize;
+        assert_eq!(volume_size % BLOCK_SIZE, 0);
+        let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -2941,7 +2960,9 @@ mod test {
         }
 
         // Read back what we wrote.
-        let mut buffer = Buffer::new(new_volume.total_size().await? as usize);
+        let volume_size = volume.total_size().await? as usize;
+        assert_eq!(volume_size % BLOCK_SIZE, 0);
+        let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
         new_volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -3004,7 +3025,9 @@ mod test {
             }
 
             for (i, random_buffer) in chunks {
-                let mut buffer = Buffer::new(CHUNK_SIZE);
+                assert_eq!(CHUNK_SIZE % BLOCK_SIZE, 0);
+                let mut buffer =
+                    Buffer::new(CHUNK_SIZE / BLOCK_SIZE, BLOCK_SIZE);
                 volume
                     .read(
                         Block::new(i as u64, BLOCK_SIZE.trailing_zeros()),
@@ -3044,7 +3067,7 @@ mod test {
         guest.query_work_queue().await?;
 
         // Verify contents are zero on init
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -3060,7 +3083,7 @@ mod test {
             .await?;
 
         // Read parent, verify contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -3088,7 +3111,7 @@ mod test {
         guest.query_work_queue().await?;
 
         // Read of length 0
-        let mut buffer = Buffer::new(0);
+        let mut buffer = Buffer::new(0, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -3171,7 +3194,7 @@ mod test {
         }
 
         // Read back our block post replacement, verify contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -3287,7 +3310,7 @@ mod test {
             .await?;
 
         // Read parent, verify contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -3303,7 +3326,7 @@ mod test {
             .await?;
 
         // Read back the same blocks.
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -3320,7 +3343,7 @@ mod test {
             .await?;
 
         // Read back the same blocks.
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -3369,7 +3392,7 @@ mod test {
             .await?;
 
         // Read back the first block.
-        let mut buffer = Buffer::new(BLOCK_SIZE);
+        let mut buffer = Buffer::new(1, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -3378,7 +3401,7 @@ mod test {
         assert_eq!(vec![0x55_u8; BLOCK_SIZE], &buffer[..]);
 
         // Read back the next two blocks.
-        let mut buffer = Buffer::new(BLOCK_SIZE * 2);
+        let mut buffer = Buffer::new(2, BLOCK_SIZE);
         guest
             .read(Block::new(1, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -3427,7 +3450,7 @@ mod test {
             .await?;
 
         // Read back the all three blocks.
-        let mut buffer = Buffer::new(BLOCK_SIZE * 3);
+        let mut buffer = Buffer::new(3, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -3486,7 +3509,7 @@ mod test {
             .await?;
 
         // Read back the all three blocks.
-        let mut buffer = Buffer::new(BLOCK_SIZE * 3);
+        let mut buffer = Buffer::new(3, BLOCK_SIZE);
         guest
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -3540,7 +3563,7 @@ mod test {
             .await?;
 
         // Read back both blocks
-        let mut buffer = Buffer::new(BLOCK_SIZE * 2);
+        let mut buffer = Buffer::new(2, BLOCK_SIZE);
         guest
             .read(Block::new(4, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -3594,7 +3617,7 @@ mod test {
             .await?;
 
         // Read back both blocks
-        let mut buffer = Buffer::new(BLOCK_SIZE * 2);
+        let mut buffer = Buffer::new(2, BLOCK_SIZE);
         guest
             .read(Block::new(4, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
@@ -3638,7 +3661,7 @@ mod test {
         assert!(res.is_err());
 
         // Read a block past the end of the extent
-        let mut buffer = Buffer::new(BLOCK_SIZE);
+        let mut buffer = Buffer::new(1, BLOCK_SIZE);
         let res = guest
             .read(Block::new(11, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await;
@@ -3674,7 +3697,7 @@ mod test {
         assert!(res.is_err());
 
         // Read a block with buffer that extends past the end of the region
-        let mut buffer = Buffer::new(BLOCK_SIZE * 2);
+        let mut buffer = Buffer::new(2, BLOCK_SIZE);
         let res = guest
             .read(Block::new(10, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await;
@@ -3826,7 +3849,8 @@ mod test {
         let volume = Volume::construct(vcr, None, csl()).await.unwrap();
         volume.activate().await.unwrap();
 
-        let mut buffer = Buffer::new(bytes.len());
+        assert_eq!(bytes.len() % BLOCK_SIZE, 0);
+        let mut buffer = Buffer::new(bytes.len() / BLOCK_SIZE, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await
@@ -3934,7 +3958,7 @@ mod test {
                 .unwrap();
             volume.activate().await.unwrap();
 
-            let mut buffer = Buffer::new(5120);
+            let mut buffer = Buffer::new(10, BLOCK_SIZE);
             volume
                 .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
                 .await
@@ -3986,7 +4010,7 @@ mod test {
         let volume = Volume::construct(vcr, None, log.clone()).await.unwrap();
         volume.activate().await.unwrap();
 
-        let mut buffer = Buffer::new(5120);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await
@@ -4064,7 +4088,7 @@ mod test {
         let volume = Volume::construct(vcr, None, csl()).await.unwrap();
         volume.activate().await.unwrap();
 
-        let mut buffer = Buffer::new(5120);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await
@@ -4127,17 +4151,16 @@ mod test {
         let volume = Volume::construct(vcr, None, csl()).await.unwrap();
         volume.activate().await.unwrap();
 
+        use crucible_pantry::pantry::PantryEntry;
+        assert_eq!(PantryEntry::MAX_CHUNK_SIZE % BLOCK_SIZE, 0);
         let mut buffer =
-            Buffer::new(crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE);
+            Buffer::new(PantryEntry::MAX_CHUNK_SIZE / BLOCK_SIZE, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await
             .unwrap();
 
-        assert_eq!(
-            vec![0x99; crucible_pantry::pantry::PantryEntry::MAX_CHUNK_SIZE],
-            &buffer[..]
-        );
+        assert_eq!(vec![0x99; PantryEntry::MAX_CHUNK_SIZE], &buffer[..]);
     }
 
     /// Assert that the Pantry will fail for non-block sized writes
@@ -4265,7 +4288,8 @@ mod test {
             let volume = Volume::construct(vcr, None, csl()).await.unwrap();
             volume.activate().await.unwrap();
 
-            let mut buffer = Buffer::new(data.len());
+            assert_eq!(data.len() % BLOCK_SIZE, 0);
+            let mut buffer = Buffer::new(data.len() / BLOCK_SIZE, BLOCK_SIZE);
             volume
                 .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
                 .await
@@ -4360,7 +4384,8 @@ mod test {
         let volume = Volume::construct(vcr, None, log.clone()).await.unwrap();
         volume.activate().await.unwrap();
 
-        let mut buffer = Buffer::new(data.len());
+        assert_eq!(data.len() % BLOCK_SIZE, 0);
+        let mut buffer = Buffer::new(data.len() / BLOCK_SIZE, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await
@@ -4851,7 +4876,7 @@ mod test {
             .unwrap();
 
         // Read parent, verify contents
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await
@@ -4891,7 +4916,7 @@ mod test {
         info!(log, "Replace VCR now: {:?}", replacement);
         volume.target_replace(original, replacement).await.unwrap();
         info!(log, "send read now");
-        let mut buffer = Buffer::new(BLOCK_SIZE * 10);
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await

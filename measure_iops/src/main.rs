@@ -124,7 +124,13 @@ async fn main() -> Result<()> {
     let total_blocks: u64 = guest.total_size().await? / bsz;
 
     let io_size = if let Some(io_size_in_bytes) = opt.io_size_in_bytes {
-        io_size_in_bytes
+        if io_size_in_bytes as u64 % bsz != 0 {
+            bail!(
+                "invalid io size: {io_size_in_bytes} is not divisible by {bsz}"
+            );
+        } else {
+            io_size_in_bytes
+        }
     } else {
         bsz as usize
     };
@@ -154,7 +160,10 @@ async fn main() -> Result<()> {
                 rng.gen::<u64>() % (total_blocks - io_size as u64 / bsz);
 
             if rng.gen::<bool>() {
-                ops.push(RandomOp::Read(offset, Buffer::new(io_size)));
+                ops.push(RandomOp::Read(
+                    offset,
+                    Buffer::new(io_size / bsz as usize, bsz as usize),
+                ));
             } else {
                 let bytes = Bytes::from(if opt.all_zeroes {
                     vec![0u8; io_size]

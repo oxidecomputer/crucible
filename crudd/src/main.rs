@@ -171,7 +171,7 @@ async fn cmd_read<T: BlockIO + std::marker::Send + 'static>(
         cmp::min(num_bytes, native_block_size - offset_misalignment);
     if offset_misalignment != 0 {
         // Read the full block
-        let mut buffer = Buffer::new(native_block_size as usize);
+        let mut buffer = Buffer::new(1, native_block_size as usize);
         let block_idx = opt.byte_offset / native_block_size;
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
         crucible.read(offset, &mut buffer).await?;
@@ -207,9 +207,13 @@ async fn cmd_read<T: BlockIO + std::marker::Send + 'static>(
     let cmd_count = num_bytes / (opt.iocmd_block_count * native_block_size);
     let remainder = num_bytes % (opt.iocmd_block_count * native_block_size);
 
-    let buffer_size = (opt.iocmd_block_count * native_block_size) as usize;
     let mut buffers: Vec<Buffer> = (0..opt.pipeline_length)
-        .map(|_| Buffer::new(buffer_size))
+        .map(|_| {
+            Buffer::new(
+                opt.iocmd_block_count as usize,
+                native_block_size as usize,
+            )
+        })
         .collect();
 
     // Issue all of our read commands
@@ -255,7 +259,8 @@ async fn cmd_read<T: BlockIO + std::marker::Send + 'static>(
         // let block_remainder = remainder % native_block_size;
         // round up
         let blocks = (remainder + native_block_size - 1) / native_block_size;
-        let mut buffer = Buffer::new((blocks * native_block_size) as usize);
+        let mut buffer =
+            Buffer::new(blocks as usize, native_block_size as usize);
         let block_idx = (cmd_count * opt.iocmd_block_count) + block_offset;
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
         crucible.read(offset, &mut buffer).await?;
@@ -309,7 +314,7 @@ async fn write_remainder_and_finalize<'a, T: BlockIO>(
             offset.value + uflow_blocks,
             native_block_size.trailing_zeros(),
         );
-        let mut uflow_r_buf = Buffer::new(native_block_size as usize);
+        let mut uflow_r_buf = Buffer::new(1, native_block_size as usize);
         crucible.read(uflow_offset, &mut uflow_r_buf).await?;
 
         // Copy it into w_buf
@@ -394,7 +399,7 @@ async fn cmd_write<T: BlockIO>(
         // We need to read-modify-write here.
 
         // Read the full block
-        let mut buffer = Buffer::new(native_block_size as usize);
+        let mut buffer = Buffer::new(1, native_block_size as usize);
         let block_idx = opt.byte_offset / native_block_size;
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
         crucible.read(offset, &mut buffer).await?;

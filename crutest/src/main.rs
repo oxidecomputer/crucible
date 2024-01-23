@@ -1120,8 +1120,11 @@ async fn verify_volume(
             io_sz
         };
 
-        let length: usize = next_io_blocks * ri.block_size as usize;
-        let mut data = crucible::Buffer::from_vec(vec![255; length]);
+        let mut data = crucible::Buffer::repeat(
+            255,
+            next_io_blocks,
+            ri.block_size as usize,
+        );
         guest.read(offset, &mut data).await?;
 
         let dl = data.into_vec();
@@ -1359,8 +1362,8 @@ async fn balloon_workload(
             guest.write(offset, data).await?;
             guest.flush(None).await?;
 
-            let length: usize = size * ri.block_size as usize;
-            let mut data = crucible::Buffer::from_vec(vec![255; length]);
+            let mut data =
+                crucible::Buffer::repeat(255, size, ri.block_size as usize);
             guest.read(offset, &mut data).await?;
 
             let dl = data.into_vec();
@@ -1576,8 +1579,8 @@ async fn generic_workload(
                 guest.write(offset, data).await?;
             } else {
                 // Read (+ verify)
-                let length: usize = size * ri.block_size as usize;
-                let mut data = crucible::Buffer::from_vec(vec![255; length]);
+                let mut data =
+                    crucible::Buffer::repeat(255, size, ri.block_size as usize);
                 if !quiet {
                     match wtq {
                         WhenToQuit::Count { count } => {
@@ -1602,6 +1605,7 @@ async fn generic_workload(
                 }
                 guest.read(offset, &mut data).await?;
 
+                let data_len = data.len();
                 let dl = data.into_vec();
                 match validate_vec(
                     dl,
@@ -1611,7 +1615,7 @@ async fn generic_workload(
                     false,
                 ) {
                     ValidateStatus::Bad | ValidateStatus::InRange => {
-                        bail!("Verify Error at {} len:{}", block_index, length);
+                        bail!("Verify Error at {block_index} len:{data_len}")
                     }
                     ValidateStatus::Good => {}
                 }
@@ -2065,8 +2069,9 @@ async fn perf_workload(
         })
         .collect();
 
-    let mut read_buffers: Vec<Buffer> =
-        (0..io_depth).map(|_| Buffer::new(io_size)).collect();
+    let mut read_buffers: Vec<Buffer> = (0..io_depth)
+        .map(|_| Buffer::new(blocks_per_io, ri.block_size as usize))
+        .collect();
 
     let es = ri.extent_size.value;
     let ec = ri.total_blocks as u64 / es;
@@ -2229,8 +2234,7 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
 
     guest.write(offset, data).await?;
 
-    let length: usize = size * ri.block_size as usize;
-    let mut data = crucible::Buffer::from_vec(vec![255; length]);
+    let mut data = crucible::Buffer::repeat(255, size, ri.block_size as usize);
 
     println!("Read  at block {:5}, len:{:7}", offset.value, data.len());
     guest.read(offset, &mut data).await?;
@@ -2383,8 +2387,8 @@ async fn write_flush_read_workload(
 
         guest.flush(None).await?;
 
-        let length: usize = size * ri.block_size as usize;
-        let mut data = crucible::Buffer::from_vec(vec![255; length]);
+        let mut data =
+            crucible::Buffer::repeat(255, size, ri.block_size as usize);
         guest.read(offset, &mut data).await?;
 
         let dl = data.into_vec();
@@ -2544,8 +2548,8 @@ async fn repair_workload(
                 guest.write(offset, data).await?;
             } else {
                 // Read
-                let length: usize = size * ri.block_size as usize;
-                let mut data = crucible::Buffer::from_vec(vec![255; length]);
+                let mut data =
+                    crucible::Buffer::repeat(255, size, ri.block_size as usize);
                 println!(
                     "{:>0width$}/{:>0width$} Read  \
                     block {:>bw$}  len {:>sw$}",
@@ -2626,13 +2630,12 @@ async fn demo_workload(
                 futures.push(future);
             } else {
                 // Read
-                let length: usize = size * ri.block_size as usize;
-
+                let block_size = ri.block_size as usize;
                 let future = {
                     let guest = guest.clone();
                     tokio::spawn(async move {
                         let mut data =
-                            crucible::Buffer::from_vec(vec![255; length]);
+                            crucible::Buffer::repeat(255, size, block_size);
                         guest.read(offset, &mut data).await?;
                         Ok(data)
                     })
@@ -2699,8 +2702,7 @@ async fn span_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     println!("Sending a flush");
     guest.flush(None).await?;
 
-    let length: usize = 2 * ri.block_size as usize;
-    let mut data = crucible::Buffer::from_vec(vec![99; length]);
+    let mut data = crucible::Buffer::repeat(99, 2, ri.block_size as usize);
 
     println!("Sending a read spanning two extents");
     guest.read(offset, &mut data).await?;
@@ -2739,8 +2741,7 @@ async fn big_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
 
         guest.flush(None).await?;
 
-        let length: usize = ri.block_size as usize;
-        let mut data = crucible::Buffer::from_vec(vec![255; length]);
+        let mut data = crucible::Buffer::repeat(255, 1, ri.block_size as usize);
         guest.read(offset, &mut data).await?;
 
         let dl = data.into_vec();
@@ -2871,7 +2872,7 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
                 futures.push(future);
             } else {
                 let mut data =
-                    crucible::Buffer::from_vec(vec![0; ri.block_size as usize]);
+                    crucible::Buffer::repeat(0, 1, ri.block_size as usize);
 
                 println!(
                     "Loop:{} send read  {} @ offset:{} len:{}",

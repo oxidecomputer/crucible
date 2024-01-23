@@ -60,6 +60,7 @@ impl BlockIO for InMemoryBlockIO {
         offset: Block,
         data: &mut Buffer,
     ) -> Result<(), CrucibleError> {
+        self.check_data_size(data.len()).await?;
         let inner = self.inner.lock().await;
 
         let start = offset.value as usize * self.block_size as usize;
@@ -79,6 +80,7 @@ impl BlockIO for InMemoryBlockIO {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
+        self.check_data_size(data.len()).await?;
         let mut inner = self.inner.lock().await;
 
         let start = offset.value as usize * self.block_size as usize;
@@ -96,6 +98,7 @@ impl BlockIO for InMemoryBlockIO {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
+        self.check_data_size(data.len()).await?;
         let mut inner = self.inner.lock().await;
 
         let start = offset.value as usize * self.block_size as usize;

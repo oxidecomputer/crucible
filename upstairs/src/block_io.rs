@@ -65,6 +65,7 @@ impl BlockIO for FileBlockIO {
         offset: Block,
         data: &mut Buffer,
     ) -> Result<(), CrucibleError> {
+        self.check_data_size(data.len()).await?;
         let start: usize = (offset.value * self.block_size) as usize;
 
         let mut file = self.file.lock().await;
@@ -82,6 +83,7 @@ impl BlockIO for FileBlockIO {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
+        self.check_data_size(data.len()).await?;
         let start = offset.value * self.block_size;
 
         let mut file = self.file.lock().await;
@@ -207,6 +209,7 @@ impl BlockIO for ReqwestBlockIO {
         offset: Block,
         data: &mut Buffer,
     ) -> Result<(), CrucibleError> {
+        self.check_data_size(data.len()).await?;
         let cc = self.next_count();
         cdt::reqwest__read__start!(|| (cc, self.uuid));
 

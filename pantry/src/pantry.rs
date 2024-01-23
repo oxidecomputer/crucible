@@ -292,7 +292,13 @@ impl PantryEntry {
             );
         }
 
-        let mut buffer = crucible::Buffer::new(size);
+        let volume_block_size =
+            self.volume.check_data_size(size).await? as usize;
+
+        let mut buffer = crucible::Buffer::new(
+            size / volume_block_size as usize,
+            volume_block_size,
+        );
 
         self.volume
             .read_from_byte_offset(offset, &mut buffer)
@@ -326,8 +332,19 @@ impl PantryEntry {
                 block_size,
             );
         }
+        if Self::MAX_CHUNK_SIZE % block_size as usize != 0 {
+            crucible_bail!(
+                InvalidNumberOfBlocks,
+                "max chunk size {} not divisible by block size {}!",
+                Self::MAX_CHUNK_SIZE,
+                block_size,
+            );
+        }
 
-        let mut data = crucible::Buffer::with_capacity(Self::MAX_CHUNK_SIZE);
+        let mut data = crucible::Buffer::with_capacity(
+            Self::MAX_CHUNK_SIZE / block_size as usize,
+            block_size as usize,
+        );
 
         for chunk in (0..size_to_validate).step_by(Self::MAX_CHUNK_SIZE) {
             let start = chunk;
@@ -335,8 +352,14 @@ impl PantryEntry {
                 start + Self::MAX_CHUNK_SIZE as u64,
                 size_to_validate,
             );
+            let length = (end - start) as usize;
 
-            data.reset((end - start) as usize);
+            // Both size_to_validate and MAX_CHUNK_SIZE are even multiples of
+            // block_size (checked above), so we should always be operating on
+            // blocks here.
+            assert_eq!(length % block_size as usize, 0);
+
+            data.reset(length / block_size as usize, block_size as usize);
 
             self.volume.read_from_byte_offset(start, &mut data).await?;
 

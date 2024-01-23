@@ -655,7 +655,7 @@ pub(crate) mod protocol_test {
             // We must tokio::spawn here because `read` will wait for the
             // response to come back before returning
             tokio::spawn(async move {
-                let mut buffer = Buffer::new(512);
+                let mut buffer = Buffer::new(1, 512);
                 harness
                     .guest
                     .read(Block::new_512(0), &mut buffer)
@@ -709,7 +709,7 @@ pub(crate) mod protocol_test {
             let harness = harness.clone();
 
             tokio::spawn(async move {
-                let mut buffer = Buffer::new(512);
+                let mut buffer = Buffer::new(1, 512);
                 harness
                     .guest
                     .read(Block::new_512(0), &mut buffer)
@@ -867,7 +867,7 @@ pub(crate) mod protocol_test {
             // We must tokio::spawn here because `read` will wait for the
             // response to come back before returning
             tokio::spawn(async move {
-                let mut buffer = Buffer::new(512);
+                let mut buffer = Buffer::new(1, 512);
                 harness
                     .guest
                     .read(Block::new_512(0), &mut buffer)
@@ -951,7 +951,7 @@ pub(crate) mod protocol_test {
                 // We must tokio::spawn here because `read` will wait for the
                 // response to come back before returning
                 tokio::spawn(async move {
-                    let mut buffer = Buffer::new(512);
+                    let mut buffer = Buffer::new(1, 512);
                     harness
                         .guest
                         .read(Block::new_512(0), &mut buffer)
@@ -1255,7 +1255,7 @@ pub(crate) mod protocol_test {
                 {
                     let harness = harness.clone();
                     tokio::spawn(async move {
-                        let mut buffer = Buffer::new(512);
+                        let mut buffer = Buffer::new(1, 512);
                         harness
                             .guest
                             .read(
@@ -1936,7 +1936,7 @@ pub(crate) mod protocol_test {
                 // We must tokio::spawn here because `read` will wait for the
                 // response to come back before returning
                 tokio::spawn(async move {
-                    let mut buffer = Buffer::new(512);
+                    let mut buffer = Buffer::new(1, 512);
                     harness
                         .guest
                         .read(Block::new_512(0), &mut buffer)
@@ -1990,7 +1990,7 @@ pub(crate) mod protocol_test {
                 // We must tokio::spawn here because `read` will wait for the
                 // response to come back before returning
                 tokio::spawn(async move {
-                    let mut buffer = Buffer::new(512);
+                    let mut buffer = Buffer::new(1, 512);
                     harness
                         .guest
                         .read(Block::new_512(0), &mut buffer)
@@ -2694,7 +2694,7 @@ pub(crate) mod protocol_test {
                 // We must tokio::spawn here because `read` will wait for the
                 // response to come back before returning
                 tokio::spawn(async move {
-                    let mut buffer = Buffer::new(512);
+                    let mut buffer = Buffer::new(1, 512);
                     harness
                         .guest
                         .read(Block::new_512(0), &mut buffer)
@@ -2943,7 +2943,7 @@ pub(crate) mod protocol_test {
         // We must tokio::spawn here because `read` will wait for the
         // response to come back before returning
         tokio::spawn(async move {
-            let mut buffer = Buffer::new(512);
+            let mut buffer = Buffer::new(1, 512);
             harness
                 .guest
                 .read(Block::new_512(0), &mut buffer)
@@ -2986,7 +2986,7 @@ pub(crate) mod protocol_test {
             // We must tokio::spawn here because `read` will wait for the
             // response to come back before returning
             tokio::spawn(async move {
-                let mut buffer = Buffer::new(512);
+                let mut buffer = Buffer::new(1, 512);
                 harness
                     .guest
                     .read(Block::new_512(0), &mut buffer)
