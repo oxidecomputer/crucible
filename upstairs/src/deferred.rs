@@ -3,15 +3,17 @@
 use std::sync::Arc;
 
 use crate::{
-    upstairs::UpstairsConfig, BlockContext, BlockReq, BlockRes, ImpactedBlocks,
+    upstairs::UpstairsConfig, BlockContext, BlockReq, BlockRes, ClientId,
+    ImpactedBlocks, Message,
 };
 use bytes::Bytes;
 use crucible_common::{integrity_hash, CrucibleError, RegionDefinition};
 use futures::{
-    future::{Either, Ready},
+    future::{ready, Either, Ready},
     stream::FuturesOrdered,
     StreamExt,
 };
+use slog::{error, Logger};
 use tokio::sync::oneshot;
 
 /// Future stored in a [`DeferredQueue`]
@@ -68,6 +70,18 @@ impl<T> DeferredQueue<T> {
         // The oneshot is managed by a worker thread, which should never be
         // dropped, so we don't expect the oneshot
         t.map(|t| t.expect("oneshot failed"))
+    }
+
+    /// Stores a new future in the queue, marking it as non-empty
+    pub fn push_immediate(&mut self, t: T) {
+        self.push_back(Either::Left(ready(Ok(t))));
+    }
+
+    /// Stores a new pending oneshot in the queue, returning the sender
+    pub fn push_oneshot(&mut self) -> oneshot::Sender<T> {
+        let (rx, tx) = oneshot::channel();
+        self.push_back(Either::Right(tx));
+        rx
     }
 
     /// Check whether the queue is known to be empty
@@ -182,5 +196,69 @@ impl DeferredWrite {
             res: self.res,
             is_write_unwritten: self.is_write_unwritten,
         })
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+#[derive(Debug)]
+pub(crate) struct DeferredMessage {
+    pub message: Message,
+
+    /// If this was a `ReadResponse`, then the hashes are stored here
+    pub hashes: Vec<Option<u64>>,
+
+    pub client_id: ClientId,
+}
+
+/// Standalone data structure which can perform decryption
+pub(crate) struct DeferredRead {
+    /// Message, which must be a `ReadResponse`
+    pub message: Message,
+
+    pub client_id: ClientId,
+    pub cfg: Arc<UpstairsConfig>,
+    pub log: Logger,
+}
+
+impl DeferredRead {
+    /// Consume the `DeferredRead` and perform decryption
+    ///
+    /// If decryption fails, then the resulting `Message` has an error in the
+    /// `responses` field, and `hashes` is empty.
+    pub fn run(mut self) -> DeferredMessage {
+        use crate::client::{
+            validate_encrypted_read_response,
+            validate_unencrypted_read_response,
+        };
+        let Message::ReadResponse { responses, .. } = &mut self.message else {
+            panic!("invalid DeferredRead");
+        };
+        let mut hashes = vec![];
+
+        if let Ok(rs) = responses {
+            for r in rs.iter_mut() {
+                let v = if let Some(ctx) = &self.cfg.encryption_context {
+                    validate_encrypted_read_response(r, ctx, &self.log)
+                } else {
+                    validate_unencrypted_read_response(r, &self.log)
+                };
+                match v {
+                    Ok(hash) => hashes.push(hash),
+                    Err(e) => {
+                        error!(self.log, "decryption failure: {e:?}");
+                        *responses = Err(e);
+                        hashes.clear();
+                        break;
+                    }
+                }
+            }
+        }
+
+        DeferredMessage {
+            client_id: self.client_id,
+            message: self.message,
+            hashes,
+        }
     }
 }

@@ -2901,6 +2901,7 @@ impl Downstairs {
         &mut self,
         client_id: ClientId,
         m: Message,
+        read_response_hashes: Vec<Option<u64>>,
         up_state: &UpstairsState,
     ) -> Result<(), CrucibleError> {
         let (upstairs_id, session_id, ds_id, read_data, extent_info) = match &m
@@ -3133,6 +3134,7 @@ impl Downstairs {
             ds_id,
             client_id,
             read_data,
+            read_response_hashes,
             up_state,
             extent_info,
         );
@@ -3181,10 +3183,18 @@ impl Downstairs {
         extent_info: Option<ExtentInfo>,
     ) -> bool {
         let was_ackable = self.ackable_work.contains(&ds_id);
+
+        // Make up dummy values for hashes, since they're not actually checked
+        // here (besides confirming that we have the correct number).
+        let hashes = match &responses {
+            Ok(r) => vec![Some(0); r.len()],
+            Err(..) => vec![],
+        };
         self.process_io_completion_inner(
             ds_id,
             client_id,
             responses,
+            hashes,
             up_state,
             extent_info,
         );
@@ -3198,6 +3208,7 @@ impl Downstairs {
         ds_id: JobId,
         client_id: ClientId,
         responses: Result<Vec<ReadResponse>, CrucibleError>,
+        read_response_hashes: Vec<Option<u64>>,
         up_state: &UpstairsState,
         extent_info: Option<ExtentInfo>,
     ) {
@@ -3226,9 +3237,17 @@ impl Downstairs {
             return;
         };
 
+        // Sanity-checking for a programmer error during offloaded decryption.
+        // If we didn't get one hash per read block, then `responses` must
+        // have been converted into `Err(..)`.
+        if let Ok(reads) = &responses {
+            assert_eq!(reads.len(), read_response_hashes.len());
+        }
+
         if self.clients[client_id].process_io_completion(
             job,
             responses,
+            read_response_hashes,
             deactivate,
             extent_info,
         ) {

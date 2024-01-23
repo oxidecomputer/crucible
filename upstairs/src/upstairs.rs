@@ -6,7 +6,8 @@ use crate::{
     control::ControlRequest,
     deadline_secs,
     deferred::{
-        DeferredBlockReq, DeferredQueue, DeferredWrite, EncryptedWrite,
+        DeferredBlockReq, DeferredMessage, DeferredQueue, DeferredRead,
+        DeferredWrite, EncryptedWrite,
     },
     downstairs::{Downstairs, DownstairsAction},
     extent_from_offset,
@@ -25,11 +26,11 @@ use std::{
     },
 };
 
-use futures::future::{pending, ready, Either};
+use futures::future::{pending, Either};
 use ringbuffer::RingBuffer;
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::mpsc,
     time::{sleep_until, Instant},
 };
 use uuid::Uuid;
@@ -196,6 +197,9 @@ pub(crate) struct Upstairs {
 
     /// Stream of post-processed `BlockOp` futures
     deferred_reqs: DeferredQueue<Option<DeferredBlockReq>>,
+
+    /// Stream of decrypted `Message` futures
+    deferred_msgs: DeferredQueue<DeferredMessage>,
 }
 
 /// Action to be taken which modifies the [`Upstairs`] state
@@ -206,6 +210,9 @@ pub(crate) enum UpstairsAction {
 
     /// A deferred block request has completed
     DeferredBlockReq(DeferredBlockReq),
+
+    /// A deferred message has arrived
+    DeferredMessage(DeferredMessage),
 
     LeakCheck,
     FlushCheck,
@@ -340,6 +347,7 @@ impl Upstairs {
             control_rx,
             control_tx,
             deferred_reqs: DeferredQueue::new(),
+            deferred_msgs: DeferredQueue::new(),
         }
     }
 
@@ -416,6 +424,16 @@ impl Upstairs {
                     }
                 }
             }
+            m = self.deferred_msgs.next(), if !self.deferred_msgs.is_empty()
+            => {
+                // The outer Option is None if the queue is empty.  If this is
+                // the case, then we check that the empty flag was set.
+                let Some(m) = m else {
+                    assert!(self.deferred_msgs.is_empty());
+                    return UpstairsAction::NoOp;
+                };
+                UpstairsAction::DeferredMessage(m)
+            }
             _ = sleep_until(self.leak_deadline) => {
                 UpstairsAction::LeakCheck
             }
@@ -444,6 +462,9 @@ impl Upstairs {
             }
             UpstairsAction::DeferredBlockReq(req) => {
                 self.apply_guest_request(req).await;
+            }
+            UpstairsAction::DeferredMessage(m) => {
+                self.on_client_message(m).await;
             }
             UpstairsAction::LeakCheck => {
                 const LEAK_MS: usize = 1000;
@@ -563,6 +584,20 @@ impl Upstairs {
             self.apply(UpstairsAction::DeferredBlockReq(req)).await;
         }
         assert!(self.deferred_reqs.is_empty());
+    }
+
+    /// Helper function to await all deferred messages
+    ///
+    /// This is only useful in tests because it **only** processes deferred
+    /// messages (doing no other Upstairs work).  In production, there
+    /// could be other events that need handling simultaneously, so we do not
+    /// want to stall the Upstairs.
+    #[cfg(test)]
+    async fn await_deferred_msgs(&mut self) {
+        while let Some(msg) = self.deferred_msgs.next().await {
+            self.apply(UpstairsAction::DeferredMessage(msg)).await;
+        }
+        assert!(self.deferred_msgs.is_empty());
     }
 
     /// Check outstanding IOops for each downstairs.
@@ -802,9 +837,8 @@ impl Upstairs {
             // have to keep using it for subsequent requests (even ones that are
             // not writes) to preserve FIFO ordering
             _ if !self.deferred_reqs.is_empty() => {
-                self.deferred_reqs.push_back(Either::Left(ready(Ok(Some(
-                    DeferredBlockReq::Other(req),
-                )))));
+                self.deferred_reqs
+                    .push_immediate(Some(DeferredBlockReq::Other(req)));
             }
             // Otherwise, we can apply a non-write operation immediately, saving
             // a trip through the FuturesUnordered
@@ -1282,12 +1316,11 @@ impl Upstairs {
         if let Some(w) =
             self.compute_deferred_write(offset, data, res, is_write_unwritten)
         {
-            let (tx, rx) = oneshot::channel();
+            let tx = self.deferred_reqs.push_oneshot();
             rayon::spawn(move || {
                 let out = w.run().map(DeferredBlockReq::Write);
                 let _ = tx.send(out);
             });
-            self.deferred_reqs.push_back(Either::Right(rx));
         }
     }
 
@@ -1421,7 +1454,62 @@ impl Upstairs {
                 c.halt_io_task(ClientStopReason::Timeout);
             }
             ClientAction::Response(m) => {
-                self.on_client_message(client_id, m).await;
+                // We have received a message, so reset the timeout watchdog for
+                // this particular client.
+                self.downstairs.clients[client_id].reset_timeout();
+
+                // Defer the message if it's a (large) read that needs
+                // decryption, or there are other deferred messages in the queue
+                // (to preserve order).  Otherwise, handle it immediately.
+                if let Message::ReadResponse { responses, .. } = &m {
+                    // Any read larger than this constant should be deferred to
+                    // the worker pool; smaller reads can be processed in-thread
+                    // (since the overhead isn't worth it)
+                    const MIN_DEFER_SIZE_BYTES: u64 = 8192;
+                    let should_defer = !self.deferred_msgs.is_empty()
+                        || match responses {
+                            Ok(rs) => {
+                                // Find the number of bytes being decrypted
+                                let response_size = rs.len() as u64
+                                    * self
+                                        .ddef
+                                        .get_def()
+                                        .map(|b| b.block_size())
+                                        .unwrap_or(0);
+
+                                response_size > MIN_DEFER_SIZE_BYTES
+                            }
+                            Err(_) => false,
+                        };
+
+                    let dr = DeferredRead {
+                        message: m,
+                        client_id,
+                        cfg: self.cfg.clone(),
+                        log: self.log.new(o!("job" => "decrypt")),
+                    };
+                    if should_defer {
+                        let tx = self.deferred_msgs.push_oneshot();
+                        rayon::spawn(move || {
+                            let out = dr.run();
+                            let _ = tx.send(out);
+                        });
+                    } else {
+                        // Do decryption right here!
+                        self.on_client_message(dr.run()).await;
+                    }
+                } else {
+                    let dm = DeferredMessage {
+                        message: m,
+                        hashes: vec![],
+                        client_id,
+                    };
+                    if self.deferred_msgs.is_empty() {
+                        self.on_client_message(dm).await;
+                    } else {
+                        self.deferred_msgs.push_immediate(dm);
+                    }
+                }
             }
             ClientAction::TaskStopped(r) => {
                 self.on_client_task_stopped(client_id, r);
@@ -1437,10 +1525,8 @@ impl Upstairs {
         }
     }
 
-    async fn on_client_message(&mut self, client_id: ClientId, m: Message) {
-        // We have received a message, so reset the timeout watchdog for this
-        // particular client.
-        self.downstairs.clients[client_id].reset_timeout();
+    async fn on_client_message(&mut self, m: DeferredMessage) {
+        let (client_id, m, hashes) = (m.client_id, m.message, m.hashes);
         match m {
             Message::Imok => {
                 // Nothing to do here, glad to hear that you're okay
@@ -1460,6 +1546,7 @@ impl Upstairs {
                 let r = self.downstairs.process_io_completion(
                     client_id,
                     m,
+                    hashes,
                     &self.state,
                 );
                 if let Err(e) = r {
@@ -3634,6 +3721,7 @@ pub(crate) mod test {
             }],
         }]);
 
+        // Because this read is small, it happens right away
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
             client_id: ClientId::new(0),
             action: ClientAction::Response(Message::ReadResponse {
@@ -3644,9 +3732,169 @@ pub(crate) mod test {
             }),
         }))
         .await;
-        // no panic, great work everyone
+
+        // This was a small read and handled in-line
+        assert!(up.deferred_msgs.is_empty());
+        // No panic, great job everyone
     }
 
+    #[tokio::test]
+    async fn good_deferred_decryption() {
+        let mut up = make_encrypted_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        let blocks = 16384 / 512;
+        let data = Buffer::new(512 * blocks);
+        let offset = Block::new_512(7);
+        let (_tx, res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Read { offset, data },
+            res,
+        }))
+        .await;
+
+        let mut data = Vec::from([1u8; 512]);
+
+        let (nonce, tag, hash) = up
+            .cfg
+            .encryption_context
+            .as_ref()
+            .unwrap()
+            .encrypt_in_place(&mut data)
+            .unwrap();
+
+        let nonce: [u8; 12] = nonce.into();
+        let tag: [u8; 16] = tag.into();
+
+        // Build up the long read response, which should be long enough to
+        // trigger the deferred read path.
+        let mut responses = vec![];
+        for i in 0..blocks {
+            responses.push(ReadResponse {
+                eid: 0,
+                offset: Block::new_512(offset.value + i as u64),
+                data: BytesMut::from(&data[..]),
+                block_contexts: vec![BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext { nonce, tag },
+                    ),
+                    hash,
+                }],
+            });
+        }
+        let responses = Ok(responses);
+
+        // This defers decryption to a separate thread, because the read is
+        // large.  We'll check that the job is deferred below.
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id: ClientId::new(0),
+            action: ClientAction::Response(Message::ReadResponse {
+                upstairs_id: up.cfg.upstairs_id,
+                session_id: up.cfg.session_id,
+                job_id: JobId(1000),
+                responses,
+            }),
+        }))
+        .await;
+
+        // This was a large read and was deferred
+        assert!(!up.deferred_msgs.is_empty());
+
+        up.await_deferred_msgs().await;
+        // No panic, great job everyone
+    }
+
+    #[tokio::test]
+    async fn bad_deferred_decryption_means_panic() {
+        let mut up = make_encrypted_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        let blocks = 16384 / 512;
+        let data = Buffer::new(512 * blocks);
+        let offset = Block::new_512(7);
+        let (_tx, res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Read { offset, data },
+            res,
+        }))
+        .await;
+
+        // fake read response from downstairs that will fail decryption
+        let mut data = Vec::from([1u8; 512]);
+
+        let (nonce, tag, _) = up
+            .cfg
+            .encryption_context
+            .as_ref()
+            .unwrap()
+            .encrypt_in_place(&mut data)
+            .unwrap();
+
+        let nonce: [u8; 12] = nonce.into();
+        let mut tag: [u8; 16] = tag.into();
+
+        // alter tag
+        if tag[3] == 0xFF {
+            tag[3] = 0x00;
+        } else {
+            tag[3] = 0xFF;
+        }
+
+        // compute integrity hash after alteration above! It should still
+        // validate
+        let hash = integrity_hash(&[&nonce, &tag, &data]);
+
+        // Build up the long read response, which should be long enough to
+        // trigger the deferred read path.
+        let mut responses = vec![];
+        for i in 0..blocks {
+            responses.push(ReadResponse {
+                eid: 0,
+                offset: Block::new_512(offset.value + i as u64),
+                data: BytesMut::from(&data[..]),
+                block_contexts: vec![BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext { nonce, tag },
+                    ),
+                    hash,
+                }],
+            });
+        }
+        let responses = Ok(responses);
+
+        // This defers decryption to a separate thread, because the read is
+        // large.  This won't panic, because decryption failing just populates
+        // the message with an error.
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id: ClientId::new(0),
+            action: ClientAction::Response(Message::ReadResponse {
+                upstairs_id: up.cfg.upstairs_id,
+                session_id: up.cfg.session_id,
+                job_id: JobId(1000),
+                responses,
+            }),
+        }))
+        .await;
+
+        // Prepare to receive the message with an invalid tag
+        let fut = up.await_deferred_msgs();
+
+        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+        assert!(result.is_err());
+        let r = result
+            .as_ref()
+            .unwrap_err()
+            .downcast_ref::<String>()
+            .unwrap();
+        assert!(
+            r.contains("DecryptionError"),
+            "panic for the wrong reason: {r}"
+        );
+    }
+
+    /// Confirm that an offloaded decryption also panics (eventually)
     #[tokio::test]
     async fn bad_decryption_means_panic() {
         let mut up = make_encrypted_upstairs();
