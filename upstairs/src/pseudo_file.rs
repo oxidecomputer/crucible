@@ -102,15 +102,76 @@ impl IOSpan {
     }
 
     #[instrument]
-    pub fn read_from_blocks_into_buffer(&self, data: &mut [u8]) {
+    pub fn read_from_blocks_into_buffer(&self, mut data: &mut [u8]) {
         assert_eq!(data.len(), self.sz as usize);
-        self.buffer.read(self.phase as usize, data);
+
+        if self.phase % self.block_size == 0
+            && data.len() % self.block_size as usize == 0
+        {
+            self.buffer.read(self.phase as usize, data);
+        } else {
+            let mut pos = self.phase as usize;
+            let bs = self.block_size as usize;
+            while !data.is_empty() {
+                if pos % bs == 0 && data.len() >= bs {
+                    // Read as many integral blocks as we can get
+                    let n = (data.len() / bs) * bs;
+                    let (chunk, next) = data.split_at_mut(n);
+                    self.buffer.read(pos, chunk);
+                    data = next;
+                    pos += n;
+                } else {
+                    let mut scratch = vec![0u8; bs];
+                    self.buffer.read((pos / bs) * bs, &mut scratch);
+
+                    // Patch the relevant chunk from the incoming data
+                    let n = (self.sz as usize - (pos - self.phase as usize))
+                        .min(bs - (pos % bs));
+                    let (chunk, next) = data.split_at_mut(n);
+                    chunk.copy_from_slice(&scratch[pos % bs..][..n]);
+                    data = next;
+                    pos += n;
+                }
+            }
+        }
     }
 
     #[instrument]
-    pub fn write_from_buffer_into_blocks(&mut self, data: &[u8]) {
+    pub fn write_from_buffer_into_blocks(&mut self, mut data: &[u8]) {
         assert_eq!(data.len(), self.sz as usize);
-        self.buffer.write(self.phase as usize, data);
+        if self.phase % self.block_size == 0
+            && data.len() % self.block_size as usize == 0
+        {
+            self.buffer.write(self.phase as usize, data);
+        } else {
+            let mut pos = self.phase as usize;
+            let bs = self.block_size as usize;
+            while !data.is_empty() {
+                if pos % bs == 0 && data.len() >= bs {
+                    // Write as many integral blocks as we can get
+                    let n = (data.len() / bs) * bs;
+                    let (chunk, next) = data.split_at(n);
+                    self.buffer.write(pos, chunk);
+                    data = next;
+                    pos += n;
+                } else {
+                    // Read the relevant block from the buffer
+                    let mut scratch = vec![0u8; bs];
+                    self.buffer.read((pos / bs) * bs, &mut scratch);
+
+                    // Patch the relevant chunk from the incoming data
+                    let n = (self.sz as usize - (pos - self.phase as usize))
+                        .min(bs - (pos % bs));
+                    let (chunk, next) = data.split_at(n);
+                    scratch[pos % bs..][..n].copy_from_slice(chunk);
+
+                    // Write it back to the buffer
+                    self.buffer.write((pos / bs) * bs, &scratch);
+                    data = next;
+                    pos += n;
+                }
+            }
+        }
     }
 }
 
