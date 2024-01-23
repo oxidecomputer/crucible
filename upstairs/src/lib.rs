@@ -1471,7 +1471,6 @@ impl fmt::Display for AckStatus {
 #[must_use]
 #[derive(Debug, PartialEq, Default)]
 pub struct Buffer {
-    len: usize,
     data: Vec<u8>,
     owned: Vec<bool>,
 }
@@ -1480,7 +1479,6 @@ impl Buffer {
     pub fn from_vec(data: Vec<u8>) -> Buffer {
         let len = data.len();
         Buffer {
-            len,
             data,
             owned: vec![false; len],
         }
@@ -1488,7 +1486,6 @@ impl Buffer {
 
     pub fn new(len: usize) -> Buffer {
         Buffer {
-            len,
             data: vec![0; len],
             owned: vec![false; len],
         }
@@ -1498,11 +1495,7 @@ impl Buffer {
         let data = Vec::with_capacity(capacity);
         let owned = Vec::with_capacity(capacity);
 
-        Buffer {
-            len: 0,
-            data,
-            owned,
-        }
+        Buffer { data, owned }
     }
 
     pub fn from_slice(buf: &[u8]) -> Buffer {
@@ -1521,11 +1514,11 @@ impl Buffer {
     }
 
     pub fn len(&self) -> usize {
-        self.len
+        self.data.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.data.is_empty()
     }
 
     pub fn write(&mut self, offset: usize, data: &[u8]) {
@@ -1565,9 +1558,9 @@ impl Buffer {
 
     pub fn read(&self, offset: usize, data: &mut [u8]) {
         assert!(offset + data.len() <= self.data.len());
-        for i in 0..data.len() {
+        for (i, d) in data.iter_mut().enumerate() {
             if self.owned[offset + i] {
-                data[i] = self.data[offset + i];
+                *d = self.data[offset + i];
             }
         }
     }
@@ -1598,10 +1591,8 @@ impl Buffer {
         self.data.clear();
         self.owned.clear();
 
-        self.len = len;
-
-        self.data.resize(self.len, 0u8);
-        self.owned.resize(self.len, false);
+        self.data.resize(len, 0u8);
+        self.owned.resize(len, false);
     }
 }
 
