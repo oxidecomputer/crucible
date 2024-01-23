@@ -4,7 +4,7 @@
 #![allow(clippy::mutex_atomic)]
 
 use std::clone::Clone;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::io::{Read as _, Result as IOResult, Seek, SeekFrom, Write as _};
@@ -25,7 +25,7 @@ use ringbuffer::{AllocRingBuffer, RingBuffer};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use slog::{error, info, o, warn, Logger};
-use tokio::sync::{mpsc, oneshot, Mutex, MutexGuard, Notify, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, Notify, RwLock};
 use tokio::time::Instant;
 use tracing::{instrument, span, Level};
 use usdt::register_probes;
@@ -48,7 +48,7 @@ pub mod block_io;
 pub use block_io::{FileBlockIO, ReqwestBlockIO};
 
 pub mod block_req;
-pub(crate) use block_req::{BlockReq, BlockReqWaiter, BlockRes};
+pub(crate) use block_req::{BlockReq, BlockReqReply, BlockReqWaiter, BlockRes};
 
 mod mend;
 pub use mend::{DownstairsMend, ExtentFix, RegionMetadata};
@@ -105,7 +105,7 @@ pub trait BlockIO: Sync {
     async fn read(
         &self,
         offset: Block,
-        data: Buffer,
+        data: &mut Buffer,
     ) -> Result<(), CrucibleError>;
 
     async fn write(
@@ -165,7 +165,7 @@ pub trait BlockIO: Sync {
     async fn read_from_byte_offset(
         &self,
         offset: u64,
-        data: Buffer,
+        data: &mut Buffer,
     ) -> Result<(), CrucibleError> {
         if !self.query_is_active().await? {
             return Err(CrucibleError::UpstairsInactive);
@@ -1448,32 +1448,60 @@ impl fmt::Display for AckStatus {
 /*
  * Provides a shared Buffer that Read operations will write into.
  *
- * Originally BytesMut was used here, but it didn't guarantee that memory
- * was shared between cloned BytesMut objects. Additionally, we added the
- * idea of ownership and that necessitated another field.
+ * Originally BytesMut was used here, but it didn't guarantee that memory was
+ * shared between cloned BytesMut objects. Additionally, we added the idea of
+ * ownership and that necessitated another field.
+ *
+ * Ownership of a block is defined as true if that block has been written to: we
+ * say a block is "owned" if the bytes were written to by something, rather than
+ * having been initialized to zero. For an Upstairs, a block is owned if it was
+ * returned with a non-zero number of block contexts, encrypted or not. This is
+ * important when using authenticated encryption to distinguish between zeroes
+ * that the Guest has written and blocks that were zero to begin with.
+ *
+ * It's safe to set ownership to `true` if there's no persistence of ownership
+ * information. Persistence is required otherwise: if a particular `BlockIO`
+ * implementation is dropped and recreated, the ownership should not be lost as
+ * a result.
+ *
+ * Because persistence is required, ownership will always come from the
+ * Downstairs (or other `BlockIO` implementations that persist ownership
+ * information) and be propagated "up".
  */
-#[derive(Clone, Debug)]
+#[must_use]
+#[derive(Debug, PartialEq, Default)]
 pub struct Buffer {
     len: usize,
-    data: Arc<Mutex<Vec<u8>>>,
-    owned: Arc<Mutex<Vec<bool>>>,
+    data: Vec<u8>,
+    owned: Vec<bool>,
 }
 
 impl Buffer {
-    pub fn from_vec(vec: Vec<u8>) -> Buffer {
-        let len = vec.len();
+    pub fn from_vec(data: Vec<u8>) -> Buffer {
+        let len = data.len();
         Buffer {
             len,
-            data: Arc::new(Mutex::new(vec)),
-            owned: Arc::new(Mutex::new(vec![false; len])),
+            data,
+            owned: vec![false; len],
         }
     }
 
     pub fn new(len: usize) -> Buffer {
         Buffer {
             len,
-            data: Arc::new(Mutex::new(vec![0; len])),
-            owned: Arc::new(Mutex::new(vec![false; len])),
+            data: vec![0; len],
+            owned: vec![false; len],
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> Buffer {
+        let data = Vec::with_capacity(capacity);
+        let owned = Vec::with_capacity(capacity);
+
+        Buffer {
+            len: 0,
+            data,
+            owned,
         }
     }
 
@@ -1486,16 +1514,10 @@ impl Buffer {
         Buffer::from_vec(vec)
     }
 
-    /// Attempt to extract the underlying `Vec<u8>` bearing buffered data.
-    ///
-    /// Will succeed if no other references (clones) to the Buffer exist,
-    /// otherwise will return the Buffer as it still exists.
-    pub fn into_vec(self) -> Result<Vec<u8>, Self> {
-        let Buffer { len, data, owned } = self;
-        match Arc::try_unwrap(data) {
-            Ok(buf) => Ok(buf.into_inner()),
-            Err(data) => Err(Buffer { len, data, owned }),
-        }
+    /// Extract the underlying `Vec<u8>` bearing buffered data.
+    #[must_use]
+    pub fn into_vec(self) -> Vec<u8> {
+        self.data
     }
 
     pub fn len(&self) -> usize {
@@ -1506,56 +1528,168 @@ impl Buffer {
         self.len == 0
     }
 
-    pub async fn as_vec(&self) -> MutexGuard<'_, Vec<u8>> {
-        self.data.lock().await
+    pub fn write(&mut self, offset: usize, data: &[u8]) {
+        assert!(offset + data.len() <= self.data.len());
+
+        self.data[offset..][..data.len()].copy_from_slice(data);
+        self.owned[offset..][..data.len()].fill(true);
     }
 
-    pub async fn owned_vec(&self) -> MutexGuard<'_, Vec<bool>> {
-        self.owned.lock().await
+    pub fn write_with_ownership(
+        &mut self,
+        offset: usize,
+        data: &[u8],
+        owned: &[bool],
+    ) {
+        assert!(offset + data.len() <= self.data.len());
+        for i in 0..data.len() {
+            if owned[i] {
+                self.data[offset + i] = data[i];
+                self.owned[offset + i] = true;
+            }
+        }
+    }
+
+    pub fn write_read_response(
+        &mut self,
+        offset: usize,
+        response: &ReadResponse,
+    ) {
+        assert!(offset + response.data.len() <= self.data.len());
+        if !response.block_contexts.is_empty() {
+            self.data[offset..][..response.data.len()]
+                .copy_from_slice(&response.data);
+            self.owned[offset..][..response.data.len()].fill(true);
+        }
+    }
+
+    pub fn read(&self, offset: usize, data: &mut [u8]) {
+        assert!(offset + data.len() <= self.data.len());
+        for i in 0..data.len() {
+            if self.owned[offset + i] {
+                data[i] = self.data[offset + i];
+            }
+        }
+    }
+
+    pub fn into_bytes(self) -> Bytes {
+        Bytes::from(self.data)
+    }
+
+    /// Consume and layer buffer contents on top of this one
+    pub fn eat(&mut self, offset: usize, buffer: &mut Buffer) {
+        for (i, (data, owned)) in
+            std::iter::zip(&buffer.data, &buffer.owned).enumerate()
+        {
+            if *owned {
+                self.data[offset + i] = *data;
+                self.owned[offset + i] = true;
+            }
+        }
+
+        buffer.reset(0);
+    }
+
+    pub fn owned_ref(&self) -> &[bool] {
+        &self.owned
+    }
+
+    pub fn reset(&mut self, len: usize) {
+        self.data.clear();
+        self.owned.clear();
+
+        self.len = len;
+
+        self.data.resize(self.len, 0u8);
+        self.owned.resize(self.len, false);
     }
 }
 
-#[tokio::test]
-async fn test_buffer_len() {
+impl std::ops::Deref for Buffer {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+#[test]
+fn test_buffer_sane() {
+    const BLOCK_SIZE: usize = 512;
+    let mut data = Buffer::new(1024);
+
+    data.write(0, &[99u8; BLOCK_SIZE]);
+
+    let mut read_data = vec![0u8; BLOCK_SIZE];
+    data.read(0, &mut read_data);
+
+    assert_eq!(&read_data[..], &data[..BLOCK_SIZE]);
+    assert_eq!(&data[..BLOCK_SIZE], &[99u8; BLOCK_SIZE]);
+}
+
+#[test]
+fn test_buffer_len() {
     const READ_SIZE: usize = 512;
     let data = Buffer::from_slice(&[0x99; READ_SIZE]);
     assert_eq!(data.len(), READ_SIZE);
 }
 
-#[tokio::test]
-async fn test_buffer_len_after_clone() {
-    const READ_SIZE: usize = 512;
-    let data = Buffer::from_slice(&[0x99; READ_SIZE]);
-    assert_eq!(data.len(), READ_SIZE);
-
-    #[allow(clippy::redundant_clone)]
-    let new_buffer = data.clone();
-    assert_eq!(new_buffer.len(), READ_SIZE);
-    assert_eq!(data.len(), READ_SIZE);
-}
-
-#[tokio::test]
-#[should_panic(
-    expected = "index out of bounds: the len is 512 but the index is 512"
-)]
-async fn test_buffer_len_index_overflow() {
-    const READ_SIZE: usize = 512;
-    let data = Buffer::from_slice(&[0x99; READ_SIZE]);
-    assert_eq!(data.len(), READ_SIZE);
-
-    let mut vec = data.as_vec().await;
-    assert_eq!(vec.len(), 512);
-
-    for i in 0..(READ_SIZE + 1) {
-        vec[i] = 0x99;
-    }
-}
-
-#[tokio::test]
-async fn test_buffer_len_over_block_size() {
+#[test]
+fn test_buffer_len_over_block_size() {
     const READ_SIZE: usize = 600;
     let data = Buffer::from_slice(&[0x99; READ_SIZE]);
     assert_eq!(data.len(), READ_SIZE);
+}
+
+#[test]
+fn test_buffer_writes() {
+    const READ_SIZE: usize = 512;
+    let mut data = Buffer::new(READ_SIZE);
+
+    assert_eq!(&data[..], &vec![0u8; 512]);
+
+    data.write(64, &[1u8; 64]);
+
+    assert_eq!(&data[0..64], &vec![0u8; 64]);
+    assert_eq!(&data[64..128], &vec![1u8; 64]);
+    assert_eq!(&data[128..], &vec![0u8; 512 - 64 - 64]);
+
+    data.write(128, &[7u8; 128]);
+
+    assert_eq!(&data[0..64], &vec![0u8; 64]);
+    assert_eq!(&data[64..128], &vec![1u8; 64]);
+    assert_eq!(&data[128..256], &vec![7u8; 128]);
+    assert_eq!(&data[256..], &vec![0u8; 256]);
+}
+
+#[test]
+fn test_buffer_eats() {
+    const READ_SIZE: usize = 512;
+    let mut data = Buffer::new(READ_SIZE);
+
+    assert_eq!(&data[..], &vec![0u8; 512]);
+
+    let mut buffer = Buffer::new(READ_SIZE);
+    buffer.eat(0, &mut data);
+
+    assert_eq!(&buffer[..], &vec![0u8; 512]);
+
+    let mut data = Buffer::new(READ_SIZE);
+    data.write(64, &[1u8; 64]);
+    buffer.eat(0, &mut data);
+
+    assert_eq!(&buffer[0..64], &vec![0u8; 64]);
+    assert_eq!(&buffer[64..128], &vec![1u8; 64]);
+    assert_eq!(&buffer[128..], &vec![0u8; 512 - 64 - 64]);
+
+    let mut data = Buffer::new(READ_SIZE);
+    data.write(128, &[7u8; 128]);
+    buffer.eat(0, &mut data);
+
+    assert_eq!(&buffer[0..64], &vec![0u8; 64]);
+    assert_eq!(&buffer[64..128], &vec![1u8; 64]);
+    assert_eq!(&buffer[128..256], &vec![7u8; 128]);
+    assert_eq!(&buffer[256..], &vec![0u8; 256]);
 }
 
 /*
@@ -1711,26 +1845,15 @@ async fn test_return_iops() {
 #[derive(Debug)]
 struct GtoS {
     /*
-     * Jobs we have submitted to the storage side of the upstairs process to
-     * send on to the downstairs.  The key is the ds_id number in the hashmap
-     * for downstairs work.
+     * Job we sent on to the downstairs.
      */
-    submitted: HashSet<JobId>,
-    completed: Vec<JobId>,
+    ds_id: JobId,
 
     /*
-     * These buffers are provided by the guest request. If this is a read,
+     * Buffer provided by the guest request. If this is a read,
      * data will be written here.
      */
-    guest_buffers: HashMap<JobId, Buffer>,
-
-    /*
-     * When we have an IO between the guest and crucible, it's possible
-     * it will be broken into two smaller requests if the range happens
-     * to cross an extent boundary. This hashmap is a list of those
-     * buffers with the key being the downstairs request ID.
-     */
-    downstairs_responses: HashMap<JobId, Vec<ReadResponse>>,
+    guest_buffer: Option<Buffer>,
 
     /*
      * Notify the caller waiting on the job to finish.
@@ -1752,29 +1875,9 @@ impl GtoS {
         guest_buffer: Option<Buffer>,
         res: Option<BlockRes>,
     ) -> GtoS {
-        let mut submitted = HashSet::new();
-        submitted.insert(ds_id);
-
-        let mut guest_buffers = HashMap::new();
-        if let Some(guest_buffer) = guest_buffer {
-            guest_buffers.insert(ds_id, guest_buffer);
-        }
-
-        GtoS::new_bulk(submitted, guest_buffers, res)
-    }
-
-    /// Create a new GtoS object where one Guest IO request maps to many
-    /// downstairs operations.
-    pub fn new_bulk(
-        submitted: HashSet<JobId>,
-        guest_buffers: HashMap<JobId, Buffer>,
-        res: Option<BlockRes>,
-    ) -> GtoS {
         GtoS {
-            submitted,
-            completed: Vec::new(),
-            guest_buffers,
-            downstairs_responses: HashMap::new(),
+            ds_id,
+            guest_buffer,
             res,
         }
     }
@@ -1782,52 +1885,50 @@ impl GtoS {
     /*
      * When all downstairs jobs have completed, and all buffers have been
      * attached to the GtoS struct, we can do the final copy of the data
-     * from upstairs memory back to the guest's memory.
+     * from upstairs memory back to the guest's memory. Notify corresponding
+     * BlockReqWaiter if required
      */
     #[instrument]
-    async fn transfer(&mut self) {
-        assert!(!self.completed.is_empty());
-
-        for ds_id in &self.completed {
-            if let Some(guest_buffer) = self.guest_buffers.remove(ds_id) {
+    fn transfer_and_notify(
+        self,
+        downstairs_responses: Option<Vec<ReadResponse>>,
+        result: Result<(), CrucibleError>,
+    ) {
+        let guest_buffer = if let Some(mut guest_buffer) = self.guest_buffer {
+            if let Some(downstairs_responses) = downstairs_responses {
                 let mut offset = 0;
-                let mut vec = guest_buffer.as_vec().await;
-                let mut owned_vec = guest_buffer.owned_vec().await;
 
-                /*
-                 * Should this panic?  If the caller is requesting a transfer,
-                 * the guest_buffer should exist. If it does not exist, then
-                 * either there is a real problem, or the operation was a write
-                 * or flush and why are we requesting a transfer for those.
-                 */
-                let responses =
-                    self.downstairs_responses.remove(ds_id).unwrap();
-
-                for response in responses {
+                // XXX don't do if result.is_err()?
+                for response in &downstairs_responses {
                     // Copy over into guest memory.
                     {
                         let _ignored =
                             span!(Level::TRACE, "copy to guest buffer")
                                 .entered();
 
-                        for i in &response.data {
-                            vec[offset] = *i;
-                            owned_vec[offset] =
-                                !response.block_contexts.is_empty();
-                            offset += 1;
-                        }
+                        guest_buffer.write_read_response(offset, response);
+                        offset += response.data.len();
                     }
                 }
+            } else {
+                /*
+                 * Should this panic?  If the caller is requesting a transfer,
+                 * the guest_buffer should exist. If it does not exist, then
+                 * either there is a real problem, or the operation was a write
+                 * or flush and why are we requesting a transfer for those.
+                 *
+                 * However, dropping a Guest before receiving a downstairs
+                 * response will trigger this, so eat it for now.
+                 */
             }
-        }
-    }
 
-    /*
-     * Notify corresponding BlockReqWaiter
-     */
-    fn notify(self, result: Result<(), CrucibleError>) {
+            Some(guest_buffer)
+        } else {
+            None
+        };
+
         /*
-         * If present, send the result to the guest.  If this is a flush
+         * If present, send the result to the guest. If this is a flush
          * issued on behalf of crucible, then there is no place to send
          * a result to.
          *
@@ -1838,18 +1939,19 @@ impl GtoS {
          */
         if let Some(res) = self.res {
             match result {
-                Ok(_) => res.send_ok(),
-                Err(e) => res.send_err(e),
+                Ok(_) => match guest_buffer {
+                    Some(guest_buffer) => res.send_ok_with_buffer(guest_buffer),
+                    None => res.send_ok(),
+                },
+
+                Err(e) => match guest_buffer {
+                    Some(guest_buffer) => {
+                        res.send_err_with_buffer(guest_buffer, e)
+                    }
+                    None => res.send_err(e),
+                },
             }
         }
-    }
-
-    pub async fn finalize(mut self, result: Result<(), CrucibleError>) {
-        if result.is_ok() {
-            self.transfer().await;
-        }
-
-        self.notify(result);
     }
 }
 
@@ -1917,77 +2019,21 @@ impl GuestWork {
         result: Result<(), CrucibleError>,
         log: &Logger,
     ) {
-        /*
-         * A gw_id that already finished and results were sent back to
-         * the guest could still have an outstanding ds_id.
-         */
-        let gtos_job_done = if let Some(gtos_job) = self.active.get_mut(&gw_id)
-        {
+        if let Some(gtos_job) = self.active.remove(&gw_id) {
+            assert_eq!(gtos_job.ds_id, ds_id);
+
             /*
-             * If the ds_id is on the submitted list, then we will take it
-             * off and, if it is a read, add the read result
-             * buffer to the gtos job structure for later
-             * copying.
+             * Copy (if present) read data back to the guest buffer they
+             * provided to us, and notify any waiters.
              */
-            if gtos_job.submitted.remove(&ds_id) {
-                if let Some(data) = data {
-                    /*
-                     * The first read buffer will become the source for the
-                     * final response back to the guest. This buffer will be
-                     * combined with other buffers if the upstairs request
-                     * required multiple jobs.
-                     */
-                    if gtos_job
-                        .downstairs_responses
-                        .insert(ds_id, data)
-                        .is_some()
-                    {
-                        /*
-                         * Only the first successful read should fill the
-                         * slot in the downstairs buffer for a ds_id. If
-                         * more than one is trying to, then we have a
-                         * problem.
-                         */
-                        panic!(
-                            "gw_id:{} read buffer already present for {}",
-                            gw_id, ds_id
-                        );
-                    }
-                }
+            gtos_job.transfer_and_notify(data, result);
 
-                gtos_job.completed.push(ds_id);
-            } else {
-                error!(log, "gw_id:{} ({}) already removed???", gw_id, ds_id);
-                assert!(gtos_job.completed.contains(&ds_id));
-                panic!(
-                    "{} Attempting to complete ds_id {} we already completed",
-                    gw_id, ds_id
-                );
-            }
-
-            gtos_job.submitted.is_empty()
+            self.completed.push(gw_id);
         } else {
             /*
              * XXX This is just so I can see if ever does happen.
              */
             panic!("gw_id {} for job {} not on active list", gw_id, ds_id);
-        };
-
-        if gtos_job_done {
-            if let Some(gtos_job) = self.active.remove(&gw_id) {
-                /*
-                 * Copy (if present) read data back to the guest buffer they
-                 * provided to us, and notify any waiters.
-                 */
-                gtos_job.finalize(result).await;
-
-                self.completed.push(gw_id);
-            } else {
-                /*
-                 * XXX This is just so I can see if ever does happen.
-                 */
-                panic!("gw_id {} for remove not on active list", gw_id);
-            }
         }
     }
 }
@@ -2199,7 +2245,7 @@ impl Guest {
         brw
     }
 
-    async fn send_and_wait(&self, op: BlockOp) -> Result<(), CrucibleError> {
+    async fn send_and_wait(&self, op: BlockOp) -> BlockReqReply {
         let brw = self.send(op).await;
         brw.wait(&self.log).await
     }
@@ -2370,10 +2416,13 @@ impl Guest {
     pub async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
         let data = Arc::new(Mutex::new(Block::new(0, 9)));
         let extent_query = BlockOp::QueryExtentSize { data: data.clone() };
-        self.send_and_wait(extent_query).await?;
 
-        let result = *data.lock().await;
-        Ok(result)
+        let reply = self.send_and_wait(extent_query).await;
+        assert!(reply.buffer.is_none());
+        reply.result?;
+
+        let es = *data.lock().await;
+        Ok(es)
     }
 
     pub async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
@@ -2385,7 +2434,10 @@ impl Guest {
 
         let data = Arc::new(Mutex::new(wc));
         let qwq = BlockOp::QueryWorkQueue { data: data.clone() };
-        self.send_and_wait(qwq).await?;
+
+        let reply = self.send_and_wait(qwq).await;
+        assert!(reply.buffer.is_none());
+        reply.result?;
 
         let wc = data.lock().await;
         Ok(*wc)
@@ -2401,11 +2453,16 @@ impl Guest {
             self.log,
             "The guest has requested activation with gen:{}", gen
         );
-        waiter.wait(&self.log).await?;
+
+        let reply = waiter.wait(&self.log).await;
+        assert!(reply.buffer.is_none());
+        reply.result?;
+
         info!(
             self.log,
             "The guest has finished waiting for activation with:{}", gen
         );
+
         Ok(())
     }
 
@@ -2425,32 +2482,44 @@ impl BlockIO for Guest {
     async fn activate(&self) -> Result<(), CrucibleError> {
         let waiter = self.send(BlockOp::GoActive).await;
         info!(self.log, "The guest has requested activation");
-        waiter.wait(&self.log).await?;
+
+        let reply = waiter.wait(&self.log).await;
+        assert!(reply.buffer.is_none());
+        reply.result?;
+
         info!(self.log, "The guest has finished waiting for activation");
         Ok(())
     }
 
     /// Disable any more IO from this guest and deactivate the downstairs.
     async fn deactivate(&self) -> Result<(), CrucibleError> {
-        self.send_and_wait(BlockOp::Deactivate).await
+        let reply = self.send_and_wait(BlockOp::Deactivate).await;
+        assert!(reply.buffer.is_none());
+        reply.result
     }
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
         let data = Arc::new(Mutex::new(false));
         let active_query = BlockOp::QueryGuestIOReady { data: data.clone() };
-        self.send_and_wait(active_query).await?;
 
-        let result = *data.lock().await;
-        Ok(result)
+        let reply = self.send_and_wait(active_query).await;
+        assert!(reply.buffer.is_none());
+        reply.result?;
+
+        let is_active = *data.lock().await;
+        Ok(is_active)
     }
 
     async fn total_size(&self) -> Result<u64, CrucibleError> {
         let data = Arc::new(Mutex::new(0));
         let size_query = BlockOp::QueryTotalSize { data: data.clone() };
-        self.send_and_wait(size_query).await?;
 
-        let result = *data.lock().await;
-        Ok(result)
+        let reply = self.send_and_wait(size_query).await;
+        assert!(reply.buffer.is_none());
+        reply.result?;
+
+        let total_size = *data.lock().await;
+        Ok(total_size)
     }
 
     async fn get_block_size(&self) -> Result<u64, CrucibleError> {
@@ -2458,12 +2527,15 @@ impl BlockIO for Guest {
         if bs == 0 {
             let data = Arc::new(Mutex::new(0));
             let size_query = BlockOp::QueryBlockSize { data: data.clone() };
-            self.send_and_wait(size_query).await?;
 
-            let result = *data.lock().await;
+            let reply = self.send_and_wait(size_query).await;
+            assert!(reply.buffer.is_none());
+            reply.result?;
+
+            let bs = *data.lock().await;
             self.block_size
-                .store(result, std::sync::atomic::Ordering::Relaxed);
-            Ok(result)
+                .store(bs, std::sync::atomic::Ordering::Relaxed);
+            Ok(bs)
         } else {
             Ok(bs)
         }
@@ -2472,16 +2544,19 @@ impl BlockIO for Guest {
     async fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
         let data = Arc::new(Mutex::new(Uuid::default()));
         let uuid_query = BlockOp::QueryUpstairsUuid { data: data.clone() };
-        self.send_and_wait(uuid_query).await?;
 
-        let result = *data.lock().await;
-        Ok(result)
+        let reply = self.send_and_wait(uuid_query).await;
+        assert!(reply.buffer.is_none());
+        reply.result?;
+
+        let uuid = *data.lock().await;
+        Ok(uuid)
     }
 
     async fn read(
         &self,
         offset: Block,
-        data: Buffer,
+        data: &mut Buffer,
     ) -> Result<(), CrucibleError> {
         let bs = self.get_block_size().await?;
 
@@ -2496,8 +2571,20 @@ impl BlockIO for Guest {
         if data.is_empty() {
             return Ok(());
         }
-        let rio = BlockOp::Read { offset, data };
-        self.send_and_wait(rio).await
+
+        let buffer = std::mem::take(data);
+        let rio = BlockOp::Read {
+            offset,
+            data: buffer,
+        };
+
+        // We've replaced `data` with a blank Buffer, and sent it over the
+        // channel. Replace it regardless of the outcome of the read so that the
+        // caller will not have to reallocate it.
+        let reply = self.send_and_wait(rio).await;
+        *data = reply.buffer.unwrap();
+
+        reply.result
     }
 
     async fn write(
@@ -2521,7 +2608,10 @@ impl BlockIO for Guest {
         let wio = BlockOp::Write { offset, data };
 
         self.backpressure_sleep().await;
-        self.send_and_wait(wio).await
+
+        let reply = self.send_and_wait(wio).await;
+        assert!(reply.buffer.is_none());
+        reply.result
     }
 
     async fn write_unwritten(
@@ -2545,15 +2635,20 @@ impl BlockIO for Guest {
         let wio = BlockOp::WriteUnwritten { offset, data };
 
         self.backpressure_sleep().await;
-        self.send_and_wait(wio).await
+        let reply = self.send_and_wait(wio).await;
+        assert!(reply.buffer.is_none());
+        reply.result
     }
 
     async fn flush(
         &self,
         snapshot_details: Option<SnapshotDetails>,
     ) -> Result<(), CrucibleError> {
-        self.send_and_wait(BlockOp::Flush { snapshot_details })
-            .await
+        let reply = self
+            .send_and_wait(BlockOp::Flush { snapshot_details })
+            .await;
+        assert!(reply.buffer.is_none());
+        reply.result
     }
 
     async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
@@ -2567,7 +2662,10 @@ impl BlockIO for Guest {
 
         let data = Arc::new(Mutex::new(wc));
         let sw = BlockOp::ShowWork { data: data.clone() };
-        self.send_and_wait(sw).await?;
+
+        let reply = self.send_and_wait(sw).await;
+        assert!(reply.buffer.is_none());
+        reply.result?;
 
         let wc = data.lock().await;
         Ok(*wc)
@@ -2587,7 +2685,10 @@ impl BlockIO for Guest {
             result: data.clone(),
         };
 
-        self.send_and_wait(sw).await?;
+        let reply = self.send_and_wait(sw).await;
+        assert!(reply.buffer.is_none());
+        reply.result?;
+
         let result = data.lock().await;
         Ok(*result)
     }
@@ -2729,10 +2830,7 @@ async fn show_guest_work(guest: &Arc<Guest>) -> usize {
     kvec.sort_unstable();
     for id in kvec.iter() {
         let job = gw.active.get(id).unwrap();
-        println!(
-            "GW_JOB active:[{:04}] S:{:?} C:{:?} ",
-            id, job.submitted, job.completed
-        );
+        println!("GW_JOB active:[{:04}] D:{:?} ", id, job.ds_id);
     }
     let done = gw.completed.to_vec();
     println!("GW_JOB completed count:{:?} ", done.len());

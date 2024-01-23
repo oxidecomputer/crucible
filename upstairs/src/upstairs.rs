@@ -1171,7 +1171,7 @@ impl Upstairs {
 
         if !self.guest_io_ready() {
             if let Some(res) = res {
-                res.send_err(CrucibleError::UpstairsInactive);
+                res.send_err_with_buffer(data, CrucibleError::UpstairsInactive);
             }
             return;
         }
@@ -1189,7 +1189,7 @@ impl Upstairs {
          */
         if let Err(e) = ddef.validate_io(offset, data.len()) {
             if let Some(res) = res {
-                res.send_err(e);
+                res.send_err_with_buffer(data, e);
             }
             return;
         }
@@ -1996,7 +1996,10 @@ pub(crate) mod test {
             res: ds_done_res,
         }))
         .await;
-        assert!(ds_done_brw.wait(&up.log).await.is_err());
+
+        let reply = ds_done_brw.wait(&up.log).await;
+        assert!(reply.buffer.is_none());
+        assert!(reply.result.is_err());
 
         up.force_active().unwrap();
 
@@ -2006,7 +2009,10 @@ pub(crate) mod test {
             res: ds_done_res,
         }))
         .await;
-        assert!(ds_done_brw.wait(&up.log).await.is_ok());
+
+        let reply = ds_done_brw.wait(&up.log).await;
+        assert!(reply.buffer.is_none());
+        assert!(reply.result.is_ok());
 
         let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -2014,7 +2020,10 @@ pub(crate) mod test {
             res: ds_done_res,
         }))
         .await;
-        assert!(ds_done_brw.wait(&up.log).await.is_err())
+
+        let reply = ds_done_brw.wait(&up.log).await;
+        assert!(reply.buffer.is_none());
+        assert!(reply.result.is_err());
     }
 
     #[tokio::test]
@@ -2063,7 +2072,10 @@ pub(crate) mod test {
                 assert!(matches!(up.state, UpstairsState::Initializing));
             }
         }
-        assert!(ds_done_brw.wait(&up.log).await.is_ok());
+
+        let reply = ds_done_brw.wait(&up.log).await;
+        assert!(reply.buffer.is_none());
+        assert!(reply.result.is_ok());
     }
 
     // Job dependency tests
@@ -3566,7 +3578,10 @@ pub(crate) mod test {
             }))
             .await;
         }
-        assert_eq!(deactivate_done_brw.try_wait(), Some(Ok(())));
+
+        let reply = deactivate_done_brw.try_wait().unwrap();
+        assert!(reply.buffer.is_none());
+        reply.result.unwrap();
 
         // Verify we have disconnected and can go back to init.
         assert!(matches!(up.state, UpstairsState::Initializing));

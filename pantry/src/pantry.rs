@@ -292,13 +292,13 @@ impl PantryEntry {
             );
         }
 
-        let buffer = crucible::Buffer::new(size);
+        let mut buffer = crucible::Buffer::new(size);
 
         self.volume
-            .read_from_byte_offset(offset, buffer.clone())
+            .read_from_byte_offset(offset, &mut buffer)
             .await?;
 
-        Ok(buffer.into_vec().unwrap())
+        Ok(buffer.into_vec())
     }
 
     pub async fn scrub(&self) -> Result<(), CrucibleError> {
@@ -327,6 +327,8 @@ impl PantryEntry {
             );
         }
 
+        let mut data = crucible::Buffer::with_capacity(Self::MAX_CHUNK_SIZE);
+
         for chunk in (0..size_to_validate).step_by(Self::MAX_CHUNK_SIZE) {
             let start = chunk;
             let end = std::cmp::min(
@@ -334,13 +336,11 @@ impl PantryEntry {
                 size_to_validate,
             );
 
-            let data = crucible::Buffer::new((end - start) as usize);
+            data.reset((end - start) as usize);
 
-            self.volume
-                .read_from_byte_offset(start, data.clone())
-                .await?;
+            self.volume.read_from_byte_offset(start, &mut data).await?;
 
-            hasher.update(&data.into_vec().unwrap())
+            hasher.update(&*data)
         }
 
         let digest = hex::encode(hasher.finalize());

@@ -63,20 +63,16 @@ impl BlockIO for FileBlockIO {
     async fn read(
         &self,
         offset: Block,
-        data: Buffer,
+        data: &mut Buffer,
     ) -> Result<(), CrucibleError> {
-        let mut data_vec = data.as_vec().await;
-        let mut owned_vec = data.owned_vec().await;
-
-        let start = offset.value * self.block_size;
+        let start: usize = (offset.value * self.block_size) as usize;
 
         let mut file = self.file.lock().await;
-        file.seek(SeekFrom::Start(start))?;
-        file.read_exact(&mut data_vec[..])?;
+        file.seek(SeekFrom::Start(start as u64))?;
 
-        for i in 0..data_vec.len() {
-            owned_vec[i] = true;
-        }
+        let mut buf = vec![0u8; data.len()];
+        file.read_exact(&mut buf)?;
+        data.write(0, &buf);
 
         Ok(())
     }
@@ -209,13 +205,10 @@ impl BlockIO for ReqwestBlockIO {
     async fn read(
         &self,
         offset: Block,
-        data: Buffer,
+        data: &mut Buffer,
     ) -> Result<(), CrucibleError> {
         let cc = self.next_count();
         cdt::reqwest__read__start!(|| (cc, self.uuid));
-
-        let mut data_vec = data.as_vec().await;
-        let mut owned_vec = data.owned_vec().await;
 
         let start = offset.value * self.block_size;
 
@@ -224,11 +217,7 @@ impl BlockIO for ReqwestBlockIO {
             .get(&self.url)
             .header(
                 RANGE,
-                format!(
-                    "bytes={}-{}",
-                    start,
-                    start + data_vec.len() as u64 - 1
-                ),
+                format!("bytes={}-{}", start, start + data.len() as u64 - 1),
             )
             .send()
             .await
@@ -246,17 +235,22 @@ impl BlockIO for ReqwestBlockIO {
         )
         .map_err(|e| CrucibleError::GenericError(e.to_string()))?;
 
-        assert_eq!(total_size, data_vec.len() as u64);
+        // Did the HTTP server _not_ honour the Range request?
+        if total_size != data.len() as u64 {
+            crucible_bail!(
+                IoError,
+                "Requested {} bytes but HTTP server returned {}!",
+                data.len(),
+                total_size
+            );
+        }
 
         let bytes = response
             .bytes()
             .await
             .map_err(|e| CrucibleError::GenericError(e.to_string()))?;
 
-        for i in 0..data_vec.len() {
-            data_vec[i] = bytes[i];
-            owned_vec[i] = true;
-        }
+        data.write(0, &bytes);
 
         cdt::reqwest__read__done!(|| (cc, self.uuid));
         Ok(())
