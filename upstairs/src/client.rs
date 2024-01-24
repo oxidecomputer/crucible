@@ -138,9 +138,6 @@ pub(crate) struct DownstairsClient {
     /// Deadline for the next ping
     ping_interval: Instant,
 
-    /// Deadline until we mark the client as dead
-    timeout_deadline: Instant,
-
     /// Ping every 10 seconds if things are idle
     ping_count: u64,
 
@@ -179,7 +176,6 @@ impl DownstairsClient {
             ping_interval: deadline_secs(PING_INTERVAL_SECS),
             tls_context,
             promote_state: None,
-            timeout_deadline: deadline_secs(TIMEOUT_SECS),
             log,
             target_addr,
             repair_addr: None,
@@ -218,7 +214,6 @@ impl DownstairsClient {
             ping_interval: deadline_secs(PING_INTERVAL_SECS),
             tls_context: None,
             promote_state: None,
-            timeout_deadline: deadline_secs(TIMEOUT_SECS),
             log: crucible_common::build_logger(),
             target_addr: None,
             repair_addr: None,
@@ -258,9 +253,6 @@ impl DownstairsClient {
             }
             _ = sleep_until(self.ping_interval) => {
                 ClientAction::Ping
-            }
-            _ = sleep_until(self.timeout_deadline) => {
-                ClientAction::Timeout
             }
         }
     }
@@ -601,7 +593,6 @@ impl DownstairsClient {
             self.tls_context.clone(),
             &self.log,
         );
-        self.reset_timeout();
     }
 
     fn new_io_task(
@@ -1160,11 +1151,6 @@ impl DownstairsClient {
         self.checked_state_transition(up_state, DsState::Active);
         self.repair_info = None;
         self.stats.live_repair_completed += 1;
-    }
-
-    /// Resets our timeout deadline
-    pub(crate) fn reset_timeout(&mut self) {
-        self.timeout_deadline = deadline_secs(TIMEOUT_SECS);
     }
 
     /// Handles a single IO operation
@@ -2206,9 +2192,6 @@ pub(crate) enum ClientAction {
     /// It's time to ping the client
     Ping,
 
-    /// The client has hit a (Crucible) timeout
-    Timeout,
-
     /// The client IO channel has returned `None`
     ///
     /// This should never happen during normal operation, because
@@ -2256,9 +2239,6 @@ pub(crate) struct DownstairsStats {
 /// When the upstairs halts the IO client task, it must provide a reason
 #[derive(Debug)]
 pub(crate) enum ClientStopReason {
-    /// Crucible-level timeout (i.e. no packets received in too long)
-    Timeout,
-
     /// We are about to replace the client task
     Replacing,
 
@@ -2317,6 +2297,8 @@ pub(crate) enum ClientRunResult {
     ConnectionTimeout,
     /// We failed to make the initial connection
     ConnectionFailed(std::io::Error),
+    /// We experienced a timeout after connecting
+    Timeout,
     /// A socket write failed
     WriteFailed(anyhow::Error),
     /// We received an error while reading from the connection
@@ -2491,11 +2473,55 @@ async fn proc_stream(
     }
 }
 
+async fn rx_loop<R>(
+    tx: mpsc::Sender<ClientResponse>,
+    mut fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
+    log: Logger,
+) -> ClientRunResult
+where
+    R: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send + 'static,
+{
+    let mut timeout = deadline_secs(TIMEOUT_SECS);
+    loop {
+        tokio::select! {
+            f = fr.next() => {
+                match f {
+                    Some(Ok(m)) => {
+                        timeout = deadline_secs(TIMEOUT_SECS);
+                        if let Err(e) =
+                            tx.send(ClientResponse::Message(m)).await
+                        {
+                            warn!(
+                                log,
+                                "client response queue closed unexpectedly: \
+                                 {e}; is the program exiting?"
+                            );
+                            break ClientRunResult::QueueClosed;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        warn!(log, "downstairs client error {e}");
+                        break ClientRunResult::ReadFailed(e);
+                    }
+                    None => {
+                        warn!(log, "downstairs disconnected");
+                        break ClientRunResult::Finished;
+                    }
+                }
+            }
+            _ = tokio::time::sleep_until(timeout) => {
+                warn!(log, "downstairs timed out");
+                break ClientRunResult::Timeout;
+            }
+        }
+    }
+}
+
 async fn cmd_loop<R, W>(
     rx: &mut mpsc::Receiver<Message>,
     stop: &mut oneshot::Receiver<ClientStopReason>,
     tx: &mpsc::Sender<ClientResponse>,
-    mut fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
+    fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
     mut fw: FramedWrite<W, crucible_protocol::CrucibleEncoder>,
     log: &Logger,
 ) -> ClientRunResult
@@ -2511,31 +2537,7 @@ where
         let tx = tx.clone();
         let log = log.clone();
 
-        tokio::spawn(async move {
-            while let Some(f) = fr.next().await {
-                match f {
-                    Ok(m) => {
-                        if let Err(e) =
-                            tx.send(ClientResponse::Message(m)).await
-                        {
-                            warn!(
-                                log,
-                                "client response queue closed unexpectedly: \
-                                 {e}; is the program exiting?"
-                            );
-                            return ClientRunResult::QueueClosed;
-                        }
-                    }
-                    Err(e) => {
-                        warn!(log, "downstairs client error {e}");
-                        return ClientRunResult::ReadFailed(e);
-                    }
-                }
-            }
-            // Downstairs disconnected
-            warn!(log, "downstairs disconnected");
-            ClientRunResult::Finished
-        })
+        tokio::spawn(rx_loop(tx, fr, log))
     };
 
     loop {
