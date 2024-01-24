@@ -2,7 +2,7 @@
 //! Data structures specific to Crucible's `struct Upstairs`
 use crate::{
     cdt,
-    client::{ClientAction, ClientRunResult, ClientStopReason},
+    client::{ClientAction, ClientRunResult},
     control::ControlRequest,
     deadline_secs,
     deferred::{
@@ -1518,27 +1518,7 @@ impl Upstairs {
                 self.downstairs.clients[client_id].stats.connected += 1;
                 self.downstairs.clients[client_id].send_here_i_am().await;
             }
-            ClientAction::Ping => {
-                self.downstairs.clients[client_id].send_ping().await;
-            }
-            ClientAction::Timeout => {
-                // Ask the downstairs client task to stop, because the client
-                // has hit a Crucible timeout.
-                //
-                // This will come back to `TaskStopped`, at which point we'll
-                // clear out the task and restart it.
-                //
-                // We need to reset the timeout, because otherwise it will keep
-                // firing and will monopolize the future.
-                let c = &mut self.downstairs.clients[client_id];
-                c.reset_timeout();
-                c.halt_io_task(ClientStopReason::Timeout);
-            }
             ClientAction::Response(m) => {
-                // We have received a message, so reset the timeout watchdog for
-                // this particular client.
-                self.downstairs.clients[client_id].reset_timeout();
-
                 // Defer the message if it's a (large) read that needs
                 // decryption, or there are other deferred messages in the queue
                 // (to preserve order).  Otherwise, handle it immediately.
@@ -2075,6 +2055,7 @@ impl Upstairs {
 pub(crate) mod test {
     use super::*;
     use crate::{
+        client::ClientStopReason,
         downstairs::test::set_all_active,
         test::{make_encrypted_upstairs, make_upstairs},
         BlockContext, BlockReq, BlockReqWaiter, DsState, JobId,
