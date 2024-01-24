@@ -1654,9 +1654,13 @@ impl Buffer {
     /// Consume and layer buffer contents on top of this one
     ///
     /// # Panics
-    /// The offset must be block-aligned; otherwise, this function will panic
+    /// - The offset must be block-aligned
+    /// - Both buffers must have the same block size
+    ///
+    /// If either of these conditions is not met, the function will panic
     pub(crate) fn eat(&mut self, offset: usize, buffer: &mut Buffer) {
         assert_eq!(offset % self.block_size, 0);
+        assert_eq!(self.block_size, buffer.block_size);
         for (i, (data, owned)) in
             std::iter::zip(&buffer.data, &buffer.owned).enumerate()
         {
