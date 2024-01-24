@@ -1638,7 +1638,8 @@ impl Buffer {
 
     /// Reads buffer data into the given array
     ///
-    /// Values in blocks with `self.owned` are left unmodified
+    /// Only blocks with `self.owned` are changed; other blocks are left
+    /// unmodified.
     ///
     /// # Panics
     /// - The offset must be block-aligned
