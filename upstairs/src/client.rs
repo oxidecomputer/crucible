@@ -2311,7 +2311,12 @@ async fn client_run(
     .await;
 
     warn!(log, "client task is sending Done({r:?})");
-    tx.send(ClientResponse::Done(r)).await.unwrap();
+    if tx.send(ClientResponse::Done(r)).await.is_err() {
+        warn!(
+            log,
+            "client task could not reply to main task; shutting down?"
+        );
+    }
     while let Some(v) = rx.recv().await {
         warn!(log, "exiting client task is ignoring message {v:?}");
     }
