@@ -17,7 +17,7 @@ use slog::{debug, error, info, o, warn, Logger};
 use tokio::{
     net::{TcpSocket, TcpStream},
     sync::{mpsc, oneshot},
-    time::{sleep_until, Instant},
+    time::sleep_until,
 };
 use tokio_util::codec::{FramedRead, FramedWrite};
 use uuid::Uuid;
@@ -135,12 +135,6 @@ pub(crate) struct DownstairsClient {
      */
     pub(crate) repair_info: Option<ExtentInfo>,
 
-    /// Deadline for the next ping
-    ping_interval: Instant,
-
-    /// Ping every 10 seconds if things are idle
-    ping_count: u64,
-
     /// Accumulated statistics
     pub(crate) stats: DownstairsStats,
 
@@ -172,8 +166,6 @@ impl DownstairsClient {
             client_id,
             region_uuid: None,
             negotiation_state: NegotiationState::Start,
-            ping_count: 0,
-            ping_interval: deadline_secs(PING_INTERVAL_SECS),
             tls_context,
             promote_state: None,
             log,
@@ -210,8 +202,6 @@ impl DownstairsClient {
             client_id: ClientId::new(0),
             region_uuid: None,
             negotiation_state: NegotiationState::Start,
-            ping_count: 0,
-            ping_interval: deadline_secs(PING_INTERVAL_SECS),
             tls_context: None,
             promote_state: None,
             log: crucible_common::build_logger(),
@@ -251,9 +241,6 @@ impl DownstairsClient {
                     None => ClientAction::ChannelClosed,
                 }
             }
-            _ = sleep_until(self.ping_interval) => {
-                ClientAction::Ping
-            }
         }
     }
 
@@ -269,19 +256,6 @@ impl DownstairsClient {
             alternate_versions: vec![],
         })
         .await;
-    }
-
-    /// If the client task is running, send a `Message::Ruok`
-    ///
-    /// If the client task is **not** running, log a warning to that effect.
-    pub(crate) async fn send_ping(&mut self) {
-        self.ping_interval = deadline_secs(PING_INTERVAL_SECS);
-        // It's possible for the client task to have stopped after we requested
-        // the ping.  If that's the case, then we'll catch it on the next
-        // go-around, and should just log an error here.
-        self.send(Message::Ruok).await;
-        self.ping_count += 1;
-        cdt::ds__ping__sent!(|| (self.ping_count, self.client_id.get()));
     }
 
     pub(crate) fn halt_io_task(&mut self, r: ClientStopReason) {
@@ -2189,9 +2163,6 @@ pub(crate) enum ClientAction {
     /// The client task has stopped
     TaskStopped(ClientRunResult),
 
-    /// It's time to ping the client
-    Ping,
-
     /// The client IO channel has returned `None`
     ///
     /// This should never happen during normal operation, because
@@ -2443,10 +2414,11 @@ async fn client_run_inner(
             WrappedStream::Http(tcp)
         }
     };
-    proc_stream(tcp, rx, stop, tx, log).await
+    proc_stream(client_id, tcp, rx, stop, tx, log).await
 }
 
 async fn proc_stream(
+    client_id: ClientId,
     stream: WrappedStream,
     rx: &mut mpsc::Receiver<Message>,
     stop: &mut oneshot::Receiver<ClientStopReason>,
@@ -2460,7 +2432,7 @@ async fn proc_stream(
             let fr = FramedRead::new(read, CrucibleDecoder::new());
             let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
-            cmd_loop(rx, stop, tx, fr, fw, log).await
+            cmd_loop(client_id, rx, stop, tx, fr, fw, log).await
         }
         WrappedStream::Https(stream) => {
             let (read, write) = tokio::io::split(stream);
@@ -2468,7 +2440,7 @@ async fn proc_stream(
             let fr = FramedRead::new(read, CrucibleDecoder::new());
             let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
-            cmd_loop(rx, stop, tx, fr, fw, log).await
+            cmd_loop(client_id, rx, stop, tx, fr, fw, log).await
         }
     }
 }
@@ -2509,7 +2481,7 @@ where
                     }
                 }
             }
-            _ = tokio::time::sleep_until(timeout) => {
+            _ = sleep_until(timeout) => {
                 warn!(log, "downstairs timed out");
                 break ClientRunResult::Timeout;
             }
@@ -2518,6 +2490,7 @@ where
 }
 
 async fn cmd_loop<R, W>(
+    client_id: ClientId,
     rx: &mut mpsc::Receiver<Message>,
     stop: &mut oneshot::Receiver<ClientStopReason>,
     tx: &mpsc::Sender<ClientResponse>,
@@ -2540,6 +2513,8 @@ where
         tokio::spawn(rx_loop(tx, fr, log))
     };
 
+    let mut ping_interval = deadline_secs(PING_INTERVAL_SECS);
+    let mut ping_count = 0u64;
     loop {
         tokio::select! {
             join_result = &mut recv_task => {
@@ -2557,6 +2532,16 @@ where
                 };
 
                 if let Err(e) = fw.send(m).await {
+                    break ClientRunResult::WriteFailed(e);
+                }
+            }
+
+            _ = sleep_until(ping_interval) => {
+                ping_interval = deadline_secs(PING_INTERVAL_SECS);
+                ping_count += 1;
+                cdt::ds__ping__sent!(|| (ping_count, client_id.get()));
+
+                if let Err(e) = fw.send(Message::Ruok).await {
                     break ClientRunResult::WriteFailed(e);
                 }
             }
