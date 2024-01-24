@@ -1602,7 +1602,7 @@ impl Buffer {
 
         let start_block = offset / self.block_size;
         for (b, chunk) in data.chunks(self.block_size).enumerate() {
-            assert_eq!(chunk.len(), self.block_size);
+            debug_assert_eq!(chunk.len(), self.block_size);
             if owned[b] {
                 let block = start_block + b;
                 self.owned[block] = true;
@@ -1630,9 +1630,9 @@ impl Buffer {
         assert_eq!(offset % self.block_size, 0);
         assert_eq!(response.data.len(), self.block_size);
         if !response.block_contexts.is_empty() {
-            self.block_mut(offset / self.block_size)
-                .copy_from_slice(&response.data);
-            self.owned[offset / self.block_size] = true;
+            let block = offset / self.block_size;
+            self.owned[block] = true;
+            self.block_mut(block).copy_from_slice(&response.data);
         }
     }
 
@@ -1654,7 +1654,7 @@ impl Buffer {
 
         let start_block = offset / self.block_size;
         for (b, chunk) in data.chunks_mut(self.block_size).enumerate() {
-            assert_eq!(chunk.len(), self.block_size);
+            debug_assert_eq!(chunk.len(), self.block_size);
             let block = start_block + b;
             if self.owned[block] {
                 chunk.copy_from_slice(self.block(block));
