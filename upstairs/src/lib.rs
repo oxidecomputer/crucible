@@ -1507,6 +1507,10 @@ impl fmt::Display for AckStatus {
 pub struct Buffer {
     block_size: usize,
     data: Vec<u8>,
+
+    /// Per-block ownership data
+    ///
+    /// `owned.len() == data.len() / block_size`
     owned: Vec<bool>,
 }
 
@@ -1516,7 +1520,7 @@ impl Buffer {
         Buffer {
             block_size,
             data: vec![0; len],
-            owned: vec![false; len],
+            owned: vec![false; block_count],
         }
     }
 
@@ -1526,14 +1530,14 @@ impl Buffer {
         Buffer {
             block_size,
             data: vec![v; len],
-            owned: vec![false; len],
+            owned: vec![false; block_count],
         }
     }
 
     pub fn with_capacity(block_count: usize, block_size: usize) -> Buffer {
         let len = block_count * block_size;
         let data = Vec::with_capacity(len);
-        let owned = Vec::with_capacity(len);
+        let owned = Vec::with_capacity(block_count);
 
         Buffer {
             block_size,
@@ -1570,10 +1574,13 @@ impl Buffer {
         assert_eq!(data.len() % self.block_size, 0);
 
         self.data[offset..][..data.len()].copy_from_slice(data);
-        self.owned[offset..][..data.len()].fill(true);
+        self.owned[offset / self.block_size..][..data.len() / self.block_size]
+            .fill(true);
     }
 
-    /// Writes both data and ownership to the buffer
+    /// Writes data to the buffer where `owned` is true
+    ///
+    /// If `owned[i]` is `false`, then that block is not written
     ///
     /// # Panics
     /// - The offset must be block-aligned
@@ -1582,29 +1589,35 @@ impl Buffer {
     /// - `data` and `owned` must be the same size
     ///
     /// If any of these conditions are not met, the function will panic.
-    pub(crate) fn write_with_ownership(
+    pub(crate) fn write_if_owned(
         &mut self,
         offset: usize,
         data: &[u8],
         owned: &[bool],
     ) {
         assert!(offset + data.len() <= self.data.len());
-        assert_eq!(data.len(), owned.len());
         assert_eq!(data.len() % self.block_size, 0);
         assert_eq!(offset % self.block_size, 0);
-        for i in 0..data.len() {
-            if owned[i] {
-                self.data[offset + i] = data[i];
-                self.owned[offset + i] = true;
+        assert_eq!(data.len() / self.block_size, owned.len());
+
+        let start_block = offset / self.block_size;
+        for (b, chunk) in data.chunks(self.block_size).enumerate() {
+            debug_assert_eq!(chunk.len(), self.block_size);
+            if owned[b] {
+                let block = start_block + b;
+                self.owned[block] = true;
+                self.block_mut(block).copy_from_slice(chunk);
             }
         }
     }
 
     /// Writes a `ReadResponse` into the buffer, setting `owned` to true
     ///
+    /// The `ReadResponse` must contain a single block's worth of data.
+    ///
     /// # Panics
     /// - The offset must be block-aligned
-    /// - The response data length must be divisible by block size
+    /// - The response data length must be block size
     /// - Data cannot exceed the buffer's length
     ///
     /// If any of these conditions are not met, the function will panic.
@@ -1617,15 +1630,16 @@ impl Buffer {
         assert_eq!(offset % self.block_size, 0);
         assert_eq!(response.data.len(), self.block_size);
         if !response.block_contexts.is_empty() {
-            self.data[offset..][..response.data.len()]
-                .copy_from_slice(&response.data);
-            self.owned[offset..][..response.data.len()].fill(true);
+            let block = offset / self.block_size;
+            self.owned[block] = true;
+            self.block_mut(block).copy_from_slice(&response.data);
         }
     }
 
     /// Reads buffer data into the given array
     ///
-    /// Values without `self.owned` are left unmodified
+    /// Only blocks with `self.owned` are changed; other blocks are left
+    /// unmodified.
     ///
     /// # Panics
     /// - The offset must be block-aligned
@@ -1637,9 +1651,13 @@ impl Buffer {
         assert!(offset + data.len() <= self.data.len());
         assert_eq!(offset % self.block_size, 0);
         assert_eq!(data.len() % self.block_size, 0);
-        for (i, d) in data.iter_mut().enumerate() {
-            if self.owned[offset + i] {
-                *d = self.data[offset + i];
+
+        let start_block = offset / self.block_size;
+        for (b, chunk) in data.chunks_mut(self.block_size).enumerate() {
+            debug_assert_eq!(chunk.len(), self.block_size);
+            let block = start_block + b;
+            if self.owned[block] {
+                chunk.copy_from_slice(self.block(block));
             }
         }
     }
@@ -1653,6 +1671,9 @@ impl Buffer {
 
     /// Consume and layer buffer contents on top of this one
     ///
+    /// The `buffer` argument will be reset to zero size, but preserves its
+    /// allocations for reuse.
+    ///
     /// # Panics
     /// - The offset must be block-aligned
     /// - Both buffers must have the same block size
@@ -1661,12 +1682,13 @@ impl Buffer {
     pub(crate) fn eat(&mut self, offset: usize, buffer: &mut Buffer) {
         assert_eq!(offset % self.block_size, 0);
         assert_eq!(self.block_size, buffer.block_size);
-        for (i, (data, owned)) in
-            std::iter::zip(&buffer.data, &buffer.owned).enumerate()
-        {
-            if *owned {
-                self.data[offset + i] = *data;
-                self.owned[offset + i] = true;
+
+        let start_block = offset / self.block_size;
+        for (b, (owned, chunk)) in buffer.blocks().enumerate() {
+            if owned {
+                let block = start_block + b;
+                self.owned[block] = true;
+                self.block_mut(block).copy_from_slice(chunk);
             }
         }
 
@@ -1683,8 +1705,26 @@ impl Buffer {
 
         let len = block_count * block_size;
         self.data.resize(len, 0u8);
-        self.owned.resize(len, false);
+        self.owned.resize(block_count, false);
         self.block_size = block_size;
+    }
+
+    /// Returns a reference to a particular block
+    pub fn block(&self, b: usize) -> &[u8] {
+        &self.data[b * self.block_size..][..self.block_size]
+    }
+
+    /// Returns a mutable reference to a particular block
+    pub fn block_mut(&mut self, b: usize) -> &mut [u8] {
+        &mut self.data[b * self.block_size..][..self.block_size]
+    }
+
+    /// Returns an iterator over `(owned, block)` tuples
+    pub fn blocks(&self) -> impl Iterator<Item = (bool, &[u8])> {
+        self.owned
+            .iter()
+            .cloned()
+            .zip(self.data.chunks(self.block_size))
     }
 }
 
