@@ -313,7 +313,8 @@ mod cdt {
     fn up__apply(_: u64) {}
     fn up__action_downstairs(_: u64) {}
     fn up__action_guest(_: u64) {}
-    fn up__action_deferred(_: u64) {}
+    fn up__action_deferred_block(_: u64) {}
+    fn up__action_deferred_message(_: u64) {}
     fn up__action_leak_check(_: u64) {}
     fn up__action_flush_check(_: u64) {}
     fn up__action_stat_check(_: u64) {}

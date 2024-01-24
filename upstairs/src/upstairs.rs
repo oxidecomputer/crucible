@@ -73,7 +73,8 @@ pub struct UpCounters {
     apply: u64,
     action_downstairs: u64,
     action_guest: u64,
-    action_deferred: u64,
+    action_deferred_block: u64,
+    action_deferred_message: u64,
     action_leak_check: u64,
     action_flush_check: u64,
     action_stat_check: u64,
@@ -88,7 +89,8 @@ impl UpCounters {
             apply: 0,
             action_downstairs: 0,
             action_guest: 0,
-            action_deferred: 0,
+            action_deferred_block: 0,
+            action_deferred_message: 0,
             action_leak_check: 0,
             action_flush_check: 0,
             action_stat_check: 0,
@@ -507,11 +509,17 @@ impl Upstairs {
                 self.defer_guest_request(b).await;
             }
             UpstairsAction::DeferredBlockReq(req) => {
-                self.counters.action_deferred += 1;
-                cdt::up__action_deferred!(|| (self.counters.action_deferred));
+                self.counters.action_deferred_block += 1;
+                cdt::up__action_deferred_block!(|| (self
+                    .counters
+                    .action_deferred_block));
                 self.apply_guest_request(req).await;
             }
             UpstairsAction::DeferredMessage(m) => {
+                self.counters.action_deferred_message += 1;
+                cdt::up__action_deferred_message!(|| (self
+                    .counters
+                    .action_deferred_message));
                 self.on_client_message(m).await;
             }
             UpstairsAction::LeakCheck => {
