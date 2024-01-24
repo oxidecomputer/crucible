@@ -38,7 +38,8 @@ impl IOSpan {
             block_size,
             phase: offset % block_size,
             buffer: Buffer::new(
-                affected_block_numbers.len() * block_size as usize,
+                affected_block_numbers.len(),
+                block_size as usize,
             ),
             affected_block_numbers,
         }

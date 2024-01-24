@@ -2658,7 +2658,7 @@ pub(crate) mod test {
 
         // op 1
         upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .submit_dummy_read(Block::new_512(0), Buffer::new(1, 512))
             .await;
 
         let jobs = upstairs.downstairs.get_all_jobs();
@@ -2696,7 +2696,7 @@ pub(crate) mod test {
 
         // op 3
         upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512 * 2))
+            .submit_dummy_read(Block::new_512(0), Buffer::new(2, 512))
             .await;
 
         let jobs = upstairs.downstairs.get_all_jobs();
@@ -2729,12 +2729,12 @@ pub(crate) mod test {
 
         // op 0
         upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .submit_dummy_read(Block::new_512(0), Buffer::new(1, 512))
             .await;
 
         // op 1
         upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .submit_dummy_read(Block::new_512(0), Buffer::new(1, 512))
             .await;
 
         let jobs = upstairs.downstairs.get_all_jobs();
@@ -2769,12 +2769,12 @@ pub(crate) mod test {
 
         // op 1
         upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .submit_dummy_read(Block::new_512(0), Buffer::new(1, 512))
             .await;
 
         // op 2
         upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .submit_dummy_read(Block::new_512(0), Buffer::new(1, 512))
             .await;
 
         let jobs = upstairs.downstairs.get_all_jobs();
@@ -2813,7 +2813,7 @@ pub(crate) mod test {
 
         // op 2
         upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512 * 2))
+            .submit_dummy_read(Block::new_512(0), Buffer::new(2, 512))
             .await;
 
         let jobs = upstairs.downstairs.get_all_jobs();
@@ -2940,7 +2940,7 @@ pub(crate) mod test {
 
         // op 0
         upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .submit_dummy_read(Block::new_512(0), Buffer::new(1, 512))
             .await;
 
         // op 1
@@ -2975,7 +2975,7 @@ pub(crate) mod test {
 
         // op 0
         upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .submit_dummy_read(Block::new_512(0), Buffer::new(1, 512))
             .await;
 
         // op 1
@@ -2989,7 +2989,7 @@ pub(crate) mod test {
 
         // op 2
         upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .submit_dummy_read(Block::new_512(0), Buffer::new(1, 512))
             .await;
 
         let jobs = upstairs.downstairs.get_all_jobs();
@@ -3019,7 +3019,7 @@ pub(crate) mod test {
 
         // op 0
         upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
+            .submit_dummy_read(Block::new_512(0), Buffer::new(1, 512))
             .await;
 
         // op 1
@@ -3033,7 +3033,7 @@ pub(crate) mod test {
 
         // op 2
         upstairs
-            .submit_dummy_read(Block::new_512(1), Buffer::new(512 * 2))
+            .submit_dummy_read(Block::new_512(1), Buffer::new(2, 512))
             .await;
 
         // op 3
@@ -3047,7 +3047,7 @@ pub(crate) mod test {
 
         // op 4
         upstairs
-            .submit_dummy_read(Block::new_512(3), Buffer::new(512 * 2))
+            .submit_dummy_read(Block::new_512(3), Buffer::new(2, 512))
             .await;
 
         // op 5
@@ -3308,7 +3308,7 @@ pub(crate) mod test {
 
         // op 4
         upstairs
-            .submit_dummy_read(Block::new_512(99), Buffer::new(512))
+            .submit_dummy_read(Block::new_512(99), Buffer::new(1, 512))
             .await;
 
         let ds = &upstairs.downstairs;
@@ -3405,7 +3405,7 @@ pub(crate) mod test {
 
         // op 0
         upstairs
-            .submit_dummy_read(Block::new_512(95), Buffer::new(512 * 2))
+            .submit_dummy_read(Block::new_512(95), Buffer::new(2, 512))
             .await;
 
         // op 1
@@ -3766,7 +3766,7 @@ pub(crate) mod test {
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        let data = Buffer::new(512);
+        let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -3826,7 +3826,7 @@ pub(crate) mod test {
         set_all_active(&mut up.downstairs);
 
         let blocks = 16384 / 512;
-        let data = Buffer::new(512 * blocks);
+        let data = Buffer::new(blocks, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -3893,7 +3893,7 @@ pub(crate) mod test {
         set_all_active(&mut up.downstairs);
 
         let blocks = 16384 / 512;
-        let data = Buffer::new(512 * blocks);
+        let data = Buffer::new(blocks, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -3982,7 +3982,7 @@ pub(crate) mod test {
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        let data = Buffer::new(512);
+        let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -4061,7 +4061,7 @@ pub(crate) mod test {
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        let data = Buffer::new(512);
+        let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -4129,7 +4129,7 @@ pub(crate) mod test {
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        let data = Buffer::new(512);
+        let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -4182,7 +4182,7 @@ pub(crate) mod test {
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        let data = Buffer::new(512);
+        let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -4260,7 +4260,7 @@ pub(crate) mod test {
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        let data = Buffer::new(512);
+        let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -4340,7 +4340,7 @@ pub(crate) mod test {
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        let data = Buffer::new(512);
+        let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -4417,7 +4417,7 @@ pub(crate) mod test {
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        let data = Buffer::new(512);
+        let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -4487,7 +4487,7 @@ pub(crate) mod test {
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        let data = Buffer::new(512);
+        let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {

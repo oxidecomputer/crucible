@@ -197,6 +197,18 @@ pub trait BlockIO: Sync {
 
         self.activate().await
     }
+
+    /// Checks that the data length is a multiple of block size
+    ///
+    /// Returns block size on success, since we have to look it up anyways.
+    async fn check_data_size(&self, len: usize) -> Result<u64, CrucibleError> {
+        let block_size = self.get_block_size().await?;
+        if len as u64 % block_size == 0 {
+            Ok(block_size)
+        } else {
+            Err(CrucibleError::DataLenUnaligned)
+        }
+    }
 }
 
 pub type CrucibleBlockIOFuture<'a> = Pin<
@@ -1488,47 +1500,41 @@ impl fmt::Display for AckStatus {
 #[must_use]
 #[derive(Debug, PartialEq, Default)]
 pub struct Buffer {
-    len: usize,
+    block_size: usize,
     data: Vec<u8>,
     owned: Vec<bool>,
 }
 
 impl Buffer {
-    pub fn from_vec(data: Vec<u8>) -> Buffer {
-        let len = data.len();
+    pub fn new(block_count: usize, block_size: usize) -> Buffer {
+        let len = block_count * block_size;
         Buffer {
-            len,
-            data,
-            owned: vec![false; len],
-        }
-    }
-
-    pub fn new(len: usize) -> Buffer {
-        Buffer {
-            len,
+            block_size,
             data: vec![0; len],
             owned: vec![false; len],
         }
     }
 
-    pub fn with_capacity(capacity: usize) -> Buffer {
-        let data = Vec::with_capacity(capacity);
-        let owned = Vec::with_capacity(capacity);
-
+    /// Builds a new buffer that repeats the given value
+    pub fn repeat(v: u8, block_count: usize, block_size: usize) -> Self {
+        let len = block_count * block_size;
         Buffer {
-            len: 0,
-            data,
-            owned,
+            block_size,
+            data: vec![v; len],
+            owned: vec![false; len],
         }
     }
 
-    pub fn from_slice(buf: &[u8]) -> Buffer {
-        let mut vec = Vec::<u8>::with_capacity(buf.len());
-        for item in buf {
-            vec.push(*item);
-        }
+    pub fn with_capacity(block_count: usize, block_size: usize) -> Buffer {
+        let len = block_count * block_size;
+        let data = Vec::with_capacity(len);
+        let owned = Vec::with_capacity(len);
 
-        Buffer::from_vec(vec)
+        Buffer {
+            block_size,
+            data,
+            owned,
+        }
     }
 
     /// Extract the underlying `Vec<u8>` bearing buffered data.
@@ -1538,11 +1544,11 @@ impl Buffer {
     }
 
     pub fn len(&self) -> usize {
-        self.len
+        self.data.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.data.is_empty()
     }
 
     pub fn write(&mut self, offset: usize, data: &[u8]) {
@@ -1582,9 +1588,9 @@ impl Buffer {
 
     pub fn read(&self, offset: usize, data: &mut [u8]) {
         assert!(offset + data.len() <= self.data.len());
-        for i in 0..data.len() {
+        for (i, d) in data.iter_mut().enumerate() {
             if self.owned[offset + i] {
-                data[i] = self.data[offset + i];
+                *d = self.data[offset + i];
             }
         }
     }
@@ -1604,21 +1610,21 @@ impl Buffer {
             }
         }
 
-        buffer.reset(0);
+        buffer.reset(0, self.block_size);
     }
 
     pub fn owned_ref(&self) -> &[bool] {
         &self.owned
     }
 
-    pub fn reset(&mut self, len: usize) {
+    pub fn reset(&mut self, block_count: usize, block_size: usize) {
         self.data.clear();
         self.owned.clear();
 
-        self.len = len;
-
-        self.data.resize(self.len, 0u8);
-        self.owned.resize(self.len, false);
+        let len = block_count * block_size;
+        self.data.resize(len, 0u8);
+        self.owned.resize(len, false);
+        self.block_size = block_size;
     }
 }
 
@@ -1633,7 +1639,7 @@ impl std::ops::Deref for Buffer {
 #[test]
 fn test_buffer_sane() {
     const BLOCK_SIZE: usize = 512;
-    let mut data = Buffer::new(1024);
+    let mut data = Buffer::new(2, BLOCK_SIZE);
 
     data.write(0, &[99u8; BLOCK_SIZE]);
 
@@ -1647,21 +1653,21 @@ fn test_buffer_sane() {
 #[test]
 fn test_buffer_len() {
     const READ_SIZE: usize = 512;
-    let data = Buffer::from_slice(&[0x99; READ_SIZE]);
+    let data = Buffer::repeat(0x99, 1, READ_SIZE);
     assert_eq!(data.len(), READ_SIZE);
 }
 
 #[test]
 fn test_buffer_len_over_block_size() {
-    const READ_SIZE: usize = 600;
-    let data = Buffer::from_slice(&[0x99; READ_SIZE]);
+    const READ_SIZE: usize = 1024;
+    let data = Buffer::repeat(0x99, 2, 512);
     assert_eq!(data.len(), READ_SIZE);
 }
 
 #[test]
 fn test_buffer_writes() {
     const READ_SIZE: usize = 512;
-    let mut data = Buffer::new(READ_SIZE);
+    let mut data = Buffer::new(1, READ_SIZE);
 
     assert_eq!(&data[..], &vec![0u8; 512]);
 
@@ -1682,16 +1688,16 @@ fn test_buffer_writes() {
 #[test]
 fn test_buffer_eats() {
     const READ_SIZE: usize = 512;
-    let mut data = Buffer::new(READ_SIZE);
+    let mut data = Buffer::new(1, READ_SIZE);
 
     assert_eq!(&data[..], &vec![0u8; 512]);
 
-    let mut buffer = Buffer::new(READ_SIZE);
+    let mut buffer = Buffer::new(1, READ_SIZE);
     buffer.eat(0, &mut data);
 
     assert_eq!(&buffer[..], &vec![0u8; 512]);
 
-    let mut data = Buffer::new(READ_SIZE);
+    let mut data = Buffer::new(1, READ_SIZE);
     data.write(64, &[1u8; 64]);
     buffer.eat(0, &mut data);
 
@@ -1699,7 +1705,7 @@ fn test_buffer_eats() {
     assert_eq!(&buffer[64..128], &vec![1u8; 64]);
     assert_eq!(&buffer[128..], &vec![0u8; 512 - 64 - 64]);
 
-    let mut data = Buffer::new(READ_SIZE);
+    let mut data = Buffer::new(1, READ_SIZE);
     data.write(128, &[7u8; 128]);
     buffer.eat(0, &mut data);
 
@@ -1828,25 +1834,25 @@ async fn test_return_iops() {
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
-        data: Buffer::new(1),
+        data: Buffer::new(1, 512),
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
-        data: Buffer::new(8000),
+        data: Buffer::new(8, 512), // 4096 bytes
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
-        data: Buffer::new(16000),
+        data: Buffer::new(31, 512), // 15872 bytes < 16000
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
-        data: Buffer::new(16001),
+        data: Buffer::new(32, 512), // 16384 bytes > 16000
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 2);
 }
@@ -2575,11 +2581,7 @@ impl BlockIO for Guest {
         offset: Block,
         data: &mut Buffer,
     ) -> Result<(), CrucibleError> {
-        let bs = self.get_block_size().await?;
-
-        if (data.len() % bs as usize) != 0 {
-            crucible_bail!(DataLenUnaligned);
-        }
+        let bs = self.check_data_size(data.len()).await?;
 
         if offset.block_size_in_bytes() as u64 != bs {
             crucible_bail!(BlockSizeMismatch);
@@ -2609,11 +2611,7 @@ impl BlockIO for Guest {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
-        let bs = self.get_block_size().await?;
-
-        if (data.len() % bs as usize) != 0 {
-            crucible_bail!(DataLenUnaligned);
-        }
+        let bs = self.check_data_size(data.len()).await?;
 
         if offset.block_size_in_bytes() as u64 != bs {
             crucible_bail!(BlockSizeMismatch);
@@ -2636,11 +2634,7 @@ impl BlockIO for Guest {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
-        let bs = self.get_block_size().await?;
-
-        if (data.len() % bs as usize) != 0 {
-            crucible_bail!(DataLenUnaligned);
-        }
+        let bs = self.check_data_size(data.len()).await?;
 
         if offset.block_size_in_bytes() as u64 != bs {
             crucible_bail!(BlockSizeMismatch);

@@ -149,7 +149,7 @@ mod test {
     async fn test_blockreq_and_blockreqwaiter_with_buffer() {
         let (brw, res) = BlockReqWaiter::pair();
 
-        res.send_ok_with_buffer(Buffer::with_capacity(0));
+        res.send_ok_with_buffer(Buffer::with_capacity(0, 512));
 
         let reply = brw.wait(&crucible_common::build_logger()).await;
         assert!(reply.buffer.is_some());
@@ -172,7 +172,7 @@ mod test {
         let (brw, res) = BlockReqWaiter::pair();
 
         res.send_err_with_buffer(
-            Buffer::with_capacity(0),
+            Buffer::with_capacity(0, 512),
             CrucibleError::UpstairsInactive,
         );
 
