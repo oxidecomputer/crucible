@@ -1713,7 +1713,7 @@ impl Buffer {
         &self.data[b * self.block_size..][..self.block_size]
     }
 
-    /// Returns a reference to a particular block
+    /// Returns a mutable reference to a particular block
     pub fn block_mut(&mut self, b: usize) -> &mut [u8] {
         &mut self.data[b * self.block_size..][..self.block_size]
     }
