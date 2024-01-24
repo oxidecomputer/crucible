@@ -12,16 +12,18 @@ use tokio_rustls::rustls::{
 
 pub fn load_certs(path: &str) -> io::Result<Vec<Certificate>> {
     certs(&mut BufReader::new(File::open(path)?))
+        .map(|v| v.map(|c| Certificate(c.to_vec())))
+        .collect::<Result<Vec<Certificate>, _>>()
         .map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidInput, "invalid cert")
         })
-        .map(|mut certs| certs.drain(..).map(Certificate).collect())
 }
 
 pub fn load_rsa_keys(path: &str) -> io::Result<Vec<PrivateKey>> {
     rsa_private_keys(&mut BufReader::new(File::open(path)?))
+        .map(|v| v.map(|c| PrivateKey(c.secret_pkcs1_der().to_owned())))
+        .collect::<Result<Vec<PrivateKey>, _>>()
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid key"))
-        .map(|mut keys| keys.drain(..).map(PrivateKey).collect())
 }
 
 #[derive(thiserror::Error, Debug)]
