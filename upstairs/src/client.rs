@@ -2459,6 +2459,7 @@ where
             f = fr.next() => {
                 match f {
                     Some(Ok(m)) => {
+                        // reset the timeout, since we've received a message
                         timeout = deadline_secs(TIMEOUT_SECS);
                         if let Err(e) =
                             tx.send(ClientResponse::Message(m)).await
@@ -2506,12 +2507,9 @@ where
         .await
         .expect("client_response_tx closed unexpectedly");
 
-    let mut recv_task = {
-        let tx = tx.clone();
-        let log = log.clone();
-
-        tokio::spawn(rx_loop(tx, fr, log))
-    };
+    // Spawn a separate task to receive data over the network, so that we can
+    // always make progress and keep the socket buffer from filling up.
+    let mut recv_task = tokio::spawn(rx_loop(tx.clone(), fr, log.clone()));
 
     let mut ping_interval = deadline_secs(PING_INTERVAL_SECS);
     let mut ping_count = 0u64;
