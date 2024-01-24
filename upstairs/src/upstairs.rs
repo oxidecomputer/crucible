@@ -2011,12 +2011,8 @@ impl Upstairs {
             | UpstairsState::Deactivating { .. } => false,
         };
 
-        self.downstairs.reinitialize(
-            client_id,
-            auto_promote,
-            reason,
-            &self.state,
-        );
+        self.downstairs
+            .reinitialize(client_id, auto_promote, &self.state);
     }
 
     fn set_backpressure(&self) {
