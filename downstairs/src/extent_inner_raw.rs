@@ -17,7 +17,7 @@ use slog::{error, Logger};
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, IoSliceMut, Read};
-use std::os::fd::AsRawFd;
+use std::os::fd::AsFd;
 use std::path::Path;
 
 /// Equivalent to `DownstairsBlockContext`, but without one's own block number
@@ -249,7 +249,7 @@ impl ExtentInner for RawInner {
             // bytes.  We could do more robust error handling here (e.g.
             // retrying in a loop), but for now, simply bailing out seems wise.
             let num_bytes = nix::sys::uio::preadv(
-                self.file.as_raw_fd(),
+                self.file.as_fd(),
                 &mut iovecs,
                 first_req.offset.value as i64 * block_size as i64,
             )
@@ -645,7 +645,7 @@ impl RawInner {
         let block_size = self.extent_size.block_size_in_bytes();
         let mut buf = vec![0; block_size as usize];
         pread_all(
-            self.file.as_raw_fd(),
+            self.file.as_fd(),
             &mut buf,
             (block_size as u64 * block) as i64,
         )
@@ -837,7 +837,7 @@ impl RawInner {
     ) -> Result<(), CrucibleError> {
         // Now, batch writes into iovecs and use pwritev to write them all out.
         let mut batched_pwritev = BatchedPwritev::new(
-            self.file.as_raw_fd(),
+            self.file.as_fd(),
             writes.len(),
             self.extent_size.block_size_in_bytes().into(),
             iov_max,
@@ -1207,7 +1207,7 @@ impl RawLayout {
     /// changed.
     fn set_dirty(&self, file: &File) -> Result<(), CrucibleError> {
         let offset = self.metadata_offset();
-        pwrite_all(file.as_raw_fd(), &[1u8], offset as i64).map_err(|e| {
+        pwrite_all(file.as_fd(), &[1u8], offset as i64).map_err(|e| {
             CrucibleError::IoError(format!("writing dirty byte failed: {e}",))
         })?;
         Ok(())
@@ -1268,7 +1268,7 @@ impl RawLayout {
     fn get_metadata(&self, file: &File) -> Result<OnDiskMeta, CrucibleError> {
         let mut buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
         let offset = self.metadata_offset();
-        pread_all(file.as_raw_fd(), &mut buf, offset as i64).map_err(|e| {
+        pread_all(file.as_fd(), &mut buf, offset as i64).map_err(|e| {
             CrucibleError::IoError(format!("reading metadata failed: {e}"))
         })?;
         let out: OnDiskMeta = bincode::deserialize(&buf)
@@ -1298,7 +1298,7 @@ impl RawLayout {
             bincode::serialize_into(&mut buf[n..], &d).unwrap();
         }
         let offset = self.context_slot_offset(block_start, slot);
-        pwrite_all(file.as_raw_fd(), &buf, offset as i64).map_err(|e| {
+        pwrite_all(file.as_fd(), &buf, offset as i64).map_err(|e| {
             CrucibleError::IoError(format!("writing context slots failed: {e}"))
         })?;
         Ok(())
@@ -1315,7 +1315,7 @@ impl RawLayout {
             vec![0u8; (BLOCK_CONTEXT_SLOT_SIZE_BYTES * block_count) as usize];
 
         let offset = self.context_slot_offset(block_start, slot);
-        pread_all(file.as_raw_fd(), &mut buf, offset as i64).map_err(|e| {
+        pread_all(file.as_fd(), &mut buf, offset as i64).map_err(|e| {
             CrucibleError::IoError(format!("reading context slots failed: {e}"))
         })?;
 
@@ -1376,7 +1376,7 @@ impl RawLayout {
 
         let offset = self.active_context_offset();
 
-        pwrite_all(file.as_raw_fd(), &buf, offset as i64).map_err(|e| {
+        pwrite_all(file.as_fd(), &buf, offset as i64).map_err(|e| {
             CrucibleError::IoError(format!("writing metadata failed: {e}"))
         })?;
 
@@ -1392,7 +1392,7 @@ impl RawLayout {
     ) -> Result<Vec<ContextSlot>, CrucibleError> {
         let mut buf = vec![0u8; self.active_context_size() as usize];
         let offset = self.active_context_offset();
-        pread_all(file.as_raw_fd(), &mut buf, offset as i64).map_err(|e| {
+        pread_all(file.as_fd(), &mut buf, offset as i64).map_err(|e| {
             CrucibleError::IoError(format!(
                 "could not read active contexts: {e}"
             ))
@@ -1428,8 +1428,8 @@ impl RawLayout {
 ///
 /// We don't have to worry about most of these conditions, but it may be
 /// possible for Crucible to be interrupted by a signal, so let's play it safe.
-fn pread_all(
-    fd: std::os::fd::RawFd,
+fn pread_all<F: AsFd + Copy>(
+    fd: F,
     mut buf: &mut [u8],
     mut offset: i64,
 ) -> Result<(), nix::errno::Errno> {
@@ -1444,8 +1444,8 @@ fn pread_all(
 /// Call `pwrite` repeatedly to write an entire buffer
 ///
 /// See details for why this is necessary in [`pread_all`]
-fn pwrite_all(
-    fd: std::os::fd::RawFd,
+fn pwrite_all<F: AsFd + Copy>(
+    fd: F,
     mut buf: &[u8],
     mut offset: i64,
 ) -> Result<(), nix::errno::Errno> {

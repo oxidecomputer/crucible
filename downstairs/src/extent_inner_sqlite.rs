@@ -15,7 +15,7 @@ use slog::{error, Logger};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, IoSliceMut, Read, Seek, SeekFrom};
-use std::os::fd::AsRawFd;
+use std::os::fd::AsFd;
 use std::path::Path;
 
 #[derive(Debug)]
@@ -217,7 +217,7 @@ impl ExtentInner for SqliteInner {
             });
 
             nix::sys::uio::preadv(
-                self.file.as_raw_fd(),
+                self.file.as_fd(),
                 &mut iovecs,
                 first_req.offset.value as i64 * block_size as i64,
             )
@@ -437,7 +437,7 @@ impl ExtentInner for SqliteInner {
 
         // Now, batch writes into iovecs and use pwritev to write them all out.
         let mut batched_pwritev = BatchedPwritev::new(
-            self.file.as_raw_fd(),
+            self.file.as_fd(),
             writes.len(),
             self.extent_size.block_size_in_bytes() as u64,
             iov_max,
