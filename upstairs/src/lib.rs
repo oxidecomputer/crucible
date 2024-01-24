@@ -1561,7 +1561,7 @@ impl Buffer {
     /// # Panics
     /// - The offset must be block-aligned
     /// - The data length must be divisible by block size
-    /// - Data cannot exceed the buffer's lengt
+    /// - Data cannot exceed the buffer's length
     ///
     /// If any of these conditions are not met, the function will panic.
     pub(crate) fn write(&mut self, offset: usize, data: &[u8]) {
