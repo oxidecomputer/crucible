@@ -1578,7 +1578,7 @@ impl Buffer {
             .fill(true);
     }
 
-    /// Writes both data and ownership to the buffer
+    /// Writes data to the buffer where `owned` is true
     ///
     /// If `owned[i]` is `false`, then that block is not written
     ///
@@ -1589,7 +1589,7 @@ impl Buffer {
     /// - `data` and `owned` must be the same size
     ///
     /// If any of these conditions are not met, the function will panic.
-    pub(crate) fn write_with_ownership(
+    pub(crate) fn write_if_owned(
         &mut self,
         offset: usize,
         data: &[u8],

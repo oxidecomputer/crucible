@@ -70,7 +70,7 @@ impl BlockIO for InMemoryBlockIO {
 
         let start = offset.value as usize * bs;
 
-        data.write_with_ownership(
+        data.write_if_owned(
             0,
             &inner.bytes[start..][..data.len()],
             &inner.owned[offset.value as usize..][..data.len() / bs],
