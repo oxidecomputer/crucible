@@ -65,7 +65,7 @@ num-traits = "0.2"
 omicron-zone-package = "0.10.0"
 openapiv3 = "2.0.0"
 opentelemetry = "0.21.0"
-opentelemetry-jaeger = { version = "0.17.0" }
+opentelemetry-jaeger = { version = "0.20.0" }
 percent-encoding = "2.3"
 proptest = "1.4.0"
 rayon = "1.8.0"
@@ -99,7 +99,7 @@ tokio-test = "*"
 tokio-util = { version = "0.7", features = ["codec"]}
 toml = "0.8"
 tracing = "0.1"
-tracing-opentelemetry = "0.18.0"
+tracing-opentelemetry = "0.22.0"
 tracing-subscriber = "0.3.18"
 twox-hash = "1.6.3"
 usdt = "0.3.5"
