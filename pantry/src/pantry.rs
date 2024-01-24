@@ -87,6 +87,18 @@ where
     }
 }
 
+// Static assertions to ensure that MAX_CHUNK_SIZE is divisible into blocks.
+//
+// Block size is always a power of two, so if we're divisible by the largest
+// possible block, then we're also divisible by all others.
+static_assertions::const_assert_eq!(
+    PantryEntry::MAX_CHUNK_SIZE % crucible::MAX_BLOCK_SIZE,
+    0
+);
+static_assertions::const_assert!(
+    PantryEntry::MAX_CHUNK_SIZE >= crucible::MAX_BLOCK_SIZE,
+);
+
 impl PantryEntry {
     pub const MAX_CHUNK_SIZE: usize = 512 * 1024;
 
@@ -332,14 +344,8 @@ impl PantryEntry {
                 block_size,
             );
         }
-        if Self::MAX_CHUNK_SIZE % block_size as usize != 0 {
-            crucible_bail!(
-                InvalidNumberOfBlocks,
-                "max chunk size {} not divisible by block size {}!",
-                Self::MAX_CHUNK_SIZE,
-                block_size,
-            );
-        }
+        // This is checked by static assertions above
+        assert_eq!(Self::MAX_CHUNK_SIZE % block_size as usize, 0);
 
         let mut data = crucible::Buffer::with_capacity(
             Self::MAX_CHUNK_SIZE / block_size as usize,

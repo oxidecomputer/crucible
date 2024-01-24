@@ -87,6 +87,7 @@ slog-async = { version = "2.8" }
 slog-bunyan = "2.4.0"
 slog-dtrace = "0.2"
 slog-term = { version = "2.9" }
+static_assertions = "1.1.0"
 statistical = "1.0.0"
 subprocess = "0.2.9"
 tempfile = "3"
