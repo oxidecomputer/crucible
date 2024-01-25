@@ -7,9 +7,7 @@ use std::{
 
 use crate::{
     cdt,
-    client::{
-        ClientAction, ClientRunResult, ClientStopReason, DownstairsClient,
-    },
+    client::{ClientAction, ClientStopReason, DownstairsClient},
     live_repair::ExtentInfo,
     stats::UpStatOuter,
     upstairs::{UpstairsConfig, UpstairsState},
@@ -660,7 +658,6 @@ impl Downstairs {
         &mut self,
         client_id: ClientId,
         auto_promote: bool,
-        reason: ClientRunResult,
         up_state: &UpstairsState,
     ) {
         let prev_state = self.clients[client_id].state();
@@ -682,15 +679,6 @@ impl Downstairs {
         if matches!(prev_state, DsState::LiveRepair | DsState::Active)
             && matches!(new_state, DsState::Faulted)
         {
-            if matches!(reason, ClientRunResult::RequestedStop(..)) {
-                // It's invalid for the upstairs to request that the IO task
-                // stop _without_ changing its state to something that causes
-                // jobs to be skipped.
-                panic!(
-                    "caller must change state from {prev_state} \
-                     when requesting a stop"
-                );
-            }
             self.skip_all_jobs(client_id);
         }
 
