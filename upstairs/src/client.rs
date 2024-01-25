@@ -258,7 +258,7 @@ impl DownstairsClient {
         .await;
     }
 
-    pub(crate) fn halt_io_task(&mut self, r: ClientStopReason) {
+    fn halt_io_task(&mut self, r: ClientStopReason) {
         if let Some(t) = self.client_task.client_stop_tx.take() {
             if let Err(_e) = t.send(r) {
                 warn!(self.log, "failed to send stop request")
