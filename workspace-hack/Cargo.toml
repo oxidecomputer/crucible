@@ -33,6 +33,7 @@ hex = { version = "0.4", features = ["serde"] }
 indexmap = { version = "2", features = ["serde"] }
 libc = { version = "0.2", features = ["extra_traits"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
+memchr = { version = "2" }
 num-integer = { version = "0.1", default-features = false, features = ["i128", "std"] }
 num-iter = { version = "0.1", default-features = false, features = ["i128", "std"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
@@ -44,10 +45,9 @@ rand_core = { version = "0.6", default-features = false, features = ["std"] }
 reqwest = { version = "0.11", features = ["blocking", "json", "rustls-tls", "stream"] }
 schemars = { version = "0.8", features = ["bytes", "chrono", "uuid1"] }
 semver = { version = "1", features = ["serde"] }
-serde = { version = "1", features = ["alloc", "derive"] }
+serde = { version = "1", features = ["alloc", "derive", "rc"] }
 slog = { version = "2", features = ["dynamic-keys", "max_level_trace", "release_max_level_debug"] }
-syn-dff4ba8e3ae991db = { package = "syn", version = "1", features = ["extra-traits", "full"] }
-syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "full", "visit", "visit-mut"] }
+syn = { version = "2", features = ["extra-traits", "full", "visit", "visit-mut"] }
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
 tokio = { version = "1", features = ["full", "test-util"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
@@ -55,7 +55,7 @@ tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
 unicode-bidi = { version = "0.3" }
 unicode-normalization = { version = "0.1" }
-usdt = { version = "0.3" }
+usdt = { version = "0.5" }
 usdt-impl = { version = "0.5", default-features = false, features = ["asm", "des"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 zerocopy = { version = "0.7", features = ["derive", "simd"] }
@@ -70,6 +70,7 @@ hashbrown = { version = "0.14", features = ["raw"] }
 indexmap = { version = "2", features = ["serde"] }
 libc = { version = "0.2", features = ["extra_traits"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
+memchr = { version = "2" }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
 openapiv3 = { version = "2", default-features = false, features = ["skip_serializing_defaults"] }
 phf_shared = { version = "0.11" }
@@ -78,9 +79,8 @@ rand_chacha = { version = "0.3" }
 rand_core = { version = "0.6", default-features = false, features = ["std"] }
 schemars = { version = "0.8", features = ["bytes", "chrono", "uuid1"] }
 semver = { version = "1", features = ["serde"] }
-serde = { version = "1", features = ["alloc", "derive"] }
-syn-dff4ba8e3ae991db = { package = "syn", version = "1", features = ["extra-traits", "full"] }
-syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "full", "visit", "visit-mut"] }
+serde = { version = "1", features = ["alloc", "derive", "rc"] }
+syn = { version = "2", features = ["extra-traits", "full", "visit", "visit-mut"] }
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
 time-macros = { version = "0.2", default-features = false, features = ["formatting", "parsing"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
@@ -98,12 +98,10 @@ once_cell = { version = "1", features = ["unstable"] }
 rustix = { version = "0.38", features = ["fs", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
-syn-dff4ba8e3ae991db = { package = "syn", version = "1", default-features = false, features = ["visit"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
 dof = { version = "0.3", default-features = false, features = ["des"] }
 once_cell = { version = "1", features = ["unstable"] }
-syn-dff4ba8e3ae991db = { package = "syn", version = "1", default-features = false, features = ["visit"] }
 
 [target.aarch64-apple-darwin.dependencies]
 hyper = { version = "0.14", features = ["full"] }
@@ -123,11 +121,9 @@ once_cell = { version = "1", features = ["unstable"] }
 rustix = { version = "0.38", features = ["fs", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
-syn-dff4ba8e3ae991db = { package = "syn", version = "1", default-features = false, features = ["visit"] }
 
 [target.x86_64-unknown-illumos.build-dependencies]
 dof = { version = "0.3", default-features = false, features = ["des"] }
 once_cell = { version = "1", features = ["unstable"] }
-syn-dff4ba8e3ae991db = { package = "syn", version = "1", default-features = false, features = ["visit"] }
 
 ### END HAKARI SECTION
