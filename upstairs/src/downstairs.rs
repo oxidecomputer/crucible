@@ -7,16 +7,16 @@ use std::{
 
 use crate::{
     cdt,
-    client::{ClientAction, ClientStopReason, DownstairsClient},
+    client::{ClientAction, ClientRequest, ClientStopReason, DownstairsClient},
     live_repair::ExtentInfo,
     stats::UpStatOuter,
     upstairs::{UpstairsConfig, UpstairsState},
     AckStatus, ActiveJobs, AllocRingBuffer, ClientData, ClientIOStateCount,
     ClientId, ClientMap, CrucibleError, DownstairsIO, DownstairsMend, DsState,
     ExtentFix, ExtentRepairIDs, GtoS, GuestWork, GuestWorkId, IOState,
-    IOStateCount, IOop, ImpactedBlocks, JobId, Message, ReadRequest,
-    ReadResponse, ReconcileIO, ReconciliationId, RegionDefinition,
-    ReplaceResult, SnapshotDetails, WorkSummary,
+    IOStateCount, IOop, ImpactedBlocks, JobId, Message, RawMessage,
+    ReadRequest, ReadResponse, ReconcileIO, ReconciliationId, RegionDefinition,
+    ReplaceResult, SerializedWrite, SnapshotDetails, WorkSummary,
 };
 use crucible_common::MAX_ACTIVE_COUNT;
 
@@ -347,7 +347,6 @@ impl Downstairs {
 
     /// Match on the `IOop` type, update stats, and fire DTrace probes
     fn cdt_gw_work_done(job: &DownstairsIO, stats: &UpStatOuter) {
-        let ds_id = job.ds_id;
         let gw_id = job.guest_id;
         let io_size = job.io_size();
         match &job.work {
@@ -367,17 +366,6 @@ impl Downstairs {
             IOop::Flush { .. } => {
                 cdt::gw__flush__done!(|| (gw_id.0));
                 stats.add_flush();
-            }
-            IOop::ExtentClose { extent, .. } => {
-                // The upstairs should never have an ExtentClose on the
-                // work queue.  We will always use ExtentFlushClose as the
-                // IOop, then convert to the proper Message to send to
-                // each downstairs depending on the source/repair downstairs
-                // values in that IOop.
-                panic!(
-                    "job: {} gw: {}  Received illegal IOop::ExtentClose {}",
-                    ds_id, gw_id, extent,
-                );
             }
             IOop::ExtentFlushClose { extent, .. } => {
                 cdt::gw__close__done!(|| (gw_id.0, extent));
@@ -451,34 +439,32 @@ impl Downstairs {
             };
 
             let message = match job {
-                IOop::Write {
-                    dependencies,
-                    writes,
-                } => {
+                IOop::Write { dependencies, data } => {
                     cdt::ds__write__io__start!(|| (new_id.0, client_id.get()));
-                    Message::Write {
-                        upstairs_id: self.cfg.upstairs_id,
-                        session_id: self.cfg.session_id,
-                        job_id: new_id,
-                        dependencies,
-                        writes,
-                    }
+                    ClientRequest::RawMessage(
+                        RawMessage::Write {
+                            upstairs_id: self.cfg.upstairs_id,
+                            session_id: self.cfg.session_id,
+                            job_id: new_id,
+                            dependencies,
+                        },
+                        data.data,
+                    )
                 }
-                IOop::WriteUnwritten {
-                    dependencies,
-                    writes,
-                } => {
+                IOop::WriteUnwritten { dependencies, data } => {
                     cdt::ds__write__unwritten__io__start!(|| (
                         new_id.0,
                         client_id.get()
                     ));
-                    Message::WriteUnwritten {
-                        upstairs_id: self.cfg.upstairs_id,
-                        session_id: self.cfg.session_id,
-                        job_id: new_id,
-                        dependencies,
-                        writes,
-                    }
+                    ClientRequest::RawMessage(
+                        RawMessage::WriteUnwritten {
+                            upstairs_id: self.cfg.upstairs_id,
+                            session_id: self.cfg.session_id,
+                            job_id: new_id,
+                            dependencies,
+                        },
+                        data.data,
+                    )
                 }
                 IOop::Flush {
                     dependencies,
@@ -488,7 +474,7 @@ impl Downstairs {
                     extent_limit,
                 } => {
                     cdt::ds__flush__io__start!(|| (new_id.0, client_id.get()));
-                    Message::Flush {
+                    ClientRequest::Message(Message::Flush {
                         upstairs_id: self.cfg.upstairs_id,
                         session_id: self.cfg.session_id,
                         job_id: new_id,
@@ -497,32 +483,20 @@ impl Downstairs {
                         gen_number,
                         snapshot_details,
                         extent_limit,
-                    }
+                    })
                 }
                 IOop::Read {
                     dependencies,
                     requests,
                 } => {
                     cdt::ds__read__io__start!(|| (new_id.0, client_id.get()));
-                    Message::ReadRequest {
+                    ClientRequest::Message(Message::ReadRequest {
                         upstairs_id: self.cfg.upstairs_id,
                         session_id: self.cfg.session_id,
                         job_id: new_id,
                         dependencies,
                         requests,
-                    }
-                }
-                IOop::ExtentClose {
-                    dependencies: _,
-                    extent: _,
-                } => {
-                    // This command should never exist on the upstairs side.
-                    // We only construct it for downstairs IO, after
-                    // receiving ExtentLiveClose from the upstairs.
-                    panic!(
-                        "[{}] Received illegal IOop::ExtentClose",
-                        client_id
-                    );
+                    })
                 }
                 IOop::ExtentFlushClose {
                     dependencies,
@@ -539,15 +513,15 @@ impl Downstairs {
                     ));
                     if repair_downstairs.contains(&client_id) {
                         // We are the downstairs being repaired, so just close.
-                        Message::ExtentLiveClose {
+                        ClientRequest::Message(Message::ExtentLiveClose {
                             upstairs_id: self.cfg.upstairs_id,
                             session_id: self.cfg.session_id,
                             job_id: new_id,
                             dependencies,
                             extent_id: extent,
-                        }
+                        })
                     } else {
-                        Message::ExtentLiveFlushClose {
+                        ClientRequest::Message(Message::ExtentLiveFlushClose {
                             upstairs_id: self.cfg.upstairs_id,
                             session_id: self.cfg.session_id,
                             job_id: new_id,
@@ -555,7 +529,7 @@ impl Downstairs {
                             extent_id: extent,
                             flush_number,
                             gen_number,
-                        }
+                        })
                     }
                 }
                 IOop::ExtentLiveRepair {
@@ -571,7 +545,7 @@ impl Downstairs {
                         extent
                     ));
                     if repair_downstairs.contains(&client_id) {
-                        Message::ExtentLiveRepair {
+                        ClientRequest::Message(Message::ExtentLiveRepair {
                             upstairs_id: self.cfg.upstairs_id,
                             session_id: self.cfg.session_id,
                             job_id: new_id,
@@ -579,14 +553,14 @@ impl Downstairs {
                             extent_id: extent,
                             source_client_id: source_downstairs,
                             source_repair_address,
-                        }
+                        })
                     } else {
-                        Message::ExtentLiveNoOp {
+                        ClientRequest::Message(Message::ExtentLiveNoOp {
                             upstairs_id: self.cfg.upstairs_id,
                             session_id: self.cfg.session_id,
                             job_id: new_id,
                             dependencies,
-                        }
+                        })
                     }
                 }
                 IOop::ExtentLiveReopen {
@@ -598,22 +572,22 @@ impl Downstairs {
                         client_id.get(),
                         extent
                     ));
-                    Message::ExtentLiveReopen {
+                    ClientRequest::Message(Message::ExtentLiveReopen {
                         upstairs_id: self.cfg.upstairs_id,
                         session_id: self.cfg.session_id,
                         job_id: new_id,
                         dependencies,
                         extent_id: extent,
-                    }
+                    })
                 }
                 IOop::ExtentLiveNoOp { dependencies } => {
                     cdt::ds__noop__start!(|| (new_id.0, client_id.get()));
-                    Message::ExtentLiveNoOp {
+                    ClientRequest::Message(Message::ExtentLiveNoOp {
                         upstairs_id: self.cfg.upstairs_id,
                         session_id: self.cfg.session_id,
                         job_id: new_id,
                         dependencies,
-                    }
+                    })
                 }
             };
             self.clients[client_id].send(message).await
@@ -1731,7 +1705,7 @@ impl Downstairs {
         self.create_and_enqueue_write_eob(
             iblocks,
             GuestWorkId(10),
-            vec![request.clone()],
+            SerializedWrite::from_writes(vec![request.clone()]),
             is_write_unwritten,
         )
     }
@@ -1740,7 +1714,7 @@ impl Downstairs {
         &mut self,
         blocks: ImpactedBlocks,
         gw_id: GuestWorkId,
-        writes: Vec<crucible_protocol::Write>,
+        data: SerializedWrite,
         is_write_unwritten: bool,
     ) -> JobId {
         let ds_id = self.next_id();
@@ -1752,15 +1726,9 @@ impl Downstairs {
         debug!(self.log, "IO Write {} has deps {:?}", ds_id, dependencies);
 
         let awrite = if is_write_unwritten {
-            IOop::WriteUnwritten {
-                dependencies,
-                writes,
-            }
+            IOop::WriteUnwritten { dependencies, data }
         } else {
-            IOop::Write {
-                dependencies,
-                writes,
-            }
+            IOop::Write { dependencies, data }
         };
 
         let io = DownstairsIO {
@@ -2269,7 +2237,7 @@ impl Downstairs {
         &mut self,
         guest_id: GuestWorkId,
         blocks: ImpactedBlocks,
-        writes: Vec<crucible_protocol::Write>,
+        serialized_write: SerializedWrite,
         is_write_unwritten: bool,
     ) -> JobId {
         // If there is a live-repair in progress that intersects with this read,
@@ -2279,7 +2247,7 @@ impl Downstairs {
         self.create_and_enqueue_write_eob(
             blocks,
             guest_id,
-            writes,
+            serialized_write,
             is_write_unwritten,
         )
     }
@@ -2342,10 +2310,8 @@ impl Downstairs {
         // If this is a write (which will be fast-acked), increment our byte
         // counter for backpressure calculations.
         match &io.work {
-            IOop::Write { writes, .. }
-            | IOop::WriteUnwritten { writes, .. } => {
-                self.write_bytes_outstanding +=
-                    writes.iter().map(|w| w.data.len() as u64).sum::<u64>();
+            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
+                self.write_bytes_outstanding += data.io_size_bytes as u64;
             }
             _ => (),
         };
@@ -2715,21 +2681,15 @@ impl Downstairs {
             for &id in &retired {
                 let job = self.ds_active.remove(&id);
                 // Update pending bytes when this job is retired
-                match &job.work {
-                    IOop::Write { writes, .. }
-                    | IOop::WriteUnwritten { writes, .. } => {
-                        self.write_bytes_outstanding = self
-                            .write_bytes_outstanding
-                            .checked_sub(
-                                writes
-                                    .iter()
-                                    .map(|w| w.data.len() as u64)
-                                    .sum::<u64>(),
-                            )
-                            .unwrap();
+                let change = match &job.work {
+                    IOop::Write { data, .. }
+                    | IOop::WriteUnwritten { data, .. } => {
+                        data.io_size_bytes as u64
                     }
-                    _ => (),
-                }
+                    _ => 0,
+                };
+                self.write_bytes_outstanding =
+                    self.write_bytes_outstanding.checked_sub(change).unwrap();
             }
 
             debug!(self.log, "[rc] retire {} clears {:?}", ds_id, retired);
@@ -2778,35 +2738,17 @@ impl Downstairs {
                     let num_blocks = requests.len();
                     (job_type, num_blocks)
                 }
-                IOop::Write { writes, .. } => {
+                IOop::Write { data, .. } => {
                     let job_type = "Write".to_string();
-                    let mut num_blocks = 0;
-
-                    for write in writes {
-                        let block_size = write.offset.block_size_in_bytes();
-                        num_blocks += write.data.len() / block_size as usize;
-                    }
-
-                    (job_type, num_blocks)
+                    (job_type, data.num_blocks)
                 }
-                IOop::WriteUnwritten { writes, .. } => {
+                IOop::WriteUnwritten { data, .. } => {
                     let job_type = "WriteU".to_string();
-                    let mut num_blocks = 0;
-
-                    for write in writes {
-                        let block_size = write.offset.block_size_in_bytes();
-                        num_blocks += write.data.len() / block_size as usize;
-                    }
-
-                    (job_type, num_blocks)
+                    (job_type, data.num_blocks)
                 }
                 IOop::Flush { .. } => {
                     let job_type = "Flush".to_string();
                     (job_type, 0)
-                }
-                IOop::ExtentClose { extent, .. } => {
-                    let job_type = "EClose".to_string();
-                    (job_type, *extent)
                 }
                 IOop::ExtentFlushClose { extent, .. } => {
                     let job_type = "FClose".to_string();
@@ -3479,7 +3421,12 @@ impl Downstairs {
             },
         });
 
-        self.submit_write(gwid, blocks, writes.collect(), is_write_unwritten)
+        self.submit_write(
+            gwid,
+            blocks,
+            SerializedWrite::from_writes(writes.collect()),
+            is_write_unwritten,
+        )
     }
 
     #[cfg(test)]

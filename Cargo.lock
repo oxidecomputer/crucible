@@ -747,6 +747,7 @@ dependencies = [
  "async-recursion",
  "async-trait",
  "base64",
+ "bincode",
  "bytes",
  "chrono",
  "crucible-client-types",
@@ -1092,6 +1093,7 @@ dependencies = [
  "num_enum",
  "schemars",
  "serde",
+ "strum_macros",
  "tokio-util",
  "uuid",
 ]

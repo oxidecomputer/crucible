@@ -3,27 +3,79 @@ use crate::{
     cdt, deadline_secs, integrity_hash, live_repair::ExtentInfo,
     upstairs::UpstairsConfig, upstairs::UpstairsState, ClientIOStateCount,
     ClientId, CrucibleDecoder, CrucibleEncoder, CrucibleError, DownstairsIO,
-    DsState, EncryptionContext, IOState, IOop, JobId, Message, ReadResponse,
-    ReconcileIO, RegionDefinitionStatus, RegionMetadata, WrappedStream,
-    MAX_ACTIVE_COUNT,
+    DsState, EncryptionContext, IOState, IOop, JobId, Message, RawMessage,
+    ReadResponse, ReconcileIO, RegionDefinitionStatus, RegionMetadata,
+    WrappedStream, MAX_ACTIVE_COUNT,
 };
 use crucible_common::x509::TLSContext;
 use crucible_protocol::{ReconciliationId, CRUCIBLE_MESSAGE_VERSION};
 
 use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
 
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::{
+    io::AsyncWriteExt,
     net::{TcpSocket, TcpStream},
     sync::{mpsc, oneshot},
     time::sleep_until,
 };
-use tokio_util::codec::{FramedRead, FramedWrite};
+use tokio_util::codec::{Encoder, FramedRead};
 use uuid::Uuid;
 
 const TIMEOUT_SECS: f32 = 50.0;
 const PING_INTERVAL_SECS: f32 = 5.0;
+
+#[derive(Debug)]
+pub(crate) enum ClientRequest {
+    /// Normal message to be sent down the wire
+    Message(Message),
+    /// Pre-serialized message to be sent down the wire
+    RawMessage(RawMessage, bytes::Bytes),
+}
+
+impl ClientRequest {
+    /// Write the given message to an `AsyncWrite` sink
+    async fn write<W>(&self, fw: &mut W) -> Result<(), CrucibleError>
+    where
+        W: tokio::io::AsyncWrite
+            + std::marker::Unpin
+            + std::marker::Send
+            + 'static,
+    {
+        match self {
+            ClientRequest::Message(m) => {
+                let mut out = bytes::BytesMut::new();
+                let mut e = CrucibleEncoder::new();
+                e.encode(m, &mut out)?;
+                fw.write_all(&out).await?;
+            }
+            ClientRequest::RawMessage(m, data) => {
+                // Manual implementation of CrucibleEncoder, for situations
+                // where the bulk of the message has already been
+                // pre-serialized.
+                let mut header = bincode::serialize(&(
+                    0u32, // dummy length, to be patched later
+                    &m,
+                ))
+                .unwrap();
+
+                // Patch the length
+                let len: u32 = (header.len() + data.len()).try_into().unwrap();
+                header[0..4].copy_from_slice(&len.to_le_bytes());
+
+                // Patch the discriminant
+                bincode::serialize_into(&mut header[4..8], &m.discriminant())
+                    .unwrap();
+
+                // write_all_vectored would save a syscall, but is nightly-only
+                fw.write_all(&header).await?;
+                fw.write_all(data).await?;
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Handle to a running I/O task
 ///
@@ -36,7 +88,7 @@ struct ClientTaskHandle {
     ///
     /// The only thing that we send to the client is [`Message`], which is then
     /// sent out over the network.
-    client_request_tx: mpsc::Sender<Message>,
+    client_request_tx: mpsc::Sender<ClientRequest>,
 
     /// Handle to receive data from the I/O task
     ///
@@ -246,7 +298,7 @@ impl DownstairsClient {
 
     /// Send a `Message::HereIAm` via the client IO task
     pub(crate) async fn send_here_i_am(&mut self) {
-        self.send(Message::HereIAm {
+        self.send_message(Message::HereIAm {
             version: CRUCIBLE_MESSAGE_VERSION,
             upstairs_id: self.cfg.upstairs_id,
             session_id: self.cfg.session_id,
@@ -298,7 +350,11 @@ impl DownstairsClient {
         self.new_jobs.insert(work);
     }
 
-    pub(crate) async fn send(&mut self, m: Message) {
+    pub(crate) async fn send_message(&mut self, m: Message) {
+        self.send(ClientRequest::Message(m)).await
+    }
+
+    pub(crate) async fn send(&mut self, m: ClientRequest) {
         // Normally, the client task continues running until
         // `self.client_task.client_request_tx` is dropped; as such, we should
         // always be able to send it a message.
@@ -344,7 +400,6 @@ impl DownstairsClient {
                 | IOop::WriteUnwritten { dependencies, .. }
                 | IOop::Flush { dependencies, .. }
                 | IOop::Read { dependencies, .. }
-                | IOop::ExtentClose { dependencies, .. }
                 | IOop::ExtentFlushClose { dependencies, .. }
                 | IOop::ExtentLiveRepair { dependencies, .. }
                 | IOop::ExtentLiveReopen { dependencies, .. }
@@ -727,7 +782,7 @@ impl DownstairsClient {
                 // If the client task has stopped, then print a warning but
                 // otherwise continue (because we'll be cleaned up by the
                 // JoinHandle watcher).
-                self.send(Message::PromoteToActive {
+                self.send_message(Message::PromoteToActive {
                     upstairs_id: self.cfg.upstairs_id,
                     session_id: self.cfg.session_id,
                     gen: self.cfg.generation(),
@@ -1207,8 +1262,7 @@ impl DownstairsClient {
                         }
 
                         // If a repair job errors, mark that downstairs as bad
-                        IOop::ExtentClose { .. }
-                        | IOop::ExtentFlushClose { .. }
+                        IOop::ExtentFlushClose { .. }
                         | IOop::ExtentLiveRepair { .. }
                         | IOop::ExtentLiveReopen { .. }
                         | IOop::ExtentLiveNoOp { .. } => {
@@ -1311,8 +1365,7 @@ impl DownstairsClient {
                  * are done.
                  */
                 IOop::Write { .. } | IOop::WriteUnwritten { .. } => {}
-                IOop::ExtentClose { .. }
-                | IOop::ExtentFlushClose { .. }
+                IOop::ExtentFlushClose { .. }
                 | IOop::ExtentLiveRepair { .. }
                 | IOop::ExtentLiveReopen { .. }
                 | IOop::ExtentLiveNoOp { .. } => {
@@ -1416,12 +1469,6 @@ impl DownstairsClient {
                         }
                     }
                     self.last_flush = ds_id;
-                }
-                IOop::ExtentClose { extent, .. } => {
-                    panic!(
-                        "[{}] job: {:?} Received illegal IOop::ExtentClose {}",
-                        self.client_id, job, extent,
-                    );
                 }
                 IOop::ExtentFlushClose { .. } => {
                     assert!(read_data.is_empty());
@@ -1631,7 +1678,7 @@ impl DownstairsClient {
                 self.repair_addr = Some(repair_addr);
                 match self.promote_state {
                     Some(PromoteState::Waiting) => {
-                        self.send(Message::PromoteToActive {
+                        self.send_message(Message::PromoteToActive {
                             upstairs_id: self.cfg.upstairs_id,
                             session_id: self.cfg.session_id,
                             gen: self.cfg.generation(),
@@ -1770,7 +1817,7 @@ impl DownstairsClient {
                 }
 
                 self.negotiation_state = NegotiationState::WaitForRegionInfo;
-                self.send(Message::RegionInfoPlease).await;
+                self.send_message(Message::RegionInfoPlease).await;
             }
             Message::RegionInfo { region_def } => {
                 if self.negotiation_state != NegotiationState::WaitForRegionInfo
@@ -1901,7 +1948,7 @@ impl DownstairsClient {
                         );
                         self.negotiation_state = NegotiationState::GetLastFlush;
 
-                        self.send(Message::LastFlush {
+                        self.send_message(Message::LastFlush {
                             last_flush_number: lf,
                         })
                         .await;
@@ -1914,7 +1961,7 @@ impl DownstairsClient {
                          */
                         self.negotiation_state =
                             NegotiationState::GetExtentVersions;
-                        self.send(Message::ExtentVersionsPlease).await;
+                        self.send_message(Message::ExtentVersionsPlease).await;
                     }
                     DsState::Replacing => {
                         warn!(
@@ -2071,7 +2118,7 @@ impl DownstairsClient {
                 assert!(!dest_clients.is_empty());
                 if dest_clients.iter().any(|d| *d == self.client_id) {
                     info!(self.log, "sending reconcile request {repair_id:?}");
-                    self.send(job.op.clone()).await;
+                    self.send_message(job.op.clone()).await;
                 } else {
                     // Skip this job for this Downstairs, since only the target
                     // clients need to do the reconcile.
@@ -2088,7 +2135,7 @@ impl DownstairsClient {
             } => {
                 if *client_id == self.client_id {
                     info!(self.log, "sending flush request {repair_id:?}");
-                    self.send(job.op.clone()).await;
+                    self.send_message(job.op.clone()).await;
                 } else {
                     info!(self.log, "skipping flush request {repair_id:?}");
                     // Skip this job for this Downstairs, since it's narrowly
@@ -2100,7 +2147,7 @@ impl DownstairsClient {
             }
             Message::ExtentReopen { .. } | Message::ExtentClose { .. } => {
                 // All other reconcile ops are sent as-is
-                self.send(job.op.clone()).await;
+                self.send_message(job.op.clone()).await;
             }
             m => panic!("invalid reconciliation request {m:?}"),
         }
@@ -2290,7 +2337,7 @@ async fn client_run(
     client_id: ClientId,
     tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     target: SocketAddr,
-    mut rx: mpsc::Receiver<Message>,
+    mut rx: mpsc::Receiver<ClientRequest>,
     mut start: oneshot::Receiver<()>,
     mut stop: oneshot::Receiver<ClientStopReason>,
     tx: mpsc::Sender<ClientResponse>,
@@ -2328,7 +2375,7 @@ async fn client_run_inner(
     client_id: ClientId,
     tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     target: SocketAddr,
-    rx: &mut mpsc::Receiver<Message>,
+    rx: &mut mpsc::Receiver<ClientRequest>,
     mut start: &mut oneshot::Receiver<()>,
     mut stop: &mut oneshot::Receiver<ClientStopReason>,
     tx: &mpsc::Sender<ClientResponse>,
@@ -2425,7 +2472,7 @@ async fn client_run_inner(
 async fn proc_stream(
     client_id: ClientId,
     stream: WrappedStream,
-    rx: &mut mpsc::Receiver<Message>,
+    rx: &mut mpsc::Receiver<ClientRequest>,
     stop: &mut oneshot::Receiver<ClientStopReason>,
     tx: &mpsc::Sender<ClientResponse>,
     log: &Logger,
@@ -2435,17 +2482,15 @@ async fn proc_stream(
             let (read, write) = sock.into_split();
 
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
-            cmd_loop(client_id, rx, stop, tx, fr, fw, log).await
+            cmd_loop(client_id, rx, stop, tx, fr, write, log).await
         }
         WrappedStream::Https(stream) => {
             let (read, write) = tokio::io::split(stream);
 
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
-            cmd_loop(client_id, rx, stop, tx, fr, fw, log).await
+            cmd_loop(client_id, rx, stop, tx, fr, write, log).await
         }
     }
 }
@@ -2497,11 +2542,11 @@ where
 
 async fn cmd_loop<R, W>(
     client_id: ClientId,
-    rx: &mut mpsc::Receiver<Message>,
+    rx: &mut mpsc::Receiver<ClientRequest>,
     stop: &mut oneshot::Receiver<ClientStopReason>,
     tx: &mpsc::Sender<ClientResponse>,
     fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
-    mut fw: FramedWrite<W, crucible_protocol::CrucibleEncoder>,
+    mut fw: W,
     log: &Logger,
 ) -> ClientRunResult
 where
@@ -2534,8 +2579,8 @@ where
                     break ClientRunResult::QueueClosed;
                 };
 
-                if let Err(e) = fw.send(m).await {
-                    break ClientRunResult::WriteFailed(e);
+                if let Err(e) = m.write(&mut fw).await {
+                    break ClientRunResult::WriteFailed(e.into());
                 }
             }
 
@@ -2544,8 +2589,9 @@ where
                 ping_count += 1;
                 cdt::ds__ping__sent!(|| (ping_count, client_id.get()));
 
-                if let Err(e) = fw.send(Message::Ruok).await {
-                    break ClientRunResult::WriteFailed(e);
+                let m = ClientRequest::Message(Message::Ruok);
+                if let Err(e) = m.write(&mut fw).await {
+                    break ClientRunResult::WriteFailed(e.into());
                 }
             }
 
@@ -2780,6 +2826,12 @@ pub(crate) fn validate_unencrypted_read_response(
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::{
+        Block, EncryptionContext, ImpactedAddr, ImpactedBlocks,
+        RegionDefinition,
+    };
+    use rand::prelude::*;
+    use tokio_util::codec::Decoder;
 
     #[test]
     fn downstairs_transition_normal() {
@@ -3169,5 +3221,205 @@ mod test {
             &UpstairsState::Initializing,
             DsState::Faulted,
         );
+    }
+
+    /// Confirms that `RawMessage` serialization works for a `Write`
+    #[tokio::test]
+    async fn test_raw_write_serialization() -> anyhow::Result<()> {
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(25));
+        ddef.set_extent_count(4);
+
+        let mut data = vec![0u8; 512 * 10];
+        rand::thread_rng().fill(&mut data[..]);
+
+        let impacted_blocks = ImpactedBlocks::InclusiveRange(
+            ImpactedAddr {
+                extent_id: 1,
+                block: 7,
+            },
+            ImpactedAddr {
+                extent_id: 1,
+                block: 16,
+            },
+        );
+
+        let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
+        let context = EncryptionContext::new(key_bytes.to_vec(), 512);
+        let cfg = Arc::new(UpstairsConfig {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            generation: std::sync::atomic::AtomicU64::new(10),
+            read_only: false,
+            encryption_context: Some(context),
+            lossy: false,
+        });
+
+        let dr = crate::deferred::DeferredWrite {
+            ddef,
+            impacted_blocks,
+            data: data.clone().into(),
+            res: None,
+            is_write_unwritten: false,
+            cfg: cfg.clone(),
+        };
+        let write_data = dr.run().unwrap();
+
+        let msg = ClientRequest::RawMessage(
+            RawMessage::Write {
+                upstairs_id: cfg.upstairs_id,
+                session_id: cfg.session_id,
+                job_id: JobId(1234),
+                dependencies: vec![JobId(100), JobId(300), JobId(6000)],
+            },
+            write_data.data.data,
+        );
+
+        // Write the raw message to an in-memory buffer
+        let mut cursor = std::io::Cursor::new(vec![]);
+        msg.write(&mut cursor).await.unwrap();
+
+        let mut out = bytes::BytesMut::new();
+        out.extend(cursor.into_inner());
+
+        let mut decoder = CrucibleDecoder::new();
+        let out = decoder.decode(&mut out).unwrap().unwrap();
+
+        let Message::Write {
+            upstairs_id,
+            session_id,
+            job_id,
+            dependencies,
+            writes,
+        } = out
+        else {
+            panic!("bad serialization");
+        };
+        assert_eq!(upstairs_id, cfg.upstairs_id);
+        assert_eq!(session_id, cfg.session_id);
+        assert_eq!(job_id, JobId(1234));
+        assert_eq!(dependencies, vec![JobId(100), JobId(300), JobId(6000)]);
+
+        // Check that all of the writes worked
+        assert_eq!(writes.len(), 10);
+        for (i, w) in writes.iter().enumerate() {
+            assert_eq!(w.eid, 1);
+            assert_eq!(w.offset, Block::new_512(7 + i as u64));
+            let mut out = bytes::BytesMut::from(&*w.data);
+
+            let ctx = w.block_context.encryption_context.unwrap();
+            cfg.encryption_context
+                .as_ref()
+                .unwrap()
+                .decrypt_in_place(&mut out, &ctx.nonce.into(), &ctx.tag.into())
+                .unwrap();
+            assert_eq!(out, &data[i * 512..(i + 1) * 512]);
+
+            let hash = integrity_hash(&[&ctx.nonce, &ctx.tag, &w.data]);
+            assert_eq!(w.block_context.hash, hash);
+        }
+
+        Ok(())
+    }
+
+    /// Confirms that `RawMessage` serialization works for a `WriteUnwritten`
+    #[tokio::test]
+    async fn test_raw_write_unwritten_serialization() -> anyhow::Result<()> {
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(25));
+        ddef.set_extent_count(4);
+
+        let mut data = vec![0u8; 512 * 10];
+        rand::thread_rng().fill(&mut data[..]);
+
+        let impacted_blocks = ImpactedBlocks::InclusiveRange(
+            ImpactedAddr {
+                extent_id: 1,
+                block: 7,
+            },
+            ImpactedAddr {
+                extent_id: 1,
+                block: 16,
+            },
+        );
+
+        let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
+        let context = EncryptionContext::new(key_bytes.to_vec(), 512);
+        let cfg = Arc::new(UpstairsConfig {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            generation: std::sync::atomic::AtomicU64::new(10),
+            read_only: false,
+            encryption_context: Some(context),
+            lossy: false,
+        });
+
+        let dr = crate::deferred::DeferredWrite {
+            ddef,
+            impacted_blocks,
+            data: data.clone().into(),
+            res: None,
+            is_write_unwritten: true,
+            cfg: cfg.clone(),
+        };
+        let write_data = dr.run().unwrap();
+
+        let msg = ClientRequest::RawMessage(
+            RawMessage::WriteUnwritten {
+                upstairs_id: cfg.upstairs_id,
+                session_id: cfg.session_id,
+                job_id: JobId(1234),
+                dependencies: vec![JobId(100), JobId(300), JobId(6000)],
+            },
+            write_data.data.data,
+        );
+
+        // Write the raw message to an in-memory buffer
+        let mut cursor = std::io::Cursor::new(vec![]);
+        msg.write(&mut cursor).await.unwrap();
+
+        let mut out = bytes::BytesMut::new();
+        out.extend(cursor.into_inner());
+
+        let mut decoder = CrucibleDecoder::new();
+        let out = decoder.decode(&mut out).unwrap().unwrap();
+
+        let Message::WriteUnwritten {
+            upstairs_id,
+            session_id,
+            job_id,
+            dependencies,
+            writes,
+        } = out
+        else {
+            panic!("bad serialization");
+        };
+        assert_eq!(upstairs_id, cfg.upstairs_id);
+        assert_eq!(session_id, cfg.session_id);
+        assert_eq!(job_id, JobId(1234));
+        assert_eq!(dependencies, vec![JobId(100), JobId(300), JobId(6000)]);
+
+        // Check that all of the writes worked
+        assert_eq!(writes.len(), 10);
+        for (i, w) in writes.iter().enumerate() {
+            assert_eq!(w.eid, 1);
+            assert_eq!(w.offset, Block::new_512(7 + i as u64));
+            let mut out = bytes::BytesMut::from(&*w.data);
+
+            let ctx = w.block_context.encryption_context.unwrap();
+            cfg.encryption_context
+                .as_ref()
+                .unwrap()
+                .decrypt_in_place(&mut out, &ctx.nonce.into(), &ctx.tag.into())
+                .unwrap();
+            assert_eq!(out, &data[i * 512..(i + 1) * 512]);
+
+            let hash = integrity_hash(&[&ctx.nonce, &ctx.tag, &w.data]);
+            assert_eq!(w.block_context.hash, hash);
+        }
+
+        Ok(())
     }
 }

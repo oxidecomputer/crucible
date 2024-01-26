@@ -1492,7 +1492,7 @@ impl Upstairs {
         let next_id = self.downstairs.submit_write(
             gw_id,
             write.impacted_blocks,
-            write.writes,
+            write.data,
             write.is_write_unwritten,
         );
 
