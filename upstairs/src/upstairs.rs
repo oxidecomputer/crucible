@@ -1117,7 +1117,7 @@ impl Upstairs {
 
     pub(crate) fn show_all_work(&self) -> WQCounts {
         let gior = self.guest_io_ready();
-        let up_count = self.guest.guest_work.active.len();
+        let up_count = self.guest.active_count();
 
         let ds_count = self.downstairs.active_count();
 
@@ -1133,7 +1133,7 @@ impl Upstairs {
         );
         if ds_count == 0 {
             if up_count != 0 {
-                crate::show_guest_work(&self.guest);
+                crate::guest::show_guest_work(&self.guest);
             }
         } else {
             self.downstairs.show_all_work()
