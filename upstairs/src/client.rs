@@ -5,7 +5,7 @@ use crate::{
     ClientId, CrucibleDecoder, CrucibleEncoder, CrucibleError, DownstairsIO,
     DsState, EncryptionContext, IOState, IOop, JobId, Message, RawMessage,
     ReadResponse, ReconcileIO, RegionDefinitionStatus, RegionMetadata,
-    WrappedStream, MAX_ACTIVE_COUNT,
+    MAX_ACTIVE_COUNT,
 };
 use crucible_common::x509::TLSContext;
 use crucible_protocol::{ReconciliationId, CRUCIBLE_MESSAGE_VERSION};
@@ -685,18 +685,19 @@ impl DownstairsClient {
 
         let log = log.new(o!("" => "io task"));
         tokio::spawn(async move {
-            client_run(
+            let mut c = ClientIoTask {
                 client_id,
                 tls_context,
                 target,
-                client_request_rx,
-                client_connect_rx,
-                client_stop_rx,
-                client_response_tx,
+                rx: client_request_rx,
+                tx: client_response_tx,
+                start: client_connect_rx,
+                stop: client_stop_rx,
+                recv_task: ClientRxTask { handle: None },
                 delay,
                 log,
-            )
-            .await
+            };
+            c.run().await
         });
         ClientTaskHandle {
             client_request_tx,
@@ -2332,165 +2333,319 @@ pub(crate) enum ClientRunResult {
     QueueClosed,
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn client_run(
+/// Data structure to hold context for the client IO task
+///
+/// Client IO is managed by two tasks:
+/// - The tx task, which calls `ClientIoTask::run`, sends messages from the main
+///   task to the downstairs via a socket
+/// - The rx task, which is spawned within `ClientIoTask::run` (and is not
+///   publicly visible) receives messages from the socket and sends them
+///   directly to the main task.
+///
+/// Splitting tx and rx is important, because it means that one or the other
+/// should always be able to make progress.
+struct ClientIoTask {
     client_id: ClientId,
     tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     target: SocketAddr,
-    mut rx: mpsc::Receiver<ClientRequest>,
-    mut start: oneshot::Receiver<()>,
-    mut stop: oneshot::Receiver<ClientStopReason>,
-    tx: mpsc::Sender<ClientResponse>,
-    delay: bool,
-    log: Logger,
-) {
-    let r = client_run_inner(
-        client_id,
-        tls_context,
-        target,
-        &mut rx,
-        &mut start,
-        &mut stop,
-        &tx,
-        delay,
-        &log,
-    )
-    .await;
 
-    warn!(log, "client task is sending Done({r:?})");
-    if tx.send(ClientResponse::Done(r)).await.is_err() {
-        warn!(
-            log,
-            "client task could not reply to main task; shutting down?"
-        );
-    }
-    while let Some(v) = rx.recv().await {
-        warn!(log, "exiting client task is ignoring message {v:?}");
-    }
-    info!(log, "client task is exiting");
+    /// Request channel from the main task
+    rx: mpsc::Receiver<ClientRequest>,
+
+    /// Reply channel to the main task
+    tx: mpsc::Sender<ClientResponse>,
+
+    /// Oneshot used to start the task
+    start: oneshot::Receiver<()>,
+
+    /// Oneshot used to stop the task
+    stop: oneshot::Receiver<ClientStopReason>,
+
+    /// Delay on startup, to avoid a busy-loop if connections always fail
+    delay: bool,
+
+    /// Handle for the rx task
+    recv_task: ClientRxTask,
+
+    log: Logger,
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn client_run_inner(
-    client_id: ClientId,
-    tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
-    target: SocketAddr,
-    rx: &mut mpsc::Receiver<ClientRequest>,
-    mut start: &mut oneshot::Receiver<()>,
-    mut stop: &mut oneshot::Receiver<ClientStopReason>,
-    tx: &mpsc::Sender<ClientResponse>,
-    delay: bool,
-    log: &Logger,
-) -> ClientRunResult {
-    // If we're reconnecting, then add a short delay to avoid constantly
-    // spinning (e.g. if something is fundamentally wrong with the Downstairs)
-    if delay {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    }
+/// Handle for the rx side of client IO
+///
+/// This is a convenient wrapper so that we can join the task exactly once,
+/// aborting if the wrapper is dropped without being joined.
+struct ClientRxTask {
+    handle: Option<tokio::task::JoinHandle<ClientRunResult>>,
+}
 
-    // Wait for the start oneshot to fire.  This may happen immediately, but not
-    // necessarily (for example, if the client was deactivated).  We also wait
-    // for the stop oneshot here, in case someone decides to stop the IO task
-    // before it tries to connect.
-    tokio::select! {
-        s = &mut start => {
-            if let Err(e) = s {
-                warn!(log, "failed to await start oneshot: {e}");
-                return ClientRunResult::QueueClosed;
+impl ClientRxTask {
+    async fn join(&mut self) -> ClientRunResult {
+        match self.handle.as_mut() {
+            Some(t) => {
+                let r = t.await.expect("join error on recv_task");
+                self.handle = None;
+                r
             }
-            // Otherwise, continue as usual
-        }
-        s = &mut stop => {
-            warn!(log, "client IO task stopped before connecting");
-            return match s {
-                Ok(s) =>
-                    ClientRunResult::RequestedStop(s),
-                Err(e) => {
-                    warn!(log, "client_stop_rx closed unexpectedly: {e:?}");
-                    ClientRunResult::QueueClosed
-                }
-            }
+            None => futures::future::pending().await,
         }
     }
+}
 
-    // Make connection to this downstairs.
-    let sock = if target.is_ipv4() {
-        TcpSocket::new_v4().unwrap()
-    } else {
-        TcpSocket::new_v6().unwrap()
-    };
-
-    // Set a connect timeout, and connect to the target:
-    info!(log, "connecting to {target}");
-    let tcp: TcpStream = tokio::select! {
-        _ = sleep_until(deadline_secs(10.0))=> {
-            warn!(log, "connect timeout");
-            return ClientRunResult::ConnectionTimeout;
+impl Drop for ClientRxTask {
+    fn drop(&mut self) {
+        if let Some(t) = self.handle.take() {
+            t.abort();
         }
-        tcp = sock.connect(target) => {
-            match tcp {
-                Ok(tcp) => {
-                    info!(log, "ds_connection connected");
-                    tcp
+    }
+}
+
+impl ClientIoTask {
+    async fn run(&mut self) {
+        let r = self.run_inner().await;
+
+        warn!(self.log, "client task is sending Done({r:?})");
+        if self.tx.send(ClientResponse::Done(r)).await.is_err() {
+            warn!(
+                self.log,
+                "client task could not reply to main task; shutting down?"
+            );
+        }
+        while let Some(v) = self.rx.recv().await {
+            warn!(self.log, "exiting client task is ignoring message {v:?}");
+        }
+        info!(self.log, "client task is exiting");
+    }
+
+    async fn run_inner(&mut self) -> ClientRunResult {
+        // If we're reconnecting, then add a short delay to avoid constantly
+        // spinning (e.g. if something is fundamentally wrong with the
+        // Downstairs)
+        if self.delay {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+
+        // Wait for the start oneshot to fire.  This may happen immediately, but
+        // not necessarily (for example, if the client was deactivated).  We
+        // also wait for the stop oneshot here, in case someone decides to stop
+        // the IO task before it tries to connect.
+        tokio::select! {
+            s = &mut self.start => {
+                if let Err(e) = s {
+                    warn!(self.log, "failed to await start oneshot: {e}");
+                    return ClientRunResult::QueueClosed;
                 }
-                Err(e) => {
-                    warn!(
-                        log, "ds_connection connect to {target} failure: {e:?}",
-                    );
-                    return ClientRunResult::ConnectionFailed(e);
+                // Otherwise, continue as usual
+            }
+            s = &mut self.stop => {
+                warn!(self.log, "client IO task stopped before connecting");
+                return match s {
+                    Ok(s) =>
+                        ClientRunResult::RequestedStop(s),
+                    Err(e) => {
+                        warn!(
+                            self.log,
+                           "client_stop_rx closed unexpectedly: {e:?}"
+                        );
+                        ClientRunResult::QueueClosed
+                    }
                 }
             }
         }
-    };
 
-    // We're connected; before we wrap it, set TCP_NODELAY to assure
-    // that we don't get Nagle'd.
-    tcp.set_nodelay(true).expect("could not set TCP_NODELAY");
+        // Make connection to this downstairs.
+        let sock = if self.target.is_ipv4() {
+            TcpSocket::new_v4().unwrap()
+        } else {
+            TcpSocket::new_v6().unwrap()
+        };
 
-    let tcp = {
-        if let Some(tls_context) = &tls_context {
+        // Set a connect timeout, and connect to the target:
+        info!(self.log, "connecting to {}", self.target);
+        let tcp: TcpStream = tokio::select! {
+            _ = sleep_until(deadline_secs(10.0))=> {
+                warn!(self.log, "connect timeout");
+                return ClientRunResult::ConnectionTimeout;
+            }
+            tcp = sock.connect(self.target) => {
+                match tcp {
+                    Ok(tcp) => {
+                        info!(self.log, "ds_connection connected");
+                        tcp
+                    }
+                    Err(e) => {
+                        warn!(
+                            self.log,
+                            "ds_connection connect to {} failure: {e:?}",
+                            self.target,
+                        );
+                        return ClientRunResult::ConnectionFailed(e);
+                    }
+                }
+            }
+        };
+
+        // We're connected; before we wrap it, set TCP_NODELAY to assure
+        // that we don't get Nagle'd.
+        tcp.set_nodelay(true).expect("could not set TCP_NODELAY");
+
+        if let Some(tls_context) = &self.tls_context {
             // XXX these unwraps are bad!
             let config = tls_context.get_client_config().unwrap();
 
             let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
 
             let server_name = tokio_rustls::rustls::ServerName::try_from(
-                format!("downstairs{}", client_id).as_str(),
+                format!("downstairs{}", self.client_id).as_str(),
             )
             .unwrap();
 
-            WrappedStream::Https(
-                connector.connect(server_name, tcp).await.unwrap(),
-            )
+            let sock = connector.connect(server_name, tcp).await.unwrap();
+            let (read, write) = tokio::io::split(sock);
+            let fr = FramedRead::new(read, CrucibleDecoder::new());
+            self.cmd_loop(fr, write).await
         } else {
-            WrappedStream::Http(tcp)
-        }
-    };
-    proc_stream(client_id, tcp, rx, stop, tx, log).await
-}
-
-async fn proc_stream(
-    client_id: ClientId,
-    stream: WrappedStream,
-    rx: &mut mpsc::Receiver<ClientRequest>,
-    stop: &mut oneshot::Receiver<ClientStopReason>,
-    tx: &mpsc::Sender<ClientResponse>,
-    log: &Logger,
-) -> ClientRunResult {
-    match stream {
-        WrappedStream::Http(sock) => {
-            let (read, write) = sock.into_split();
-
+            let (read, write) = tcp.into_split();
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-
-            cmd_loop(client_id, rx, stop, tx, fr, write, log).await
+            self.cmd_loop(fr, write).await
         }
-        WrappedStream::Https(stream) => {
-            let (read, write) = tokio::io::split(stream);
+    }
 
-            let fr = FramedRead::new(read, CrucibleDecoder::new());
+    async fn cmd_loop<R, W>(
+        &mut self,
+        fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
+        mut fw: W,
+    ) -> ClientRunResult
+    where
+        R: tokio::io::AsyncRead
+            + std::marker::Unpin
+            + std::marker::Send
+            + 'static,
+        W: tokio::io::AsyncWrite
+            + std::marker::Unpin
+            + std::marker::Send
+            + 'static,
+    {
+        self.tx
+            .send(ClientResponse::Connected)
+            .await
+            .expect("client_response_tx closed unexpectedly");
 
-            cmd_loop(client_id, rx, stop, tx, fr, write, log).await
+        // Spawn a separate task to receive data over the network, so that we
+        // can always make progress and keep the socket buffer from filling up.
+        self.recv_task = ClientRxTask {
+            handle: Some(tokio::spawn(rx_loop(
+                self.tx.clone(),
+                fr,
+                self.log.clone(),
+            ))),
+        };
+
+        let mut ping_interval = deadline_secs(PING_INTERVAL_SECS);
+        let mut ping_count = 0u64;
+        loop {
+            tokio::select! {
+                join_result = self.recv_task.join() => {
+                    break join_result
+                }
+
+                m = self.rx.recv() => {
+                    let Some(m) = m else {
+                        warn!(
+                            self.log,
+                            "client request queue closed unexpectedly; \
+                             is the program exiting?"
+                         );
+                        break ClientRunResult::QueueClosed;
+                    };
+
+                    if let Err(e) = self.write(&mut fw, m).await {
+                        break e;
+                    }
+                }
+
+                _ = sleep_until(ping_interval) => {
+                    ping_interval = deadline_secs(PING_INTERVAL_SECS);
+                    ping_count += 1;
+                    cdt::ds__ping__sent!(|| (ping_count, self.client_id.get()));
+
+                    let m = ClientRequest::Message(Message::Ruok);
+                    if let Err(e) = self.write(&mut fw, m).await {
+                        break e;
+                    }
+                }
+
+                s = &mut self.stop => {
+                    match s {
+                        Ok(s) => {
+                            break ClientRunResult::RequestedStop(s);
+                        }
+
+                        Err(e) => {
+                            warn!(
+                                self.log,
+                                "client_stop_rx closed unexpectedly: {e:?}"
+                            );
+                            break ClientRunResult::QueueClosed;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Writes a message to the given `AsyncWrite` stream, with cancel detection
+    ///
+    /// We wait for three possible outcomes:
+    ///
+    /// - The write completes (this is the normal outcome), with or without an
+    ///   error.  Any error is returned.
+    /// - The client rx task times out or exits for some other reason.  This is
+    ///   definitionally a termination condition, so it is returned as an
+    ///   `Err(..)` variant.
+    /// - The main task requests that the IO task stop through the oneshot
+    ///   channel.  This is returned as `ClientRunResult::RequestedStop`
+    ///
+    /// Any error returned here is an indication that the client task should
+    /// stop immediately.
+    async fn write<W>(
+        &mut self,
+        fw: &mut W,
+        m: ClientRequest,
+    ) -> Result<(), ClientRunResult>
+    where
+        W: tokio::io::AsyncWrite
+            + std::marker::Unpin
+            + std::marker::Send
+            + 'static,
+    {
+        // There's some duplication between this function and `cmd_loop` above,
+        // but it's not obvious whether there's a cleaner way to organize stuff.
+        tokio::select! {
+            r = m.write(fw) => {
+                if let Err(e) = r {
+                    Err(ClientRunResult::WriteFailed(e.into()))
+                } else {
+                    Ok(())
+                }
+            }
+            s = &mut self.stop => {
+                match s {
+                    Ok(s) => {
+                        Err(ClientRunResult::RequestedStop(s))
+                    }
+
+                    Err(e) => {
+                        warn!(
+                            self.log,
+                            "client_stop_rx closed unexpectedly: {e:?}"
+                        );
+                        Err(ClientRunResult::QueueClosed)
+                    }
+                }
+            }
+            join_result = self.recv_task.join() => {
+                Err(join_result)
+            }
         }
     }
 }
@@ -2535,78 +2690,6 @@ where
             _ = sleep_until(timeout) => {
                 warn!(log, "downstairs timed out");
                 break ClientRunResult::Timeout;
-            }
-        }
-    }
-}
-
-async fn cmd_loop<R, W>(
-    client_id: ClientId,
-    rx: &mut mpsc::Receiver<ClientRequest>,
-    stop: &mut oneshot::Receiver<ClientStopReason>,
-    tx: &mpsc::Sender<ClientResponse>,
-    fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
-    mut fw: W,
-    log: &Logger,
-) -> ClientRunResult
-where
-    R: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send + 'static,
-    W: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
-{
-    tx.send(ClientResponse::Connected)
-        .await
-        .expect("client_response_tx closed unexpectedly");
-
-    // Spawn a separate task to receive data over the network, so that we can
-    // always make progress and keep the socket buffer from filling up.
-    let mut recv_task = tokio::spawn(rx_loop(tx.clone(), fr, log.clone()));
-
-    let mut ping_interval = deadline_secs(PING_INTERVAL_SECS);
-    let mut ping_count = 0u64;
-    loop {
-        tokio::select! {
-            join_result = &mut recv_task => {
-                break join_result.expect("join error on recv_task!");
-            }
-
-            m = rx.recv() => {
-                let Some(m) = m else {
-                    warn!(
-                        log,
-                        "client request queue closed unexpectedly; \
-                         is the program exiting?"
-                     );
-                    break ClientRunResult::QueueClosed;
-                };
-
-                if let Err(e) = m.write(&mut fw).await {
-                    break ClientRunResult::WriteFailed(e.into());
-                }
-            }
-
-            _ = sleep_until(ping_interval) => {
-                ping_interval = deadline_secs(PING_INTERVAL_SECS);
-                ping_count += 1;
-                cdt::ds__ping__sent!(|| (ping_count, client_id.get()));
-
-                let m = ClientRequest::Message(Message::Ruok);
-                if let Err(e) = m.write(&mut fw).await {
-                    break ClientRunResult::WriteFailed(e.into());
-                }
-            }
-
-            s = &mut *stop => {
-                match s {
-                    Ok(s) => {
-                        recv_task.abort();
-                        break ClientRunResult::RequestedStop(s);
-                    }
-
-                    Err(e) => {
-                        warn!(log, "client_stop_rx closed unexpectedly: {e:?}");
-                        break ClientRunResult::QueueClosed;
-                    }
-                }
             }
         }
     }

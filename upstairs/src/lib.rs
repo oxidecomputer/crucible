@@ -463,12 +463,6 @@ impl<T> std::ops::Index<ClientId> for ClientMap<T> {
     }
 }
 
-#[allow(clippy::large_enum_variant)]
-enum WrappedStream {
-    Http(tokio::net::TcpStream),
-    Https(tokio_rustls::client::TlsStream<tokio::net::TcpStream>),
-}
-
 /*
  * These counts describe the various states that a Downstairs IO can
  * be in.
