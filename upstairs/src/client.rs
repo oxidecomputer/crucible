@@ -693,7 +693,10 @@ impl DownstairsClient {
                 response_tx: client_response_tx,
                 start: client_connect_rx,
                 stop: client_stop_rx,
-                recv_task: ClientRxTask { handle: None },
+                recv_task: ClientRxTask {
+                    handle: None,
+                    log: log.clone(),
+                },
                 delay,
                 log,
             };
@@ -2382,6 +2385,7 @@ struct ClientIoTask {
 /// aborting if the wrapper is dropped without being joined.
 struct ClientRxTask {
     handle: Option<tokio::task::JoinHandle<ClientRunResult>>,
+    log: Logger,
 }
 
 impl ClientRxTask {
@@ -2396,7 +2400,14 @@ impl ClientRxTask {
         };
         match t.await {
             Ok(r) => r,
-            Err(e) if e.is_cancelled() => ClientRunResult::ReceiveTaskCancelled,
+            Err(e) if e.is_cancelled() => {
+                warn!(
+                    self.log,
+                    "client task was cancelled without us; \
+                     hopefully the program is exiting"
+                );
+                ClientRunResult::ReceiveTaskCancelled
+            }
             Err(e) => {
                 panic!("join error on recv_task: {e:?}");
             }
@@ -2550,13 +2561,11 @@ impl ClientIoTask {
 
         // Spawn a separate task to receive data over the network, so that we
         // can always make progress and keep the socket buffer from filling up.
-        self.recv_task = ClientRxTask {
-            handle: Some(tokio::spawn(rx_loop(
-                self.response_tx.clone(),
-                fr,
-                self.log.clone(),
-            ))),
-        };
+        self.recv_task.handle = Some(tokio::spawn(rx_loop(
+            self.response_tx.clone(),
+            fr,
+            self.log.clone(),
+        )));
 
         let mut ping_interval = deadline_secs(PING_INTERVAL_SECS);
         let mut ping_count = 0u64;
