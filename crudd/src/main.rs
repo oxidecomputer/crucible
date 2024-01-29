@@ -544,14 +544,10 @@ async fn handle_signals(
     mut signals: Signals,
     early_shutdown: oneshot::Sender<()>,
 ) {
-    while let Some(signal) = signals.next().await {
-        match signal {
-            SIGUSR1 => {
-                early_shutdown.send(()).unwrap();
-                break;
-            }
-            _ => unreachable!(),
-        }
+    match signals.next().await {
+        Some(SIGUSR1) => early_shutdown.send(()).unwrap(),
+        Some(_) => unreachable!(),
+        None => (), // signal sender is dropped
     }
 }
 

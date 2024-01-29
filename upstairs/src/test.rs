@@ -116,12 +116,10 @@ pub(crate) mod up_test {
             assert_eq!(span.buffer()[i], 0);
         }
 
-        let mut data = vec![0u8; 64];
+        let mut data = [0u8; 64];
         span.read_from_blocks_into_buffer(&mut data[..]);
 
-        for i in 0..64 {
-            assert_eq!(data[i], 1);
-        }
+        assert_eq!(data, [1; 64]);
     }
 
     /*

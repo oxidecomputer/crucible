@@ -658,24 +658,22 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
         let tcp = sock.connect(attach);
         tokio::pin!(tcp);
 
-        let mut tcp: TcpStream = loop {
-            tokio::select! {
-                _ = &mut deadline => {
-                    println!("connect timeout");
-                    continue 'outer;
-                }
-                tcp = &mut tcp => {
-                    match tcp {
-                        Ok(tcp) => {
-                            println!("connected to {}", attach);
-                            break tcp;
-                        }
-                        Err(e) => {
-                            println!("connect to {0} failure: {1:?}",
-                                attach, e);
-                            tokio::time::sleep_until(deadline_secs(10.0)).await;
-                            continue 'outer;
-                        }
+        let mut tcp: TcpStream = tokio::select! {
+            _ = &mut deadline => {
+                println!("connect timeout");
+                continue 'outer;
+            }
+            tcp = &mut tcp => {
+                match tcp {
+                    Ok(tcp) => {
+                        println!("connected to {}", attach);
+                        tcp
+                    }
+                    Err(e) => {
+                        println!("connect to {0} failure: {1:?}",
+                            attach, e);
+                        tokio::time::sleep_until(deadline_secs(10.0)).await;
+                        continue 'outer;
                     }
                 }
             }

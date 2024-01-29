@@ -307,10 +307,8 @@ impl PantryEntry {
         let volume_block_size =
             self.volume.check_data_size(size).await? as usize;
 
-        let mut buffer = crucible::Buffer::new(
-            size / volume_block_size as usize,
-            volume_block_size,
-        );
+        let mut buffer =
+            crucible::Buffer::new(size / volume_block_size, volume_block_size);
 
         self.volume
             .read_from_byte_offset(offset, &mut buffer)

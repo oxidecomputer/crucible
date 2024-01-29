@@ -150,7 +150,7 @@ impl ReadResponse {
     }
 
     pub fn first_hash(&self) -> Option<u64> {
-        self.block_contexts.get(0).map(|ctx| ctx.hash)
+        self.block_contexts.first().map(|ctx| ctx.hash)
     }
 
     pub fn encryption_contexts(&self) -> Vec<Option<&EncryptionContext>> {
