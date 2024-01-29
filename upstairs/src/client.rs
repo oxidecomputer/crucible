@@ -2379,6 +2379,11 @@ struct ClientRxTask {
 }
 
 impl ClientRxTask {
+    /// Waits for the client IO task to end
+    ///
+    /// # Panics
+    /// If the `JoinHandle` returns a `JoinError`, or this is called without an
+    /// IO handle (i.e. before the task is started or after it has been joined).
     async fn join(&mut self) -> ClientRunResult {
         match self.handle.as_mut() {
             Some(t) => {
@@ -2386,7 +2391,7 @@ impl ClientRxTask {
                 self.handle = None;
                 r
             }
-            None => futures::future::pending().await,
+            None => panic!("cannot join client rx task twice"),
         }
     }
 }
