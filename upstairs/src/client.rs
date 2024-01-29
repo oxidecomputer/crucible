@@ -2331,6 +2331,12 @@ pub(crate) enum ClientRunResult {
     /// This should only occur during program exit, when tasks are destroyed in
     /// arbitrary order.
     QueueClosed,
+    /// The receive task has been cancelled
+    ///
+    /// This should only occur during program exit, when tasks are cancelled in
+    /// arbitrary order (so the main client task may be awaiting the rx task
+    /// when the latter is cancelled)
+    ReceiveTaskCancelled,
 }
 
 /// Data structure to hold context for the client IO task
@@ -2385,13 +2391,15 @@ impl ClientRxTask {
     /// If the `JoinHandle` returns a `JoinError`, or this is called without an
     /// IO handle (i.e. before the task is started or after it has been joined).
     async fn join(&mut self) -> ClientRunResult {
-        match self.handle.as_mut() {
-            Some(t) => {
-                let r = t.await.expect("join error on recv_task");
-                self.handle = None;
-                r
+        let Some(t) = self.handle.take() else {
+            panic!("cannot join client rx task twice")
+        };
+        match t.await {
+            Ok(r) => r,
+            Err(e) if e.is_cancelled() => ClientRunResult::ReceiveTaskCancelled,
+            Err(e) => {
+                panic!("join error on recv_task: {e:?}");
             }
-            None => panic!("cannot join client rx task twice"),
         }
     }
 }
