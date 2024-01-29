@@ -689,8 +689,8 @@ impl DownstairsClient {
                 client_id,
                 tls_context,
                 target,
-                rx: client_request_rx,
-                tx: client_response_tx,
+                request_rx: client_request_rx,
+                response_tx: client_response_tx,
                 start: client_connect_rx,
                 stop: client_stop_rx,
                 recv_task: ClientRxTask { handle: None },
@@ -2350,10 +2350,10 @@ struct ClientIoTask {
     target: SocketAddr,
 
     /// Request channel from the main task
-    rx: mpsc::Receiver<ClientRequest>,
+    request_rx: mpsc::Receiver<ClientRequest>,
 
     /// Reply channel to the main task
-    tx: mpsc::Sender<ClientResponse>,
+    response_tx: mpsc::Sender<ClientResponse>,
 
     /// Oneshot used to start the task
     start: oneshot::Receiver<()>,
@@ -2409,13 +2409,18 @@ impl ClientIoTask {
         let r = self.run_inner().await;
 
         warn!(self.log, "client task is sending Done({r:?})");
-        if self.tx.send(ClientResponse::Done(r)).await.is_err() {
+        if self
+            .response_tx
+            .send(ClientResponse::Done(r))
+            .await
+            .is_err()
+        {
             warn!(
                 self.log,
                 "client task could not reply to main task; shutting down?"
             );
         }
-        while let Some(v) = self.rx.recv().await {
+        while let Some(v) = self.request_rx.recv().await {
             warn!(self.log, "exiting client task is ignoring message {v:?}");
         }
         info!(self.log, "client task is exiting");
@@ -2530,7 +2535,7 @@ impl ClientIoTask {
             + std::marker::Send
             + 'static,
     {
-        self.tx
+        self.response_tx
             .send(ClientResponse::Connected)
             .await
             .expect("client_response_tx closed unexpectedly");
@@ -2539,7 +2544,7 @@ impl ClientIoTask {
         // can always make progress and keep the socket buffer from filling up.
         self.recv_task = ClientRxTask {
             handle: Some(tokio::spawn(rx_loop(
-                self.tx.clone(),
+                self.response_tx.clone(),
                 fr,
                 self.log.clone(),
             ))),
@@ -2553,7 +2558,7 @@ impl ClientIoTask {
                     break join_result
                 }
 
-                m = self.rx.recv() => {
+                m = self.request_rx.recv() => {
                     let Some(m) = m else {
                         warn!(
                             self.log,
@@ -2656,7 +2661,7 @@ impl ClientIoTask {
 }
 
 async fn rx_loop<R>(
-    tx: mpsc::Sender<ClientResponse>,
+    response_tx: mpsc::Sender<ClientResponse>,
     mut fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
     log: Logger,
 ) -> ClientRunResult
@@ -2672,7 +2677,7 @@ where
                         // reset the timeout, since we've received a message
                         timeout = deadline_secs(TIMEOUT_SECS);
                         if let Err(e) =
-                            tx.send(ClientResponse::Message(m)).await
+                            response_tx.send(ClientResponse::Message(m)).await
                         {
                             warn!(
                                 log,
