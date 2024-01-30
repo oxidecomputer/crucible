@@ -2395,10 +2395,10 @@ impl ClientRxTask {
     /// If the `JoinHandle` returns a `JoinError`, or this is called without an
     /// IO handle (i.e. before the task is started or after it has been joined).
     async fn join(&mut self) -> ClientRunResult {
-        let Some(t) = self.handle.take() else {
+        let Some(t) = self.handle.as_mut() else {
             panic!("cannot join client rx task twice")
         };
-        match t.await {
+        let out = match t.await {
             Ok(r) => r,
             Err(e) if e.is_cancelled() => {
                 warn!(
@@ -2411,7 +2411,10 @@ impl ClientRxTask {
             Err(e) => {
                 panic!("join error on recv_task: {e:?}");
             }
-        }
+        };
+        // The IO task has finished, one way or another
+        self.handle.take();
+        out
     }
 }
 
