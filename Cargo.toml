@@ -62,10 +62,10 @@ nix = { version = "0.26", features = [ "feature", "uio" ] }
 num_enum = "0.7"
 num-derive = "0.4"
 num-traits = "0.2"
-omicron-zone-package = "0.9.1"
+omicron-zone-package = "0.10.0"
 openapiv3 = "2.0.0"
 opentelemetry = "0.21.0"
-opentelemetry-jaeger = { version = "0.17.0" }
+opentelemetry-jaeger = { version = "0.20.0" }
 percent-encoding = "2.3"
 proptest = "1.4.0"
 rayon = "1.8.0"
@@ -85,10 +85,12 @@ signal-hook-tokio = { version = "0.3.1", features = ["futures-v0_3"] }
 slog = { version = "2.7", features = ["max_level_trace", "release_max_level_debug"] }
 slog-async = { version = "2.8" }
 slog-bunyan = "2.4.0"
-slog-dtrace = "0.2"
+slog-dtrace = "0.3"
 slog-term = { version = "2.9" }
+static_assertions = "1.1.0"
 statistical = "1.0.0"
 subprocess = "0.2.9"
+strum_macros = "0.25.3"
 tempfile = "3"
 test-strategy = "0.3.1"
 thiserror = "1"
@@ -98,10 +100,10 @@ tokio-test = "*"
 tokio-util = { version = "0.7", features = ["codec"]}
 toml = "0.8"
 tracing = "0.1"
-tracing-opentelemetry = "0.18.0"
+tracing-opentelemetry = "0.22.0"
 tracing-subscriber = "0.3.18"
 twox-hash = "1.6.3"
-usdt = "0.3.5"
+usdt = "0.5.0"
 uuid = { version = "1", features = [ "serde", "v4" ] }
 
 # git

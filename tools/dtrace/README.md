@@ -300,6 +300,38 @@ Trace a downstairs IO and measure time for in in the following three parts:
 * 2nd report is OS time (for flush, to flush all extents)
 * 3rd report is OS done to downstairs sending the ACK back to upstairs
 
+## upstairs_action.d
+This is a dtrace script for printing the counts of the upstairs main action
+loop.
+```
+pfexec dtrace -s upstairs_action.d
+```
+
+You start crucible, then run the above script.  Output should start appearing
+within a few seconds.
+
+The output has several columns.  The first column is the total count of time
+the upstairs apply() was called in the main run loop.
+The other columns indicate counters for each UpstairsAction the apply loop
+has received.
+
+Here is how some sample output might look:
+```
+    APPLY    DOWN_S     GUEST   DFR_BLK   DFR_MSG  LEAK_CHK FLUSH_CHK  STAT_CHK  REPR_CHK  CTRL_CHK      NOOP
+    19533      8829      2945      1417      3792         0         1         1         0         0      2548
+    39372     17769      5924      2791      7752         2         3         2         0         0      5129
+    59638     26823      8941      4214     11870         3         5         3         0         0      7779
+    78887     35580     11859      5545     15599         4         7         4         0         1     10288
+    98570     44556     14849      6918     19395         5         9         5         0         2     12831
+   117642     53205     17731      8259     23104         6        11         6         0         3     15317
+   137393     62142     20709      9660     26965         6        13         7         0         4     17887
+   157578     71220     23734     11043     31032         8        15         8         0         5     20513
+   176640     79788     26590     12371     34814         9        17         9         0         6     23036
+   195661     88512     29496     13719     38399        10        19        10         0         6     25490
+   215616     97539     32503     15120     42307        11        21        11         0         6     28098
+   234292    106008     35324     16515     45826        12        23        12         0         6     30566
+```
+
 ## upstairs_info.d
 This is a dtrace script for printing upstairs state and work queue info.
 If the upstairs is not yet running, add the -Z flag to dtrace so it will
@@ -372,8 +404,8 @@ for each downstairs client.
 
 `CON` The number of times the upstairs has connected to downstairs.
 `LRC` The number of times this downstairs has completed a LiveRepair.
-`LRA` The number of times this downstiars aborted a LiveRepair.
-`REP` The number of times this downstairs was replaced. 
+`LRA` The number of times this downstairs aborted a LiveRepair.
+`REP` The number of times this downstairs was replaced.
 
 Here is an example of how it might look:
 ```

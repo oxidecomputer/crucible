@@ -88,8 +88,7 @@ pub enum DscCommand {
 #[derive(Debug, Parser, PartialEq)]
 #[clap(name = "", term_width = 80, no_binary_name = true)]
 enum CliCommand {
-    /// Send an activation message to all the downstairs and block
-    /// until all the downstairs answer
+    /// Send an activation message and wait for an answer.
     Activate {
         /// Specify this generation number to use when requesting activation.
         #[clap(long, short, default_value = "1", action)]
@@ -225,14 +224,12 @@ async fn cli_read(
      * Convert offset to its byte value.
      */
     let offset = Block::new(block_index as u64, ri.block_size.trailing_zeros());
-    let length: usize = size * ri.block_size as usize;
-
-    let data = crucible::Buffer::from_vec(vec![255; length]);
+    let mut data = crucible::Buffer::repeat(255, size, ri.block_size as usize);
 
     println!("Read  at block {:5}, len:{:7}", offset.value, data.len());
-    guest.read(offset, data.clone()).await?;
+    guest.read(offset, &mut data).await?;
 
-    let mut dl = data.into_vec().unwrap();
+    let mut dl = data.into_vec();
     match validate_vec(
         dl.clone(),
         block_index,
@@ -661,24 +658,22 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
         let tcp = sock.connect(attach);
         tokio::pin!(tcp);
 
-        let mut tcp: TcpStream = loop {
-            tokio::select! {
-                _ = &mut deadline => {
-                    println!("connect timeout");
-                    continue 'outer;
-                }
-                tcp = &mut tcp => {
-                    match tcp {
-                        Ok(tcp) => {
-                            println!("connected to {}", attach);
-                            break tcp;
-                        }
-                        Err(e) => {
-                            println!("connect to {0} failure: {1:?}",
-                                attach, e);
-                            tokio::time::sleep_until(deadline_secs(10.0)).await;
-                            continue 'outer;
-                        }
+        let mut tcp: TcpStream = tokio::select! {
+            _ = &mut deadline => {
+                println!("connect timeout");
+                continue 'outer;
+            }
+            tcp = &mut tcp => {
+                match tcp {
+                    Ok(tcp) => {
+                        println!("connected to {}", attach);
+                        tcp
+                    }
+                    Err(e) => {
+                        println!("connect to {0} failure: {1:?}",
+                            attach, e);
+                        tokio::time::sleep_until(deadline_secs(10.0)).await;
+                        continue 'outer;
                     }
                 }
             }

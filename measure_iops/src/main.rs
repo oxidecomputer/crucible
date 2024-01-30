@@ -101,19 +101,19 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }));
 
-    let mut guest = Guest::new(None);
+    let (guest, mut io) = Guest::new(None);
+    let guest = Arc::new(guest);
 
     if let Some(iop_limit) = opt.iop_limit {
-        guest.set_iop_limit(16 * 1024 * 1024, iop_limit);
+        io.set_iop_limit(16 * 1024 * 1024, iop_limit);
     }
 
     if let Some(bw_limit) = opt.bw_limit_in_bytes {
-        guest.set_bw_limit(bw_limit);
+        io.set_bw_limit(bw_limit);
     }
 
     let guest = Arc::new(guest);
-    let _join_handle =
-        up_main(crucible_opts, opt.gen, None, guest.clone(), None)?;
+    let _join_handle = up_main(crucible_opts, opt.gen, None, io, None)?;
     println!("Crucible runtime is spawned");
 
     guest.activate().await?;
@@ -124,7 +124,13 @@ async fn main() -> Result<()> {
     let total_blocks: u64 = guest.total_size().await? / bsz;
 
     let io_size = if let Some(io_size_in_bytes) = opt.io_size_in_bytes {
-        io_size_in_bytes
+        if io_size_in_bytes as u64 % bsz != 0 {
+            bail!(
+                "invalid io size: {io_size_in_bytes} is not divisible by {bsz}"
+            );
+        } else {
+            io_size_in_bytes
+        }
     } else {
         bsz as usize
     };
@@ -135,9 +141,6 @@ async fn main() -> Result<()> {
         1
     };
 
-    let read_buffers: Vec<Buffer> =
-        (0..io_depth).map(|_| Buffer::new(io_size)).collect();
-
     let mut io_operations_sent = 0;
     let mut bw_consumed = 0;
     let mut measurement_time = Instant::now();
@@ -146,44 +149,59 @@ async fn main() -> Result<()> {
     let mut bws: Vec<f32> = vec![];
 
     'outer: loop {
-        let mut futures = Vec::with_capacity(io_depth);
+        enum RandomOp {
+            Read(u64, Buffer),
+            Write(u64, Bytes),
+        }
 
-        let write_buffers: Vec<Bytes> = (0..io_depth)
-            .map(|_| {
-                Bytes::from(if opt.all_zeroes {
+        let mut ops = Vec::with_capacity(io_depth);
+        for _ in 0..io_depth {
+            let offset: u64 =
+                rng.gen::<u64>() % (total_blocks - io_size as u64 / bsz);
+
+            if rng.gen::<bool>() {
+                ops.push(RandomOp::Read(
+                    offset,
+                    Buffer::new(io_size / bsz as usize, bsz as usize),
+                ));
+            } else {
+                let bytes = Bytes::from(if opt.all_zeroes {
                     vec![0u8; io_size]
                 } else {
                     (0..io_size)
                         .map(|_| rng.sample(rand::distributions::Standard))
                         .collect::<Vec<u8>>()
-                })
-            })
-            .collect();
-
-        let io_operation_time = Instant::now();
-
-        for i in 0..io_depth {
-            let offset: u64 =
-                rng.gen::<u64>() % (total_blocks - io_size as u64 / bsz);
-
-            if rng.gen::<bool>() {
-                let future = guest.write_to_byte_offset(
-                    offset * bsz,
-                    write_buffers[i].clone(),
-                );
-
-                futures.push(future);
-            } else {
-                let future = guest.read_from_byte_offset(
-                    offset * bsz,
-                    read_buffers[i].clone(),
-                );
-
-                futures.push(future);
+                });
+                ops.push(RandomOp::Write(offset, bytes));
             }
         }
 
-        crucible::join_all(futures).await?;
+        let mut futures = Vec::with_capacity(io_depth);
+
+        let io_operation_time = Instant::now();
+
+        for op in ops {
+            let guest = guest.clone();
+            match op {
+                RandomOp::Read(offset, mut buffer) => {
+                    futures.push(tokio::spawn(async move {
+                        guest
+                            .read_from_byte_offset(offset * bsz, &mut buffer)
+                            .await
+                    }));
+                }
+
+                RandomOp::Write(offset, bytes) => {
+                    futures.push(tokio::spawn(async move {
+                        guest.write_to_byte_offset(offset * bsz, bytes).await
+                    }));
+                }
+            }
+        }
+
+        for future in futures {
+            future.await??;
+        }
 
         total_io_time += io_operation_time.elapsed();
         io_operations_sent +=

@@ -2,6 +2,7 @@
  * Display internal Upstairs status.
  */
 #pragma D option quiet
+#pragma D option strsize=1k
 /*
  * Print the header right away
  */
@@ -32,7 +33,7 @@ crucible_upstairs*:::up-status
 {
     show = show + 1;
     /*
-     * State for the three downstiars
+     * State for the three downstairs
      */
     printf("%17s", json(copyinstr(arg1), "ok.ds_state[0]"));
     printf(" %17s", json(copyinstr(arg1), "ok.ds_state[1]"));

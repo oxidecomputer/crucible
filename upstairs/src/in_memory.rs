@@ -4,6 +4,8 @@ use super::*;
 
 struct Inner {
     bytes: Vec<u8>,
+
+    /// Ownership is tracked per block
     owned: Vec<bool>,
 }
 
@@ -16,12 +18,15 @@ pub struct InMemoryBlockIO {
 
 impl InMemoryBlockIO {
     pub fn new(id: Uuid, block_size: u64, total_size: usize) -> Self {
+        // TODO: make this take (block_count, block_size) so that it matches
+        // Buffer; this requires changing a bunch of call sites.
+        assert_eq!(total_size % block_size as usize, 0);
         Self {
             uuid: id,
             block_size,
             inner: Mutex::new(Inner {
                 bytes: vec![0; total_size],
-                owned: vec![false; total_size],
+                owned: vec![false; total_size / block_size as usize],
             }),
         }
     }
@@ -54,38 +59,40 @@ impl BlockIO for InMemoryBlockIO {
         Ok(self.uuid)
     }
 
+    /// Read from `self` into `data`, setting ownership accordingly
     async fn read(
         &self,
         offset: Block,
-        data: Buffer,
+        data: &mut Buffer,
     ) -> Result<(), CrucibleError> {
+        let bs = self.check_data_size(data.len()).await? as usize;
         let inner = self.inner.lock().await;
 
-        let mut data_vec = data.as_vec().await;
-        let mut owned_vec = data.owned_vec().await;
+        let start = offset.value as usize * bs;
 
-        let start = offset.value as usize * self.block_size as usize;
-
-        for i in 0..data_vec.len() {
-            data_vec[i] = inner.bytes[start + i];
-            owned_vec[i] = inner.owned[start + i];
-        }
+        data.write_if_owned(
+            0,
+            &inner.bytes[start..][..data.len()],
+            &inner.owned[offset.value as usize..][..data.len() / bs],
+        );
 
         Ok(())
     }
 
+    /// Write from `data` into `self`, setting all owned bits to `true`
     async fn write(
         &self,
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
+        let bs = self.check_data_size(data.len()).await? as usize;
         let mut inner = self.inner.lock().await;
 
-        let start = offset.value as usize * self.block_size as usize;
-
-        for i in 0..data.len() {
-            inner.bytes[start + i] = data[i];
-            inner.owned[start + i] = true;
+        let start_block = offset.value as usize;
+        for (b, chunk) in data.chunks(bs).enumerate() {
+            let block = start_block + b;
+            inner.owned[block] = true;
+            inner.bytes[block * bs..][..bs].copy_from_slice(chunk);
         }
 
         Ok(())
@@ -96,14 +103,15 @@ impl BlockIO for InMemoryBlockIO {
         offset: Block,
         data: Bytes,
     ) -> Result<(), CrucibleError> {
+        let bs = self.check_data_size(data.len()).await? as usize;
         let mut inner = self.inner.lock().await;
 
-        let start = offset.value as usize * self.block_size as usize;
-
-        for i in 0..data.len() {
-            if !inner.owned[start + i] {
-                inner.bytes[start + i] = data[i];
-                inner.owned[start + i] = true;
+        let start_block = offset.value as usize;
+        for (b, chunk) in data.chunks(bs).enumerate() {
+            let block = start_block + b;
+            if !inner.owned[block] {
+                inner.owned[block] = true;
+                inner.bytes[block * bs..][..bs].copy_from_slice(chunk);
             }
         }
 

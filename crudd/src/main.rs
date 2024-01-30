@@ -11,6 +11,7 @@ use std::{cmp, io};
 use anyhow::{bail, Result};
 use clap::Parser;
 use futures::stream::StreamExt;
+use itertools::Itertools;
 use signal_hook::consts::signal::*;
 use signal_hook_tokio::Signals;
 use tokio::sync::oneshot;
@@ -102,7 +103,7 @@ pub fn opts() -> Result<Opt> {
     Ok(opt)
 }
 
-async fn cmd_read<T: BlockIO>(
+async fn cmd_read<T: BlockIO + std::marker::Send + 'static>(
     opt: &Opt,
     crucible: Arc<T>,
     mut early_shutdown: oneshot::Receiver<()>,
@@ -154,7 +155,6 @@ async fn cmd_read<T: BlockIO>(
     //
     // TODO this is no longer true after the Upstairs is async, multiple
     // requests can be submitted and await'ed on at the same time.
-    let mut buffers = VecDeque::with_capacity(opt.pipeline_length);
     let mut futures = VecDeque::with_capacity(opt.pipeline_length);
 
     // First, align our offset to the underlying blocks with an initial read
@@ -171,16 +171,16 @@ async fn cmd_read<T: BlockIO>(
         cmp::min(num_bytes, native_block_size - offset_misalignment);
     if offset_misalignment != 0 {
         // Read the full block
-        let buffer = Buffer::new(native_block_size as usize);
+        let mut buffer = Buffer::new(1, native_block_size as usize);
         let block_idx = opt.byte_offset / native_block_size;
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
-        crucible.read(offset, buffer.clone()).await?;
+        crucible.read(offset, &mut buffer).await?;
 
         // write only (block size - misalignment) bytes
         // So say we have an offset of 5. we're misaligned by 5 bytes, so we
         // read 5 bytes we don't need. we skip those 5 bytes then write
         // the rest to the output
-        let bytes = buffer.into_vec().unwrap();
+        let bytes = buffer.into_vec();
         output.write_all(
             &bytes[offset_misalignment as usize
                 ..(offset_misalignment + alignment_bytes) as usize],
@@ -207,47 +207,50 @@ async fn cmd_read<T: BlockIO>(
     let cmd_count = num_bytes / (opt.iocmd_block_count * native_block_size);
     let remainder = num_bytes % (opt.iocmd_block_count * native_block_size);
 
+    let mut buffers: Vec<Buffer> = (0..opt.pipeline_length)
+        .map(|_| {
+            Buffer::new(
+                opt.iocmd_block_count as usize,
+                native_block_size as usize,
+            )
+        })
+        .collect();
+
     // Issue all of our read commands
-    for i in 0..cmd_count {
-        // which blocks in the underlying store are we accessing?
-        let block_idx = block_offset + (i * opt.iocmd_block_count);
-        let offset = Block::new(block_idx, native_block_size.trailing_zeros());
+    for cmd_range in &(0..cmd_count as usize).chunks(opt.pipeline_length) {
+        for i in cmd_range {
+            // which blocks in the underlying store are we accessing?
+            let block_idx = block_offset + (i as u64 * opt.iocmd_block_count);
+            let offset =
+                Block::new(block_idx, native_block_size.trailing_zeros());
 
-        // Send the read command with whichever buffer is at the back of the
-        // queue. We re-use the buffers to avoid lots of allocations
-        let w_buf =
-            Buffer::new((opt.iocmd_block_count * native_block_size) as usize);
-        let w_future = crucible.read(offset, w_buf.clone());
-        buffers.push_back(w_buf);
-        futures.push_back(w_future);
-        total_bytes_read +=
-            (opt.iocmd_block_count * native_block_size) as usize;
+            // Send the read command with whichever buffer is at the back of the
+            // queue. We re-use the buffers to avoid lots of allocations
+            let mut buffer = buffers.pop().unwrap();
+            let crucible = crucible.clone();
+            futures.push_back(tokio::spawn(async move {
+                crucible.read(offset, &mut buffer).await?;
+                Ok(buffer)
+            }));
 
-        // If we have a queue of futures, drain the oldest one to output.
-        if futures.len() == opt.pipeline_length {
-            futures.pop_front().unwrap().await?;
-            let r_buf = buffers.pop_front().unwrap();
-            output.write_all(&r_buf.as_vec().await)?;
+            total_bytes_read +=
+                (opt.iocmd_block_count * native_block_size) as usize;
+        }
+
+        for future in futures.drain(..) {
+            let result: Result<Buffer, CrucibleError> = future.await?;
+            let r_buf = result?;
+            output.write_all(&r_buf)?;
+            buffers.push(r_buf);
         }
 
         if early_shutdown.try_recv().is_ok() {
             eprintln!("shutting down early in response to SIGUSR1");
-            join_all(futures).await?;
             return Ok(total_bytes_read);
         }
     }
 
-    // Drain the outstanding commands
-    if !futures.is_empty() {
-        crucible::join_all(futures).await?;
-
-        // drain the buffer to the output file
-        while !buffers.is_empty() {
-            // unwrapping is safe because of the length check
-            let r_buf = buffers.pop_front().unwrap();
-            output.write_all(&r_buf.as_vec().await)?;
-        }
-    }
+    assert!(futures.is_empty());
 
     // Issue our final read command, if any. This could be interleaved with
     // draining the outstanding commands but it's more complicated and
@@ -256,12 +259,13 @@ async fn cmd_read<T: BlockIO>(
         // let block_remainder = remainder % native_block_size;
         // round up
         let blocks = (remainder + native_block_size - 1) / native_block_size;
-        let buffer = Buffer::new((blocks * native_block_size) as usize);
+        let mut buffer =
+            Buffer::new(blocks as usize, native_block_size as usize);
         let block_idx = (cmd_count * opt.iocmd_block_count) + block_offset;
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
-        crucible.read(offset, buffer.clone()).await?;
+        crucible.read(offset, &mut buffer).await?;
         total_bytes_read += remainder as usize;
-        output.write_all(&buffer.as_vec().await[0..remainder as usize])?;
+        output.write_all(&buffer[0..remainder as usize])?;
     }
 
     Ok(total_bytes_read)
@@ -280,7 +284,7 @@ async fn write_remainder_and_finalize<'a, T: BlockIO>(
     offset: Block,
     n_read: usize,
     native_block_size: u64,
-    mut futures: VecDeque<crucible::CrucibleBlockIOFuture<'a>>,
+    mut futures: VecDeque<CrucibleBlockIOFuture<'a>>,
 ) -> Result<()> {
     // the input stream ended,
     // - read/mod/write for alignment
@@ -310,11 +314,11 @@ async fn write_remainder_and_finalize<'a, T: BlockIO>(
             offset.value + uflow_blocks,
             native_block_size.trailing_zeros(),
         );
-        let uflow_r_buf = Buffer::new(native_block_size as usize);
-        crucible.read(uflow_offset, uflow_r_buf.clone()).await?;
+        let mut uflow_r_buf = Buffer::new(1, native_block_size as usize);
+        crucible.read(uflow_offset, &mut uflow_r_buf).await?;
 
         // Copy it into w_buf
-        let r_bytes = uflow_r_buf.into_vec().unwrap();
+        let r_bytes = uflow_r_buf.into_vec();
         w_buf[n_read..n_read + uflow_backfill]
             .copy_from_slice(&r_bytes[uflow_remainder as usize..]);
 
@@ -323,12 +327,12 @@ async fn write_remainder_and_finalize<'a, T: BlockIO>(
         futures.push_back(w_future);
     }
 
-    // Flush
-    let flush_future = crucible.flush(None);
-    futures.push_back(flush_future);
+    // Wait for all the writes first, then flush
+    for future in futures {
+        future.await?;
+    }
 
-    // Wait for all the writes
-    join_all(futures).await?;
+    crucible.flush(None).await?;
 
     Ok(())
 }
@@ -395,12 +399,12 @@ async fn cmd_write<T: BlockIO>(
         // We need to read-modify-write here.
 
         // Read the full block
-        let buffer = Buffer::new(native_block_size as usize);
+        let mut buffer = Buffer::new(1, native_block_size as usize);
         let block_idx = opt.byte_offset / native_block_size;
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
-        crucible.read(offset, buffer.clone()).await?;
+        crucible.read(offset, &mut buffer).await?;
 
-        let mut w_vec = buffer.into_vec().unwrap();
+        let mut w_vec = buffer.into_vec();
         // Write our data into the buffer
         let bytes_read = input.read(
             &mut w_vec[offset_misalignment as usize
@@ -485,7 +489,9 @@ async fn cmd_write<T: BlockIO>(
 
         if early_shutdown.try_recv().is_ok() {
             eprintln!("shutting down early in response to SIGUSR1");
-            join_all(futures).await?;
+            for future in futures {
+                future.await?;
+            }
             crucible.flush(None).await?;
             return Ok(total_bytes_written);
         }
@@ -523,7 +529,9 @@ async fn cmd_write<T: BlockIO>(
         )
         .await?;
     } else {
-        join_all(futures).await?;
+        for future in futures {
+            future.await?;
+        }
         crucible.flush(None).await?;
     }
 
@@ -536,14 +544,10 @@ async fn handle_signals(
     mut signals: Signals,
     early_shutdown: oneshot::Sender<()>,
 ) {
-    while let Some(signal) = signals.next().await {
-        match signal {
-            SIGUSR1 => {
-                early_shutdown.send(()).unwrap();
-                break;
-            }
-            _ => unreachable!(),
-        }
+    match signals.next().await {
+        Some(SIGUSR1) => early_shutdown.send(()).unwrap(),
+        Some(_) => unreachable!(),
+        None => (), // signal sender is dropped
     }
 }
 
@@ -563,10 +567,10 @@ async fn main() -> Result<()> {
     };
 
     // TODO: volumes?
-    let guest = Arc::new(Guest::new(None));
+    let (guest, io) = Guest::new(None);
+    let guest = Arc::new(guest);
 
-    let _join_handle =
-        up_main(crucible_opts, opt.gen, None, guest.clone(), None)?;
+    let _join_handle = up_main(crucible_opts, opt.gen, None, io, None)?;
     eprintln!("Crucible runtime is spawned");
 
     // IO time

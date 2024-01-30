@@ -1,7 +1,6 @@
 // Copyright 2023 Oxide Computer Company
 
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 use anyhow::{bail, Result};
 use clap::Parser;
@@ -130,11 +129,10 @@ async fn main() -> Result<()> {
          * We create this here instead of inside up_main() so we can use
          * the methods provided by guest to interact with Crucible.
          */
-        let guest = Arc::new(Guest::new(None));
+        let (guest, io) = Guest::new(None);
 
         let gen: u64 = i as u64 + opt.gen;
-        let _join_handle =
-            up_main(crucible_opts.clone(), gen, None, guest.clone(), None)?;
+        let _join_handle = up_main(crucible_opts.clone(), gen, None, io, None)?;
         println!("Crucible runtime is spawned");
 
         cpfs.push(crucible::CruciblePseudoFile::from(guest)?);

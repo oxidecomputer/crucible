@@ -17,6 +17,7 @@ schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 slog.workspace = true
+static_assertions.workspace = true
 crucible.workspace = true
 crucible-common.workspace = true
 crucible-smf.workspace = true

@@ -2,34 +2,33 @@
 //! Data structures specific to Crucible's `struct Upstairs`
 use crate::{
     cdt,
-    client::{ClientAction, ClientRunResult, ClientStopReason},
+    client::{ClientAction, ClientRunResult},
     control::ControlRequest,
     deadline_secs,
     deferred::{
-        DeferredBlockReq, DeferredQueue, DeferredWrite, EncryptedWrite,
+        DeferredBlockReq, DeferredMessage, DeferredQueue, DeferredRead,
+        DeferredWrite, EncryptedWrite,
     },
     downstairs::{Downstairs, DownstairsAction},
     extent_from_offset,
     stats::UpStatOuter,
     Block, BlockOp, BlockReq, BlockRes, Buffer, Bytes, ClientId, ClientMap,
-    CrucibleOpts, DsState, EncryptionContext, GtoS, Guest, Message,
+    CrucibleOpts, DsState, EncryptionContext, GtoS, GuestIoHandle, Message,
     RegionDefinition, RegionDefinitionStatus, SnapshotDetails, WQCounts,
 };
 use crucible_common::CrucibleError;
+use serde::{Deserialize, Serialize};
 
-use std::{
-    ops::DerefMut,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
 };
 
-use futures::future::{pending, ready, Either};
+use futures::future::{pending, Either};
 use ringbuffer::RingBuffer;
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::mpsc,
     time::{sleep_until, Instant},
 };
 use uuid::Uuid;
@@ -63,11 +62,46 @@ pub(crate) enum UpstairsState {
     Deactivating(BlockRes),
 }
 
+/// Crucible upstairs counters
+///
+/// Counters indicating the upstairs selects path.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct UpCounters {
+    apply: u64,
+    action_downstairs: u64,
+    action_guest: u64,
+    action_deferred_block: u64,
+    action_deferred_message: u64,
+    action_leak_check: u64,
+    action_flush_check: u64,
+    action_stat_check: u64,
+    action_repair_check: u64,
+    action_control_check: u64,
+    action_noop: u64,
+}
+
+impl UpCounters {
+    fn new() -> UpCounters {
+        UpCounters {
+            apply: 0,
+            action_downstairs: 0,
+            action_guest: 0,
+            action_deferred_block: 0,
+            action_deferred_message: 0,
+            action_leak_check: 0,
+            action_flush_check: 0,
+            action_stat_check: 0,
+            action_repair_check: 0,
+            action_control_check: 0,
+            action_noop: 0,
+        }
+    }
+}
 /// Crucible upstairs state
 ///
 /// This `struct` has exclusive ownership over (almost) everything that's needed
-/// to run the Crucible upstairs, and a shared handle to the [`Guest`] data
-/// structure (which is our main source of operations).
+/// to run the Crucible upstairs, and a handle to the incoming `Guest` queues
+/// (which is our main source of operations).
 ///
 /// In normal operation, the `Upstairs` expects to run a simple loop forever in
 /// an async task:
@@ -138,7 +172,13 @@ pub(crate) struct Upstairs {
     /// The guest struct keeps track of jobs accepted from the Guest
     ///
     /// A single job submitted can produce multiple downstairs requests.
-    pub(crate) guest: Arc<Guest>,
+    pub(crate) guest: GuestIoHandle,
+
+    /// Set to `true` when we first notice the `Guest` has been dropped
+    ///
+    /// The `Guest` being dropped is indicated when the [`GuestIoHandle`]
+    /// receives `None` from its `req_rx` receiver.
+    guest_dropped: bool,
 
     /// Region definition
     ///
@@ -164,6 +204,8 @@ pub(crate) struct Upstairs {
     /// Shared with the metrics producer, so this `struct` wraps a
     /// `std::sync::Mutex`
     pub(crate) stats: UpStatOuter,
+    /// Some internal counters
+    pub(crate) counters: UpCounters,
 
     /// Fixed configuration
     pub(crate) cfg: Arc<UpstairsConfig>,
@@ -196,6 +238,9 @@ pub(crate) struct Upstairs {
 
     /// Stream of post-processed `BlockOp` futures
     deferred_reqs: DeferredQueue<Option<DeferredBlockReq>>,
+
+    /// Stream of decrypted `Message` futures
+    deferred_msgs: DeferredQueue<DeferredMessage>,
 }
 
 /// Action to be taken which modifies the [`Upstairs`] state
@@ -207,11 +252,17 @@ pub(crate) enum UpstairsAction {
     /// A deferred block request has completed
     DeferredBlockReq(DeferredBlockReq),
 
+    /// A deferred message has arrived
+    DeferredMessage(DeferredMessage),
+
     LeakCheck,
     FlushCheck,
     StatUpdate,
     RepairCheck,
     Control(ControlRequest),
+
+    /// The guest connection has been dropped
+    GuestDropped,
 
     /// We received an event of some kind, but it requires no follow-up work
     NoOp,
@@ -258,7 +309,7 @@ impl Upstairs {
         opt: &CrucibleOpts,
         gen: u64,
         expected_region_def: Option<RegionDefinition>,
-        guest: Arc<Guest>,
+        guest: GuestIoHandle,
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     ) -> Self {
         /*
@@ -293,6 +344,7 @@ impl Upstairs {
 
         let uuid = opt.id;
         let stats = UpStatOuter::new(uuid);
+        let counters = UpCounters::new();
 
         let rd_status = match expected_region_def {
             None => RegionDefinitionStatus::WaitingForDownstairs,
@@ -332,14 +384,17 @@ impl Upstairs {
             stat_deadline: deadline_secs(STAT_INTERVAL_SECS),
             flush_timeout_secs,
             guest,
+            guest_dropped: false,
             ddef: rd_status,
             need_flush: false,
             stats,
+            counters,
             log,
             downstairs,
             control_rx,
             control_tx,
             deferred_reqs: DeferredQueue::new(),
+            deferred_msgs: DeferredQueue::new(),
         }
     }
 
@@ -360,22 +415,31 @@ impl Upstairs {
         };
 
         let log = crucible_common::build_logger();
+        let (_guest, io) = crate::Guest::new(Some(log.clone()));
 
-        Self::new(
-            &opts,
-            0,
-            ddef,
-            Arc::new(Guest::new(Some(log.clone()))),
-            None,
-        )
+        Self::new(&opts, 0, ddef, io, None)
     }
 
     /// Runs the upstairs (forever)
     pub(crate) async fn run(&mut self) {
-        loop {
+        while !self.done() {
             let action = self.select().await;
+            self.counters.apply += 1;
+            cdt::up__apply!(|| (self.counters.apply));
             self.apply(action).await
         }
+    }
+
+    /// Returns `true` if the worker thread can stop
+    ///
+    /// This is only true if the `Guest` handle has been dropped and all
+    /// remaining messages have been processed.
+    fn done(&self) -> bool {
+        self.guest_dropped
+            && self.guest.guest_work.is_empty()
+            && self.downstairs.ds_active.is_empty()
+            && self.deferred_reqs.is_empty()
+            && self.deferred_msgs.is_empty()
     }
 
     /// Select an event from possible actions
@@ -384,8 +448,8 @@ impl Upstairs {
             d = self.downstairs.select() => {
                 UpstairsAction::Downstairs(d)
             }
-            d = self.guest.recv() => {
-                UpstairsAction::Guest(d)
+            d = self.guest.recv(), if !self.guest_dropped => {
+                d
             }
             _ = self.repair_check_interval
                 .map(|r| Either::Left(sleep_until(r)))
@@ -416,6 +480,16 @@ impl Upstairs {
                     }
                 }
             }
+            m = self.deferred_msgs.next(), if !self.deferred_msgs.is_empty()
+            => {
+                // The outer Option is None if the queue is empty.  If this is
+                // the case, then we check that the empty flag was set.
+                let Some(m) = m else {
+                    assert!(self.deferred_msgs.is_empty());
+                    return UpstairsAction::NoOp;
+                };
+                UpstairsAction::DeferredMessage(m)
+            }
             _ = sleep_until(self.leak_deadline) => {
                 UpstairsAction::LeakCheck
             }
@@ -437,24 +511,48 @@ impl Upstairs {
     pub(crate) async fn apply(&mut self, action: UpstairsAction) {
         match action {
             UpstairsAction::Downstairs(d) => {
+                self.counters.action_downstairs += 1;
+                cdt::up__action_downstairs!(|| (self
+                    .counters
+                    .action_downstairs));
                 self.apply_downstairs_action(d).await
             }
             UpstairsAction::Guest(b) => {
+                self.counters.action_guest += 1;
+                cdt::up__action_guest!(|| (self.counters.action_guest));
                 self.defer_guest_request(b).await;
             }
+            UpstairsAction::GuestDropped => {
+                self.guest_dropped = true;
+            }
             UpstairsAction::DeferredBlockReq(req) => {
+                self.counters.action_deferred_block += 1;
+                cdt::up__action_deferred_block!(|| (self
+                    .counters
+                    .action_deferred_block));
                 self.apply_guest_request(req).await;
             }
+            UpstairsAction::DeferredMessage(m) => {
+                self.counters.action_deferred_message += 1;
+                cdt::up__action_deferred_message!(|| (self
+                    .counters
+                    .action_deferred_message));
+                self.on_client_message(m).await;
+            }
             UpstairsAction::LeakCheck => {
+                self.counters.action_leak_check += 1;
+                cdt::up__action_leak_check!(|| (self
+                    .counters
+                    .action_leak_check));
                 const LEAK_MS: usize = 1000;
                 let leak_tick =
                     tokio::time::Duration::from_millis(LEAK_MS as u64);
-                if let Some(iop_limit) = self.guest.get_iop_limit() {
-                    let tokens = iop_limit / (1000 / LEAK_MS);
+                if let Some(iop_limit_cfg) = self.guest.limits.iop_limit {
+                    let tokens = iop_limit_cfg.iop_limit / (1000 / LEAK_MS);
                     self.guest.leak_iop_tokens(tokens);
                 }
 
-                if let Some(bw_limit) = self.guest.get_bw_limit() {
+                if let Some(bw_limit) = self.guest.limits.bw_limit {
                     let tokens = bw_limit / (1000 / LEAK_MS);
                     self.guest.leak_bw_tokens(tokens);
                 }
@@ -463,22 +561,41 @@ impl Upstairs {
                     Instant::now().checked_add(leak_tick).unwrap();
             }
             UpstairsAction::FlushCheck => {
+                self.counters.action_flush_check += 1;
+                cdt::up__action_flush_check!(|| (self
+                    .counters
+                    .action_flush_check));
                 if self.need_flush {
-                    self.submit_flush(None, None).await;
+                    self.submit_flush(None, None);
                 }
                 self.flush_deadline = deadline_secs(self.flush_timeout_secs);
             }
             UpstairsAction::StatUpdate => {
-                self.on_stat_update().await;
+                self.counters.action_stat_check += 1;
+                cdt::up__action_stat_check!(|| (self
+                    .counters
+                    .action_stat_check));
+                self.on_stat_update();
                 self.stat_deadline = deadline_secs(STAT_INTERVAL_SECS);
             }
             UpstairsAction::RepairCheck => {
-                self.on_repair_check().await;
+                self.counters.action_repair_check += 1;
+                cdt::up__action_repair_check!(|| (self
+                    .counters
+                    .action_repair_check));
+                self.on_repair_check();
             }
             UpstairsAction::Control(c) => {
-                self.on_control_req(c).await;
+                self.counters.action_control_check += 1;
+                cdt::up__action_control_check!(|| (self
+                    .counters
+                    .action_control_check));
+                self.on_control_req(c);
             }
-            UpstairsAction::NoOp => (),
+            UpstairsAction::NoOp => {
+                self.counters.action_noop += 1;
+                cdt::up__action_noop!(|| (self.counters.action_noop));
+            }
         }
 
         // Check whether we need to mark a Downstairs as faulted because too
@@ -490,9 +607,11 @@ impl Upstairs {
         // This must be called before acking jobs, because it looks in
         // `Downstairs::ackable_jobs` to see which jobs are done.
         if let Some(job_id) = self.downstairs.check_live_repair() {
-            let mut gw = self.guest.guest_work.lock().await;
-            self.downstairs
-                .continue_live_repair(job_id, &mut gw, &self.state);
+            self.downstairs.continue_live_repair(
+                job_id,
+                &mut self.guest.guest_work,
+                &self.state,
+            );
         }
 
         // Send jobs downstairs as they become available.  This must be called
@@ -505,8 +624,9 @@ impl Upstairs {
 
         // Handle any jobs that have become ready for acks
         if self.downstairs.has_ackable_jobs() {
-            let mut gw = self.guest.guest_work.lock().await;
-            self.downstairs.ack_jobs(&mut gw, &self.stats).await;
+            self.downstairs
+                .ack_jobs(&mut self.guest.guest_work, &self.stats)
+                .await;
         }
 
         // Check for client-side deactivation
@@ -565,6 +685,20 @@ impl Upstairs {
         assert!(self.deferred_reqs.is_empty());
     }
 
+    /// Helper function to await all deferred messages
+    ///
+    /// This is only useful in tests because it **only** processes deferred
+    /// messages (doing no other Upstairs work).  In production, there
+    /// could be other events that need handling simultaneously, so we do not
+    /// want to stall the Upstairs.
+    #[cfg(test)]
+    async fn await_deferred_msgs(&mut self) {
+        while let Some(msg) = self.deferred_msgs.next().await {
+            self.apply(UpstairsAction::DeferredMessage(msg)).await;
+        }
+        assert!(self.deferred_msgs.is_empty());
+    }
+
     /// Check outstanding IOops for each downstairs.
     ///
     /// If the number is too high, then mark that downstairs as failed, scrub
@@ -590,8 +724,10 @@ impl Upstairs {
     }
 
     /// Fires the `up-status` DTrace probe
-    async fn on_stat_update(&self) {
-        let up_count = self.guest.guest_work.lock().await.active.len() as u32;
+    fn on_stat_update(&self) {
+        let up_count = self.guest.guest_work.active.len() as u32;
+        let up_counters = self.counters;
+
         let ds_count = self.downstairs.active_count() as u32;
         let ds_state = self.downstairs.collect_stats(|c| c.state());
 
@@ -624,6 +760,7 @@ impl Upstairs {
         cdt::up__status!(|| {
             let arg = Arg {
                 up_count,
+                up_counters,
                 up_backpressure,
                 write_bytes_out,
                 ds_count,
@@ -645,14 +782,15 @@ impl Upstairs {
     }
 
     /// Handles a request from the (optional) control server
-    async fn on_control_req(&self, c: ControlRequest) {
+    fn on_control_req(&self, c: ControlRequest) {
         match c {
             ControlRequest::UpstairsStats(tx) => {
                 let ds_state = self.downstairs.collect_stats(|c| c.state());
-                let up_jobs = self.guest.guest_work.lock().await.active.len();
+                let up_jobs = self.guest.guest_work.active.len();
                 let ds_jobs = self.downstairs.active_count();
-                let repair_done = self.downstairs.reconcile_repaired();
-                let repair_needed = self.downstairs.reconcile_repair_needed();
+                let reconcile_done = self.downstairs.reconcile_repaired();
+                let reconcile_needed =
+                    self.downstairs.reconcile_repair_needed();
                 let extents_repaired =
                     self.downstairs.collect_stats(|c| c.stats.extents_repaired);
                 let extents_confirmed = self
@@ -695,8 +833,8 @@ impl Upstairs {
                     ds_state: ds_state.to_vec(),
                     up_jobs,
                     ds_jobs,
-                    repair_done,
-                    repair_needed,
+                    reconcile_done,
+                    reconcile_needed,
                     extents_repaired: extents_repaired.to_vec(),
                     extents_confirmed: extents_confirmed.to_vec(),
                     extent_limit: extent_limit.to_vec(),
@@ -726,7 +864,7 @@ impl Upstairs {
     /// If this Upstairs is [UpstairsConfig::read_only], this function will move
     /// any Downstairs from [DsState::LiveRepairReady] back to [DsState::Active]
     /// without actually performing any repair.
-    pub(crate) async fn on_repair_check(&mut self) {
+    pub(crate) fn on_repair_check(&mut self) {
         info!(self.log, "Checking if live repair is needed");
         if !matches!(self.state, UpstairsState::Active) {
             info!(self.log, "inactive, no live repair needed");
@@ -769,7 +907,7 @@ impl Upstairs {
             info!(self.log, "No Live Repair required at this time");
         } else if !self.downstairs.start_live_repair(
             &self.state,
-            self.guest.guest_work.lock().await.deref_mut(),
+            &mut self.guest.guest_work,
             self.ddef.get_def().unwrap().extent_count().into(),
         ) {
             // It's hard to hit this condition; we need a Downstairs to be in
@@ -801,9 +939,8 @@ impl Upstairs {
             // have to keep using it for subsequent requests (even ones that are
             // not writes) to preserve FIFO ordering
             _ if !self.deferred_reqs.is_empty() => {
-                self.deferred_reqs.push_back(Either::Left(ready(Ok(Some(
-                    DeferredBlockReq::Other(req),
-                )))));
+                self.deferred_reqs
+                    .push_immediate(Some(DeferredBlockReq::Other(req)));
             }
             // Otherwise, we can apply a non-write operation immediately, saving
             // a trip through the FuturesUnordered
@@ -825,7 +962,7 @@ impl Upstairs {
     /// and report an error.
     async fn apply_guest_request(&mut self, req: DeferredBlockReq) {
         match req {
-            DeferredBlockReq::Write(req) => self.submit_write(req).await,
+            DeferredBlockReq::Write(req) => self.submit_write(req),
             DeferredBlockReq::Other(req) => {
                 self.apply_guest_request_inner(req).await
             }
@@ -861,7 +998,7 @@ impl Upstairs {
                 res.send_ok();
             }
             BlockOp::Deactivate => {
-                self.set_deactivate(res).await;
+                self.set_deactivate(res);
             }
 
             // Query ops
@@ -930,7 +1067,7 @@ impl Upstairs {
                     .filter(|c| c.state() == DsState::Active)
                     .count();
                 *data.lock().await = WQCounts {
-                    up_count: self.guest.guest_work.lock().await.active.len(),
+                    up_count: self.guest.guest_work.active.len(),
                     ds_count: self.downstairs.active_count(),
                     active_count,
                 };
@@ -939,12 +1076,12 @@ impl Upstairs {
 
             BlockOp::ShowWork { data } => {
                 // TODO should this first check if the Upstairs is active?
-                *data.lock().await = self.show_all_work().await;
+                *data.lock().await = self.show_all_work();
                 res.send_ok();
             }
 
             BlockOp::Read { offset, data } => {
-                self.submit_read(offset, data, res).await
+                self.submit_read(offset, data, res)
             }
             BlockOp::Write { .. } | BlockOp::WriteUnwritten { .. } => {
                 panic!("writes must always be deferred")
@@ -961,7 +1098,7 @@ impl Upstairs {
                     res.send_err(CrucibleError::UpstairsInactive);
                     return;
                 }
-                self.submit_flush(Some(res), snapshot_details).await;
+                self.submit_flush(Some(res), snapshot_details);
             }
             BlockOp::ReplaceDownstairs {
                 id,
@@ -978,9 +1115,9 @@ impl Upstairs {
         }
     }
 
-    pub(crate) async fn show_all_work(&self) -> WQCounts {
+    pub(crate) fn show_all_work(&self) -> WQCounts {
         let gior = self.guest_io_ready();
-        let up_count = self.guest.guest_work.lock().await.active.len();
+        let up_count = self.guest.guest_work.active.len();
 
         let ds_count = self.downstairs.active_count();
 
@@ -996,7 +1133,7 @@ impl Upstairs {
         );
         if ds_count == 0 {
             if up_count != 0 {
-                crate::show_guest_work(&self.guest).await;
+                crate::show_guest_work(&self.guest);
             }
         } else {
             self.downstairs.show_all_work()
@@ -1015,7 +1152,7 @@ impl Upstairs {
 
         // TODO this is a ringbuffer, why are we turning it to a Vec to look at
         // the last five items?
-        let up_done = self.guest.guest_work.lock().await.completed.to_vec();
+        let up_done = self.guest.guest_work.completed.to_vec();
         print!("Upstairs last five completed:  ");
         for j in up_done.iter().rev().take(5) {
             print!(" {:4}", j);
@@ -1077,7 +1214,7 @@ impl Upstairs {
     /// when complete.
     ///
     /// In either case, `self.state` is set to `UpstairsState::Deactivating`
-    async fn set_deactivate(&mut self, res: BlockRes) {
+    fn set_deactivate(&mut self, res: BlockRes) {
         info!(self.log, "Request to deactivate this guest");
         match &self.state {
             UpstairsState::Initializing | UpstairsState::GoActive(..) => {
@@ -1092,7 +1229,7 @@ impl Upstairs {
         }
         if !self.downstairs.can_deactivate_immediately() {
             debug!(self.log, "not ready to deactivate; submitting final flush");
-            self.submit_flush(None, None).await;
+            self.submit_flush(None, None);
         } else {
             debug!(self.log, "ready to deactivate right away");
             // Deactivation is handled in the invariant-checking portion of
@@ -1102,7 +1239,7 @@ impl Upstairs {
         self.state = UpstairsState::Deactivating(res);
     }
 
-    pub(crate) async fn submit_flush(
+    pub(crate) fn submit_flush(
         &mut self,
         res: Option<BlockRes>,
         snapshot_details: Option<SnapshotDetails>,
@@ -1119,8 +1256,7 @@ impl Upstairs {
          * ID and the next_id are connected here, in that all future writes
          * should be flushed at the next flush ID.
          */
-        let mut gw = self.guest.guest_work.lock().await;
-        let gw_id = gw.next_gw_id();
+        let gw_id = self.guest.guest_work.next_gw_id();
         cdt::gw__flush__start!(|| (gw_id.0));
 
         if snapshot_details.is_some() {
@@ -1130,36 +1266,27 @@ impl Upstairs {
         let next_id = self.downstairs.submit_flush(gw_id, snapshot_details);
 
         let new_gtos = GtoS::new(next_id, None, res);
-        gw.active.insert(gw_id, new_gtos);
+        self.guest.guest_work.active.insert(gw_id, new_gtos);
 
         cdt::up__to__ds__flush__start!(|| (gw_id.0));
     }
 
     /// Submits a read job to the downstairs
-    async fn submit_read(
-        &mut self,
-        offset: Block,
-        data: Buffer,
-        res: BlockRes,
-    ) {
-        self.submit_read_inner(offset, data, Some(res)).await
+    fn submit_read(&mut self, offset: Block, data: Buffer, res: BlockRes) {
+        self.submit_read_inner(offset, data, Some(res))
     }
 
     /// Submits a dummy read (without associated `BlockReq`)
     #[cfg(test)]
-    pub(crate) async fn submit_dummy_read(
-        &mut self,
-        offset: Block,
-        data: Buffer,
-    ) {
-        self.submit_read_inner(offset, data, None).await
+    pub(crate) fn submit_dummy_read(&mut self, offset: Block, data: Buffer) {
+        self.submit_read_inner(offset, data, None)
     }
 
     /// Submit a read job to the downstairs, optionally without a `BlockReq`
     ///
     /// # Panics
     /// If `res` is `None` and this isn't the test suite
-    async fn submit_read_inner(
+    fn submit_read_inner(
         &mut self,
         offset: Block,
         data: Buffer,
@@ -1170,7 +1297,7 @@ impl Upstairs {
 
         if !self.guest_io_ready() {
             if let Some(res) = res {
-                res.send_err(CrucibleError::UpstairsInactive);
+                res.send_err_with_buffer(data, CrucibleError::UpstairsInactive);
             }
             return;
         }
@@ -1180,7 +1307,6 @@ impl Upstairs {
          * end. This ID is also put into the IO struct we create that
          * handles the operation(s) on the storage side.
          */
-        let mut gw = self.guest.guest_work.lock().await;
         let ddef = self.ddef.get_def().unwrap();
 
         /*
@@ -1188,7 +1314,7 @@ impl Upstairs {
          */
         if let Err(e) = ddef.validate_io(offset, data.len()) {
             if let Some(res) = res {
-                res.send_err(e);
+                res.send_err_with_buffer(data, e);
             }
             return;
         }
@@ -1210,7 +1336,7 @@ impl Upstairs {
          * Grab this ID after extent_from_offset: in case of Err we don't
          * want to create a gap in the IDs.
          */
-        let gw_id = gw.next_gw_id();
+        let gw_id = self.guest.guest_work.next_gw_id();
         cdt::gw__read__start!(|| (gw_id.0));
 
         let next_id = self.downstairs.submit_read(gw_id, impacted_blocks, ddef);
@@ -1220,7 +1346,7 @@ impl Upstairs {
         // modifying the Upstairs right now; even if the job finishes
         // instantaneously, it can't interrupt this function.
         let new_gtos = GtoS::new(next_id, Some(data), res);
-        gw.active.insert(gw_id, new_gtos);
+        self.guest.guest_work.active.insert(gw_id, new_gtos);
 
         cdt::up__to__ds__read__start!(|| (gw_id.0));
     }
@@ -1249,7 +1375,7 @@ impl Upstairs {
     ///
     /// This **does not** go through the deferred-write pipeline
     #[cfg(test)]
-    pub(crate) async fn submit_dummy_write(
+    pub(crate) fn submit_dummy_write(
         &mut self,
         offset: Block,
         data: Bytes,
@@ -1259,7 +1385,7 @@ impl Upstairs {
             .compute_deferred_write(offset, data, None, is_write_unwritten)
             .and_then(DeferredWrite::run)
         {
-            self.apply_guest_request(DeferredBlockReq::Write(w)).await
+            self.submit_write(w)
         }
     }
 
@@ -1281,12 +1407,11 @@ impl Upstairs {
         if let Some(w) =
             self.compute_deferred_write(offset, data, res, is_write_unwritten)
         {
-            let (tx, rx) = oneshot::channel();
+            let tx = self.deferred_reqs.push_oneshot();
             rayon::spawn(move || {
                 let out = w.run().map(DeferredBlockReq::Write);
                 let _ = tx.send(out);
             });
-            self.deferred_reqs.push_back(Either::Right(rx));
         }
     }
 
@@ -1345,20 +1470,19 @@ impl Upstairs {
         })
     }
 
-    async fn submit_write(&mut self, write: EncryptedWrite) {
+    fn submit_write(&mut self, write: EncryptedWrite) {
         /*
          * Get the next ID for the guest work struct we will make at the
          * end. This ID is also put into the IO struct we create that
          * handles the operation(s) on the storage side.
          */
-        let mut gw = self.guest.guest_work.lock().await;
         self.need_flush = true;
 
         /*
          * Grab this ID after extent_from_offset: in case of Err we don't
          * want to create a gap in the IDs.
          */
-        let gw_id = gw.next_gw_id();
+        let gw_id = self.guest.guest_work.next_gw_id();
         if write.is_write_unwritten {
             cdt::gw__write__unwritten__start!(|| (gw_id.0));
         } else {
@@ -1368,13 +1492,13 @@ impl Upstairs {
         let next_id = self.downstairs.submit_write(
             gw_id,
             write.impacted_blocks,
-            write.writes,
+            write.data,
             write.is_write_unwritten,
         );
 
         // New work created, add to the guest_work HM
         let new_gtos = GtoS::new(next_id, None, write.res);
-        gw.active.insert(gw_id, new_gtos);
+        self.guest.guest_work.active.insert(gw_id, new_gtos);
 
         if write.is_write_unwritten {
             cdt::up__to__ds__write__unwritten__start!(|| (gw_id.0));
@@ -1403,24 +1527,59 @@ impl Upstairs {
                 self.downstairs.clients[client_id].stats.connected += 1;
                 self.downstairs.clients[client_id].send_here_i_am().await;
             }
-            ClientAction::Ping => {
-                self.downstairs.clients[client_id].send_ping().await;
-            }
-            ClientAction::Timeout => {
-                // Ask the downstairs client task to stop, because the client
-                // has hit a Crucible timeout.
-                //
-                // This will come back to `TaskStopped`, at which point we'll
-                // clear out the task and restart it.
-                //
-                // We need to reset the timeout, because otherwise it will keep
-                // firing and will monopolize the future.
-                let c = &mut self.downstairs.clients[client_id];
-                c.reset_timeout();
-                c.halt_io_task(ClientStopReason::Timeout);
-            }
             ClientAction::Response(m) => {
-                self.on_client_message(client_id, m).await;
+                // Defer the message if it's a (large) read that needs
+                // decryption, or there are other deferred messages in the queue
+                // (to preserve order).  Otherwise, handle it immediately.
+                if let Message::ReadResponse { responses, .. } = &m {
+                    // Any read larger than this constant should be deferred to
+                    // the worker pool; smaller reads can be processed in-thread
+                    // (since the overhead isn't worth it)
+                    const MIN_DEFER_SIZE_BYTES: u64 = 8192;
+                    let should_defer = !self.deferred_msgs.is_empty()
+                        || match responses {
+                            Ok(rs) => {
+                                // Find the number of bytes being decrypted
+                                let response_size = rs.len() as u64
+                                    * self
+                                        .ddef
+                                        .get_def()
+                                        .map(|b| b.block_size())
+                                        .unwrap_or(0);
+
+                                response_size > MIN_DEFER_SIZE_BYTES
+                            }
+                            Err(_) => false,
+                        };
+
+                    let dr = DeferredRead {
+                        message: m,
+                        client_id,
+                        cfg: self.cfg.clone(),
+                        log: self.log.new(o!("job" => "decrypt")),
+                    };
+                    if should_defer {
+                        let tx = self.deferred_msgs.push_oneshot();
+                        rayon::spawn(move || {
+                            let out = dr.run();
+                            let _ = tx.send(out);
+                        });
+                    } else {
+                        // Do decryption right here!
+                        self.on_client_message(dr.run()).await;
+                    }
+                } else {
+                    let dm = DeferredMessage {
+                        message: m,
+                        hashes: vec![],
+                        client_id,
+                    };
+                    if self.deferred_msgs.is_empty() {
+                        self.on_client_message(dm).await;
+                    } else {
+                        self.deferred_msgs.push_immediate(dm);
+                    }
+                }
             }
             ClientAction::TaskStopped(r) => {
                 self.on_client_task_stopped(client_id, r);
@@ -1436,10 +1595,8 @@ impl Upstairs {
         }
     }
 
-    async fn on_client_message(&mut self, client_id: ClientId, m: Message) {
-        // We have received a message, so reset the timeout watchdog for this
-        // particular client.
-        self.downstairs.clients[client_id].reset_timeout();
+    async fn on_client_message(&mut self, m: DeferredMessage) {
+        let (client_id, m, hashes) = (m.client_id, m.message, m.hashes);
         match m {
             Message::Imok => {
                 // Nothing to do here, glad to hear that you're okay
@@ -1459,6 +1616,7 @@ impl Upstairs {
                 let r = self.downstairs.process_io_completion(
                     client_id,
                     m,
+                    hashes,
                     &self.state,
                 );
                 if let Err(e) = r {
@@ -1528,7 +1686,7 @@ impl Upstairs {
                     .await
                 {
                     // reconciliation is done, great work everyone
-                    self.on_reconciliation_done(DsState::Repair);
+                    self.on_reconciliation_done(DsState::Reconcile);
                 }
             }
 
@@ -1578,10 +1736,10 @@ impl Upstairs {
     /// If we have a problem here, we can't activate the upstairs.
     async fn connect_region_set(&mut self) -> bool {
         /*
-         * If reconciliation (also called Repair in DsState) is required, it
-         * happens in three phases.  Typically an interruption of repair will
-         * result in things starting over, but if actual repair work to an
-         * extent is completed, that extent won't need to be repaired again.
+         * If reconciliation is required, it happens in three phases.
+         * Typically an interruption of reconciliation will result in things
+         * starting over, but if actual repair work to an extent is
+         * completed, that extent won't need to be repaired again.
          *
          * The three phases are:
          *
@@ -1687,9 +1845,9 @@ impl Upstairs {
                 true
             }
             Ok(false) => {
-                info!(self.log, "No downstairs repair required");
+                info!(self.log, "No downstairs reconciliation required");
                 self.on_reconciliation_done(DsState::WaitQuorum);
-                info!(self.log, "Set Active after no repair");
+                info!(self.log, "Set Active after no reconciliation");
                 true
             }
         }
@@ -1701,8 +1859,11 @@ impl Upstairs {
         // successfully; make some assertions to that effect.
         self.downstairs.on_reconciliation_done(from_state);
 
-        info!(self.log, "All required repair work is completed");
-        info!(self.log, "Set Downstairs and Upstairs active after repairs");
+        info!(self.log, "All required reconciliation work is completed");
+        info!(
+            self.log,
+            "Set Downstairs and Upstairs active after reconciliation"
+        );
 
         if !matches!(self.state, UpstairsState::GoActive(..)) {
             error!(
@@ -1850,12 +2011,8 @@ impl Upstairs {
             | UpstairsState::Deactivating { .. } => false,
         };
 
-        self.downstairs.reinitialize(
-            client_id,
-            auto_promote,
-            reason,
-            &self.state,
-        );
+        self.downstairs
+            .reinitialize(client_id, auto_promote, &self.state);
     }
 
     fn set_backpressure(&self) {
@@ -1903,6 +2060,7 @@ impl Upstairs {
 pub(crate) mod test {
     use super::*;
     use crate::{
+        client::ClientStopReason,
         downstairs::test::set_all_active,
         test::{make_encrypted_upstairs, make_upstairs},
         BlockContext, BlockReq, BlockReqWaiter, DsState, JobId,
@@ -1948,7 +2106,7 @@ pub(crate) mod test {
         up.apply(UpstairsAction::RepairCheck).await;
 
         // Assert that the repair started
-        up.on_repair_check().await;
+        up.on_repair_check();
         assert!(up.repair_check_interval.is_none());
         assert!(up.downstairs.live_repair_in_progress());
 
@@ -1992,7 +2150,10 @@ pub(crate) mod test {
             res: ds_done_res,
         }))
         .await;
-        assert!(ds_done_brw.wait(&up.log).await.is_err());
+
+        let reply = ds_done_brw.wait(&up.log).await;
+        assert!(reply.buffer.is_none());
+        assert!(reply.result.is_err());
 
         up.force_active().unwrap();
 
@@ -2002,7 +2163,10 @@ pub(crate) mod test {
             res: ds_done_res,
         }))
         .await;
-        assert!(ds_done_brw.wait(&up.log).await.is_ok());
+
+        let reply = ds_done_brw.wait(&up.log).await;
+        assert!(reply.buffer.is_none());
+        assert!(reply.result.is_ok());
 
         let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -2010,7 +2174,10 @@ pub(crate) mod test {
             res: ds_done_res,
         }))
         .await;
-        assert!(ds_done_brw.wait(&up.log).await.is_err())
+
+        let reply = ds_done_brw.wait(&up.log).await;
+        assert!(reply.buffer.is_none());
+        assert!(reply.result.is_err());
     }
 
     #[tokio::test]
@@ -2059,7 +2226,10 @@ pub(crate) mod test {
                 assert!(matches!(up.state, UpstairsState::Initializing));
             }
         }
-        assert!(ds_done_brw.wait(&up.log).await.is_ok());
+
+        let reply = ds_done_brw.wait(&up.log).await;
+        assert!(reply.buffer.is_none());
+        assert!(reply.result.is_ok());
     }
 
     // Job dependency tests
@@ -2095,8 +2265,8 @@ pub(crate) mod test {
     // above example, operation 3 depends on operations 0, 1, and 2.
     //
 
-    #[tokio::test]
-    async fn test_deps_writes_depend_on_overlapping_writes() {
+    #[test]
+    fn test_deps_writes_depend_on_overlapping_writes() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -2109,22 +2279,18 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0xff; 512]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512]),
+            false,
+        );
 
         // op 1
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0x00; 512]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0x00; 512]),
+            false,
+        );
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 2);
@@ -2133,8 +2299,8 @@ pub(crate) mod test {
         assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
     }
 
-    #[tokio::test]
-    async fn test_deps_writes_depend_on_overlapping_writes_chain() {
+    #[test]
+    fn test_deps_writes_depend_on_overlapping_writes_chain() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -2148,31 +2314,25 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0xff; 512]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512]),
+            false,
+        );
 
         // op 1
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0x00; 512]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0x00; 512]),
+            false,
+        );
 
         // op 2
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0x55; 512]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0x55; 512]),
+            false,
+        );
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
@@ -2182,8 +2342,8 @@ pub(crate) mod test {
         assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id],);
     }
 
-    #[tokio::test]
-    async fn test_deps_writes_depend_on_overlapping_writes_and_flushes() {
+    #[test]
+    fn test_deps_writes_depend_on_overlapping_writes_and_flushes() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -2197,25 +2357,21 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0xff; 512]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512]),
+            false,
+        );
 
         // op 1
-        upstairs.submit_flush(None, None).await;
+        upstairs.submit_flush(None, None);
 
         // op 2
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0x55; 512]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0x55; 512]),
+            false,
+        );
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
@@ -2225,8 +2381,8 @@ pub(crate) mod test {
         assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // write (op 2)
     }
 
-    #[tokio::test]
-    async fn test_deps_all_writes_depend_on_flushes() {
+    #[test]
+    fn test_deps_all_writes_depend_on_flushes() {
         // Test that the following job dependency graph is made:
         //
         //          block
@@ -2245,27 +2401,23 @@ pub(crate) mod test {
 
         // ops 0 to 2
         for i in 0..3 {
-            upstairs
-                .submit_dummy_write(
-                    Block::new_512(i),
-                    Bytes::from(vec![0xff; 512]),
-                    false,
-                )
-                .await;
+            upstairs.submit_dummy_write(
+                Block::new_512(i),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            );
         }
 
         // op 3
-        upstairs.submit_flush(None, None).await;
+        upstairs.submit_flush(None, None);
 
         // ops 4 to 6
         for i in 3..6 {
-            upstairs
-                .submit_dummy_write(
-                    Block::new_512(i),
-                    Bytes::from(vec![0xff; 512]),
-                    false,
-                )
-                .await;
+            upstairs.submit_dummy_write(
+                Block::new_512(i),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            );
         }
 
         let jobs = upstairs.downstairs.get_all_jobs();
@@ -2285,8 +2437,8 @@ pub(crate) mod test {
         assert_eq!(jobs[6].work.deps(), &[jobs[3].ds_id]); // write @ 5
     }
 
-    #[tokio::test]
-    async fn test_deps_little_writes_depend_on_big_write() {
+    #[test]
+    fn test_deps_little_writes_depend_on_big_write() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -2301,23 +2453,19 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0xff; 512 * 3]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512 * 3]),
+            false,
+        );
 
         // ops 1 to 3
         for i in 0..3 {
-            upstairs
-                .submit_dummy_write(
-                    Block::new_512(i),
-                    Bytes::from(vec![0xff; 512]),
-                    false,
-                )
-                .await;
+            upstairs.submit_dummy_write(
+                Block::new_512(i),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            );
         }
 
         let jobs = upstairs.downstairs.get_all_jobs();
@@ -2330,8 +2478,8 @@ pub(crate) mod test {
         assert_eq!(jobs[3].work.deps(), &[jobs[0].ds_id]); // write @ 2
     }
 
-    #[tokio::test]
-    async fn test_deps_little_writes_depend_on_big_write_chain() {
+    #[test]
+    fn test_deps_little_writes_depend_on_big_write_chain() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -2349,34 +2497,28 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0xff; 512 * 3]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512 * 3]),
+            false,
+        );
 
         // ops 1 to 3
         for i in 0..3 {
-            upstairs
-                .submit_dummy_write(
-                    Block::new_512(i),
-                    Bytes::from(vec![0xff; 512]),
-                    false,
-                )
-                .await;
+            upstairs.submit_dummy_write(
+                Block::new_512(i),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            );
         }
 
         // ops 4 to 6
         for i in 0..3 {
-            upstairs
-                .submit_dummy_write(
-                    Block::new_512(i),
-                    Bytes::from(vec![0xff; 512]),
-                    false,
-                )
-                .await;
+            upstairs.submit_dummy_write(
+                Block::new_512(i),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            );
         }
 
         let jobs = upstairs.downstairs.get_all_jobs();
@@ -2402,8 +2544,8 @@ pub(crate) mod test {
         );
     }
 
-    #[tokio::test]
-    async fn test_deps_big_write_depends_on_little_writes() {
+    #[test]
+    fn test_deps_big_write_depends_on_little_writes() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -2419,23 +2561,19 @@ pub(crate) mod test {
 
         // ops 0 to 2
         for i in 0..3 {
-            upstairs
-                .submit_dummy_write(
-                    Block::new_512(i),
-                    Bytes::from(vec![0xff; 512]),
-                    false,
-                )
-                .await;
+            upstairs.submit_dummy_write(
+                Block::new_512(i),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            );
         }
 
         // op 3
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0xff; 512 * 3]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512 * 3]),
+            false,
+        );
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 4);
@@ -2450,8 +2588,8 @@ pub(crate) mod test {
         );
     }
 
-    #[tokio::test]
-    async fn test_deps_read_depends_on_write() {
+    #[test]
+    fn test_deps_read_depends_on_write() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -2464,18 +2602,14 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0xff; 512]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512]),
+            false,
+        );
 
         // op 1
-        upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
-            .await;
+        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 2);
@@ -2484,8 +2618,8 @@ pub(crate) mod test {
         assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // read @ 0
     }
 
-    #[tokio::test]
-    async fn test_deps_big_read_depends_on_little_writes() {
+    #[test]
+    fn test_deps_big_read_depends_on_little_writes() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -2501,19 +2635,15 @@ pub(crate) mod test {
 
         // ops 0 to 2
         for i in 0..3 {
-            upstairs
-                .submit_dummy_write(
-                    Block::new_512(i),
-                    Bytes::from(vec![0xff; 512]),
-                    false,
-                )
-                .await;
+            upstairs.submit_dummy_write(
+                Block::new_512(i),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            );
         }
 
         // op 3
-        upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512 * 2))
-            .await;
+        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(2, 512));
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 4);
@@ -2528,8 +2658,8 @@ pub(crate) mod test {
         );
     }
 
-    #[tokio::test]
-    async fn test_deps_read_no_depend_on_read() {
+    #[test]
+    fn test_deps_read_no_depend_on_read() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -2544,14 +2674,10 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
-            .await;
+        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
 
         // op 1
-        upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
-            .await;
+        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 2);
@@ -2560,8 +2686,8 @@ pub(crate) mod test {
         assert!(jobs[1].work.deps().is_empty()); // read @ 0
     }
 
-    #[tokio::test]
-    async fn test_deps_multiple_reads_depend_on_write() {
+    #[test]
+    fn test_deps_multiple_reads_depend_on_write() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -2575,23 +2701,17 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0xff; 512]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512]),
+            false,
+        );
 
         // op 1
-        upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
-            .await;
+        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
 
         // op 2
-        upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
-            .await;
+        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
@@ -2601,8 +2721,8 @@ pub(crate) mod test {
         assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id]); // read @ 0
     }
 
-    #[tokio::test]
-    async fn test_deps_read_depends_on_flush() {
+    #[test]
+    fn test_deps_read_depends_on_flush() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -2616,21 +2736,17 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0xff; 512]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512]),
+            false,
+        );
 
         // op 1
-        upstairs.submit_flush(None, None).await;
+        upstairs.submit_flush(None, None);
 
         // op 2
-        upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512 * 2))
-            .await;
+        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(2, 512));
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
@@ -2640,8 +2756,8 @@ pub(crate) mod test {
         assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // read @ 0
     }
 
-    #[tokio::test]
-    async fn test_deps_flushes_depend_on_flushes() {
+    #[test]
+    fn test_deps_flushes_depend_on_flushes() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -2654,11 +2770,11 @@ pub(crate) mod test {
         let mut upstairs = make_upstairs();
         upstairs.force_active().unwrap();
 
-        upstairs.submit_flush(None, None).await;
+        upstairs.submit_flush(None, None);
 
-        upstairs.submit_flush(None, None).await;
+        upstairs.submit_flush(None, None);
 
-        upstairs.submit_flush(None, None).await;
+        upstairs.submit_flush(None, None);
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
@@ -2668,8 +2784,8 @@ pub(crate) mod test {
         assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]);
     }
 
-    #[tokio::test]
-    async fn test_deps_flushes_depend_on_flushes_and_all_writes() {
+    #[test]
+    fn test_deps_flushes_depend_on_flushes_and_all_writes() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -2688,35 +2804,31 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs.submit_flush(None, None).await;
+        upstairs.submit_flush(None, None);
 
         // ops 1 to 2
         for i in 0..2 {
-            upstairs
-                .submit_dummy_write(
-                    Block::new_512(i),
-                    Bytes::from(vec![0xff; 512]),
-                    false,
-                )
-                .await;
+            upstairs.submit_dummy_write(
+                Block::new_512(i),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            );
         }
 
         // op 3
-        upstairs.submit_flush(None, None).await;
+        upstairs.submit_flush(None, None);
 
         // ops 4 to 6
         for i in 0..3 {
-            upstairs
-                .submit_dummy_write(
-                    Block::new_512(i),
-                    Bytes::from(vec![0xff; 512]),
-                    false,
-                )
-                .await;
+            upstairs.submit_dummy_write(
+                Block::new_512(i),
+                Bytes::from(vec![0xff; 512]),
+                false,
+            );
         }
 
         // op 7
-        upstairs.submit_flush(None, None).await;
+        upstairs.submit_flush(None, None);
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 8);
@@ -2741,8 +2853,8 @@ pub(crate) mod test {
         );
     }
 
-    #[tokio::test]
-    async fn test_deps_writes_depend_on_read() {
+    #[test]
+    fn test_deps_writes_depend_on_read() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -2755,18 +2867,14 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
-            .await;
+        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
 
         // op 1
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0xff; 512]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512]),
+            false,
+        );
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 2);
@@ -2775,8 +2883,8 @@ pub(crate) mod test {
         assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
     }
 
-    #[tokio::test]
-    async fn test_deps_write_unwrittens_depend_on_read() {
+    #[test]
+    fn test_deps_write_unwrittens_depend_on_read() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -2790,23 +2898,17 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
-            .await;
+        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
 
         // op 1
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0xff; 512]),
-                true,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512]),
+            true,
+        );
 
         // op 2
-        upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
-            .await;
+        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
@@ -2816,8 +2918,8 @@ pub(crate) mod test {
         assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
     }
 
-    #[tokio::test]
-    async fn test_deps_read_write_ladder_1() {
+    #[test]
+    fn test_deps_read_write_ladder_1() {
         // Test that the following job dependency graph is made:
         //
         //          block
@@ -2834,46 +2936,34 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs
-            .submit_dummy_read(Block::new_512(0), Buffer::new(512))
-            .await;
+        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
 
         // op 1
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0xff; 512]),
-                true,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512]),
+            true,
+        );
 
         // op 2
-        upstairs
-            .submit_dummy_read(Block::new_512(1), Buffer::new(512 * 2))
-            .await;
+        upstairs.submit_dummy_read(Block::new_512(1), Buffer::new(2, 512));
 
         // op 3
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(1),
-                Bytes::from(vec![0xff; 512 * 2]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(1),
+            Bytes::from(vec![0xff; 512 * 2]),
+            false,
+        );
 
         // op 4
-        upstairs
-            .submit_dummy_read(Block::new_512(3), Buffer::new(512 * 2))
-            .await;
+        upstairs.submit_dummy_read(Block::new_512(3), Buffer::new(2, 512));
 
         // op 5
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(3),
-                Bytes::from(vec![0xff; 512 * 2]),
-                true,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(3),
+            Bytes::from(vec![0xff; 512 * 2]),
+            true,
+        );
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 6);
@@ -2888,8 +2978,8 @@ pub(crate) mod test {
         assert_eq!(jobs[5].work.deps(), &[jobs[4].ds_id]); // op 5
     }
 
-    #[tokio::test]
-    async fn test_deps_read_write_ladder_2() {
+    #[test]
+    fn test_deps_read_write_ladder_2() {
         // Test that the following job dependency graph is made:
         //
         //          block
@@ -2906,13 +2996,11 @@ pub(crate) mod test {
 
         // ops 0 to 4
         for i in 0..5 {
-            upstairs
-                .submit_dummy_write(
-                    Block::new_512(i),
-                    Bytes::from(vec![0xff; 512 * 2]),
-                    true,
-                )
-                .await;
+            upstairs.submit_dummy_write(
+                Block::new_512(i),
+                Bytes::from(vec![0xff; 512 * 2]),
+                true,
+            );
         }
 
         let jobs = upstairs.downstairs.get_all_jobs();
@@ -2925,8 +3013,8 @@ pub(crate) mod test {
         assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // op 4
     }
 
-    #[tokio::test]
-    async fn test_deps_read_write_ladder_3() {
+    #[test]
+    fn test_deps_read_write_ladder_3() {
         // Test that the following job dependency graph is made:
         //
         //          block
@@ -2943,13 +3031,11 @@ pub(crate) mod test {
 
         // ops 0 to 4
         for i in (0..5).rev() {
-            upstairs
-                .submit_dummy_write(
-                    Block::new_512(i),
-                    Bytes::from(vec![0xff; 512 * 2]),
-                    false,
-                )
-                .await;
+            upstairs.submit_dummy_write(
+                Block::new_512(i),
+                Bytes::from(vec![0xff; 512 * 2]),
+                false,
+            );
         }
 
         let jobs = upstairs.downstairs.get_all_jobs();
@@ -2962,8 +3048,8 @@ pub(crate) mod test {
         assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // op 4
     }
 
-    #[tokio::test]
-    async fn test_deps_read_write_batman() {
+    #[test]
+    fn test_deps_read_write_batman() {
         // Test that the following job dependency graph is made:
         //
         //          block
@@ -2979,31 +3065,25 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0xff; 512 * 2]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512 * 2]),
+            false,
+        );
 
         // op 1
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(4),
-                Bytes::from(vec![0xff; 512 * 2]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(4),
+            Bytes::from(vec![0xff; 512 * 2]),
+            false,
+        );
 
         // op 2
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(1),
-                Bytes::from(vec![0xff; 512 * 4]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(1),
+            Bytes::from(vec![0xff; 512 * 4]),
+            false,
+        );
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
@@ -3013,8 +3093,8 @@ pub(crate) mod test {
         assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id, jobs[1].ds_id],); // op 2
     }
 
-    #[tokio::test]
-    async fn test_deps_multi_extent_write() {
+    #[test]
+    fn test_deps_multi_extent_write() {
         // Test that the following job dependency graph is made:
         //
         //     |      block     |      block      |
@@ -3028,31 +3108,25 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(95),
-                Bytes::from(vec![0xff; 512 * 2]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(95),
+            Bytes::from(vec![0xff; 512 * 2]),
+            false,
+        );
 
         // op 1
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(96),
-                Bytes::from(vec![0xff; 512 * 7]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(96),
+            Bytes::from(vec![0xff; 512 * 7]),
+            false,
+        );
 
         // op 2
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(102),
-                Bytes::from(vec![0xff; 512 * 2]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(102),
+            Bytes::from(vec![0xff; 512 * 2]),
+            false,
+        );
 
         let ds = &upstairs.downstairs;
         let jobs = ds.get_all_jobs();
@@ -3070,8 +3144,8 @@ pub(crate) mod test {
         assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
     }
 
-    #[tokio::test]
-    async fn test_deps_multi_extent_there_and_back_again() {
+    #[test]
+    fn test_deps_multi_extent_there_and_back_again() {
         // Test that the following job dependency graph is made:
         //
         //     |      block     |      block      |
@@ -3087,45 +3161,35 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(95),
-                Bytes::from(vec![0xff; 512 * 2]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(95),
+            Bytes::from(vec![0xff; 512 * 2]),
+            false,
+        );
 
         // op 1
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(96),
-                Bytes::from(vec![0xff; 512 * 7]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(96),
+            Bytes::from(vec![0xff; 512 * 7]),
+            false,
+        );
 
         // op 2
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(101),
-                Bytes::from(vec![0xff; 512]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(101),
+            Bytes::from(vec![0xff; 512]),
+            false,
+        );
 
         // op 3
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(99),
-                Bytes::from(vec![0xff; 512 * 3]),
-                true,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(99),
+            Bytes::from(vec![0xff; 512 * 3]),
+            true,
+        );
 
         // op 4
-        upstairs
-            .submit_dummy_read(Block::new_512(99), Buffer::new(512))
-            .await;
+        upstairs.submit_dummy_read(Block::new_512(99), Buffer::new(1, 512));
 
         let ds = &upstairs.downstairs;
         let jobs = ds.get_all_jobs();
@@ -3148,8 +3212,8 @@ pub(crate) mod test {
         assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // op 4
     }
 
-    #[tokio::test]
-    async fn test_deps_multi_extent_batman() {
+    #[test]
+    fn test_deps_multi_extent_batman() {
         // Test that the following job dependency graph is made:
         //
         //     |      block     |      block      |
@@ -3163,31 +3227,25 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(95),
-                Bytes::from(vec![0xff; 512 * 2]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(95),
+            Bytes::from(vec![0xff; 512 * 2]),
+            false,
+        );
 
         // op 1
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(102),
-                Bytes::from(vec![0xff; 512]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(102),
+            Bytes::from(vec![0xff; 512]),
+            false,
+        );
 
         // op 2
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(96),
-                Bytes::from(vec![0xff; 512 * 7]),
-                true,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(96),
+            Bytes::from(vec![0xff; 512 * 7]),
+            true,
+        );
 
         let ds = &upstairs.downstairs;
         let jobs = ds.get_all_jobs();
@@ -3205,8 +3263,8 @@ pub(crate) mod test {
         assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id, jobs[1].ds_id]); // op 2
     }
 
-    #[tokio::test]
-    async fn test_read_flush_write_hash_mismatch() {
+    #[test]
+    fn test_read_flush_write_hash_mismatch() {
         // Test that the following job dependency graph is made:
         //
         //     |      block     |
@@ -3220,21 +3278,17 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs
-            .submit_dummy_read(Block::new_512(95), Buffer::new(512 * 2))
-            .await;
+        upstairs.submit_dummy_read(Block::new_512(95), Buffer::new(2, 512));
 
         // op 1
-        upstairs.submit_flush(None, None).await;
+        upstairs.submit_flush(None, None);
 
         // op 2
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(96),
-                Bytes::from(vec![0xff; 512 * 2]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(96),
+            Bytes::from(vec![0xff; 512 * 2]),
+            false,
+        );
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
@@ -3249,8 +3303,8 @@ pub(crate) mod test {
         assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
     }
 
-    #[tokio::test]
-    async fn test_deps_depend_on_acked_work() {
+    #[test]
+    fn test_deps_depend_on_acked_work() {
         // Test that jobs will depend on acked work (important for the case of
         // replay - the upstairs will replay all work since the last flush if a
         // downstairs leaves and comes back)
@@ -3260,13 +3314,11 @@ pub(crate) mod test {
 
         // submit a write, complete, then ack it
 
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0xff; 512]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512]),
+            false,
+        );
 
         {
             let ds = &mut upstairs.downstairs;
@@ -3280,13 +3332,11 @@ pub(crate) mod test {
 
         // submit an overlapping write
 
-        upstairs
-            .submit_dummy_write(
-                Block::new_512(0),
-                Bytes::from(vec![0xff; 512]),
-                false,
-            )
-            .await;
+        upstairs.submit_dummy_write(
+            Block::new_512(0),
+            Bytes::from(vec![0xff; 512]),
+            false,
+        );
 
         {
             let ds = &upstairs.downstairs;
@@ -3300,8 +3350,8 @@ pub(crate) mod test {
         }
     }
 
-    #[tokio::test]
-    async fn test_check_for_repair_normal() {
+    #[test]
+    fn test_check_for_repair_normal() {
         // No repair needed here.
         // Verify we can't repair when the upstairs is not active.
         // Verify we wont try to repair if it's not needed.
@@ -3314,7 +3364,7 @@ pub(crate) mod test {
 
         // Before we are active, we have no need to repair or check for future
         // repairs.
-        up.on_repair_check().await;
+        up.on_repair_check();
         assert!(up.repair_check_interval.is_none());
         assert!(!up.downstairs.live_repair_in_progress());
 
@@ -3322,7 +3372,7 @@ pub(crate) mod test {
         set_all_active(&mut up.downstairs);
 
         // No need to repair or check for future repairs here either
-        up.on_repair_check().await;
+        up.on_repair_check();
         assert!(up.repair_check_interval.is_none());
         assert!(!up.downstairs.live_repair_in_progress());
 
@@ -3333,8 +3383,8 @@ pub(crate) mod test {
         assert!(up.downstairs.repair().is_none());
     }
 
-    #[tokio::test]
-    async fn test_check_for_repair_do_repair() {
+    #[test]
+    fn test_check_for_repair_do_repair() {
         // No repair needed here.
         let mut ddef = RegionDefinition::default();
         ddef.set_block_size(512);
@@ -3348,15 +3398,15 @@ pub(crate) mod test {
         // Force client 1 into LiveRepairReady
         up.ds_transition(ClientId::new(1), DsState::Faulted);
         up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
-        up.on_repair_check().await;
+        up.on_repair_check();
         assert!(up.repair_check_interval.is_none());
         assert!(up.downstairs.live_repair_in_progress());
         assert_eq!(up.ds_state(ClientId::new(1)), DsState::LiveRepair);
         assert!(up.downstairs.repair().is_some());
     }
 
-    #[tokio::test]
-    async fn test_check_for_repair_do_two_repair() {
+    #[test]
+    fn test_check_for_repair_do_two_repair() {
         // No repair needed here.
         let mut ddef = RegionDefinition::default();
         ddef.set_block_size(512);
@@ -3372,7 +3422,7 @@ pub(crate) mod test {
             up.ds_transition(i, DsState::Faulted);
             up.ds_transition(i, DsState::LiveRepairReady);
         }
-        up.on_repair_check().await;
+        up.on_repair_check();
         assert!(up.repair_check_interval.is_none());
         assert!(up.downstairs.live_repair_in_progress());
 
@@ -3382,8 +3432,8 @@ pub(crate) mod test {
         assert!(up.downstairs.repair().is_some())
     }
 
-    #[tokio::test]
-    async fn test_check_for_repair_already_repair() {
+    #[test]
+    fn test_check_for_repair_already_repair() {
         // No repair needed here.
         let mut ddef = RegionDefinition::default();
         ddef.set_block_size(512);
@@ -3398,7 +3448,7 @@ pub(crate) mod test {
         up.ds_transition(ClientId::new(1), DsState::LiveRepair);
 
         // Start the live-repair
-        up.on_repair_check().await;
+        up.on_repair_check();
         assert!(up.downstairs.live_repair_in_progress());
         assert!(up.repair_check_interval.is_none());
 
@@ -3408,13 +3458,13 @@ pub(crate) mod test {
         up.ds_transition(ClientId::new(0), DsState::Faulted);
         up.ds_transition(ClientId::new(0), DsState::LiveRepairReady);
 
-        up.on_repair_check().await;
+        up.on_repair_check();
         assert!(up.downstairs.live_repair_in_progress());
         assert!(up.repair_check_interval.is_some());
     }
 
-    #[tokio::test]
-    async fn test_check_for_repair_task_running() {
+    #[test]
+    fn test_check_for_repair_task_running() {
         let mut ddef = RegionDefinition::default();
         ddef.set_block_size(512);
         ddef.set_extent_size(Block::new_512(3));
@@ -3426,12 +3476,12 @@ pub(crate) mod test {
         up.ds_transition(ClientId::new(1), DsState::Faulted);
         up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
 
-        up.on_repair_check().await;
+        up.on_repair_check();
         assert!(up.repair_check_interval.is_none());
         assert!(up.downstairs.live_repair_in_progress());
 
         // Checking again is idempotent
-        up.on_repair_check().await;
+        up.on_repair_check();
         assert!(up.repair_check_interval.is_none());
         assert!(up.downstairs.live_repair_in_progress());
     }
@@ -3562,7 +3612,10 @@ pub(crate) mod test {
             }))
             .await;
         }
-        assert_eq!(deactivate_done_brw.try_wait(), Some(Ok(())));
+
+        let reply = deactivate_done_brw.try_wait().unwrap();
+        assert!(reply.buffer.is_none());
+        reply.result.unwrap();
 
         // Verify we have disconnected and can go back to init.
         assert!(matches!(up.state, UpstairsState::Initializing));
@@ -3579,7 +3632,7 @@ pub(crate) mod test {
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        let data = Buffer::new(512);
+        let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -3615,6 +3668,7 @@ pub(crate) mod test {
             }],
         }]);
 
+        // Because this read is small, it happens right away
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
             client_id: ClientId::new(0),
             action: ClientAction::Response(Message::ReadResponse {
@@ -3625,16 +3679,176 @@ pub(crate) mod test {
             }),
         }))
         .await;
-        // no panic, great work everyone
+
+        // This was a small read and handled in-line
+        assert!(up.deferred_msgs.is_empty());
+        // No panic, great job everyone
     }
 
+    #[tokio::test]
+    async fn good_deferred_decryption() {
+        let mut up = make_encrypted_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        let blocks = 16384 / 512;
+        let data = Buffer::new(blocks, 512);
+        let offset = Block::new_512(7);
+        let (_tx, res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Read { offset, data },
+            res,
+        }))
+        .await;
+
+        let mut data = Vec::from([1u8; 512]);
+
+        let (nonce, tag, hash) = up
+            .cfg
+            .encryption_context
+            .as_ref()
+            .unwrap()
+            .encrypt_in_place(&mut data)
+            .unwrap();
+
+        let nonce: [u8; 12] = nonce.into();
+        let tag: [u8; 16] = tag.into();
+
+        // Build up the long read response, which should be long enough to
+        // trigger the deferred read path.
+        let mut responses = vec![];
+        for i in 0..blocks {
+            responses.push(ReadResponse {
+                eid: 0,
+                offset: Block::new_512(offset.value + i as u64),
+                data: BytesMut::from(&data[..]),
+                block_contexts: vec![BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext { nonce, tag },
+                    ),
+                    hash,
+                }],
+            });
+        }
+        let responses = Ok(responses);
+
+        // This defers decryption to a separate thread, because the read is
+        // large.  We'll check that the job is deferred below.
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id: ClientId::new(0),
+            action: ClientAction::Response(Message::ReadResponse {
+                upstairs_id: up.cfg.upstairs_id,
+                session_id: up.cfg.session_id,
+                job_id: JobId(1000),
+                responses,
+            }),
+        }))
+        .await;
+
+        // This was a large read and was deferred
+        assert!(!up.deferred_msgs.is_empty());
+
+        up.await_deferred_msgs().await;
+        // No panic, great job everyone
+    }
+
+    #[tokio::test]
+    async fn bad_deferred_decryption_means_panic() {
+        let mut up = make_encrypted_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        let blocks = 16384 / 512;
+        let data = Buffer::new(blocks, 512);
+        let offset = Block::new_512(7);
+        let (_tx, res) = BlockReqWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockReq {
+            op: BlockOp::Read { offset, data },
+            res,
+        }))
+        .await;
+
+        // fake read response from downstairs that will fail decryption
+        let mut data = Vec::from([1u8; 512]);
+
+        let (nonce, tag, _) = up
+            .cfg
+            .encryption_context
+            .as_ref()
+            .unwrap()
+            .encrypt_in_place(&mut data)
+            .unwrap();
+
+        let nonce: [u8; 12] = nonce.into();
+        let mut tag: [u8; 16] = tag.into();
+
+        // alter tag
+        if tag[3] == 0xFF {
+            tag[3] = 0x00;
+        } else {
+            tag[3] = 0xFF;
+        }
+
+        // compute integrity hash after alteration above! It should still
+        // validate
+        let hash = integrity_hash(&[&nonce, &tag, &data]);
+
+        // Build up the long read response, which should be long enough to
+        // trigger the deferred read path.
+        let mut responses = vec![];
+        for i in 0..blocks {
+            responses.push(ReadResponse {
+                eid: 0,
+                offset: Block::new_512(offset.value + i as u64),
+                data: BytesMut::from(&data[..]),
+                block_contexts: vec![BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext { nonce, tag },
+                    ),
+                    hash,
+                }],
+            });
+        }
+        let responses = Ok(responses);
+
+        // This defers decryption to a separate thread, because the read is
+        // large.  This won't panic, because decryption failing just populates
+        // the message with an error.
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id: ClientId::new(0),
+            action: ClientAction::Response(Message::ReadResponse {
+                upstairs_id: up.cfg.upstairs_id,
+                session_id: up.cfg.session_id,
+                job_id: JobId(1000),
+                responses,
+            }),
+        }))
+        .await;
+
+        // Prepare to receive the message with an invalid tag
+        let fut = up.await_deferred_msgs();
+
+        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+        assert!(result.is_err());
+        let r = result
+            .as_ref()
+            .unwrap_err()
+            .downcast_ref::<String>()
+            .unwrap();
+        assert!(
+            r.contains("DecryptionError"),
+            "panic for the wrong reason: {r}"
+        );
+    }
+
+    /// Confirm that an offloaded decryption also panics (eventually)
     #[tokio::test]
     async fn bad_decryption_means_panic() {
         let mut up = make_encrypted_upstairs();
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        let data = Buffer::new(512);
+        let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -3713,7 +3927,7 @@ pub(crate) mod test {
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        let data = Buffer::new(512);
+        let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -3781,7 +3995,7 @@ pub(crate) mod test {
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        let data = Buffer::new(512);
+        let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -3834,7 +4048,7 @@ pub(crate) mod test {
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        let data = Buffer::new(512);
+        let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -3912,7 +4126,7 @@ pub(crate) mod test {
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        let data = Buffer::new(512);
+        let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -3992,7 +4206,7 @@ pub(crate) mod test {
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        let data = Buffer::new(512);
+        let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -4069,7 +4283,7 @@ pub(crate) mod test {
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        let data = Buffer::new(512);
+        let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
@@ -4139,7 +4353,7 @@ pub(crate) mod test {
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
 
-        let data = Buffer::new(512);
+        let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {

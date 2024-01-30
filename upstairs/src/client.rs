@@ -3,27 +3,79 @@ use crate::{
     cdt, deadline_secs, integrity_hash, live_repair::ExtentInfo,
     upstairs::UpstairsConfig, upstairs::UpstairsState, ClientIOStateCount,
     ClientId, CrucibleDecoder, CrucibleEncoder, CrucibleError, DownstairsIO,
-    DsState, EncryptionContext, IOState, IOop, JobId, Message, ReadResponse,
-    ReconcileIO, RegionDefinitionStatus, RegionMetadata, WrappedStream,
-    MAX_ACTIVE_COUNT,
+    DsState, EncryptionContext, IOState, IOop, JobId, Message, RawMessage,
+    ReadResponse, ReconcileIO, RegionDefinitionStatus, RegionMetadata,
+    WrappedStream, MAX_ACTIVE_COUNT,
 };
 use crucible_common::x509::TLSContext;
 use crucible_protocol::{ReconciliationId, CRUCIBLE_MESSAGE_VERSION};
 
 use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
 
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::{
+    io::AsyncWriteExt,
     net::{TcpSocket, TcpStream},
     sync::{mpsc, oneshot},
-    time::{sleep_until, Instant},
+    time::sleep_until,
 };
-use tokio_util::codec::{FramedRead, FramedWrite};
+use tokio_util::codec::{Encoder, FramedRead};
 use uuid::Uuid;
 
 const TIMEOUT_SECS: f32 = 50.0;
 const PING_INTERVAL_SECS: f32 = 5.0;
+
+#[derive(Debug)]
+pub(crate) enum ClientRequest {
+    /// Normal message to be sent down the wire
+    Message(Message),
+    /// Pre-serialized message to be sent down the wire
+    RawMessage(RawMessage, bytes::Bytes),
+}
+
+impl ClientRequest {
+    /// Write the given message to an `AsyncWrite` sink
+    async fn write<W>(&self, fw: &mut W) -> Result<(), CrucibleError>
+    where
+        W: tokio::io::AsyncWrite
+            + std::marker::Unpin
+            + std::marker::Send
+            + 'static,
+    {
+        match self {
+            ClientRequest::Message(m) => {
+                let mut out = bytes::BytesMut::new();
+                let mut e = CrucibleEncoder::new();
+                e.encode(m, &mut out)?;
+                fw.write_all(&out).await?;
+            }
+            ClientRequest::RawMessage(m, data) => {
+                // Manual implementation of CrucibleEncoder, for situations
+                // where the bulk of the message has already been
+                // pre-serialized.
+                let mut header = bincode::serialize(&(
+                    0u32, // dummy length, to be patched later
+                    &m,
+                ))
+                .unwrap();
+
+                // Patch the length
+                let len: u32 = (header.len() + data.len()).try_into().unwrap();
+                header[0..4].copy_from_slice(&len.to_le_bytes());
+
+                // Patch the discriminant
+                bincode::serialize_into(&mut header[4..8], &m.discriminant())
+                    .unwrap();
+
+                // write_all_vectored would save a syscall, but is nightly-only
+                fw.write_all(&header).await?;
+                fw.write_all(data).await?;
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Handle to a running I/O task
 ///
@@ -36,7 +88,7 @@ struct ClientTaskHandle {
     ///
     /// The only thing that we send to the client is [`Message`], which is then
     /// sent out over the network.
-    client_request_tx: mpsc::Sender<Message>,
+    client_request_tx: mpsc::Sender<ClientRequest>,
 
     /// Handle to receive data from the I/O task
     ///
@@ -135,15 +187,6 @@ pub(crate) struct DownstairsClient {
      */
     pub(crate) repair_info: Option<ExtentInfo>,
 
-    /// Deadline for the next ping
-    ping_interval: Instant,
-
-    /// Deadline until we mark the client as dead
-    timeout_deadline: Instant,
-
-    /// Ping every 10 seconds if things are idle
-    ping_count: u64,
-
     /// Accumulated statistics
     pub(crate) stats: DownstairsStats,
 
@@ -175,11 +218,8 @@ impl DownstairsClient {
             client_id,
             region_uuid: None,
             negotiation_state: NegotiationState::Start,
-            ping_count: 0,
-            ping_interval: deadline_secs(PING_INTERVAL_SECS),
             tls_context,
             promote_state: None,
-            timeout_deadline: deadline_secs(TIMEOUT_SECS),
             log,
             target_addr,
             repair_addr: None,
@@ -214,11 +254,8 @@ impl DownstairsClient {
             client_id: ClientId::new(0),
             region_uuid: None,
             negotiation_state: NegotiationState::Start,
-            ping_count: 0,
-            ping_interval: deadline_secs(PING_INTERVAL_SECS),
             tls_context: None,
             promote_state: None,
-            timeout_deadline: deadline_secs(TIMEOUT_SECS),
             log: crucible_common::build_logger(),
             target_addr: None,
             repair_addr: None,
@@ -256,18 +293,12 @@ impl DownstairsClient {
                     None => ClientAction::ChannelClosed,
                 }
             }
-            _ = sleep_until(self.ping_interval) => {
-                ClientAction::Ping
-            }
-            _ = sleep_until(self.timeout_deadline) => {
-                ClientAction::Timeout
-            }
         }
     }
 
     /// Send a `Message::HereIAm` via the client IO task
     pub(crate) async fn send_here_i_am(&mut self) {
-        self.send(Message::HereIAm {
+        self.send_message(Message::HereIAm {
             version: CRUCIBLE_MESSAGE_VERSION,
             upstairs_id: self.cfg.upstairs_id,
             session_id: self.cfg.session_id,
@@ -279,20 +310,7 @@ impl DownstairsClient {
         .await;
     }
 
-    /// If the client task is running, send a `Message::Ruok`
-    ///
-    /// If the client task is **not** running, log a warning to that effect.
-    pub(crate) async fn send_ping(&mut self) {
-        self.ping_interval = deadline_secs(PING_INTERVAL_SECS);
-        // It's possible for the client task to have stopped after we requested
-        // the ping.  If that's the case, then we'll catch it on the next
-        // go-around, and should just log an error here.
-        self.send(Message::Ruok).await;
-        self.ping_count += 1;
-        cdt::ds__ping__sent!(|| (self.ping_count, self.client_id.get()));
-    }
-
-    pub(crate) fn halt_io_task(&mut self, r: ClientStopReason) {
+    fn halt_io_task(&mut self, r: ClientStopReason) {
         if let Some(t) = self.client_task.client_stop_tx.take() {
             if let Err(_e) = t.send(r) {
                 warn!(self.log, "failed to send stop request")
@@ -332,7 +350,11 @@ impl DownstairsClient {
         self.new_jobs.insert(work);
     }
 
-    pub(crate) async fn send(&mut self, m: Message) {
+    pub(crate) async fn send_message(&mut self, m: Message) {
+        self.send(ClientRequest::Message(m)).await
+    }
+
+    pub(crate) async fn send(&mut self, m: ClientRequest) {
         // Normally, the client task continues running until
         // `self.client_task.client_request_tx` is dropped; as such, we should
         // always be able to send it a message.
@@ -378,7 +400,6 @@ impl DownstairsClient {
                 | IOop::WriteUnwritten { dependencies, .. }
                 | IOop::Flush { dependencies, .. }
                 | IOop::Read { dependencies, .. }
-                | IOop::ExtentClose { dependencies, .. }
                 | IOop::ExtentFlushClose { dependencies, .. }
                 | IOop::ExtentLiveRepair { dependencies, .. }
                 | IOop::ExtentLiveReopen { dependencies, .. }
@@ -430,14 +451,14 @@ impl DownstairsClient {
             && !self.skipped_jobs.is_empty()
     }
 
-    /// Sets our state to `DsState::Repair`
+    /// Sets our state to `DsState::Reconcile`
     ///
     /// # Panics
     /// If the previous state is not `DsState::WaitQuorum`
     pub(crate) fn begin_reconcile(&mut self) {
-        info!(self.log, "Transition from {} to Repair", self.state);
+        info!(self.log, "Transition from {} to Reconcile", self.state);
         assert_eq!(self.state, DsState::WaitQuorum);
-        self.state = DsState::Repair;
+        self.state = DsState::Reconcile;
     }
 
     /// Go through the list of dependencies and remove any jobs that this
@@ -494,8 +515,8 @@ impl DownstairsClient {
 
             DsState::New
             | DsState::Deactivated
-            | DsState::Repair
-            | DsState::FailedRepair
+            | DsState::Reconcile
+            | DsState::FailedReconcile
             | DsState::Disconnected
             | DsState::BadVersion
             | DsState::WaitQuorum
@@ -601,7 +622,6 @@ impl DownstairsClient {
             self.tls_context.clone(),
             &self.log,
         );
-        self.reset_timeout();
     }
 
     fn new_io_task(
@@ -762,7 +782,7 @@ impl DownstairsClient {
                 // If the client task has stopped, then print a warning but
                 // otherwise continue (because we'll be cleaned up by the
                 // JoinHandle watcher).
-                self.send(Message::PromoteToActive {
+                self.send_message(Message::PromoteToActive {
                     upstairs_id: self.cfg.upstairs_id,
                     session_id: self.cfg.session_id,
                     gen: self.cfg.generation(),
@@ -789,11 +809,14 @@ impl DownstairsClient {
         self.state
     }
 
-    /// Sets the current state to `DsState::FailedRepair`
-    pub(crate) fn set_failed_repair(&mut self, up_state: &UpstairsState) {
-        info!(self.log, "Transition from {} to FailedRepair", self.state);
-        self.checked_state_transition(up_state, DsState::FailedRepair);
-        self.restart_connection(up_state, ClientStopReason::FailedRepair)
+    /// Sets the current state to `DsState::FailedReconcile`
+    pub(crate) fn set_failed_reconcile(&mut self, up_state: &UpstairsState) {
+        info!(
+            self.log,
+            "Transition from {} to FailedReconcile", self.state
+        );
+        self.checked_state_transition(up_state, DsState::FailedReconcile);
+        self.restart_connection(up_state, ClientStopReason::FailedReconcile)
     }
 
     pub(crate) fn restart_connection(
@@ -808,8 +831,8 @@ impl DownstairsClient {
             DsState::Migrating => DsState::Faulted,
             DsState::Faulted => DsState::Faulted,
             DsState::Deactivated => DsState::New,
-            DsState::Repair => DsState::New,
-            DsState::FailedRepair => DsState::New,
+            DsState::Reconcile => DsState::New,
+            DsState::FailedReconcile => DsState::New,
             DsState::LiveRepair => DsState::Faulted,
             DsState::LiveRepairReady => DsState::Faulted,
             DsState::Replacing => DsState::Replaced,
@@ -978,14 +1001,14 @@ impl DownstairsClient {
             DsState::WaitQuorum => {
                 assert_eq!(old_state, DsState::WaitActive);
             }
-            DsState::FailedRepair => {
-                assert_eq!(old_state, DsState::Repair);
+            DsState::FailedReconcile => {
+                assert_eq!(old_state, DsState::Reconcile);
             }
             DsState::Faulted => {
                 match old_state {
                     DsState::Active
                     | DsState::Faulted
-                    | DsState::Repair
+                    | DsState::Reconcile
                     | DsState::LiveRepair
                     | DsState::LiveRepairReady
                     | DsState::Offline
@@ -995,7 +1018,7 @@ impl DownstairsClient {
                     }
                 }
             }
-            DsState::Repair => {
+            DsState::Reconcile => {
                 assert!(!matches!(up_state, UpstairsState::Active));
                 assert_eq!(old_state, DsState::WaitQuorum);
             }
@@ -1007,7 +1030,7 @@ impl DownstairsClient {
                 match old_state {
                     DsState::WaitQuorum
                     | DsState::Replay
-                    | DsState::Repair
+                    | DsState::Reconcile
                     | DsState::LiveRepair => {} // Okay
 
                     DsState::LiveRepairReady if self.cfg.read_only => {} // Okay
@@ -1017,9 +1040,9 @@ impl DownstairsClient {
                     }
                 }
                 /*
-                 * Make sure repair happened when the upstairs is inactive.
+                 * Make sure reconcile happened when the upstairs is inactive.
                  */
-                if old_state == DsState::Repair {
+                if old_state == DsState::Reconcile {
                     assert!(!matches!(up_state, UpstairsState::Active));
                 }
             }
@@ -1034,7 +1057,7 @@ impl DownstairsClient {
                     | DsState::Replay
                     | DsState::LiveRepair
                     | DsState::LiveRepairReady
-                    | DsState::Repair => {} // Okay
+                    | DsState::Reconcile => {} // Okay
                     _ => {
                         panic_invalid();
                     }
@@ -1058,7 +1081,7 @@ impl DownstairsClient {
                     DsState::Active
                     | DsState::Deactivated
                     | DsState::Faulted
-                    | DsState::FailedRepair => {} // Okay
+                    | DsState::FailedReconcile => {} // Okay
                     _ => {
                         panic_invalid();
                     }
@@ -1159,18 +1182,18 @@ impl DownstairsClient {
         self.stats.live_repair_completed += 1;
     }
 
-    /// Resets our timeout deadline
-    pub(crate) fn reset_timeout(&mut self) {
-        self.timeout_deadline = deadline_secs(TIMEOUT_SECS);
-    }
-
     /// Handles a single IO operation
     ///
     /// Returns `true` if the job is now ackable, `false` otherwise
+    ///
+    /// If this is a read response, then the values in `responses` must
+    /// _already_ be decrypted (with corresponding hashes stored in
+    /// `read_response_hashes`).
     pub(crate) fn process_io_completion(
         &mut self,
         job: &mut DownstairsIO,
-        mut responses: Result<Vec<ReadResponse>, CrucibleError>,
+        responses: Result<Vec<ReadResponse>, CrucibleError>,
+        read_response_hashes: Vec<Option<u64>>,
         deactivate: bool,
         extent_info: Option<ExtentInfo>,
     ) -> bool {
@@ -1186,26 +1209,9 @@ impl DownstairsClient {
         let mut jobs_completed_ok = job.state_count().completed_ok();
         let mut ackable = false;
 
-        // Validate integrity hashes and optionally authenticated decryption.
-        //
-        // With AE, responses can come back that are invalid given an encryption
-        // context. Test this here. If it fails, then something has gone
-        // irrecoverably wrong and we should panic.
-        let mut read_response_hashes = Vec::new();
-        let new_state = match &mut responses {
-            Ok(responses) => {
-                responses.iter_mut().for_each(|x| {
-                    let mh =
-                        if let Some(context) = &self.cfg.encryption_context {
-                            validate_encrypted_read_response(
-                                x, context, &self.log,
-                            )
-                        } else {
-                            validate_unencrypted_read_response(x, &self.log)
-                        }
-                        .expect("decryption failed");
-                    read_response_hashes.push(mh);
-                });
+        let new_state = match &responses {
+            Ok(..) => {
+                // Messages have already been decrypted out-of-band
                 jobs_completed_ok += 1;
                 IOState::Done
             }
@@ -1246,8 +1252,8 @@ impl DownstairsClient {
                 }
                 _ => {
                     match job.work {
-                        // Mark this downstairs as bad if this was a write or flush
-                        // XXX: reconcilation, retries?
+                        // Mark this downstairs as bad if this was a write,
+                        // a write unwritten, or a flush
                         // XXX: Errors should be reported to nexus
                         IOop::Write { .. }
                         | IOop::WriteUnwritten { .. }
@@ -1256,17 +1262,10 @@ impl DownstairsClient {
                         }
 
                         // If a repair job errors, mark that downstairs as bad
-                        IOop::ExtentClose { .. }
-                        | IOop::ExtentFlushClose { .. }
+                        IOop::ExtentFlushClose { .. }
                         | IOop::ExtentLiveRepair { .. }
                         | IOop::ExtentLiveReopen { .. }
                         | IOop::ExtentLiveNoOp { .. } => {
-                            // TODO: Figure out a plan on how to handle
-                            // errors during repair.  We must invalidate
-                            // any jobs dependent on the repair success as
-                            // well as throw out the whole repair and start
-                            // over as we can no longer trust results from
-                            // the downstairs under repair.
                             self.stats.downstairs_errors += 1;
                         }
 
@@ -1366,8 +1365,7 @@ impl DownstairsClient {
                  * are done.
                  */
                 IOop::Write { .. } | IOop::WriteUnwritten { .. } => {}
-                IOop::ExtentClose { .. }
-                | IOop::ExtentFlushClose { .. }
+                IOop::ExtentFlushClose { .. }
                 | IOop::ExtentLiveRepair { .. }
                 | IOop::ExtentLiveReopen { .. }
                 | IOop::ExtentLiveNoOp { .. } => {
@@ -1472,12 +1470,6 @@ impl DownstairsClient {
                     }
                     self.last_flush = ds_id;
                 }
-                IOop::ExtentClose { extent, .. } => {
-                    panic!(
-                        "[{}] job: {:?} Received illegal IOop::ExtentClose {}",
-                        self.client_id, job, extent,
-                    );
-                }
                 IOop::ExtentFlushClose { .. } => {
                     assert!(read_data.is_empty());
 
@@ -1528,7 +1520,7 @@ impl DownstairsClient {
         self.halt_io_task(ClientStopReason::Disabled);
     }
 
-    /// Skips from `LiveRepairRead` to `Active`; a no-op otherwise
+    /// Skips from `LiveRepairReady` to `Active`; a no-op otherwise
     ///
     /// # Panics
     /// If this downstairs is not read-only
@@ -1686,7 +1678,7 @@ impl DownstairsClient {
                 self.repair_addr = Some(repair_addr);
                 match self.promote_state {
                     Some(PromoteState::Waiting) => {
-                        self.send(Message::PromoteToActive {
+                        self.send_message(Message::PromoteToActive {
                             upstairs_id: self.cfg.upstairs_id,
                             session_id: self.cfg.session_id,
                             gen: self.cfg.generation(),
@@ -1825,7 +1817,7 @@ impl DownstairsClient {
                 }
 
                 self.negotiation_state = NegotiationState::WaitForRegionInfo;
-                self.send(Message::RegionInfoPlease).await;
+                self.send_message(Message::RegionInfoPlease).await;
             }
             Message::RegionInfo { region_def } => {
                 if self.negotiation_state != NegotiationState::WaitForRegionInfo
@@ -1857,7 +1849,7 @@ impl DownstairsClient {
 
                 /*
                  * TODO: Verify that a new downstairs does not share the same
-                 * UUID with an existing downstiars.
+                 * UUID with an existing downstairs.
                  *
                  * TODO(#551) Verify that `region_def` makes sense (valid,
                  * nonzero block size, etc.)
@@ -1956,7 +1948,7 @@ impl DownstairsClient {
                         );
                         self.negotiation_state = NegotiationState::GetLastFlush;
 
-                        self.send(Message::LastFlush {
+                        self.send_message(Message::LastFlush {
                             last_flush_number: lf,
                         })
                         .await;
@@ -1969,7 +1961,7 @@ impl DownstairsClient {
                          */
                         self.negotiation_state =
                             NegotiationState::GetExtentVersions;
-                        self.send(Message::ExtentVersionsPlease).await;
+                        self.send_message(Message::ExtentVersionsPlease).await;
                     }
                     DsState::Replacing => {
                         warn!(
@@ -2107,9 +2099,9 @@ impl DownstairsClient {
         &mut self,
         job: &mut ReconcileIO,
     ) {
-        // If someone has moved us out of repair, this is a logic error
-        if self.state != DsState::Repair {
-            panic!("should still be in repair");
+        // If someone has moved us out of reconcile, this is a logic error
+        if self.state != DsState::Reconcile {
+            panic!("should still be in reconcile");
         }
         let prev_state = job.state.insert(self.client_id, IOState::InProgress);
         assert_eq!(prev_state, IOState::New);
@@ -2125,11 +2117,11 @@ impl DownstairsClient {
             } => {
                 assert!(!dest_clients.is_empty());
                 if dest_clients.iter().any(|d| *d == self.client_id) {
-                    info!(self.log, "sending repair request {repair_id:?}");
-                    self.send(job.op.clone()).await;
+                    info!(self.log, "sending reconcile request {repair_id:?}");
+                    self.send_message(job.op.clone()).await;
                 } else {
                     // Skip this job for this Downstairs, since only the target
-                    // clients need to do the repair.
+                    // clients need to do the reconcile.
                     let prev_state =
                         job.state.insert(self.client_id, IOState::Skipped);
                     assert_eq!(prev_state, IOState::InProgress);
@@ -2143,7 +2135,7 @@ impl DownstairsClient {
             } => {
                 if *client_id == self.client_id {
                     info!(self.log, "sending flush request {repair_id:?}");
-                    self.send(job.op.clone()).await;
+                    self.send_message(job.op.clone()).await;
                 } else {
                     info!(self.log, "skipping flush request {repair_id:?}");
                     // Skip this job for this Downstairs, since it's narrowly
@@ -2154,8 +2146,8 @@ impl DownstairsClient {
                 }
             }
             Message::ExtentReopen { .. } | Message::ExtentClose { .. } => {
-                // All other repair ops are sent as-is
-                self.send(job.op.clone()).await;
+                // All other reconcile ops are sent as-is
+                self.send_message(job.op.clone()).await;
             }
             m => panic!("invalid reconciliation request {m:?}"),
         }
@@ -2166,12 +2158,12 @@ impl DownstairsClient {
     /// Returns `true` if the job is done for all clients
     pub(crate) fn on_reconciliation_job_done(
         &mut self,
-        repair_id: ReconciliationId,
+        reconcile_id: ReconciliationId,
         job: &mut ReconcileIO,
     ) -> bool {
         let old_state = job.state.insert(self.client_id, IOState::Done);
         assert_eq!(old_state, IOState::InProgress);
-        assert_eq!(job.id, repair_id);
+        assert_eq!(job.id, reconcile_id);
         job.state
             .iter()
             .all(|s| matches!(s, IOState::Done | IOState::Skipped))
@@ -2217,12 +2209,6 @@ pub(crate) enum ClientAction {
 
     /// The client task has stopped
     TaskStopped(ClientRunResult),
-
-    /// It's time to ping the client
-    Ping,
-
-    /// The client has hit a (Crucible) timeout
-    Timeout,
 
     /// The client IO channel has returned `None`
     ///
@@ -2271,9 +2257,6 @@ pub(crate) struct DownstairsStats {
 /// When the upstairs halts the IO client task, it must provide a reason
 #[derive(Debug)]
 pub(crate) enum ClientStopReason {
-    /// Crucible-level timeout (i.e. no packets received in too long)
-    Timeout,
-
     /// We are about to replace the client task
     Replacing,
 
@@ -2282,8 +2265,8 @@ pub(crate) enum ClientStopReason {
     /// (for example, we have received `Message::YouAreNoLongerActive`)
     Disabled,
 
-    /// Repair failed and we're restarting
-    FailedRepair,
+    /// Reconcile failed and we're restarting
+    FailedReconcile,
 
     /// Received an error from some IO
     IOError,
@@ -2332,6 +2315,8 @@ pub(crate) enum ClientRunResult {
     ConnectionTimeout,
     /// We failed to make the initial connection
     ConnectionFailed(std::io::Error),
+    /// We experienced a timeout after connecting
+    Timeout,
     /// A socket write failed
     WriteFailed(anyhow::Error),
     /// We received an error while reading from the connection
@@ -2352,7 +2337,7 @@ async fn client_run(
     client_id: ClientId,
     tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     target: SocketAddr,
-    mut rx: mpsc::Receiver<Message>,
+    mut rx: mpsc::Receiver<ClientRequest>,
     mut start: oneshot::Receiver<()>,
     mut stop: oneshot::Receiver<ClientStopReason>,
     tx: mpsc::Sender<ClientResponse>,
@@ -2373,7 +2358,12 @@ async fn client_run(
     .await;
 
     warn!(log, "client task is sending Done({r:?})");
-    tx.send(ClientResponse::Done(r)).await.unwrap();
+    if tx.send(ClientResponse::Done(r)).await.is_err() {
+        warn!(
+            log,
+            "client task could not reply to main task; shutting down?"
+        );
+    }
     while let Some(v) = rx.recv().await {
         warn!(log, "exiting client task is ignoring message {v:?}");
     }
@@ -2385,7 +2375,7 @@ async fn client_run_inner(
     client_id: ClientId,
     tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     target: SocketAddr,
-    rx: &mut mpsc::Receiver<Message>,
+    rx: &mut mpsc::Receiver<ClientRequest>,
     mut start: &mut oneshot::Receiver<()>,
     mut stop: &mut oneshot::Receiver<ClientStopReason>,
     tx: &mpsc::Sender<ClientResponse>,
@@ -2476,12 +2466,13 @@ async fn client_run_inner(
             WrappedStream::Http(tcp)
         }
     };
-    proc_stream(tcp, rx, stop, tx, log).await
+    proc_stream(client_id, tcp, rx, stop, tx, log).await
 }
 
 async fn proc_stream(
+    client_id: ClientId,
     stream: WrappedStream,
-    rx: &mut mpsc::Receiver<Message>,
+    rx: &mut mpsc::Receiver<ClientRequest>,
     stop: &mut oneshot::Receiver<ClientStopReason>,
     tx: &mpsc::Sender<ClientResponse>,
     log: &Logger,
@@ -2491,27 +2482,71 @@ async fn proc_stream(
             let (read, write) = sock.into_split();
 
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
-            cmd_loop(rx, stop, tx, fr, fw, log).await
+            cmd_loop(client_id, rx, stop, tx, fr, write, log).await
         }
         WrappedStream::Https(stream) => {
             let (read, write) = tokio::io::split(stream);
 
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
-            cmd_loop(rx, stop, tx, fr, fw, log).await
+            cmd_loop(client_id, rx, stop, tx, fr, write, log).await
+        }
+    }
+}
+
+async fn rx_loop<R>(
+    tx: mpsc::Sender<ClientResponse>,
+    mut fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
+    log: Logger,
+) -> ClientRunResult
+where
+    R: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send + 'static,
+{
+    let mut timeout = deadline_secs(TIMEOUT_SECS);
+    loop {
+        tokio::select! {
+            f = fr.next() => {
+                match f {
+                    Some(Ok(m)) => {
+                        // reset the timeout, since we've received a message
+                        timeout = deadline_secs(TIMEOUT_SECS);
+                        if let Err(e) =
+                            tx.send(ClientResponse::Message(m)).await
+                        {
+                            warn!(
+                                log,
+                                "client response queue closed unexpectedly: \
+                                 {e}; is the program exiting?"
+                            );
+                            break ClientRunResult::QueueClosed;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        warn!(log, "downstairs client error {e}");
+                        break ClientRunResult::ReadFailed(e);
+                    }
+                    None => {
+                        warn!(log, "downstairs disconnected");
+                        break ClientRunResult::Finished;
+                    }
+                }
+            }
+            _ = sleep_until(timeout) => {
+                warn!(log, "downstairs timed out");
+                break ClientRunResult::Timeout;
+            }
         }
     }
 }
 
 async fn cmd_loop<R, W>(
-    rx: &mut mpsc::Receiver<Message>,
+    client_id: ClientId,
+    rx: &mut mpsc::Receiver<ClientRequest>,
     stop: &mut oneshot::Receiver<ClientStopReason>,
     tx: &mpsc::Sender<ClientResponse>,
-    mut fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
-    mut fw: FramedWrite<W, crucible_protocol::CrucibleEncoder>,
+    fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
+    mut fw: W,
     log: &Logger,
 ) -> ClientRunResult
 where
@@ -2522,37 +2557,12 @@ where
         .await
         .expect("client_response_tx closed unexpectedly");
 
-    let mut recv_task = {
-        let tx = tx.clone();
-        let log = log.clone();
+    // Spawn a separate task to receive data over the network, so that we can
+    // always make progress and keep the socket buffer from filling up.
+    let mut recv_task = tokio::spawn(rx_loop(tx.clone(), fr, log.clone()));
 
-        tokio::spawn(async move {
-            while let Some(f) = fr.next().await {
-                match f {
-                    Ok(m) => {
-                        if let Err(e) =
-                            tx.send(ClientResponse::Message(m)).await
-                        {
-                            warn!(
-                                log,
-                                "client response queue closed unexpectedly: \
-                                 {e}; is the program exiting?"
-                            );
-                            return ClientRunResult::QueueClosed;
-                        }
-                    }
-                    Err(e) => {
-                        warn!(log, "downstairs client error {e}");
-                        return ClientRunResult::ReadFailed(e);
-                    }
-                }
-            }
-            // Downstairs disconnected
-            warn!(log, "downstairs disconnected");
-            ClientRunResult::Finished
-        })
-    };
-
+    let mut ping_interval = deadline_secs(PING_INTERVAL_SECS);
+    let mut ping_count = 0u64;
     loop {
         tokio::select! {
             join_result = &mut recv_task => {
@@ -2569,8 +2579,19 @@ where
                     break ClientRunResult::QueueClosed;
                 };
 
-                if let Err(e) = fw.send(m).await {
-                    break ClientRunResult::WriteFailed(e);
+                if let Err(e) = m.write(&mut fw).await {
+                    break ClientRunResult::WriteFailed(e.into());
+                }
+            }
+
+            _ = sleep_until(ping_interval) => {
+                ping_interval = deadline_secs(PING_INTERVAL_SECS);
+                ping_count += 1;
+                cdt::ds__ping__sent!(|| (ping_count, client_id.get()));
+
+                let m = ClientRequest::Message(Message::Ruok);
+                if let Err(e) = m.write(&mut fw).await {
+                    break ClientRunResult::WriteFailed(e.into());
                 }
             }
 
@@ -2623,8 +2644,12 @@ pub(crate) fn validate_encrypted_read_response(
         // expect to see this case unless this is a blank block.
         //
         // XXX if it's not a blank block, we may be under attack?
-        assert!(response.data[..].iter().all(|&x| x == 0));
-        return Ok(None);
+        if response.data[..].iter().all(|&x| x == 0) {
+            return Ok(None);
+        } else {
+            error!(log, "got empty block context with non-blank block");
+            return Err(CrucibleError::MissingBlockContext);
+        }
     }
 
     let mut valid_hash = None;
@@ -2789,15 +2814,24 @@ pub(crate) fn validate_unencrypted_read_response(
         // this case unless this is a blank block.
         //
         // XXX if it's not a blank block, we may be under attack?
-        assert!(response.data[..].iter().all(|&x| x == 0));
-
-        Ok(None)
+        if response.data[..].iter().all(|&x| x == 0) {
+            Ok(None)
+        } else {
+            error!(log, "got empty block context with non-blank block");
+            Err(CrucibleError::MissingBlockContext)
+        }
     }
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::{
+        Block, EncryptionContext, ImpactedAddr, ImpactedBlocks,
+        RegionDefinition,
+    };
+    use rand::prelude::*;
+    use tokio_util::codec::Decoder;
 
     #[test]
     fn downstairs_transition_normal() {
@@ -3187,5 +3221,205 @@ mod test {
             &UpstairsState::Initializing,
             DsState::Faulted,
         );
+    }
+
+    /// Confirms that `RawMessage` serialization works for a `Write`
+    #[tokio::test]
+    async fn test_raw_write_serialization() -> anyhow::Result<()> {
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(25));
+        ddef.set_extent_count(4);
+
+        let mut data = vec![0u8; 512 * 10];
+        rand::thread_rng().fill(&mut data[..]);
+
+        let impacted_blocks = ImpactedBlocks::InclusiveRange(
+            ImpactedAddr {
+                extent_id: 1,
+                block: 7,
+            },
+            ImpactedAddr {
+                extent_id: 1,
+                block: 16,
+            },
+        );
+
+        let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
+        let context = EncryptionContext::new(key_bytes.to_vec(), 512);
+        let cfg = Arc::new(UpstairsConfig {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            generation: std::sync::atomic::AtomicU64::new(10),
+            read_only: false,
+            encryption_context: Some(context),
+            lossy: false,
+        });
+
+        let dr = crate::deferred::DeferredWrite {
+            ddef,
+            impacted_blocks,
+            data: data.clone().into(),
+            res: None,
+            is_write_unwritten: false,
+            cfg: cfg.clone(),
+        };
+        let write_data = dr.run().unwrap();
+
+        let msg = ClientRequest::RawMessage(
+            RawMessage::Write {
+                upstairs_id: cfg.upstairs_id,
+                session_id: cfg.session_id,
+                job_id: JobId(1234),
+                dependencies: vec![JobId(100), JobId(300), JobId(6000)],
+            },
+            write_data.data.data,
+        );
+
+        // Write the raw message to an in-memory buffer
+        let mut cursor = std::io::Cursor::new(vec![]);
+        msg.write(&mut cursor).await.unwrap();
+
+        let mut out = bytes::BytesMut::new();
+        out.extend(cursor.into_inner());
+
+        let mut decoder = CrucibleDecoder::new();
+        let out = decoder.decode(&mut out).unwrap().unwrap();
+
+        let Message::Write {
+            upstairs_id,
+            session_id,
+            job_id,
+            dependencies,
+            writes,
+        } = out
+        else {
+            panic!("bad serialization");
+        };
+        assert_eq!(upstairs_id, cfg.upstairs_id);
+        assert_eq!(session_id, cfg.session_id);
+        assert_eq!(job_id, JobId(1234));
+        assert_eq!(dependencies, vec![JobId(100), JobId(300), JobId(6000)]);
+
+        // Check that all of the writes worked
+        assert_eq!(writes.len(), 10);
+        for (i, w) in writes.iter().enumerate() {
+            assert_eq!(w.eid, 1);
+            assert_eq!(w.offset, Block::new_512(7 + i as u64));
+            let mut out = bytes::BytesMut::from(&*w.data);
+
+            let ctx = w.block_context.encryption_context.unwrap();
+            cfg.encryption_context
+                .as_ref()
+                .unwrap()
+                .decrypt_in_place(&mut out, &ctx.nonce.into(), &ctx.tag.into())
+                .unwrap();
+            assert_eq!(out, &data[i * 512..(i + 1) * 512]);
+
+            let hash = integrity_hash(&[&ctx.nonce, &ctx.tag, &w.data]);
+            assert_eq!(w.block_context.hash, hash);
+        }
+
+        Ok(())
+    }
+
+    /// Confirms that `RawMessage` serialization works for a `WriteUnwritten`
+    #[tokio::test]
+    async fn test_raw_write_unwritten_serialization() -> anyhow::Result<()> {
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(Block::new_512(25));
+        ddef.set_extent_count(4);
+
+        let mut data = vec![0u8; 512 * 10];
+        rand::thread_rng().fill(&mut data[..]);
+
+        let impacted_blocks = ImpactedBlocks::InclusiveRange(
+            ImpactedAddr {
+                extent_id: 1,
+                block: 7,
+            },
+            ImpactedAddr {
+                extent_id: 1,
+                block: 16,
+            },
+        );
+
+        let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
+        let context = EncryptionContext::new(key_bytes.to_vec(), 512);
+        let cfg = Arc::new(UpstairsConfig {
+            upstairs_id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            generation: std::sync::atomic::AtomicU64::new(10),
+            read_only: false,
+            encryption_context: Some(context),
+            lossy: false,
+        });
+
+        let dr = crate::deferred::DeferredWrite {
+            ddef,
+            impacted_blocks,
+            data: data.clone().into(),
+            res: None,
+            is_write_unwritten: true,
+            cfg: cfg.clone(),
+        };
+        let write_data = dr.run().unwrap();
+
+        let msg = ClientRequest::RawMessage(
+            RawMessage::WriteUnwritten {
+                upstairs_id: cfg.upstairs_id,
+                session_id: cfg.session_id,
+                job_id: JobId(1234),
+                dependencies: vec![JobId(100), JobId(300), JobId(6000)],
+            },
+            write_data.data.data,
+        );
+
+        // Write the raw message to an in-memory buffer
+        let mut cursor = std::io::Cursor::new(vec![]);
+        msg.write(&mut cursor).await.unwrap();
+
+        let mut out = bytes::BytesMut::new();
+        out.extend(cursor.into_inner());
+
+        let mut decoder = CrucibleDecoder::new();
+        let out = decoder.decode(&mut out).unwrap().unwrap();
+
+        let Message::WriteUnwritten {
+            upstairs_id,
+            session_id,
+            job_id,
+            dependencies,
+            writes,
+        } = out
+        else {
+            panic!("bad serialization");
+        };
+        assert_eq!(upstairs_id, cfg.upstairs_id);
+        assert_eq!(session_id, cfg.session_id);
+        assert_eq!(job_id, JobId(1234));
+        assert_eq!(dependencies, vec![JobId(100), JobId(300), JobId(6000)]);
+
+        // Check that all of the writes worked
+        assert_eq!(writes.len(), 10);
+        for (i, w) in writes.iter().enumerate() {
+            assert_eq!(w.eid, 1);
+            assert_eq!(w.offset, Block::new_512(7 + i as u64));
+            let mut out = bytes::BytesMut::from(&*w.data);
+
+            let ctx = w.block_context.encryption_context.unwrap();
+            cfg.encryption_context
+                .as_ref()
+                .unwrap()
+                .decrypt_in_place(&mut out, &ctx.nonce.into(), &ctx.tag.into())
+                .unwrap();
+            assert_eq!(out, &data[i * 512..(i + 1) * 512]);
+
+            let hash = integrity_hash(&[&ctx.nonce, &ctx.tag, &w.data]);
+            assert_eq!(w.block_context.hash, hash);
+        }
+
+        Ok(())
     }
 }

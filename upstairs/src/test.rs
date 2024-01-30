@@ -18,14 +18,8 @@ pub(crate) fn make_upstairs() -> crate::upstairs::Upstairs {
         key: None,
         ..Default::default()
     };
-
-    crate::upstairs::Upstairs::new(
-        &opts,
-        0,
-        Some(def),
-        Arc::new(Guest::new(None)),
-        None,
-    )
+    let (_guest, io) = Guest::new(None);
+    crate::upstairs::Upstairs::new(&opts, 0, Some(def), io, None)
 }
 
 pub(crate) fn make_encrypted_upstairs() -> crate::upstairs::Upstairs {
@@ -41,13 +35,8 @@ pub(crate) fn make_encrypted_upstairs() -> crate::upstairs::Upstairs {
         ..Default::default()
     };
 
-    crate::upstairs::Upstairs::new(
-        &opts,
-        0,
-        Some(def),
-        Arc::new(Guest::new(None)),
-        None,
-    )
+    let (_guest, io) = Guest::new(None);
+    crate::upstairs::Upstairs::new(&opts, 0, Some(def), io, None)
 }
 
 #[cfg(test)]
@@ -60,11 +49,9 @@ pub(crate) mod up_test {
         },
         upstairs::Upstairs,
     };
-    use rand::prelude::*;
 
     use base64::{engine, Engine};
     use pseudo_file::IOSpan;
-    use ringbuffer::RingBuffer;
 
     // Create a simple logger
     pub fn csl() -> Logger {
@@ -110,33 +97,29 @@ pub(crate) mod up_test {
 
     #[tokio::test]
     async fn test_iospan_buffer_read_write() {
-        let span = IOSpan::new(500, 64, 512);
+        let mut span = IOSpan::new(500, 64, 512);
         assert_eq!(span.affected_block_count(), 2);
         assert_eq!(span.affected_block_numbers(), &vec![0, 1]);
 
-        span.write_from_buffer_into_blocks(&Bytes::from(vec![1; 64]))
-            .await;
+        span.write_from_buffer_into_blocks(&Bytes::from(vec![1; 64]));
 
         for i in 0..500 {
-            assert_eq!(span.buffer().as_vec().await[i], 0);
+            assert_eq!(span.buffer()[i], 0);
         }
         for i in 500..512 {
-            assert_eq!(span.buffer().as_vec().await[i], 1);
+            assert_eq!(span.buffer()[i], 1);
         }
         for i in 512..(512 + 64 - 12) {
-            assert_eq!(span.buffer().as_vec().await[i], 1);
+            assert_eq!(span.buffer()[i], 1);
         }
         for i in (512 + 64 - 12)..1024 {
-            assert_eq!(span.buffer().as_vec().await[i], 0);
+            assert_eq!(span.buffer()[i], 0);
         }
 
-        let data = Buffer::new(64);
-        span.read_from_blocks_into_buffer(&mut data.as_vec().await[..])
-            .await;
+        let mut data = [0u8; 64];
+        span.read_from_blocks_into_buffer(&mut data[..]);
 
-        for i in 0..64 {
-            assert_eq!(data.as_vec().await[i], 1);
-        }
+        assert_eq!(data, [1; 64]);
     }
 
     /*
@@ -711,124 +694,132 @@ pub(crate) mod up_test {
         Ok(())
     }
 
-    macro_rules! assert_consumed {
-        ($guest:expr) => {{
-            let req = $guest.consume_req().await;
-            assert!(req.is_some());
-            // Send a completion for the req, rather than just dropping it.
-            // This fulfills the invariant that BlockRes is completed prior to
-            // being dropped.
-            req.unwrap().res.send_ok();
-        }};
+    async fn assert_consumed(io: &mut GuestIoHandle) {
+        tokio::select! {
+            _ = io.recv() => {
+                // correct!
+            },
+            _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {
+                panic!("timed out while waiting for message");
+            }
+        }
     }
-    macro_rules! assert_none_consumed {
-        ($guest:expr) => {{
-            assert!($guest.consume_req().await.is_none());
-        }};
+
+    async fn assert_none_consumed(io: &mut GuestIoHandle) {
+        tokio::select! {
+            _ = io.recv() => {
+                panic!("got message when expecting nothing")
+            },
+            _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {
+                // nothing to do here
+            }
+        }
     }
 
     #[tokio::test]
     async fn test_no_iop_limit() -> Result<()> {
-        let guest = Guest::new(None);
-
-        assert_none_consumed!(&guest);
+        let (guest, mut io) = Guest::new(None);
+        assert_none_consumed(&mut io).await;
 
         // Don't use guest.read, that will send a block size query that will
         // never be answered.
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(1),
+                data: Buffer::new(1, 512),
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(8000),
+                data: Buffer::new(8, 512),
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(16000),
+                data: Buffer::new(32, 512),
             })
             .await;
 
         // With no IOP limit, all requests are consumed immediately
-        assert_consumed!(&guest);
-        assert_consumed!(&guest);
-        assert_consumed!(&guest);
+        assert_consumed(&mut io).await;
+        assert_consumed(&mut io).await;
+        assert_consumed(&mut io).await;
 
-        assert_none_consumed!(&guest);
+        assert_none_consumed(&mut io).await;
 
         // If no IOP limit set, don't track it
-        assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
+        assert_eq!(io.iop_tokens, 0);
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_set_iop_limit() -> Result<()> {
-        let mut guest = Guest::new(None);
-        guest.set_iop_limit(16000, 2);
+    async fn test_iop_limit() -> Result<()> {
+        let (guest, mut io) = Guest::new(None);
+        io.set_iop_limit(16000, 2);
 
-        assert_none_consumed!(&guest);
+        assert_none_consumed(&mut io).await;
 
         // Don't use guest.read, that will send a block size query that will
         // never be answered.
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(1),
+                data: Buffer::new(1, 512),
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(8000),
+                data: Buffer::new(8, 512),
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(16000),
+                data: Buffer::new(31, 512),
             })
             .await;
 
         // First two reads succeed
-        assert_consumed!(&guest);
-        assert_consumed!(&guest);
+        assert_consumed(&mut io).await;
+        assert_consumed(&mut io).await;
 
         // Next cannot be consumed until there's available IOP tokens so it
-        // remains in the queue.
-        assert_none_consumed!(&guest);
-        assert!(!guest.reqs.lock().await.is_empty());
-        assert_eq!(*guest.iop_tokens.lock().unwrap(), 2);
+        // remains in the queue.  Strictly speaking, it's been popped to the
+        // `req_head` position.
+        assert_none_consumed(&mut io).await;
+        assert!(io.req_rx.try_recv().is_err());
+        assert_eq!(io.iop_tokens, 2);
+        assert!(io.req_head.is_some());
 
         // Replenish one token, meaning next read can be consumed
-        guest.leak_iop_tokens(1);
-        assert_eq!(*guest.iop_tokens.lock().unwrap(), 1);
+        io.leak_iop_tokens(1);
+        assert_eq!(io.iop_tokens, 1);
 
-        assert_consumed!(&guest);
-        assert!(guest.reqs.lock().await.is_empty());
-        assert_eq!(*guest.iop_tokens.lock().unwrap(), 2);
+        assert_consumed(&mut io).await;
+        assert!(io.req_rx.try_recv().is_err());
+        assert!(io.req_head.is_none());
+        assert_eq!(io.iop_tokens, 2);
 
-        guest.leak_iop_tokens(2);
-        assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
+        io.leak_iop_tokens(2);
+        assert_eq!(io.iop_tokens, 0);
 
-        guest.leak_iop_tokens(16000);
-        assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
+        io.leak_iop_tokens(16000);
+        assert_eq!(io.iop_tokens, 0);
 
         Ok(())
     }
 
     #[tokio::test]
     async fn test_flush_does_not_consume_iops() -> Result<()> {
-        let mut guest = Guest::new(None);
+        let (guest, mut io) = Guest::new(None);
 
         // Set 0 as IOP limit
-        guest.set_iop_limit(16000, 0);
-        assert_none_consumed!(&guest);
+        io.set_iop_limit(16000, 0);
+        assert_none_consumed(&mut io).await;
 
         let _ = guest
             .send(BlockOp::Flush {
@@ -846,77 +837,79 @@ pub(crate) mod up_test {
             })
             .await;
 
-        assert_consumed!(&guest);
-        assert_consumed!(&guest);
-        assert_consumed!(&guest);
+        assert_consumed(&mut io).await;
+        assert_consumed(&mut io).await;
+        assert_consumed(&mut io).await;
 
-        assert_none_consumed!(&guest);
+        assert_none_consumed(&mut io).await;
 
         Ok(())
     }
 
     #[tokio::test]
     async fn test_set_bw_limit() -> Result<()> {
-        let mut guest = Guest::new(None);
-        guest.set_bw_limit(1024 * 1024); // 1 KiB
+        let (guest, mut io) = Guest::new(None);
+        io.set_bw_limit(1024 * 1024); // 1 KiB
 
-        assert_none_consumed!(&guest);
+        assert_none_consumed(&mut io).await;
 
         // Don't use guest.read, that will send a block size query that will
         // never be answered.
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(1024 * 1024 / 2),
+                data: Buffer::new(1024, 512), // 512 KiB
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(1024 * 1024 / 2),
+                data: Buffer::new(1024, 512),
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(1024 * 1024 / 2),
+                data: Buffer::new(1024, 512),
             })
             .await;
 
         // First two reads succeed
-        assert_consumed!(&guest);
-        assert_consumed!(&guest);
+        assert_consumed(&mut io).await;
+        assert_consumed(&mut io).await;
 
         // Next cannot be consumed until there's available BW tokens so it
         // remains in the queue.
-        assert_none_consumed!(&guest);
-        assert!(!guest.reqs.lock().await.is_empty());
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 1024 * 1024);
+        assert_none_consumed(&mut io).await;
+        assert!(io.req_rx.try_recv().is_err());
+        assert!(io.req_head.is_some());
+        assert_eq!(io.bw_tokens, 1024 * 1024);
 
         // Replenish enough tokens, meaning next read can be consumed
-        guest.leak_bw_tokens(1024 * 1024 / 2);
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 1024 * 1024 / 2);
+        io.leak_bw_tokens(1024 * 1024 / 2);
+        assert_eq!(io.bw_tokens, 1024 * 1024 / 2);
 
-        assert_consumed!(&guest);
-        assert!(guest.reqs.lock().await.is_empty());
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 1024 * 1024);
+        assert_consumed(&mut io).await;
+        assert!(io.req_rx.try_recv().is_err());
+        assert!(io.req_head.is_none());
+        assert_eq!(io.bw_tokens, 1024 * 1024);
 
-        guest.leak_bw_tokens(1024 * 1024);
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 0);
+        io.leak_bw_tokens(1024 * 1024);
+        assert_eq!(io.bw_tokens, 0);
 
-        guest.leak_bw_tokens(1024 * 1024 * 1024);
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 0);
+        io.leak_bw_tokens(1024 * 1024 * 1024);
+        assert_eq!(io.bw_tokens, 0);
 
         Ok(())
     }
 
     #[tokio::test]
     async fn test_flush_does_not_consume_bw() -> Result<()> {
-        let mut guest = Guest::new(None);
+        let (guest, mut io) = Guest::new(None);
 
         // Set 0 as bandwidth limit
-        guest.set_bw_limit(0);
-        assert_none_consumed!(&guest);
+        io.set_bw_limit(0);
+        assert_none_consumed(&mut io).await;
 
         let _ = guest
             .send(BlockOp::Flush {
@@ -934,22 +927,22 @@ pub(crate) mod up_test {
             })
             .await;
 
-        assert_consumed!(&guest);
-        assert_consumed!(&guest);
-        assert_consumed!(&guest);
+        assert_consumed(&mut io).await;
+        assert_consumed(&mut io).await;
+        assert_consumed(&mut io).await;
 
-        assert_none_consumed!(&guest);
+        assert_none_consumed(&mut io).await;
 
         Ok(())
     }
 
     #[tokio::test]
     async fn test_iop_and_bw_limit() -> Result<()> {
-        let mut guest = Guest::new(None);
+        let (guest, mut io) = Guest::new(None);
 
-        guest.set_iop_limit(16384, 500); // 1 IOP is 16 KiB
-        guest.set_bw_limit(6400 * 1024); // 16384 B * 400 = 6400 KiB/s
-        assert_none_consumed!(&guest);
+        io.set_iop_limit(16384, 500); // 1 IOP is 16 KiB
+        io.set_bw_limit(6400 * 1024); // 16384 B * 400 = 6400 KiB/s
+        assert_none_consumed(&mut io).await;
 
         // Don't use guest.read, that will send a block size query that will
         // never be answered.
@@ -960,72 +953,71 @@ pub(crate) mod up_test {
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(7000 * 1024),
+                data: Buffer::new(14000, 512), // 7000 KiB
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(7000 * 1024),
+                data: Buffer::new(14000, 512), // 7000 KiB
             })
             .await;
 
-        assert_consumed!(&guest);
-        assert_none_consumed!(&guest);
+        assert_consumed(&mut io).await;
+        assert_none_consumed(&mut io).await;
 
         // Assert we've hit the BW limit before IOPS
-        assert_eq!(*guest.iop_tokens.lock().unwrap(), 438); // 437.5 rounded up
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 7000 * 1024);
+        assert_eq!(io.iop_tokens, 438); // 437.5 rounded up
+        assert_eq!(io.bw_tokens, 7000 * 1024);
 
-        guest.leak_iop_tokens(438);
-        guest.leak_bw_tokens(7000 * 1024);
+        io.leak_iop_tokens(438);
+        io.leak_bw_tokens(7000 * 1024);
 
-        assert_consumed!(&guest);
-        assert!(guest.reqs.lock().await.is_empty());
+        assert_consumed(&mut io).await;
+
+        // Everything should be empty now
+        assert!(io.req_rx.try_recv().is_err());
+        assert!(io.req_head.is_none());
 
         // Back to zero
-        guest.leak_iop_tokens(438);
-        guest.leak_bw_tokens(7000 * 1024);
+        io.leak_iop_tokens(438);
+        io.leak_bw_tokens(7000 * 1024);
 
-        assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 0);
+        assert_eq!(io.iop_tokens, 0);
+        assert_eq!(io.bw_tokens, 0);
 
         // Validate that IOP limit activates by sending 501 1024b IOs
         for _ in 0..500 {
             let _ = guest
                 .send(BlockOp::Read {
                     offset: Block::new_512(0),
-                    data: Buffer::new(1024),
+                    data: Buffer::new(2, 512),
                 })
                 .await;
-            assert_consumed!(&guest);
+            assert_consumed(&mut io).await;
         }
 
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(1024),
+                data: Buffer::new(2, 512),
             })
             .await;
-        assert_none_consumed!(&guest);
+        assert_none_consumed(&mut io).await;
 
         // Assert we've hit the IOPS limit
-        assert_eq!(*guest.iop_tokens.lock().unwrap(), 500);
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 500 * 1024);
+        assert_eq!(io.iop_tokens, 500);
+        assert_eq!(io.bw_tokens, 500 * 1024);
 
         // Back to zero
-        guest.leak_iop_tokens(500);
-        guest.leak_bw_tokens(500 * 1024);
-        guest
-            .reqs
-            .lock()
-            .await
-            .drain(..)
-            .for_each(|req| req.res.send_ok());
+        io.leak_iop_tokens(500);
+        io.leak_bw_tokens(500 * 1024);
 
-        assert!(guest.reqs.lock().await.is_empty());
-        assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 0);
+        // Remove the 501st request
+        assert!(io.req_head.take().is_some());
+        assert!(io.req_rx.try_recv().is_err());
+        assert_eq!(io.iop_tokens, 0);
+        assert_eq!(io.bw_tokens, 0);
 
         // From
         // https://aws.amazon.com/premiumsupport/knowledge-center/ebs-calculate-optimal-io-size/:
@@ -1035,27 +1027,31 @@ pub(crate) mod up_test {
 
         let optimal_io_size: usize = 6400 * 1024 / 500;
 
+        // Round down to the nearest size in blocks
+        let optimal_io_size = (optimal_io_size / 512) * 512;
+
         // Make sure this is <= an IOP size
         assert!(optimal_io_size <= 16384);
 
         // I mean, it makes sense: now we submit 500 of those to reach both
         // limits at the same time.
         for i in 0..500 {
-            assert_eq!(*guest.iop_tokens.lock().unwrap(), i);
-            assert_eq!(*guest.bw_tokens.lock().unwrap(), i * optimal_io_size);
+            assert_eq!(io.iop_tokens, i);
+            assert_eq!(io.bw_tokens, i * optimal_io_size);
+            assert_eq!(optimal_io_size % 512, 0);
 
             let _ = guest
                 .send(BlockOp::Read {
                     offset: Block::new_512(0),
-                    data: Buffer::new(optimal_io_size),
+                    data: Buffer::new(optimal_io_size / 512, 512),
                 })
                 .await;
 
-            assert_consumed!(&guest);
+            assert_consumed(&mut io).await;
         }
 
-        assert_eq!(*guest.iop_tokens.lock().unwrap(), 500);
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 500 * optimal_io_size);
+        assert_eq!(io.iop_tokens, 500);
+        assert_eq!(io.bw_tokens, 500 * optimal_io_size);
 
         Ok(())
     }
@@ -1063,60 +1059,60 @@ pub(crate) mod up_test {
     // Is it possible to submit an IO that will never be sent? It shouldn't be!
     #[tokio::test]
     async fn test_impossible_io() -> Result<()> {
-        let mut guest = Guest::new(None);
+        let (guest, mut io) = Guest::new(None);
 
-        guest.set_iop_limit(1024 * 1024 / 2, 10); // 1 IOP is half a KiB
-        guest.set_bw_limit(1024 * 1024); // 1 KiB
-        assert_none_consumed!(&guest);
+        io.set_iop_limit(1024 * 1024 / 2, 10); // 1 IOP is half a KiB
+        io.set_bw_limit(1024 * 1024); // 1 KiB
+        assert_none_consumed(&mut io).await;
 
-        // Sending an IO of 10 KiB is larger than the bandwidth limit and
+        // Sending an IO of 10 MiB is larger than the bandwidth limit and
         // represents 20 IOPs, larger than the IOP limit.
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(10 * 1024 * 1024),
+                data: Buffer::new(20480, 512), // 10 MiB
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
-                data: Buffer::new(0),
+                data: Buffer::new(0, 512),
             })
             .await;
 
-        assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 0);
+        assert_eq!(io.iop_tokens, 0);
+        assert_eq!(io.bw_tokens, 0);
 
         // Even though the first IO is larger than the bandwidth and IOP limit,
         // it should still succeed. The next IO should not, even if it consumes
         // nothing, because the iops and bw tokens will be larger than the limit
         // for a while (until they leak enough).
 
-        assert_consumed!(&guest);
-        assert_none_consumed!(&guest);
+        assert_consumed(&mut io).await;
+        assert_none_consumed(&mut io).await;
 
-        assert_eq!(*guest.iop_tokens.lock().unwrap(), 20);
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 10 * 1024 * 1024);
+        assert_eq!(io.iop_tokens, 20);
+        assert_eq!(io.bw_tokens, 10 * 1024 * 1024);
 
         // Bandwidth trigger is going to be larger and need more leaking to get
         // down to a point where the zero sized IO can fire.
         for _ in 0..9 {
-            guest.leak_iop_tokens(10);
-            guest.leak_bw_tokens(1024 * 1024);
+            io.leak_iop_tokens(10);
+            io.leak_bw_tokens(1024 * 1024);
 
-            assert_none_consumed!(&guest);
+            assert_none_consumed(&mut io).await;
         }
 
-        assert_eq!(*guest.iop_tokens.lock().unwrap(), 0);
-        assert_eq!(*guest.bw_tokens.lock().unwrap(), 1024 * 1024);
+        assert_eq!(io.iop_tokens, 0);
+        assert_eq!(io.bw_tokens, 1024 * 1024);
 
-        assert_none_consumed!(&guest);
+        assert_none_consumed(&mut io).await;
 
-        guest.leak_iop_tokens(10);
-        guest.leak_bw_tokens(1024 * 1024);
+        io.leak_iop_tokens(10);
+        io.leak_bw_tokens(1024 * 1024);
 
         // We've leaked 10 KiB worth, it should fire now!
-        assert_consumed!(&guest);
+        assert_consumed(&mut io).await;
 
         Ok(())
     }
@@ -1180,12 +1176,12 @@ pub(crate) mod up_test {
         if wu {
             IOop::WriteUnwritten {
                 dependencies: vec![],
-                writes,
+                data: SerializedWrite::from_writes(writes),
             }
         } else {
             IOop::Write {
                 dependencies: vec![],
-                writes,
+                data: SerializedWrite::from_writes(writes),
             }
         }
     }
@@ -1230,82 +1226,5 @@ pub(crate) mod up_test {
 
         // Back to being below the limit
         assert!(wr.send_io_live_repair(Some(3)));
-    }
-
-    // Test that multiple GtoS downstairs jobs work
-    #[tokio::test]
-    async fn test_multiple_gtos_bulk_read_read() {
-        let mut up = Upstairs::test_default(None);
-        up.force_active().unwrap();
-        crate::downstairs::test::set_all_active(&mut up.downstairs);
-
-        let mut gw = up.guest.guest_work.lock().await;
-
-        let gw_id = GuestWorkId(12345);
-
-        // Create two reads
-        let first_id = JobId(1010);
-        let second_id = JobId(1011);
-
-        let mut data_buffers = HashMap::new();
-        data_buffers.insert(first_id, Buffer::new(512));
-        data_buffers.insert(second_id, Buffer::new(512));
-
-        let mut sub = HashSet::new();
-        sub.insert(first_id);
-        sub.insert(second_id);
-
-        let guest_job = GtoS::new_bulk(sub, data_buffers.clone(), None);
-
-        gw.active.insert(gw_id, guest_job);
-
-        let mut first_response_data = BytesMut::with_capacity(512);
-        first_response_data.resize(512, 0u8);
-        thread_rng().fill(&mut first_response_data[..]);
-        let first_read_response_hash =
-            integrity_hash(&[&first_response_data[..]]);
-
-        let mut second_response_data = BytesMut::with_capacity(512);
-        second_response_data.resize(512, 0u8);
-        thread_rng().fill(&mut second_response_data[..]);
-        let second_read_response_hash =
-            integrity_hash(&[&second_response_data[..]]);
-
-        let first_response = Some(vec![ReadResponse {
-            eid: 0,
-            offset: Block::new_512(0),
-            data: first_response_data.clone(),
-            block_contexts: vec![BlockContext {
-                hash: first_read_response_hash,
-                encryption_context: None,
-            }],
-        }]);
-
-        let second_response = Some(vec![ReadResponse {
-            eid: 0,
-            offset: Block::new_512(0),
-            data: second_response_data.clone(),
-            block_contexts: vec![BlockContext {
-                hash: second_read_response_hash,
-                encryption_context: None,
-            }],
-        }]);
-
-        gw.gw_ds_complete(gw_id, first_id, first_response, Ok(()), &up.log)
-            .await;
-        assert!(!gw.completed.contains(&gw_id));
-
-        gw.gw_ds_complete(gw_id, second_id, second_response, Ok(()), &up.log)
-            .await;
-        assert!(gw.completed.contains(&gw_id));
-
-        assert_eq!(
-            *data_buffers.get(&first_id).unwrap().as_vec().await,
-            first_response_data.to_vec()
-        );
-        assert_eq!(
-            *data_buffers.get(&second_id).unwrap().as_vec().await,
-            second_response_data.to_vec()
-        );
     }
 }

@@ -53,7 +53,9 @@ pub async fn dynamometer(
         for eid in 0..ddef.extent_count() {
             let mut block_offset = 0;
             loop {
-                if block_offset >= ddef.extent_size().value {
+                if (block_offset + num_writes as u64)
+                    >= ddef.extent_size().value
+                {
                     break;
                 }
 

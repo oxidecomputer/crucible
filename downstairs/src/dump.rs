@@ -725,7 +725,7 @@ async fn show_extent_block(
         println!();
 
         print!("{}  ", String::from_utf8(vec![b'-'; 6])?);
-        for (_, _) in dvec.iter().enumerate() {
+        for _ in &dvec {
             print!("{} ", String::from_utf8(vec![b'-'; 24])?);
         }
         if !only_show_differences {
@@ -784,7 +784,7 @@ async fn show_extent_block(
         println!();
 
         print!("{}  ", String::from_utf8(vec![b'-'; 6])?);
-        for (_, _) in dvec.iter().enumerate() {
+        for _ in &dvec {
             print!("{} ", String::from_utf8(vec![b'-'; 32])?);
         }
         if !only_show_differences {
@@ -848,7 +848,7 @@ async fn show_extent_block(
         println!();
 
         print!("{}  ", String::from_utf8(vec![b'-'; 6])?);
-        for (_, _) in dvec.iter().enumerate() {
+        for _ in &dvec {
             print!("{} ", String::from_utf8(vec![b'-'; 16])?);
         }
         if !only_show_differences {

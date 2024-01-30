@@ -3,15 +3,17 @@
 use std::sync::Arc;
 
 use crate::{
-    upstairs::UpstairsConfig, BlockContext, BlockReq, BlockRes, ImpactedBlocks,
+    upstairs::UpstairsConfig, BlockContext, BlockReq, BlockRes, ClientId,
+    ImpactedBlocks, Message, SerializedWrite,
 };
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use crucible_common::{integrity_hash, CrucibleError, RegionDefinition};
 use futures::{
-    future::{Either, Ready},
+    future::{ready, Either, Ready},
     stream::FuturesOrdered,
     StreamExt,
 };
+use slog::{error, Logger};
 use tokio::sync::oneshot;
 
 /// Future stored in a [`DeferredQueue`]
@@ -70,6 +72,18 @@ impl<T> DeferredQueue<T> {
         t.map(|t| t.expect("oneshot failed"))
     }
 
+    /// Stores a new future in the queue, marking it as non-empty
+    pub fn push_immediate(&mut self, t: T) {
+        self.push_back(Either::Left(ready(Ok(t))));
+    }
+
+    /// Stores a new pending oneshot in the queue, returning the sender
+    pub fn push_oneshot(&mut self) -> oneshot::Sender<T> {
+        let (rx, tx) = oneshot::channel();
+        self.push_back(Either::Right(tx));
+        rx
+    }
+
     /// Check whether the queue is known to be empty
     ///
     /// It is possible for this to return `false` if the queue is actually
@@ -109,7 +123,11 @@ pub(crate) enum DeferredBlockReq {
 
 #[derive(Debug)]
 pub(crate) struct EncryptedWrite {
-    pub writes: Vec<crucible_protocol::Write>,
+    /// Raw data to be written, along with extra metadata
+    ///
+    /// This is equivalent to a pre-serialized `Vec<Write>`, but avoids
+    /// superfluous memory copies.
+    pub data: SerializedWrite,
     pub impacted_blocks: ImpactedBlocks,
     pub res: Option<BlockRes>,
     pub is_write_unwritten: bool,
@@ -118,37 +136,59 @@ pub(crate) struct EncryptedWrite {
 impl DeferredWrite {
     pub fn run(self) -> Option<EncryptedWrite> {
         // Build up all of the Write operations, encrypting data here
-        let mut writes: Vec<crucible_protocol::Write> =
-            Vec::with_capacity(self.impacted_blocks.len(&self.ddef));
+        let byte_len: usize = self.ddef.block_size() as usize;
+        let mut serialized = {
+            let block_count = self.impacted_blocks.blocks(&self.ddef).len();
+            // TODO I think is an overestimation?
+            let bytes_per_block =
+                byte_len + std::mem::size_of::<crucible_protocol::Write>();
+            BytesMut::with_capacity(
+                block_count * bytes_per_block + std::mem::size_of::<usize>(),
+            )
+        };
+
+        // First, serialize the length of the Vec<Write>
+        let num_blocks = self.impacted_blocks.blocks(&self.ddef).len();
+        serialized.extend(bincode::serialize(&num_blocks).unwrap());
+
+        // Metadata to store
+        let mut eids = Vec::with_capacity(num_blocks);
 
         let mut cur_offset: usize = 0;
-        let byte_len: usize = self.ddef.block_size() as usize;
         for (eid, offset) in self.impacted_blocks.blocks(&self.ddef) {
-            let (sub_data, encryption_context, hash) = if let Some(context) =
+            if eids.last().map(|e| *e != eid).unwrap_or(true) {
+                eids.push(eid);
+            }
+
+            // Write the header for this section
+            let header = bincode::serialize(&(eid, offset, byte_len)).unwrap();
+            serialized.extend(header);
+
+            // Copy over raw data, since we need exclusive ownership to mutate
+            // it (doing in-place encryption).
+            let pos = serialized.len();
+            serialized.extend_from_slice(
+                &self.data[cur_offset..(cur_offset + byte_len)],
+            );
+
+            let (encryption_context, hash) = if let Some(ctx) =
                 &self.cfg.encryption_context
             {
                 // Encrypt here
-                let mut mut_data = self
-                    .data
-                    .slice(cur_offset..(cur_offset + byte_len))
-                    .to_vec();
-
-                let (nonce, tag, hash) =
-                    match context.encrypt_in_place(&mut mut_data[..]) {
-                        Err(e) => {
-                            if let Some(res) = self.res {
-                                res.send_err(CrucibleError::EncryptionError(
-                                    e.to_string(),
-                                ));
-                            }
-                            return None;
+                let mut_data = &mut serialized[pos..];
+                let (nonce, tag, hash) = match ctx.encrypt_in_place(mut_data) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        if let Some(res) = self.res {
+                            res.send_err(CrucibleError::EncryptionError(
+                                e.to_string(),
+                            ));
                         }
-
-                        Ok(v) => v,
-                    };
+                        return None;
+                    }
+                };
 
                 (
-                    Bytes::copy_from_slice(&mut_data),
                     Some(crucible_protocol::EncryptionContext {
                         nonce: nonce.into(),
                         tag: tag.into(),
@@ -157,30 +197,98 @@ impl DeferredWrite {
                 )
             } else {
                 // Unencrypted
-                let sub_data =
-                    self.data.slice(cur_offset..(cur_offset + byte_len));
-                let hash = integrity_hash(&[&sub_data[..]]);
+                let hash = integrity_hash(&[&serialized[pos..]]);
 
-                (sub_data, None, hash)
+                (None, hash)
             };
 
-            writes.push(crucible_protocol::Write {
-                eid,
-                offset,
-                data: sub_data,
-                block_context: BlockContext {
-                    hash,
-                    encryption_context,
-                },
-            });
+            // Write the trailing data for this chunk
+            let trailer = bincode::serialize(&BlockContext {
+                hash,
+                encryption_context,
+            })
+            .unwrap();
+            serialized.extend(trailer);
 
             cur_offset += byte_len;
         }
+
+        let data = SerializedWrite {
+            data: serialized.freeze(),
+            num_blocks,
+            io_size_bytes: self.data.len(),
+            eids,
+        };
+
         Some(EncryptedWrite {
-            writes,
+            data,
             impacted_blocks: self.impacted_blocks,
             res: self.res,
             is_write_unwritten: self.is_write_unwritten,
         })
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+#[derive(Debug)]
+pub(crate) struct DeferredMessage {
+    pub message: Message,
+
+    /// If this was a `ReadResponse`, then the hashes are stored here
+    pub hashes: Vec<Option<u64>>,
+
+    pub client_id: ClientId,
+}
+
+/// Standalone data structure which can perform decryption
+pub(crate) struct DeferredRead {
+    /// Message, which must be a `ReadResponse`
+    pub message: Message,
+
+    pub client_id: ClientId,
+    pub cfg: Arc<UpstairsConfig>,
+    pub log: Logger,
+}
+
+impl DeferredRead {
+    /// Consume the `DeferredRead` and perform decryption
+    ///
+    /// If decryption fails, then the resulting `Message` has an error in the
+    /// `responses` field, and `hashes` is empty.
+    pub fn run(mut self) -> DeferredMessage {
+        use crate::client::{
+            validate_encrypted_read_response,
+            validate_unencrypted_read_response,
+        };
+        let Message::ReadResponse { responses, .. } = &mut self.message else {
+            panic!("invalid DeferredRead");
+        };
+        let mut hashes = vec![];
+
+        if let Ok(rs) = responses {
+            for r in rs.iter_mut() {
+                let v = if let Some(ctx) = &self.cfg.encryption_context {
+                    validate_encrypted_read_response(r, ctx, &self.log)
+                } else {
+                    validate_unencrypted_read_response(r, &self.log)
+                };
+                match v {
+                    Ok(hash) => hashes.push(hash),
+                    Err(e) => {
+                        error!(self.log, "decryption failure: {e:?}");
+                        *responses = Err(e);
+                        hashes.clear();
+                        break;
+                    }
+                }
+            }
+        }
+
+        DeferredMessage {
+            client_id: self.client_id,
+            message: self.message,
+            hashes,
+        }
     }
 }
