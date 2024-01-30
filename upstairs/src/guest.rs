@@ -202,12 +202,22 @@ impl GuestWork {
         (gw_id, ds_id)
     }
 
+    /// Low-level function to get next guest work ID
+    ///
+    /// Normally, `submit_job` should be called instead; this function should
+    /// only be used to reserve `GuestWorkId`s in advance of submitting the
+    /// jobs.
     pub(crate) fn next_gw_id(&mut self) -> GuestWorkId {
         let id = self.next_gw_id;
         self.next_gw_id += 1;
         GuestWorkId(id)
     }
 
+    /// Low-level function to insert work into the map
+    ///
+    /// Normally, `submit_job` should be called instead; this function should
+    /// only be used if we have reserved the `GuestWorkId` and `JobId` in
+    /// advance.
     pub(crate) fn insert(
         &mut self,
         gw_id: GuestWorkId,
@@ -536,7 +546,7 @@ impl BlockIO for Guest {
     }
 
     async fn get_block_size(&self) -> Result<u64, CrucibleError> {
-        let bs = self.block_size.load(std::sync::atomic::Ordering::Relaxed);
+        let bs = self.block_size.load(Ordering::Relaxed);
         if bs == 0 {
             let data = Arc::new(Mutex::new(0));
             let size_query = BlockOp::QueryBlockSize { data: data.clone() };
@@ -546,8 +556,7 @@ impl BlockIO for Guest {
             reply.result?;
 
             let bs = *data.lock().await;
-            self.block_size
-                .store(bs, std::sync::atomic::Ordering::Relaxed);
+            self.block_size.store(bs, Ordering::Relaxed);
             Ok(bs)
         } else {
             Ok(bs)
@@ -945,8 +954,7 @@ impl GuestIoHandle {
 
     /// Looks up current backpressure
     pub fn backpressure_us(&self) -> u64 {
-        self.backpressure_us
-            .load(std::sync::atomic::Ordering::Acquire)
+        self.backpressure_us.load(Ordering::Acquire)
     }
 
     /// Debug function to dump the guest work structure.
