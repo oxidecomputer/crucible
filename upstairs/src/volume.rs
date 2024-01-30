@@ -1,6 +1,8 @@
 // Copyright 2023 Oxide Computer Company
 
 use super::*;
+use crate::guest::Guest;
+
 use async_recursion::async_recursion;
 use oximeter::types::ProducerRegistry;
 use std::ops::Range;

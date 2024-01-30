@@ -173,21 +173,50 @@ impl std::fmt::Display for GuestWorkId {
  * it should probably be a ring buffer.
  */
 #[derive(Debug)]
-struct GuestWork {
+pub struct GuestWork {
     active: HashMap<GuestWorkId, GtoS>,
     next_gw_id: u64,
     completed: AllocRingBuffer<GuestWorkId>,
 }
 
 impl GuestWork {
-    fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.active.is_empty()
     }
 
-    fn next_gw_id(&mut self) -> GuestWorkId {
+    pub fn len(&self) -> usize {
+        self.active.len()
+    }
+
+    /// Helper function to install new work into the map
+    pub(crate) fn submit_job<F: FnOnce(GuestWorkId) -> JobId>(
+        &mut self,
+        f: F,
+        guest_buffer: Option<Buffer>,
+        res: Option<BlockRes>,
+    ) -> (GuestWorkId, JobId) {
+        let gw_id = self.next_gw_id();
+        let ds_id = f(gw_id);
+
+        self.insert(gw_id, ds_id, guest_buffer, res);
+        (gw_id, ds_id)
+    }
+
+    pub(crate) fn next_gw_id(&mut self) -> GuestWorkId {
         let id = self.next_gw_id;
         self.next_gw_id += 1;
         GuestWorkId(id)
+    }
+
+    pub(crate) fn insert(
+        &mut self,
+        gw_id: GuestWorkId,
+        ds_id: JobId,
+        guest_buffer: Option<Buffer>,
+        res: Option<BlockRes>,
+    ) {
+        let new_gtos = GtoS::new(ds_id, guest_buffer, res);
+        self.active.insert(gw_id, new_gtos);
     }
 
     /*
@@ -205,7 +234,7 @@ impl GuestWork {
      * This may include moving data buffers from completed reads.
      */
     #[instrument]
-    async fn gw_ds_complete(
+    pub async fn gw_ds_complete(
         &mut self,
         gw_id: GuestWorkId,
         ds_id: JobId,
@@ -228,6 +257,13 @@ impl GuestWork {
              * XXX This is just so I can see if ever does happen.
              */
             panic!("gw_id {} for job {} not on active list", gw_id, ds_id);
+        }
+    }
+
+    pub fn print_last_completed(&self, n: usize) {
+        print!("Upstairs last five completed:  ");
+        for j in self.completed.iter().rev().take(n) {
+            print!(" {:4}", j);
         }
     }
 }
@@ -368,6 +404,8 @@ impl Guest {
 
     /*
      * This is used to submit a new BlockOp IO request to Crucible.
+     *
+     * It's public for testing, but shouldn't be called
      */
     async fn send(&self, op: BlockOp) -> BlockReqWaiter {
         let (brw, res) = BlockReqWaiter::pair();
@@ -740,13 +778,30 @@ pub struct GuestIoHandle {
     /// It is during this process that data will encrypted. For a read, the
     /// data is decrypted back to the guest provided buffer after all the
     /// required downstairs operations are completed.
-    guest_work: GuestWork,
+    pub guest_work: GuestWork,
 
     /// Log handle, mainly to pass it into the [`Upstairs`]
     pub log: Logger,
 }
 
 impl GuestIoHandle {
+    pub fn iop_tokens(&self) -> usize {
+        self.iop_tokens
+    }
+
+    /// Leaks IOP and BW tokens
+    pub fn leak_check(&mut self, leak_ms: usize) {
+        if let Some(iop_limit_cfg) = self.limits.iop_limit {
+            let tokens = iop_limit_cfg.iop_limit / (1000 / leak_ms);
+            self.leak_iop_tokens(tokens);
+        }
+
+        if let Some(bw_limit) = self.limits.bw_limit {
+            let tokens = bw_limit / (1000 / leak_ms);
+            self.leak_bw_tokens(tokens);
+        }
+    }
+
     /// Leak IOPs tokens
     fn leak_iop_tokens(&mut self, tokens: usize) {
         self.iop_tokens = self.iop_tokens.saturating_sub(tokens);
@@ -768,7 +823,7 @@ impl GuestIoHandle {
     /// branch** of a `select!` statement that _also_ includes at least one
     /// timeout; we should use that timeout to periodically service the IOP / BW
     /// token counters, which will unblock the `GuestIoHandle` in future calls.
-    async fn recv(&mut self) -> UpstairsAction {
+    pub(crate) async fn recv(&mut self) -> UpstairsAction {
         let req = if self.req_limited {
             futures::future::pending().await
         } else if let Some(req) = self.req_head.take() {
@@ -843,8 +898,13 @@ impl GuestIoHandle {
         }
     }
 
+    #[cfg(test)]
+    pub fn disable_queue_backpressure(&mut self) {
+        self.backpressure_config.queue_max_delay = Duration::ZERO;
+    }
+
     /// Set `self.backpressure_us` based on outstanding IO ratio
-    fn set_backpressure(&self, bytes: u64, ratio: f64) {
+    pub fn set_backpressure(&self, bytes: u64, ratio: f64) {
         // Check to see if the number of outstanding write bytes (between
         // the upstairs and downstairs) is particularly high.  If so,
         // apply some backpressure by delaying host operations, with a
@@ -882,6 +942,31 @@ impl GuestIoHandle {
     pub fn active_count(&self) -> usize {
         self.guest_work.active.len()
     }
+
+    /// Looks up current backpressure
+    pub fn backpressure_us(&self) -> u64 {
+        self.backpressure_us
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Debug function to dump the guest work structure.
+    ///
+    /// TODO: make this one big dump, where we include the up.work.active
+    /// printing for each guest_work. It will be much more dense, but require
+    /// holding both locks for the duration.
+    pub(crate) fn show_work(&self) -> usize {
+        println!("Guest work:  Active and Completed Jobs:");
+        let gw = &self.guest_work;
+        let mut kvec: Vec<_> = gw.active.keys().cloned().collect();
+        kvec.sort_unstable();
+        for id in kvec.iter() {
+            let job = gw.active.get(id).unwrap();
+            println!("GW_JOB active:[{:04}] D:{:?} ", id, job.ds_id);
+        }
+        let done = gw.completed.to_vec();
+        println!("GW_JOB completed count:{:?} ", done.len());
+        kvec.len()
+    }
 }
 
 /*
@@ -894,25 +979,431 @@ pub struct WQCounts {
     pub active_count: usize,
 }
 
-/*
- * Debug function to dump the guest work structure.
- * This does a bit while holding the mutex, so don't expect performance
- * to get better when calling it.
- *
- * TODO: make this one big dump, where we include the up.work.active
- * printing for each guest_work. It will be much more dense, but require
- * holding both locks for the duration.
- */
-pub(crate) fn show_guest_work(guest: &GuestIoHandle) -> usize {
-    println!("Guest work:  Active and Completed Jobs:");
-    let gw = &guest.guest_work;
-    let mut kvec: Vec<_> = gw.active.keys().cloned().collect();
-    kvec.sort_unstable();
-    for id in kvec.iter() {
-        let job = gw.active.get(id).unwrap();
-        println!("GW_JOB active:[{:04}] D:{:?} ", id, job.ds_id);
+#[cfg(test)]
+mod test {
+    use super::*;
+    use anyhow::Result;
+
+    async fn assert_consumed(io: &mut GuestIoHandle) {
+        tokio::select! {
+            _ = io.recv() => {
+                // correct!
+            },
+            _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {
+                panic!("timed out while waiting for message");
+            }
+        }
     }
-    let done = gw.completed.to_vec();
-    println!("GW_JOB completed count:{:?} ", done.len());
-    kvec.len()
+
+    async fn assert_none_consumed(io: &mut GuestIoHandle) {
+        tokio::select! {
+            _ = io.recv() => {
+                panic!("got message when expecting nothing")
+            },
+            _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {
+                // nothing to do here
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_no_iop_limit() -> Result<()> {
+        let (guest, mut io) = Guest::new(None);
+        assert_none_consumed(&mut io).await;
+
+        // Don't use guest.read, that will send a block size query that will
+        // never be answered.
+        let _ = guest
+            .send(BlockOp::Read {
+                offset: Block::new_512(0),
+                data: Buffer::new(1, 512),
+            })
+            .await;
+        let _ = guest
+            .send(BlockOp::Read {
+                offset: Block::new_512(0),
+                data: Buffer::new(8, 512),
+            })
+            .await;
+        let _ = guest
+            .send(BlockOp::Read {
+                offset: Block::new_512(0),
+                data: Buffer::new(32, 512),
+            })
+            .await;
+
+        // With no IOP limit, all requests are consumed immediately
+        assert_consumed(&mut io).await;
+        assert_consumed(&mut io).await;
+        assert_consumed(&mut io).await;
+
+        assert_none_consumed(&mut io).await;
+
+        // If no IOP limit set, don't track it
+        assert_eq!(io.iop_tokens, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_iop_limit() -> Result<()> {
+        let (guest, mut io) = Guest::new(None);
+        io.set_iop_limit(16000, 2);
+
+        assert_none_consumed(&mut io).await;
+
+        // Don't use guest.read, that will send a block size query that will
+        // never be answered.
+        let _ = guest
+            .send(BlockOp::Read {
+                offset: Block::new_512(0),
+                data: Buffer::new(1, 512),
+            })
+            .await;
+        let _ = guest
+            .send(BlockOp::Read {
+                offset: Block::new_512(0),
+                data: Buffer::new(8, 512),
+            })
+            .await;
+        let _ = guest
+            .send(BlockOp::Read {
+                offset: Block::new_512(0),
+                data: Buffer::new(31, 512),
+            })
+            .await;
+
+        // First two reads succeed
+        assert_consumed(&mut io).await;
+        assert_consumed(&mut io).await;
+
+        // Next cannot be consumed until there's available IOP tokens so it
+        // remains in the queue.  Strictly speaking, it's been popped to the
+        // `req_head` position.
+        assert_none_consumed(&mut io).await;
+        assert!(io.req_rx.try_recv().is_err());
+        assert_eq!(io.iop_tokens, 2);
+        assert!(io.req_head.is_some());
+
+        // Replenish one token, meaning next read can be consumed
+        io.leak_iop_tokens(1);
+        assert_eq!(io.iop_tokens, 1);
+
+        assert_consumed(&mut io).await;
+        assert!(io.req_rx.try_recv().is_err());
+        assert!(io.req_head.is_none());
+        assert_eq!(io.iop_tokens, 2);
+
+        io.leak_iop_tokens(2);
+        assert_eq!(io.iop_tokens, 0);
+
+        io.leak_iop_tokens(16000);
+        assert_eq!(io.iop_tokens, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_flush_does_not_consume_iops() -> Result<()> {
+        let (guest, mut io) = Guest::new(None);
+
+        // Set 0 as IOP limit
+        io.set_iop_limit(16000, 0);
+        assert_none_consumed(&mut io).await;
+
+        let _ = guest
+            .send(BlockOp::Flush {
+                snapshot_details: None,
+            })
+            .await;
+        let _ = guest
+            .send(BlockOp::Flush {
+                snapshot_details: None,
+            })
+            .await;
+        let _ = guest
+            .send(BlockOp::Flush {
+                snapshot_details: None,
+            })
+            .await;
+
+        assert_consumed(&mut io).await;
+        assert_consumed(&mut io).await;
+        assert_consumed(&mut io).await;
+
+        assert_none_consumed(&mut io).await;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_set_bw_limit() -> Result<()> {
+        let (guest, mut io) = Guest::new(None);
+        io.set_bw_limit(1024 * 1024); // 1 KiB
+
+        assert_none_consumed(&mut io).await;
+
+        // Don't use guest.read, that will send a block size query that will
+        // never be answered.
+        let _ = guest
+            .send(BlockOp::Read {
+                offset: Block::new_512(0),
+                data: Buffer::new(1024, 512), // 512 KiB
+            })
+            .await;
+        let _ = guest
+            .send(BlockOp::Read {
+                offset: Block::new_512(0),
+                data: Buffer::new(1024, 512),
+            })
+            .await;
+        let _ = guest
+            .send(BlockOp::Read {
+                offset: Block::new_512(0),
+                data: Buffer::new(1024, 512),
+            })
+            .await;
+
+        // First two reads succeed
+        assert_consumed(&mut io).await;
+        assert_consumed(&mut io).await;
+
+        // Next cannot be consumed until there's available BW tokens so it
+        // remains in the queue.
+        assert_none_consumed(&mut io).await;
+        assert!(io.req_rx.try_recv().is_err());
+        assert!(io.req_head.is_some());
+        assert_eq!(io.bw_tokens, 1024 * 1024);
+
+        // Replenish enough tokens, meaning next read can be consumed
+        io.leak_bw_tokens(1024 * 1024 / 2);
+        assert_eq!(io.bw_tokens, 1024 * 1024 / 2);
+
+        assert_consumed(&mut io).await;
+        assert!(io.req_rx.try_recv().is_err());
+        assert!(io.req_head.is_none());
+        assert_eq!(io.bw_tokens, 1024 * 1024);
+
+        io.leak_bw_tokens(1024 * 1024);
+        assert_eq!(io.bw_tokens, 0);
+
+        io.leak_bw_tokens(1024 * 1024 * 1024);
+        assert_eq!(io.bw_tokens, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_flush_does_not_consume_bw() -> Result<()> {
+        let (guest, mut io) = Guest::new(None);
+
+        // Set 0 as bandwidth limit
+        io.set_bw_limit(0);
+        assert_none_consumed(&mut io).await;
+
+        let _ = guest
+            .send(BlockOp::Flush {
+                snapshot_details: None,
+            })
+            .await;
+        let _ = guest
+            .send(BlockOp::Flush {
+                snapshot_details: None,
+            })
+            .await;
+        let _ = guest
+            .send(BlockOp::Flush {
+                snapshot_details: None,
+            })
+            .await;
+
+        assert_consumed(&mut io).await;
+        assert_consumed(&mut io).await;
+        assert_consumed(&mut io).await;
+
+        assert_none_consumed(&mut io).await;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_iop_and_bw_limit() -> Result<()> {
+        let (guest, mut io) = Guest::new(None);
+
+        io.set_iop_limit(16384, 500); // 1 IOP is 16 KiB
+        io.set_bw_limit(6400 * 1024); // 16384 B * 400 = 6400 KiB/s
+        assert_none_consumed(&mut io).await;
+
+        // Don't use guest.read, that will send a block size query that will
+        // never be answered.
+
+        // Validate that BW limit activates by sending two 7000 KiB IOs. 7000
+        // KiB is only 437.5 IOPs
+
+        let _ = guest
+            .send(BlockOp::Read {
+                offset: Block::new_512(0),
+                data: Buffer::new(14000, 512), // 7000 KiB
+            })
+            .await;
+        let _ = guest
+            .send(BlockOp::Read {
+                offset: Block::new_512(0),
+                data: Buffer::new(14000, 512), // 7000 KiB
+            })
+            .await;
+
+        assert_consumed(&mut io).await;
+        assert_none_consumed(&mut io).await;
+
+        // Assert we've hit the BW limit before IOPS
+        assert_eq!(io.iop_tokens, 438); // 437.5 rounded up
+        assert_eq!(io.bw_tokens, 7000 * 1024);
+
+        io.leak_iop_tokens(438);
+        io.leak_bw_tokens(7000 * 1024);
+
+        assert_consumed(&mut io).await;
+
+        // Everything should be empty now
+        assert!(io.req_rx.try_recv().is_err());
+        assert!(io.req_head.is_none());
+
+        // Back to zero
+        io.leak_iop_tokens(438);
+        io.leak_bw_tokens(7000 * 1024);
+
+        assert_eq!(io.iop_tokens, 0);
+        assert_eq!(io.bw_tokens, 0);
+
+        // Validate that IOP limit activates by sending 501 1024b IOs
+        for _ in 0..500 {
+            let _ = guest
+                .send(BlockOp::Read {
+                    offset: Block::new_512(0),
+                    data: Buffer::new(2, 512),
+                })
+                .await;
+            assert_consumed(&mut io).await;
+        }
+
+        let _ = guest
+            .send(BlockOp::Read {
+                offset: Block::new_512(0),
+                data: Buffer::new(2, 512),
+            })
+            .await;
+        assert_none_consumed(&mut io).await;
+
+        // Assert we've hit the IOPS limit
+        assert_eq!(io.iop_tokens, 500);
+        assert_eq!(io.bw_tokens, 500 * 1024);
+
+        // Back to zero
+        io.leak_iop_tokens(500);
+        io.leak_bw_tokens(500 * 1024);
+
+        // Remove the 501st request
+        assert!(io.req_head.take().is_some());
+        assert!(io.req_rx.try_recv().is_err());
+        assert_eq!(io.iop_tokens, 0);
+        assert_eq!(io.bw_tokens, 0);
+
+        // From
+        // https://aws.amazon.com/premiumsupport/knowledge-center/ebs-calculate-optimal-io-size/:
+        //
+        // Amazon EBS calculates the optimal I/O size using the following
+        // equation: throughput / number of IOPS = optimal I/O size.
+
+        let optimal_io_size: usize = 6400 * 1024 / 500;
+
+        // Round down to the nearest size in blocks
+        let optimal_io_size = (optimal_io_size / 512) * 512;
+
+        // Make sure this is <= an IOP size
+        assert!(optimal_io_size <= 16384);
+
+        // I mean, it makes sense: now we submit 500 of those to reach both
+        // limits at the same time.
+        for i in 0..500 {
+            assert_eq!(io.iop_tokens, i);
+            assert_eq!(io.bw_tokens, i * optimal_io_size);
+            assert_eq!(optimal_io_size % 512, 0);
+
+            let _ = guest
+                .send(BlockOp::Read {
+                    offset: Block::new_512(0),
+                    data: Buffer::new(optimal_io_size / 512, 512),
+                })
+                .await;
+
+            assert_consumed(&mut io).await;
+        }
+
+        assert_eq!(io.iop_tokens, 500);
+        assert_eq!(io.bw_tokens, 500 * optimal_io_size);
+
+        Ok(())
+    }
+
+    // Is it possible to submit an IO that will never be sent? It shouldn't be!
+    #[tokio::test]
+    async fn test_impossible_io() -> Result<()> {
+        let (guest, mut io) = Guest::new(None);
+
+        io.set_iop_limit(1024 * 1024 / 2, 10); // 1 IOP is half a KiB
+        io.set_bw_limit(1024 * 1024); // 1 KiB
+        assert_none_consumed(&mut io).await;
+
+        // Sending an IO of 10 MiB is larger than the bandwidth limit and
+        // represents 20 IOPs, larger than the IOP limit.
+        let _ = guest
+            .send(BlockOp::Read {
+                offset: Block::new_512(0),
+                data: Buffer::new(20480, 512), // 10 MiB
+            })
+            .await;
+        let _ = guest
+            .send(BlockOp::Read {
+                offset: Block::new_512(0),
+                data: Buffer::new(0, 512),
+            })
+            .await;
+
+        assert_eq!(io.iop_tokens, 0);
+        assert_eq!(io.bw_tokens, 0);
+
+        // Even though the first IO is larger than the bandwidth and IOP limit,
+        // it should still succeed. The next IO should not, even if it consumes
+        // nothing, because the iops and bw tokens will be larger than the limit
+        // for a while (until they leak enough).
+
+        assert_consumed(&mut io).await;
+        assert_none_consumed(&mut io).await;
+
+        assert_eq!(io.iop_tokens, 20);
+        assert_eq!(io.bw_tokens, 10 * 1024 * 1024);
+
+        // Bandwidth trigger is going to be larger and need more leaking to get
+        // down to a point where the zero sized IO can fire.
+        for _ in 0..9 {
+            io.leak_iop_tokens(10);
+            io.leak_bw_tokens(1024 * 1024);
+
+            assert_none_consumed(&mut io).await;
+        }
+
+        assert_eq!(io.iop_tokens, 0);
+        assert_eq!(io.bw_tokens, 1024 * 1024);
+
+        assert_none_consumed(&mut io).await;
+
+        io.leak_iop_tokens(10);
+        io.leak_bw_tokens(1024 * 1024);
+
+        // We've leaked 10 KiB worth, it should fire now!
+        assert_consumed(&mut io).await;
+
+        Ok(())
+    }
 }

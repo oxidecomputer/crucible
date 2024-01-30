@@ -54,7 +54,8 @@ pub use mend::{DownstairsMend, ExtentFix, RegionMetadata};
 pub use pseudo_file::CruciblePseudoFile;
 
 pub(crate) mod guest;
-use guest::{GuestIoHandle, GuestWorkId, WQCounts};
+pub use guest::{Guest, WQCounts};
+use guest::{GuestIoHandle, GuestWorkId};
 
 mod stats;
 
