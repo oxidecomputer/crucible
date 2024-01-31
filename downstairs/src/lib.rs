@@ -2,7 +2,6 @@
 #![cfg_attr(usdt_need_asm, feature(asm))]
 #![cfg_attr(all(target_os = "macos", usdt_need_asm_sym), feature(asm_sym))]
 
-use futures::executor;
 use futures::lock::{Mutex, MutexGuard};
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -1092,14 +1091,11 @@ where
                             // The job completed successfully, so inform the
                             // Upstairs
 
-                            ads.lock()
-                                .await
-                                .complete_work_stat(
-                                    upstairs_connection,
-                                    &m,
-                                    job_id,
-                                )
-                                .await?;
+                            ads.lock().await.complete_work_stat(
+                                upstairs_connection,
+                                &m,
+                                job_id,
+                            )?;
 
                             // Notify the upstairs before completing work
                             let mut fw = fw.lock().await;
@@ -1886,7 +1882,7 @@ impl Downstairs {
         log: Logger,
     ) -> Self {
         let dss = DsStatOuter {
-            ds_stat_wrap: Arc::new(Mutex::new(DsCountStat::new(
+            ds_stat_wrap: Arc::new(std::sync::Mutex::new(DsCountStat::new(
                 region.def().uuid(),
             ))),
         };
@@ -2419,7 +2415,7 @@ impl Downstairs {
      * After we complete a read/write/flush on a region, update the
      * Oximeter counter for the operation.
      */
-    async fn complete_work_stat(
+    fn complete_work_stat(
         &mut self,
         _upstairs_connection: UpstairsConnection,
         m: &Message,
@@ -2429,19 +2425,19 @@ impl Downstairs {
         match m {
             Message::FlushAck { .. } => {
                 cdt::submit__flush__done!(|| ds_id.0);
-                self.dss.add_flush().await;
+                self.dss.add_flush();
             }
             Message::WriteAck { .. } => {
                 cdt::submit__write__done!(|| ds_id.0);
-                self.dss.add_write().await;
+                self.dss.add_write();
             }
             Message::WriteUnwrittenAck { .. } => {
                 cdt::submit__writeunwritten__done!(|| ds_id.0);
-                self.dss.add_write().await;
+                self.dss.add_write();
             }
             Message::ReadResponse { .. } => {
                 cdt::submit__read__done!(|| ds_id.0);
-                self.dss.add_read().await;
+                self.dss.add_read();
             }
             Message::ExtentLiveClose { .. } => {
                 cdt::submit__el__close__done!(|| ds_id.0);
@@ -3326,7 +3322,7 @@ pub async fn start_downstairs(
                  * from an upstairs
                  */
                 let mut ds = d.lock().await;
-                ds.dss.add_connection().await;
+                ds.dss.add_connection();
             }
 
             let dd = d.clone();
