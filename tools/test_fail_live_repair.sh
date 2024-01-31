@@ -200,7 +200,7 @@ while [[ $count -le $loops ]]; do
         pstop "$ds_pid"
     fi
 
-    echo "Wait for downstairs $choice go go back to faulted"
+    echo "Wait for downstairs $choice to go back to faulted"
     choice_state="undefined"
     while [[ "$choice_state" != "faulted" ]]; do
         sleep 3
@@ -212,7 +212,7 @@ while [[ $count -le $loops ]]; do
             choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $12}')
         fi
     done
-    #
+
     sleep 2
     echo "Start $choice for a second time" | tee -a "$test_log"
     if [[ $pstop -eq 0 ]]; then
