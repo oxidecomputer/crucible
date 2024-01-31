@@ -23,7 +23,7 @@ fn handle_nbd_client<T: crucible::BlockIO>(
         readonly: false,
         ..Default::default()
     };
-    handshake(&mut stream, &e)?;
+    handshake(&mut stream, |_name| Ok(e))?;
     transmission(&mut stream, cpf)?;
     Ok(())
 }
