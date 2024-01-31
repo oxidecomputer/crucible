@@ -285,13 +285,21 @@ impl DownstairsClient {
     /// must the select expressions be cancel safe, but the **bodies** must also
     /// be cancel-safe.  This is why we simply return a single value in the body
     /// of each statement.
+    ///
+    /// This function will wait forever if we have asked for the client task to
+    /// stop, so it should only be called in a higher-level `select!`.
     pub(crate) async fn select(&mut self) -> ClientAction {
-        tokio::select! {
-            d = self.client_task.client_response_rx.recv() => {
-                match d {
-                    Some(c) => c.into(),
-                    None => ClientAction::ChannelClosed,
-                }
+        loop {
+            let out = match self.client_task.client_response_rx.recv().await {
+                Some(c) => c.into(),
+                None => break ClientAction::ChannelClosed,
+            };
+            // Ignore client responses if we have told the client to exit (we
+            // still propagate other ClientAction variants, e.g. TaskStopped).
+            if self.client_task.client_stop_tx.is_some()
+                || !matches!(out, ClientAction::Response(..))
+            {
+                break out;
             }
         }
     }
