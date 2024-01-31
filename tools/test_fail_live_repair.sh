@@ -3,10 +3,15 @@
 # Create and start up the downstairs.
 # In a loop:
 #  Send IO through crutest
-#  Fault a downstairs
+#  `pstop` or kill the downstairs process
+#  wait for missing downstairs to be faulted
+#  `pstart` or restart the downstairs
 #  Let the repair start.
-#  Fault the downstairs again.
+#  `pstop` or kill the same downstairs again.
+#  wait for missing downstairs to be faulted again
+#  `pstart` or restart the downstairs again
 #  Let the upstairs repair start over and finish.
+#  Stop crutest, then restart and verify the whole disk.
 
 err=0
 total=0
@@ -55,14 +60,22 @@ if pgrep -fl -U "$(id -u)" "$cds"; then
 fi
 
 loops=20
+pstop=0
 
 usage () {
-    echo "Usage: $0 [-l #]" >&2
+    echo "Usage: $0 [-l #][-p]" >&2
     echo " -l loops   Number of test loops to perform (default 20)" >&2
+    echo " -p         Use pstop/prun to pause/resume downstairs" >&2
 }
 
-while getopts 'l:' opt; do
+while getopts 'l:p' opt; do
     case "$opt" in
+        p)  pstop=1
+            if [[ ! -f /usr/bin/pstop ]] || [[ ! -f /usr/bin/prun ]]; then
+                echo "Can't find pstop/prun, which is needed for this test"
+                exit 1
+            fi
+            ;;
         l)  loops=$OPTARG
             ;;
         *)  echo "Invalid option"
@@ -85,7 +98,7 @@ echo "Tail $test_log for test output"
 # is repairing.
 if ! ${dsc} create --cleanup \
   --ds-bin "$cds" \
-  --extent-count 200 \
+  --extent-count 400 \
   --extent-size 300 >> "$dsc_test_log"; then
     echo "Failed to create downstairs regions"
     exit 1
@@ -120,67 +133,100 @@ count=1
 while [[ $count -le $loops ]]; do
     SECONDS=0
     choice=$((RANDOM % 3))
+    ds_pid=$(./target/release/dsc cmd pid -c "$choice" | sed 's/[^0-9]*//g')
 
     # Clear the log on each loop
     echo "" > "$test_log"
     echo "New loop starts now $(date) faulting: $choice" | tee -a "$test_log"
+    echo "Downstairs client $choice has pid: $ds_pid" | tee -a "$test_log"
+
     # Start sending IO.
     "$crucible_test" generic "${args[@]}" --continuous \
         -q -g "$gen" --verify-out "$verify_file" \
         --verify-in "$verify_file" \
-        --control 127.0.0.1:7777 \
+        --control 127.0.0.1:7890 \
         --retry-activate >> "$test_log" 2>&1 &
     crutest_pid=$!
     sleep 5
 
-    ${dsc} cmd stop -c "$choice" >> "$dsc_test_log" 2>&1 &
+    if [[ $pstop -eq 0 ]]; then
+        ${dsc} cmd stop -c "$choice" >> "$dsc_test_log" 2>&1 &
+    else
+        pstop "$ds_pid"
+    fi
+
     # Wait for our downstairs to fault
     echo Wait for our downstairs to fault | tee -a "$test_log"
     choice_state="undefined"
     while [[ "$choice_state" != "faulted" ]]; do
         sleep 3
         if [[ $choice -eq 0 ]]; then
-            choice_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $8}')
+            choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $8}')
         elif [[ $choice -eq 1 ]]; then
-            choice_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $10}')
+            choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $10}')
         else
-            choice_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $12}')
+            choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $12}')
         fi
     done
 
-    ${dsc} cmd start -c "$choice" >> "$dsc_test_log" 2>&1 &
+    if [[ $pstop -eq 0 ]]; then
+        ${dsc} cmd start -c "$choice" >> "$dsc_test_log" 2>&1 &
+    else
+        prun "$ds_pid"
+    fi
 
     # Wait for our downstairs to begin live_repair
     echo Wait for our downstairs to begin live_repair | tee -a "$test_log"
     choice_state="undefined"
     while [[ "$choice_state" != "live_repair" ]]; do
-        sleep 3
+        sleep 2
         if [[ $choice -eq 0 ]]; then
-            choice_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $8}')
+            choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $8}')
         elif [[ $choice -eq 1 ]]; then
-            choice_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $10}')
+            choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $10}')
         else
-            choice_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $12}')
+            choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $12}')
         fi
     done
 
-    # Give the live repair between 5 and 25 seconds to start repairing.
-    rand_sleep=$((RANDOM % 20))
+    # Give the live repair between 5 and 10 seconds to start repairing.
+    rand_sleep=$((RANDOM % 5))
     ((rand_sleep += 5))
     sleep $rand_sleep
     echo "After $rand_sleep seconds, Stop $choice again" | tee -a "$test_log"
-    ${dsc} cmd stop -c "$choice" >> "$dsc_test_log" 2>&1 &
+    if [[ $pstop -eq 0 ]]; then
+        ${dsc} cmd stop -c "$choice" >> "$dsc_test_log" 2>&1 &
+    else
+        pstop "$ds_pid"
+    fi
 
+    echo "Wait for downstairs $choice go go back to faulted"
+    choice_state="undefined"
+    while [[ "$choice_state" != "faulted" ]]; do
+        sleep 3
+        if [[ $choice -eq 0 ]]; then
+            choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $8}')
+        elif [[ $choice -eq 1 ]]; then
+            choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $10}')
+        else
+            choice_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $12}')
+        fi
+    done
+    #
     sleep 2
     echo "Start $choice for a second time" | tee -a "$test_log"
-    ${dsc} cmd start -c "$choice" >> "$dsc_test_log" 2>&1 &
+    if [[ $pstop -eq 0 ]]; then
+        ${dsc} cmd start -c "$choice" >> "$dsc_test_log" 2>&1 &
+    else
+        prun "$ds_pid"
+    fi
 
     # Now wait for all downstairs to be active
     echo Now wait for all downstairs to be active | tee -a "$test_log"
-    all_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $8","$10","$12}')
+    all_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $8","$10","$12}')
     while [[ "${all_state}" != "active,active,active" ]]; do
         sleep 5
-        all_state=$(curl -s http://127.0.0.1:7777/info | awk -F\" '{print $8","$10","$12}')
+        all_state=$(curl -s http://127.0.0.1:7890/info | awk -F\" '{print $8","$10","$12}')
     done
 
     echo All downstairs active, now stop IO test and wait for it to finish | tee -a "$test_log"
@@ -204,7 +250,7 @@ while [[ $count -le $loops ]]; do
     # Run a verify now
     if ! "$crucible_test" verify "${args[@]}" -q -g "$gen" \
       --verify-in "$verify_file" \
-      --control 127.0.0.1:7777 >> "$test_log" 2>&1 ; then
+      --control 127.0.0.1:7890 >> "$test_log" 2>&1 ; then
         if tail "$test_log" | grep dropshot > /dev/null ; then
             (( dropshot += 1 ))
         else
