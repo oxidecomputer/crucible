@@ -13,4 +13,6 @@ reqwest.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+crucible-common.workspace = true
 crucible-workspace-hack.workspace = true
+uuid.workspace = true

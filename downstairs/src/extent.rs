@@ -308,7 +308,7 @@ impl Extent {
                 "Extent {} found replacement dir, finishing replacement",
                 number
             );
-            move_replacement_extent(dir, number as usize, log)?;
+            move_replacement_extent(dir, number as usize, log, false)?;
         }
 
         // We will migrate every read-write extent with a SQLite file present.
@@ -618,6 +618,7 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
     region_dir: P,
     eid: usize,
     log: &Logger,
+    clone: bool,
 ) -> Result<(), CrucibleError> {
     let destination_dir = extent_dir(&region_dir, eid as u32);
     let extent_file_name = extent_file_name(eid as u32, ExtentType::Data);
@@ -653,13 +654,19 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
     sync_path(&original_file, log)?;
 
     // We distinguish between SQLite-backend and raw-file extents based on the
-    // presence of the `.db` file.  We should never do live migration across
-    // different extent formats; in fact, we should never live-migrate
-    // SQLite-backed extents at all, but must still handle the case of
-    // unfinished migrations.
+    // presence of the `.db` file.  Under normal conditions, we should never
+    // do extent repair across different extent formats; in fact, we should
+    // never extent repair SQLite-backed extents at all, but must still
+    // handle the case of unfinished migrations.
+    // If we are replacing a downstairs, and have created the region empty
+    // with the plan to replace it, then we can have a mismatch between
+    // what files we have and what files we want to replace them with.  When
+    // repairing a downstairs, we don't know in advance if the source of our
+    // repair will be SQLite-backend or not.
     new_file.set_extension("db");
     original_file.set_extension("db");
-    if original_file.exists() {
+
+    if original_file.exists() || (new_file.exists() && clone) {
         if let Err(e) = std::fs::copy(new_file.clone(), original_file.clone()) {
             crucible_bail!(
                 IoError,
@@ -669,6 +676,12 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
                 e
             );
         }
+        info!(
+            log,
+            "Moved file {:?} to {:?}",
+            new_file.clone(),
+            original_file.clone()
+        );
         sync_path(&original_file, log)?;
 
         // The .db-shm and .db-wal files may or may not exist.  If they don't
@@ -688,8 +701,15 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
                     e
                 );
             }
+            info!(
+                log,
+                "Moved db-shm file {:?} to {:?}",
+                new_file.clone(),
+                original_file.clone()
+            );
             sync_path(&original_file, log)?;
         } else if original_file.exists() {
+            assert!(!clone);
             info!(
                 log,
                 "Remove old file {:?} as there is no replacement",
@@ -712,8 +732,15 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
                     e
                 );
             }
+            info!(
+                log,
+                "Moved db-wal file {:?} to {:?}",
+                new_file.clone(),
+                original_file.clone()
+            );
             sync_path(&original_file, log)?;
         } else if original_file.exists() {
+            assert!(!clone);
             info!(
                 log,
                 "Remove old file {:?} as there is no replacement",

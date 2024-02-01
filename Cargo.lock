@@ -3847,6 +3847,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "chrono",
+ "crucible-common",
  "crucible-workspace-hack",
  "percent-encoding",
  "progenitor",
@@ -3854,6 +3855,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "uuid",
 ]
 
 [[package]]

@@ -32,8 +32,30 @@ use crate::extent::{
  * There is only one repair file: the raw file itself (which also contains
  * structured context and metadata at the end).
  */
-pub fn validate_repair_files(eid: usize, files: &[String]) -> bool {
-    files == [extent_file_name(eid as u32, ExtentType::Data)]
+pub fn validate_repair_files(
+    eid: usize,
+    files: &[String],
+    replacement: bool,
+) -> bool {
+    if replacement {
+        let one = vec![extent_file_name(eid as u32, ExtentType::Data)];
+
+        let mut some = one.clone();
+        some.extend(vec![extent_file_name(eid as u32, ExtentType::Db)]);
+
+        let mut all = some.clone();
+        all.extend(vec![
+            extent_file_name(eid as u32, ExtentType::DbShm),
+            extent_file_name(eid as u32, ExtentType::DbWal),
+        ]);
+
+        // For replacement, we require one, some, or all
+        files == one || files == some || files == all
+    } else {
+        // If we are not replacing our region, then there should only be just
+        // the one data file per extent.
+        files == [extent_file_name(eid as u32, ExtentType::Data)]
+    }
 }
 
 /// Wrapper type for either a job or reconciliation ID
@@ -75,7 +97,7 @@ pub struct Region {
     def: RegionDefinition,
     pub extents: Vec<Arc<Mutex<ExtentState>>>,
 
-    /// extents which are dirty and need to be flushed. should be true if the
+    /// Extents which are dirty and need to be flushed. Should be true if the
     /// dirty flag in the extent's metadata is set. When an extent is opened, if
     /// it's dirty, it's added to here. When a write is issued to an extent,
     /// it's added to here. If the write doesn't actually make the extent dirty
@@ -389,6 +411,16 @@ impl Region {
         Ok(())
     }
 
+    pub async fn close_all_extents(&mut self) -> Result<()> {
+        for eid in 0..self.def.extent_count() as usize {
+            if let Err(e) = self.close_extent(eid).await {
+                bail!("Failed closing extent {eid} with {e}");
+            }
+        }
+
+        Ok(())
+    }
+
     /**
      * Walk the list of all extents and find any that are not open.
      * Open any extents that are not.
@@ -501,25 +533,35 @@ impl Region {
      *   C. If xxx.replace dir found start at step 4 above and continue
      *      on through 6.
      *   D. Only then, open extent.
+     *
+     *   If clone == true, then we are replacing our extent files
+     *   with ones from a remote downstairs.  We make a few different
+     *   decisions as that remote downstairs might have a different
+     *   backend than our region was created with.
      */
     pub async fn repair_extent(
         &self,
         eid: usize,
         repair_addr: SocketAddr,
+        clone: bool,
     ) -> Result<(), CrucibleError> {
         // Make sure the extent:
-        // is currently closed, matches our eid, is not read-only
+        // is currently closed, matches our eid
         let mg = self.extents[eid].lock().await;
         assert!(matches!(*mg, ExtentState::Closed));
         drop(mg);
-        assert!(!self.read_only);
 
-        self.get_extent_copy(eid, repair_addr).await?;
+        // If this is not a clone, then we must not be read_only
+        if !clone {
+            assert!(!self.read_only);
+        }
+
+        self.get_extent_copy(eid, repair_addr, clone).await?;
 
         // Returning from get_extent_copy means we have copied all our
         // files and moved the copy directory to replace directory.
         // Now, replace the current extent files with the replacement ones.
-        move_replacement_extent(&self.dir, eid, &self.log)?;
+        move_replacement_extent(&self.dir, eid, &self.log, clone)?;
 
         Ok(())
     }
@@ -535,6 +577,7 @@ impl Region {
         &self,
         eid: usize,
         repair_addr: SocketAddr,
+        clone: bool,
     ) -> Result<(), CrucibleError> {
         // An extent must be closed before we replace its files.
         let mg = self.extents[eid].lock().await;
@@ -579,8 +622,9 @@ impl Region {
         );
 
         // The repair file list should always contain the extent data
-        // file itself, and nothing else.
-        if !validate_repair_files(eid, &repair_files) {
+        // file itself and nothing else, unless, we are repairing from
+        // an old snapshot, that could have a longer list of repair files.
+        if !validate_repair_files(eid, &repair_files, clone) {
             crucible_bail!(
                 RepairFilesInvalid,
                 "Invalid repair file list: {:?}",
@@ -605,11 +649,46 @@ impl Region {
             }
         };
         save_stream_to_file(extent_copy, repair_stream.into_inner()).await?;
+        let mut count = 1;
+
+        // If we are replacing our region with one from an older version
+        // that contained the SQLite, then look for and copy the database
+        // files.
+        for opt_file in &[ExtentType::Db, ExtentType::DbShm, ExtentType::DbWal]
+        {
+            let filename = extent_file_name(eid as u32, opt_file.clone());
+
+            if repair_files.contains(&filename) {
+                let extent_shm = Self::create_copy_file(
+                    copy_dir.clone(),
+                    eid,
+                    Some(opt_file.clone()),
+                )?;
+                let repair_stream = match repair_server
+                    .get_extent_file(eid as u32, opt_file.to_file_type())
+                    .await
+                {
+                    Ok(rs) => rs,
+                    Err(e) => {
+                        crucible_bail!(
+                            RepairRequestError,
+                            "Failed to get extent {} {} file: {:?}",
+                            eid,
+                            opt_file,
+                            e,
+                        );
+                    }
+                };
+                save_stream_to_file(extent_shm, repair_stream.into_inner())
+                    .await?;
+                count += 1;
+            }
+        }
 
         // After we have all files: move the repair dir.
         info!(
             self.log,
-            "Repair files downloaded, move directory {:?} to {:?}",
+            "{count} Repair files downloaded, move directory {:?} to {:?}",
             copy_dir,
             rd
         );
@@ -1180,7 +1259,7 @@ impl<'a> BatchedPwritev<'a> {
     }
 }
 
-fn config_path<P: AsRef<Path>>(dir: P) -> PathBuf {
+pub fn config_path<P: AsRef<Path>>(dir: P) -> PathBuf {
     let mut out = dir.as_ref().to_path_buf();
     out.push("region.json");
     out
@@ -2047,10 +2126,12 @@ pub(crate) mod test {
         Ok(())
     }
 
+    // wrapper to send to sub-tests for true/false here
     #[test]
     fn validate_repair_files_empty() {
         // No repair files is a failure
-        assert!(!validate_repair_files(1, &Vec::new()));
+        assert!(!validate_repair_files(1, &Vec::new(), false));
+        assert!(!validate_repair_files(1, &Vec::new(), true));
     }
 
     #[test]
@@ -2058,7 +2139,8 @@ pub(crate) mod test {
         // This is an expected list of files for an extent
         let good_files: Vec<String> = vec!["001".to_string()];
 
-        assert!(validate_repair_files(1, &good_files));
+        assert!(validate_repair_files(1, &good_files, false));
+        assert!(validate_repair_files(1, &good_files, true));
     }
 
     #[test]
@@ -2066,24 +2148,107 @@ pub(crate) mod test {
         // duplicate file names for extent 2
         let good_files: Vec<String> =
             vec!["002".to_string(), "002".to_string()];
-        assert!(!validate_repair_files(2, &good_files));
+        assert!(!validate_repair_files(2, &good_files, false));
+        assert!(!validate_repair_files(2, &good_files, true));
     }
 
     #[test]
-    fn validate_repair_files_offbyon() {
+    fn validate_repair_files_offbyon_data() {
         // Incorrect file names for extent 2
         let good_files: Vec<String> = vec!["001".to_string()];
 
-        assert!(!validate_repair_files(2, &good_files));
+        assert!(!validate_repair_files(2, &good_files, false));
+        assert!(!validate_repair_files(2, &good_files, true));
     }
 
     #[test]
-    fn validate_repair_files_old() {
-        // Old extent files
+    fn validate_repair_files_db() {
+        // db file only exists on replacement
         let good_files: Vec<String> =
             vec!["001".to_string(), "001.db".to_string()];
 
-        assert!(!validate_repair_files(1, &good_files));
+        assert!(!validate_repair_files(1, &good_files, false));
+        // Valid for replacement
+        assert!(validate_repair_files(1, &good_files, true));
+    }
+
+    #[test]
+    fn validate_repair_files_db_more() {
+        // This list can only exist for replacement
+        let many_files: Vec<String> = vec![
+            "001".to_string(),
+            "001.db".to_string(),
+            "001.db-shm".to_string(),
+            "001.db-wal".to_string(),
+        ];
+
+        assert!(!validate_repair_files(1, &many_files, false));
+        assert!(validate_repair_files(1, &many_files, true));
+    }
+
+    #[test]
+    fn validate_repair_files_duplicate_pair() {
+        // duplicate file names for extent 2
+        let good_files: Vec<String> = vec![
+            "002".to_string(),
+            "002".to_string(),
+            "002.db".to_string(),
+            "002.db".to_string(),
+        ];
+        assert!(!validate_repair_files(2, &good_files, false));
+        assert!(!validate_repair_files(2, &good_files, true));
+    }
+
+    #[test]
+    fn validate_repair_files_quad_duplicate() {
+        // Duplicate db-shm file
+        let good_files: Vec<String> = vec![
+            "001".to_string(),
+            "001.db".to_string(),
+            "001.db-shm".to_string(),
+            "001.db-shm".to_string(),
+        ];
+        assert!(!validate_repair_files(1, &good_files, false));
+        assert!(!validate_repair_files(1, &good_files, true));
+    }
+
+    #[test]
+    fn validate_repair_files_offbyon_all() {
+        // Incorrect file names for extent 2
+        let good_files: Vec<String> = vec![
+            "001".to_string(),
+            "001.db".to_string(),
+            "001.db-shm".to_string(),
+            "001.db-wal".to_string(),
+        ];
+        assert!(!validate_repair_files(2, &good_files, false));
+        assert!(!validate_repair_files(2, &good_files, true));
+    }
+
+    #[test]
+    fn validate_repair_files_too_good() {
+        // Duplicate data file in list
+        let good_files: Vec<String> = vec![
+            "001".to_string(),
+            "001".to_string(),
+            "001.db".to_string(),
+            "001.db-shm".to_string(),
+            "001.db-wal".to_string(),
+        ];
+        assert!(!validate_repair_files(1, &good_files, false));
+        assert!(!validate_repair_files(1, &good_files, true));
+    }
+
+    #[test]
+    fn validate_repair_files_not_good_enough() {
+        // Replacement requires 1, 2 or 4 files, not 3
+        let good_files: Vec<String> = vec![
+            "001".to_string(),
+            "001.db".to_string(),
+            "001.db-wal".to_string(),
+        ];
+        assert!(!validate_repair_files(1, &good_files, false));
+        assert!(!validate_repair_files(1, &good_files, true));
     }
 
     #[tokio::test]

@@ -2394,6 +2394,9 @@ impl Downstairs {
             self.log,
             "{id} request to replace downstairs {old} with {new}"
         );
+        for (i, c) in self.clients.iter().enumerate() {
+            info!(self.log, "Have target: {:?} at {:?}", c.target_addr, i);
+        }
 
         // We check all targets first to not only find our current target,
         // but to be sure our new target is not an already active target

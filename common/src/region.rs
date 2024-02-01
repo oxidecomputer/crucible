@@ -1,5 +1,6 @@
 // Copyright 2021 Oxide Computer Company
 use anyhow::{bail, Result};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -17,7 +18,16 @@ use super::*;
  * downstairs expects Block { 2, 12 }.
  */
 #[derive(
-    Deserialize, Serialize, Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord,
+    Deserialize,
+    Serialize,
+    Copy,
+    Clone,
+    Debug,
+    PartialEq,
+    Eq,
+    JsonSchema,
+    PartialOrd,
+    Ord,
 )]
 pub struct Block {
     // Value could mean a size or offset
@@ -118,7 +128,7 @@ impl Block {
     }
 }
 
-#[derive(Deserialize, Serialize, Copy, Clone, Debug, PartialEq)]
+#[derive(Deserialize, Serialize, Copy, Clone, Debug, JsonSchema, PartialEq)]
 pub struct RegionDefinition {
     /**
      * The size of each block in bytes. Must be a power of 2, minimum 512.
@@ -168,6 +178,55 @@ impl RegionDefinition {
             database_read_version: DATABASE_READ_VERSION,
             database_write_version: DATABASE_WRITE_VERSION,
         })
+    }
+
+    // Compare two RegionDefinitions and verify they are compatable.
+    // Compatable is valid if all fields are the same, expect for the
+    // UUID. The UUID should be different.
+    pub fn compatable(
+        self,
+        other: RegionDefinition,
+    ) -> Result<(), CrucibleError> {
+        // These fields should be the same.
+        if self.block_size != other.block_size {
+            return Err(CrucibleError::RegionIncompatable(
+                "block_size".to_string(),
+            ));
+        }
+        if self.extent_size != other.extent_size {
+            return Err(CrucibleError::RegionIncompatable(
+                "extent_size".to_string(),
+            ));
+        }
+        if self.extent_count != other.extent_count {
+            return Err(CrucibleError::RegionIncompatable(
+                "extent_count".to_string(),
+            ));
+        }
+        if self.encrypted != other.encrypted {
+            return Err(CrucibleError::RegionIncompatable(
+                "encrypted".to_string(),
+            ));
+        }
+        if self.database_read_version != other.database_read_version {
+            return Err(CrucibleError::RegionIncompatable(
+                "database_read_version".to_string(),
+            ));
+        }
+        if self.database_write_version != other.database_write_version {
+            return Err(CrucibleError::RegionIncompatable(
+                "database_write_version".to_string(),
+            ));
+        }
+
+        // If the UUIDs are the same, this is invalid.
+        if self.uuid == other.uuid {
+            return Err(CrucibleError::RegionIncompatable(
+                "UUIDs are the same".to_string(),
+            ));
+        }
+
+        Ok(())
     }
 
     pub fn database_read_version(&self) -> usize {
@@ -488,5 +547,114 @@ mod test {
          *   IO         |---|---|---|---|
          */
         assert!(rd.validate_io(Block::new(1, 9), 2048).is_err());
+    }
+
+    fn test_rd() -> RegionDefinition {
+        RegionDefinition {
+            block_size: 512,
+            extent_size: Block::new(10, 9),
+            extent_count: 8,
+            uuid: Uuid::new_v4(),
+            encrypted: false,
+            database_read_version: DATABASE_READ_VERSION,
+            database_write_version: DATABASE_WRITE_VERSION,
+        }
+    }
+
+    #[test]
+    fn test_region_compare_block() {
+        let mut rd1 = test_rd();
+        let rd2 = test_rd();
+
+        // Basic positive test first.
+        assert_eq!(rd1.compatable(rd2), Ok(()));
+
+        rd1.block_size = 4096;
+        assert!(rd1.compatable(rd2).is_err());
+
+        let rd1 = test_rd();
+        let mut rd2 = test_rd();
+        rd2.block_size = 4096;
+        assert!(rd1.compatable(rd2).is_err());
+    }
+
+    #[test]
+    fn test_region_compare_extent_size() {
+        let mut rd1 = test_rd();
+        let rd2 = test_rd();
+
+        rd1.extent_size = Block::new(2, 9);
+        assert!(rd1.compatable(rd2).is_err());
+
+        let rd1 = test_rd();
+        let mut rd2 = test_rd();
+        rd2.extent_size = Block::new(2, 9);
+        assert!(rd1.compatable(rd2).is_err());
+    }
+
+    #[test]
+    fn test_region_compare_extent_count() {
+        let mut rd1 = test_rd();
+        let rd2 = test_rd();
+
+        rd1.extent_count = 9;
+        assert!(rd1.compatable(rd2).is_err());
+
+        let rd1 = test_rd();
+        let mut rd2 = test_rd();
+        rd2.extent_count = 9;
+        assert!(rd1.compatable(rd2).is_err());
+    }
+
+    #[test]
+    fn test_region_compare_uuid() {
+        // Verify region compare, UUIDs must be different
+        let mut rd1 = test_rd();
+        let rd2 = test_rd();
+
+        rd1.uuid = rd2.uuid;
+        assert!(rd1.compatable(rd2).is_err());
+    }
+
+    #[test]
+    fn test_region_compare_encrypted() {
+        let mut rd1 = test_rd();
+        let rd2 = test_rd();
+
+        rd1.encrypted = true;
+        assert!(rd1.compatable(rd2).is_err());
+
+        let rd1 = test_rd();
+        let mut rd2 = test_rd();
+        rd2.encrypted = true;
+        assert!(rd1.compatable(rd2).is_err());
+    }
+
+    #[test]
+    fn test_region_compare_db_read_version() {
+        let mut rd1 = test_rd();
+        let rd2 = test_rd();
+
+        rd1.database_read_version = DATABASE_READ_VERSION + 1;
+        assert!(rd1.compatable(rd2).is_err());
+
+        let rd1 = test_rd();
+        let mut rd2 = test_rd();
+        rd2.database_read_version = DATABASE_READ_VERSION + 1;
+        assert!(rd1.compatable(rd2).is_err());
+    }
+
+    #[test]
+    fn test_region_compare_db_write_version() {
+        let mut rd1 = test_rd();
+        let rd2 = test_rd();
+
+        rd1.database_write_version = DATABASE_WRITE_VERSION + 1;
+        assert!(rd1.compatable(rd2).is_err());
+
+        let rd1 = test_rd();
+        let mut rd2 = test_rd();
+        rd2.database_write_version = DATABASE_WRITE_VERSION + 1;
+        assert!(rd1.compatable(rd2).is_err());
     }
 }

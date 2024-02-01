@@ -16,6 +16,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::*;
+//use crucible_common::RegionDefinition;
 use crate::extent::{extent_dir, extent_file_name, extent_path, ExtentType};
 
 /**
@@ -23,6 +24,7 @@ use crate::extent::{extent_dir, extent_file_name, extent_path, ExtentType};
  */
 pub struct FileServerContext {
     region_dir: PathBuf,
+    read_only: bool,
 }
 
 pub fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
@@ -35,6 +37,8 @@ fn build_api() -> ApiDescription<Arc<FileServerContext>> {
     let mut api = ApiDescription::new();
     api.register(get_extent_file).unwrap();
     api.register(get_files_for_extent).unwrap();
+    api.register(get_region_info).unwrap();
+    api.register(get_region_mode).unwrap();
 
     api
 }
@@ -65,11 +69,15 @@ pub async fn repair_main(
      */
     let ds = ds.lock().await;
     let region_dir = ds.region.dir.clone();
+    let read_only = ds.read_only;
     drop(ds);
 
-    let context = FileServerContext { region_dir };
+    info!(log, "Repair listens on {} for path:{:?}", addr, region_dir);
+    let context = FileServerContext {
+        region_dir,
+        read_only,
+    };
 
-    info!(log, "Repair listens on {}", addr);
     /*
      * Set up the server.
      */
@@ -126,10 +134,10 @@ async fn get_extent_file(
             extent_path.set_extension("db");
         }
         FileType::DatabaseSharedMemory => {
-            extent_path.set_extension("db-wal");
+            extent_path.set_extension("db-shm");
         }
         FileType::DatabaseLog => {
-            extent_path.set_extension("db-shm");
+            extent_path.set_extension("db-wal");
         }
         FileType::Data => (),
     };
@@ -159,6 +167,7 @@ async fn get_a_file(path: PathBuf) -> Result<Response<Body>, HttpError> {
             "Expected a file, found a directory".to_string(),
         ))
     } else {
+        println!("Get file at: {:?}", path);
         let file = tokio::fs::File::open(&path).await.map_err(|e| {
             HttpError::for_bad_request(
                 None,
@@ -226,7 +235,12 @@ fn extent_file_list(
     eid: u32,
 ) -> Result<Vec<String>, HttpError> {
     let mut files = Vec::new();
-    let possible_files = vec![(extent_file_name(eid, ExtentType::Data), true)];
+    let possible_files = vec![
+        (extent_file_name(eid, ExtentType::Data), true),
+        (extent_file_name(eid, ExtentType::Db), false),
+        (extent_file_name(eid, ExtentType::DbShm), false),
+        (extent_file_name(eid, ExtentType::DbWal), false),
+    ];
 
     for (file, required) in possible_files.into_iter() {
         let mut fullname = extent_dir.clone();
@@ -239,6 +253,39 @@ fn extent_file_list(
     }
 
     Ok(files)
+}
+/// Return the RegionDefinition describing our region.
+#[endpoint {
+    method = GET,
+    path = "/region-info",
+}]
+async fn get_region_info(
+    rqctx: RequestContext<Arc<FileServerContext>>,
+) -> Result<HttpResponseOk<crucible_common::RegionDefinition>, HttpError> {
+    let region_info = rqctx.context().region_dir.clone();
+    let cp = region::config_path(region_info);
+
+    let def: crucible_common::RegionDefinition = match read_json(&cp) {
+        Ok(def) => def,
+        Err(e) => {
+            let msg = format!("Error {e} opening {:?}", cp);
+            return Err(HttpError::for_bad_request(None, msg));
+        }
+    };
+    Ok(HttpResponseOk(def))
+}
+
+/// Return the RegionDefinition describing our region.
+#[endpoint {
+    method = GET,
+    path = "/region-mode",
+}]
+async fn get_region_mode(
+    rqctx: RequestContext<Arc<FileServerContext>>,
+) -> Result<HttpResponseOk<bool>, HttpError> {
+    let read_only = rqctx.context().read_only;
+
+    Ok(HttpResponseOk(read_only))
 }
 
 #[cfg(test)]

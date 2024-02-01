@@ -158,6 +158,9 @@ pub enum CrucibleError {
 
     #[error("missing block context for non-empty block")]
     MissingBlockContext,
+
+    #[error("Incompatable RegionDefinition {0}")]
+    RegionIncompatable(String),
 }
 
 impl From<std::io::Error> for CrucibleError {
@@ -363,6 +366,7 @@ impl From<CrucibleError> for dropshot::HttpError {
             | CrucibleError::ModifyingReadOnlyRegion
             | CrucibleError::OffsetInvalid
             | CrucibleError::OffsetUnaligned
+            | CrucibleError::RegionIncompatable(_)
             | CrucibleError::ReplaceRequestInvalid(_)
             | CrucibleError::SnapshotExistsAlready(_)
             | CrucibleError::Unsupported(_) => {

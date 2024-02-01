@@ -31,18 +31,47 @@ mkdir "${testdir}"
 
 set -o errexit
 uuid="12345678-1234-1234-1234-000000000001"
-dir="${testdir}/export"
+region_dir="${testdir}/region"
 exp="${testdir}/exported_file"
 imp="${testdir}/import"
+clone_dir="${testdir}/clone"
+clone_exp="${testdir}/clone_export_file"
 echo "Create file for import"
 dd if=/dev/urandom of="$imp" bs=512 count=300
 
 echo "Import region"
-${cds} create -i "$imp" -u $uuid -d "$dir"
+${cds} create -i "$imp" -u $uuid -d "$region_dir"
 echo "Export region"
-${cds} export -d "$dir" -e "$exp" --count 300
+${cds} export -d "$region_dir" -e "$exp" --count 300
 
 diff $imp $exp
-
 echo "Import Export test passed"
+
+# We can make use of the export function to test downstairs clone
+echo "Test clone"
+echo "Starting downstairs"
+${cds} run -d "$region_dir" -p 8810 --mode ro > ${testdir}/ds_out.txt &
+ds_pid=$!
+
+sleep 1
+if ! ps -p $ds_pid; then
+    echo "Failed to start downstairs"
+    exit 1
+else
+    echo "Downstairs running"
+fi
+
+echo "Creating new downstairs"
+${cds} create -u $(uuidgen) -d "$clone_dir" --extent-size 100 --extent-count 15 --block-size 512
+echo "Cloning existing downstairs"
+${cds} clone -d "$clone_dir" -s 127.0.0.1:12810
+
+echo "Verify clone using export"
+${cds} export -d "$clone_dir" -e "$clone_exp" --count 300
+
+diff $imp $clone_exp
+
+echo "Stopping downstairs"
+kill "$ds_pid"
+echo "Clone test passed"
 rm -rf ${testdir}

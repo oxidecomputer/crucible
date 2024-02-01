@@ -35,6 +35,8 @@ downstairs UUID and is intended to provide a sample to build off of.
 
 ## test_ds.sh
 Test import then export for crucible downstairs.
+Then, test the clone subcommand and verify that the cloned downstairs
+exports the same file as the original downstairs.
 
 ## test_nightly.sh
 This runs a selection of tests from this directory and reports their

@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use crucible::*;
 use crucible_common::{build_logger, Block, CrucibleError, MAX_BLOCK_SIZE};
+use repair_client::Client;
 
 use anyhow::{bail, Result};
 use bytes::BytesMut;
@@ -935,7 +936,7 @@ where
                 );
                 match d
                     .region
-                    .repair_extent(extent_id, source_repair_address)
+                    .repair_extent(extent_id, source_repair_address, false)
                     .await
                 {
                     Ok(()) => Message::RepairAckId { repair_id },
@@ -2304,7 +2305,7 @@ impl Downstairs {
                     Err(CrucibleError::UpstairsInactive)
                 } else {
                     self.region
-                        .repair_extent(*extent, *source_repair_address)
+                        .repair_extent(*extent, *source_repair_address, false)
                         .await
                 };
                 debug!(
@@ -3291,7 +3292,7 @@ pub async fn start_downstairs(
          * it and wait for another connection. Downstairs can handle
          * multiple Upstairs connecting but only one active one.
          */
-        info!(log, "listening on {}", listen_on);
+        info!(log, "downstairs listening on {}", listen_on);
         loop {
             let (sock, raddr) = listener.accept().await?;
 
@@ -3348,6 +3349,72 @@ pub async fn start_downstairs(
     });
 
     Ok(join_handle)
+}
+
+/// Clone the extent files in a region from another running downstairs.
+///
+/// Use the reconcile/repair extent methods to copy another downstairs.
+/// The source downstairs must have the same RegionDefinition as we do,
+/// and both downstairs must be running in read only mode.
+pub async fn start_clone(
+    d: Arc<Mutex<Downstairs>>,
+    source: SocketAddr,
+) -> Result<()> {
+    let info = crucible_common::BuildInfo::default();
+    let log = d.lock().await.log.new(o!("task" => "main".to_string()));
+    info!(log, "Crucible Version: {}", info);
+    info!(
+        log,
+        "Upstairs <-> Downstairs Message Version: {}", CRUCIBLE_MESSAGE_VERSION
+    );
+
+    info!(log, "Connecting to {source} to obtain our extent files.");
+
+    let url = format!("http://{:?}", source);
+    let repair_server = Client::new(&url);
+    let source_def = match repair_server.get_region_info().await {
+        Ok(def) => def.into_inner(),
+        Err(e) => {
+            bail!("Failed to get source region definition: {e}");
+        }
+    };
+    info!(log, "The source RegionDefinition is: {:?}", source_def);
+
+    let source_ro_mode = match repair_server.get_region_mode().await {
+        Ok(ro) => ro.into_inner(),
+        Err(e) => {
+            bail!("Failed to get source mode: {e}");
+        }
+    };
+
+    info!(log, "The source mode is: {:?}", source_ro_mode);
+    if !source_ro_mode {
+        bail!("Source downstairs is not read only");
+    }
+
+    let mut ds = d.lock().await;
+
+    let my_def = ds.region.def();
+    info!(log, "my def is {:?}", my_def);
+
+    if let Err(e) = my_def.compatable(source_def) {
+        bail!("Incompatible region definitions: {e}");
+    }
+
+    if let Err(e) = ds.region.close_all_extents().await {
+        bail!("Failed to close all extents: {e}");
+    }
+
+    for eid in 0..my_def.extent_count() as usize {
+        info!(log, "Repair extent {eid}");
+
+        if let Err(e) = ds.region.repair_extent(eid, source, true).await {
+            bail!("repair extent {eid} returned: {e}");
+        }
+    }
+    info!(log, "Region has been cloned");
+
+    Ok(())
 }
 
 #[cfg(test)]
