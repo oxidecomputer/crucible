@@ -16,7 +16,6 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::*;
-//use crucible_common::RegionDefinition;
 use crate::extent::{extent_dir, extent_file_name, extent_path, ExtentType};
 
 /**
