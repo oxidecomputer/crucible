@@ -231,11 +231,6 @@ fn parse_duration(arg: &str) -> Result<Duration, std::num::ParseIntError> {
 async fn main() -> Result<()> {
     let args = Args::try_parse()?;
 
-    /*
-     * Everyone needs a region
-     */
-    let mut region;
-
     let log = build_logger();
 
     match args {
@@ -295,8 +290,7 @@ async fn main() -> Result<()> {
                 no_color,
                 log,
             )
-            .await?;
-            Ok(())
+            .await
         }
         Args::Export {
             count,
@@ -305,7 +299,7 @@ async fn main() -> Result<()> {
             skip,
         } => {
             // Open Region read only
-            region = region::Region::open(
+            let mut region = region::Region::open(
                 data,
                 Default::default(),
                 true,
@@ -314,8 +308,7 @@ async fn main() -> Result<()> {
             )
             .await?;
 
-            downstairs_export(&mut region, export_path, skip, count).await?;
-            Ok(())
+            downstairs_export(&mut region, export_path, skip, count).await
         }
         Args::Run {
             address,
@@ -464,9 +457,7 @@ async fn main() -> Result<()> {
                 DynoFlushConfig::None
             };
 
-            dynamometer(region, num_writes, samples, flush_config).await?;
-
-            Ok(())
+            dynamometer(region, num_writes, samples, flush_config).await
         }
     }
 }

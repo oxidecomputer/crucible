@@ -2,7 +2,6 @@
 #![cfg_attr(usdt_need_asm, feature(asm))]
 #![cfg_attr(all(target_os = "macos", usdt_need_asm_sym), feature(asm_sym))]
 
-use futures::executor;
 use futures::lock::{Mutex, MutexGuard};
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -23,8 +22,7 @@ use futures::{SinkExt, StreamExt};
 use rand::prelude::*;
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
 use uuid::Uuid;
@@ -577,7 +575,7 @@ async fn proc_frame<WT>(
     ad: &Mutex<Downstairs>,
     m: Message,
     fw: &Mutex<FramedWrite<WT, CrucibleEncoder>>,
-    job_channel_tx: &Mutex<Sender<()>>,
+    job_channel_tx: &mpsc::Sender<()>,
 ) -> Result<()>
 where
     WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send,
@@ -978,7 +976,7 @@ where
      */
     if let Some(new_ds_id) = new_ds_id {
         cdt::work__start!(|| new_ds_id.0);
-        job_channel_tx.lock().await.send(()).await?;
+        job_channel_tx.send(()).await?;
     }
 
     Ok(())
@@ -987,7 +985,7 @@ where
 async fn do_work_task<T>(
     ads: &Mutex<Downstairs>,
     upstairs_connection: UpstairsConnection,
-    mut job_channel_rx: Receiver<()>,
+    mut job_channel_rx: mpsc::Receiver<()>,
     fw: &Mutex<FramedWrite<T, CrucibleEncoder>>,
 ) -> Result<()>
 where
@@ -1093,14 +1091,11 @@ where
                             // The job completed successfully, so inform the
                             // Upstairs
 
-                            ads.lock()
-                                .await
-                                .complete_work_stat(
-                                    upstairs_connection,
-                                    &m,
-                                    job_id,
-                                )
-                                .await?;
+                            ads.lock().await.complete_work_stat(
+                                upstairs_connection,
+                                &m,
+                                job_id,
+                            )?;
 
                             // Notify the upstairs before completing work
                             let mut fw = fw.lock().await;
@@ -1206,9 +1201,12 @@ where
 
     let mut upstairs_connection: Option<UpstairsConnection> = None;
 
-    let (_another_upstairs_active_tx, mut another_upstairs_active_rx) =
-        channel::<UpstairsConnection>(1);
-    let another_upstairs_active_tx = Arc::new(_another_upstairs_active_tx);
+    let (another_upstairs_active_tx, mut another_upstairs_active_rx) =
+        oneshot::channel::<UpstairsConnection>();
+
+    // Put the oneshot tx side into an Option so we can move it out at the
+    // appropriate point in negotiation.
+    let mut another_upstairs_active_tx = Some(another_upstairs_active_tx);
 
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
     enum NegotiationState {
@@ -1251,9 +1249,9 @@ where
              * activated, and then another did (in order to send this thread
              * this signal).
              */
-            new_upstairs_connection = another_upstairs_active_rx.recv() => {
+            new_upstairs_connection = &mut another_upstairs_active_rx => {
                 match new_upstairs_connection {
-                    None => {
+                    Err(e) => {
                         // There shouldn't be a path through the code where we
                         // close the channel before sending a message through it
                         // (see [`promote_to_active`]), though [`clear_active`]
@@ -1265,10 +1263,10 @@ where
                         // running without the ability for another Upstairs to
                         // kick out the previous one during activation.
                         bail!("another_upstairs_active_rx closed during \
-                            negotiation");
+                            negotiation: {e:?}");
                     }
 
-                    Some(new_upstairs_connection) => {
+                    Ok(new_upstairs_connection) => {
                         // another upstairs negotiated and went active after
                         // this one did (and before this one completed
                         // negotiation)
@@ -1514,7 +1512,9 @@ where
 
                                 ds.promote_to_active(
                                     *upstairs_connection,
-                                    another_upstairs_active_tx.clone()
+                                    another_upstairs_active_tx
+                                        .take()
+                                        .expect("no oneshot tx"),
                                 ).await?;
                             }
                             negotiated = NegotiationState::PromotedToActive;
@@ -1654,7 +1654,7 @@ async fn resp_loop<RT, WT>(
     ads: &Arc<Mutex<Downstairs>>,
     mut fr: FramedRead<RT, CrucibleDecoder>,
     fw: Arc<Mutex<FramedWrite<WT, CrucibleEncoder>>>,
-    mut another_upstairs_active_rx: mpsc::Receiver<UpstairsConnection>,
+    mut another_upstairs_active_rx: oneshot::Receiver<UpstairsConnection>,
     upstairs_connection: UpstairsConnection,
 ) -> Result<()>
 where
@@ -1670,8 +1670,7 @@ where
 
     // Give our work queue a little more space than we expect the upstairs
     // to ever send us.
-    let (_job_channel_tx, job_channel_rx) = channel(MAX_ACTIVE_COUNT + 50);
-    let job_channel_tx = Arc::new(Mutex::new(_job_channel_tx));
+    let (job_channel_tx, job_channel_rx) = mpsc::channel(MAX_ACTIVE_COUNT + 50);
 
     /*
      * Create tasks for:
@@ -1697,7 +1696,7 @@ where
     };
 
     let (message_channel_tx, mut message_channel_rx) =
-        channel(MAX_ACTIVE_COUNT + 50);
+        mpsc::channel(MAX_ACTIVE_COUNT + 50);
     let pf_task = {
         let adc = ads.clone();
         let tx = job_channel_tx.clone();
@@ -1735,7 +1734,7 @@ where
              * trigger once then never again.
              */
             _ = sleep_until(lossy_interval), if lossy => {
-                job_channel_tx.lock().await.send(()).await?;
+                job_channel_tx.send(()).await?;
                 lossy_interval = deadline_secs(5);
             }
             /*
@@ -1758,9 +1757,9 @@ where
              * activated, and then another did (in order to send this thread
              * this signal).
              */
-            new_upstairs_connection = another_upstairs_active_rx.recv() => {
+            new_upstairs_connection = &mut another_upstairs_active_rx => {
                 match new_upstairs_connection {
-                    None => {
+                    Err(e) => {
                         // There shouldn't be a path through the code where we
                         // close the channel before sending a message through it
                         // (see [`promote_to_active`]), though [`clear_active`]
@@ -1772,10 +1771,10 @@ where
                         // running without the ability for another Upstairs to
                         // kick out the previous one during activation.
                         bail!("another_upstairs_active_rx closed during \
-                            resp_loop");
+                            resp_loop: {e:?}");
                     }
 
-                    Some(new_upstairs_connection) => {
+                    Ok(new_upstairs_connection) => {
                         // another upstairs negotiated and went active after
                         // this one did
                         warn!(
@@ -1846,7 +1845,7 @@ where
 pub struct ActiveUpstairs {
     pub upstairs_connection: UpstairsConnection,
     pub work: Mutex<Work>,
-    pub terminate_sender: Arc<Sender<UpstairsConnection>>,
+    pub terminate_sender: oneshot::Sender<UpstairsConnection>,
 }
 
 /*
@@ -1883,7 +1882,7 @@ impl Downstairs {
         log: Logger,
     ) -> Self {
         let dss = DsStatOuter {
-            ds_stat_wrap: Arc::new(Mutex::new(DsCountStat::new(
+            ds_stat_wrap: Arc::new(std::sync::Mutex::new(DsCountStat::new(
                 region.def().uuid(),
             ))),
         };
@@ -2416,7 +2415,7 @@ impl Downstairs {
      * After we complete a read/write/flush on a region, update the
      * Oximeter counter for the operation.
      */
-    async fn complete_work_stat(
+    fn complete_work_stat(
         &mut self,
         _upstairs_connection: UpstairsConnection,
         m: &Message,
@@ -2426,19 +2425,19 @@ impl Downstairs {
         match m {
             Message::FlushAck { .. } => {
                 cdt::submit__flush__done!(|| ds_id.0);
-                self.dss.add_flush().await;
+                self.dss.add_flush();
             }
             Message::WriteAck { .. } => {
                 cdt::submit__write__done!(|| ds_id.0);
-                self.dss.add_write().await;
+                self.dss.add_write();
             }
             Message::WriteUnwrittenAck { .. } => {
                 cdt::submit__writeunwritten__done!(|| ds_id.0);
-                self.dss.add_write().await;
+                self.dss.add_write();
             }
             Message::ReadResponse { .. } => {
                 cdt::submit__read__done!(|| ds_id.0);
-                self.dss.add_read().await;
+                self.dss.add_read();
             }
             Message::ExtentLiveClose { .. } => {
                 cdt::submit__el__close__done!(|| ds_id.0);
@@ -2464,7 +2463,7 @@ impl Downstairs {
     async fn promote_to_active(
         &mut self,
         upstairs_connection: UpstairsConnection,
-        tx: Arc<Sender<UpstairsConnection>>,
+        tx: oneshot::Sender<UpstairsConnection>,
     ) -> Result<()> {
         if self.read_only {
             // Multiple active read-only sessions are allowed, but multiple
@@ -2472,8 +2471,9 @@ impl Downstairs {
             // previously active session for this UUID if one exists. Do this
             // while holding the work lock so the previously active Upstairs
             // isn't adding more work.
-            if let Some(active_upstairs) =
-                self.active_upstairs.get(&upstairs_connection.upstairs_id)
+            if let Some(active_upstairs) = self
+                .active_upstairs
+                .remove(&upstairs_connection.upstairs_id)
             {
                 let mut work = active_upstairs.work.lock().await;
 
@@ -2485,10 +2485,7 @@ impl Downstairs {
                     upstairs_connection,
                 );
 
-                match active_upstairs
-                    .terminate_sender
-                    .send(upstairs_connection)
-                    .await
+                match active_upstairs.terminate_sender.send(upstairs_connection)
                 {
                     Ok(_) => {}
                     Err(e) => {
@@ -2649,7 +2646,6 @@ impl Downstairs {
                     match active_upstairs
                         .terminate_sender
                         .send(upstairs_connection)
-                        .await
                     {
                         Ok(_) => {}
                         Err(e) => {
@@ -3326,7 +3322,7 @@ pub async fn start_downstairs(
                  * from an upstairs
                  */
                 let mut ds = d.lock().await;
-                ds.dss.add_connection().await;
+                ds.dss.add_connection();
             }
 
             let dd = d.clone();
@@ -3357,7 +3353,7 @@ mod test {
     use std::net::Ipv4Addr;
     use tempfile::{tempdir, TempDir};
     use tokio::net::TcpSocket;
-    use tokio::sync::mpsc::error::TryRecvError;
+    use tokio::sync::oneshot::error::TryRecvError;
 
     // Create a simple logger
     fn csl() -> Logger {
@@ -3555,12 +3551,10 @@ mod test {
         };
 
         // For the other_active_upstairs, unused.
-        let (_tx, mut _rx) = channel(1);
-        let tx = Arc::new(_tx);
+        let (tx, mut _rx) = oneshot::channel();
 
         let mut ds = ads.lock().await;
-        ds.promote_to_active(upstairs_connection, tx.clone())
-            .await?;
+        ds.promote_to_active(upstairs_connection, tx).await?;
 
         let rio = IOop::Read {
             dependencies: Vec::new(),
@@ -3663,12 +3657,10 @@ mod test {
         };
 
         // For the other_active_upstairs, unused.
-        let (_tx, mut _rx) = channel(1);
-        let tx = Arc::new(_tx);
+        let (tx, mut _rx) = oneshot::channel();
 
         let mut ds = ads.lock().await;
-        ds.promote_to_active(upstairs_connection, tx.clone())
-            .await?;
+        ds.promote_to_active(upstairs_connection, tx).await?;
 
         let rio = IOop::ExtentClose {
             dependencies: Vec::new(),
@@ -3753,12 +3745,10 @@ mod test {
         };
 
         // For the other_active_upstairs, unused.
-        let (_tx, mut _rx) = channel(1);
-        let tx = Arc::new(_tx);
+        let (tx, mut _rx) = oneshot::channel();
 
         let mut ds = ads.lock().await;
-        ds.promote_to_active(upstairs_connection, tx.clone())
-            .await?;
+        ds.promote_to_active(upstairs_connection, tx).await?;
 
         let rio = IOop::ExtentClose {
             dependencies: Vec::new(),
@@ -3932,12 +3922,10 @@ mod test {
             session_id: Uuid::new_v4(),
             gen,
         };
-        let (_tx, mut _rx) = channel(1);
-        let tx = Arc::new(_tx);
+        let (tx, mut _rx) = oneshot::channel();
 
         let mut ds = ads.lock().await;
-        ds.promote_to_active(upstairs_connection, tx.clone())
-            .await?;
+        ds.promote_to_active(upstairs_connection, tx).await?;
 
         let eid = 3;
 
@@ -4066,12 +4054,10 @@ mod test {
             session_id: Uuid::new_v4(),
             gen,
         };
-        let (_tx, mut _rx) = channel(1);
-        let tx = Arc::new(_tx);
+        let (tx, mut _rx) = oneshot::channel();
 
         let mut ds = ads.lock().await;
-        ds.promote_to_active(upstairs_connection, tx.clone())
-            .await?;
+        ds.promote_to_active(upstairs_connection, tx).await?;
 
         let eid = 0;
 
@@ -4184,12 +4170,10 @@ mod test {
         };
 
         // For the other_active_upstairs, unused.
-        let (_tx, mut _rx) = channel(1);
-        let tx = Arc::new(_tx);
+        let (tx, mut _rx) = oneshot::channel();
 
         let mut ds = ads.lock().await;
-        ds.promote_to_active(upstairs_connection, tx.clone())
-            .await?;
+        ds.promote_to_active(upstairs_connection, tx).await?;
 
         let eid = 1;
 
@@ -4305,11 +4289,9 @@ mod test {
             gen,
         };
 
-        let (_tx, mut _rx) = channel(1);
-        let tx = Arc::new(_tx);
+        let (tx, mut _rx) = oneshot::channel();
         let mut ds = ads.lock().await;
-        ds.promote_to_active(upstairs_connection, tx.clone())
-            .await?;
+        ds.promote_to_active(upstairs_connection, tx).await?;
 
         let eid_one = 1;
         let eid_two = 2;
@@ -5560,8 +5542,7 @@ mod test {
             gen: 1,
         };
 
-        let (_tx, mut _rx) = channel(1);
-        let tx = Arc::new(_tx);
+        let (tx, mut _rx) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection, tx).await?;
@@ -5581,8 +5562,7 @@ mod test {
             gen: 1,
         };
 
-        let (_tx, mut _rx) = channel(1);
-        let tx = Arc::new(_tx);
+        let (tx, mut _rx) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection, tx).await?;
@@ -5611,11 +5591,8 @@ mod test {
             gen: 1,
         };
 
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
-
-        let (tx2, mut rx2) = channel(1);
-        let tx2 = Arc::new(tx2);
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
@@ -5628,10 +5605,7 @@ mod test {
         assert!(res.is_err());
 
         assert!(matches!(rx1.try_recv().unwrap_err(), TryRecvError::Empty));
-        assert!(matches!(
-            rx2.try_recv().unwrap_err(),
-            TryRecvError::Disconnected
-        ));
+        assert!(matches!(rx2.try_recv().unwrap_err(), TryRecvError::Closed));
 
         assert_eq!(ds.active_upstairs().len(), 1);
 
@@ -5662,11 +5636,8 @@ mod test {
             gen: 1,
         };
 
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
-
-        let (tx2, mut rx2) = channel(1);
-        let tx2 = Arc::new(tx2);
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         println!("ds1: {:?}", ds);
@@ -5681,10 +5652,7 @@ mod test {
         assert!(res.is_err());
 
         assert!(matches!(rx1.try_recv().unwrap_err(), TryRecvError::Empty));
-        assert!(matches!(
-            rx2.try_recv().unwrap_err(),
-            TryRecvError::Disconnected
-        ));
+        assert!(matches!(rx2.try_recv().unwrap_err(), TryRecvError::Closed));
 
         assert_eq!(ds.active_upstairs().len(), 1);
 
@@ -5716,11 +5684,8 @@ mod test {
             gen: 1,
         };
 
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
-
-        let (tx2, mut rx2) = channel(1);
-        let tx2 = Arc::new(tx2);
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
@@ -5733,10 +5698,7 @@ mod test {
         assert!(res.is_err());
 
         assert!(matches!(rx1.try_recv().unwrap_err(), TryRecvError::Empty));
-        assert!(matches!(
-            rx2.try_recv().unwrap_err(),
-            TryRecvError::Disconnected
-        ));
+        assert!(matches!(rx2.try_recv().unwrap_err(), TryRecvError::Closed));
 
         assert_eq!(ds.active_upstairs().len(), 1);
 
@@ -5766,11 +5728,8 @@ mod test {
             gen: 2,
         };
 
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
-
-        let (tx2, mut rx2) = channel(1);
-        let tx2 = Arc::new(tx2);
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
@@ -5810,11 +5769,8 @@ mod test {
             gen: 1,
         };
 
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
-
-        let (tx2, mut rx2) = channel(1);
-        let tx2 = Arc::new(tx2);
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
@@ -5853,11 +5809,8 @@ mod test {
             gen: 1,
         };
 
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
-
-        let (tx2, mut rx2) = channel(1);
-        let tx2 = Arc::new(tx2);
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
@@ -5895,11 +5848,8 @@ mod test {
             gen: 1,
         };
 
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
-
-        let (tx2, mut rx2) = channel(1);
-        let tx2 = Arc::new(tx2);
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
@@ -6000,8 +5950,7 @@ mod test {
         };
 
         // For the other_active_upstairs, unused.
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
+        let (tx1, mut rx1) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
@@ -6038,9 +5987,7 @@ mod test {
             gen: 11,
         };
 
-        let (_tx2, mut _rx2) = channel(1);
-        let tx2 = Arc::new(_tx2);
-
+        let (tx2, mut _rx2) = oneshot::channel();
         ds.promote_to_active(upstairs_connection_2, tx2).await?;
 
         assert_eq!(rx1.try_recv().unwrap(), upstairs_connection_2);
@@ -6103,8 +6050,7 @@ mod test {
         };
 
         // For the other_active_upstairs, unused.
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
+        let (tx1, mut rx1) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
@@ -6141,9 +6087,7 @@ mod test {
             gen: 11,
         };
 
-        let (_tx2, mut _rx2) = channel(1);
-        let tx2 = Arc::new(_tx2);
-
+        let (tx2, mut _rx2) = oneshot::channel();
         ds.promote_to_active(upstairs_connection_2, tx2).await?;
 
         assert_eq!(rx1.try_recv().unwrap(), upstairs_connection_2);
@@ -6206,8 +6150,7 @@ mod test {
         };
 
         // For the other_active_upstairs, unused.
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
+        let (tx1, mut rx1) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
@@ -6237,9 +6180,7 @@ mod test {
             .unwrap();
 
         // Before complete_work, the same Upstairs reconnects and goes active
-        let (_tx2, mut _rx2) = channel(1);
-        let tx2 = Arc::new(_tx2);
-
+        let (tx2, mut _rx2) = oneshot::channel();
         ds.promote_to_active(upstairs_connection_1, tx2).await?;
 
         // In the real downstairs, there would be two tasks now that both
