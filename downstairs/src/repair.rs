@@ -70,16 +70,7 @@ pub async fn repair_main(
     let ds = ds.lock().await;
     let region_dir = ds.region.dir.clone();
     let read_only = ds.read_only;
-    let rd = region::config_path(region_dir.clone());
-    let region_definition = match read_json(&rd) {
-        Ok(def) => def,
-        Err(e) => {
-            return Err(format!(
-                "Can't get region definition from {:?}: {:?}",
-                rd, e
-            ));
-        }
-    };
+    let region_definition = ds.region.def();
     drop(ds);
 
     info!(log, "Repair listens on {} for path:{:?}", addr, region_dir);
