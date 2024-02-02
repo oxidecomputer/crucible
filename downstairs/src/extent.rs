@@ -144,7 +144,7 @@ impl ExtentMeta {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 #[allow(clippy::enum_variant_names)]
 pub enum ExtentType {
     Data,
@@ -169,7 +169,7 @@ impl fmt::Display for ExtentType {
  * FileType from the repair client.
  */
 impl ExtentType {
-    pub fn to_file_type(&self) -> FileType {
+    pub fn to_file_type(self) -> FileType {
         match self {
             ExtentType::Data => FileType::Data,
             ExtentType::Db => FileType::Db,
@@ -654,15 +654,27 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
     sync_path(&original_file, log)?;
 
     // We distinguish between SQLite-backend and raw-file extents based on the
-    // presence of the `.db` file.  Under normal conditions, we should never
-    // do extent repair across different extent formats; in fact, we should
-    // never extent repair SQLite-backed extents at all, but must still
-    // handle the case of unfinished migrations.
-    // If we are replacing a downstairs, and have created the region empty
-    // with the plan to replace it, then we can have a mismatch between
-    // what files we have and what files we want to replace them with.  When
-    // repairing a downstairs, we don't know in advance if the source of our
-    // repair will be SQLite-backend or not.
+    // presence of the `.db` file.  We should never do extent repair across
+    // different extent formats; it must be SQLite-to-SQLite or raw-to-raw.
+    //
+    // It is uncommon to perform extent repair on SQLite-backed extents at all,
+    // because they are automatically migrated into raw file extents or
+    // read-only.  However, it must be supported for two cases:
+    //
+    // - If there was an unfinished replacement, we must finish that replacement
+    //   before migrating from SQLite -> raw file backend, which happens
+    //   automatically later in startup.
+    // - We use this same code path to perform clones of read-only regions,
+    //   which may be SQLite-backed (and will never migrate to raw files,
+    //   because they are read only).  This is only the case when the `clone`
+    //   argument is `true`.
+    //
+    // In the first case, we know that we are repairing an SQLite-based extent
+    // because the target (original) extent includes a `.db` file.
+    //
+    // In the second case, the target (original) extent is not present, so we
+    // check whether the new files include a `.db` file.
+
     new_file.set_extension("db");
     original_file.set_extension("db");
 
@@ -676,12 +688,6 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
                 e
             );
         }
-        info!(
-            log,
-            "Moved file {:?} to {:?}",
-            new_file.clone(),
-            original_file.clone()
-        );
         sync_path(&original_file, log)?;
 
         // The .db-shm and .db-wal files may or may not exist.  If they don't
@@ -701,14 +707,11 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
                     e
                 );
             }
-            info!(
-                log,
-                "Moved db-shm file {:?} to {:?}",
-                new_file.clone(),
-                original_file.clone()
-            );
             sync_path(&original_file, log)?;
         } else if original_file.exists() {
+            // If we are cloning, then our new region will have been
+            // created with Backend::RawFile, and we should have no SQLite
+            // files.
             assert!(!clone);
             info!(
                 log,
@@ -732,14 +735,11 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
                     e
                 );
             }
-            info!(
-                log,
-                "Moved db-wal file {:?} to {:?}",
-                new_file.clone(),
-                original_file.clone()
-            );
             sync_path(&original_file, log)?;
         } else if original_file.exists() {
+            // If we are cloning, then our new region will have been
+            // created with Backend::RawFile, and we should have no SQLite
+            // files.
             assert!(!clone);
             info!(
                 log,

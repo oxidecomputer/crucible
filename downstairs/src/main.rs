@@ -298,7 +298,7 @@ async fn main() -> Result<()> {
             )
             .await?;
 
-            start_clone(d, source).await
+            clone_region(d, source).await
         }
         Args::Create {
             block_size,

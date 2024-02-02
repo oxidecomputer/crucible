@@ -24,6 +24,7 @@ use crate::extent::{extent_dir, extent_file_name, extent_path, ExtentType};
 pub struct FileServerContext {
     region_dir: PathBuf,
     read_only: bool,
+    region_definition: RegionDefinition,
 }
 
 pub fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
@@ -69,12 +70,23 @@ pub async fn repair_main(
     let ds = ds.lock().await;
     let region_dir = ds.region.dir.clone();
     let read_only = ds.read_only;
+    let rd = region::config_path(region_dir.clone());
+    let region_definition = match read_json(&rd) {
+        Ok(def) => def,
+        Err(e) => {
+            return Err(format!(
+                "Can't get region definition from {:?}: {:?}",
+                rd, e
+            ));
+        }
+    };
     drop(ds);
 
     info!(log, "Repair listens on {} for path:{:?}", addr, region_dir);
     let context = FileServerContext {
         region_dir,
         read_only,
+        region_definition,
     };
 
     /*
@@ -166,7 +178,6 @@ async fn get_a_file(path: PathBuf) -> Result<Response<Body>, HttpError> {
             "Expected a file, found a directory".to_string(),
         ))
     } else {
-        println!("Get file at: {:?}", path);
         let file = tokio::fs::File::open(&path).await.map_err(|e| {
             HttpError::for_bad_request(
                 None,
@@ -234,18 +245,19 @@ fn extent_file_list(
     eid: u32,
 ) -> Result<Vec<String>, HttpError> {
     let mut files = Vec::new();
-    let possible_files = vec![
-        (extent_file_name(eid, ExtentType::Data), true),
-        (extent_file_name(eid, ExtentType::Db), false),
-        (extent_file_name(eid, ExtentType::DbShm), false),
-        (extent_file_name(eid, ExtentType::DbWal), false),
+    let possible_files = [
+        (ExtentType::Data, true),
+        (ExtentType::Db, false),
+        (ExtentType::DbShm, false),
+        (ExtentType::DbWal, false),
     ];
 
     for (file, required) in possible_files.into_iter() {
         let mut fullname = extent_dir.clone();
-        fullname.push(file.clone());
+        let file_name = extent_file_name(eid, file);
+        fullname.push(file_name.clone());
         if fullname.exists() {
-            files.push(file);
+            files.push(file_name);
         } else if required {
             return Err(HttpError::for_bad_request(None, "EBADF".to_string()));
         }
@@ -261,17 +273,9 @@ fn extent_file_list(
 async fn get_region_info(
     rqctx: RequestContext<Arc<FileServerContext>>,
 ) -> Result<HttpResponseOk<crucible_common::RegionDefinition>, HttpError> {
-    let region_info = rqctx.context().region_dir.clone();
-    let cp = region::config_path(region_info);
+    let region_definition = rqctx.context().region_definition;
 
-    let def: crucible_common::RegionDefinition = match read_json(&cp) {
-        Ok(def) => def,
-        Err(e) => {
-            let msg = format!("Error {e} opening {:?}", cp);
-            return Err(HttpError::for_bad_request(None, msg));
-        }
-    };
-    Ok(HttpResponseOk(def))
+    Ok(HttpResponseOk(region_definition))
 }
 
 /// Return the RegionDefinition describing our region.

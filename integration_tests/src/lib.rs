@@ -167,7 +167,7 @@ mod test {
             )
             .await?;
 
-            start_clone(self.downstairs.clone(), source).await
+            clone_region(self.downstairs.clone(), source).await
         }
 
         pub async fn address(&self) -> SocketAddr {

@@ -3356,12 +3356,12 @@ pub async fn start_downstairs(
 /// Use the reconcile/repair extent methods to copy another downstairs.
 /// The source downstairs must have the same RegionDefinition as we do,
 /// and both downstairs must be running in read only mode.
-pub async fn start_clone(
+pub async fn clone_region(
     d: Arc<Mutex<Downstairs>>,
     source: SocketAddr,
 ) -> Result<()> {
     let info = crucible_common::BuildInfo::default();
-    let log = d.lock().await.log.new(o!("task" => "main".to_string()));
+    let log = d.lock().await.log.new(o!("task" => "clone".to_string()));
     info!(log, "Crucible Version: {}", info);
     info!(
         log,

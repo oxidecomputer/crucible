@@ -189,39 +189,39 @@ impl RegionDefinition {
     ) -> Result<(), CrucibleError> {
         // These fields should be the same.
         if self.block_size != other.block_size {
-            return Err(CrucibleError::RegionIncompatable(
+            return Err(CrucibleError::RegionIncompatible(
                 "block_size".to_string(),
             ));
         }
         if self.extent_size != other.extent_size {
-            return Err(CrucibleError::RegionIncompatable(
+            return Err(CrucibleError::RegionIncompatible(
                 "extent_size".to_string(),
             ));
         }
         if self.extent_count != other.extent_count {
-            return Err(CrucibleError::RegionIncompatable(
+            return Err(CrucibleError::RegionIncompatible(
                 "extent_count".to_string(),
             ));
         }
         if self.encrypted != other.encrypted {
-            return Err(CrucibleError::RegionIncompatable(
+            return Err(CrucibleError::RegionIncompatible(
                 "encrypted".to_string(),
             ));
         }
         if self.database_read_version != other.database_read_version {
-            return Err(CrucibleError::RegionIncompatable(
+            return Err(CrucibleError::RegionIncompatible(
                 "database_read_version".to_string(),
             ));
         }
         if self.database_write_version != other.database_write_version {
-            return Err(CrucibleError::RegionIncompatable(
+            return Err(CrucibleError::RegionIncompatible(
                 "database_write_version".to_string(),
             ));
         }
 
         // If the UUIDs are the same, this is invalid.
         if self.uuid == other.uuid {
-            return Err(CrucibleError::RegionIncompatable(
+            return Err(CrucibleError::RegionIncompatible(
                 "UUIDs are the same".to_string(),
             ));
         }
