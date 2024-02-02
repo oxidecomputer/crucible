@@ -2184,6 +2184,18 @@ impl DownstairsClient {
     pub(crate) fn total_live_work(&self) -> usize {
         (self.io_state_count.new + self.io_state_count.in_progress) as usize
     }
+
+    /// Returns a unique ID for the current connect, or `None`
+    ///
+    /// This can be used to disambiguate between messages returned from
+    /// different connections to the same Downstairs.
+    pub(crate) fn get_connection_id(&self) -> Option<u64> {
+        if self.client_task.client_stop_tx.is_some() {
+            Some(self.stats.connected as u64)
+        } else {
+            None
+        }
+    }
 }
 
 /// How to handle "promote to active" requests
