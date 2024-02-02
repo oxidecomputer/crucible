@@ -1528,6 +1528,12 @@ impl Upstairs {
                 self.downstairs.clients[client_id].send_here_i_am().await;
             }
             ClientAction::Response(m) => {
+                // We would not have received ClientAction::Response if the IO
+                // task was not still running, so it's safe to unwrap this.
+                let id = self.downstairs.clients[client_id]
+                    .get_connection_id()
+                    .expect("io task must be running");
+
                 // Defer the message if it's a (large) read that needs
                 // decryption, or there are other deferred messages in the queue
                 // (to preserve order).  Otherwise, handle it immediately.
@@ -1555,6 +1561,7 @@ impl Upstairs {
                     let dr = DeferredRead {
                         message: m,
                         client_id,
+                        connection_id: id,
                         cfg: self.cfg.clone(),
                         log: self.log.new(o!("job" => "decrypt")),
                     };
@@ -1573,6 +1580,7 @@ impl Upstairs {
                         message: m,
                         hashes: vec![],
                         client_id,
+                        connection_id: id,
                     };
                     if self.deferred_msgs.is_empty() {
                         self.on_client_message(dm).await;
@@ -1595,8 +1603,23 @@ impl Upstairs {
         }
     }
 
-    async fn on_client_message(&mut self, m: DeferredMessage) {
-        let (client_id, m, hashes) = (m.client_id, m.message, m.hashes);
+    async fn on_client_message(&mut self, dm: DeferredMessage) {
+        let (client_id, m, hashes) = (dm.client_id, dm.message, dm.hashes);
+
+        // It's possible for a deferred message to arrive **after** we have
+        // disconnected from this particular Downstairs.  In that case, we want
+        // to ignore the message, because we've already marked it as Skipped or
+        // re-sent it (marking it as New).
+        if self.downstairs.clients[client_id].get_connection_id()
+            != Some(dm.connection_id)
+        {
+            warn!(
+                self.log,
+                "ignoring deferred message with out-dated connection id"
+            );
+            return;
+        }
+
         match m {
             Message::Imok => {
                 // Nothing to do here, glad to hear that you're okay
