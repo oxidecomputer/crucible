@@ -68,7 +68,7 @@ opentelemetry = "0.21.0"
 opentelemetry-jaeger = { version = "0.20.0" }
 percent-encoding = "2.3"
 proptest = "1.4.0"
-rayon = "1.8.0"
+rayon = "1.8.1"
 rand = { version = "0.8.5", features = ["min_const_gen", "small_rng"] }
 rand_chacha = "0.3.1"
 reedline = "0.27.1"
