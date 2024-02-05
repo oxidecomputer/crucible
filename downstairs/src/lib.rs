@@ -3397,7 +3397,7 @@ pub async fn clone_region(
     let my_def = ds.region.def();
     info!(log, "my def is {:?}", my_def);
 
-    if let Err(e) = my_def.compatable(source_def) {
+    if let Err(e) = my_def.compatible(source_def) {
         bail!("Incompatible region definitions: {e}");
     }
 
@@ -6479,7 +6479,7 @@ mod test {
         Ok(())
     }
     #[tokio::test]
-    async fn test_version_uprev_compatable() -> Result<()> {
+    async fn test_version_uprev_compatible() -> Result<()> {
         // Test sending the +1 version to the DS, but also include the
         // current version on the supported list.  The downstairs should
         // see that and respond with the version it does support.

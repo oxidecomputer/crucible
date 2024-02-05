@@ -180,10 +180,10 @@ impl RegionDefinition {
         })
     }
 
-    // Compare two RegionDefinitions and verify they are compatable.
-    // Compatable is valid if all fields are the same, expect for the
+    // Compare two RegionDefinitions and verify they are compatible.
+    // compatible is valid if all fields are the same, expect for the
     // UUID. The UUID should be different.
-    pub fn compatable(
+    pub fn compatible(
         self,
         other: RegionDefinition,
     ) -> Result<(), CrucibleError> {
@@ -567,15 +567,15 @@ mod test {
         let rd2 = test_rd();
 
         // Basic positive test first.
-        assert_eq!(rd1.compatable(rd2), Ok(()));
+        assert_eq!(rd1.compatible(rd2), Ok(()));
 
         rd1.block_size = 4096;
-        assert!(rd1.compatable(rd2).is_err());
+        assert!(rd1.compatible(rd2).is_err());
 
         let rd1 = test_rd();
         let mut rd2 = test_rd();
         rd2.block_size = 4096;
-        assert!(rd1.compatable(rd2).is_err());
+        assert!(rd1.compatible(rd2).is_err());
     }
 
     #[test]
@@ -584,12 +584,12 @@ mod test {
         let rd2 = test_rd();
 
         rd1.extent_size = Block::new(2, 9);
-        assert!(rd1.compatable(rd2).is_err());
+        assert!(rd1.compatible(rd2).is_err());
 
         let rd1 = test_rd();
         let mut rd2 = test_rd();
         rd2.extent_size = Block::new(2, 9);
-        assert!(rd1.compatable(rd2).is_err());
+        assert!(rd1.compatible(rd2).is_err());
     }
 
     #[test]
@@ -598,12 +598,12 @@ mod test {
         let rd2 = test_rd();
 
         rd1.extent_count = 9;
-        assert!(rd1.compatable(rd2).is_err());
+        assert!(rd1.compatible(rd2).is_err());
 
         let rd1 = test_rd();
         let mut rd2 = test_rd();
         rd2.extent_count = 9;
-        assert!(rd1.compatable(rd2).is_err());
+        assert!(rd1.compatible(rd2).is_err());
     }
 
     #[test]
@@ -613,7 +613,7 @@ mod test {
         let rd2 = test_rd();
 
         rd1.uuid = rd2.uuid;
-        assert!(rd1.compatable(rd2).is_err());
+        assert!(rd1.compatible(rd2).is_err());
     }
 
     #[test]
@@ -622,12 +622,12 @@ mod test {
         let rd2 = test_rd();
 
         rd1.encrypted = true;
-        assert!(rd1.compatable(rd2).is_err());
+        assert!(rd1.compatible(rd2).is_err());
 
         let rd1 = test_rd();
         let mut rd2 = test_rd();
         rd2.encrypted = true;
-        assert!(rd1.compatable(rd2).is_err());
+        assert!(rd1.compatible(rd2).is_err());
     }
 
     #[test]
@@ -636,12 +636,12 @@ mod test {
         let rd2 = test_rd();
 
         rd1.database_read_version = DATABASE_READ_VERSION + 1;
-        assert!(rd1.compatable(rd2).is_err());
+        assert!(rd1.compatible(rd2).is_err());
 
         let rd1 = test_rd();
         let mut rd2 = test_rd();
         rd2.database_read_version = DATABASE_READ_VERSION + 1;
-        assert!(rd1.compatable(rd2).is_err());
+        assert!(rd1.compatible(rd2).is_err());
     }
 
     #[test]
@@ -650,11 +650,11 @@ mod test {
         let rd2 = test_rd();
 
         rd1.database_write_version = DATABASE_WRITE_VERSION + 1;
-        assert!(rd1.compatable(rd2).is_err());
+        assert!(rd1.compatible(rd2).is_err());
 
         let rd1 = test_rd();
         let mut rd2 = test_rd();
         rd2.database_write_version = DATABASE_WRITE_VERSION + 1;
-        assert!(rd1.compatable(rd2).is_err());
+        assert!(rd1.compatible(rd2).is_err());
     }
 }
