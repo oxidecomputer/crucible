@@ -536,28 +536,25 @@ pub mod cdt {
 // Check if a Message is valid on this downstairs or not.
 // If not, then send the correct error on the provided channel, return false.
 // If correct, then return true.
-async fn is_message_valid<WT>(
+async fn is_message_valid(
     upstairs_connection: UpstairsConnection,
     upstairs_id: Uuid,
     session_id: Uuid,
-    fw: &Mutex<FramedWrite<WT, CrucibleEncoder>>,
-) -> Result<bool>
-where
-    WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send,
-{
+    resp_tx: &mpsc::Sender<Message>,
+) -> Result<bool> {
     if upstairs_connection.upstairs_id != upstairs_id {
-        let mut fw = fw.lock().await;
-        fw.send(Message::UuidMismatch {
-            expected_id: upstairs_connection.upstairs_id,
-        })
-        .await?;
+        resp_tx
+            .send(Message::UuidMismatch {
+                expected_id: upstairs_connection.upstairs_id,
+            })
+            .await?;
         Ok(false)
     } else if upstairs_connection.session_id != session_id {
-        let mut fw = fw.lock().await;
-        fw.send(Message::UuidMismatch {
-            expected_id: upstairs_connection.session_id,
-        })
-        .await?;
+        resp_tx
+            .send(Message::UuidMismatch {
+                expected_id: upstairs_connection.session_id,
+            })
+            .await?;
         Ok(false)
     } else {
         Ok(true)
@@ -566,20 +563,17 @@ where
 
 /*
  * A new IO request has been received.
- * If the message is a ping or negotiation message, send the correct
- * response. If the message is an IO, then put the new IO the work hashmap.
- * If the message is a repair message, then we handle it right here.
+ * If the message is a ping, send the correct response. If the message is an IO,
+ * then put the new IO the work hashmap. If the message is a repair message,
+ * then we handle it right here.
  */
-async fn proc_frame<WT>(
+async fn proc_frame(
     upstairs_connection: UpstairsConnection,
     ad: &Mutex<Downstairs>,
     m: Message,
-    fw: &Mutex<FramedWrite<WT, CrucibleEncoder>>,
+    resp_tx: &mpsc::Sender<Message>,
     job_channel_tx: &mpsc::Sender<()>,
-) -> Result<()>
-where
-    WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send,
-{
+) -> Result<()> {
     let new_ds_id = match m {
         Message::Write {
             upstairs_id,
@@ -592,7 +586,7 @@ where
                 upstairs_connection,
                 upstairs_id,
                 session_id,
-                fw,
+                resp_tx,
             )
             .await?
             {
@@ -623,7 +617,7 @@ where
                 upstairs_connection,
                 upstairs_id,
                 session_id,
-                fw,
+                resp_tx,
             )
             .await?
             {
@@ -654,7 +648,7 @@ where
                 upstairs_connection,
                 upstairs_id,
                 session_id,
-                fw,
+                resp_tx,
             )
             .await?
             {
@@ -682,7 +676,7 @@ where
                 upstairs_connection,
                 upstairs_id,
                 session_id,
-                fw,
+                resp_tx,
             )
             .await?
             {
@@ -711,7 +705,7 @@ where
                 upstairs_connection,
                 upstairs_id,
                 session_id,
-                fw,
+                resp_tx,
             )
             .await?
             {
@@ -742,7 +736,7 @@ where
                 upstairs_connection,
                 upstairs_id,
                 session_id,
-                fw,
+                resp_tx,
             )
             .await?
             {
@@ -777,7 +771,7 @@ where
                 upstairs_connection,
                 upstairs_id,
                 session_id,
-                fw,
+                resp_tx,
             )
             .await?
             {
@@ -810,7 +804,7 @@ where
                 upstairs_connection,
                 upstairs_id,
                 session_id,
-                fw,
+                resp_tx,
             )
             .await?
             {
@@ -837,7 +831,7 @@ where
                 upstairs_connection,
                 upstairs_id,
                 session_id,
-                fw,
+                resp_tx,
             )
             .await?
             {
@@ -889,8 +883,7 @@ where
                     },
                 }
             };
-            let mut fw = fw.lock().await;
-            fw.send(msg).await?;
+            resp_tx.send(msg).await?;
             return Ok(());
         }
         Message::ExtentClose {
@@ -909,8 +902,7 @@ where
                     },
                 }
             };
-            let mut fw = fw.lock().await;
-            fw.send(msg).await?;
+            resp_tx.send(msg).await?;
             return Ok(());
         }
         Message::ExtentRepair {
@@ -944,8 +936,7 @@ where
                     },
                 }
             };
-            let mut fw = fw.lock().await;
-            fw.send(msg).await?;
+            resp_tx.send(msg).await?;
             return Ok(());
         }
         Message::ExtentReopen {
@@ -964,8 +955,7 @@ where
                     },
                 }
             };
-            let mut fw = fw.lock().await;
-            fw.send(msg).await?;
+            resp_tx.send(msg).await?;
             return Ok(());
         }
         x => bail!("unexpected frame {:?}", x),
@@ -982,15 +972,12 @@ where
     Ok(())
 }
 
-async fn do_work_task<T>(
+async fn do_work_task(
     ads: &Mutex<Downstairs>,
     upstairs_connection: UpstairsConnection,
     mut job_channel_rx: mpsc::Receiver<()>,
-    fw: &Mutex<FramedWrite<T, CrucibleEncoder>>,
-) -> Result<()>
-where
-    T: tokio::io::AsyncWrite + std::marker::Unpin,
-{
+    resp_tx: mpsc::Sender<Message>,
+) -> Result<()> {
     // The lossy attribute currently does not change at runtime. To avoid
     // continually locking the downstairs, cache the result here.
     let is_lossy = ads.lock().await.lossy;
@@ -1074,15 +1061,15 @@ where
                         abort_needed = check_message_for_abort(&m);
 
                         if let Some(error) = m.err() {
-                            let mut fw = fw.lock().await;
-                            fw.send(&Message::ErrorReport {
-                                upstairs_id: upstairs_connection.upstairs_id,
-                                session_id: upstairs_connection.session_id,
-                                job_id: new_id,
-                                error: error.clone(),
-                            })
-                            .await?;
-                            drop(fw);
+                            resp_tx
+                                .send(Message::ErrorReport {
+                                    upstairs_id: upstairs_connection
+                                        .upstairs_id,
+                                    session_id: upstairs_connection.session_id,
+                                    job_id: new_id,
+                                    error: error.clone(),
+                                })
+                                .await?;
 
                             // If the job errored, do not consider it completed.
                             // Retry it.
@@ -1097,14 +1084,20 @@ where
                                 job_id,
                             )?;
 
-                            // Notify the upstairs before completing work
-                            let mut fw = fw.lock().await;
-                            fw.send(&m).await?;
-                            drop(fw);
+                            // Notify the upstairs before completing work, which
+                            // consumes the message (so we'll check whether it's
+                            // a FlushAck beforehand)
+                            let is_flush =
+                                matches!(m, Message::FlushAck { .. });
+                            resp_tx.send(m).await?;
 
                             ads.lock()
                                 .await
-                                .complete_work(upstairs_connection, job_id, m)
+                                .complete_work_inner(
+                                    upstairs_connection,
+                                    job_id,
+                                    is_flush,
+                                )
                                 .await?;
 
                             cdt::work__done!(|| job_id.0);
@@ -1618,14 +1611,28 @@ where
         }
     }
 
-    let fw = Arc::new(Mutex::new(fw));
-
     info!(log, "Downstairs has completed Negotiation");
     assert!(upstairs_connection.is_some());
     let upstairs_connection = upstairs_connection.unwrap();
 
     resp_loop(ads, fr, fw, another_upstairs_active_rx, upstairs_connection)
         .await
+}
+
+async fn reply_task<WT>(
+    mut resp_channel_rx: mpsc::Receiver<Message>,
+    mut fw: FramedWrite<WT, CrucibleEncoder>,
+) -> Result<()>
+where
+    WT: tokio::io::AsyncWrite
+        + std::marker::Unpin
+        + std::marker::Send
+        + 'static,
+{
+    while let Some(m) = resp_channel_rx.recv().await {
+        fw.send(m).await?;
+    }
+    Ok(())
 }
 
 /*
@@ -1636,7 +1643,7 @@ where
 async fn resp_loop<RT, WT>(
     ads: &Arc<Mutex<Downstairs>>,
     mut fr: FramedRead<RT, CrucibleDecoder>,
-    fw: Arc<Mutex<FramedWrite<WT, CrucibleEncoder>>>,
+    fw: FramedWrite<WT, CrucibleEncoder>,
     mut another_upstairs_active_rx: oneshot::Receiver<UpstairsConnection>,
     upstairs_connection: UpstairsConnection,
 ) -> Result<()>
@@ -1655,10 +1662,15 @@ where
     // to ever send us.
     let (job_channel_tx, job_channel_rx) = mpsc::channel(MAX_ACTIVE_COUNT + 50);
 
+    let (resp_channel_tx, resp_channel_rx) =
+        mpsc::channel(MAX_ACTIVE_COUNT + 50);
+    let mut framed_write_task = tokio::spawn(reply_task(resp_channel_rx, fw));
+
     /*
      * Create tasks for:
      *  Doing the work then sending the ACK
      *  Pulling work off the socket and putting on the work queue.
+     *  Sending messages back on the FramedWrite
      *
      * These tasks and this function must be able to handle the
      * Upstairs connection going away at any time, as well as a forced
@@ -1669,25 +1681,62 @@ where
      * gracefully.  By exiting the loop here, we allow the calling
      * function to take over and handle a reconnect or a new upstairs
      * takeover.
+     *
+     * Tasks are organized as follows, with tasks in `snake_case`
+     *
+     *   ┌──────────┐              ┌───────────┐
+     *   │FramedRead│              │FramedWrite│
+     *   └────┬─────┘              └─────▲─────┘
+     *        │                          │
+     *        │         ┌────────────────┴────────────────────┐
+     *        │         │         framed_write_task           │
+     *        │         └─▲─────▲──────────────────▲──────────┘
+     *        │           │     │                  │
+     *        │       ping│     │invalid           │
+     *        │  ┌────────┘     │frame             │responses
+     *        │  │              │errors            │
+     *        │  │              │                  │
+     *   ┌────▼──┴─┐ message   ┌┴──────┐  job     ┌┴────────┐
+     *   │resp_loop├──────────►│pf_task├─────────►│ dw_task │
+     *   └─────────┘ channel   └──┬────┘ channel  └▲────────┘
+     *                            │                │
+     *                         add│work         new│work
+     *   per-connection           │                │
+     *  ========================= │ ============== │ ===============
+     *   shared state          ┌──▼────────────────┴────────────┐
+     *                         │           Downstairs           │
+     *                         └────────────────────────────────┘
      */
-    let dw_task = {
+    let mut dw_task = {
         let adc = ads.clone();
-        let fwc = fw.clone();
+        let resp_channel_tx = resp_channel_tx.clone();
         tokio::spawn(async move {
-            do_work_task(&adc, upstairs_connection, job_channel_rx, &fwc).await
+            do_work_task(
+                &adc,
+                upstairs_connection,
+                job_channel_rx,
+                resp_channel_tx,
+            )
+            .await
         })
     };
 
     let (message_channel_tx, mut message_channel_rx) =
         mpsc::channel(MAX_ACTIVE_COUNT + 50);
-    let pf_task = {
+    let mut pf_task = {
         let adc = ads.clone();
         let tx = job_channel_tx.clone();
-        let fwc = fw.clone();
+        let resp_channel_tx = resp_channel_tx.clone();
         tokio::spawn(async move {
             while let Some(m) = message_channel_rx.recv().await {
-                if let Err(e) =
-                    proc_frame(upstairs_connection, &adc, m, &fwc, &tx).await
+                if let Err(e) = proc_frame(
+                    upstairs_connection,
+                    &adc,
+                    m,
+                    &resp_channel_tx,
+                    &tx,
+                )
+                .await
                 {
                     bail!("Proc frame returns error: {}", e);
                 }
@@ -1700,8 +1749,6 @@ where
     // continually locking the downstairs, cache the result here.
     let lossy = ads.lock().await.lossy;
 
-    tokio::pin!(dw_task);
-    tokio::pin!(pf_task);
     loop {
         tokio::select! {
             e = &mut dw_task => {
@@ -1709,6 +1756,9 @@ where
             }
             e = &mut pf_task => {
                 bail!("pf task ended: {:?}", e);
+            }
+            e = &mut framed_write_task => {
+                bail!("framed write task ended: {:?}", e);
             }
             /*
              * If we have set "lossy", then we need to check every now and
@@ -1766,14 +1816,15 @@ where
                             shutting down connection for {:?}",
                             new_upstairs_connection, upstairs_connection);
 
-                        let mut fw = fw.lock().await;
-                        if let Err(e) = fw.send(Message::YouAreNoLongerActive {
-                            new_upstairs_id:
-                                new_upstairs_connection.upstairs_id,
-                            new_session_id:
-                                new_upstairs_connection.session_id,
-                            new_gen: new_upstairs_connection.gen,
-                        }).await {
+                        if let Err(e) = resp_channel_tx.send(
+                            Message::YouAreNoLongerActive {
+                                new_upstairs_id:
+                                    new_upstairs_connection.upstairs_id,
+                                new_session_id:
+                                    new_upstairs_connection.session_id,
+                                new_gen: new_upstairs_connection.gen,
+                            }).await
+                        {
                             warn!(log, "Failed sending YouAreNoLongerActive: {}", e);
                         }
 
@@ -1805,8 +1856,7 @@ where
                     Some(Ok(msg)) => {
                         if matches!(msg, Message::Ruok) {
                             // Respond instantly to pings, don't wait.
-                            let mut fw = fw.lock().await;
-                            if let Err(e) = fw.send(Message::Imok).await {
+                            if let Err(e) = resp_channel_tx.send(Message::Imok).await {
                                 bail!("Failed sending Imok: {}", e);
                             }
                         } else if let Err(e) = message_channel_tx.send(msg).await {
@@ -2363,16 +2413,33 @@ impl Downstairs {
      * - removing the response
      * - putting the id on the completed list.
      */
+    /// Helper function to call `complete_work` if the `Message` is available
+    #[cfg(test)]
     async fn complete_work(
-        &self,
+        &mut self,
         upstairs_connection: UpstairsConnection,
         ds_id: JobId,
         m: Message,
     ) -> Result<()> {
-        let mut work = self.work_lock(upstairs_connection).await?;
-
-        // Complete the job
         let is_flush = matches!(m, Message::FlushAck { .. });
+        self.complete_work_inner(upstairs_connection, ds_id, is_flush)
+            .await
+    }
+
+    /*
+     * Complete work by:
+     *
+     * - removing the job from active
+     * - removing the response
+     * - putting the id on the completed list.
+     */
+    async fn complete_work_inner(
+        &mut self,
+        upstairs_connection: UpstairsConnection,
+        ds_id: JobId,
+        is_flush: bool,
+    ) -> Result<()> {
+        let mut work = self.work_lock(upstairs_connection).await?;
 
         // If upstairs_connection grabs the work lock, it is the active
         // connection for this Upstairs UUID. The job should exist in the Work
