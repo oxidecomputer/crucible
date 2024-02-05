@@ -2405,18 +2405,10 @@ impl Downstairs {
         }
     }
 
-    /*
-     * Complete work by:
-     *
-     * - notifying the upstairs with the response
-     * - removing the job from active
-     * - removing the response
-     * - putting the id on the completed list.
-     */
     /// Helper function to call `complete_work` if the `Message` is available
     #[cfg(test)]
     async fn complete_work(
-        &mut self,
+        &self,
         upstairs_connection: UpstairsConnection,
         ds_id: JobId,
         m: Message,
@@ -2434,7 +2426,7 @@ impl Downstairs {
      * - putting the id on the completed list.
      */
     async fn complete_work_inner(
-        &mut self,
+        &self,
         upstairs_connection: UpstairsConnection,
         ds_id: JobId,
         is_flush: bool,
