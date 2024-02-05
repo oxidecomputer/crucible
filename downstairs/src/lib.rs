@@ -1148,10 +1148,7 @@ async fn proc_stream(
             let (read, write) = sock.into_split();
 
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = Arc::new(Mutex::new(FramedWrite::new(
-                write,
-                CrucibleEncoder::new(),
-            )));
+            let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
             proc(ads, fr, fw).await
         }
@@ -1159,10 +1156,7 @@ async fn proc_stream(
             let (read, write) = tokio::io::split(stream);
 
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = Arc::new(Mutex::new(FramedWrite::new(
-                write,
-                CrucibleEncoder::new(),
-            )));
+            let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
             proc(ads, fr, fw).await
         }
@@ -1186,7 +1180,7 @@ pub struct UpstairsConnection {
 async fn proc<RT, WT>(
     ads: &Arc<Mutex<Downstairs>>,
     mut fr: FramedRead<RT, CrucibleDecoder>,
-    fw: Arc<Mutex<FramedWrite<WT, CrucibleEncoder>>>,
+    mut fw: FramedWrite<WT, CrucibleEncoder>,
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
@@ -1277,7 +1271,6 @@ where
                             shutting down connection for {:?}",
                             new_upstairs_connection, upstairs_connection);
 
-                        let mut fw = fw.lock().await;
                         if let Err(e) = fw.send(Message::YouAreNoLongerActive {
                             new_upstairs_id:
                                 new_upstairs_connection.upstairs_id,
@@ -1344,7 +1337,6 @@ where
                         return Ok(());
                     }
                     Some(Message::Ruok) => {
-                        let mut fw = fw.lock().await;
                         if let Err(e) = fw.send(Message::Imok).await {
                             bail!("Failed to answer ping: {}", e);
                         }
@@ -1386,7 +1378,6 @@ where
                                 let m = Message::VersionMismatch {
                                     version: CRUCIBLE_MESSAGE_VERSION,
                                 };
-                                let mut fw = fw.lock().await;
                                 if let Err(e) = fw.send(m).await {
                                     warn!(
                                         log,
@@ -1409,8 +1400,6 @@ where
                         {
                             let ds = ads.lock().await;
                             if ds.read_only != read_only {
-                                let mut fw = fw.lock().await;
-
                                 if let Err(e) = fw.send(Message::ReadOnlyMismatch {
                                     expected: ds.read_only,
                                 }).await {
@@ -1422,8 +1411,6 @@ where
                             }
 
                             if ds.encrypted != encrypted {
-                                let mut fw = fw.lock().await;
-
                                 if let Err(e) = fw.send(Message::EncryptedMismatch {
                                     expected: ds.encrypted,
                                 }).await {
@@ -1446,7 +1433,6 @@ where
                             upstairs_connection.unwrap(),
                             CRUCIBLE_MESSAGE_VERSION);
 
-                        let mut fw = fw.lock().await;
                         if let Err(e) = fw.send(
                             Message::YesItsMe {
                                 version: CRUCIBLE_MESSAGE_VERSION,
@@ -1474,7 +1460,6 @@ where
                             upstairs_connection.session_id == session_id;
 
                         if !matches_self {
-                            let mut fw = fw.lock().await;
                             if let Err(e) = fw.send(
                                 Message::UuidMismatch {
                                     expected_id:
@@ -1519,7 +1504,6 @@ where
                             }
                             negotiated = NegotiationState::PromotedToActive;
 
-                            let mut fw = fw.lock().await;
                             if let Err(e) = fw.send(Message::YouAreNowActive {
                                 upstairs_id,
                                 session_id,
@@ -1540,7 +1524,6 @@ where
                             ds.region.def()
                         };
 
-                        let mut fw = fw.lock().await;
                         if let Err(e) = fw.send(Message::RegionInfo { region_def }).await {
                             bail!("Failed sending RegionInfo: {}", e);
                         }
@@ -1564,7 +1547,6 @@ where
                                 "Set last flush {}", last_flush_number);
                         }
 
-                        let mut fw = fw.lock().await;
                         if let Err(e) = fw.send(Message::LastFlushAck {
                             last_flush_number
                         }).await {
@@ -1611,7 +1593,6 @@ where
                                 flush_numbers);
                         }
 
-                        let mut fw = fw.lock().await;
                         if let Err(e) = fw.send(Message::ExtentVersions {
                             gen_numbers,
                             flush_numbers,
@@ -1636,6 +1617,8 @@ where
             }
         }
     }
+
+    let fw = Arc::new(Mutex::new(fw));
 
     info!(log, "Downstairs has completed Negotiation");
     assert!(upstairs_connection.is_some());
