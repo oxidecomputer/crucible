@@ -159,10 +159,10 @@ impl ExtentInner for SqliteInner {
     fn read(
         &mut self,
         job_id: JobId,
-        requests: &[&crucible_protocol::ReadRequest],
-        responses: &mut Vec<crucible_protocol::ReadResponse>,
+        requests: &[crucible_protocol::ReadRequest],
         iov_max: usize,
-    ) -> Result<(), CrucibleError> {
+    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
+        let mut responses = Vec::with_capacity(requests.len());
         // This code batches up operations for contiguous regions of
         // ReadRequests, so we can perform larger read syscalls and sqlite
         // queries. This significantly improves read throughput.
@@ -172,7 +172,7 @@ impl ExtentInner for SqliteInner {
         // request.
         let mut req_run_start = 0;
         while req_run_start < requests.len() {
-            let first_req = requests[req_run_start];
+            let first_req = &requests[req_run_start];
 
             // Starting from the first request in the potential run, we scan
             // forward until we find a request with a block that isn't
@@ -255,13 +255,13 @@ impl ExtentInner for SqliteInner {
 
             req_run_start += n_contiguous_requests;
         }
-        Ok(())
+        Ok(responses)
     }
 
     fn write(
         &mut self,
         job_id: JobId,
-        writes: &[&crucible_protocol::Write],
+        writes: &[crucible_protocol::Write],
         only_write_unwritten: bool,
         iov_max: usize,
     ) -> Result<(), CrucibleError> {
@@ -321,7 +321,7 @@ impl ExtentInner for SqliteInner {
             });
             let mut write_run_start = 0;
             while write_run_start < writes.len() {
-                let first_write = writes[write_run_start];
+                let first_write = &writes[write_run_start];
 
                 // Starting from the first write in the potential run, we scan
                 // forward until we find a write with a block that isn't
@@ -1520,7 +1520,7 @@ mod test {
                 hash,
             },
         };
-        inner.write(JobId(10), &[&write], false, IOV_MAX_TEST)?;
+        inner.write(JobId(10), &[write], false, IOV_MAX_TEST)?;
 
         // We haven't flushed, but this should leave our context in place.
         inner.fully_rehash_and_clean_all_stale_contexts(false)?;
@@ -1540,14 +1540,13 @@ mod test {
                 data: data.clone(),
                 block_context,
             };
-            inner.write(JobId(20), &[&write], true, IOV_MAX_TEST)?;
+            inner.write(JobId(20), &[write], true, IOV_MAX_TEST)?;
 
-            let mut resp = Vec::new();
             let read = ReadRequest {
                 eid: 0,
                 offset: Block::new_512(0),
             };
-            inner.read(JobId(21), &[&read], &mut resp, IOV_MAX_TEST)?;
+            let resp = inner.read(JobId(21), &[read], IOV_MAX_TEST)?;
 
             // We should not get back our data, because block 0 was written.
             assert_ne!(
@@ -1575,14 +1574,13 @@ mod test {
                 data: data.clone(),
                 block_context,
             };
-            inner.write(JobId(30), &[&write], true, IOV_MAX_TEST)?;
+            inner.write(JobId(30), &[write], true, IOV_MAX_TEST)?;
 
-            let mut resp = Vec::new();
             let read = ReadRequest {
                 eid: 0,
                 offset: Block::new_512(1),
             };
-            inner.read(JobId(31), &[&read], &mut resp, IOV_MAX_TEST)?;
+            let resp = inner.read(JobId(31), &[read], IOV_MAX_TEST)?;
 
             // We should get back our data! Block 1 was never written.
             assert_eq!(
@@ -1642,14 +1640,13 @@ mod test {
                 data: data.clone(),
                 block_context,
             };
-            inner.write(JobId(30), &[&write], true, IOV_MAX_TEST)?;
+            inner.write(JobId(30), &[write], true, IOV_MAX_TEST)?;
 
-            let mut resp = Vec::new();
             let read = ReadRequest {
                 eid: 0,
                 offset: Block::new_512(0),
             };
-            inner.read(JobId(31), &[&read], &mut resp, IOV_MAX_TEST)?;
+            let resp = inner.read(JobId(31), &[read], IOV_MAX_TEST)?;
 
             // We should get back our data! Block 1 was never written.
             assert_eq!(
