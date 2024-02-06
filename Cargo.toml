@@ -58,7 +58,7 @@ itertools = "0.12.1"
 libc = "0.2"
 mime_guess = "2.0.4"
 nbd = "0.2.3"
-nix = { version = "0.26", features = [ "feature", "uio" ] }
+nix = { version = "0.27", features = [ "feature", "uio" ] }
 num_enum = "0.7"
 num-derive = "0.4"
 num-traits = "0.2"

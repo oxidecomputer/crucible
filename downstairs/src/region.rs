@@ -1073,7 +1073,7 @@ struct BatchedPwritevState<'a> {
 }
 
 pub(crate) struct BatchedPwritev<'a> {
-    fd: std::os::fd::RawFd,
+    fd: std::os::fd::BorrowedFd<'a>,
     capacity: usize,
     state: Option<BatchedPwritevState<'a>>,
     block_size: u64,
@@ -1082,7 +1082,7 @@ pub(crate) struct BatchedPwritev<'a> {
 
 impl<'a> BatchedPwritev<'a> {
     pub fn new(
-        fd: std::os::fd::RawFd,
+        fd: std::os::fd::BorrowedFd<'a>,
         capacity: usize,
         block_size: u64,
         iov_max: usize,
