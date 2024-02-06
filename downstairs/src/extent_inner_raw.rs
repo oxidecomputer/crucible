@@ -325,24 +325,42 @@ impl ExtentInner for RawInner {
         // operation atomic.
         self.set_flush_number(new_flush, new_gen)?;
 
-        // Now, we fsync to ensure data is flushed to disk.  It's okay to crash
-        // before this point, because setting the flush number is atomic.
-        cdt::extent__flush__file__start!(|| {
-            (job_id.get(), self.extent_number, 0)
-        });
-        if let Err(e) = self.file.sync_all() {
-            /*
-             * XXX Retry?  Mark extent as broken?
-             */
-            return Err(CrucibleError::IoError(format!(
-                "extent {}: fsync 1 failure: {e:?}",
-                self.extent_number,
-            )));
+        if cfg!(feature = "omicron-build") {
+            // no-op, FIOFFS will be called in region_flush
+        } else {
+            // Now, we fsync to ensure data is flushed to disk.  It's okay to crash
+            // before this point, because setting the flush number is atomic.
+            cdt::extent__flush__file__start!(|| {
+                (job_id.get(), self.extent_number, 0)
+            });
+
+            if let Err(e) = self.file.sync_all() {
+                /*
+                 * XXX Retry?  Mark extent as broken?
+                 */
+                return Err(CrucibleError::IoError(format!(
+                    "extent {}: fsync 1 failure: {e:?}",
+                    self.extent_number,
+                )));
+            }
+
+            cdt::extent__flush__file__done!(|| {
+                (job_id.get(), self.extent_number, 0)
+            });
         }
+
+        cdt::extent__flush__done!(|| { (job_id.get(), self.extent_number, 0) });
+
+        Ok(())
+    }
+
+    fn post_flush(
+        &mut self,
+        _new_flush: u64,
+        _new_gen: u64,
+        _job_id: JobOrReconciliationId,
+    ) -> Result<(), CrucibleError> {
         self.context_slot_dirty.fill(0);
-        cdt::extent__flush__file__done!(|| {
-            (job_id.get(), self.extent_number, 0)
-        });
 
         // Check for fragmentation in the context slots leading to worse
         // performance, and defragment if that's the case.
@@ -352,15 +370,11 @@ impl ExtentInner for RawInner {
             .unwrap_or(0);
         self.extra_syscall_count = 0;
         self.extra_syscall_denominator = 0;
-        let r = if extra_syscalls_per_rw > DEFRAGMENT_THRESHOLD {
+        if extra_syscalls_per_rw > DEFRAGMENT_THRESHOLD {
             self.defragment()
         } else {
             Ok(())
-        };
-
-        cdt::extent__flush__done!(|| { (job_id.get(), self.extent_number, 0) });
-
-        r
+        }
     }
 
     #[cfg(test)]
@@ -1852,6 +1866,7 @@ mod test {
 
         // Flush!  This will mark all slots as synched
         inner.flush(12, 12, JobId(11).into())?;
+        inner.post_flush(12, 12, JobId(11).into())?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
         assert_eq!(inner.context_slot_dirty[0], 0b00);
 
@@ -1904,6 +1919,7 @@ mod test {
 
         // Flush!  This will mark all slots as synched
         inner.flush(12, 12, JobId(11).into())?;
+        inner.post_flush(12, 12, JobId(11).into())?;
         assert_eq!(inner.active_context[0], ContextSlot::A);
         assert_eq!(inner.context_slot_dirty[0], 0b00);
 
@@ -2029,6 +2045,7 @@ mod test {
         assert_eq!(inner.extra_syscall_count, 0);
         assert_eq!(inner.extra_syscall_denominator, 5);
         inner.flush(10, 10, JobId(10).into())?;
+        inner.post_flush(10, 10, JobId(10).into())?;
         assert!(inner.context_slot_dirty.iter().all(|v| *v == 0));
 
         // This should not have changed active context slots!
@@ -2080,6 +2097,7 @@ mod test {
         // trigger defragmentation; after the flush, every context slot should
         // be in array A.
         inner.flush(11, 11, JobId(11).into())?;
+        inner.post_flush(11, 11, JobId(11).into())?;
 
         for i in 0..10 {
             assert_eq!(
@@ -2132,6 +2150,7 @@ mod test {
         assert_eq!(inner.extra_syscall_count, 0);
         assert_eq!(inner.extra_syscall_denominator, 3);
         inner.flush(10, 10, JobId(10).into())?;
+        inner.post_flush(10, 10, JobId(10).into())?;
 
         // This should not have changed active context slots!
         for i in 0..10 {
@@ -2185,6 +2204,7 @@ mod test {
         // trigger defragmentation; after the flush, every context slot should
         // be in array B (which minimizes copies)
         inner.flush(11, 11, JobId(11).into())?;
+        inner.post_flush(11, 11, JobId(11).into())?;
 
         for i in 0..10 {
             assert_eq!(
@@ -2239,6 +2259,7 @@ mod test {
         assert_eq!(inner.extra_syscall_count, 0);
         assert_eq!(inner.extra_syscall_denominator, 3);
         inner.flush(10, 10, JobId(10).into())?;
+        inner.post_flush(10, 10, JobId(10).into())?;
 
         // This should not have changed active context slots!
         for i in 0..10 {
@@ -2293,6 +2314,7 @@ mod test {
         // trigger defragmentation; after the flush, every context slot should
         // be in array A (which minimizes copies)
         inner.flush(11, 11, JobId(11).into())?;
+        inner.post_flush(11, 11, JobId(11).into())?;
 
         for i in 0..10 {
             assert_eq!(
@@ -2347,6 +2369,7 @@ mod test {
         assert_eq!(inner.extra_syscall_count, 0);
         assert_eq!(inner.extra_syscall_denominator, 2);
         inner.flush(10, 10, JobId(10).into())?;
+        inner.post_flush(10, 10, JobId(10).into())?;
 
         // This should not have changed active context slots!
         for i in 0..10 {
@@ -2400,6 +2423,7 @@ mod test {
         // This write didn't add enough extra syscalls to trigger
         // defragmentation.
         inner.flush(11, 11, JobId(11).into())?;
+        inner.post_flush(11, 11, JobId(11).into())?;
 
         // These should be the same!
         for i in 0..10 {

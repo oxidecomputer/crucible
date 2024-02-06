@@ -71,3 +71,4 @@ asm = ["usdt/asm"]
 default = []
 zfs_snapshot = []
 integration-tests = [] # Enables creating SQLite volumes
+omicron-build = []

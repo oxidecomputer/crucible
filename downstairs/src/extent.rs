@@ -42,6 +42,15 @@ pub(crate) trait ExtentInner: Send + Debug {
         job_id: JobOrReconciliationId,
     ) -> Result<(), CrucibleError>;
 
+    /// After both user data and any extent metadata have been flushed to
+    /// durable storage, perform accounting or clean-up.
+    fn post_flush(
+        &mut self,
+        new_flush: u64,
+        new_gen: u64,
+        job_id: JobOrReconciliationId,
+    ) -> Result<(), CrucibleError>;
+
     fn read(
         &mut self,
         job_id: JobId,
@@ -588,6 +597,18 @@ impl Extent {
         }
 
         inner.flush(new_flush, new_gen, job_id)
+    }
+
+    #[instrument]
+    pub(crate) async fn post_flush<I: Into<JobOrReconciliationId> + Debug>(
+        &self,
+        new_flush: u64,
+        new_gen: u64,
+        id: I, // only used for logging
+    ) -> Result<(), CrucibleError> {
+        let job_id = id.into();
+        let mut inner = self.inner.lock().await;
+        inner.post_flush(new_flush, new_gen, job_id)
     }
 
     pub async fn get_meta_info(&self) -> ExtentMeta {

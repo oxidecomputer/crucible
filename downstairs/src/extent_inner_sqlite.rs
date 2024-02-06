@@ -75,6 +75,18 @@ impl ExtentInner for SqliteInner {
         new_gen: u64,
         job_id: JobOrReconciliationId,
     ) -> Result<(), CrucibleError> {
+        if !self.dirty()? {
+            /*
+             * If we have made no writes to this extent since the last flush,
+             * we do not need to update the extent on disk
+             */
+            return Ok(());
+        }
+
+        // We put all of our metadata updates into a single write to make this
+        // operation atomic.
+        self.set_flush_number(new_flush, new_gen)?;
+
         // Used for profiling
         let n_dirty_blocks = self.dirty_blocks.len() as u64;
 
@@ -82,26 +94,44 @@ impl ExtentInner for SqliteInner {
             (job_id.get(), self.extent_number, n_dirty_blocks)
         });
 
-        /*
-         * We must first fsync to get any outstanding data written to disk.
-         * This must be done before we update the flush number.
-         */
-        cdt::extent__flush__file__start!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
-        });
-        if let Err(e) = self.file.sync_all() {
+        if cfg!(feature = "omicron-build") {
+            // no-op, FIOFFS will be called in region_flush
+        } else {
             /*
-             * XXX Retry?  Mark extent as broken?
+             * We must first fsync to get any outstanding data written to disk.
+             * This must be done before we update the flush number.
              */
-            crucible_bail!(
-                IoError,
-                "extent {}: fsync 1 failure: {e:?}",
-                self.extent_number,
-            );
+            cdt::extent__flush__file__start!(|| {
+                (job_id.get(), self.extent_number, n_dirty_blocks)
+            });
+
+            if let Err(e) = self.file.sync_all() {
+                /*
+                 * XXX Retry?  Mark extent as broken?
+                 */
+                crucible_bail!(
+                    IoError,
+                    "extent {}: fsync 1 failure: {e:?}",
+                    self.extent_number,
+                );
+            }
+
+            cdt::extent__flush__file__done!(|| {
+                (job_id.get(), self.extent_number, n_dirty_blocks)
+            });
         }
-        cdt::extent__flush__file__done!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
-        });
+
+        Ok(())
+    }
+
+    fn post_flush(
+        &mut self,
+        new_flush: u64,
+        new_gen: u64,
+        job_id: JobOrReconciliationId,
+    ) -> Result<(), CrucibleError> {
+        // Used for profiling
+        let n_dirty_blocks = self.dirty_blocks.len() as u64;
 
         // Clear old block contexts. In order to be crash consistent, only
         // perform this after the extent fsync is done. For each block
