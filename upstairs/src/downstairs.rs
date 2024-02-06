@@ -6,6 +6,8 @@ use std::{
     time::Duration,
 };
 
+#[cfg(feature = "omicron-build")]
+use crate::client::ClientRunResult;
 use crate::{
     cdt,
     client::{ClientAction, ClientStopReason, DownstairsClient},
@@ -73,6 +75,9 @@ pub(crate) struct Downstairs {
 
     /// Ringbuf of a summary of each recently completed downstairs IO.
     completed_jobs: AllocRingBuffer<WorkSummary>,
+
+    /// Data for an in-progress reconciliation
+    reconcile: Option<ReconcileData>,
 
     /// Current piece of reconcile work that the downstairs are working on
     ///
@@ -155,8 +160,11 @@ impl LiveRepairState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct LiveRepairData {
+    /// An ID uniquely identifying this repair
+    id: Uuid,
+
     /// Total number of extents that need checking
     extent_count: u64,
 
@@ -194,6 +202,15 @@ pub(crate) struct LiveRepairData {
 
     /// Current state
     state: LiveRepairState,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ReconcileData {
+    /// An ID uniquely identifying this reconciliation
+    id: Uuid,
+
+    /// Current index into reconcile_task_list
+    reconcile_task_list_index: usize,
 }
 
 #[derive(Debug)]
@@ -249,6 +266,7 @@ impl Downstairs {
             completed: AllocRingBuffer::new(2048),
             completed_jobs: AllocRingBuffer::new(8),
             next_id: JobId(1000),
+            reconcile: None,
             reconcile_current_work: None,
             reconcile_task_list: VecDeque::new(),
             reconcile_repaired: 0,
@@ -964,21 +982,38 @@ impl Downstairs {
          * about that
          */
         if let Some(reconcile_list) = self.mismatch_list() {
+            self.reconcile = Some(ReconcileData {
+                id: Uuid::new_v4(),
+                reconcile_task_list_index: 0,
+            });
+
+            #[cfg(feature = "omicron-build")]
+            {
+                // If building for production, then notify Nexus when any
+                // reconciliation starts.
+                let cloned_reconcile = self.reconcile.as_ref().unwrap().clone();
+                self.notify_nexus_of_reconcile_start(cloned_reconcile);
+            }
+
             for c in self.clients.iter_mut() {
                 c.begin_reconcile();
             }
 
             info!(
                 self.log,
-                "Found {:?} extents that need repair",
+                "starting reconciliation {}: found {:?} extents that need repair",
+                self.reconcile.as_ref().unwrap().id,
                 reconcile_list.mend.len()
             );
+
             self.convert_rc_to_messages(
                 reconcile_list.mend,
                 max_flush,
                 max_gen,
             );
+
             self.reconcile_repair_needed = self.reconcile_task_list.len();
+
             Ok(true)
         } else {
             info!(self.log, "All extents match");
@@ -1069,6 +1104,7 @@ impl Downstairs {
         };
 
         self.repair = Some(LiveRepairData {
+            id: Uuid::new_v4(),
             extent_count,
             repair_downstairs,
             source_downstairs,
@@ -1078,6 +1114,20 @@ impl Downstairs {
             repair_job_ids: BTreeMap::new(),
             state,
         });
+
+        info!(
+            self.log,
+            "starting repair {}",
+            self.repair.as_ref().unwrap().id
+        );
+
+        #[cfg(feature = "omicron-build")]
+        {
+            // If building for production, then notify Nexus when any
+            // live repair starts.
+            let cloned_repair = self.repair.as_ref().unwrap().clone();
+            self.notify_nexus_of_live_repair_start(cloned_repair);
+        }
 
         // We'll be back in on_live_repair once the initial job finishes
         true
@@ -1301,10 +1351,26 @@ impl Downstairs {
                 } else {
                     // Keep going!
                     repair.active_extent = next_extent;
+
                     let repair_downstairs = repair.repair_downstairs.clone();
                     let active_extent = repair.active_extent;
                     let aborting = repair.aborting_repair;
                     let source_downstairs = repair.source_downstairs;
+
+                    #[cfg(feature = "omicron-build")]
+                    {
+                        let repair_id = repair.id;
+                        let extent_count = repair.extent_count;
+
+                        // If building for production, then notify Nexus of live
+                        // repair progress.
+                        self.notify_nexus_of_live_repair_progress(
+                            repair_id,
+                            active_extent,
+                            extent_count,
+                        );
+                    }
+
                     self.begin_repair_for(
                         active_extent,
                         aborting,
@@ -1329,6 +1395,15 @@ impl Downstairs {
                         self.clients[*c].finish_repair(up_state);
                     }
                 }
+
+                #[cfg(feature = "omicron-build")]
+                {
+                    // If building for production, then notify Nexus when any
+                    // live repair completes.
+                    let cloned_repair = repair.clone();
+                    self.notify_nexus_of_live_repair_finish(cloned_repair);
+                }
+
                 // Set `self.repair` to `None` on our way out the door (because
                 // repair is done, one way or the other)
                 self.repair = None;
@@ -1961,17 +2036,51 @@ impl Downstairs {
     /// empty).
     ///
     /// # Panics
-    /// If `self.reconcile_current_work` is not `None`
+    /// If `self.reconcile_current_work` is not `None`, or if `self.reconcile`
+    /// is `None`.
     pub(crate) async fn send_next_reconciliation_req(&mut self) -> bool {
         assert!(self.reconcile_current_work.is_none());
+
+        let Some(ref mut reconcile) = self.reconcile else {
+            panic!("`self.reconcile` must be Some during reconciliation");
+        };
+
         let Some(mut next) = self.reconcile_task_list.pop_front() else {
             info!(self.log, "done with reconciliation");
             return true;
         };
+
+        reconcile.reconcile_task_list_index += 1;
+
+        info!(
+            self.log,
+            "reconciliation {}: on task {} of {}",
+            reconcile.id,
+            reconcile.reconcile_task_list_index,
+            self.reconcile_repair_needed,
+        );
+
+        #[cfg(feature = "omicron-build")]
+        {
+            // If building for production, then notify Nexus of reconciliation
+            // progress.
+            let reconcile_id = reconcile.id.clone();
+            let current_task = reconcile.reconcile_task_list_index;
+            let task_count = self.reconcile_repair_needed;
+
+            self.notify_nexus_of_reconcile_progress(
+                reconcile_id,
+                current_task,
+                task_count,
+            );
+        }
+
         for c in self.clients.iter_mut() {
             c.send_next_reconciliation_req(&mut next).await;
         }
+
         self.reconcile_current_work = Some(next);
+
         false
     }
 
@@ -2063,9 +2172,25 @@ impl Downstairs {
                 error!(self.log, "Mark {} as FAILED REPAIR", i);
             }
         }
+
         info!(self.log, "Clear out existing repair work queue");
         self.reconcile_task_list = VecDeque::new();
         self.reconcile_current_work = None;
+
+        assert!(self.reconcile.is_some());
+
+        #[cfg(feature = "omicron-build")]
+        {
+            // If building for production, then notify Nexus when any
+            // reconciliation finishes.
+            let cloned_reconcile = self.reconcile.as_ref().unwrap().clone();
+            self.notify_nexus_of_reconcile_finished(
+                cloned_reconcile,
+                true, /* aborted */
+            );
+        }
+
+        self.reconcile = None;
     }
 
     /// Asserts that initial reconciliation is done, and sets clients as Active
@@ -2079,6 +2204,29 @@ impl Downstairs {
         for (i, c) in self.clients.iter_mut().enumerate() {
             assert_eq!(c.state(), from_state, "invalid state for client {i}");
             c.set_active();
+        }
+
+        if from_state == DsState::Reconcile {
+            // reconciliation completed
+            assert!(self.reconcile.is_some());
+
+            #[cfg(feature = "omicron-build")]
+            {
+                // If building for production, then notify Nexus when any
+                // reconciliation finishes.
+                let cloned_reconcile = self.reconcile.as_ref().unwrap().clone();
+                self.notify_nexus_of_reconcile_finished(
+                    cloned_reconcile,
+                    false, /* aborted */
+                );
+            }
+
+            self.reconcile = None;
+        } else if from_state == DsState::WaitQuorum {
+            // no reconciliation was required
+            assert!(self.reconcile.is_none());
+        } else {
+            panic!("unexpected from_state {from_state}");
         }
     }
 
@@ -3673,6 +3821,589 @@ impl Downstairs {
             }
         }
     }
+
+    #[cfg(feature = "omicron-build")]
+    fn get_target_addrs(&mut self) -> Vec<SocketAddr> {
+        self.clients
+            .iter()
+            .map(|client| client.target_addr.clone())
+            .flat_map(|x| x)
+            .collect()
+    }
+
+    #[cfg(feature = "omicron-build")]
+    fn notify_nexus_of_live_repair_start(&mut self, repair: LiveRepairData) {
+        use crate::get_nexus_client;
+        use chrono::Utc;
+        use nexus_client::types::DownstairsUnderRepair;
+        use nexus_client::types::RepairStartInfo;
+        use nexus_client::types::UpstairsRepairType;
+        use omicron_uuid_kinds::GenericUuid;
+        use omicron_uuid_kinds::TypedUuid;
+        use omicron_uuid_kinds::UpstairsKind;
+        use omicron_uuid_kinds::UpstairsRepairKind;
+        use omicron_uuid_kinds::UpstairsSessionKind;
+
+        let mut repairs: Vec<DownstairsUnderRepair> =
+            Vec::with_capacity(repair.repair_downstairs.len());
+
+        for cid in &repair.repair_downstairs {
+            let Some(region_uuid) = self.clients[*cid].id() else {
+                // A downstairs doesn't have an id but is being repaired...?
+                continue;
+            };
+
+            let Some(target_addr) = self.clients[*cid].target_addr else {
+                // A downstairs doesn't have a target_addr but is being
+                // repaired...?
+                continue;
+            };
+
+            repairs.push(DownstairsUnderRepair {
+                region_uuid: region_uuid.into(),
+                target_addr: target_addr.to_string(),
+            });
+        }
+
+        let upstairs_id: TypedUuid<UpstairsKind> =
+            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
+        let session_id: TypedUuid<UpstairsSessionKind> =
+            TypedUuid::from_untyped_uuid(self.cfg.session_id);
+        let repair_id: TypedUuid<UpstairsRepairKind> =
+            TypedUuid::from_untyped_uuid(repair.id);
+
+        let now = Utc::now();
+        let log = self.log.new(o!("repair" => repair_id.to_string()));
+
+        // Spawn a task so we don't block the main loop talking to
+        // Nexus.
+        let target_addrs = self.get_target_addrs();
+        tokio::spawn(async move {
+            let Some(nexus_client) =
+                get_nexus_client(&log, &target_addrs).await
+            else {
+                // Exit if no Nexus client returned from DNS - our notification
+                // is best effort.
+                return;
+            };
+
+            match omicron_common::retry_until_known_result(&log, || async {
+                nexus_client
+                    .cpapi_upstairs_repair_start(
+                        &upstairs_id,
+                        &RepairStartInfo {
+                            time: now,
+                            repair_id: repair_id.clone(),
+                            repair_type: UpstairsRepairType::Live,
+                            session_id: session_id.clone(),
+                            repairs: repairs.clone(),
+                        },
+                    )
+                    .await
+            })
+            .await
+            {
+                Ok(_) => {
+                    info!(log, "notified Nexus of repair start");
+                }
+
+                Err(e) => {
+                    error!(log, "failed to notify Nexus of repair start! {e}");
+                }
+            }
+        });
+    }
+
+    #[cfg(feature = "omicron-build")]
+    fn notify_nexus_of_live_repair_finish(&mut self, repair: LiveRepairData) {
+        use crate::get_nexus_client;
+        use chrono::Utc;
+        use nexus_client::types::DownstairsUnderRepair;
+        use nexus_client::types::RepairFinishInfo;
+        use nexus_client::types::UpstairsRepairType;
+        use omicron_uuid_kinds::GenericUuid;
+        use omicron_uuid_kinds::TypedUuid;
+        use omicron_uuid_kinds::UpstairsKind;
+        use omicron_uuid_kinds::UpstairsRepairKind;
+        use omicron_uuid_kinds::UpstairsSessionKind;
+
+        let aborted = repair.aborting_repair;
+
+        let mut repairs: Vec<DownstairsUnderRepair> =
+            Vec::with_capacity(repair.repair_downstairs.len());
+
+        for cid in &repair.repair_downstairs {
+            let Some(region_uuid) = self.clients[*cid].id() else {
+                // A downstairs doesn't have an id but is being repaired...?
+                continue;
+            };
+
+            let Some(target_addr) = self.clients[*cid].target_addr else {
+                // A downstairs doesn't have a target_addr but is being
+                // repaired...?
+                continue;
+            };
+
+            repairs.push(DownstairsUnderRepair {
+                region_uuid: region_uuid.into(),
+                target_addr: target_addr.to_string(),
+            });
+        }
+
+        let upstairs_id: TypedUuid<UpstairsKind> =
+            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
+        let session_id: TypedUuid<UpstairsSessionKind> =
+            TypedUuid::from_untyped_uuid(self.cfg.session_id);
+        let repair_id: TypedUuid<UpstairsRepairKind> =
+            TypedUuid::from_untyped_uuid(repair.id);
+
+        let now = Utc::now();
+        let log = self.log.new(o!("repair" => repair_id.to_string()));
+
+        // Spawn a task so we don't block the main loop talking to
+        // Nexus.
+        let target_addrs = self.get_target_addrs();
+        tokio::spawn(async move {
+            let Some(nexus_client) =
+                get_nexus_client(&log, &target_addrs).await
+            else {
+                // Exit if no Nexus client returned from DNS - our notification
+                // is best effort.
+                return;
+            };
+
+            match omicron_common::retry_until_known_result(&log, || async {
+                nexus_client
+                    .cpapi_upstairs_repair_finish(
+                        &upstairs_id,
+                        &RepairFinishInfo {
+                            time: now,
+                            repair_id: repair_id.clone(),
+                            repair_type: UpstairsRepairType::Live,
+                            session_id: session_id.clone(),
+                            repairs: repairs.clone(),
+                            aborted,
+                        },
+                    )
+                    .await
+            })
+            .await
+            {
+                Ok(_) => {
+                    info!(log, "notified Nexus of repair finish");
+                }
+
+                Err(e) => {
+                    error!(log, "failed to notify Nexus of repair finish! {e}");
+                }
+            }
+        });
+    }
+
+    #[cfg(feature = "omicron-build")]
+    fn notify_nexus_of_live_repair_progress(
+        &mut self,
+        repair_id: Uuid,
+        current_extent: u64,
+        extent_count: u64,
+    ) {
+        use crate::get_nexus_client;
+        use chrono::Utc;
+        use nexus_client::types::RepairProgress;
+        use omicron_uuid_kinds::GenericUuid;
+        use omicron_uuid_kinds::TypedUuid;
+        use omicron_uuid_kinds::UpstairsKind;
+        use omicron_uuid_kinds::UpstairsRepairKind;
+
+        let upstairs_id: TypedUuid<UpstairsKind> =
+            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
+        let repair_id: TypedUuid<UpstairsRepairKind> =
+            TypedUuid::from_untyped_uuid(repair_id);
+
+        let now = Utc::now();
+        let log = self.log.new(o!("repair" => repair_id.to_string()));
+
+        // Spawn a task so we don't block the main loop talking to
+        // Nexus.
+        let target_addrs = self.get_target_addrs();
+        tokio::spawn(async move {
+            let Some(nexus_client) =
+                get_nexus_client(&log, &target_addrs).await
+            else {
+                // If no Nexus client from DNS, spin until one arrives - our
+                // notification is best effort.
+                return;
+            };
+
+            match omicron_common::retry_until_known_result(&log, || async {
+                nexus_client
+                    .cpapi_upstairs_repair_progress(
+                        &upstairs_id,
+                        &repair_id,
+                        &RepairProgress {
+                            time: now,
+                            // surely we won't have u64::MAX extents
+                            current_item: current_extent as i64,
+                            // i am serious, and don't call me shirley
+                            total_items: extent_count as i64,
+                        },
+                    )
+                    .await
+            })
+            .await
+            {
+                Ok(_) => {
+                    info!(log, "notified Nexus of repair progress");
+                }
+
+                Err(e) => {
+                    error!(
+                        log,
+                        "failed to notify Nexus of repair progress! {e}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[cfg(feature = "omicron-build")]
+    fn notify_nexus_of_reconcile_start(&mut self, reconcile: ReconcileData) {
+        use crate::get_nexus_client;
+        use chrono::Utc;
+        use nexus_client::types::DownstairsUnderRepair;
+        use nexus_client::types::RepairStartInfo;
+        use nexus_client::types::UpstairsRepairType;
+        use omicron_uuid_kinds::GenericUuid;
+        use omicron_uuid_kinds::TypedUuid;
+        use omicron_uuid_kinds::UpstairsKind;
+        use omicron_uuid_kinds::UpstairsRepairKind;
+        use omicron_uuid_kinds::UpstairsSessionKind;
+
+        // Reconcilation involves everyone
+        let mut repairs: Vec<DownstairsUnderRepair> =
+            Vec::with_capacity(self.clients.len());
+
+        for client in self.clients.iter() {
+            let Some(region_uuid) = client.id() else {
+                // A downstairs doesn't have an id but is being reconciled...?
+                continue;
+            };
+
+            let Some(target_addr) = client.target_addr else {
+                // A downstairs doesn't have a target_addr but is being
+                // reconciled...?
+                continue;
+            };
+
+            repairs.push(DownstairsUnderRepair {
+                region_uuid: region_uuid.into(),
+                target_addr: target_addr.to_string(),
+            });
+        }
+
+        let upstairs_id: TypedUuid<UpstairsKind> =
+            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
+        let session_id: TypedUuid<UpstairsSessionKind> =
+            TypedUuid::from_untyped_uuid(self.cfg.session_id);
+        let repair_id: TypedUuid<UpstairsRepairKind> =
+            TypedUuid::from_untyped_uuid(reconcile.id);
+
+        let now = Utc::now();
+        let log = self.log.new(o!("reconcile" => repair_id.to_string()));
+
+        // Spawn a task so we don't block the main loop talking to
+        // Nexus.
+        let target_addrs = self.get_target_addrs();
+        tokio::spawn(async move {
+            let Some(nexus_client) =
+                get_nexus_client(&log, &target_addrs).await
+            else {
+                // Exit if no Nexus client returned from DNS - our notification
+                // is best effort.
+                return;
+            };
+
+            match omicron_common::retry_until_known_result(&log, || async {
+                nexus_client
+                    .cpapi_upstairs_repair_start(
+                        &upstairs_id,
+                        &RepairStartInfo {
+                            time: now,
+                            repair_id: repair_id.clone(),
+                            repair_type: UpstairsRepairType::Reconciliation,
+                            session_id: session_id.clone(),
+                            repairs: repairs.clone(),
+                        },
+                    )
+                    .await
+            })
+            .await
+            {
+                Ok(_) => {
+                    info!(log, "notified Nexus of reconcile start");
+                }
+
+                Err(e) => {
+                    error!(
+                        log,
+                        "error notifying Nexus of reconcile start! {e}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[cfg(feature = "omicron-build")]
+    fn notify_nexus_of_reconcile_finished(
+        &mut self,
+        reconcile: ReconcileData,
+        aborted: bool,
+    ) {
+        use crate::get_nexus_client;
+        use chrono::Utc;
+        use nexus_client::types::DownstairsUnderRepair;
+        use nexus_client::types::RepairFinishInfo;
+        use nexus_client::types::UpstairsRepairType;
+        use omicron_uuid_kinds::GenericUuid;
+        use omicron_uuid_kinds::TypedUuid;
+        use omicron_uuid_kinds::UpstairsKind;
+        use omicron_uuid_kinds::UpstairsRepairKind;
+        use omicron_uuid_kinds::UpstairsSessionKind;
+
+        // Reconcilation involves everyone
+        let mut repairs: Vec<DownstairsUnderRepair> =
+            Vec::with_capacity(self.clients.len());
+
+        for client in self.clients.iter() {
+            let Some(region_uuid) = client.id() else {
+                // A downstairs doesn't have an id but is being reconciled...?
+                continue;
+            };
+
+            let Some(target_addr) = client.target_addr else {
+                // A downstairs doesn't have a target_addr but is being
+                // reconciled...?
+                continue;
+            };
+
+            repairs.push(DownstairsUnderRepair {
+                region_uuid: region_uuid.into(),
+                target_addr: target_addr.to_string(),
+            });
+        }
+
+        let upstairs_id: TypedUuid<UpstairsKind> =
+            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
+        let session_id: TypedUuid<UpstairsSessionKind> =
+            TypedUuid::from_untyped_uuid(self.cfg.session_id);
+        let repair_id: TypedUuid<UpstairsRepairKind> =
+            TypedUuid::from_untyped_uuid(reconcile.id);
+
+        let now = Utc::now();
+        let log = self.log.new(o!("reconcile" => repair_id.to_string()));
+
+        // Spawn a task so we don't block the main loop talking to
+        // Nexus.
+        let target_addrs = self.get_target_addrs();
+        tokio::spawn(async move {
+            let Some(nexus_client) =
+                get_nexus_client(&log, &target_addrs).await
+            else {
+                // Exit if no Nexus client returned from DNS - our notification
+                // is best effort.
+                return;
+            };
+
+            match omicron_common::retry_until_known_result(&log, || async {
+                nexus_client
+                    .cpapi_upstairs_repair_finish(
+                        &upstairs_id,
+                        &RepairFinishInfo {
+                            time: now,
+                            repair_id: repair_id.clone(),
+                            repair_type: UpstairsRepairType::Reconciliation,
+                            session_id: session_id.clone(),
+                            repairs: repairs.clone(),
+                            aborted,
+                        },
+                    )
+                    .await
+            })
+            .await
+            {
+                Ok(_) => {
+                    info!(log, "notified Nexus of reconcile finish");
+                }
+
+                Err(e) => {
+                    error!(
+                        log,
+                        "failed to notify Nexus of reconcile finish! {e}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[cfg(feature = "omicron-build")]
+    fn notify_nexus_of_reconcile_progress(
+        &mut self,
+        reconcile_id: Uuid,
+        current_task: usize,
+        task_count: usize,
+    ) {
+        use crate::get_nexus_client;
+        use chrono::Utc;
+        use nexus_client::types::RepairProgress;
+        use omicron_uuid_kinds::GenericUuid;
+        use omicron_uuid_kinds::TypedUuid;
+        use omicron_uuid_kinds::UpstairsKind;
+        use omicron_uuid_kinds::UpstairsRepairKind;
+
+        let upstairs_id: TypedUuid<UpstairsKind> =
+            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
+        let repair_id: TypedUuid<UpstairsRepairKind> =
+            TypedUuid::from_untyped_uuid(reconcile_id);
+
+        let now = Utc::now();
+        let log = self.log.new(o!("reconcile" => repair_id.to_string()));
+
+        // Spawn a task so we don't block the main loop talking to
+        // Nexus.
+        let target_addrs = self.get_target_addrs();
+        tokio::spawn(async move {
+            let Some(nexus_client) =
+                get_nexus_client(&log, &target_addrs).await
+            else {
+                // Exit if no Nexus client returned from DNS - our notification
+                // is best effort.
+                return;
+            };
+
+            match omicron_common::retry_until_known_result(&log, || async {
+                nexus_client
+                    .cpapi_upstairs_repair_progress(
+                        &upstairs_id,
+                        &repair_id,
+                        &RepairProgress {
+                            time: now,
+                            // surely we won't have usize::MAX extents
+                            current_item: current_task as i64,
+                            // i am serious, and don't call me shirley
+                            total_items: task_count as i64,
+                        },
+                    )
+                    .await
+            })
+            .await
+            {
+                Ok(_) => {
+                    info!(log, "notified Nexus of reconcile progress");
+                }
+
+                Err(e) => {
+                    error!(
+                        log,
+                        "failed to notify Nexus of reconcile progress! {e}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[cfg(feature = "omicron-build")]
+    pub(crate) fn notify_nexus_of_client_task_stopped(
+        &mut self,
+        client_id: ClientId,
+        reason: ClientRunResult,
+    ) {
+        use crate::get_nexus_client;
+        use chrono::Utc;
+        use nexus_client::types::DownstairsClientStopped;
+        use nexus_client::types::DownstairsClientStoppedReason;
+        use omicron_uuid_kinds::DownstairsKind;
+        use omicron_uuid_kinds::GenericUuid;
+        use omicron_uuid_kinds::TypedUuid;
+        use omicron_uuid_kinds::UpstairsKind;
+
+        let upstairs_id: TypedUuid<UpstairsKind> =
+            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
+
+        let Some(downstairs_id) = self.clients[client_id].id() else {
+            return;
+        };
+        let downstairs_id: TypedUuid<DownstairsKind> =
+            TypedUuid::from_untyped_uuid(downstairs_id);
+
+        let now = Utc::now();
+        let log = self
+            .log
+            .new(o!("downstairs_id" => downstairs_id.to_string()));
+
+        let reason = match reason {
+            ClientRunResult::ConnectionTimeout => {
+                DownstairsClientStoppedReason::ConnectionTimeout
+            }
+            ClientRunResult::ConnectionFailed(_) => {
+                DownstairsClientStoppedReason::ConnectionFailed
+            }
+            ClientRunResult::Timeout => DownstairsClientStoppedReason::Timeout,
+            ClientRunResult::WriteFailed(_) => {
+                DownstairsClientStoppedReason::WriteFailed
+            }
+            ClientRunResult::ReadFailed(_) => {
+                DownstairsClientStoppedReason::ReadFailed
+            }
+            ClientRunResult::RequestedStop(_) => {
+                DownstairsClientStoppedReason::RequestedStop
+            }
+            ClientRunResult::Finished => {
+                DownstairsClientStoppedReason::Finished
+            }
+            ClientRunResult::QueueClosed => {
+                DownstairsClientStoppedReason::QueueClosed
+            }
+            ClientRunResult::ReceiveTaskCancelled => {
+                DownstairsClientStoppedReason::ReceiveTaskCancelled
+            }
+        };
+
+        // Spawn a task so we don't block the main loop talking to
+        // Nexus.
+        let target_addrs = self.get_target_addrs();
+        tokio::spawn(async move {
+            let Some(nexus_client) =
+                get_nexus_client(&log, &target_addrs).await
+            else {
+                // Exit if no Nexus client returned from DNS - our notification
+                // is best effort.
+                return;
+            };
+
+            match omicron_common::retry_until_known_result(&log, || async {
+                nexus_client
+                    .cpapi_downstairs_client_stopped(
+                        &upstairs_id,
+                        &downstairs_id,
+                        &DownstairsClientStopped { time: now, reason },
+                    )
+                    .await
+            })
+            .await
+            {
+                Ok(_) => {
+                    info!(log, "notified Nexus of client stopped");
+                }
+
+                Err(e) => {
+                    error!(
+                        log,
+                        "failed to notify Nexus of client stopped: {e}"
+                    );
+                }
+            }
+        });
+    }
 }
 
 /// Configuration for per-client backpressure
@@ -3706,7 +4437,7 @@ struct DownstairsBackpressureConfig {
 pub(crate) mod test {
     use super::Downstairs;
     use crate::{
-        downstairs::{LiveRepairData, LiveRepairState},
+        downstairs::{LiveRepairData, LiveRepairState, ReconcileData},
         guest::GuestWork,
         live_repair::ExtentInfo,
         upstairs::UpstairsState,
@@ -3723,6 +4454,8 @@ pub(crate) mod test {
         collections::{BTreeMap, HashMap},
         net::{IpAddr, Ipv4Addr, SocketAddr},
     };
+
+    use uuid::Uuid;
 
     /// Forces the given job to completion and acks it
     ///
@@ -5695,6 +6428,11 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
         set_all_reconcile(&mut ds);
 
+        ds.reconcile = Some(ReconcileData {
+            id: Uuid::new_v4(),
+            reconcile_task_list_index: 0,
+        });
+
         let w = ds.send_next_reconciliation_req().await;
         assert!(w); // reconciliation is "done", because there's nothing there
     }
@@ -5708,6 +6446,12 @@ pub(crate) mod test {
 
         let close_id = ReconciliationId(0);
         let rep_id = ReconciliationId(1);
+
+        ds.reconcile = Some(ReconcileData {
+            id: Uuid::new_v4(),
+            reconcile_task_list_index: 0,
+        });
+
         // Put a jobs on the todo list
         ds.reconcile_task_list.push_back(ReconcileIO::new(
             close_id,
@@ -5755,8 +6499,8 @@ pub(crate) mod test {
 
         // Verify that no more reconciliation work is happening
         assert!(ds.reconcile_task_list.is_empty());
-        let w = ds.send_next_reconciliation_req().await;
-        assert!(w);
+        assert!(ds.reconcile_current_work.is_none());
+        assert!(ds.reconcile.is_none());
     }
 
     #[tokio::test]
@@ -5769,6 +6513,12 @@ pub(crate) mod test {
 
         let up_state = UpstairsState::Active;
         let rep_id = ReconciliationId(0);
+
+        ds.reconcile = Some(ReconcileData {
+            id: Uuid::new_v4(),
+            reconcile_task_list_index: 0,
+        });
+
         // Put two jobs on the todo list
         ds.reconcile_task_list.push_back(ReconcileIO::new(
             rep_id,
@@ -5841,6 +6591,12 @@ pub(crate) mod test {
         let up_state = UpstairsState::Active;
         let close_id = ReconciliationId(0);
         let rep_id = ReconciliationId(1);
+
+        ds.reconcile = Some(ReconcileData {
+            id: Uuid::new_v4(),
+            reconcile_task_list_index: 0,
+        });
+
         ds.reconcile_task_list.push_back(ReconcileIO::new(
             close_id,
             Message::ExtentClose {
@@ -5896,6 +6652,11 @@ pub(crate) mod test {
 
         let up_state = UpstairsState::Active;
         let rep_id = ReconciliationId(1);
+
+        ds.reconcile = Some(ReconcileData {
+            id: Uuid::new_v4(),
+            reconcile_task_list_index: 0,
+        });
 
         // Queue up a repair message, which will be skiped for client 0
         ds.reconcile_task_list.push_back(ReconcileIO::new(
@@ -9237,6 +9998,7 @@ pub(crate) mod test {
         // with what things would look like at the start of the repair. But, we
         // enqueue jobs ourselves.
         ds.repair = Some(LiveRepairData {
+            id: Uuid::new_v4(),
             extent_count: 3,
             active_extent: 0,
             min_id: JobId(1000),
@@ -9535,6 +10297,7 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
         ds.repair = Some(LiveRepairData {
+            id: Uuid::new_v4(),
             extent_count: 3,
             active_extent: 0,
             min_id: JobId(1000),
@@ -9606,6 +10369,7 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
         ds.repair = Some(LiveRepairData {
+            id: Uuid::new_v4(),
             extent_count: 3,
             active_extent: 0,
             min_id: JobId(1000),
@@ -9675,6 +10439,7 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
         ds.repair = Some(LiveRepairData {
+            id: Uuid::new_v4(),
             extent_count: 3,
             active_extent: 0,
             min_id: JobId(1000),
@@ -9707,6 +10472,7 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
         ds.repair = Some(LiveRepairData {
+            id: Uuid::new_v4(),
             extent_count: 3,
             active_extent: 1,
             min_id: JobId(1004),
@@ -9772,6 +10538,7 @@ pub(crate) mod test {
 
         let next_id = ds.peek_next_id().0;
         ds.repair = Some(LiveRepairData {
+            id: Uuid::new_v4(),
             extent_count: 3,
             active_extent: 0,
             min_id: JobId(next_id),
@@ -9795,6 +10562,7 @@ pub(crate) mod test {
         // Same as the last repair assignment but active_extent is 1 now
         let next_id = ds.peek_next_id().0;
         ds.repair = Some(LiveRepairData {
+            id: Uuid::new_v4(),
             extent_count: 3,
             active_extent: 1,
             min_id: JobId(next_id),
@@ -9957,6 +10725,7 @@ pub(crate) mod test {
         let next_id = ds.peek_next_id().0;
 
         ds.repair = Some(LiveRepairData {
+            id: Uuid::new_v4(),
             extent_count: 3,
             active_extent: 0,
             min_id: JobId(next_id),
@@ -10230,6 +10999,7 @@ pub(crate) mod test {
 
         // Make sure we're in the repair on extent 0
         ds.repair = Some(LiveRepairData {
+            id: Uuid::new_v4(),
             extent_count: 3,
             active_extent: 0,
             min_id: JobId(1000),
@@ -10329,6 +11099,7 @@ pub(crate) mod test {
 
         // Make sure we're in the repair on extent 0
         ds.repair = Some(LiveRepairData {
+            id: Uuid::new_v4(),
             extent_count: 3,
             active_extent: 0,
             min_id: JobId(1000),

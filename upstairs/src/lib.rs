@@ -422,6 +422,12 @@ impl<T: Clone> ClientData<T> {
     }
 }
 impl<T> ClientData<T> {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.0.iter()
     }
@@ -2105,4 +2111,62 @@ pub fn up_main(
     let join_handle = tokio::spawn(async move { up.run().await });
 
     Ok(join_handle)
+}
+
+/// Gets a Nexus client based on any IPv6 address
+#[cfg(feature = "omicron-build")]
+pub(crate) async fn get_nexus_client(
+    log: &Logger,
+    target_addrs: &[SocketAddr],
+) -> Option<nexus_client::Client> {
+    use internal_dns::resolver::Resolver;
+    use internal_dns::ServiceName;
+    use std::net::Ipv6Addr;
+
+    // Use any rack internal address for `Resolver::new_from_ip`, as that will
+    // use the AZ_PREFIX to find internal DNS servers.
+    let mut addr: Option<Ipv6Addr> = None;
+
+    for target_addr in target_addrs {
+        match &target_addr {
+            SocketAddr::V6(target_addr) => {
+                addr = Some(target_addr.ip().clone());
+                break;
+            }
+
+            SocketAddr::V4(_) => {
+                // This branch is seen if compiling with the `omicron-build`
+                // feature but deploying in an ipv4 environment, usually during
+                // development. `Resolver::new_from_ip` only accepts IPv6
+                // addresses, so we can't use it to look up an address for the
+                // Nexus client.
+            }
+        }
+    }
+
+    let Some(addr) = addr else {
+        return None;
+    };
+
+    let resolver = match Resolver::new_from_ip(log.clone(), addr) {
+        Ok(resolver) => resolver,
+        Err(e) => {
+            error!(log, "could not make resolver: {e}");
+            return None;
+        }
+    };
+
+    let nexus_address =
+        match resolver.lookup_socket_v6(ServiceName::Nexus).await {
+            Ok(addr) => addr,
+            Err(e) => {
+                error!(log, "lookup Nexus address failed: {e}");
+                return None;
+            }
+        };
+
+    Some(nexus_client::Client::new(
+        &format!("http://{}", nexus_address),
+        log.clone(),
+    ))
 }

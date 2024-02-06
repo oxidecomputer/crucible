@@ -2237,6 +2237,11 @@ impl DownstairsClient {
     pub(crate) fn get_delay_us(&self) -> u64 {
         self.client_delay_us.load(Ordering::Relaxed)
     }
+
+    #[cfg(feature = "omicron-build")]
+    pub(crate) fn id(&self) -> Option<Uuid> {
+        self.region_uuid
+    }
 }
 
 /// How to handle "promote to active" requests
