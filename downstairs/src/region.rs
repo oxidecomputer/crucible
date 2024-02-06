@@ -909,6 +909,12 @@ impl Region {
         }
 
         if cfg!(feature = "omicron-build") {
+            // If using `omicron-build`, then we're running on illumos and the
+            // region is backed by a ZFS dataset. Issue a _FIOFFS call, which
+            // will result in a `zfs_sync` to the entire region dataset. If this
+            // feature is enabled then the `extent.flush` calls above will _not_
+            // sync their data, but will update the flush and gen numbers and
+            // clear the dirty bit.
             use std::io;
             use std::os::fd::AsRawFd;
             use std::ptr;
