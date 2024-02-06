@@ -45,15 +45,14 @@ pub(crate) trait ExtentInner: Send + Debug {
     fn read(
         &mut self,
         job_id: JobId,
-        requests: &[&crucible_protocol::ReadRequest],
-        responses: &mut Vec<crucible_protocol::ReadResponse>,
+        requests: &[crucible_protocol::ReadRequest],
         iov_max: usize,
-    ) -> Result<(), CrucibleError>;
+    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError>;
 
     fn write(
         &mut self,
         job_id: JobId,
-        writes: &[&crucible_protocol::Write],
+        writes: &[crucible_protocol::Write],
         only_write_unwritten: bool,
         iov_max: usize,
     ) -> Result<(), CrucibleError>;
@@ -519,29 +518,28 @@ impl Extent {
     pub async fn read(
         &self,
         job_id: JobId,
-        requests: &[&crucible_protocol::ReadRequest],
-        responses: &mut Vec<crucible_protocol::ReadResponse>,
-    ) -> Result<(), CrucibleError> {
+        requests: &[crucible_protocol::ReadRequest],
+    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
         cdt::extent__read__start!(|| {
             (job_id.0, self.number, requests.len() as u64)
         });
 
         let mut inner = self.inner.lock().await;
 
-        inner.read(job_id, requests, responses, self.iov_max)?;
+        let responses = inner.read(job_id, requests, self.iov_max)?;
 
         cdt::extent__read__done!(|| {
             (job_id.0, self.number, requests.len() as u64)
         });
 
-        Ok(())
+        Ok(responses)
     }
 
     #[instrument]
     pub async fn write(
         &self,
         job_id: JobId,
-        writes: &[&crucible_protocol::Write],
+        writes: &[crucible_protocol::Write],
         only_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
         if self.read_only {

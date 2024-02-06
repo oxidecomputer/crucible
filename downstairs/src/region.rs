@@ -718,13 +718,13 @@ impl Region {
          * Batch writes so they can all be sent to the appropriate extent
          * together.
          */
-        let mut batched_writes: HashMap<usize, Vec<&crucible_protocol::Write>> =
+        let mut batched_writes: HashMap<usize, Vec<crucible_protocol::Write>> =
             HashMap::new();
 
         for write in writes {
             let extent_vec =
                 batched_writes.entry(write.eid as usize).or_default();
-            extent_vec.push(write);
+            extent_vec.push(write.clone());
         }
 
         if only_write_unwritten {
@@ -769,36 +769,32 @@ impl Region {
          * use a hashmap in the same way that batching writes can.
          */
         let mut eid: Option<u64> = None;
-        let mut batched_reads: Vec<&crucible_protocol::ReadRequest> =
-            Vec::with_capacity(requests.len());
+        let mut batched_reads = Vec::with_capacity(requests.len());
 
         cdt::os__read__start!(|| job_id.0);
         for request in requests {
             if let Some(_eid) = eid {
                 if request.eid == _eid {
-                    batched_reads.push(request);
+                    batched_reads.push(request.clone());
                 } else {
                     let extent = self.get_opened_extent(_eid as usize).await;
-                    extent
-                        .read(job_id, &batched_reads[..], &mut responses)
-                        .await?;
+                    responses
+                        .extend(extent.read(job_id, &batched_reads[..]).await?);
 
                     eid = Some(request.eid);
                     batched_reads.clear();
-                    batched_reads.push(request);
+                    batched_reads.push(request.clone());
                 }
             } else {
                 eid = Some(request.eid);
                 batched_reads.clear();
-                batched_reads.push(request);
+                batched_reads.push(request.clone());
             }
         }
 
         if let Some(_eid) = eid {
             let extent = self.get_opened_extent(_eid as usize).await;
-            extent
-                .read(job_id, &batched_reads[..], &mut responses)
-                .await?;
+            responses.extend(extent.read(job_id, &batched_reads[..]).await?);
         }
         cdt::os__read__done!(|| job_id.0);
 
