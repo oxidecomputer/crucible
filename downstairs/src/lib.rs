@@ -849,7 +849,7 @@ async fn proc_frame(
             gen_number,
         } => {
             let msg = {
-                let d = ad.lock().await;
+                let mut d = ad.lock().await;
                 debug!(
                     d.log,
                     "{} Flush extent {} with f:{} g:{}",
@@ -885,7 +885,7 @@ async fn proc_frame(
             extent_id,
         } => {
             let msg = {
-                let d = ad.lock().await;
+                let mut d = ad.lock().await;
                 debug!(d.log, "{} Close extent {}", repair_id, extent_id);
                 match d.region.close_extent(extent_id).await {
                     Ok(_) => Message::RepairAckId { repair_id },

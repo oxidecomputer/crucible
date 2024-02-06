@@ -59,8 +59,7 @@ pub async fn dump_region(
          * directory index and the value is the ExtentMeta for that region.
          */
         for e in &region.extents {
-            let e = e.lock().await;
-            let e = match &*e {
+            let e = match e {
                 extent::ExtentState::Opened(extent) => extent,
                 extent::ExtentState::Closed => panic!("dump on closed extent!"),
             };
@@ -534,7 +533,7 @@ async fn show_extent(
          */
         for (index, dir) in region_dir.iter().enumerate() {
             // Open Region read only
-            let region =
+            let mut region =
                 Region::open(dir, Default::default(), false, true, &log)
                     .await?;
 
@@ -650,7 +649,7 @@ async fn show_extent_block(
      */
     for (index, dir) in region_dir.iter().enumerate() {
         // Open Region read only
-        let region =
+        let mut region =
             Region::open(dir, Default::default(), false, true, &log).await?;
 
         let mut responses = region
