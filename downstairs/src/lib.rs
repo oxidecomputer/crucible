@@ -533,39 +533,14 @@ pub mod cdt {
     fn work__done(_: u64) {}
 }
 
-// Check if a Message is valid on this downstairs or not.
-// If not, then send the correct error on the provided channel, return false.
-// If correct, then return true.
-async fn is_message_valid(
-    upstairs_connection: UpstairsConnection,
-    upstairs_id: Uuid,
-    session_id: Uuid,
-    resp_tx: &mpsc::Sender<Message>,
-) -> Result<bool> {
-    if upstairs_connection.upstairs_id != upstairs_id {
-        resp_tx
-            .send(Message::UuidMismatch {
-                expected_id: upstairs_connection.upstairs_id,
-            })
-            .await?;
-        Ok(false)
-    } else if upstairs_connection.session_id != session_id {
-        resp_tx
-            .send(Message::UuidMismatch {
-                expected_id: upstairs_connection.session_id,
-            })
-            .await?;
-        Ok(false)
-    } else {
-        Ok(true)
-    }
-}
-
 /*
  * A new IO request has been received.
- * If the message is a ping, send the correct response. If the message is an IO,
- * then put the new IO the work hashmap. If the message is a repair message,
- * then we handle it right here.
+ *
+ * By this point, invalid messages and pings have been handled, so we don't need
+ * to check upstairs_id / session_id fields.
+ *
+ * If the message is an IO, then put the new IO into work hashmap. If the
+ * message is a repair message, then we handle it right here.
  */
 async fn proc_frame(
     upstairs_connection: UpstairsConnection,
@@ -576,22 +551,11 @@ async fn proc_frame(
 ) -> Result<()> {
     let new_ds_id = match m {
         Message::Write {
-            upstairs_id,
-            session_id,
             job_id,
             dependencies,
             writes,
+            ..
         } => {
-            if !is_message_valid(
-                upstairs_connection,
-                upstairs_id,
-                session_id,
-                resp_tx,
-            )
-            .await?
-            {
-                return Ok(());
-            }
             cdt::submit__write__start!(|| job_id.0);
 
             let new_write = IOop::Write {
@@ -604,27 +568,15 @@ async fn proc_frame(
             Some(job_id)
         }
         Message::Flush {
-            upstairs_id,
-            session_id,
             job_id,
             dependencies,
             flush_number,
             gen_number,
             snapshot_details,
             extent_limit,
+            ..
         } => {
-            if !is_message_valid(
-                upstairs_connection,
-                upstairs_id,
-                session_id,
-                resp_tx,
-            )
-            .await?
-            {
-                return Ok(());
-            }
             cdt::submit__flush__start!(|| job_id.0);
-
             let new_flush = IOop::Flush {
                 dependencies,
                 flush_number,
@@ -638,22 +590,11 @@ async fn proc_frame(
             Some(job_id)
         }
         Message::WriteUnwritten {
-            upstairs_id,
-            session_id,
             job_id,
             dependencies,
             writes,
+            ..
         } => {
-            if !is_message_valid(
-                upstairs_connection,
-                upstairs_id,
-                session_id,
-                resp_tx,
-            )
-            .await?
-            {
-                return Ok(());
-            }
             cdt::submit__writeunwritten__start!(|| job_id.0);
 
             let new_write = IOop::WriteUnwritten {
@@ -666,22 +607,11 @@ async fn proc_frame(
             Some(job_id)
         }
         Message::ReadRequest {
-            upstairs_id,
-            session_id,
             job_id,
             dependencies,
             requests,
+            ..
         } => {
-            if !is_message_valid(
-                upstairs_connection,
-                upstairs_id,
-                session_id,
-                resp_tx,
-            )
-            .await?
-            {
-                return Ok(());
-            }
             cdt::submit__read__start!(|| job_id.0);
 
             let new_read = IOop::Read {
@@ -695,23 +625,11 @@ async fn proc_frame(
         }
         // These are for repair while taking live IO
         Message::ExtentLiveClose {
-            upstairs_id,
-            session_id,
             job_id,
             dependencies,
             extent_id,
+            ..
         } => {
-            if !is_message_valid(
-                upstairs_connection,
-                upstairs_id,
-                session_id,
-                resp_tx,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-
             cdt::submit__el__close__start!(|| job_id.0);
             // TODO: Add dtrace probes
             let ext_close = IOop::ExtentClose {
@@ -724,25 +642,13 @@ async fn proc_frame(
             Some(job_id)
         }
         Message::ExtentLiveFlushClose {
-            upstairs_id,
-            session_id,
             job_id,
             dependencies,
             extent_id,
             flush_number,
             gen_number,
+            ..
         } => {
-            if !is_message_valid(
-                upstairs_connection,
-                upstairs_id,
-                session_id,
-                resp_tx,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-
             cdt::submit__el__flush__close__start!(|| job_id.0);
             // Do both the flush, and then the close
             let new_flush = IOop::ExtentFlushClose {
@@ -759,25 +665,13 @@ async fn proc_frame(
             Some(job_id)
         }
         Message::ExtentLiveRepair {
-            upstairs_id,
-            session_id,
             job_id,
             dependencies,
             extent_id,
             source_client_id,
             source_repair_address,
+            ..
         } => {
-            if !is_message_valid(
-                upstairs_connection,
-                upstairs_id,
-                session_id,
-                resp_tx,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-
             cdt::submit__el__repair__start!(|| job_id.0);
             // Do both the flush, and then the close
             let new_repair = IOop::ExtentLiveRepair {
@@ -794,23 +688,11 @@ async fn proc_frame(
             Some(job_id)
         }
         Message::ExtentLiveReopen {
-            upstairs_id,
-            session_id,
             job_id,
             dependencies,
             extent_id,
+            ..
         } => {
-            if !is_message_valid(
-                upstairs_connection,
-                upstairs_id,
-                session_id,
-                resp_tx,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-
             cdt::submit__el__reopen__start!(|| job_id.0);
             let new_open = IOop::ExtentLiveReopen {
                 dependencies,
@@ -822,21 +704,10 @@ async fn proc_frame(
             Some(job_id)
         }
         Message::ExtentLiveNoOp {
-            upstairs_id,
-            session_id,
             job_id,
             dependencies,
+            ..
         } => {
-            if !is_message_valid(
-                upstairs_connection,
-                upstairs_id,
-                session_id,
-                resp_tx,
-            )
-            .await?
-            {
-                return Ok(());
-            }
             cdt::submit__el__noop__start!(|| job_id.0);
             let new_open = IOop::ExtentLiveNoOp { dependencies };
 
@@ -1692,9 +1563,9 @@ where
      *        │         │         framed_write_task           │
      *        │         └─▲─────▲──────────────────▲──────────┘
      *        │           │     │                  │
-     *        │       ping│     │invalid           │
-     *        │  ┌────────┘     │frame             │responses
-     *        │  │              │errors            │
+     *        │       ping│     │                  │
+     *        │  ┌────────┘     │repair            │io responses
+     *        │  │bad uuids     │responses         │
      *        │  │              │                  │
      *   ┌────▼──┴─┐ message   ┌┴──────┐  job     ┌┴────────┐
      *   │resp_loop├──────────►│pf_task├─────────►│ dw_task │
@@ -1854,13 +1725,26 @@ where
                         return Ok(());
                     }
                     Some(Ok(msg)) => {
-                        if matches!(msg, Message::Ruok) {
-                            // Respond instantly to pings, don't wait.
-                            if let Err(e) = resp_channel_tx.send(Message::Imok).await {
-                                bail!("Failed sending Imok: {}", e);
+                        match check_incoming_message(msg, &upstairs_connection)
+                        {
+                            // The message is good, send it to the downstairs
+                            // worker task via `message_channel_tx`
+                            Ok(m) => {
+                                if let Err(e) = message_channel_tx.send(m)
+                                    .await
+                                {
+                                    bail!(
+                                        "Failed sending message to proc_frame: \
+                                         {e}"
+                                    );
+                                }
                             }
-                        } else if let Err(e) = message_channel_tx.send(msg).await {
-                            bail!("Failed sending message to proc_frame: {}", e);
+                            // The message is bad, send a reply immediately
+                            Err(e) => {
+                                if let Err(e) = resp_channel_tx.send(e).await {
+                                    bail!("Failed sending reply: {e}");
+                                }
+                            }
                         }
                     }
                     Some(Err(e)) => {
@@ -1871,6 +1755,82 @@ where
                 }
             }
         }
+    }
+}
+
+/// Checks an incoming message for initial validity
+///
+/// Returns `Ok(msg)` if the message should be handled by the `Downstairs`, or
+/// `Err(e)` if we should reply to the message immediately
+fn check_incoming_message(
+    msg: Message,
+    upstairs_connection: &UpstairsConnection,
+) -> Result<Message, Message> {
+    match &msg {
+        // Reply immediately to pings
+        Message::Ruok => Err(Message::Imok),
+
+        // Check upstairs and session ID for mismatches
+        Message::Write {
+            upstairs_id,
+            session_id,
+            ..
+        }
+        | Message::Flush {
+            upstairs_id,
+            session_id,
+            ..
+        }
+        | Message::WriteUnwritten {
+            upstairs_id,
+            session_id,
+            ..
+        }
+        | Message::ReadRequest {
+            upstairs_id,
+            session_id,
+            ..
+        }
+        | Message::ExtentLiveClose {
+            upstairs_id,
+            session_id,
+            ..
+        }
+        | Message::ExtentLiveFlushClose {
+            upstairs_id,
+            session_id,
+            ..
+        }
+        | Message::ExtentLiveRepair {
+            upstairs_id,
+            session_id,
+            ..
+        }
+        | Message::ExtentLiveReopen {
+            upstairs_id,
+            session_id,
+            ..
+        }
+        | Message::ExtentLiveNoOp {
+            upstairs_id,
+            session_id,
+            ..
+        } => {
+            if upstairs_connection.upstairs_id != *upstairs_id {
+                Err(Message::UuidMismatch {
+                    expected_id: upstairs_connection.upstairs_id,
+                })
+            } else if upstairs_connection.session_id != *session_id {
+                Err(Message::UuidMismatch {
+                    expected_id: upstairs_connection.session_id,
+                })
+            } else {
+                Ok(msg)
+            }
+        }
+
+        // All other messages are handled by the Downstairs
+        _ => Ok(msg),
     }
 }
 
