@@ -8,7 +8,6 @@ source.paths = [
   { from = "agent/downstairs_method_script.sh", to = "/opt/oxide/lib/svc/manifest/crucible/downstairs.sh" },
 ]
 output.type = "zone"
-output.intermediate_only = true
 
 [package.crucible-pantry]
 service_name = "pantry"
@@ -19,4 +18,3 @@ source.paths = [
   { from = "pantry/smf/pantry.xml", to = "/var/svc/manifest/site/crucible/pantry.xml" },
 ]
 output.type = "zone"
-output.intermediate_only = true
