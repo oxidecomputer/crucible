@@ -41,6 +41,22 @@ impl std::str::FromStr for Mode {
 #[derive(Debug, Parser)]
 #[clap(about = "disk-side storage component")]
 enum Args {
+    /// Clone the extents from another region into this region.
+    ///
+    /// The other downstairs should be running read-only.  All data in
+    /// the region here will be replaced.
+    Clone {
+        /// Directory where the region is located.
+        #[clap(short, long, name = "DIRECTORY", action)]
+        data: PathBuf,
+
+        /// Source IP:Port where the extent files will come from.
+        #[clap(short, long, action)]
+        source: SocketAddr,
+
+        #[clap(short, long, action)]
+        trace_endpoint: Option<String>,
+    },
     Create {
         #[clap(long, default_value = "512", action)]
         block_size: u64,
@@ -234,6 +250,41 @@ async fn main() -> Result<()> {
     let log = build_logger();
 
     match args {
+        Args::Clone {
+            data,
+            source,
+            trace_endpoint,
+        } => {
+            // Instrumentation is shared.
+            if let Some(endpoint) = trace_endpoint {
+                let tracer = opentelemetry_jaeger::new_agent_pipeline()
+                    .with_endpoint(endpoint) // usually port 6831
+                    .with_service_name("downstairs")
+                    .install_simple()
+                    .expect("Error initializing Jaeger exporter");
+
+                let telemetry =
+                    tracing_opentelemetry::layer().with_tracer(tracer);
+
+                tracing_subscriber::registry()
+                    .with(telemetry)
+                    .try_init()
+                    .expect("Error init tracing subscriber");
+            }
+
+            let d = build_downstairs_for_region(
+                &data,
+                false,
+                false,
+                false,
+                false,
+                true, // read_only
+                Some(log),
+            )
+            .await?;
+
+            clone_region(d, source).await
+        }
         Args::Create {
             block_size,
             data,

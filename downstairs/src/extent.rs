@@ -143,7 +143,7 @@ impl ExtentMeta {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 #[allow(clippy::enum_variant_names)]
 pub enum ExtentType {
     Data,
@@ -168,7 +168,7 @@ impl fmt::Display for ExtentType {
  * FileType from the repair client.
  */
 impl ExtentType {
-    pub fn to_file_type(&self) -> FileType {
+    pub fn to_file_type(self) -> FileType {
         match self {
             ExtentType::Data => FileType::Data,
             ExtentType::Db => FileType::Db,
@@ -307,7 +307,7 @@ impl Extent {
                 "Extent {} found replacement dir, finishing replacement",
                 number
             );
-            move_replacement_extent(dir, number as usize, log)?;
+            move_replacement_extent(dir, number as usize, log, false)?;
         }
 
         // We will migrate every read-write extent with a SQLite file present.
@@ -616,6 +616,7 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
     region_dir: P,
     eid: usize,
     log: &Logger,
+    clone: bool,
 ) -> Result<(), CrucibleError> {
     let destination_dir = extent_dir(&region_dir, eid as u32);
     let extent_file_name = extent_file_name(eid as u32, ExtentType::Data);
@@ -651,13 +652,31 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
     sync_path(&original_file, log)?;
 
     // We distinguish between SQLite-backend and raw-file extents based on the
-    // presence of the `.db` file.  We should never do live migration across
-    // different extent formats; in fact, we should never live-migrate
-    // SQLite-backed extents at all, but must still handle the case of
-    // unfinished migrations.
+    // presence of the `.db` file.  We should never do extent repair across
+    // different extent formats; it must be SQLite-to-SQLite or raw-to-raw.
+    //
+    // It is uncommon to perform extent repair on SQLite-backed extents at all,
+    // because they are automatically migrated into raw file extents or
+    // read-only.  However, it must be supported for two cases:
+    //
+    // - If there was an unfinished replacement, we must finish that replacement
+    //   before migrating from SQLite -> raw file backend, which happens
+    //   automatically later in startup.
+    // - We use this same code path to perform clones of read-only regions,
+    //   which may be SQLite-backed (and will never migrate to raw files,
+    //   because they are read only).  This is only the case when the `clone`
+    //   argument is `true`.
+    //
+    // In the first case, we know that we are repairing an SQLite-based extent
+    // because the target (original) extent includes a `.db` file.
+    //
+    // In the second case, the target (original) extent is not present, so we
+    // check whether the new files include a `.db` file.
+
     new_file.set_extension("db");
     original_file.set_extension("db");
-    if original_file.exists() {
+
+    if original_file.exists() || (new_file.exists() && clone) {
         if let Err(e) = std::fs::copy(new_file.clone(), original_file.clone()) {
             crucible_bail!(
                 IoError,
@@ -688,6 +707,10 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
             }
             sync_path(&original_file, log)?;
         } else if original_file.exists() {
+            // If we are cloning, then our new region will have been
+            // created with Backend::RawFile, and we should have no SQLite
+            // files.
+            assert!(!clone);
             info!(
                 log,
                 "Remove old file {:?} as there is no replacement",
@@ -712,6 +735,10 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
             }
             sync_path(&original_file, log)?;
         } else if original_file.exists() {
+            // If we are cloning, then our new region will have been
+            // created with Backend::RawFile, and we should have no SQLite
+            // files.
+            assert!(!clone);
             info!(
                 log,
                 "Remove old file {:?} as there is no replacement",
