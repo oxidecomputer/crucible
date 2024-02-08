@@ -269,7 +269,7 @@ async fn get_region_info(
     Ok(HttpResponseOk(region_definition))
 }
 
-/// Return the RegionDefinition describing our region.
+/// Return the region-mode describing our region.
 #[endpoint {
     method = GET,
     path = "/region-mode",

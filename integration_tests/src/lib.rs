@@ -2820,7 +2820,7 @@ mod test {
 
     #[tokio::test]
     async fn integration_test_clone_diff_ec() -> Result<()> {
-        // Test downstairs replacement.
+        // Test downstairs region clone.
         // Verify different extent count will fail.
 
         let mut ds_one = TestDownstairs::new(
@@ -2856,7 +2856,7 @@ mod test {
 
     #[tokio::test]
     async fn integration_test_clone_diff_es() -> Result<()> {
-        // Test downstairs replacement.
+        // Test downstairs region clone.
         // Verify different extent size will fail.
 
         let mut ds_one = TestDownstairs::new(
@@ -2892,8 +2892,8 @@ mod test {
 
     #[tokio::test]
     async fn integration_test_clone_not_ro() -> Result<()> {
-        // Test downstairs replacement.
-        // Verify you can't replace from a RW downstairs
+        // Test downstairs region clone.
+        // Verify you can't clone from a RW downstairs
 
         let ds_one = TestDownstairs::new(
             "127.0.0.1".parse().unwrap(),
@@ -2927,7 +2927,7 @@ mod test {
 
     #[tokio::test]
     async fn integration_test_clone_diff_encrypted() -> Result<()> {
-        // Test downstairs replacement.
+        // Test downstairs region clone.
         // Verify downstairs encryption state must match.
 
         let ds_one = TestDownstairs::new(
