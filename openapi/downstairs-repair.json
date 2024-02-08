@@ -107,7 +107,7 @@
     },
     "/region-mode": {
       "get": {
-        "summary": "Return the RegionDefinition describing our region.",
+        "summary": "Return the region-mode describing our region.",
         "operationId": "get_region_mode",
         "responses": {
           "200": {
