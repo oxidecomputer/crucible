@@ -1902,13 +1902,9 @@ impl DownstairsBuilder<'_> {
 
     pub async fn build(&mut self) -> Result<Arc<Mutex<Downstairs>>> {
         let lossy = self.lossy.unwrap_or(false);
-
         let read_errors = self.read_errors.unwrap_or(false);
-
         let write_errors = self.write_errors.unwrap_or(false);
-
         let flush_errors = self.flush_errors.unwrap_or(false);
-
         let backend = self.backend.unwrap_or(Backend::RawFile);
 
         let log = match &self.log {
