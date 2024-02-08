@@ -353,16 +353,13 @@ async fn main() -> Result<()> {
             }
 
             let read_only = mode == Mode::Ro;
-            let d = build_downstairs_for_region(
-                &data,
-                lossy,
-                read_errors,
-                write_errors,
-                flush_errors,
-                read_only,
-                Some(log),
-            )
-            .await?;
+
+            let d = Downstairs::new_builder(&data, read_only)
+                .set_lossy(lossy)
+                .set_logger(log)
+                .set_test_errors(read_errors, write_errors, flush_errors)
+                .build()
+                .await?;
 
             let downstairs_join_handle = start_downstairs(
                 d,

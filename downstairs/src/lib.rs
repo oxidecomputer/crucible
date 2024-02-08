@@ -1863,6 +1863,103 @@ pub struct ActiveUpstairs {
     pub terminate_sender: oneshot::Sender<UpstairsConnection>,
 }
 
+#[derive(Debug)]
+pub struct DownstairsBuilder<'a> {
+    data: &'a Path,
+    read_only: bool,
+    lossy: Option<bool>,
+    read_errors: Option<bool>,  // Test flag
+    write_errors: Option<bool>, // Test flag
+    flush_errors: Option<bool>, // Test flag
+    backend: Option<Backend>,
+    log: Option<Logger>,
+}
+
+impl DownstairsBuilder<'_> {
+    pub fn set_lossy(&mut self, lossy: bool) -> &mut Self {
+        self.lossy = Some(lossy);
+        self
+    }
+    pub fn set_test_errors(
+        &mut self,
+        read_errors: bool,
+        write_errors: bool,
+        flush_errors: bool,
+    ) -> &mut Self {
+        self.read_errors = Some(read_errors);
+        self.write_errors = Some(write_errors);
+        self.flush_errors = Some(flush_errors);
+        self
+    }
+    pub fn set_backend(&mut self, backend: Backend) -> &mut Self {
+        self.backend = Some(backend);
+        self
+    }
+    pub fn set_logger(&mut self, log: Logger) -> &mut Self {
+        self.log = Some(log);
+        self
+    }
+
+    pub async fn build(&mut self) -> Result<Arc<Mutex<Downstairs>>> {
+        let lossy = self.lossy.unwrap_or(false);
+
+        let read_errors = self.read_errors.unwrap_or(false);
+
+        let write_errors = self.write_errors.unwrap_or(false);
+
+        let flush_errors = self.flush_errors.unwrap_or(false);
+
+        let backend = self.backend.unwrap_or(Backend::RawFile);
+
+        let log = match &self.log {
+            Some(log) => log.clone(),
+            None => build_logger(),
+        };
+
+        // Open the region at the provided location.
+        let region = Region::open_with_backend(
+            self.data,
+            Default::default(),
+            true,
+            self.read_only,
+            backend,
+            &log,
+        )
+        .await?;
+
+        let encrypted = region.encrypted();
+
+        let dss = DsStatOuter {
+            ds_stat_wrap: Arc::new(std::sync::Mutex::new(DsCountStat::new(
+                region.def().uuid(),
+            ))),
+        };
+
+        info!(log, "UUID: {:?}", region.def().uuid());
+        info!(
+            log,
+            "Blocks per extent:{} Total Extents: {}",
+            region.def().extent_size().value,
+            region.def().extent_count(),
+        );
+
+        Ok(Arc::new(Mutex::new(Downstairs {
+            region,
+            lossy,
+            read_errors,
+            write_errors,
+            flush_errors,
+            active_upstairs: HashMap::new(),
+            dss,
+            read_only: self.read_only,
+            encrypted,
+            address: None,
+            repair_address: None,
+            log,
+        })))
+    }
+}
+
 /*
  * Overall structure for things the downstairs is tracking.
  * This includes the extents and their status as well as the
@@ -1886,34 +1983,16 @@ pub struct Downstairs {
 
 #[allow(clippy::too_many_arguments)]
 impl Downstairs {
-    fn new(
-        region: Region,
-        lossy: bool,
-        read_errors: bool,
-        write_errors: bool,
-        flush_errors: bool,
-        read_only: bool,
-        encrypted: bool,
-        log: Logger,
-    ) -> Self {
-        let dss = DsStatOuter {
-            ds_stat_wrap: Arc::new(std::sync::Mutex::new(DsCountStat::new(
-                region.def().uuid(),
-            ))),
-        };
-        Downstairs {
-            region,
-            lossy,
-            read_errors,
-            write_errors,
-            flush_errors,
-            active_upstairs: HashMap::new(),
-            dss,
+    pub fn new_builder(data: &Path, read_only: bool) -> DownstairsBuilder {
+        DownstairsBuilder {
+            data,
             read_only,
-            encrypted,
-            address: None,
-            repair_address: None,
-            log,
+            lossy: Some(false),
+            read_errors: Some(false),
+            write_errors: Some(false),
+            flush_errors: Some(false),
+            backend: Some(Backend::RawFile),
+            log: None,
         }
     }
 
@@ -3123,78 +3202,6 @@ pub async fn create_region_with_backend(
     Ok(region)
 }
 
-pub async fn build_downstairs_for_region(
-    data: &Path,
-    lossy: bool,
-    read_errors: bool,
-    write_errors: bool,
-    flush_errors: bool,
-    read_only: bool,
-    log_request: Option<Logger>,
-) -> Result<Arc<Mutex<Downstairs>>> {
-    build_downstairs_for_region_with_backend(
-        data,
-        lossy,
-        read_errors,
-        write_errors,
-        flush_errors,
-        read_only,
-        Backend::RawFile,
-        log_request,
-    )
-    .await
-}
-
-// Build the downstairs struct given a region directory and some additional
-// needed information.  If a logger is passed in, we will use that, otherwise
-// a logger will be created.
-#[allow(clippy::too_many_arguments)]
-pub async fn build_downstairs_for_region_with_backend(
-    data: &Path,
-    lossy: bool,
-    read_errors: bool,
-    write_errors: bool,
-    flush_errors: bool,
-    read_only: bool,
-    backend: Backend,
-    log_request: Option<Logger>,
-) -> Result<Arc<Mutex<Downstairs>>> {
-    let log = match log_request {
-        Some(log) => log,
-        None => build_logger(),
-    };
-    let region = Region::open_with_backend(
-        data,
-        Default::default(),
-        true,
-        read_only,
-        backend,
-        &log,
-    )
-    .await?;
-
-    info!(log, "UUID: {:?}", region.def().uuid());
-    info!(
-        log,
-        "Blocks per extent:{} Total Extents: {}",
-        region.def().extent_size().value,
-        region.def().extent_count(),
-    );
-
-    let encrypted = region.encrypted();
-
-    Ok(Arc::new(Mutex::new(Downstairs::new(
-        region,
-        lossy,
-        read_errors,
-        write_errors,
-        flush_errors,
-        read_only,
-        encrypted,
-        log,
-    ))))
-}
-
 /// Returns Ok if everything spawned ok, Err otherwise
 ///
 /// Return Ok(main task join handle) if all the necessary tasks spawned
@@ -3556,16 +3563,10 @@ mod test {
         region.extend(2).await?;
 
         let path_dir = dir.as_ref().to_path_buf();
-        let ads = build_downstairs_for_region(
-            &path_dir,
-            false,
-            false,
-            false,
-            false,
-            false,
-            Some(csl()),
-        )
-        .await?;
+        let ads = Downstairs::new_builder(&path_dir, false)
+            .set_logger(csl())
+            .build()
+            .await?;
 
         // This happens in proc() function.
         let upstairs_connection = UpstairsConnection {
@@ -3642,16 +3643,10 @@ mod test {
         region.extend(extent_count).await?;
 
         let path_dir = dir.as_ref().to_path_buf();
-        let ads = build_downstairs_for_region(
-            &path_dir,
-            false,
-            false,
-            false,
-            false,
-            false,
-            Some(csl()),
-        )
-        .await?;
+        let ads = Downstairs::new_builder(&path_dir, false)
+            .set_logger(csl())
+            .build()
+            .await?;
 
         Ok(ads)
     }
@@ -5544,16 +5539,10 @@ mod test {
 
         let path_dir = dir.as_ref().to_path_buf();
 
-        build_downstairs_for_region(
-            &path_dir,
-            false, // lossy
-            false, // read errors
-            false, // write errors
-            false, // flush errors
-            read_only,
-            Some(csl()),
-        )
-        .await
+        Downstairs::new_builder(&path_dir, read_only)
+            .set_logger(csl())
+            .build()
+            .await
     }
 
     #[tokio::test]
@@ -5955,16 +5944,10 @@ mod test {
         region.extend(2).await?;
 
         let path_dir = dir.as_ref().to_path_buf();
-        let ads = build_downstairs_for_region(
-            &path_dir,
-            false,
-            false,
-            false,
-            false,
-            false,
-            Some(csl()),
-        )
-        .await?;
+        let ads = Downstairs::new_builder(&path_dir, false)
+            .set_logger(csl())
+            .build()
+            .await?;
 
         // This happens in proc() function.
         let upstairs_connection_1 = UpstairsConnection {
@@ -6055,16 +6038,10 @@ mod test {
         region.extend(2).await?;
 
         let path_dir = dir.as_ref().to_path_buf();
-        let ads = build_downstairs_for_region(
-            &path_dir,
-            false,
-            false,
-            false,
-            false,
-            false,
-            Some(csl()),
-        )
-        .await?;
+        let ads = Downstairs::new_builder(&path_dir, false)
+            .set_logger(csl())
+            .build()
+            .await?;
 
         // This happens in proc() function.
         let upstairs_connection_1 = UpstairsConnection {
@@ -6155,16 +6132,10 @@ mod test {
         region.extend(2).await?;
 
         let path_dir = dir.as_ref().to_path_buf();
-        let ads = build_downstairs_for_region(
-            &path_dir,
-            false,
-            false,
-            false,
-            false,
-            false,
-            Some(csl()),
-        )
-        .await?;
+        let ads = Downstairs::new_builder(&path_dir, false)
+            .set_logger(csl())
+            .build()
+            .await?;
 
         // This happens in proc() function.
         let upstairs_connection_1 = UpstairsConnection {
