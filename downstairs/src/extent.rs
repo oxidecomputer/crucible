@@ -3,7 +3,6 @@ use std::convert::TryInto;
 use std::fmt;
 use std::fmt::Debug;
 use std::fs::{File, OpenOptions};
-use tokio::sync::Mutex;
 
 use anyhow::{anyhow, bail, Context, Result};
 use nix::unistd::{sysconf, SysconfVar};
@@ -27,10 +26,10 @@ pub struct Extent {
     /// data, the metadata about that extent, and the set of dirty blocks that
     /// have been written to since last flush.  We use dynamic dispatch here to
     /// support multiple extent implementations.
-    inner: Mutex<Box<dyn ExtentInner>>,
+    inner: Box<dyn ExtentInner + Send + Sync>,
 }
 
-pub(crate) trait ExtentInner: Send + Debug {
+pub(crate) trait ExtentInner: Send + Sync + Debug {
     fn gen_number(&self) -> Result<u64, CrucibleError>;
     fn flush_number(&self) -> Result<u64, CrucibleError>;
     fn dirty(&self) -> Result<bool, CrucibleError>;
@@ -88,7 +87,7 @@ pub struct DownstairsBlockContext {
 /// out of band. If Opened, then this extent is accepting operations.
 #[derive(Debug)]
 pub enum ExtentState {
-    Opened(Arc<Extent>),
+    Opened(Extent),
     Closed,
 }
 
@@ -417,7 +416,7 @@ impl Extent {
         // using the raw extent format, but for older read-only snapshots that
         // were constructed using the SQLite backend, we have to keep them
         // as-is.
-        let inner: Box<dyn ExtentInner> = {
+        let inner: Box<dyn ExtentInner + Send + Sync> = {
             if has_sqlite {
                 assert!(read_only || force_sqlite_backend);
                 let inner = extent_inner_sqlite::SqliteInner::open(
@@ -436,25 +435,25 @@ impl Extent {
             number,
             read_only,
             iov_max: Extent::get_iov_max()?,
-            inner: Mutex::new(inner),
+            inner,
         };
 
         Ok(extent)
     }
 
+    #[allow(clippy::unused_async)] // this will be async again in the future
     pub async fn dirty(&self) -> bool {
-        self.inner.lock().await.dirty().unwrap()
+        self.inner.dirty().unwrap()
     }
 
     /**
      * Close an extent and the metadata db files for it.
      */
+    #[allow(clippy::unused_async)] // this will be async again in the future
     pub async fn close(self) -> Result<(u64, u64, bool), CrucibleError> {
-        let inner = self.inner.lock().await;
-
-        let gen = inner.gen_number().unwrap();
-        let flush = inner.flush_number().unwrap();
-        let dirty = inner.dirty().unwrap();
+        let gen = self.inner.gen_number().unwrap();
+        let flush = self.inner.flush_number().unwrap();
+        let dirty = self.inner.dirty().unwrap();
 
         Ok((gen, flush, dirty))
     }
@@ -486,7 +485,7 @@ impl Extent {
         }
         remove_copy_cleanup_dir(dir, number)?;
 
-        let inner: Box<dyn ExtentInner> = match backend {
+        let inner: Box<dyn ExtentInner + Send + Sync> = match backend {
             Backend::RawFile => {
                 Box::new(extent_inner_raw::RawInner::create(dir, def, number)?)
             }
@@ -503,7 +502,7 @@ impl Extent {
             number,
             read_only: false,
             iov_max: Extent::get_iov_max()?,
-            inner: Mutex::new(inner),
+            inner,
         })
     }
 
@@ -516,7 +515,7 @@ impl Extent {
     /// `responses` is undefined.
     #[instrument]
     pub async fn read(
-        &self,
+        &mut self,
         job_id: JobId,
         requests: &[crucible_protocol::ReadRequest],
     ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
@@ -524,10 +523,7 @@ impl Extent {
             (job_id.0, self.number, requests.len() as u64)
         });
 
-        let mut inner = self.inner.lock().await;
-
-        let responses = inner.read(job_id, requests, self.iov_max)?;
-
+        let responses = self.inner.read(job_id, requests, self.iov_max)?;
         cdt::extent__read__done!(|| {
             (job_id.0, self.number, requests.len() as u64)
         });
@@ -537,7 +533,7 @@ impl Extent {
 
     #[instrument]
     pub async fn write(
-        &self,
+        &mut self,
         job_id: JobId,
         writes: &[crucible_protocol::Write],
         only_write_unwritten: bool,
@@ -550,8 +546,8 @@ impl Extent {
             (job_id.0, self.number, writes.len() as u64)
         });
 
-        let mut inner = self.inner.lock().await;
-        inner.write(job_id, writes, only_write_unwritten, self.iov_max)?;
+        self.inner
+            .write(job_id, writes, only_write_unwritten, self.iov_max)?;
 
         cdt::extent__write__done!(|| {
             (job_id.0, self.number, writes.len() as u64)
@@ -562,16 +558,15 @@ impl Extent {
 
     #[instrument]
     pub(crate) async fn flush<I: Into<JobOrReconciliationId> + Debug>(
-        &self,
+        &mut self,
         new_flush: u64,
         new_gen: u64,
         id: I, // only used for logging
         log: &Logger,
     ) -> Result<(), CrucibleError> {
         let job_id: JobOrReconciliationId = id.into();
-        let mut inner = self.inner.lock().await;
 
-        if !inner.dirty()? {
+        if !self.inner.dirty()? {
             /*
              * If we have made no writes to this extent since the last flush,
              * we do not need to update the extent on disk
@@ -587,24 +582,36 @@ impl Extent {
             crucible_bail!(ModifyingReadOnlyRegion);
         }
 
-        inner.flush(new_flush, new_gen, job_id)
+        self.inner.flush(new_flush, new_gen, job_id)
     }
 
+    #[allow(clippy::unused_async)] // this will be async again in the future
     pub async fn get_meta_info(&self) -> ExtentMeta {
-        let inner = self.inner.lock().await;
         ExtentMeta {
             ext_version: 0,
-            gen_number: inner.gen_number().unwrap(),
-            flush_number: inner.flush_number().unwrap(),
-            dirty: inner.dirty().unwrap(),
+            gen_number: self.inner.gen_number().unwrap(),
+            flush_number: self.inner.flush_number().unwrap(),
+            dirty: self.inner.dirty().unwrap(),
         }
     }
 
     #[cfg(test)]
-    pub(crate) async fn lock(
-        &self,
-    ) -> tokio::sync::MutexGuard<Box<dyn ExtentInner>> {
-        self.inner.lock().await
+    #[allow(clippy::unused_async)] // this will be async again in the future
+    pub async fn set_dirty_and_block_context(
+        &mut self,
+        block_context: &DownstairsBlockContext,
+    ) -> Result<(), CrucibleError> {
+        self.inner.set_dirty_and_block_context(block_context)
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::unused_async)] // this will be async again in the future
+    pub async fn get_block_contexts(
+        &mut self,
+        block: u64,
+        count: u64,
+    ) -> Result<Vec<Vec<DownstairsBlockContext>>, CrucibleError> {
+        self.inner.get_block_contexts(block, count)
     }
 }
 
