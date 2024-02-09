@@ -86,15 +86,11 @@ enum IOop {
         extent: usize,
         flush_number: u64,
         gen_number: u64,
-        source_downstairs: ClientId,
-        repair_downstairs: Vec<ClientId>,
     },
     ExtentLiveRepair {
         dependencies: Vec<JobId>, // Jobs that must finish before this
         extent: usize,
-        source_downstairs: ClientId,
         source_repair_address: SocketAddr,
-        repair_downstairs: Vec<ClientId>,
     },
     ExtentLiveReopen {
         dependencies: Vec<JobId>, // Jobs that must finish before this
@@ -751,8 +747,6 @@ async fn proc_frame(
                 extent: extent_id,
                 flush_number,
                 gen_number,
-                source_downstairs: ClientId::new(0), // Unused in the downstairs
-                repair_downstairs: vec![],           // Unused in the downstairs
             };
 
             let d = ad.lock().await;
@@ -765,8 +759,8 @@ async fn proc_frame(
             job_id,
             dependencies,
             extent_id,
-            source_client_id,
             source_repair_address,
+            ..
         } => {
             if !is_message_valid(
                 upstairs_connection,
@@ -784,9 +778,8 @@ async fn proc_frame(
             let new_repair = IOop::ExtentLiveRepair {
                 dependencies,
                 extent: extent_id,
-                source_downstairs: source_client_id,
+
                 source_repair_address,
-                repair_downstairs: vec![],
             };
 
             let d = ad.lock().await;
@@ -2258,8 +2251,6 @@ impl Downstairs {
                 extent,
                 flush_number,
                 gen_number,
-                source_downstairs: _,
-                repair_downstairs: _,
             } => {
                 let result = if !self.is_active(job.upstairs_connection) {
                     error!(self.log, "Upstairs inactive error");
@@ -2304,9 +2295,7 @@ impl Downstairs {
             IOop::ExtentLiveRepair {
                 dependencies,
                 extent,
-                source_downstairs: _,
                 source_repair_address,
-                repair_downstairs: _,
             } => {
                 debug!(
                     self.log,
@@ -3764,8 +3753,6 @@ mod test {
             extent: 1,
             flush_number: 1,
             gen_number: 2,
-            source_downstairs: ClientId::new(0),
-            repair_downstairs: vec![ClientId::new(1)],
         };
         ds.add_work(upstairs_connection, JobId(1001), rio).await?;
 
@@ -3852,8 +3839,6 @@ mod test {
             extent: 1,
             flush_number: 1,
             gen_number: gen,
-            source_downstairs: ClientId::new(0),
-            repair_downstairs: vec![ClientId::new(1)],
         };
         ds.add_work(upstairs_connection, JobId(1001), rio).await?;
 
@@ -4281,8 +4266,6 @@ mod test {
             extent: eid as usize,
             flush_number: 3,
             gen_number: gen,
-            source_downstairs: ClientId::new(0),
-            repair_downstairs: vec![ClientId::new(1)],
         };
         ds.add_work(upstairs_connection, JobId(1001), rio).await?;
 
@@ -4409,8 +4392,6 @@ mod test {
             extent: eid_one as usize,
             flush_number: 6,
             gen_number: gen,
-            source_downstairs: ClientId::new(0),
-            repair_downstairs: vec![ClientId::new(1)],
         };
         ds.add_work(upstairs_connection, JobId(1002), rio).await?;
 
@@ -4579,8 +4560,6 @@ mod test {
             extent: eid,
             flush_number: 1,
             gen_number: 2,
-            source_downstairs: ClientId::new(0),
-            repair_downstairs: vec![ClientId::new(1)],
         };
         test_misc_work_through_work_queue(JobId(1000), ioop);
     }
@@ -4596,9 +4575,7 @@ mod test {
         let ioop = IOop::ExtentLiveRepair {
             dependencies: vec![],
             extent: eid,
-            source_downstairs: ClientId::new(0),
             source_repair_address,
-            repair_downstairs: vec![ClientId::new(1)],
         };
         test_misc_work_through_work_queue(JobId(1000), ioop);
     }
