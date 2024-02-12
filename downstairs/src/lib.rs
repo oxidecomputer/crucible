@@ -1182,18 +1182,27 @@ where
         let resp_channel_tx = resp_channel_tx.clone();
         tokio::spawn(async move {
             while let Some(m) = message_channel_rx.recv().await {
-                if let Err(e) = Downstairs::proc_frame(
+                match Downstairs::proc_frame(
                     &adc,
                     upstairs_connection,
                     m,
                     &resp_channel_tx,
-                    &tx,
                 )
                 .await
                 {
-                    bail!("Proc frame returns error: {}", e);
+                    // If we added work, tell the work task to get busy.
+                    Ok(Some(new_ds_id)) => {
+                        cdt::work__start!(|| new_ds_id.0);
+                        tx.send(()).await?;
+                    }
+                    // If we handled the job locally, nothing to do here
+                    Ok(None) => (),
+                    Err(e) => {
+                        bail!("Proc frame returns error: {}", e);
+                    }
                 }
             }
+
             Ok(())
         })
     };
@@ -2231,26 +2240,62 @@ impl Downstairs {
         Ok(())
     }
 
-    /*
-     * A new IO request has been received.
-     * If the message is a ping, send the correct response. If the message is an
-     * IO, then put the new IO the work hashmap. If the message is a repair
-     * message, then we handle it right here.
-     */
+    /// Handle a new message from the upstairs
+    ///
+    /// If the message is an IO, then put the new IO the work hashmap. If the
+    /// message is a repair message, then we handle it right here.
     async fn proc_frame(
         ad: &Mutex<Downstairs>,
         upstairs_connection: UpstairsConnection,
         m: Message,
         resp_tx: &mpsc::Sender<Message>,
-        job_channel_tx: &mpsc::Sender<()>,
-    ) -> Result<()> {
-        let new_ds_id = match m {
+    ) -> Result<Option<JobId>> {
+        // Initial check against upstairs and session ID
+        match m {
             Message::Write {
                 upstairs_id,
                 session_id,
-                job_id,
-                dependencies,
-                writes,
+                ..
+            }
+            | Message::WriteUnwritten {
+                upstairs_id,
+                session_id,
+                ..
+            }
+            | Message::Flush {
+                upstairs_id,
+                session_id,
+                ..
+            }
+            | Message::ReadRequest {
+                upstairs_id,
+                session_id,
+                ..
+            }
+            | Message::ExtentLiveClose {
+                upstairs_id,
+                session_id,
+                ..
+            }
+            | Message::ExtentLiveFlushClose {
+                upstairs_id,
+                session_id,
+                ..
+            }
+            | Message::ExtentLiveRepair {
+                upstairs_id,
+                session_id,
+                ..
+            }
+            | Message::ExtentLiveReopen {
+                upstairs_id,
+                session_id,
+                ..
+            }
+            | Message::ExtentLiveNoOp {
+                upstairs_id,
+                session_id,
+                ..
             } => {
                 if !is_message_valid(
                     upstairs_connection,
@@ -2260,8 +2305,19 @@ impl Downstairs {
                 )
                 .await?
                 {
-                    return Ok(());
+                    return Ok(None);
                 }
+            }
+            _ => (),
+        }
+
+        let r = match m {
+            Message::Write {
+                job_id,
+                dependencies,
+                writes,
+                ..
+            } => {
                 cdt::submit__write__start!(|| job_id.0);
 
                 let new_write = IOop::Write {
@@ -2274,25 +2330,14 @@ impl Downstairs {
                 Some(job_id)
             }
             Message::Flush {
-                upstairs_id,
-                session_id,
                 job_id,
                 dependencies,
                 flush_number,
                 gen_number,
                 snapshot_details,
                 extent_limit,
+                ..
             } => {
-                if !is_message_valid(
-                    upstairs_connection,
-                    upstairs_id,
-                    session_id,
-                    resp_tx,
-                )
-                .await?
-                {
-                    return Ok(());
-                }
                 cdt::submit__flush__start!(|| job_id.0);
 
                 let new_flush = IOop::Flush {
@@ -2308,22 +2353,11 @@ impl Downstairs {
                 Some(job_id)
             }
             Message::WriteUnwritten {
-                upstairs_id,
-                session_id,
                 job_id,
                 dependencies,
                 writes,
+                ..
             } => {
-                if !is_message_valid(
-                    upstairs_connection,
-                    upstairs_id,
-                    session_id,
-                    resp_tx,
-                )
-                .await?
-                {
-                    return Ok(());
-                }
                 cdt::submit__writeunwritten__start!(|| job_id.0);
 
                 let new_write = IOop::WriteUnwritten {
@@ -2336,22 +2370,11 @@ impl Downstairs {
                 Some(job_id)
             }
             Message::ReadRequest {
-                upstairs_id,
-                session_id,
                 job_id,
                 dependencies,
                 requests,
+                ..
             } => {
-                if !is_message_valid(
-                    upstairs_connection,
-                    upstairs_id,
-                    session_id,
-                    resp_tx,
-                )
-                .await?
-                {
-                    return Ok(());
-                }
                 cdt::submit__read__start!(|| job_id.0);
 
                 let new_read = IOop::Read {
@@ -2365,23 +2388,11 @@ impl Downstairs {
             }
             // These are for repair while taking live IO
             Message::ExtentLiveClose {
-                upstairs_id,
-                session_id,
                 job_id,
                 dependencies,
                 extent_id,
+                ..
             } => {
-                if !is_message_valid(
-                    upstairs_connection,
-                    upstairs_id,
-                    session_id,
-                    resp_tx,
-                )
-                .await?
-                {
-                    return Ok(());
-                }
-
                 cdt::submit__el__close__start!(|| job_id.0);
                 // TODO: Add dtrace probes
                 let ext_close = IOop::ExtentClose {
@@ -2394,25 +2405,13 @@ impl Downstairs {
                 Some(job_id)
             }
             Message::ExtentLiveFlushClose {
-                upstairs_id,
-                session_id,
                 job_id,
                 dependencies,
                 extent_id,
                 flush_number,
                 gen_number,
+                ..
             } => {
-                if !is_message_valid(
-                    upstairs_connection,
-                    upstairs_id,
-                    session_id,
-                    resp_tx,
-                )
-                .await?
-                {
-                    return Ok(());
-                }
-
                 cdt::submit__el__flush__close__start!(|| job_id.0);
                 // Do both the flush, and then the close
                 let new_flush = IOop::ExtentFlushClose {
@@ -2427,25 +2426,12 @@ impl Downstairs {
                 Some(job_id)
             }
             Message::ExtentLiveRepair {
-                upstairs_id,
-                session_id,
                 job_id,
                 dependencies,
                 extent_id,
                 source_repair_address,
                 ..
             } => {
-                if !is_message_valid(
-                    upstairs_connection,
-                    upstairs_id,
-                    session_id,
-                    resp_tx,
-                )
-                .await?
-                {
-                    return Ok(());
-                }
-
                 cdt::submit__el__repair__start!(|| job_id.0);
                 // Do both the flush, and then the close
                 let new_repair = IOop::ExtentLiveRepair {
@@ -2461,23 +2447,11 @@ impl Downstairs {
                 Some(job_id)
             }
             Message::ExtentLiveReopen {
-                upstairs_id,
-                session_id,
                 job_id,
                 dependencies,
                 extent_id,
+                ..
             } => {
-                if !is_message_valid(
-                    upstairs_connection,
-                    upstairs_id,
-                    session_id,
-                    resp_tx,
-                )
-                .await?
-                {
-                    return Ok(());
-                }
-
                 cdt::submit__el__reopen__start!(|| job_id.0);
                 let new_open = IOop::ExtentLiveReopen {
                     dependencies,
@@ -2489,21 +2463,10 @@ impl Downstairs {
                 Some(job_id)
             }
             Message::ExtentLiveNoOp {
-                upstairs_id,
-                session_id,
                 job_id,
                 dependencies,
+                ..
             } => {
-                if !is_message_valid(
-                    upstairs_connection,
-                    upstairs_id,
-                    session_id,
-                    resp_tx,
-                )
-                .await?
-                {
-                    return Ok(());
-                }
                 cdt::submit__el__noop__start!(|| job_id.0);
                 let new_open = IOop::ExtentLiveNoOp { dependencies };
 
@@ -2551,7 +2514,7 @@ impl Downstairs {
                     }
                 };
                 resp_tx.send(msg).await?;
-                return Ok(());
+                None
             }
             Message::ExtentClose {
                 repair_id,
@@ -2570,7 +2533,7 @@ impl Downstairs {
                     }
                 };
                 resp_tx.send(msg).await?;
-                return Ok(());
+                None
             }
             Message::ExtentRepair {
                 repair_id,
@@ -2604,7 +2567,7 @@ impl Downstairs {
                     }
                 };
                 resp_tx.send(msg).await?;
-                return Ok(());
+                None
             }
             Message::ExtentReopen {
                 repair_id,
@@ -2623,20 +2586,11 @@ impl Downstairs {
                     }
                 };
                 resp_tx.send(msg).await?;
-                return Ok(());
+                None
             }
             x => bail!("unexpected frame {:?}", x),
         };
-
-        /*
-         * If we added work, tell the work task to get busy.
-         */
-        if let Some(new_ds_id) = new_ds_id {
-            cdt::work__start!(|| new_ds_id.0);
-            job_channel_tx.send(()).await?;
-        }
-
-        Ok(())
+        Ok(r)
     }
 
     async fn do_work_for(
