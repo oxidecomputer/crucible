@@ -13,7 +13,7 @@ use crate::{
     extent_from_offset,
     stats::UpStatOuter,
     Block, BlockOp, BlockReq, BlockRes, Buffer, Bytes, ClientId, ClientMap,
-    CrucibleOpts, DsState, EncryptionContext, GtoS, GuestIoHandle, Message,
+    CrucibleOpts, DsState, EncryptionContext, GuestIoHandle, Message,
     RegionDefinition, RegionDefinitionStatus, SnapshotDetails, WQCounts,
 };
 use crucible_common::CrucibleError;
@@ -25,7 +25,6 @@ use std::sync::{
 };
 
 use futures::future::{pending, Either};
-use ringbuffer::RingBuffer;
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::{
     sync::mpsc,
@@ -415,7 +414,7 @@ impl Upstairs {
         };
 
         let log = crucible_common::build_logger();
-        let (_guest, io) = crate::Guest::new(Some(log.clone()));
+        let (_guest, io) = crate::guest::Guest::new(Some(log.clone()));
 
         Self::new(&opts, 0, ddef, io, None)
     }
@@ -545,18 +544,9 @@ impl Upstairs {
                     .counters
                     .action_leak_check));
                 const LEAK_MS: usize = 1000;
+                self.guest.leak_check(LEAK_MS);
                 let leak_tick =
                     tokio::time::Duration::from_millis(LEAK_MS as u64);
-                if let Some(iop_limit_cfg) = self.guest.limits.iop_limit {
-                    let tokens = iop_limit_cfg.iop_limit / (1000 / LEAK_MS);
-                    self.guest.leak_iop_tokens(tokens);
-                }
-
-                if let Some(bw_limit) = self.guest.limits.bw_limit {
-                    let tokens = bw_limit / (1000 / LEAK_MS);
-                    self.guest.leak_bw_tokens(tokens);
-                }
-
                 self.leak_deadline =
                     Instant::now().checked_add(leak_tick).unwrap();
             }
@@ -725,7 +715,7 @@ impl Upstairs {
 
     /// Fires the `up-status` DTrace probe
     fn on_stat_update(&self) {
-        let up_count = self.guest.guest_work.active.len() as u32;
+        let up_count = self.guest.guest_work.len() as u32;
         let up_counters = self.counters;
 
         let ds_count = self.downstairs.active_count() as u32;
@@ -751,10 +741,7 @@ impl Upstairs {
         let ds_ro_lr_skipped =
             self.downstairs.collect_stats(|c| c.stats.ro_lr_skipped);
 
-        let up_backpressure = self
-            .guest
-            .backpressure_us
-            .load(std::sync::atomic::Ordering::Acquire);
+        let up_backpressure = self.guest.backpressure_us();
         let write_bytes_out = self.downstairs.write_bytes_outstanding();
 
         cdt::up__status!(|| {
@@ -786,7 +773,7 @@ impl Upstairs {
         match c {
             ControlRequest::UpstairsStats(tx) => {
                 let ds_state = self.downstairs.collect_stats(|c| c.state());
-                let up_jobs = self.guest.guest_work.active.len();
+                let up_jobs = self.guest.guest_work.len();
                 let ds_jobs = self.downstairs.active_count();
                 let reconcile_done = self.downstairs.reconcile_repaired();
                 let reconcile_needed =
@@ -1067,7 +1054,7 @@ impl Upstairs {
                     .filter(|c| c.state() == DsState::Active)
                     .count();
                 *data.lock().await = WQCounts {
-                    up_count: self.guest.guest_work.active.len(),
+                    up_count: self.guest.guest_work.len(),
                     ds_count: self.downstairs.active_count(),
                     active_count,
                 };
@@ -1117,7 +1104,7 @@ impl Upstairs {
 
     pub(crate) fn show_all_work(&self) -> WQCounts {
         let gior = self.guest_io_ready();
-        let up_count = self.guest.guest_work.active.len();
+        let up_count = self.guest.active_count();
 
         let ds_count = self.downstairs.active_count();
 
@@ -1133,7 +1120,7 @@ impl Upstairs {
         );
         if ds_count == 0 {
             if up_count != 0 {
-                crate::show_guest_work(&self.guest);
+                self.guest.show_work();
             }
         } else {
             self.downstairs.show_all_work()
@@ -1150,13 +1137,7 @@ impl Upstairs {
             .filter(|c| c.state() == DsState::Active)
             .count();
 
-        // TODO this is a ringbuffer, why are we turning it to a Vec to look at
-        // the last five items?
-        let up_done = self.guest.guest_work.completed.to_vec();
-        print!("Upstairs last five completed:  ");
-        for j in up_done.iter().rev().take(5) {
-            print!(" {:4}", j);
-        }
+        self.guest.guest_work.print_last_completed(5);
         println!();
 
         WQCounts {
@@ -1256,17 +1237,17 @@ impl Upstairs {
          * ID and the next_id are connected here, in that all future writes
          * should be flushed at the next flush ID.
          */
-        let gw_id = self.guest.guest_work.next_gw_id();
-        cdt::gw__flush__start!(|| (gw_id.0));
-
-        if snapshot_details.is_some() {
-            info!(self.log, "flush with snap requested");
-        }
-
-        let next_id = self.downstairs.submit_flush(gw_id, snapshot_details);
-
-        let new_gtos = GtoS::new(next_id, None, res);
-        self.guest.guest_work.active.insert(gw_id, new_gtos);
+        let (gw_id, _) = self.guest.guest_work.submit_job(
+            |gw_id| {
+                cdt::gw__flush__start!(|| (gw_id.0));
+                if snapshot_details.is_some() {
+                    info!(self.log, "flush with snap requested");
+                }
+                self.downstairs.submit_flush(gw_id, snapshot_details)
+            },
+            None,
+            res,
+        );
 
         cdt::up__to__ds__flush__start!(|| (gw_id.0));
     }
@@ -1336,17 +1317,14 @@ impl Upstairs {
          * Grab this ID after extent_from_offset: in case of Err we don't
          * want to create a gap in the IDs.
          */
-        let gw_id = self.guest.guest_work.next_gw_id();
-        cdt::gw__read__start!(|| (gw_id.0));
-
-        let next_id = self.downstairs.submit_read(gw_id, impacted_blocks, ddef);
-
-        // New work created, add to the guest_work HM.  It's fine to do this
-        // after submitting the job to the downstairs, because no one else is
-        // modifying the Upstairs right now; even if the job finishes
-        // instantaneously, it can't interrupt this function.
-        let new_gtos = GtoS::new(next_id, Some(data), res);
-        self.guest.guest_work.active.insert(gw_id, new_gtos);
+        let (gw_id, _) = self.guest.guest_work.submit_job(
+            |gw_id| {
+                cdt::gw__read__start!(|| (gw_id.0));
+                self.downstairs.submit_read(gw_id, impacted_blocks, ddef)
+            },
+            Some(data),
+            res,
+        );
 
         cdt::up__to__ds__read__start!(|| (gw_id.0));
     }
@@ -1482,23 +1460,23 @@ impl Upstairs {
          * Grab this ID after extent_from_offset: in case of Err we don't
          * want to create a gap in the IDs.
          */
-        let gw_id = self.guest.guest_work.next_gw_id();
-        if write.is_write_unwritten {
-            cdt::gw__write__unwritten__start!(|| (gw_id.0));
-        } else {
-            cdt::gw__write__start!(|| (gw_id.0));
-        }
-
-        let next_id = self.downstairs.submit_write(
-            gw_id,
-            write.impacted_blocks,
-            write.data,
-            write.is_write_unwritten,
+        let (gw_id, _) = self.guest.guest_work.submit_job(
+            |gw_id| {
+                if write.is_write_unwritten {
+                    cdt::gw__write__unwritten__start!(|| (gw_id.0));
+                } else {
+                    cdt::gw__write__start!(|| (gw_id.0));
+                }
+                self.downstairs.submit_write(
+                    gw_id,
+                    write.impacted_blocks,
+                    write.data,
+                    write.is_write_unwritten,
+                )
+            },
+            None,
+            write.res,
         );
-
-        // New work created, add to the guest_work HM
-        let new_gtos = GtoS::new(next_id, None, write.res);
-        self.guest.guest_work.active.insert(gw_id, new_gtos);
 
         if write.is_write_unwritten {
             cdt::up__to__ds__write__unwritten__start!(|| (gw_id.0));
@@ -1528,6 +1506,12 @@ impl Upstairs {
                 self.downstairs.clients[client_id].send_here_i_am().await;
             }
             ClientAction::Response(m) => {
+                // We would not have received ClientAction::Response if the IO
+                // task was not still running, so it's safe to unwrap this.
+                let id = self.downstairs.clients[client_id]
+                    .get_connection_id()
+                    .expect("io task must be running");
+
                 // Defer the message if it's a (large) read that needs
                 // decryption, or there are other deferred messages in the queue
                 // (to preserve order).  Otherwise, handle it immediately.
@@ -1555,6 +1539,7 @@ impl Upstairs {
                     let dr = DeferredRead {
                         message: m,
                         client_id,
+                        connection_id: id,
                         cfg: self.cfg.clone(),
                         log: self.log.new(o!("job" => "decrypt")),
                     };
@@ -1573,6 +1558,7 @@ impl Upstairs {
                         message: m,
                         hashes: vec![],
                         client_id,
+                        connection_id: id,
                     };
                     if self.deferred_msgs.is_empty() {
                         self.on_client_message(dm).await;
@@ -1595,8 +1581,23 @@ impl Upstairs {
         }
     }
 
-    async fn on_client_message(&mut self, m: DeferredMessage) {
-        let (client_id, m, hashes) = (m.client_id, m.message, m.hashes);
+    async fn on_client_message(&mut self, dm: DeferredMessage) {
+        let (client_id, m, hashes) = (dm.client_id, dm.message, dm.hashes);
+
+        // It's possible for a deferred message to arrive **after** we have
+        // disconnected from this particular Downstairs.  In that case, we want
+        // to ignore the message, because we've already marked it as Skipped or
+        // re-sent it (marking it as New).
+        if self.downstairs.clients[client_id].get_connection_id()
+            != Some(dm.connection_id)
+        {
+            warn!(
+                self.log,
+                "ignoring deferred message with out-dated connection id"
+            );
+            return;
+        }
+
         match m {
             Message::Imok => {
                 // Nothing to do here, glad to hear that you're okay

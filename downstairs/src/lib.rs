@@ -2,10 +2,9 @@
 #![cfg_attr(usdt_need_asm, feature(asm))]
 #![cfg_attr(all(target_os = "macos", usdt_need_asm_sym), feature(asm_sym))]
 
-use futures::executor;
 use futures::lock::{Mutex, MutexGuard};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs::File;
 use std::io::{Read, Write};
@@ -16,6 +15,7 @@ use std::time::Duration;
 
 use crucible::*;
 use crucible_common::{build_logger, Block, CrucibleError, MAX_BLOCK_SIZE};
+use repair_client::Client;
 
 use anyhow::{bail, Result};
 use bytes::BytesMut;
@@ -23,8 +23,7 @@ use futures::{SinkExt, StreamExt};
 use rand::prelude::*;
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep_until, Instant};
 use tokio_util::codec::{FramedRead, FramedWrite};
 use uuid::Uuid;
@@ -87,15 +86,11 @@ enum IOop {
         extent: usize,
         flush_number: u64,
         gen_number: u64,
-        source_downstairs: ClientId,
-        repair_downstairs: Vec<ClientId>,
     },
     ExtentLiveRepair {
         dependencies: Vec<JobId>, // Jobs that must finish before this
         extent: usize,
-        source_downstairs: ClientId,
         source_repair_address: SocketAddr,
-        repair_downstairs: Vec<ClientId>,
     },
     ExtentLiveReopen {
         dependencies: Vec<JobId>, // Jobs that must finish before this
@@ -538,28 +533,25 @@ pub mod cdt {
 // Check if a Message is valid on this downstairs or not.
 // If not, then send the correct error on the provided channel, return false.
 // If correct, then return true.
-async fn is_message_valid<WT>(
+async fn is_message_valid(
     upstairs_connection: UpstairsConnection,
     upstairs_id: Uuid,
     session_id: Uuid,
-    fw: &Mutex<FramedWrite<WT, CrucibleEncoder>>,
-) -> Result<bool>
-where
-    WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send,
-{
+    resp_tx: &mpsc::Sender<Message>,
+) -> Result<bool> {
     if upstairs_connection.upstairs_id != upstairs_id {
-        let mut fw = fw.lock().await;
-        fw.send(Message::UuidMismatch {
-            expected_id: upstairs_connection.upstairs_id,
-        })
-        .await?;
+        resp_tx
+            .send(Message::UuidMismatch {
+                expected_id: upstairs_connection.upstairs_id,
+            })
+            .await?;
         Ok(false)
     } else if upstairs_connection.session_id != session_id {
-        let mut fw = fw.lock().await;
-        fw.send(Message::UuidMismatch {
-            expected_id: upstairs_connection.session_id,
-        })
-        .await?;
+        resp_tx
+            .send(Message::UuidMismatch {
+                expected_id: upstairs_connection.session_id,
+            })
+            .await?;
         Ok(false)
     } else {
         Ok(true)
@@ -568,20 +560,17 @@ where
 
 /*
  * A new IO request has been received.
- * If the message is a ping or negotiation message, send the correct
- * response. If the message is an IO, then put the new IO the work hashmap.
- * If the message is a repair message, then we handle it right here.
+ * If the message is a ping, send the correct response. If the message is an IO,
+ * then put the new IO the work hashmap. If the message is a repair message,
+ * then we handle it right here.
  */
-async fn proc_frame<WT>(
+async fn proc_frame(
     upstairs_connection: UpstairsConnection,
     ad: &Mutex<Downstairs>,
     m: Message,
-    fw: &Mutex<FramedWrite<WT, CrucibleEncoder>>,
-    job_channel_tx: &Mutex<Sender<()>>,
-) -> Result<()>
-where
-    WT: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send,
-{
+    resp_tx: &mpsc::Sender<Message>,
+    job_channel_tx: &mpsc::Sender<()>,
+) -> Result<()> {
     let new_ds_id = match m {
         Message::Write {
             upstairs_id,
@@ -594,7 +583,7 @@ where
                 upstairs_connection,
                 upstairs_id,
                 session_id,
-                fw,
+                resp_tx,
             )
             .await?
             {
@@ -625,7 +614,7 @@ where
                 upstairs_connection,
                 upstairs_id,
                 session_id,
-                fw,
+                resp_tx,
             )
             .await?
             {
@@ -656,7 +645,7 @@ where
                 upstairs_connection,
                 upstairs_id,
                 session_id,
-                fw,
+                resp_tx,
             )
             .await?
             {
@@ -684,7 +673,7 @@ where
                 upstairs_connection,
                 upstairs_id,
                 session_id,
-                fw,
+                resp_tx,
             )
             .await?
             {
@@ -713,7 +702,7 @@ where
                 upstairs_connection,
                 upstairs_id,
                 session_id,
-                fw,
+                resp_tx,
             )
             .await?
             {
@@ -744,7 +733,7 @@ where
                 upstairs_connection,
                 upstairs_id,
                 session_id,
-                fw,
+                resp_tx,
             )
             .await?
             {
@@ -758,8 +747,6 @@ where
                 extent: extent_id,
                 flush_number,
                 gen_number,
-                source_downstairs: ClientId::new(0), // Unused in the downstairs
-                repair_downstairs: vec![],           // Unused in the downstairs
             };
 
             let d = ad.lock().await;
@@ -772,14 +759,14 @@ where
             job_id,
             dependencies,
             extent_id,
-            source_client_id,
             source_repair_address,
+            ..
         } => {
             if !is_message_valid(
                 upstairs_connection,
                 upstairs_id,
                 session_id,
-                fw,
+                resp_tx,
             )
             .await?
             {
@@ -791,9 +778,8 @@ where
             let new_repair = IOop::ExtentLiveRepair {
                 dependencies,
                 extent: extent_id,
-                source_downstairs: source_client_id,
+
                 source_repair_address,
-                repair_downstairs: vec![],
             };
 
             let d = ad.lock().await;
@@ -812,7 +798,7 @@ where
                 upstairs_connection,
                 upstairs_id,
                 session_id,
-                fw,
+                resp_tx,
             )
             .await?
             {
@@ -839,7 +825,7 @@ where
                 upstairs_connection,
                 upstairs_id,
                 session_id,
-                fw,
+                resp_tx,
             )
             .await?
             {
@@ -863,7 +849,7 @@ where
             gen_number,
         } => {
             let msg = {
-                let d = ad.lock().await;
+                let mut d = ad.lock().await;
                 debug!(
                     d.log,
                     "{} Flush extent {} with f:{} g:{}",
@@ -891,8 +877,7 @@ where
                     },
                 }
             };
-            let mut fw = fw.lock().await;
-            fw.send(msg).await?;
+            resp_tx.send(msg).await?;
             return Ok(());
         }
         Message::ExtentClose {
@@ -900,7 +885,7 @@ where
             extent_id,
         } => {
             let msg = {
-                let d = ad.lock().await;
+                let mut d = ad.lock().await;
                 debug!(d.log, "{} Close extent {}", repair_id, extent_id);
                 match d.region.close_extent(extent_id).await {
                     Ok(_) => Message::RepairAckId { repair_id },
@@ -911,8 +896,7 @@ where
                     },
                 }
             };
-            let mut fw = fw.lock().await;
-            fw.send(msg).await?;
+            resp_tx.send(msg).await?;
             return Ok(());
         }
         Message::ExtentRepair {
@@ -935,7 +919,7 @@ where
                 );
                 match d
                     .region
-                    .repair_extent(extent_id, source_repair_address)
+                    .repair_extent(extent_id, source_repair_address, false)
                     .await
                 {
                     Ok(()) => Message::RepairAckId { repair_id },
@@ -946,8 +930,7 @@ where
                     },
                 }
             };
-            let mut fw = fw.lock().await;
-            fw.send(msg).await?;
+            resp_tx.send(msg).await?;
             return Ok(());
         }
         Message::ExtentReopen {
@@ -966,8 +949,7 @@ where
                     },
                 }
             };
-            let mut fw = fw.lock().await;
-            fw.send(msg).await?;
+            resp_tx.send(msg).await?;
             return Ok(());
         }
         x => bail!("unexpected frame {:?}", x),
@@ -978,21 +960,18 @@ where
      */
     if let Some(new_ds_id) = new_ds_id {
         cdt::work__start!(|| new_ds_id.0);
-        job_channel_tx.lock().await.send(()).await?;
+        job_channel_tx.send(()).await?;
     }
 
     Ok(())
 }
 
-async fn do_work_task<T>(
+async fn do_work_task(
     ads: &Mutex<Downstairs>,
     upstairs_connection: UpstairsConnection,
-    mut job_channel_rx: Receiver<()>,
-    fw: &Mutex<FramedWrite<T, CrucibleEncoder>>,
-) -> Result<()>
-where
-    T: tokio::io::AsyncWrite + std::marker::Unpin,
-{
+    mut job_channel_rx: mpsc::Receiver<()>,
+    resp_tx: mpsc::Sender<Message>,
+) -> Result<()> {
     // The lossy attribute currently does not change at runtime. To avoid
     // continually locking the downstairs, cache the result here.
     let is_lossy = ads.lock().await.lossy;
@@ -1016,11 +995,11 @@ where
          * Build ourselves a list of all the jobs on the work hashmap that
          * are New or DepWait.
          */
-        let mut new_work: Vec<JobId> = {
+        let mut new_work: VecDeque<JobId> = {
             if let Ok(new_work) =
                 ads.lock().await.new_work(upstairs_connection).await
             {
-                new_work
+                new_work.into_iter().collect()
             } else {
                 // This means we couldn't unblock jobs for this UUID
                 continue;
@@ -1033,115 +1012,100 @@ where
          * sorted before it is returned so this function iterates through jobs
          * in order.
          */
-        while !new_work.is_empty() {
-            let mut repeat_work = Vec::with_capacity(new_work.len());
-
-            for new_id in new_work.drain(..) {
-                if is_lossy && random() && random() {
-                    // Skip a job that needs to be done. Sometimes
-                    info!(ads.lock().await.log, "[lossy] skipping {}", new_id);
-                    repeat_work.push(new_id);
-                    continue;
-                }
-
-                /*
-                 * If this job is still new, take it and go to work. The
-                 * in_progress method will only return a job if all
-                 * dependencies are met.
-                 */
-                let job_id = ads
-                    .lock()
-                    .await
-                    .in_progress(upstairs_connection, new_id)
-                    .await?;
-
-                if let Some(job_id) = job_id {
-                    cdt::work__process!(|| job_id.0);
-                    let m = ads
-                        .lock()
-                        .await
-                        .do_work(upstairs_connection, job_id)
-                        .await?;
-
-                    // If this is a repair job, and that repair failed, we
-                    // can do no more work on this downstairs and should
-                    // force everything to come down before more work arrives.
-                    //
-                    // However, we can respond to the upstairs with the failed
-                    // result, and let the upstairs take action that will
-                    // allow it to abort the repair and continue working in
-                    // some degraded state.
-                    let mut abort_needed = false;
-                    if let Some(m) = m {
-                        abort_needed = check_message_for_abort(&m);
-
-                        if let Some(error) = m.err() {
-                            let mut fw = fw.lock().await;
-                            fw.send(&Message::ErrorReport {
-                                upstairs_id: upstairs_connection.upstairs_id,
-                                session_id: upstairs_connection.session_id,
-                                job_id: new_id,
-                                error: error.clone(),
-                            })
-                            .await?;
-                            drop(fw);
-
-                            // If the job errored, do not consider it completed.
-                            // Retry it.
-                            repeat_work.push(new_id);
-                        } else {
-                            // The job completed successfully, so inform the
-                            // Upstairs
-
-                            ads.lock()
-                                .await
-                                .complete_work_stat(
-                                    upstairs_connection,
-                                    &m,
-                                    job_id,
-                                )
-                                .await?;
-
-                            // Notify the upstairs before completing work
-                            let mut fw = fw.lock().await;
-                            fw.send(&m).await?;
-                            drop(fw);
-
-                            ads.lock()
-                                .await
-                                .complete_work(upstairs_connection, job_id, m)
-                                .await?;
-
-                            cdt::work__done!(|| job_id.0);
-                        }
-                    }
-
-                    // Now, if the message requires an abort, we handle
-                    // that now by exiting this task with error.
-                    if abort_needed {
-                        bail!("Repair has failed, exiting task");
-                    }
-                }
+        while let Some(new_id) = new_work.pop_front() {
+            if is_lossy && random() && random() {
+                // Skip a job that needs to be done, moving it to the back of
+                // the list.  This exercises job dependency tracking in the face
+                // of arbitrary reordering.
+                info!(ads.lock().await.log, "[lossy] skipping {}", new_id);
+                new_work.push_back(new_id);
+                continue;
             }
 
-            new_work = repeat_work;
+            /*
+             * If this job is still new, take it and go to work. The
+             * in_progress method will only return a job if all
+             * dependencies are met.
+             */
+            let job_id = ads
+                .lock()
+                .await
+                .in_progress(upstairs_connection, new_id)
+                .await?;
+
+            // If the job's dependencies aren't met, then keep going
+            let Some(job_id) = job_id else {
+                continue;
+            };
+
+            cdt::work__process!(|| job_id.0);
+            let m = ads
+                .lock()
+                .await
+                .do_work(upstairs_connection, job_id)
+                .await?;
+
+            // If a different downstairs was promoted, then `do_work` returns
+            // `None` and we ignore the job.
+            let Some(m) = m else {
+                continue;
+            };
+
+            if let Some(error) = m.err() {
+                resp_tx
+                    .send(Message::ErrorReport {
+                        upstairs_id: upstairs_connection.upstairs_id,
+                        session_id: upstairs_connection.session_id,
+                        job_id: new_id,
+                        error: error.clone(),
+                    })
+                    .await?;
+
+                // If the job errored, do not consider it completed.
+                // Retry it.
+                new_work.push_back(new_id);
+
+                // If this is a repair job, and that repair failed, we
+                // can do no more work on this downstairs and should
+                // force everything to come down before more work arrives.
+                //
+                // We have replied to the Upstairs above, which lets the
+                // upstairs take action to abort the repair and continue
+                // working in some degraded state.
+                //
+                // If you change this, change how the Upstairs processes
+                // ErrorReports!
+                if matches!(m, Message::ExtentLiveRepairAckId { .. }) {
+                    bail!("Repair has failed, exiting task");
+                }
+            } else {
+                // The job completed successfully, so inform the
+                // Upstairs
+
+                ads.lock().await.complete_work_stat(
+                    upstairs_connection,
+                    &m,
+                    job_id,
+                )?;
+
+                // Notify the upstairs before completing work, which
+                // consumes the message (so we'll check whether it's
+                // a FlushAck beforehand)
+                let is_flush = matches!(m, Message::FlushAck { .. });
+                resp_tx.send(m).await?;
+
+                ads.lock()
+                    .await
+                    .complete_work_inner(upstairs_connection, job_id, is_flush)
+                    .await?;
+
+                cdt::work__done!(|| job_id.0);
+            }
         }
     }
 
     // None means the channel is closed
     Ok(())
-}
-
-// Check and see if this message is A LiveRepair, and if it has failed. If you
-// change this, change how the Upstairs processes ErrorReports!
-fn check_message_for_abort(m: &Message) -> bool {
-    if let Message::ExtentLiveRepairAckId { result, .. } = m {
-        if result.is_err() {
-            return true;
-        }
-    }
-
-    false
 }
 
 async fn proc_stream(
@@ -1153,10 +1117,7 @@ async fn proc_stream(
             let (read, write) = sock.into_split();
 
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = Arc::new(Mutex::new(FramedWrite::new(
-                write,
-                CrucibleEncoder::new(),
-            )));
+            let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
             proc(ads, fr, fw).await
         }
@@ -1164,10 +1125,7 @@ async fn proc_stream(
             let (read, write) = tokio::io::split(stream);
 
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = Arc::new(Mutex::new(FramedWrite::new(
-                write,
-                CrucibleEncoder::new(),
-            )));
+            let fw = FramedWrite::new(write, CrucibleEncoder::new());
 
             proc(ads, fr, fw).await
         }
@@ -1191,7 +1149,7 @@ pub struct UpstairsConnection {
 async fn proc<RT, WT>(
     ads: &Arc<Mutex<Downstairs>>,
     mut fr: FramedRead<RT, CrucibleDecoder>,
-    fw: Arc<Mutex<FramedWrite<WT, CrucibleEncoder>>>,
+    mut fw: FramedWrite<WT, CrucibleEncoder>,
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
@@ -1206,9 +1164,12 @@ where
 
     let mut upstairs_connection: Option<UpstairsConnection> = None;
 
-    let (_another_upstairs_active_tx, mut another_upstairs_active_rx) =
-        channel::<UpstairsConnection>(1);
-    let another_upstairs_active_tx = Arc::new(_another_upstairs_active_tx);
+    let (another_upstairs_active_tx, mut another_upstairs_active_rx) =
+        oneshot::channel::<UpstairsConnection>();
+
+    // Put the oneshot tx side into an Option so we can move it out at the
+    // appropriate point in negotiation.
+    let mut another_upstairs_active_tx = Some(another_upstairs_active_tx);
 
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
     enum NegotiationState {
@@ -1251,9 +1212,9 @@ where
              * activated, and then another did (in order to send this thread
              * this signal).
              */
-            new_upstairs_connection = another_upstairs_active_rx.recv() => {
+            new_upstairs_connection = &mut another_upstairs_active_rx => {
                 match new_upstairs_connection {
-                    None => {
+                    Err(e) => {
                         // There shouldn't be a path through the code where we
                         // close the channel before sending a message through it
                         // (see [`promote_to_active`]), though [`clear_active`]
@@ -1265,10 +1226,10 @@ where
                         // running without the ability for another Upstairs to
                         // kick out the previous one during activation.
                         bail!("another_upstairs_active_rx closed during \
-                            negotiation");
+                            negotiation: {e:?}");
                     }
 
-                    Some(new_upstairs_connection) => {
+                    Ok(new_upstairs_connection) => {
                         // another upstairs negotiated and went active after
                         // this one did (and before this one completed
                         // negotiation)
@@ -1279,7 +1240,6 @@ where
                             shutting down connection for {:?}",
                             new_upstairs_connection, upstairs_connection);
 
-                        let mut fw = fw.lock().await;
                         if let Err(e) = fw.send(Message::YouAreNoLongerActive {
                             new_upstairs_id:
                                 new_upstairs_connection.upstairs_id,
@@ -1346,7 +1306,6 @@ where
                         return Ok(());
                     }
                     Some(Message::Ruok) => {
-                        let mut fw = fw.lock().await;
                         if let Err(e) = fw.send(Message::Imok).await {
                             bail!("Failed to answer ping: {}", e);
                         }
@@ -1388,7 +1347,6 @@ where
                                 let m = Message::VersionMismatch {
                                     version: CRUCIBLE_MESSAGE_VERSION,
                                 };
-                                let mut fw = fw.lock().await;
                                 if let Err(e) = fw.send(m).await {
                                     warn!(
                                         log,
@@ -1411,8 +1369,6 @@ where
                         {
                             let ds = ads.lock().await;
                             if ds.read_only != read_only {
-                                let mut fw = fw.lock().await;
-
                                 if let Err(e) = fw.send(Message::ReadOnlyMismatch {
                                     expected: ds.read_only,
                                 }).await {
@@ -1424,8 +1380,6 @@ where
                             }
 
                             if ds.encrypted != encrypted {
-                                let mut fw = fw.lock().await;
-
                                 if let Err(e) = fw.send(Message::EncryptedMismatch {
                                     expected: ds.encrypted,
                                 }).await {
@@ -1448,7 +1402,6 @@ where
                             upstairs_connection.unwrap(),
                             CRUCIBLE_MESSAGE_VERSION);
 
-                        let mut fw = fw.lock().await;
                         if let Err(e) = fw.send(
                             Message::YesItsMe {
                                 version: CRUCIBLE_MESSAGE_VERSION,
@@ -1476,7 +1429,6 @@ where
                             upstairs_connection.session_id == session_id;
 
                         if !matches_self {
-                            let mut fw = fw.lock().await;
                             if let Err(e) = fw.send(
                                 Message::UuidMismatch {
                                     expected_id:
@@ -1514,12 +1466,13 @@ where
 
                                 ds.promote_to_active(
                                     *upstairs_connection,
-                                    another_upstairs_active_tx.clone()
+                                    another_upstairs_active_tx
+                                        .take()
+                                        .expect("no oneshot tx"),
                                 ).await?;
                             }
                             negotiated = NegotiationState::PromotedToActive;
 
-                            let mut fw = fw.lock().await;
                             if let Err(e) = fw.send(Message::YouAreNowActive {
                                 upstairs_id,
                                 session_id,
@@ -1540,7 +1493,6 @@ where
                             ds.region.def()
                         };
 
-                        let mut fw = fw.lock().await;
                         if let Err(e) = fw.send(Message::RegionInfo { region_def }).await {
                             bail!("Failed sending RegionInfo: {}", e);
                         }
@@ -1564,7 +1516,6 @@ where
                                 "Set last flush {}", last_flush_number);
                         }
 
-                        let mut fw = fw.lock().await;
                         if let Err(e) = fw.send(Message::LastFlushAck {
                             last_flush_number
                         }).await {
@@ -1611,7 +1562,6 @@ where
                                 flush_numbers);
                         }
 
-                        let mut fw = fw.lock().await;
                         if let Err(e) = fw.send(Message::ExtentVersions {
                             gen_numbers,
                             flush_numbers,
@@ -1645,6 +1595,22 @@ where
         .await
 }
 
+async fn reply_task<WT>(
+    mut resp_channel_rx: mpsc::Receiver<Message>,
+    mut fw: FramedWrite<WT, CrucibleEncoder>,
+) -> Result<()>
+where
+    WT: tokio::io::AsyncWrite
+        + std::marker::Unpin
+        + std::marker::Send
+        + 'static,
+{
+    while let Some(m) = resp_channel_rx.recv().await {
+        fw.send(m).await?;
+    }
+    Ok(())
+}
+
 /*
  * This function listens for and answers requests from the upstairs.
  * We assume here that correct negotiation has taken place and this
@@ -1653,8 +1619,8 @@ where
 async fn resp_loop<RT, WT>(
     ads: &Arc<Mutex<Downstairs>>,
     mut fr: FramedRead<RT, CrucibleDecoder>,
-    fw: Arc<Mutex<FramedWrite<WT, CrucibleEncoder>>>,
-    mut another_upstairs_active_rx: mpsc::Receiver<UpstairsConnection>,
+    fw: FramedWrite<WT, CrucibleEncoder>,
+    mut another_upstairs_active_rx: oneshot::Receiver<UpstairsConnection>,
     upstairs_connection: UpstairsConnection,
 ) -> Result<()>
 where
@@ -1670,13 +1636,17 @@ where
 
     // Give our work queue a little more space than we expect the upstairs
     // to ever send us.
-    let (_job_channel_tx, job_channel_rx) = channel(MAX_ACTIVE_COUNT + 50);
-    let job_channel_tx = Arc::new(Mutex::new(_job_channel_tx));
+    let (job_channel_tx, job_channel_rx) = mpsc::channel(MAX_ACTIVE_COUNT + 50);
+
+    let (resp_channel_tx, resp_channel_rx) =
+        mpsc::channel(MAX_ACTIVE_COUNT + 50);
+    let mut framed_write_task = tokio::spawn(reply_task(resp_channel_rx, fw));
 
     /*
      * Create tasks for:
      *  Doing the work then sending the ACK
      *  Pulling work off the socket and putting on the work queue.
+     *  Sending messages back on the FramedWrite
      *
      * These tasks and this function must be able to handle the
      * Upstairs connection going away at any time, as well as a forced
@@ -1687,25 +1657,62 @@ where
      * gracefully.  By exiting the loop here, we allow the calling
      * function to take over and handle a reconnect or a new upstairs
      * takeover.
+     *
+     * Tasks are organized as follows, with tasks in `snake_case`
+     *
+     *   ┌──────────┐              ┌───────────┐
+     *   │FramedRead│              │FramedWrite│
+     *   └────┬─────┘              └─────▲─────┘
+     *        │                          │
+     *        │         ┌────────────────┴────────────────────┐
+     *        │         │         framed_write_task           │
+     *        │         └─▲─────▲──────────────────▲──────────┘
+     *        │           │     │                  │
+     *        │       ping│     │invalid           │
+     *        │  ┌────────┘     │frame             │responses
+     *        │  │              │errors            │
+     *        │  │              │                  │
+     *   ┌────▼──┴─┐ message   ┌┴──────┐  job     ┌┴────────┐
+     *   │resp_loop├──────────►│pf_task├─────────►│ dw_task │
+     *   └─────────┘ channel   └──┬────┘ channel  └▲────────┘
+     *                            │                │
+     *                         add│work         new│work
+     *   per-connection           │                │
+     *  ========================= │ ============== │ ===============
+     *   shared state          ┌──▼────────────────┴────────────┐
+     *                         │           Downstairs           │
+     *                         └────────────────────────────────┘
      */
-    let dw_task = {
+    let mut dw_task = {
         let adc = ads.clone();
-        let fwc = fw.clone();
+        let resp_channel_tx = resp_channel_tx.clone();
         tokio::spawn(async move {
-            do_work_task(&adc, upstairs_connection, job_channel_rx, &fwc).await
+            do_work_task(
+                &adc,
+                upstairs_connection,
+                job_channel_rx,
+                resp_channel_tx,
+            )
+            .await
         })
     };
 
     let (message_channel_tx, mut message_channel_rx) =
-        channel(MAX_ACTIVE_COUNT + 50);
-    let pf_task = {
+        mpsc::channel(MAX_ACTIVE_COUNT + 50);
+    let mut pf_task = {
         let adc = ads.clone();
         let tx = job_channel_tx.clone();
-        let fwc = fw.clone();
+        let resp_channel_tx = resp_channel_tx.clone();
         tokio::spawn(async move {
             while let Some(m) = message_channel_rx.recv().await {
-                if let Err(e) =
-                    proc_frame(upstairs_connection, &adc, m, &fwc, &tx).await
+                if let Err(e) = proc_frame(
+                    upstairs_connection,
+                    &adc,
+                    m,
+                    &resp_channel_tx,
+                    &tx,
+                )
+                .await
                 {
                     bail!("Proc frame returns error: {}", e);
                 }
@@ -1718,8 +1725,6 @@ where
     // continually locking the downstairs, cache the result here.
     let lossy = ads.lock().await.lossy;
 
-    tokio::pin!(dw_task);
-    tokio::pin!(pf_task);
     loop {
         tokio::select! {
             e = &mut dw_task => {
@@ -1728,6 +1733,9 @@ where
             e = &mut pf_task => {
                 bail!("pf task ended: {:?}", e);
             }
+            e = &mut framed_write_task => {
+                bail!("framed write task ended: {:?}", e);
+            }
             /*
              * If we have set "lossy", then we need to check every now and
              * then that there were not skipped jobs that we need to go back
@@ -1735,7 +1743,7 @@ where
              * trigger once then never again.
              */
             _ = sleep_until(lossy_interval), if lossy => {
-                job_channel_tx.lock().await.send(()).await?;
+                job_channel_tx.send(()).await?;
                 lossy_interval = deadline_secs(5);
             }
             /*
@@ -1758,9 +1766,9 @@ where
              * activated, and then another did (in order to send this thread
              * this signal).
              */
-            new_upstairs_connection = another_upstairs_active_rx.recv() => {
+            new_upstairs_connection = &mut another_upstairs_active_rx => {
                 match new_upstairs_connection {
-                    None => {
+                    Err(e) => {
                         // There shouldn't be a path through the code where we
                         // close the channel before sending a message through it
                         // (see [`promote_to_active`]), though [`clear_active`]
@@ -1772,10 +1780,10 @@ where
                         // running without the ability for another Upstairs to
                         // kick out the previous one during activation.
                         bail!("another_upstairs_active_rx closed during \
-                            resp_loop");
+                            resp_loop: {e:?}");
                     }
 
-                    Some(new_upstairs_connection) => {
+                    Ok(new_upstairs_connection) => {
                         // another upstairs negotiated and went active after
                         // this one did
                         warn!(
@@ -1784,14 +1792,15 @@ where
                             shutting down connection for {:?}",
                             new_upstairs_connection, upstairs_connection);
 
-                        let mut fw = fw.lock().await;
-                        if let Err(e) = fw.send(Message::YouAreNoLongerActive {
-                            new_upstairs_id:
-                                new_upstairs_connection.upstairs_id,
-                            new_session_id:
-                                new_upstairs_connection.session_id,
-                            new_gen: new_upstairs_connection.gen,
-                        }).await {
+                        if let Err(e) = resp_channel_tx.send(
+                            Message::YouAreNoLongerActive {
+                                new_upstairs_id:
+                                    new_upstairs_connection.upstairs_id,
+                                new_session_id:
+                                    new_upstairs_connection.session_id,
+                                new_gen: new_upstairs_connection.gen,
+                            }).await
+                        {
                             warn!(log, "Failed sending YouAreNoLongerActive: {}", e);
                         }
 
@@ -1823,8 +1832,7 @@ where
                     Some(Ok(msg)) => {
                         if matches!(msg, Message::Ruok) {
                             // Respond instantly to pings, don't wait.
-                            let mut fw = fw.lock().await;
-                            if let Err(e) = fw.send(Message::Imok).await {
+                            if let Err(e) = resp_channel_tx.send(Message::Imok).await {
                                 bail!("Failed sending Imok: {}", e);
                             }
                         } else if let Err(e) = message_channel_tx.send(msg).await {
@@ -1846,7 +1854,7 @@ where
 pub struct ActiveUpstairs {
     pub upstairs_connection: UpstairsConnection,
     pub work: Mutex<Work>,
-    pub terminate_sender: Arc<Sender<UpstairsConnection>>,
+    pub terminate_sender: oneshot::Sender<UpstairsConnection>,
 }
 
 /*
@@ -1883,7 +1891,7 @@ impl Downstairs {
         log: Logger,
     ) -> Self {
         let dss = DsStatOuter {
-            ds_stat_wrap: Arc::new(Mutex::new(DsCountStat::new(
+            ds_stat_wrap: Arc::new(std::sync::Mutex::new(DsCountStat::new(
                 region.def().uuid(),
             ))),
         };
@@ -2243,8 +2251,6 @@ impl Downstairs {
                 extent,
                 flush_number,
                 gen_number,
-                source_downstairs: _,
-                repair_downstairs: _,
             } => {
                 let result = if !self.is_active(job.upstairs_connection) {
                     error!(self.log, "Upstairs inactive error");
@@ -2289,9 +2295,7 @@ impl Downstairs {
             IOop::ExtentLiveRepair {
                 dependencies,
                 extent,
-                source_downstairs: _,
                 source_repair_address,
-                repair_downstairs: _,
             } => {
                 debug!(
                     self.log,
@@ -2304,7 +2308,7 @@ impl Downstairs {
                     Err(CrucibleError::UpstairsInactive)
                 } else {
                     self.region
-                        .repair_extent(*extent, *source_repair_address)
+                        .repair_extent(*extent, *source_repair_address, false)
                         .await
                 };
                 debug!(
@@ -2373,24 +2377,33 @@ impl Downstairs {
         }
     }
 
-    /*
-     * Complete work by:
-     *
-     * - notifying the upstairs with the response
-     * - removing the job from active
-     * - removing the response
-     * - putting the id on the completed list.
-     */
+    /// Helper function to call `complete_work` if the `Message` is available
+    #[cfg(test)]
     async fn complete_work(
         &self,
         upstairs_connection: UpstairsConnection,
         ds_id: JobId,
         m: Message,
     ) -> Result<()> {
-        let mut work = self.work_lock(upstairs_connection).await?;
-
-        // Complete the job
         let is_flush = matches!(m, Message::FlushAck { .. });
+        self.complete_work_inner(upstairs_connection, ds_id, is_flush)
+            .await
+    }
+
+    /*
+     * Complete work by:
+     *
+     * - removing the job from active
+     * - removing the response
+     * - putting the id on the completed list.
+     */
+    async fn complete_work_inner(
+        &self,
+        upstairs_connection: UpstairsConnection,
+        ds_id: JobId,
+        is_flush: bool,
+    ) -> Result<()> {
+        let mut work = self.work_lock(upstairs_connection).await?;
 
         // If upstairs_connection grabs the work lock, it is the active
         // connection for this Upstairs UUID. The job should exist in the Work
@@ -2416,7 +2429,7 @@ impl Downstairs {
      * After we complete a read/write/flush on a region, update the
      * Oximeter counter for the operation.
      */
-    async fn complete_work_stat(
+    fn complete_work_stat(
         &mut self,
         _upstairs_connection: UpstairsConnection,
         m: &Message,
@@ -2426,19 +2439,19 @@ impl Downstairs {
         match m {
             Message::FlushAck { .. } => {
                 cdt::submit__flush__done!(|| ds_id.0);
-                self.dss.add_flush().await;
+                self.dss.add_flush();
             }
             Message::WriteAck { .. } => {
                 cdt::submit__write__done!(|| ds_id.0);
-                self.dss.add_write().await;
+                self.dss.add_write();
             }
             Message::WriteUnwrittenAck { .. } => {
                 cdt::submit__writeunwritten__done!(|| ds_id.0);
-                self.dss.add_write().await;
+                self.dss.add_write();
             }
             Message::ReadResponse { .. } => {
                 cdt::submit__read__done!(|| ds_id.0);
-                self.dss.add_read().await;
+                self.dss.add_read();
             }
             Message::ExtentLiveClose { .. } => {
                 cdt::submit__el__close__done!(|| ds_id.0);
@@ -2464,7 +2477,7 @@ impl Downstairs {
     async fn promote_to_active(
         &mut self,
         upstairs_connection: UpstairsConnection,
-        tx: Arc<Sender<UpstairsConnection>>,
+        tx: oneshot::Sender<UpstairsConnection>,
     ) -> Result<()> {
         if self.read_only {
             // Multiple active read-only sessions are allowed, but multiple
@@ -2472,8 +2485,9 @@ impl Downstairs {
             // previously active session for this UUID if one exists. Do this
             // while holding the work lock so the previously active Upstairs
             // isn't adding more work.
-            if let Some(active_upstairs) =
-                self.active_upstairs.get(&upstairs_connection.upstairs_id)
+            if let Some(active_upstairs) = self
+                .active_upstairs
+                .remove(&upstairs_connection.upstairs_id)
             {
                 let mut work = active_upstairs.work.lock().await;
 
@@ -2485,10 +2499,7 @@ impl Downstairs {
                     upstairs_connection,
                 );
 
-                match active_upstairs
-                    .terminate_sender
-                    .send(upstairs_connection)
-                    .await
+                match active_upstairs.terminate_sender.send(upstairs_connection)
                 {
                     Ok(_) => {}
                     Err(e) => {
@@ -2649,7 +2660,6 @@ impl Downstairs {
                     match active_upstairs
                         .terminate_sender
                         .send(upstairs_connection)
-                        .await
                     {
                         Ok(_) => {}
                         Err(e) => {
@@ -3291,7 +3301,7 @@ pub async fn start_downstairs(
          * it and wait for another connection. Downstairs can handle
          * multiple Upstairs connecting but only one active one.
          */
-        info!(log, "listening on {}", listen_on);
+        info!(log, "downstairs listening on {}", listen_on);
         loop {
             let (sock, raddr) = listener.accept().await?;
 
@@ -3326,7 +3336,7 @@ pub async fn start_downstairs(
                  * from an upstairs
                  */
                 let mut ds = d.lock().await;
-                ds.dss.add_connection().await;
+                ds.dss.add_connection();
             }
 
             let dd = d.clone();
@@ -3350,6 +3360,72 @@ pub async fn start_downstairs(
     Ok(join_handle)
 }
 
+/// Clone the extent files in a region from another running downstairs.
+///
+/// Use the reconcile/repair extent methods to copy another downstairs.
+/// The source downstairs must have the same RegionDefinition as we do,
+/// and both downstairs must be running in read only mode.
+pub async fn clone_region(
+    d: Arc<Mutex<Downstairs>>,
+    source: SocketAddr,
+) -> Result<()> {
+    let info = crucible_common::BuildInfo::default();
+    let log = d.lock().await.log.new(o!("task" => "clone".to_string()));
+    info!(log, "Crucible Version: {}", info);
+    info!(
+        log,
+        "Upstairs <-> Downstairs Message Version: {}", CRUCIBLE_MESSAGE_VERSION
+    );
+
+    info!(log, "Connecting to {source} to obtain our extent files.");
+
+    let url = format!("http://{:?}", source);
+    let repair_server = Client::new(&url);
+    let source_def = match repair_server.get_region_info().await {
+        Ok(def) => def.into_inner(),
+        Err(e) => {
+            bail!("Failed to get source region definition: {e}");
+        }
+    };
+    info!(log, "The source RegionDefinition is: {:?}", source_def);
+
+    let source_ro_mode = match repair_server.get_region_mode().await {
+        Ok(ro) => ro.into_inner(),
+        Err(e) => {
+            bail!("Failed to get source mode: {e}");
+        }
+    };
+
+    info!(log, "The source mode is: {:?}", source_ro_mode);
+    if !source_ro_mode {
+        bail!("Source downstairs is not read only");
+    }
+
+    let mut ds = d.lock().await;
+
+    let my_def = ds.region.def();
+    info!(log, "my def is {:?}", my_def);
+
+    if let Err(e) = my_def.compatible(source_def) {
+        bail!("Incompatible region definitions: {e}");
+    }
+
+    if let Err(e) = ds.region.close_all_extents().await {
+        bail!("Failed to close all extents: {e}");
+    }
+
+    for eid in 0..my_def.extent_count() as usize {
+        info!(log, "Repair extent {eid}");
+
+        if let Err(e) = ds.region.repair_extent(eid, source, true).await {
+            bail!("repair extent {eid} returned: {e}");
+        }
+    }
+    info!(log, "Region has been cloned");
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -3357,7 +3433,7 @@ mod test {
     use std::net::Ipv4Addr;
     use tempfile::{tempdir, TempDir};
     use tokio::net::TcpSocket;
-    use tokio::sync::mpsc::error::TryRecvError;
+    use tokio::sync::oneshot::error::TryRecvError;
 
     // Create a simple logger
     fn csl() -> Logger {
@@ -3555,12 +3631,10 @@ mod test {
         };
 
         // For the other_active_upstairs, unused.
-        let (_tx, mut _rx) = channel(1);
-        let tx = Arc::new(_tx);
+        let (tx, mut _rx) = oneshot::channel();
 
         let mut ds = ads.lock().await;
-        ds.promote_to_active(upstairs_connection, tx.clone())
-            .await?;
+        ds.promote_to_active(upstairs_connection, tx).await?;
 
         let rio = IOop::Read {
             dependencies: Vec::new(),
@@ -3663,12 +3737,10 @@ mod test {
         };
 
         // For the other_active_upstairs, unused.
-        let (_tx, mut _rx) = channel(1);
-        let tx = Arc::new(_tx);
+        let (tx, mut _rx) = oneshot::channel();
 
         let mut ds = ads.lock().await;
-        ds.promote_to_active(upstairs_connection, tx.clone())
-            .await?;
+        ds.promote_to_active(upstairs_connection, tx).await?;
 
         let rio = IOop::ExtentClose {
             dependencies: Vec::new(),
@@ -3681,8 +3753,6 @@ mod test {
             extent: 1,
             flush_number: 1,
             gen_number: 2,
-            source_downstairs: ClientId::new(0),
-            repair_downstairs: vec![ClientId::new(1)],
         };
         ds.add_work(upstairs_connection, JobId(1001), rio).await?;
 
@@ -3753,12 +3823,10 @@ mod test {
         };
 
         // For the other_active_upstairs, unused.
-        let (_tx, mut _rx) = channel(1);
-        let tx = Arc::new(_tx);
+        let (tx, mut _rx) = oneshot::channel();
 
         let mut ds = ads.lock().await;
-        ds.promote_to_active(upstairs_connection, tx.clone())
-            .await?;
+        ds.promote_to_active(upstairs_connection, tx).await?;
 
         let rio = IOop::ExtentClose {
             dependencies: Vec::new(),
@@ -3771,8 +3839,6 @@ mod test {
             extent: 1,
             flush_number: 1,
             gen_number: gen,
-            source_downstairs: ClientId::new(0),
-            repair_downstairs: vec![ClientId::new(1)],
         };
         ds.add_work(upstairs_connection, JobId(1001), rio).await?;
 
@@ -3932,12 +3998,10 @@ mod test {
             session_id: Uuid::new_v4(),
             gen,
         };
-        let (_tx, mut _rx) = channel(1);
-        let tx = Arc::new(_tx);
+        let (tx, mut _rx) = oneshot::channel();
 
         let mut ds = ads.lock().await;
-        ds.promote_to_active(upstairs_connection, tx.clone())
-            .await?;
+        ds.promote_to_active(upstairs_connection, tx).await?;
 
         let eid = 3;
 
@@ -4066,12 +4130,10 @@ mod test {
             session_id: Uuid::new_v4(),
             gen,
         };
-        let (_tx, mut _rx) = channel(1);
-        let tx = Arc::new(_tx);
+        let (tx, mut _rx) = oneshot::channel();
 
         let mut ds = ads.lock().await;
-        ds.promote_to_active(upstairs_connection, tx.clone())
-            .await?;
+        ds.promote_to_active(upstairs_connection, tx).await?;
 
         let eid = 0;
 
@@ -4184,12 +4246,10 @@ mod test {
         };
 
         // For the other_active_upstairs, unused.
-        let (_tx, mut _rx) = channel(1);
-        let tx = Arc::new(_tx);
+        let (tx, mut _rx) = oneshot::channel();
 
         let mut ds = ads.lock().await;
-        ds.promote_to_active(upstairs_connection, tx.clone())
-            .await?;
+        ds.promote_to_active(upstairs_connection, tx).await?;
 
         let eid = 1;
 
@@ -4206,8 +4266,6 @@ mod test {
             extent: eid as usize,
             flush_number: 3,
             gen_number: gen,
-            source_downstairs: ClientId::new(0),
-            repair_downstairs: vec![ClientId::new(1)],
         };
         ds.add_work(upstairs_connection, JobId(1001), rio).await?;
 
@@ -4305,11 +4363,9 @@ mod test {
             gen,
         };
 
-        let (_tx, mut _rx) = channel(1);
-        let tx = Arc::new(_tx);
+        let (tx, mut _rx) = oneshot::channel();
         let mut ds = ads.lock().await;
-        ds.promote_to_active(upstairs_connection, tx.clone())
-            .await?;
+        ds.promote_to_active(upstairs_connection, tx).await?;
 
         let eid_one = 1;
         let eid_two = 2;
@@ -4336,8 +4392,6 @@ mod test {
             extent: eid_one as usize,
             flush_number: 6,
             gen_number: gen,
-            source_downstairs: ClientId::new(0),
-            repair_downstairs: vec![ClientId::new(1)],
         };
         ds.add_work(upstairs_connection, JobId(1002), rio).await?;
 
@@ -4506,8 +4560,6 @@ mod test {
             extent: eid,
             flush_number: 1,
             gen_number: 2,
-            source_downstairs: ClientId::new(0),
-            repair_downstairs: vec![ClientId::new(1)],
         };
         test_misc_work_through_work_queue(JobId(1000), ioop);
     }
@@ -4523,9 +4575,7 @@ mod test {
         let ioop = IOop::ExtentLiveRepair {
             dependencies: vec![],
             extent: eid,
-            source_downstairs: ClientId::new(0),
             source_repair_address,
-            repair_downstairs: vec![ClientId::new(1)],
         };
         test_misc_work_through_work_queue(JobId(1000), ioop);
     }
@@ -5560,8 +5610,7 @@ mod test {
             gen: 1,
         };
 
-        let (_tx, mut _rx) = channel(1);
-        let tx = Arc::new(_tx);
+        let (tx, mut _rx) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection, tx).await?;
@@ -5581,8 +5630,7 @@ mod test {
             gen: 1,
         };
 
-        let (_tx, mut _rx) = channel(1);
-        let tx = Arc::new(_tx);
+        let (tx, mut _rx) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection, tx).await?;
@@ -5611,11 +5659,8 @@ mod test {
             gen: 1,
         };
 
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
-
-        let (tx2, mut rx2) = channel(1);
-        let tx2 = Arc::new(tx2);
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
@@ -5628,10 +5673,7 @@ mod test {
         assert!(res.is_err());
 
         assert!(matches!(rx1.try_recv().unwrap_err(), TryRecvError::Empty));
-        assert!(matches!(
-            rx2.try_recv().unwrap_err(),
-            TryRecvError::Disconnected
-        ));
+        assert!(matches!(rx2.try_recv().unwrap_err(), TryRecvError::Closed));
 
         assert_eq!(ds.active_upstairs().len(), 1);
 
@@ -5662,11 +5704,8 @@ mod test {
             gen: 1,
         };
 
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
-
-        let (tx2, mut rx2) = channel(1);
-        let tx2 = Arc::new(tx2);
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         println!("ds1: {:?}", ds);
@@ -5681,10 +5720,7 @@ mod test {
         assert!(res.is_err());
 
         assert!(matches!(rx1.try_recv().unwrap_err(), TryRecvError::Empty));
-        assert!(matches!(
-            rx2.try_recv().unwrap_err(),
-            TryRecvError::Disconnected
-        ));
+        assert!(matches!(rx2.try_recv().unwrap_err(), TryRecvError::Closed));
 
         assert_eq!(ds.active_upstairs().len(), 1);
 
@@ -5716,11 +5752,8 @@ mod test {
             gen: 1,
         };
 
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
-
-        let (tx2, mut rx2) = channel(1);
-        let tx2 = Arc::new(tx2);
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
@@ -5733,10 +5766,7 @@ mod test {
         assert!(res.is_err());
 
         assert!(matches!(rx1.try_recv().unwrap_err(), TryRecvError::Empty));
-        assert!(matches!(
-            rx2.try_recv().unwrap_err(),
-            TryRecvError::Disconnected
-        ));
+        assert!(matches!(rx2.try_recv().unwrap_err(), TryRecvError::Closed));
 
         assert_eq!(ds.active_upstairs().len(), 1);
 
@@ -5766,11 +5796,8 @@ mod test {
             gen: 2,
         };
 
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
-
-        let (tx2, mut rx2) = channel(1);
-        let tx2 = Arc::new(tx2);
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
@@ -5810,11 +5837,8 @@ mod test {
             gen: 1,
         };
 
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
-
-        let (tx2, mut rx2) = channel(1);
-        let tx2 = Arc::new(tx2);
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
@@ -5853,11 +5877,8 @@ mod test {
             gen: 1,
         };
 
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
-
-        let (tx2, mut rx2) = channel(1);
-        let tx2 = Arc::new(tx2);
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
@@ -5895,11 +5916,8 @@ mod test {
             gen: 1,
         };
 
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
-
-        let (tx2, mut rx2) = channel(1);
-        let tx2 = Arc::new(tx2);
+        let (tx1, mut rx1) = oneshot::channel();
+        let (tx2, mut rx2) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
@@ -6000,8 +6018,7 @@ mod test {
         };
 
         // For the other_active_upstairs, unused.
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
+        let (tx1, mut rx1) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
@@ -6038,9 +6055,7 @@ mod test {
             gen: 11,
         };
 
-        let (_tx2, mut _rx2) = channel(1);
-        let tx2 = Arc::new(_tx2);
-
+        let (tx2, mut _rx2) = oneshot::channel();
         ds.promote_to_active(upstairs_connection_2, tx2).await?;
 
         assert_eq!(rx1.try_recv().unwrap(), upstairs_connection_2);
@@ -6103,8 +6118,7 @@ mod test {
         };
 
         // For the other_active_upstairs, unused.
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
+        let (tx1, mut rx1) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
@@ -6141,9 +6155,7 @@ mod test {
             gen: 11,
         };
 
-        let (_tx2, mut _rx2) = channel(1);
-        let tx2 = Arc::new(_tx2);
-
+        let (tx2, mut _rx2) = oneshot::channel();
         ds.promote_to_active(upstairs_connection_2, tx2).await?;
 
         assert_eq!(rx1.try_recv().unwrap(), upstairs_connection_2);
@@ -6206,8 +6218,7 @@ mod test {
         };
 
         // For the other_active_upstairs, unused.
-        let (tx1, mut rx1) = channel(1);
-        let tx1 = Arc::new(tx1);
+        let (tx1, mut rx1) = oneshot::channel();
 
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection_1, tx1).await?;
@@ -6237,9 +6248,7 @@ mod test {
             .unwrap();
 
         // Before complete_work, the same Upstairs reconnects and goes active
-        let (_tx2, mut _rx2) = channel(1);
-        let tx2 = Arc::new(_tx2);
-
+        let (tx2, mut _rx2) = oneshot::channel();
         ds.promote_to_active(upstairs_connection_1, tx2).await?;
 
         // In the real downstairs, there would be two tasks now that both
@@ -6412,7 +6421,7 @@ mod test {
         Ok(())
     }
     #[tokio::test]
-    async fn test_version_uprev_compatable() -> Result<()> {
+    async fn test_version_uprev_compatible() -> Result<()> {
         // Test sending the +1 version to the DS, but also include the
         // current version on the supported list.  The downstairs should
         // see that and respond with the version it does support.

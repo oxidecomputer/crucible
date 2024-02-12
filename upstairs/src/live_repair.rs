@@ -489,7 +489,7 @@ pub mod repair_test {
         info!(up.log, "repair job should have got here, move it forward");
         // The repair (NoOp) job should have shown up.  Move it forward.
         for cid in ClientId::iter() {
-            if cid != err_ds {
+            if cid != err_ds && cid != or_ds {
                 info!(up.log, "replying to repair job on {cid}");
                 reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), None)
                     .await;
@@ -501,7 +501,7 @@ pub mod repair_test {
         // next.
         info!(up.log, "Now move the NoOp job forward");
         for cid in ClientId::iter() {
-            if cid != err_ds {
+            if cid != err_ds && cid != or_ds {
                 info!(up.log, "replying to NoOp job on {cid}");
                 reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None)
                     .await;
@@ -511,7 +511,7 @@ pub mod repair_test {
         // The reopen job should already be on the queue, move it forward.
         info!(up.log, "Finally, move the ReOpen job forward");
         for cid in ClientId::iter() {
-            if cid != err_ds {
+            if cid != err_ds && cid != or_ds {
                 info!(up.log, "replying to ReOpen job on {cid}");
                 reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None)
                     .await;
@@ -814,7 +814,7 @@ pub mod repair_test {
 
         info!(up.log, "Now ACK the reopen job");
         for cid in ClientId::iter() {
-            if cid != err_ds {
+            if cid != err_ds && cid != or_ds {
                 reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None)
                     .await;
             }

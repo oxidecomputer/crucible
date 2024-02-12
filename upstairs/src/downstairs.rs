@@ -8,15 +8,16 @@ use std::{
 use crate::{
     cdt,
     client::{ClientAction, ClientRequest, ClientStopReason, DownstairsClient},
+    guest::GuestWork,
     live_repair::ExtentInfo,
     stats::UpStatOuter,
     upstairs::{UpstairsConfig, UpstairsState},
     AckStatus, ActiveJobs, AllocRingBuffer, ClientData, ClientIOStateCount,
     ClientId, ClientMap, CrucibleError, DownstairsIO, DownstairsMend, DsState,
-    ExtentFix, ExtentRepairIDs, GtoS, GuestWork, GuestWorkId, IOState,
-    IOStateCount, IOop, ImpactedBlocks, JobId, Message, RawMessage,
-    ReadRequest, ReadResponse, ReconcileIO, ReconciliationId, RegionDefinition,
-    ReplaceResult, SerializedWrite, SnapshotDetails, WorkSummary,
+    ExtentFix, ExtentRepairIDs, GuestWorkId, IOState, IOStateCount, IOop,
+    ImpactedBlocks, JobId, Message, RawMessage, ReadRequest, ReadResponse,
+    ReconcileIO, ReconciliationId, RegionDefinition, ReplaceResult,
+    SerializedWrite, SnapshotDetails, WorkSummary,
 };
 use crucible_common::MAX_ACTIVE_COUNT;
 
@@ -1250,15 +1251,15 @@ impl Downstairs {
                     || (repair.aborting_repair && !have_reserved_jobs)
                 {
                     // We're done, submit a final flush!
-                    let gw_id = gw.next_gw_id();
-                    cdt::gw__flush__start!(|| (gw_id.0));
-
-                    let flush_id = self.submit_flush(gw_id, None);
+                    let (gw_id, flush_id) = gw.submit_job(
+                        |gw_id| {
+                            cdt::gw__flush__start!(|| (gw_id.0));
+                            self.submit_flush(gw_id, None)
+                        },
+                        None,
+                        None,
+                    );
                     info!(self.log, "LiveRepair final flush submitted");
-
-                    let new_gtos = GtoS::new(flush_id, None, None);
-                    gw.active.insert(gw_id, new_gtos);
-
                     cdt::up__to__ds__flush__start!(|| (gw_id.0));
 
                     LiveRepairState::FinalFlush { flush_id }
@@ -1310,8 +1311,7 @@ impl Downstairs {
         let nio = Self::create_noop_io(noop_id, deps, gw_noop_id);
 
         cdt::gw__noop__start!(|| (gw_noop_id.0));
-        let new_gtos = GtoS::new(noop_id, None, None);
-        gw.active.insert(gw_noop_id, new_gtos);
+        gw.insert(gw_noop_id, noop_id, None, None);
         self.enqueue_repair(nio);
     }
 
@@ -1356,8 +1356,7 @@ impl Downstairs {
 
         cdt::gw__repair__start!(|| (gw_repair_id.0, eid));
 
-        let new_gtos = GtoS::new(repair_id, None, None);
-        gw.active.insert(gw_repair_id, new_gtos);
+        gw.insert(gw_repair_id, repair_id, None, None);
         self.enqueue_repair(repair_io);
     }
 
@@ -1614,8 +1613,7 @@ impl Downstairs {
 
         cdt::gw__reopen__start!(|| (gw_reopen_id.0, eid));
 
-        let new_gtos = GtoS::new(reopen_id, None, None);
-        gw.active.insert(gw_reopen_id, new_gtos);
+        gw.insert(gw_reopen_id, reopen_id, None, None);
         self.enqueue_repair(reopen_io);
     }
 
@@ -1797,8 +1795,7 @@ impl Downstairs {
         );
 
         cdt::gw__close__start!(|| (gw_close_id.0, eid));
-        let new_gtos = GtoS::new(close_id, None, None);
-        gw.active.insert(gw_close_id, new_gtos);
+        gw.insert(gw_close_id, close_id, None, None);
         self.enqueue_repair(close_io);
     }
 
@@ -3548,11 +3545,12 @@ pub(crate) mod test {
     use super::Downstairs;
     use crate::{
         downstairs::{LiveRepairData, LiveRepairState},
+        guest::GuestWork,
         live_repair::ExtentInfo,
         upstairs::UpstairsState,
-        ClientId, CrucibleError, DownstairsIO, DsState, ExtentFix, GuestWork,
-        GuestWorkId, IOState, IOop, ImpactedAddr, ImpactedBlocks, JobId,
-        ReadResponse, ReconcileIO, ReconciliationId, SnapshotDetails,
+        ClientId, CrucibleError, DownstairsIO, DsState, ExtentFix, GuestWorkId,
+        IOState, IOop, ImpactedAddr, ImpactedBlocks, JobId, ReadResponse,
+        ReconcileIO, ReconciliationId, SnapshotDetails,
     };
     use bytes::Bytes;
 

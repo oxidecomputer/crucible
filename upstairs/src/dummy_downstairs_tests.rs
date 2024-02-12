@@ -7,12 +7,12 @@ pub(crate) mod protocol_test {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use crate::guest::Guest;
     use crate::up_main;
     use crate::BlockContext;
     use crate::BlockIO;
     use crate::Buffer;
     use crate::CrucibleError;
-    use crate::Guest;
     use crate::IO_OUTSTANDING_MAX;
     use crate::MAX_ACTIVE_COUNT;
     use crucible_client_types::CrucibleOpts;
@@ -523,7 +523,7 @@ pub(crate) mod protocol_test {
             // Configure our guest without queue backpressure, to speed up tests
             // which require triggering a timeout
             let (g, mut io) = Guest::new(Some(log.clone()));
-            io.backpressure_config.queue_max_delay = Duration::ZERO;
+            io.disable_queue_backpressure();
             let guest = Arc::new(g);
 
             let crucible_opts = CrucibleOpts {

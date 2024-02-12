@@ -239,12 +239,23 @@ pub(crate) struct DeferredMessage {
     pub hashes: Vec<Option<u64>>,
 
     pub client_id: ClientId,
+
+    /// See `DeferredRead::connection_id`
+    pub connection_id: u64,
 }
 
 /// Standalone data structure which can perform decryption
 pub(crate) struct DeferredRead {
     /// Message, which must be a `ReadResponse`
     pub message: Message,
+
+    /// Unique ID for this particular connection to the downstairs
+    ///
+    /// This is needed because -- if read decryption is deferred -- it may
+    /// complete after we have disconnected from the client, which would make
+    /// handling the decrypted value incorrect (because it may have been skipped
+    /// or re-sent).
+    pub connection_id: u64,
 
     pub client_id: ClientId,
     pub cfg: Arc<UpstairsConfig>,
@@ -288,6 +299,7 @@ impl DeferredRead {
         DeferredMessage {
             client_id: self.client_id,
             message: self.message,
+            connection_id: self.connection_id,
             hashes,
         }
     }

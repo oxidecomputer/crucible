@@ -17,7 +17,7 @@ use slog::{error, Logger};
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, IoSliceMut, Read};
-use std::os::fd::AsRawFd;
+use std::os::fd::AsFd;
 use std::path::Path;
 
 /// Equivalent to `DownstairsBlockContext`, but without one's own block number
@@ -151,7 +151,7 @@ impl ExtentInner for RawInner {
     fn write(
         &mut self,
         job_id: JobId,
-        writes: &[&crucible_protocol::Write],
+        writes: &[crucible_protocol::Write],
         only_write_unwritten: bool,
         iov_max: usize,
     ) -> Result<(), CrucibleError> {
@@ -186,10 +186,9 @@ impl ExtentInner for RawInner {
     fn read(
         &mut self,
         job_id: JobId,
-        requests: &[&crucible_protocol::ReadRequest],
-        responses: &mut Vec<crucible_protocol::ReadResponse>,
+        requests: &[crucible_protocol::ReadRequest],
         iov_max: usize,
-    ) -> Result<(), CrucibleError> {
+    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
         // This code batches up operations for contiguous regions of
         // ReadRequests, so we can perform larger read syscalls queries. This
         // significantly improves read throughput.
@@ -199,8 +198,9 @@ impl ExtentInner for RawInner {
         // request.
         let mut req_run_start = 0;
         let block_size = self.extent_size.block_size_in_bytes();
+        let mut responses = Vec::with_capacity(requests.len());
         while req_run_start < requests.len() {
-            let first_req = requests[req_run_start];
+            let first_req = &requests[req_run_start];
 
             // Starting from the first request in the potential run, we scan
             // forward until we find a request with a block that isn't
@@ -249,7 +249,7 @@ impl ExtentInner for RawInner {
             // bytes.  We could do more robust error handling here (e.g.
             // retrying in a loop), but for now, simply bailing out seems wise.
             let num_bytes = nix::sys::uio::preadv(
-                self.file.as_raw_fd(),
+                self.file.as_fd(),
                 &mut iovecs,
                 first_req.offset.value as i64 * block_size as i64,
             )
@@ -300,7 +300,7 @@ impl ExtentInner for RawInner {
             req_run_start += n_contiguous_requests;
         }
 
-        Ok(())
+        Ok(responses)
     }
 
     fn flush(
@@ -645,7 +645,7 @@ impl RawInner {
         let block_size = self.extent_size.block_size_in_bytes();
         let mut buf = vec![0; block_size as usize];
         pread_all(
-            self.file.as_raw_fd(),
+            self.file.as_fd(),
             &mut buf,
             (block_size as u64 * block) as i64,
         )
@@ -831,13 +831,13 @@ impl RawInner {
 
     fn write_inner(
         &self,
-        writes: &[&crucible_protocol::Write],
+        writes: &[crucible_protocol::Write],
         writes_to_skip: &HashSet<u64>,
         iov_max: usize,
     ) -> Result<(), CrucibleError> {
         // Now, batch writes into iovecs and use pwritev to write them all out.
         let mut batched_pwritev = BatchedPwritev::new(
-            self.file.as_raw_fd(),
+            self.file.as_fd(),
             writes.len(),
             self.extent_size.block_size_in_bytes().into(),
             iov_max,
@@ -1001,7 +1001,7 @@ impl RawInner {
     fn write_without_overlaps(
         &mut self,
         job_id: JobId,
-        writes: &[&crucible_protocol::Write],
+        writes: &[crucible_protocol::Write],
         only_write_unwritten: bool,
         iov_max: usize,
     ) -> Result<(), CrucibleError> {
@@ -1056,7 +1056,7 @@ impl RawInner {
             });
             let mut write_run_start = 0;
             while write_run_start < writes.len() {
-                let first_write = writes[write_run_start];
+                let first_write = &writes[write_run_start];
 
                 // Starting from the first write in the potential run, we scan
                 // forward until we find a write with a block that isn't
@@ -1207,7 +1207,7 @@ impl RawLayout {
     /// changed.
     fn set_dirty(&self, file: &File) -> Result<(), CrucibleError> {
         let offset = self.metadata_offset();
-        pwrite_all(file.as_raw_fd(), &[1u8], offset as i64).map_err(|e| {
+        pwrite_all(file.as_fd(), &[1u8], offset as i64).map_err(|e| {
             CrucibleError::IoError(format!("writing dirty byte failed: {e}",))
         })?;
         Ok(())
@@ -1268,7 +1268,7 @@ impl RawLayout {
     fn get_metadata(&self, file: &File) -> Result<OnDiskMeta, CrucibleError> {
         let mut buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
         let offset = self.metadata_offset();
-        pread_all(file.as_raw_fd(), &mut buf, offset as i64).map_err(|e| {
+        pread_all(file.as_fd(), &mut buf, offset as i64).map_err(|e| {
             CrucibleError::IoError(format!("reading metadata failed: {e}"))
         })?;
         let out: OnDiskMeta = bincode::deserialize(&buf)
@@ -1298,7 +1298,7 @@ impl RawLayout {
             bincode::serialize_into(&mut buf[n..], &d).unwrap();
         }
         let offset = self.context_slot_offset(block_start, slot);
-        pwrite_all(file.as_raw_fd(), &buf, offset as i64).map_err(|e| {
+        pwrite_all(file.as_fd(), &buf, offset as i64).map_err(|e| {
             CrucibleError::IoError(format!("writing context slots failed: {e}"))
         })?;
         Ok(())
@@ -1315,7 +1315,7 @@ impl RawLayout {
             vec![0u8; (BLOCK_CONTEXT_SLOT_SIZE_BYTES * block_count) as usize];
 
         let offset = self.context_slot_offset(block_start, slot);
-        pread_all(file.as_raw_fd(), &mut buf, offset as i64).map_err(|e| {
+        pread_all(file.as_fd(), &mut buf, offset as i64).map_err(|e| {
             CrucibleError::IoError(format!("reading context slots failed: {e}"))
         })?;
 
@@ -1376,7 +1376,7 @@ impl RawLayout {
 
         let offset = self.active_context_offset();
 
-        pwrite_all(file.as_raw_fd(), &buf, offset as i64).map_err(|e| {
+        pwrite_all(file.as_fd(), &buf, offset as i64).map_err(|e| {
             CrucibleError::IoError(format!("writing metadata failed: {e}"))
         })?;
 
@@ -1392,7 +1392,7 @@ impl RawLayout {
     ) -> Result<Vec<ContextSlot>, CrucibleError> {
         let mut buf = vec![0u8; self.active_context_size() as usize];
         let offset = self.active_context_offset();
-        pread_all(file.as_raw_fd(), &mut buf, offset as i64).map_err(|e| {
+        pread_all(file.as_fd(), &mut buf, offset as i64).map_err(|e| {
             CrucibleError::IoError(format!(
                 "could not read active contexts: {e}"
             ))
@@ -1428,8 +1428,8 @@ impl RawLayout {
 ///
 /// We don't have to worry about most of these conditions, but it may be
 /// possible for Crucible to be interrupted by a signal, so let's play it safe.
-fn pread_all(
-    fd: std::os::fd::RawFd,
+fn pread_all<F: AsFd + Copy>(
+    fd: F,
     mut buf: &mut [u8],
     mut offset: i64,
 ) -> Result<(), nix::errno::Errno> {
@@ -1444,8 +1444,8 @@ fn pread_all(
 /// Call `pwrite` repeatedly to write an entire buffer
 ///
 /// See details for why this is necessary in [`pread_all`]
-fn pwrite_all(
-    fd: std::os::fd::RawFd,
+fn pwrite_all<F: AsFd + Copy>(
+    fd: F,
     mut buf: &[u8],
     mut offset: i64,
 ) -> Result<(), nix::errno::Errno> {
@@ -1694,7 +1694,7 @@ mod test {
                 hash,
             },
         };
-        inner.write(JobId(10), &[&write], false, IOV_MAX_TEST)?;
+        inner.write(JobId(10), &[write], false, IOV_MAX_TEST)?;
 
         // The context should be in place, though we haven't flushed yet
 
@@ -1713,14 +1713,13 @@ mod test {
                 data: data.clone(),
                 block_context,
             };
-            inner.write(JobId(20), &[&write], true, IOV_MAX_TEST)?;
+            inner.write(JobId(20), &[write], true, IOV_MAX_TEST)?;
 
-            let mut resp = Vec::new();
             let read = ReadRequest {
                 eid: 0,
                 offset: Block::new_512(0),
             };
-            inner.read(JobId(21), &[&read], &mut resp, IOV_MAX_TEST)?;
+            let resp = inner.read(JobId(21), &[read], IOV_MAX_TEST)?;
 
             // We should not get back our data, because block 0 was written.
             assert_ne!(
@@ -1748,14 +1747,13 @@ mod test {
                 data: data.clone(),
                 block_context,
             };
-            inner.write(JobId(30), &[&write], true, IOV_MAX_TEST)?;
+            inner.write(JobId(30), &[write], true, IOV_MAX_TEST)?;
 
-            let mut resp = Vec::new();
             let read = ReadRequest {
                 eid: 0,
                 offset: Block::new_512(1),
             };
-            inner.read(JobId(31), &[&read], &mut resp, IOV_MAX_TEST)?;
+            let resp = inner.read(JobId(31), &[read], IOV_MAX_TEST)?;
 
             // We should get back our data! Block 1 was never written.
             assert_eq!(
@@ -1798,28 +1796,28 @@ mod test {
             offset: Block::new_512(1),
             ..write.clone()
         };
-        inner.write(JobId(10), &[&write1], false, IOV_MAX_TEST)?;
+        inner.write(JobId(10), &[write1], false, IOV_MAX_TEST)?;
         assert_eq!(inner.context_slot_dirty[0], 0b00);
         assert_eq!(inner.active_context[0], ContextSlot::A);
         assert_eq!(inner.context_slot_dirty[1], 0b10);
         assert_eq!(inner.active_context[1], ContextSlot::B);
 
         // The context should be written to block 0, slot B
-        inner.write(JobId(10), &[&write], false, IOV_MAX_TEST)?;
+        inner.write(JobId(10), &[write.clone()], false, IOV_MAX_TEST)?;
         assert_eq!(inner.context_slot_dirty[0], 0b10);
         assert_eq!(inner.active_context[0], ContextSlot::B);
         assert_eq!(inner.context_slot_dirty[1], 0b10); // unchanged
         assert_eq!(inner.active_context[1], ContextSlot::B); // unchanged
 
         // The context should be written to block 0, slot A
-        inner.write(JobId(11), &[&write], false, IOV_MAX_TEST)?;
+        inner.write(JobId(11), &[write.clone()], false, IOV_MAX_TEST)?;
         assert_eq!(inner.context_slot_dirty[0], 0b11);
         assert_eq!(inner.active_context[0], ContextSlot::A);
         assert_eq!(inner.context_slot_dirty[1], 0b10); // unchanged
         assert_eq!(inner.active_context[1], ContextSlot::B); // unchanged
 
         // The context should be written to slot B, forcing a sync
-        inner.write(JobId(12), &[&write], false, IOV_MAX_TEST)?;
+        inner.write(JobId(12), &[write], false, IOV_MAX_TEST)?;
         assert_eq!(inner.context_slot_dirty[0], 0b10);
         assert_eq!(inner.active_context[0], ContextSlot::B);
         assert_eq!(inner.context_slot_dirty[1], 0b00);
@@ -1848,7 +1846,7 @@ mod test {
             },
         };
         // The context should be written to slot B
-        inner.write(JobId(10), &[&write], false, IOV_MAX_TEST)?;
+        inner.write(JobId(10), &[write.clone()], false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
         assert_eq!(inner.context_slot_dirty[0], 0b10);
 
@@ -1858,17 +1856,17 @@ mod test {
         assert_eq!(inner.context_slot_dirty[0], 0b00);
 
         // The context should be written to slot A
-        inner.write(JobId(11), &[&write], false, IOV_MAX_TEST)?;
+        inner.write(JobId(11), &[write.clone()], false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::A);
         assert_eq!(inner.context_slot_dirty[0], 0b01);
 
         // The context should be written to slot B
-        inner.write(JobId(12), &[&write], false, IOV_MAX_TEST)?;
+        inner.write(JobId(12), &[write.clone()], false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
         assert_eq!(inner.context_slot_dirty[0], 0b11);
 
         // The context should be written to slot A, forcing a sync
-        inner.write(JobId(12), &[&write], false, IOV_MAX_TEST)?;
+        inner.write(JobId(12), &[write.clone()], false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::A);
         assert_eq!(inner.context_slot_dirty[0], 0b01);
 
@@ -1895,12 +1893,12 @@ mod test {
             },
         };
         // The context should be written to slot B
-        inner.write(JobId(10), &[&write], false, IOV_MAX_TEST)?;
+        inner.write(JobId(10), &[write.clone()], false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
         assert_eq!(inner.context_slot_dirty[0], 0b10);
 
         // The context should be written to slot A
-        inner.write(JobId(11), &[&write], false, IOV_MAX_TEST)?;
+        inner.write(JobId(11), &[write.clone()], false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::A);
         assert_eq!(inner.context_slot_dirty[0], 0b11);
 
@@ -1910,17 +1908,17 @@ mod test {
         assert_eq!(inner.context_slot_dirty[0], 0b00);
 
         // The context should be written to slot B
-        inner.write(JobId(12), &[&write], false, IOV_MAX_TEST)?;
+        inner.write(JobId(12), &[write.clone()], false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
         assert_eq!(inner.context_slot_dirty[0], 0b10);
 
         // The context should be written to slot A
-        inner.write(JobId(12), &[&write], false, IOV_MAX_TEST)?;
+        inner.write(JobId(12), &[write.clone()], false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::A);
         assert_eq!(inner.context_slot_dirty[0], 0b11);
 
         // The context should be written to slot B, forcing a sync
-        inner.write(JobId(11), &[&write], false, IOV_MAX_TEST)?;
+        inner.write(JobId(11), &[write.clone()], false, IOV_MAX_TEST)?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
         assert_eq!(inner.context_slot_dirty[0], 0b10);
 
@@ -1972,14 +1970,13 @@ mod test {
                 data: data.clone(),
                 block_context,
             };
-            inner.write(JobId(30), &[&write], true, IOV_MAX_TEST)?;
+            inner.write(JobId(30), &[write], true, IOV_MAX_TEST)?;
 
-            let mut resp = Vec::new();
             let read = ReadRequest {
                 eid: 0,
                 offset: Block::new_512(0),
             };
-            inner.read(JobId(31), &[&read], &mut resp, IOV_MAX_TEST)?;
+            let resp = inner.read(JobId(31), &[read], IOV_MAX_TEST)?;
 
             // We should get back our data! Block 1 was never written.
             assert_eq!(
@@ -2016,7 +2013,7 @@ mod test {
                     hash,
                 },
             };
-            inner.write(JobId(30), &[&write], false, IOV_MAX_TEST)?;
+            inner.write(JobId(30), &[write], false, IOV_MAX_TEST)?;
         }
 
         for i in 0..10 {
@@ -2064,8 +2061,7 @@ mod test {
             writes.push(write);
         }
         // This write has toggled every single context slot
-        let writes_ref: Vec<&_> = writes.iter().collect();
-        inner.write(JobId(30), &writes_ref, false, IOV_MAX_TEST)?;
+        inner.write(JobId(30), &writes, false, IOV_MAX_TEST)?;
         for i in 0..10 {
             assert_eq!(
                 inner.active_context[i],
@@ -2117,7 +2113,7 @@ mod test {
                     hash,
                 },
             };
-            inner.write(JobId(30), &[&write], false, IOV_MAX_TEST)?;
+            inner.write(JobId(30), &[write], false, IOV_MAX_TEST)?;
         }
         // 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
         // --|---|---|---|---|---|---|---|---|---
@@ -2170,8 +2166,7 @@ mod test {
         // 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
         // --|---|---|---|---|---|---|---|---|---
         // A | B | A | B | A | B | B | B | B | B
-        let writes_ref: Vec<&_> = writes.iter().collect();
-        inner.write(JobId(30), &writes_ref, false, IOV_MAX_TEST)?;
+        inner.write(JobId(30), &writes, false, IOV_MAX_TEST)?;
         for i in 0..10 {
             assert_eq!(
                 inner.active_context[i],
@@ -2225,7 +2220,7 @@ mod test {
                     hash,
                 },
             };
-            inner.write(JobId(30), &[&write], false, IOV_MAX_TEST)?;
+            inner.write(JobId(30), &[write], false, IOV_MAX_TEST)?;
         }
         // 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
         // --|---|---|---|---|---|---|---|---|---
@@ -2274,9 +2269,8 @@ mod test {
             };
             writes.push(write);
         }
-        let writes_ref: Vec<&_> = writes.iter().collect();
-        inner.write(JobId(30), &writes_ref, false, IOV_MAX_TEST)?;
-        inner.write(JobId(30), &writes_ref, false, IOV_MAX_TEST)?;
+        inner.write(JobId(30), &writes, false, IOV_MAX_TEST)?;
+        inner.write(JobId(30), &writes, false, IOV_MAX_TEST)?;
         // This write should toggled every single context slot:
         // 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
         // --|---|---|---|---|---|---|---|---|---
@@ -2334,7 +2328,7 @@ mod test {
                     hash,
                 },
             };
-            inner.write(JobId(30), &[&write], false, IOV_MAX_TEST)?;
+            inner.write(JobId(30), &[write], false, IOV_MAX_TEST)?;
         }
         // 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
         // --|---|---|---|---|---|---|---|---|---
@@ -2383,9 +2377,8 @@ mod test {
             };
             writes.push(write);
         }
-        let writes_ref: Vec<&_> = writes.iter().collect();
-        inner.write(JobId(30), &writes_ref, false, IOV_MAX_TEST)?;
-        inner.write(JobId(30), &writes_ref, false, IOV_MAX_TEST)?;
+        inner.write(JobId(30), &writes, false, IOV_MAX_TEST)?;
+        inner.write(JobId(30), &writes, false, IOV_MAX_TEST)?;
         // This write should toggled every single context slot:
         // 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
         // --|---|---|---|---|---|---|---|---|---
@@ -2476,23 +2469,19 @@ mod test {
             })
             .collect();
 
-        let write_refs: Vec<_> = writes.iter().collect();
-
         assert_eq!(inner.context_slot_dirty[0], 0b00);
-        inner.write(JobId(30), &write_refs, false, IOV_MAX_TEST)?;
+        inner.write(JobId(30), &writes, false, IOV_MAX_TEST)?;
 
         // The write should be split into four separate calls to
         // `write_without_overlaps`, triggering one bonus fsync.
         assert_eq!(inner.context_slot_dirty[0], 0b11);
 
         // Block 0 should be 0x03 repeated.
-        let mut resp = Vec::new();
         let read = ReadRequest {
             eid: 0,
             offset: Block::new_512(0),
         };
-
-        inner.read(JobId(31), &[&read], &mut resp, IOV_MAX_TEST)?;
+        let resp = inner.read(JobId(31), &[read], IOV_MAX_TEST)?;
 
         let data = Bytes::from(vec![0x03; 512]);
         let hash = integrity_hash(&[&data[..]]);
