@@ -504,7 +504,6 @@ impl Downstairs {
                     extent,
                     flush_number,
                     gen_number,
-                    source_downstairs: _,
                     repair_downstairs,
                 } => {
                     cdt::ds__close__start!(|| (
@@ -1558,7 +1557,6 @@ impl Downstairs {
                 close_deps,
                 close_id,
                 gw_close_id,
-                source_downstairs,
                 repair_downstairs,
             )
         };
@@ -1743,14 +1741,12 @@ impl Downstairs {
         ds_id
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn create_close_io(
         &mut self,
         eid: usize,
         ds_id: JobId,
         dependencies: Vec<JobId>,
         gw_id: GuestWorkId,
-        source: ClientId,
         repair: Vec<ClientId>,
     ) -> DownstairsIO {
         let close_ioop = IOop::ExtentFlushClose {
@@ -1758,7 +1754,6 @@ impl Downstairs {
             extent: eid,
             flush_number: self.next_flush_id(),
             gen_number: self.cfg.generation(),
-            source_downstairs: source,
             repair_downstairs: repair,
         };
 
@@ -1774,7 +1769,6 @@ impl Downstairs {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn create_and_enqueue_close_io(
         &mut self,
         gw: &mut GuestWork,
@@ -1782,7 +1776,6 @@ impl Downstairs {
         deps: Vec<JobId>,
         close_id: JobId,
         gw_close_id: GuestWorkId,
-        source: ClientId,
         repair: &[ClientId],
     ) {
         let close_io = self.create_close_io(
@@ -1790,7 +1783,6 @@ impl Downstairs {
             close_id,
             deps,
             gw_close_id,
-            source,
             repair.to_vec(),
         );
 
@@ -8146,7 +8138,6 @@ pub(crate) mod test {
         // incorrect flush number
         ds.next_flush = 0x1DE;
         let next_flush = ds.next_flush;
-        let source = ClientId::new(1);
         let repair = vec![ClientId::new(0), ClientId::new(2)];
         ds.create_and_enqueue_close_io(
             &mut gw,
@@ -8154,7 +8145,6 @@ pub(crate) mod test {
             deps,
             repair_ids.close_id,
             gw_close_id,
-            source,
             &repair,
         );
 
@@ -8167,7 +8157,6 @@ pub(crate) mod test {
                 extent,
                 flush_number,
                 gen_number,
-                source_downstairs,
                 repair_downstairs,
             } => {
                 assert_eq!(
@@ -8177,7 +8166,6 @@ pub(crate) mod test {
                 assert_eq!(*extent, eid as usize);
                 assert_eq!(*flush_number, next_flush);
                 assert_eq!(*gen_number, ds.cfg.generation());
-                assert_eq!(*source_downstairs, source);
                 assert_eq!(*repair_downstairs, repair);
             }
             x => {
@@ -8383,7 +8371,6 @@ pub(crate) mod test {
             deps,
             extent_repair_ids.close_id,
             gw_close_id,
-            ClientId::new(0),    // source downstairs
             &[ClientId::new(1)], // repair downstairs
         );
         let gw_repair_id = gw.next_gw_id();
