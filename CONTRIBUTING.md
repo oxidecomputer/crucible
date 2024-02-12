@@ -9,7 +9,8 @@ currently at, and manage your expectations.
 - Our current goal is support our first generation products.
 
 - We're writing Crucible in support of that goal, not as its own thing. We're
-  all working on the products, and tool development is a side effect.
+  all working on the products, and block storage is an important product
+  feature.
 
 - Crucible itself has dependencies on many other Oxide repositories, which
   themselves are undergoing a similar development churn.
