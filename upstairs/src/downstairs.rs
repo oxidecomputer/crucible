@@ -3046,6 +3046,26 @@ impl Downstairs {
                 );
                 return Err(CrucibleError::NoLongerActive);
             }
+            DsState::Offline => {
+                // If we have gone offline, it's possible that a job landed just
+                // before the downstairs went away.  If we have moved jobs to New, it
+                // means we plan to replay them and we can discard this job now.
+                if let Some(job) = self.ds_active.get(&ds_id) {
+                    if job.state[client_id] == IOState::New {
+                        warn!(
+                            self.clients[client_id].log,
+                            "Drop job {} because we are {}", ds_id, ds_state
+                        );
+                        return Err(CrucibleError::NoLongerActive);
+                    }
+                }
+                warn!(
+                    self.clients[client_id].log,
+                    "{} WARNING finish job {} when downstairs Offline",
+                    self.cfg.upstairs_id,
+                    ds_id,
+                );
+            }
             _ => {
                 warn!(
                     self.clients[client_id].log,
