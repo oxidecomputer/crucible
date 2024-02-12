@@ -507,7 +507,9 @@ impl Region {
      *
      * Let us assume we are repairing extent 012
      *  1. Make new 012.copy dir  (extent name plus: .copy)
-     *  2. Get all extent files from source side, put in 012.copy directory
+     *  2. Get all extent files from source side, put in 012.copy directory.
+     *     Verify after the copy completes that the remote side still has
+     *     the extent closed (or the region is read only).
      *  3. fsync files we just downloaded
      *  4. Rename 012.copy dir to 012.replace dir
      *  5. fsync extent directory ( 00/000/ where the extent files live)
@@ -668,6 +670,29 @@ impl Region {
             };
             save_stream_to_file(local_file, repair_stream.into_inner()).await?;
             count += 1;
+        }
+
+        // We have copied over the extent.  Verify that the remote side
+        // still believes that it is valid for repair so we know we have
+        // received a valid copy.
+        info!(self.log, "Verify extent {eid} still ready for copy");
+        let rc = match repair_server.extent_repair_ready(eid as u32).await {
+            Ok(rc) => rc.into_inner(),
+            Err(e) => {
+                crucible_bail!(
+                    RepairRequestError,
+                    "Failed to verify extent is still valid for repair {:?}",
+                    e,
+                );
+            }
+        };
+
+        if !rc {
+            warn!(self.log, "The repair of {eid} is being aborted.");
+            crucible_bail!(
+                RepairRequestError,
+                "Extent {eid} on remote repair server is in incorrect state",
+            );
         }
 
         // After we have all files: move the repair dir.

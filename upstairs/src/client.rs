@@ -1247,8 +1247,8 @@ impl DownstairsClient {
         if old_state != IOState::InProgress {
             // This job is in an unexpected state.
             panic!(
-                "[{}] Job {} completed while not InProgress: {:?}",
-                self.client_id, ds_id, old_state
+                "[{}] Job {} completed while not InProgress: {:?} {:?}",
+                self.client_id, ds_id, old_state, job
             );
         }
 

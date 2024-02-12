@@ -39,7 +39,9 @@ mod stats;
 mod extent_inner_raw;
 mod extent_inner_sqlite;
 
+use extent::ExtentState;
 use region::Region;
+use repair::RepairReadyRequest;
 
 pub use admin::run_dropshot;
 pub use dump::dump_region;
@@ -1593,6 +1595,40 @@ where
 
     resp_loop(ads, fr, fw, another_upstairs_active_rx, upstairs_connection)
         .await
+}
+
+// Repair info task
+// listen for the repair API to request if a specific extent is closed
+// or if the entire region is read only.
+async fn repair_info(
+    ads: &Arc<Mutex<Downstairs>>,
+    mut repair_request_rx: mpsc::Receiver<RepairReadyRequest>,
+) -> Result<()> {
+    info!(ads.lock().await.log, "Started repair info task");
+    while let Some(repair_request) = repair_request_rx.recv().await {
+        let ds = ads.lock().await;
+        let state = if ds.read_only {
+            true
+        } else {
+            matches!(ds.region.extents[repair_request.eid], ExtentState::Closed)
+        };
+        drop(ds);
+
+        if let Err(e) = repair_request.tx.send(state) {
+            info!(
+                ads.lock().await.log,
+                "Error {e} sending repair info for extent {}",
+                repair_request.eid,
+            );
+        } else {
+            info!(
+                ads.lock().await.log,
+                "Repair info sent {state} for extent {}", repair_request.eid,
+            );
+        }
+    }
+    warn!(ads.lock().await.log, "Repair info task ends");
+    Ok(())
 }
 
 async fn reply_task<WT>(
@@ -3255,22 +3291,41 @@ pub async fn start_downstairs(
     let dss = d.clone();
     let repair_log = d.lock().await.log.new(o!("task" => "repair".to_string()));
 
-    let repair_listener =
-        match repair::repair_main(&dss, repair_address, &repair_log).await {
-            Err(e) => {
-                // TODO tear down other things if repair server can't be
-                // started?
-                bail!("got {:?} from repair main", e);
-            }
+    let (repair_request_tx, repair_request_rx) = mpsc::channel(10);
+    let repair_listener = match repair::repair_main(
+        &dss,
+        repair_address,
+        &repair_log,
+        repair_request_tx,
+    )
+    .await
+    {
+        Err(e) => {
+            // TODO tear down other things if repair server can't be
+            // started?
+            bail!("got {:?} from repair main", e);
+        }
 
-            Ok(socket_addr) => socket_addr,
-        };
+        Ok(socket_addr) => socket_addr,
+    };
 
     {
         let mut ds = d.lock().await;
         ds.repair_address = Some(repair_listener);
     }
     info!(log, "Using repair address: {:?}", repair_listener);
+
+    let rd = d.clone();
+    let _repair_info_handle = tokio::spawn(async move {
+        if let Err(e) = repair_info(&rd, repair_request_rx).await {
+            error!(
+                rd.lock().await.log,
+                "repair info exits with error: {:?}", e
+            );
+        } else {
+            info!(rd.lock().await.log, "repair info connection all done");
+        }
+    });
 
     // Optionally require SSL connections
     let ssl_acceptor = if let Some(cert_pem_path) = cert_pem {

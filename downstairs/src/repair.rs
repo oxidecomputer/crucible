@@ -25,6 +25,7 @@ pub struct FileServerContext {
     region_dir: PathBuf,
     read_only: bool,
     region_definition: RegionDefinition,
+    repair_request_tx: mpsc::Sender<RepairReadyRequest>,
 }
 
 pub fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
@@ -39,6 +40,7 @@ fn build_api() -> ApiDescription<Arc<FileServerContext>> {
     api.register(get_files_for_extent).unwrap();
     api.register(get_region_info).unwrap();
     api.register(get_region_mode).unwrap();
+    api.register(extent_repair_ready).unwrap();
 
     api
 }
@@ -48,6 +50,7 @@ pub async fn repair_main(
     ds: &Mutex<Downstairs>,
     addr: SocketAddr,
     log: &Logger,
+    repair_request_tx: mpsc::Sender<RepairReadyRequest>,
 ) -> Result<SocketAddr, String> {
     /*
      * We must specify a configuration with a bind address.
@@ -78,6 +81,7 @@ pub async fn repair_main(
         region_dir,
         read_only,
         region_definition,
+        repair_request_tx,
     };
 
     /*
@@ -184,6 +188,29 @@ async fn get_a_file(path: PathBuf) -> Result<Response<Body>, HttpError> {
             .header(http::header::CONTENT_TYPE, content_type)
             .body(file_stream.into_body())?)
     }
+}
+
+pub struct RepairReadyRequest {
+    pub tx: oneshot::Sender<bool>,
+    pub eid: usize,
+}
+
+/// Return true if the provided extent is closed or the region is read only
+#[endpoint {
+    method = GET,
+    path = "/extent/{eid}/repair-ready",
+}]
+async fn extent_repair_ready(
+    rqctx: RequestContext<Arc<FileServerContext>>,
+    path: Path<Eid>,
+) -> Result<HttpResponseOk<bool>, HttpError> {
+    let eid: usize = path.into_inner().eid as usize;
+
+    let (tx, rx) = oneshot::channel();
+    let rrr = RepairReadyRequest { tx, eid };
+    rqctx.context().repair_request_tx.send(rrr).await.unwrap();
+    let res = rx.await.unwrap();
+    Ok(HttpResponseOk(res))
 }
 
 /**
