@@ -25,7 +25,7 @@ pub struct FileServerContext {
     region_dir: PathBuf,
     read_only: bool,
     region_definition: RegionDefinition,
-    repair_request_tx: mpsc::Sender<RepairReadyRequest>,
+    downstairs: Arc<Mutex<Downstairs>>,
 }
 
 pub fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
@@ -47,10 +47,9 @@ fn build_api() -> ApiDescription<Arc<FileServerContext>> {
 
 /// Returns Ok(listen address) if everything launched ok, Err otherwise
 pub async fn repair_main(
-    ds: &Mutex<Downstairs>,
+    downstairs: Arc<Mutex<Downstairs>>,
     addr: SocketAddr,
     log: &Logger,
-    repair_request_tx: mpsc::Sender<RepairReadyRequest>,
 ) -> Result<SocketAddr, String> {
     /*
      * We must specify a configuration with a bind address.
@@ -70,7 +69,7 @@ pub async fn repair_main(
      * Record the region directory where all the extents and metadata
      * files live.
      */
-    let ds = ds.lock().await;
+    let ds = downstairs.lock().await;
     let region_dir = ds.region.dir.clone();
     let read_only = ds.read_only;
     let region_definition = ds.region.def();
@@ -81,7 +80,7 @@ pub async fn repair_main(
         region_dir,
         read_only,
         region_definition,
-        repair_request_tx,
+        downstairs,
     };
 
     /*
@@ -190,11 +189,6 @@ async fn get_a_file(path: PathBuf) -> Result<Response<Body>, HttpError> {
     }
 }
 
-pub struct RepairReadyRequest {
-    pub tx: oneshot::Sender<bool>,
-    pub eid: usize,
-}
-
 /// Return true if the provided extent is closed or the region is read only
 #[endpoint {
     method = GET,
@@ -205,11 +199,18 @@ async fn extent_repair_ready(
     path: Path<Eid>,
 ) -> Result<HttpResponseOk<bool>, HttpError> {
     let eid: usize = path.into_inner().eid as usize;
+    let downstairs = &rqctx.context().downstairs;
 
-    let (tx, rx) = oneshot::channel();
-    let rrr = RepairReadyRequest { tx, eid };
-    rqctx.context().repair_request_tx.send(rrr).await.unwrap();
-    let res = rx.await.unwrap();
+    // If the region is read only, the extent is always ready.
+    if rqctx.context().read_only {
+        return Ok(HttpResponseOk(true));
+    }
+
+    let res = {
+        let ds = downstairs.lock().await;
+        matches!(ds.region.extents[eid], ExtentState::Closed)
+    };
+
     Ok(HttpResponseOk(res))
 }
 
