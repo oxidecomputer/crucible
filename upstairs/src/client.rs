@@ -195,6 +195,9 @@ pub(crate) struct DownstairsClient {
 
     /// State for startup negotiation
     negotiation_state: NegotiationState,
+
+    /// Session ID for a clients connection to a downstairs.
+    connection_id: usize,
 }
 
 impl DownstairsClient {
@@ -231,6 +234,7 @@ impl DownstairsClient {
             region_metadata: None,
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
+            connection_id: 0,
         }
     }
 
@@ -267,6 +271,7 @@ impl DownstairsClient {
             region_metadata: None,
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
+            connection_id: 0,
         }
     }
 
@@ -604,6 +609,7 @@ impl DownstairsClient {
             self.state = DsState::New;
         }
 
+        self.connection_id += 1;
         // Restart with a short delay
         self.start_task(true, auto_promote);
     }
@@ -2185,13 +2191,13 @@ impl DownstairsClient {
         (self.io_state_count.new + self.io_state_count.in_progress) as usize
     }
 
-    /// Returns a unique ID for the current connect, or `None`
+    /// Returns a unique ID for the current connection, or `None`
     ///
     /// This can be used to disambiguate between messages returned from
     /// different connections to the same Downstairs.
     pub(crate) fn get_connection_id(&self) -> Option<u64> {
         if self.client_task.client_stop_tx.is_some() {
-            Some(self.stats.connected as u64)
+            Some(self.connection_id as u64)
         } else {
             None
         }
