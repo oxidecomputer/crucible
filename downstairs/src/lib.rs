@@ -1908,40 +1908,12 @@ impl Downstairs {
         }
     }
 
-    /*
-     * Only grab the lock if the UpstairsConnection matches.
-     *
-     * Multiple Upstairs connecting to this Downstairs will spawn multiple
-     * threads that all can potentially add work to the same `active` hash
-     * map. Only one Upstairs can be "active" at any one time though.
-     * When promote_to_active takes the work lock, it will clear out the
-     * `active` hash map and (if applicable) will signal to the currently
-     * active Upstairs to terminate the connection.
-     *
-     * `new_work` and `add_work` both grab their work lock through this
-     * function. Let's say `promote_to_active` and `add_work` are racing for
-     * the work lock. If `add_work` wins the race it will put work into
-     * `active`, then `promote_to_active` will clear it out. If
-     * `promote_to_active` wins the race, it will change the Downstairs'
-     * active UpstairsConnection, and send the terminate signal to the
-     * tasks that are communicating to the previously active Upstairs
-     * (along with terminating the Downstairs tasks). If `add_work` for
-     * the previous Upstairs then does fire, it will fail to
-     * grab the lock because the UpstairsConnection is no longer active, and
-     * that `add_work` thread should close.
-     *
-     * Let's say `new_work` and `promote_to_active` are racing. If `new_work`
-     * wins, then it will return and run those jobs in `do_work_task`.
-     * However, `promote_to_active` will grab the lock and change the
-     * active UpstairsConnection, causing `do_work` to return
-     * UpstairsInactive for the jobs that were just returned. If
-     * `promote_to_active` wins, it will clear out the jobs of the old
-     * Upstairs.
-     *
-     * Grabbing the lock in this way should properly clear out the previously
-     * active Upstairs without causing jobs to be incorrectly sent to the
-     * newly active Upstairs.
-     */
+    /// Mutably borrow a connection's `Work` if the `UpstairsConnection` matches
+    ///
+    /// Because this function takes a `&mut self` and returns a `&mut Work`
+    /// (extending the lifetime of the initial borrow), it is impossible for
+    /// anyone else to interfere with the work map for the lifetime of the
+    /// borrow.
     fn work_mut(
         &mut self,
         upstairs_connection: UpstairsConnection,
@@ -1954,6 +1926,7 @@ impl Downstairs {
         Ok(&mut active_upstairs.work)
     }
 
+    /// Borrow a connection's `Work` if the `UpstairsConnection` matches
     fn work(&self, upstairs_connection: UpstairsConnection) -> Result<&Work> {
         self.check_upstairs_active(upstairs_connection)?;
         let active_upstairs = self
@@ -1971,7 +1944,7 @@ impl Downstairs {
         if !self.active_upstairs.contains_key(&upstairs_uuid) {
             warn!(
                 self.log,
-                "{:?} cannot grab work lock, {} is not active!",
+                "{:?} cannot get active upstairs, {} is not active!",
                 upstairs_connection,
                 upstairs_uuid,
             );
@@ -1984,7 +1957,7 @@ impl Downstairs {
         if active_upstairs.upstairs_connection != upstairs_connection {
             warn!(
                 self.log,
-                "{:?} cannot grab lock, does not match {:?}!",
+                "{:?} cannot get active upstairs, does not match {:?}!",
                 upstairs_connection,
                 active_upstairs.upstairs_connection,
             );
@@ -2418,7 +2391,7 @@ impl Downstairs {
     ) -> Result<()> {
         let work = self.work_mut(upstairs_connection)?;
 
-        // If upstairs_connection grabs the work lock, it is the active
+        // If upstairs_connection borrows the work map, it is the active
         // connection for this Upstairs UUID. The job should exist in the Work
         // struct. If it does not, then we're in the case where the same
         // Upstairs has reconnected and been promoted to active, meaning
@@ -2495,8 +2468,8 @@ impl Downstairs {
         if self.read_only {
             // Multiple active read-only sessions are allowed, but multiple
             // sessions for the same Upstairs UUID are not. Kick out a
-            // previously active session for this UUID if one exists. Do this
-            // while holding the work lock so the previously active Upstairs
+            // previously active session for this UUID if one exists. This
+            // function is called on a `&mut self`, so we're guaranteed that the
             // isn't adding more work.
             if let Some(active_upstairs) = self
                 .active_upstairs
@@ -2882,9 +2855,9 @@ impl Work {
         if let Some(job) = self.active.get_mut(&ds_id) {
             if job.state == WorkState::New || job.state == WorkState::DepWait {
                 /*
-                 * Before we can make this in_progress, we have to, while
-                 * holding this locked, check the dep list if there is one
-                 * and make sure all dependencies are completed.
+                 * Before we can make this in_progress, we have to check the dep
+                 * list if there is one and make sure all dependencies are
+                 * completed.
                  */
                 let dep_list = job.work.deps();
 
@@ -6029,7 +6002,7 @@ mod test {
         assert_eq!(rx1.try_recv().unwrap(), upstairs_connection_2);
 
         // This should error with UpstairsInactive - upstairs_connection_1 isn't
-        // active anymore and can't grab the work lock.
+        // active anymore and can't borrow the work map.
         let result = ds.complete_work(upstairs_connection_1, JobId(1000), m);
         assert!(matches!(
             result.unwrap_err().downcast::<CrucibleError>().unwrap(),
@@ -6125,7 +6098,7 @@ mod test {
         assert_eq!(rx1.try_recv().unwrap(), upstairs_connection_2);
 
         // This should error with UpstairsInactive - upstairs_connection_1 isn't
-        // active anymore and can't grab the work lock.
+        // active anymore and can't borrow the work map.
         let result = ds.complete_work(upstairs_connection_1, JobId(1000), m);
         assert!(matches!(
             result.unwrap_err().downcast::<CrucibleError>().unwrap(),
