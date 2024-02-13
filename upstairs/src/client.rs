@@ -112,6 +112,24 @@ struct ClientTaskHandle {
     client_stop_tx: Option<oneshot::Sender<ClientStopReason>>,
 }
 
+#[derive(Debug)]
+pub struct ConnectionId(pub u64);
+
+impl std::fmt::Display for ConnectionId {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> Result<(), std::fmt::Error> {
+        self.0.fmt(f)
+    }
+}
+
+impl ConnectionId {
+    fn update(&mut self) {
+        self.0 += 1;
+    }
+}
+
 /// Per-client data
 ///
 /// This data structure contains client-specific state and manages communication
@@ -197,7 +215,7 @@ pub(crate) struct DownstairsClient {
     negotiation_state: NegotiationState,
 
     /// Session ID for a clients connection to a downstairs.
-    connection_id: usize,
+    connection_id: ConnectionId,
 }
 
 impl DownstairsClient {
@@ -234,7 +252,7 @@ impl DownstairsClient {
             region_metadata: None,
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
-            connection_id: 0,
+            connection_id: ConnectionId(0),
         }
     }
 
@@ -271,7 +289,7 @@ impl DownstairsClient {
             region_metadata: None,
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
-            connection_id: 0,
+            connection_id: ConnectionId(0),
         }
     }
 
@@ -609,7 +627,7 @@ impl DownstairsClient {
             self.state = DsState::New;
         }
 
-        self.connection_id += 1;
+        self.connection_id.update();
         // Restart with a short delay
         self.start_task(true, auto_promote);
     }
@@ -2197,7 +2215,7 @@ impl DownstairsClient {
     /// different connections to the same Downstairs.
     pub(crate) fn get_connection_id(&self) -> Option<u64> {
         if self.client_task.client_stop_tx.is_some() {
-            Some(self.connection_id as u64)
+            Some(self.connection_id.0)
         } else {
             None
         }
