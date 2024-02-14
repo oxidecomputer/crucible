@@ -83,7 +83,10 @@ pub struct ZFSDataset {
 }
 
 impl ZFSDataset {
-    // From either dataset name or path, create the ZFSDataset object
+    /// From either dataset name or path, create the ZFSDataset object.
+    ///
+    /// Fails if the dataset name does not exist, or the path does not exist (or
+    /// belong to a dataset).
     pub fn new(dataset: String) -> Result<ZFSDataset> {
         // Validate the argument is a dataset
         let cmd = std::process::Command::new("zfs")

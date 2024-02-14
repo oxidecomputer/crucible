@@ -460,8 +460,43 @@ impl DataFile {
         path.push("regions");
         path.push(request.id.0.clone());
 
-        let dataset =
-            ZFSDataset::new(path.into_os_string().into_string().unwrap())?;
+        let dataset = match ZFSDataset::new(
+            path.into_os_string().into_string().unwrap(),
+        ) {
+            Ok(dataset) => dataset,
+            Err(_e) => {
+                // This branch can only be entered if `zfs list` for that
+                // dataset path failed to return anything.
+
+                // Did the region exist in the past, and was it already deleted?
+                if let Some(region) = inner.regions.get(&request.id) {
+                    match region.state {
+                        State::Tombstoned | State::Destroyed => {
+                            // If so, any snapshots must have been deleted
+                            // before the agent would allow the region to be
+                            // deleted.
+                            return Ok(());
+                        }
+
+                        State::Requested | State::Created => {
+                            // This is a bug: according to the agent's datafile,
+                            // the region exists, but according to zfs list, it
+                            // does not
+                            bail!("Agent thinks region {} exists but zfs list does not!", request.id.0);
+                        }
+
+                        State::Failed => {
+                            // Something has set the region to state failed, so
+                            // we can't delete this snapshot.
+                            bail!("Region {} is in state failed", request.id.0);
+                        }
+                    }
+                } else {
+                    // In here, the region never existed!
+                    bail!("Inside region {} snapshot {} delete, region never existed!", request.id.0, request.name);
+                }
+            }
+        };
 
         let snapshot_name = format!("{}@{}", dataset.dataset(), request.name);
 
