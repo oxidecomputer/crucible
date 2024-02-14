@@ -112,7 +112,7 @@ struct ClientTaskHandle {
     client_stop_tx: Option<oneshot::Sender<ClientStopReason>>,
 }
 
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct ConnectionId(pub u64);
 
 impl std::fmt::Display for ConnectionId {
@@ -2213,9 +2213,9 @@ impl DownstairsClient {
     ///
     /// This can be used to disambiguate between messages returned from
     /// different connections to the same Downstairs.
-    pub(crate) fn get_connection_id(&self) -> Option<u64> {
+    pub(crate) fn get_connection_id(&self) -> Option<ConnectionId> {
         if self.client_task.client_stop_tx.is_some() {
-            Some(self.connection_id.0)
+            Some(self.connection_id)
         } else {
             None
         }
