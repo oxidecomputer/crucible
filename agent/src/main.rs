@@ -98,7 +98,9 @@ impl ZFSDataset {
             .output()?;
 
         if !cmd.status.success() {
-            bail!("zfs list failed!");
+            let stderr =
+                String::from_utf8_lossy(&cmd.stderr).trim_end().to_string();
+            bail!("zfs list failed! {stderr}");
         }
 
         Ok(ZFSDataset {

@@ -464,7 +464,7 @@ impl DataFile {
             path.into_os_string().into_string().unwrap(),
         ) {
             Ok(dataset) => dataset,
-            Err(_e) => {
+            Err(e) => {
                 // This branch can only be entered if `zfs list` for that
                 // dataset path failed to return anything.
 
@@ -482,18 +482,21 @@ impl DataFile {
                             // This is a bug: according to the agent's datafile,
                             // the region exists, but according to zfs list, it
                             // does not
-                            bail!("Agent thinks region {} exists but zfs list does not!", request.id.0);
+                            bail!("Agent thinks region {} exists but zfs list does not! {e}", request.id.0);
                         }
 
                         State::Failed => {
                             // Something has set the region to state failed, so
                             // we can't delete this snapshot.
-                            bail!("Region {} is in state failed", request.id.0);
+                            bail!(
+                                "Region {} is in state failed! {e}",
+                                request.id.0
+                            );
                         }
                     }
                 } else {
                     // In here, the region never existed!
-                    bail!("Inside region {} snapshot {} delete, region never existed!", request.id.0, request.name);
+                    bail!("Inside region {} snapshot {} delete, region never existed! {e}", request.id.0, request.name);
                 }
             }
         };
