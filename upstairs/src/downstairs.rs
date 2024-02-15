@@ -2975,13 +2975,7 @@ impl Downstairs {
                         // Return the error and let the previously written error
                         // processing code work.
                         cdt::ds__repair__done!(|| (job_id.0, client_id.get()));
-                        (
-                            upstairs_id,
-                            session_id,
-                            job_id,
-                            Err(error.clone()),
-                            None,
-                        )
+                        (upstairs_id, session_id, job_id, Err(error), None)
 
                         // XXX return Ok(()) here to make the upstairs stuck in
                         // test_error_during_live_repair_no_halt
