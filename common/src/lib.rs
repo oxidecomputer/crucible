@@ -20,6 +20,7 @@ pub use region::{
     MIN_SHIFT,
 };
 
+pub mod impacted_blocks;
 pub mod x509;
 
 pub const REPAIR_PORT_OFFSET: u16 = 4000;

@@ -898,7 +898,6 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
- "crucible",
  "crucible-common",
  "crucible-protocol",
  "crucible-workspace-hack",

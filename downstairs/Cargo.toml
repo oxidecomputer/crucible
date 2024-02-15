@@ -14,7 +14,6 @@ chrono.workspace = true
 clap.workspace = true
 crucible-common.workspace = true
 crucible-protocol.workspace = true
-crucible.workspace = true
 dropshot.workspace = true
 futures-core.workspace = true
 futures.workspace = true

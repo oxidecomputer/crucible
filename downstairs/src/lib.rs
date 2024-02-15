@@ -13,8 +13,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crucible::*;
-use crucible_common::{build_logger, Block, CrucibleError, MAX_BLOCK_SIZE};
+use crucible_common::{
+    build_logger, crucible_bail, impacted_blocks::extent_from_offset,
+    integrity_hash, mkdir_for_file, Block, CrucibleError, RegionDefinition,
+    MAX_ACTIVE_COUNT, MAX_BLOCK_SIZE,
+};
+use crucible_protocol::{
+    BlockContext, CrucibleDecoder, CrucibleEncoder, JobId, Message,
+    ReadRequest, ReadResponse, ReconciliationId, SnapshotDetails,
+    CRUCIBLE_MESSAGE_VERSION,
+};
 use repair_client::Client;
 
 use anyhow::{bail, Result};
@@ -396,7 +404,6 @@ pub fn show_work(ds: &mut Downstairs) {
 // DTrace probes for the downstairs
 #[usdt::provider(provider = "crucible_downstairs")]
 pub mod cdt {
-    use crate::Arg;
     fn submit__read__start(_: u64) {}
     fn submit__writeunwritten__start(_: u64) {}
     fn submit__write__start(_: u64) {}

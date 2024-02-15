@@ -59,8 +59,7 @@ use guest::{GuestIoHandle, GuestWorkId};
 
 mod stats;
 
-mod impacted_blocks;
-pub use impacted_blocks::*;
+pub use crucible_common::impacted_blocks::*;
 
 mod deferred;
 mod live_repair;
