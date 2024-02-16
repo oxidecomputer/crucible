@@ -1267,6 +1267,7 @@ pub fn config_path<P: AsRef<Path>>(dir: P) -> PathBuf {
 
 #[cfg(test)]
 pub(crate) mod test {
+    use bytes::Bytes;
     use std::fs::rename;
     use std::path::PathBuf;
 
@@ -3501,7 +3502,7 @@ pub(crate) mod test {
     // We use the "all 9's data" and checksum.
     fn create_generic_write(
         eid: u64,
-        offset: crucible::Block,
+        offset: crucible_common::Block,
     ) -> Vec<crucible_protocol::Write> {
         let data = BytesMut::from(&[9u8; 512][..]);
         let writes: Vec<crucible_protocol::Write> =
@@ -4087,7 +4088,7 @@ pub(crate) mod test {
         let (_dir, mut region, data) = prepare_random_region().await?;
 
         // Call region_read with a single large contiguous range
-        let requests: Vec<crucible::ReadRequest> = (1..8)
+        let requests: Vec<crucible_protocol::ReadRequest> = (1..8)
             .map(|i| crucible_protocol::ReadRequest {
                 eid: 0,
                 offset: Block::new_512(i),
@@ -4114,7 +4115,7 @@ pub(crate) mod test {
 
         // Call region_read with a single large contiguous range that spans
         // multiple extents
-        let requests: Vec<crucible::ReadRequest> = (9..28)
+        let requests: Vec<crucible_protocol::ReadRequest> = (9..28)
             .map(|i| crucible_protocol::ReadRequest {
                 eid: i / 10,
                 offset: Block::new_512(i % 10),
@@ -4140,25 +4141,25 @@ pub(crate) mod test {
         let (_dir, mut region, data) = prepare_random_region().await?;
 
         // Call region_read with a multiple disjoint large contiguous ranges
-        let requests: Vec<crucible::ReadRequest> = vec![
+        let requests: Vec<crucible_protocol::ReadRequest> = vec![
             (1..4)
                 .map(|i| crucible_protocol::ReadRequest {
                     eid: i / 10,
                     offset: Block::new_512(i % 10),
                 })
-                .collect::<Vec<crucible::ReadRequest>>(),
+                .collect::<Vec<crucible_protocol::ReadRequest>>(),
             (15..24)
                 .map(|i| crucible_protocol::ReadRequest {
                     eid: i / 10,
                     offset: Block::new_512(i % 10),
                 })
-                .collect::<Vec<crucible::ReadRequest>>(),
+                .collect::<Vec<crucible_protocol::ReadRequest>>(),
             (27..28)
                 .map(|i| crucible_protocol::ReadRequest {
                     eid: i / 10,
                     offset: Block::new_512(i % 10),
                 })
-                .collect::<Vec<crucible::ReadRequest>>(),
+                .collect::<Vec<crucible_protocol::ReadRequest>>(),
         ]
         .into_iter()
         .flatten()
@@ -4188,7 +4189,7 @@ pub(crate) mod test {
         let (_dir, mut region, data) = prepare_random_region().await?;
 
         // Call region_read with a multiple disjoint non-contiguous ranges
-        let requests: Vec<crucible::ReadRequest> = vec![
+        let requests: Vec<crucible_protocol::ReadRequest> = vec![
             crucible_protocol::ReadRequest {
                 eid: 0,
                 offset: Block::new_512(0),
