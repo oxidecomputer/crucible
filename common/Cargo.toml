@@ -28,5 +28,9 @@ uuid.workspace = true
 crucible-workspace-hack.workspace = true
 dropshot.workspace = true
 
+[dev-dependencies]
+proptest.workspace = true
+test-strategy.workspace = true
+
 [build-dependencies]
 vergen = { version = "8.2", features = ["cargo", "git", "git2", "rustc" ] }

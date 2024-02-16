@@ -696,7 +696,7 @@ mod test {
         #[strategy(1 ..= (u64::MAX / #extent_count as u64))]
         extent_size: u64,
 
-        #[strategy(crucible_common::MIN_SHIFT..=crucible_common::MAX_SHIFT)]
+        #[strategy(crate::MIN_SHIFT..=crate::MAX_SHIFT)]
         block_shift: u32,
     }
 
