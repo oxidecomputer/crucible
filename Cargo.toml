@@ -71,7 +71,7 @@ proptest = "1.4.0"
 rayon = "1.8.1"
 rand = { version = "0.8.5", features = ["min_const_gen", "small_rng"] }
 rand_chacha = "0.3.1"
-reedline = "0.28.0"
+reedline = "0.29.0"
 reqwest = { version = "0.11", features = ["default", "blocking", "json", "stream"] }
 ringbuffer = "0.15.0"
 rusqlite = { version = "0.30" }
