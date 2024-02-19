@@ -53,7 +53,7 @@ http = "0.2.11"
 httptest = "0.15.5"
 hyper = { version = "0.14", features = [ "full" ] }
 hyper-staticfile = "0.9"
-indicatif = { version = "0.17.7", features = ["rayon"] }
+indicatif = { version = "0.17.8", features = ["rayon"] }
 itertools = "0.12.1"
 libc = "0.2"
 mime_guess = "2.0.4"
