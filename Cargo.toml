@@ -40,7 +40,7 @@ bincode = "1.3"
 byte-unit = "5.1.4"
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = [ "serde" ] }
-clap = { version = "4.4", features = ["derive", "env", "wrap_help"] }
+clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
 clearscreen = "2.0.1"
 crossterm = { version = "0.27.0" }
 crucible-workspace-hack = "0.1.0"  # see [patch.crates-io.crucible-workspace-hack] for more
