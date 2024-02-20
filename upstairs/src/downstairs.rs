@@ -2823,8 +2823,7 @@ impl Downstairs {
         read_response_hashes: Vec<Option<u64>>,
         up_state: &UpstairsState,
     ) -> Result<(), CrucibleError> {
-        let (upstairs_id, session_id, ds_id, read_data, extent_info) = match &m
-        {
+        let (upstairs_id, session_id, ds_id, read_data, extent_info) = match m {
             Message::WriteAck {
                 upstairs_id,
                 session_id,
@@ -2833,10 +2832,10 @@ impl Downstairs {
             } => {
                 cdt::ds__write__io__done!(|| (job_id.0, client_id.get()));
                 (
-                    *upstairs_id,
-                    *session_id,
-                    *job_id,
-                    result.clone().map(|_| Vec::new()),
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    result.map(|_| Vec::new()),
                     None,
                 )
             }
@@ -2851,10 +2850,10 @@ impl Downstairs {
                     client_id.get()
                 ));
                 (
-                    *upstairs_id,
-                    *session_id,
-                    *job_id,
-                    result.clone().map(|_| Vec::new()),
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    result.map(|_| Vec::new()),
                     None,
                 )
             }
@@ -2866,10 +2865,10 @@ impl Downstairs {
             } => {
                 cdt::ds__flush__io__done!(|| (job_id.0, client_id.get()));
                 (
-                    *upstairs_id,
-                    *session_id,
-                    *job_id,
-                    result.clone().map(|_| Vec::new()),
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    result.map(|_| Vec::new()),
                     None,
                 )
             }
@@ -2880,7 +2879,7 @@ impl Downstairs {
                 responses,
             } => {
                 cdt::ds__read__io__done!(|| (job_id.0, client_id.get()));
-                (*upstairs_id, *session_id, *job_id, responses.clone(), None)
+                (upstairs_id, session_id, job_id, responses, None)
             }
 
             Message::ExtentLiveCloseAck {
@@ -2890,7 +2889,7 @@ impl Downstairs {
                 result,
             } => {
                 // Take the result from the live close and store it away.
-                let extent_info = match result {
+                let extent_info = match &result {
                     Ok((g, f, d)) => {
                         debug!(
                             self.log,
@@ -2913,10 +2912,10 @@ impl Downstairs {
                 };
                 cdt::ds__close__done!(|| (job_id.0, client_id.get()));
                 (
-                    *upstairs_id,
-                    *session_id,
-                    *job_id,
-                    result.clone().map(|_| Vec::new()),
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    result.map(|_| Vec::new()),
                     extent_info,
                 )
             }
@@ -2929,10 +2928,10 @@ impl Downstairs {
                 cdt::ds__noop__done!(|| (job_id.0, client_id.get()));
                 cdt::ds__reopen__done!(|| (job_id.0, client_id.get()));
                 (
-                    *upstairs_id,
-                    *session_id,
-                    *job_id,
-                    result.clone().map(|_| Vec::new()),
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    result.map(|_| Vec::new()),
                     None,
                 )
             }
@@ -2944,10 +2943,10 @@ impl Downstairs {
             } => {
                 cdt::ds__repair__done!(|| (job_id.0, client_id.get()));
                 (
-                    *upstairs_id,
-                    *session_id,
-                    *job_id,
-                    result.clone().map(|_| Vec::new()),
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    result.map(|_| Vec::new()),
                     None,
                 )
             }
@@ -2971,18 +2970,12 @@ impl Downstairs {
                 // downstairs/src/lib.rs) where the Upstairs **does** need to
                 // act: when a repair job in the Downstairs fails, that
                 // Downstairs aborts itself and reconnects.
-                if let Some(job) = self.ds_active.get(job_id) {
+                if let Some(job) = self.ds_active.get(&job_id) {
                     if job.work.is_repair() {
                         // Return the error and let the previously written error
                         // processing code work.
                         cdt::ds__repair__done!(|| (job_id.0, client_id.get()));
-                        (
-                            *upstairs_id,
-                            *session_id,
-                            *job_id,
-                            Err(error.clone()),
-                            None,
-                        )
+                        (upstairs_id, session_id, job_id, Err(error), None)
 
                         // XXX return Ok(()) here to make the upstairs stuck in
                         // test_error_during_live_repair_no_halt
