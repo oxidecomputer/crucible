@@ -376,16 +376,6 @@ async fn main() -> Result<()> {
             root_cert_pem,
             mode,
         } => {
-            /*
-             * If any of our async tasks in our runtime panic, then we should
-             * exit the program right away.
-             */
-            let default_panic = std::panic::take_hook();
-            std::panic::set_hook(Box::new(move |info| {
-                default_panic(info);
-                std::process::exit(1);
-            }));
-
             // Instrumentation is shared.
             if let Some(endpoint) = trace_endpoint {
                 let tracer = opentelemetry_jaeger::new_agent_pipeline()
@@ -435,16 +425,6 @@ async fn main() -> Result<()> {
             trace_endpoint,
             bind_addr,
         } => {
-            /*
-             * If any of our async tasks in our runtime panic, then we should
-             * exit the program right away.
-             */
-            let default_panic = std::panic::take_hook();
-            std::panic::set_hook(Box::new(move |info| {
-                default_panic(info);
-                std::process::exit(1);
-            }));
-
             // Instrumentation is shared.
             if let Some(endpoint) = trace_endpoint {
                 let tracer = opentelemetry_jaeger::new_agent_pipeline()
