@@ -108,16 +108,6 @@ async fn main() -> Result<()> {
         println!("Set up tracing!");
     }
 
-    /*
-     * If any of our async tasks in our runtime panic, then we should
-     * exit the program right away.
-     */
-    let default_panic = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        default_panic(info);
-        std::process::exit(1);
-    }));
-
     // Create N CruciblePseudoFiles to test activation handoff.
     let mut cpfs: Vec<crucible::CruciblePseudoFile<Guest>> =
         Vec::with_capacity(opt.num_upstairs);

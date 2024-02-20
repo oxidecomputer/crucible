@@ -1365,14 +1365,6 @@ fn cleanup(output_dir: PathBuf, region_dir: Vec<PathBuf>) -> Result<()> {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    // If any of our async tasks in our runtime panic, then we should
-    // exit the program right away.
-    let default_panic = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        default_panic(info);
-        std::process::exit(1);
-    }));
-
     let runtime = Builder::new_multi_thread()
         .worker_threads(10)
         .thread_name("dsc")

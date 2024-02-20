@@ -595,16 +595,6 @@ async fn handle_signals(
  */
 #[tokio::main]
 async fn main() -> Result<()> {
-    /*
-     * If any of our async tasks in our runtime panic, then we should
-     * exit the program right away.
-     */
-    let default_panic = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        default_panic(info);
-        std::process::exit(1);
-    }));
-
     let opt = opts()?;
 
     // If we just want the version, print that and exit.

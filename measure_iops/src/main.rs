@@ -91,16 +91,6 @@ async fn main() -> Result<()> {
         read_only: false,
     };
 
-    /*
-     * If any of our async tasks in our runtime panic, then we should
-     * exit the program right away.
-     */
-    let default_panic = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        default_panic(info);
-        std::process::exit(1);
-    }));
-
     let (guest, mut io) = Guest::new(None);
     let guest = Arc::new(guest);
 
