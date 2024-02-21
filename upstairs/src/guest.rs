@@ -147,7 +147,7 @@ impl GtoS {
 
 /// Strongly-typed ID for guest work (stored in the [`GuestWork`] map)
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
-pub(crate) struct GuestWorkId(pub u64);
+pub struct GuestWorkId(pub u64);
 
 impl std::fmt::Display for GuestWorkId {
     fn fmt(
