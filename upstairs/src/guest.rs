@@ -839,9 +839,9 @@ impl GuestIoHandle {
 
         // Check if we can consume right away
         let iop_limit_applies =
-            self.limits.iop_limit.is_some() && req.op.consumes_iops();
+            self.limits.iop_limit.is_some() && req.op().consumes_iops();
         let bw_limit_applies =
-            self.limits.bw_limit.is_some() && req.op.sz().is_some();
+            self.limits.bw_limit.is_some() && req.op().sz().is_some();
 
         if !iop_limit_applies && !bw_limit_applies {
             return UpstairsAction::Guest(req);
@@ -860,14 +860,14 @@ impl GuestIoHandle {
         // reached.
 
         if let Some(bw_limit) = self.limits.bw_limit {
-            if req.op.sz().is_some() && self.bw_tokens >= bw_limit {
+            if req.op().sz().is_some() && self.bw_tokens >= bw_limit {
                 bw_check_ok = false;
             }
         }
 
         if let Some(iop_limit_cfg) = &self.limits.iop_limit {
             let bytes_per_iops = iop_limit_cfg.bytes_per_iop;
-            if req.op.iops(bytes_per_iops).is_some()
+            if req.op().iops(bytes_per_iops).is_some()
                 && self.iop_tokens >= iop_limit_cfg.iop_limit
             {
                 iop_check_ok = false;
@@ -878,13 +878,13 @@ impl GuestIoHandle {
         // block req
         if bw_check_ok && iop_check_ok {
             if self.limits.bw_limit.is_some() {
-                if let Some(sz) = req.op.sz() {
+                if let Some(sz) = req.op().sz() {
                     self.bw_tokens += sz;
                 }
             }
 
             if let Some(cfg) = &self.limits.iop_limit {
-                if let Some(req_iops) = req.op.iops(cfg.bytes_per_iop) {
+                if let Some(req_iops) = req.op().iops(cfg.bytes_per_iop) {
                     self.iop_tokens += req_iops;
                 }
             }

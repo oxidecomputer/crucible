@@ -11,11 +11,12 @@ use tokio::sync::oneshot;
 #[must_use]
 #[derive(Debug)]
 pub(crate) struct BlockReq {
-    pub op: BlockOp,
-    pub res: BlockRes,
+    op: BlockOp,
+    res: BlockRes,
 }
 
 impl BlockReq {
+    /// Builds a new `BlockReq`, binding the backpressure handle to `res`
     pub fn new(
         op: BlockOp,
         mut res: BlockRes,
@@ -23,6 +24,24 @@ impl BlockReq {
     ) -> Self {
         res.bind(&op, bp);
         Self { op, res }
+    }
+
+    /// Builds a new BlockReq without any backpressure
+    ///
+    /// This is only allowed during unit tests!
+    #[cfg(test)]
+    pub fn new_without_backpressure(op: BlockOp, res: BlockRes) -> Self {
+        Self { op, res }
+    }
+
+    /// Decomposes the `BlockReq` into its component pieces
+    pub fn split(self) -> (BlockOp, BlockRes) {
+        (self.op, self.res)
+    }
+
+    /// Returns a reference to the inner `BlockOp`
+    pub fn op(&self) -> &BlockOp {
+        &self.op
     }
 }
 
@@ -36,18 +55,20 @@ pub(crate) struct BlockReqReply {
     pub result: Result<(), CrucibleError>,
 }
 
+/// Handle to send a reply back to the guest
+///
+/// The handle includes both a reply oneshot and a backpressure guard, which
+/// will update our backpressure values when the `BlockRes` is dropped.  If the
+/// `BlockRes` reply is sent before the IO job is complete, then the
+/// backpressure guard should be extracted with `take_backpressure_guard` and
+/// bound to a longer-lived object (e.g. a `DownstairsIO`)
 #[must_use]
 #[derive(Debug)]
 pub(crate) struct BlockRes {
+    /// Reply handle to the upstairs
     tx: Option<oneshot::Sender<BlockReqReply>>,
 
     /// Handle to track IO and jobs in flight for upstairs backpressure
-    ///
-    /// The guard automatically decrements backpressure counters when dropped.
-    /// For some operations, this is immediately upon consuming the `BlockRes`;
-    /// however, for others (anything doing IO to the Downstairs), we extract
-    /// the backpressure guard (using `BlockRes::take_backpressure_guard`) and
-    /// move it into the [`DownstairsIO`].
     backpressure_guard: Option<BackpressureGuard>,
 }
 

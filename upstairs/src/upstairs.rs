@@ -906,14 +906,22 @@ impl Upstairs {
 
     /// When a `BlockReq` arrives, defer it as a future
     async fn defer_guest_request(&mut self, req: BlockReq) {
-        match req.op {
+        match req.op() {
             // All Write operations are deferred, because they will offload
             // encryption to a separate thread pool.
-            BlockOp::Write { offset, data } => {
-                self.submit_deferred_write(offset, data, req.res, false);
+            BlockOp::Write { .. } => {
+                let (op, res) = req.split();
+                let BlockOp::Write { offset, data } = op else {
+                    unreachable!();
+                };
+                self.submit_deferred_write(offset, data, res, false);
             }
-            BlockOp::WriteUnwritten { offset, data } => {
-                self.submit_deferred_write(offset, data, req.res, true);
+            BlockOp::WriteUnwritten { .. } => {
+                let (op, res) = req.split();
+                let BlockOp::WriteUnwritten { offset, data } = op else {
+                    unreachable!();
+                };
+                self.submit_deferred_write(offset, data, res, true);
             }
             // If we have any deferred requests in the FuturesOrdered, then we
             // have to keep using it for subsequent requests (even ones that are
@@ -958,7 +966,7 @@ impl Upstairs {
     async fn apply_guest_request_inner(&mut self, req: BlockReq) {
         // If any of the submit_* functions fail to send to the downstairs, they
         // return an error.  These are reported to the Guest.
-        let BlockReq { op, res } = req;
+        let (op, res) = req.split();
         match op {
             // These three options can be handled by this task directly,
             // and don't require the upstairs to be fully online.
@@ -2142,10 +2150,10 @@ pub(crate) mod test {
         let mut up = Upstairs::test_default(None);
 
         let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Deactivate,
-            res: ds_done_res,
-        }))
+        up.apply(UpstairsAction::Guest(BlockReq::new_without_backpressure(
+            BlockOp::Deactivate,
+            ds_done_res,
+        )))
         .await;
 
         let reply = ds_done_brw.wait(&up.log).await;
@@ -2155,10 +2163,10 @@ pub(crate) mod test {
         up.force_active().unwrap();
 
         let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Deactivate,
-            res: ds_done_res,
-        }))
+        up.apply(UpstairsAction::Guest(BlockReq::new_without_backpressure(
+            BlockOp::Deactivate,
+            ds_done_res,
+        )))
         .await;
 
         let reply = ds_done_brw.wait(&up.log).await;
@@ -2166,10 +2174,10 @@ pub(crate) mod test {
         assert!(reply.result.is_ok());
 
         let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Deactivate,
-            res: ds_done_res,
-        }))
+        up.apply(UpstairsAction::Guest(BlockReq::new_without_backpressure(
+            BlockOp::Deactivate,
+            ds_done_res,
+        )))
         .await;
 
         let reply = ds_done_brw.wait(&up.log).await;
@@ -2190,10 +2198,10 @@ pub(crate) mod test {
 
         // The deactivate message should happen immediately
         let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Deactivate,
-            res: ds_done_res,
-        }))
+        up.apply(UpstairsAction::Guest(BlockReq::new_without_backpressure(
+            BlockOp::Deactivate,
+            ds_done_res,
+        )))
         .await;
 
         // Make sure the correct DS have changed state.
@@ -3512,18 +3520,20 @@ pub(crate) mod test {
             BlockOp::Write { offset, data }
         };
         let (_write_brw, write_res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq { op, res: write_res }))
-            .await;
+        up.apply(UpstairsAction::Guest(BlockReq::new_without_backpressure(
+            op, write_res,
+        )))
+        .await;
         up.await_deferred_reqs().await;
         let id1 = JobId(1000); // We know that job IDs start at 1000
 
         // Create and enqueue the flush by setting deactivate
         let (mut deactivate_done_brw, deactivate_done_res) =
             BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Deactivate,
-            res: deactivate_done_res,
-        }))
+        up.apply(UpstairsAction::Guest(BlockReq::new_without_backpressure(
+            BlockOp::Deactivate,
+            deactivate_done_res,
+        )))
         .await;
 
         // The deactivate didn't return right away
@@ -3632,10 +3642,10 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
+        up.apply(UpstairsAction::Guest(BlockReq::new_without_backpressure(
+            BlockOp::Read { offset, data },
             res,
-        }))
+        )))
         .await;
 
         // fake read response from downstairs that will successfully decrypt
@@ -3692,10 +3702,10 @@ pub(crate) mod test {
         let data = Buffer::new(blocks, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
+        up.apply(UpstairsAction::Guest(BlockReq::new_without_backpressure(
+            BlockOp::Read { offset, data },
             res,
-        }))
+        )))
         .await;
 
         let mut data = Vec::from([1u8; 512]);
@@ -3759,10 +3769,10 @@ pub(crate) mod test {
         let data = Buffer::new(blocks, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
+        up.apply(UpstairsAction::Guest(BlockReq::new_without_backpressure(
+            BlockOp::Read { offset, data },
             res,
-        }))
+        )))
         .await;
 
         // fake read response from downstairs that will fail decryption
@@ -3848,10 +3858,10 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
+        up.apply(UpstairsAction::Guest(BlockReq::new_without_backpressure(
+            BlockOp::Read { offset, data },
             res,
-        }))
+        )))
         .await;
 
         // fake read response from downstairs that will fail decryption
@@ -3927,10 +3937,10 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
+        up.apply(UpstairsAction::Guest(BlockReq::new_without_backpressure(
+            BlockOp::Read { offset, data },
             res,
-        }))
+        )))
         .await;
 
         // fake read response from downstairs that will fail integrity hash
@@ -3995,10 +4005,10 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
+        up.apply(UpstairsAction::Guest(BlockReq::new_without_backpressure(
+            BlockOp::Read { offset, data },
             res,
-        }))
+        )))
         .await;
 
         // fake read response from downstairs that will fail integrity hash
@@ -4048,10 +4058,10 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
+        up.apply(UpstairsAction::Guest(BlockReq::new_without_backpressure(
+            BlockOp::Read { offset, data },
             res,
-        }))
+        )))
         .await;
 
         let data = BytesMut::from([1u8; 512].as_slice());
@@ -4126,10 +4136,10 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
+        up.apply(UpstairsAction::Guest(BlockReq::new_without_backpressure(
+            BlockOp::Read { offset, data },
             res,
-        }))
+        )))
         .await;
 
         for client_id in [ClientId::new(0), ClientId::new(1)] {
@@ -4206,10 +4216,10 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
+        up.apply(UpstairsAction::Guest(BlockReq::new_without_backpressure(
+            BlockOp::Read { offset, data },
             res,
-        }))
+        )))
         .await;
 
         let data = BytesMut::from([1u8; 512].as_slice());
@@ -4283,10 +4293,10 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
+        up.apply(UpstairsAction::Guest(BlockReq::new_without_backpressure(
+            BlockOp::Read { offset, data },
             res,
-        }))
+        )))
         .await;
 
         // The first read has no block contexts, because it was unwritten
@@ -4353,10 +4363,10 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_tx, res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
+        up.apply(UpstairsAction::Guest(BlockReq::new_without_backpressure(
+            BlockOp::Read { offset, data },
             res,
-        }))
+        )))
         .await;
 
         // The first read has no block contexts, because it was unwritten
