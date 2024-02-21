@@ -147,7 +147,7 @@ impl GtoS {
 
 /// Strongly-typed ID for guest work (stored in the [`GuestWork`] map)
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
-pub struct GuestWorkId(pub u64);
+pub(crate) struct GuestWorkId(pub u64);
 
 impl std::fmt::Display for GuestWorkId {
     fn fmt(
@@ -244,7 +244,7 @@ impl GuestWork {
      * This may include moving data buffers from completed reads.
      */
     #[instrument]
-    pub async fn gw_ds_complete(
+    pub(crate) async fn gw_ds_complete(
         &mut self,
         gw_id: GuestWorkId,
         ds_id: JobId,
