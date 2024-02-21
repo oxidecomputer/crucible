@@ -1,5 +1,6 @@
 // Copyright 2022 Oxide Computer Company
 use super::*;
+use crate::backpressure::{BackpressureCounters, BackpressureGuard};
 use tokio::sync::oneshot;
 
 /**
@@ -14,6 +15,17 @@ pub(crate) struct BlockReq {
     pub res: BlockRes,
 }
 
+impl BlockReq {
+    pub fn new(
+        op: BlockOp,
+        mut res: BlockRes,
+        bp: Arc<BackpressureCounters>,
+    ) -> Self {
+        res.bind(&op, bp);
+        Self { op, res }
+    }
+}
+
 #[must_use]
 #[derive(Debug, PartialEq)]
 pub(crate) struct BlockReqReply {
@@ -26,7 +38,18 @@ pub(crate) struct BlockReqReply {
 
 #[must_use]
 #[derive(Debug)]
-pub(crate) struct BlockRes(Option<oneshot::Sender<BlockReqReply>>);
+pub(crate) struct BlockRes {
+    tx: Option<oneshot::Sender<BlockReqReply>>,
+
+    /// Handle to track IO and jobs in flight for upstairs backpressure
+    ///
+    /// The guard automatically decrements backpressure counters when dropped.
+    /// For some operations, this is immediately upon consuming the `BlockRes`;
+    /// however, for others (anything doing IO to the Downstairs), we extract
+    /// the backpressure guard (using `BlockRes::take_backpressure_guard`) and
+    /// move it into the [`DownstairsIO`].
+    backpressure_guard: Option<BackpressureGuard>,
+}
 
 impl BlockRes {
     /// Consume this BlockRes and send Ok to the receiver
@@ -57,16 +80,43 @@ impl BlockRes {
     ) {
         // XXX this eats the result!
         let _ = self
-            .0
+            .tx
             .take()
             .expect("sender was populated")
             .send(BlockReqReply { buffer, result });
+    }
+
+    /// Add this job to the given backpressure counters
+    ///
+    /// The backpressure counters are stored locally and decremented when this
+    /// `BlockRes` is dropped, so we automatically keep track of outstanding
+    /// work without human intervention.
+    fn bind(&mut self, op: &BlockOp, bp: Arc<BackpressureCounters>) {
+        // Count this job as 1 job and some number of bytes
+        //
+        // (we only count write bytes because only writes return immediately)
+        assert!(self.backpressure_guard.is_none());
+        let bytes = match op {
+            BlockOp::Write { data, .. } => data.len() as u64,
+            _ => 0,
+        };
+        self.backpressure_guard = Some(BackpressureGuard::new(bp, bytes));
+    }
+
+    /// Steals the backpressure guard
+    ///
+    /// This effectively extends how long this `BlockReq` will exert
+    /// backpressure.  It is used when we reply to the `BlockReq` immediately
+    /// (e.g. for a write), but the IO operation lives and should be counted for
+    /// longer.
+    pub fn take_backpressure_guard(&mut self) -> Option<BackpressureGuard> {
+        self.backpressure_guard.take()
     }
 }
 
 impl Drop for BlockRes {
     fn drop(&mut self) {
-        if self.0.is_some() {
+        if self.tx.is_some() {
             // During normal operation, we expect to reply to every BlockReq, so
             // we'll fire a DTrace probe here.
             cdt::up__block__req__dropped!();
@@ -89,7 +139,13 @@ impl BlockReqWaiter {
     /// Create associated `BlockReqWaiter`/`BlockRes` pair
     pub fn pair() -> (BlockReqWaiter, BlockRes) {
         let (send, recv) = oneshot::channel();
-        (Self { recv }, BlockRes(Some(send)))
+        (
+            Self { recv },
+            BlockRes {
+                tx: Some(send),
+                backpressure_guard: None,
+            },
+        )
     }
 
     /// Consume this BlockReqWaiter and wait on the message

@@ -10,8 +10,9 @@ use std::{
 };
 
 use crate::{
-    BlockIO, BlockOp, BlockReq, BlockReqReply, BlockReqWaiter, BlockRes,
-    Buffer, JobId, ReplaceResult, UpstairsAction,
+    BackpressureConfig, BackpressureCounters, BlockIO, BlockOp, BlockReq,
+    BlockReqReply, BlockReqWaiter, BlockRes, Buffer, JobId, ReplaceResult,
+    UpstairsAction,
 };
 use crucible_common::{build_logger, crucible_bail, Block, CrucibleError};
 use crucible_protocol::{ReadResponse, SnapshotDetails};
@@ -308,11 +309,14 @@ pub struct Guest {
     /// it can be read from a `&self` reference.
     block_size: AtomicU64,
 
-    /// Backpressure is implemented as a delay on host write operations
+    /// Current values for backpressure
     ///
-    /// It is stored in an `Arc` so that the `GuestIoHandle` can update it from
-    /// the IO task.
-    backpressure_us: Arc<AtomicU64>,
+    /// This is an `Arc` within the `Arc<Guest>` because every `BlockReq` gets a
+    /// handle (and decrements in their `Drop` implementation)
+    backpressure_counters: Arc<BackpressureCounters>,
+
+    /// Backpressure configuration, as a starting point and max delay
+    backpressure_config: BackpressureConfig,
 
     /// Lock held during backpressure delay
     ///
@@ -324,30 +328,6 @@ pub struct Guest {
 
     /// Logger for the guest
     log: Logger,
-}
-
-/// Configuration for host-side backpressure
-///
-/// Backpressure adds an artificial delay to host write messages (which are
-/// otherwise acked immediately, before actually being complete).  The delay is
-/// varied based on two metrics:
-///
-/// - number of write bytes outstanding
-/// - queue length as a fraction (where 1.0 is full)
-///
-/// These two metrics are used for quadratic backpressure, picking the larger of
-/// the two delays.
-#[derive(Copy, Clone, Debug)]
-struct BackpressureConfig {
-    /// When should backpressure start (in bytes)?
-    bytes_start: u64,
-    /// Scale for byte-based quadratic backpressure
-    bytes_scale: f64,
-
-    /// When should queue-based backpressure start?
-    queue_start: f64,
-    /// Maximum queue-based delay
-    queue_max_delay: Duration,
 }
 
 /*
@@ -372,7 +352,13 @@ impl Guest {
         // time spent waiting for the queue versus time spent in Upstairs code).
         let (req_tx, req_rx) = mpsc::channel(500);
 
-        let backpressure_us = Arc::new(AtomicU64::new(0));
+        let backpressure_counters = BackpressureCounters::new();
+        let backpressure_config = BackpressureConfig {
+            bytes_start: 1024u64.pow(3), // Start at 1 GiB
+            bytes_scale: 9.3e-8,         // Delay of 10ms at 2 GiB in-flight
+            queue_start: 0.05,
+            queue_max_delay: Duration::from_millis(5),
+        };
         let limits = GuestLimits {
             iop_limit: None,
             bw_limit: None,
@@ -391,13 +377,7 @@ impl Guest {
 
             iop_tokens: 0,
             bw_tokens: 0,
-            backpressure_us: backpressure_us.clone(),
-            backpressure_config: BackpressureConfig {
-                bytes_start: 1024u64.pow(3), // Start at 1 GiB
-                bytes_scale: 9.3e-8,         // Delay of 10ms at 2 GiB in-flight
-                queue_start: 0.05,
-                queue_max_delay: Duration::from_millis(5),
-            },
+            backpressure_counters: backpressure_counters.clone(),
             log: log.clone(),
         };
         let guest = Guest {
@@ -405,7 +385,8 @@ impl Guest {
 
             block_size: AtomicU64::new(0),
 
-            backpressure_us,
+            backpressure_counters,
+            backpressure_config,
             backpressure_lock: Mutex::new(()),
             log,
         };
@@ -419,7 +400,8 @@ impl Guest {
      */
     async fn send(&self, op: BlockOp) -> BlockReqWaiter {
         let (brw, res) = BlockReqWaiter::pair();
-        if let Err(e) = self.req_tx.send(BlockReq { op, res }).await {
+        let req = BlockReq::new(op, res, self.backpressure_counters.clone());
+        if let Err(e) = self.req_tx.send(req).await {
             // This could happen during shutdown, if the up_main task is
             // destroyed while the Guest is still trying to do work.
             //
@@ -489,14 +471,25 @@ impl Guest {
         Ok(())
     }
 
+    /// Computes backpressure (in microseconds)
+    fn get_backpressure(&self) -> Duration {
+        self.backpressure_config
+            .get_delay(&self.backpressure_counters)
+    }
+
     async fn backpressure_sleep(&self) {
-        let bp =
-            Duration::from_micros(self.backpressure_us.load(Ordering::SeqCst));
+        let bp = self.get_backpressure();
         if bp > Duration::ZERO {
             let _guard = self.backpressure_lock.lock().await;
             tokio::time::sleep(bp).await;
             drop(_guard);
         }
+    }
+
+    /// Disables queue-based backpressure, to speed up certain unit tests
+    #[cfg(test)]
+    pub fn disable_queue_backpressure(&mut self) {
+        self.backpressure_config.queue_max_delay = Duration::ZERO;
     }
 }
 
@@ -767,10 +760,7 @@ pub struct GuestIoHandle {
     iop_tokens: usize,
 
     /// Current backpressure (shared with the `Guest`)
-    backpressure_us: Arc<AtomicU64>,
-
-    /// Backpressure configuration, as a starting point and max delay
-    backpressure_config: BackpressureConfig,
+    backpressure_counters: Arc<BackpressureCounters>,
 
     /// Bandwidth tokens (in bytes)
     bw_tokens: usize,
@@ -907,35 +897,6 @@ impl GuestIoHandle {
         }
     }
 
-    #[cfg(test)]
-    pub fn disable_queue_backpressure(&mut self) {
-        self.backpressure_config.queue_max_delay = Duration::ZERO;
-    }
-
-    /// Set `self.backpressure_us` based on outstanding IO ratio
-    pub fn set_backpressure(&self, bytes: u64, ratio: f64) {
-        // Check to see if the number of outstanding write bytes (between
-        // the upstairs and downstairs) is particularly high.  If so,
-        // apply some backpressure by delaying host operations, with a
-        // quadratically-increasing delay.
-        let d1 = (bytes.saturating_sub(self.backpressure_config.bytes_start)
-            as f64
-            * self.backpressure_config.bytes_scale)
-            .powf(2.0) as u64;
-
-        // Compute an alternate delay based on queue length
-        let d2 = self
-            .backpressure_config
-            .queue_max_delay
-            .mul_f64(
-                ((ratio - self.backpressure_config.queue_start).max(0.0)
-                    / (1.0 - self.backpressure_config.queue_start))
-                    .powf(2.0),
-            )
-            .as_micros() as u64;
-        self.backpressure_us.store(d1.max(d2), Ordering::SeqCst);
-    }
-
     pub fn set_iop_limit(&mut self, bytes_per_iop: usize, limit: usize) {
         self.limits.iop_limit = Some(IopLimit {
             bytes_per_iop,
@@ -952,9 +913,14 @@ impl GuestIoHandle {
         self.guest_work.active.len()
     }
 
-    /// Looks up current backpressure
+    /// Returns the most recent value for backpressure (in microseconds)
     pub fn backpressure_us(&self) -> u64 {
-        self.backpressure_us.load(Ordering::Acquire)
+        self.backpressure_counters.backpressure_us()
+    }
+
+    /// Returns the number of write bytes that are still in-flight
+    pub fn write_bytes_outstanding(&self) -> u64 {
+        self.backpressure_counters.write_bytes_outstanding()
     }
 
     /// Debug function to dump the guest work structure.

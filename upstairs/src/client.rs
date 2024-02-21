@@ -3417,11 +3417,11 @@ mod test {
             ddef,
             impacted_blocks,
             data: data.clone().into(),
-            res: None,
+            backpressure_guard: None,
             is_write_unwritten: false,
             cfg: cfg.clone(),
         };
-        let write_data = dr.run().unwrap();
+        let write_data = dr.run();
 
         let msg = ClientRequest::RawMessage(
             RawMessage::Write {
@@ -3517,11 +3517,11 @@ mod test {
             ddef,
             impacted_blocks,
             data: data.clone().into(),
-            res: None,
+            backpressure_guard: None,
             is_write_unwritten: true,
             cfg: cfg.clone(),
         };
-        let write_data = dr.run().unwrap();
+        let write_data = dr.run();
 
         let msg = ClientRequest::RawMessage(
             RawMessage::WriteUnwritten {

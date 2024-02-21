@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use crate::{
-    client::ConnectionId, upstairs::UpstairsConfig, BlockContext, BlockReq,
-    BlockRes, ClientId, ImpactedBlocks, Message, SerializedWrite,
+    client::ConnectionId, upstairs::UpstairsConfig, BackpressureGuard,
+    BlockContext, BlockReq, ClientId, ImpactedBlocks, Message, SerializedWrite,
 };
 use bytes::{Bytes, BytesMut};
-use crucible_common::{integrity_hash, CrucibleError, RegionDefinition};
+use crucible_common::{integrity_hash, RegionDefinition};
 use futures::{
     future::{ready, Either, Ready},
     stream::FuturesOrdered,
@@ -104,7 +104,7 @@ pub(crate) struct DeferredWrite {
     pub ddef: RegionDefinition,
     pub impacted_blocks: ImpactedBlocks,
     pub data: Bytes,
-    pub res: Option<BlockRes>,
+    pub backpressure_guard: Option<BackpressureGuard>,
     pub is_write_unwritten: bool,
     pub cfg: Arc<UpstairsConfig>,
 }
@@ -129,12 +129,12 @@ pub(crate) struct EncryptedWrite {
     /// superfluous memory copies.
     pub data: SerializedWrite,
     pub impacted_blocks: ImpactedBlocks,
-    pub res: Option<BlockRes>,
+    pub backpressure_guard: Option<BackpressureGuard>,
     pub is_write_unwritten: bool,
 }
 
 impl DeferredWrite {
-    pub fn run(self) -> Option<EncryptedWrite> {
+    pub fn run(self) -> EncryptedWrite {
         // Build up all of the Write operations, encrypting data here
         let byte_len: usize = self.ddef.block_size() as usize;
         let mut serialized = {
@@ -176,17 +176,15 @@ impl DeferredWrite {
             {
                 // Encrypt here
                 let mut_data = &mut serialized[pos..];
-                let (nonce, tag, hash) = match ctx.encrypt_in_place(mut_data) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        if let Some(res) = self.res {
-                            res.send_err(CrucibleError::EncryptionError(
-                                e.to_string(),
-                            ));
-                        }
-                        return None;
-                    }
-                };
+
+                // Encryption should be infallible.  Tracing down the call
+                // tree from `encrypt_in_place`, the only possible failures
+                // are if the plaintext or associated data is too large.
+                // Our associated data is a 12-byte nonce, so that's always
+                // fine; our plain-text is a block, which is limited by
+                // `MAX_SHIFT = 15` (well below aes_gcm_siv::P_MAX).
+                let (nonce, tag, hash) =
+                    ctx.encrypt_in_place(mut_data).expect("failed to encrypt");
 
                 (
                     Some(crucible_protocol::EncryptionContext {
@@ -220,12 +218,12 @@ impl DeferredWrite {
             eids,
         };
 
-        Some(EncryptedWrite {
+        EncryptedWrite {
             data,
             impacted_blocks: self.impacted_blocks,
-            res: self.res,
+            backpressure_guard: self.backpressure_guard,
             is_write_unwritten: self.is_write_unwritten,
-        })
+        }
     }
 }
 

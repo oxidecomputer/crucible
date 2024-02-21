@@ -236,7 +236,11 @@ pub(crate) struct Upstairs {
     pub(crate) control_tx: mpsc::Sender<ControlRequest>,
 
     /// Stream of post-processed `BlockOp` futures
-    deferred_reqs: DeferredQueue<Option<DeferredBlockReq>>,
+    ///
+    /// `BlockOp` are deferred to perform encryption without blocking the main
+    /// task; or to preserve queue ordering if there are other deferred
+    /// operations in progress.
+    deferred_reqs: DeferredQueue<DeferredBlockReq>,
 
     /// Stream of decrypted `Message` futures
     deferred_msgs: DeferredQueue<DeferredMessage>,
@@ -461,13 +465,7 @@ impl Upstairs {
                 match d {
                     // Normal operation: the deferred task gave us back a
                     // DeferredBlockReq, which we need to handle.
-                    Some(Some(d)) => UpstairsAction::DeferredBlockReq(d),
-
-                    // The innermost Option is None if the deferred task handled
-                    // the request on its own (and replied to the `BlockReq`
-                    // already). This happens if encryption fails, which would
-                    // be odd, but possible?
-                    Some(None) => UpstairsAction::NoOp,
+                    Some(d) => UpstairsAction::DeferredBlockReq(d),
 
                     // The outer Option is None if the FuturesOrdered is empty
                     None => {
@@ -654,10 +652,6 @@ impl Upstairs {
                 res.send_ok();
             }
         }
-
-        // For now, check backpressure after every event.  We may want to make
-        // this more nuanced in the future.
-        self.set_backpressure();
     }
 
     /// Helper function to await all deferred block requests
@@ -669,7 +663,6 @@ impl Upstairs {
     #[cfg(test)]
     async fn await_deferred_reqs(&mut self) {
         while let Some(req) = self.deferred_reqs.next().await {
-            let req = req.unwrap(); // the deferred request should not fail
             self.apply(UpstairsAction::DeferredBlockReq(req)).await;
         }
         assert!(self.deferred_reqs.is_empty());
@@ -742,7 +735,7 @@ impl Upstairs {
             self.downstairs.collect_stats(|c| c.stats.ro_lr_skipped);
 
         let up_backpressure = self.guest.backpressure_us();
-        let write_bytes_out = self.downstairs.write_bytes_outstanding();
+        let write_bytes_out = self.guest.write_bytes_outstanding();
 
         cdt::up__status!(|| {
             let arg = Arg {
@@ -927,7 +920,7 @@ impl Upstairs {
             // not writes) to preserve FIFO ordering
             _ if !self.deferred_reqs.is_empty() => {
                 self.deferred_reqs
-                    .push_immediate(Some(DeferredBlockReq::Other(req)));
+                    .push_immediate(DeferredBlockReq::Other(req));
             }
             // Otherwise, we can apply a non-write operation immediately, saving
             // a trip through the FuturesUnordered
@@ -1222,7 +1215,7 @@ impl Upstairs {
 
     pub(crate) fn submit_flush(
         &mut self,
-        res: Option<BlockRes>,
+        mut res: Option<BlockRes>,
         snapshot_details: Option<SnapshotDetails>,
     ) {
         // Notice that unlike submit_read and submit_write, we do not check for
@@ -1237,13 +1230,14 @@ impl Upstairs {
          * ID and the next_id are connected here, in that all future writes
          * should be flushed at the next flush ID.
          */
+        let bp = res.as_mut().and_then(|r| r.take_backpressure_guard());
         let (gw_id, _) = self.guest.guest_work.submit_job(
             |gw_id| {
                 cdt::gw__flush__start!(|| (gw_id.0));
                 if snapshot_details.is_some() {
                     info!(self.log, "flush with snap requested");
                 }
-                self.downstairs.submit_flush(gw_id, snapshot_details)
+                self.downstairs.submit_flush(gw_id, snapshot_details, bp)
             },
             None,
             res,
@@ -1271,7 +1265,7 @@ impl Upstairs {
         &mut self,
         offset: Block,
         data: Buffer,
-        res: Option<BlockRes>,
+        mut res: Option<BlockRes>,
     ) {
         #[cfg(not(test))]
         assert!(res.is_some());
@@ -1317,10 +1311,12 @@ impl Upstairs {
          * Grab this ID after extent_from_offset: in case of Err we don't
          * want to create a gap in the IDs.
          */
+        let bp = res.as_mut().and_then(|w| w.take_backpressure_guard());
         let (gw_id, _) = self.guest.guest_work.submit_job(
             |gw_id| {
                 cdt::gw__read__start!(|| (gw_id.0));
-                self.downstairs.submit_read(gw_id, impacted_blocks, ddef)
+                self.downstairs
+                    .submit_read(gw_id, impacted_blocks, ddef, bp)
             },
             Some(data),
             res,
@@ -1361,7 +1357,7 @@ impl Upstairs {
     ) {
         if let Some(w) = self
             .compute_deferred_write(offset, data, None, is_write_unwritten)
-            .and_then(DeferredWrite::run)
+            .map(DeferredWrite::run)
         {
             self.submit_write(w)
         }
@@ -1387,7 +1383,7 @@ impl Upstairs {
         {
             let tx = self.deferred_reqs.push_oneshot();
             rayon::spawn(move || {
-                let out = w.run().map(DeferredBlockReq::Write);
+                let out = DeferredBlockReq::Write(w.run());
                 let _ = tx.send(out);
             });
         }
@@ -1397,7 +1393,7 @@ impl Upstairs {
         &mut self,
         offset: Block,
         data: Bytes,
-        res: Option<BlockRes>,
+        mut res: Option<BlockRes>,
         is_write_unwritten: bool,
     ) -> Option<DeferredWrite> {
         #[cfg(not(test))]
@@ -1438,14 +1434,22 @@ impl Upstairs {
             Block::from_bytes(data.len(), &ddef),
         );
 
-        Some(DeferredWrite {
+        let out = Some(DeferredWrite {
             ddef,
             impacted_blocks,
             data,
-            res,
             is_write_unwritten,
             cfg: self.cfg.clone(),
-        })
+            backpressure_guard: res
+                .as_mut()
+                .and_then(|r| r.take_backpressure_guard()),
+        });
+
+        // Fast-ack the write
+        if let Some(res) = res {
+            res.send_ok();
+        }
+        out
     }
 
     fn submit_write(&mut self, write: EncryptedWrite) {
@@ -1472,10 +1476,15 @@ impl Upstairs {
                     write.impacted_blocks,
                     write.data,
                     write.is_write_unwritten,
+                    write.backpressure_guard,
                 )
             },
+            // no guest buffer for writes
             None,
-            write.res,
+            // we already replied to the write (in compute_deferred_write), so
+            // no need to reply to it here (and indeed, we can't because we've
+            // already consumed the `BlockReq`).
+            None,
         );
 
         if write.is_write_unwritten {
@@ -2014,19 +2023,6 @@ impl Upstairs {
 
         self.downstairs
             .reinitialize(client_id, auto_promote, &self.state);
-    }
-
-    fn set_backpressure(&self) {
-        let dsw_max = self
-            .downstairs
-            .clients
-            .iter()
-            .map(|c| c.total_live_work())
-            .max()
-            .unwrap_or(0);
-        let ratio = dsw_max as f64 / crate::IO_OUTSTANDING_MAX as f64;
-        self.guest
-            .set_backpressure(self.downstairs.write_bytes_outstanding(), ratio);
     }
 
     /// Returns the `RegionDefinition`

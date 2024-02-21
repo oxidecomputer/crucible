@@ -57,6 +57,11 @@ pub(crate) mod guest;
 pub use guest::{Guest, WQCounts};
 use guest::{GuestIoHandle, GuestWorkId};
 
+pub(crate) mod backpressure;
+use backpressure::{
+    BackpressureConfig, BackpressureCounters, BackpressureGuard,
+};
+
 mod stats;
 
 pub use crucible_common::impacted_blocks::*;
@@ -879,7 +884,7 @@ impl std::fmt::Display for DsState {
 /*
  * A unit of work for downstairs that is put into the hashmap.
  */
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct DownstairsIO {
     ds_id: JobId, // This MUST match our hashmap index
 
@@ -907,6 +912,15 @@ struct DownstairsIO {
      */
     data: Option<Vec<ReadResponse>>,
     read_response_hashes: Vec<Option<u64>>,
+
+    /// Guard to update backpressure counters when this IO is complete
+    ///
+    /// The guard is present for all IO coming from the guest, but absent for
+    /// things like live-repair.
+    ///
+    /// It is only used for its side effects on `Drop`!
+    #[allow(unused)]
+    backpressure_guard: Option<BackpressureGuard>,
 }
 
 impl DownstairsIO {
