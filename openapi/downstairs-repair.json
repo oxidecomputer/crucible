@@ -46,6 +46,43 @@
         }
       }
     },
+    "/extent/{eid}/repair-ready": {
+      "get": {
+        "summary": "Return true if the provided extent is closed or the region is read only",
+        "operationId": "extent_repair_ready",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "eid",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Boolean",
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/newextent/{eid}/{file_type}": {
       "get": {
         "operationId": "get_extent_file",

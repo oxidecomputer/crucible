@@ -47,6 +47,7 @@ mod stats;
 mod extent_inner_raw;
 mod extent_inner_sqlite;
 
+use extent::ExtentState;
 use region::Region;
 
 pub use admin::run_dropshot;
@@ -3211,7 +3212,7 @@ pub async fn start_downstairs(
     let repair_log = d.lock().await.log.new(o!("task" => "repair".to_string()));
 
     let repair_listener =
-        match repair::repair_main(&dss, repair_address, &repair_log).await {
+        match repair::repair_main(dss, repair_address, &repair_log).await {
             Err(e) => {
                 // TODO tear down other things if repair server can't be
                 // started?

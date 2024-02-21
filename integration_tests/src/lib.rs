@@ -16,6 +16,7 @@ mod test {
     use futures::lock::Mutex;
     use httptest::{matchers::*, responders::*, Expectation, Server};
     use rand::Rng;
+    use repair_client::Client;
     use sha2::Digest;
     use slog::{info, o, warn, Drain, Logger};
     use tempfile::*;
@@ -2814,6 +2815,74 @@ mod test {
             .await?;
 
         assert_eq!(&buffer[BLOCK_SIZE..], &random_buffer[BLOCK_SIZE..]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_repair_ready_not_closed() -> Result<()> {
+        // Create a new downstairs.
+        // Verify repair ready returns false when an extent is open
+
+        // Create a downstairs
+        let new_ds = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,  // encrypted
+            false, // read only
+            5,
+            2,
+            false,
+            Backend::RawFile,
+        )
+        .await
+        .unwrap();
+
+        let repair_addr = new_ds.repair_address().await;
+
+        let url = format!("http://{:?}", repair_addr);
+        let repair_server = Client::new(&url);
+
+        // Extent are open, so the repair ready request should return false.
+        let rc = repair_server.extent_repair_ready(0).await;
+        assert!(!rc.unwrap().into_inner());
+
+        let rc = repair_server.extent_repair_ready(1).await;
+        assert!(!rc.unwrap().into_inner());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_repair_ready_read_only() -> Result<()> {
+        // Create a new downstairs.
+        // Verify repair ready returns true for read only downstairs,
+        // even when extents are open.
+
+        // Create a downstairs
+        let new_ds = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true, // encrypted
+            true, // read only
+            5,
+            2,
+            false,
+            Backend::RawFile,
+        )
+        .await
+        .unwrap();
+
+        let repair_addr = new_ds.repair_address().await;
+
+        let url = format!("http://{:?}", repair_addr);
+        let repair_server = Client::new(&url);
+
+        // Extent are not open, but the region is read only, so the requests
+        // should all return true.
+        let rc = repair_server.extent_repair_ready(0).await;
+        assert!(rc.unwrap().into_inner());
+
+        let rc = repair_server.extent_repair_ready(1).await;
+        assert!(rc.unwrap().into_inner());
 
         Ok(())
     }

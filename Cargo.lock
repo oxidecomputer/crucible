@@ -989,6 +989,7 @@ dependencies = [
  "hex",
  "httptest",
  "rand 0.8.5",
+ "repair-client",
  "reqwest",
  "serde",
  "serde_json",

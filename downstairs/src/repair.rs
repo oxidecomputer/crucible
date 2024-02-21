@@ -25,6 +25,7 @@ pub struct FileServerContext {
     region_dir: PathBuf,
     read_only: bool,
     region_definition: RegionDefinition,
+    downstairs: Arc<Mutex<Downstairs>>,
 }
 
 pub fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
@@ -39,13 +40,14 @@ fn build_api() -> ApiDescription<Arc<FileServerContext>> {
     api.register(get_files_for_extent).unwrap();
     api.register(get_region_info).unwrap();
     api.register(get_region_mode).unwrap();
+    api.register(extent_repair_ready).unwrap();
 
     api
 }
 
 /// Returns Ok(listen address) if everything launched ok, Err otherwise
 pub async fn repair_main(
-    ds: &Mutex<Downstairs>,
+    downstairs: Arc<Mutex<Downstairs>>,
     addr: SocketAddr,
     log: &Logger,
 ) -> Result<SocketAddr, String> {
@@ -67,7 +69,7 @@ pub async fn repair_main(
      * Record the region directory where all the extents and metadata
      * files live.
      */
-    let ds = ds.lock().await;
+    let ds = downstairs.lock().await;
     let region_dir = ds.region.dir.clone();
     let read_only = ds.read_only;
     let region_definition = ds.region.def();
@@ -78,6 +80,7 @@ pub async fn repair_main(
         region_dir,
         read_only,
         region_definition,
+        downstairs,
     };
 
     /*
@@ -184,6 +187,31 @@ async fn get_a_file(path: PathBuf) -> Result<Response<Body>, HttpError> {
             .header(http::header::CONTENT_TYPE, content_type)
             .body(file_stream.into_body())?)
     }
+}
+
+/// Return true if the provided extent is closed or the region is read only
+#[endpoint {
+    method = GET,
+    path = "/extent/{eid}/repair-ready",
+}]
+async fn extent_repair_ready(
+    rqctx: RequestContext<Arc<FileServerContext>>,
+    path: Path<Eid>,
+) -> Result<HttpResponseOk<bool>, HttpError> {
+    let eid: usize = path.into_inner().eid as usize;
+    let downstairs = &rqctx.context().downstairs;
+
+    // If the region is read only, the extent is always ready.
+    if rqctx.context().read_only {
+        return Ok(HttpResponseOk(true));
+    }
+
+    let res = {
+        let ds = downstairs.lock().await;
+        matches!(ds.region.extents[eid], ExtentState::Closed)
+    };
+
+    Ok(HttpResponseOk(res))
 }
 
 /**
