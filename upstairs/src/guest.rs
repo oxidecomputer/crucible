@@ -244,7 +244,7 @@ impl GuestWork {
      * This may include moving data buffers from completed reads.
      */
     #[instrument]
-    pub async fn gw_ds_complete(
+    pub(crate) async fn gw_ds_complete(
         &mut self,
         gw_id: GuestWorkId,
         ds_id: JobId,
