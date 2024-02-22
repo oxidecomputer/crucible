@@ -1,5 +1,3 @@
-# This workflow file serves as an example for cargo-hakari CI integration.
-
 on:
   push:
     branches:
