@@ -445,6 +445,13 @@ impl Volume {
                 pause_millis,
             );
             self.flush(None).await?;
+            info!(self.log, "Deactivate read only parent {}", self.uuid,);
+            if let Err(e) = read_only_parent.deactivate().await {
+                warn!(
+                    self.log,
+                    "deactivate ROP on {} failed with {}", self.uuid, e
+                );
+            }
         } else {
             info!(self.log, "Scrub for {} not required", self.uuid);
         }
