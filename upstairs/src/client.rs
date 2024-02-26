@@ -10,7 +10,14 @@ use crate::{
 use crucible_common::x509::TLSContext;
 use crucible_protocol::{ReconciliationId, CRUCIBLE_MESSAGE_VERSION};
 
-use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use futures::StreamExt;
 use slog::{debug, error, info, o, warn, Logger};
@@ -18,7 +25,7 @@ use tokio::{
     io::AsyncWriteExt,
     net::{TcpSocket, TcpStream},
     sync::{mpsc, oneshot},
-    time::sleep_until,
+    time::{sleep_until, Duration},
 };
 use tokio_util::codec::{Encoder, FramedRead};
 use uuid::Uuid;
@@ -216,6 +223,9 @@ pub(crate) struct DownstairsClient {
 
     /// Session ID for a clients connection to a downstairs.
     connection_id: ConnectionId,
+
+    /// Per-client delay, shared with the [`DownstairsClient`]
+    client_delay_us: Arc<AtomicU64>,
 }
 
 impl DownstairsClient {
@@ -226,6 +236,7 @@ impl DownstairsClient {
         log: Logger,
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     ) -> Self {
+        let client_delay_us = Arc::new(AtomicU64::new(0));
         Self {
             cfg,
             client_task: Self::new_io_task(
@@ -234,6 +245,7 @@ impl DownstairsClient {
                 false, // do not start the task until GoActive
                 client_id,
                 tls_context.clone(),
+                client_delay_us.clone(),
                 &log,
             ),
             client_id,
@@ -253,6 +265,7 @@ impl DownstairsClient {
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
             connection_id: ConnectionId(0),
+            client_delay_us,
         }
     }
 
@@ -262,6 +275,7 @@ impl DownstairsClient {
     /// client will disappear into the void.
     #[cfg(test)]
     fn test_default() -> Self {
+        let client_delay_us = Arc::new(AtomicU64::new(0));
         let cfg = Arc::new(UpstairsConfig {
             encryption_context: None,
             upstairs_id: Uuid::new_v4(),
@@ -290,6 +304,7 @@ impl DownstairsClient {
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
             connection_id: ConnectionId(0),
+            client_delay_us,
         }
     }
 
@@ -652,6 +667,7 @@ impl DownstairsClient {
             connect,
             self.client_id,
             self.tls_context.clone(),
+            self.client_delay_us.clone(),
             &self.log,
         );
     }
@@ -662,6 +678,7 @@ impl DownstairsClient {
         connect: bool,
         client_id: ClientId,
         tls_context: Option<Arc<TLSContext>>,
+        client_delay_us: Arc<AtomicU64>,
         log: &Logger,
     ) -> ClientTaskHandle {
         #[cfg(test)]
@@ -672,6 +689,7 @@ impl DownstairsClient {
                 connect,
                 client_id,
                 tls_context,
+                client_delay_us,
                 log,
             )
         } else {
@@ -685,6 +703,7 @@ impl DownstairsClient {
             connect,
             client_id,
             tls_context,
+            client_delay_us,
             log,
         )
     }
@@ -695,6 +714,7 @@ impl DownstairsClient {
         connect: bool,
         client_id: ClientId,
         tls_context: Option<Arc<TLSContext>>,
+        client_delay_us: Arc<AtomicU64>,
         log: &Logger,
     ) -> ClientTaskHandle {
         // These channels must support at least MAX_ACTIVE_COUNT messages;
@@ -730,6 +750,7 @@ impl DownstairsClient {
                     log: log.clone(),
                 },
                 delay,
+                client_delay_us,
                 log,
             };
             c.run().await
@@ -1241,6 +1262,8 @@ impl DownstairsClient {
             warn!(self.log, "Dropping already skipped job {}", ds_id);
             return false;
         }
+
+        job.reply_time[self.client_id] = Some(std::time::Instant::now());
 
         let mut jobs_completed_ok = job.state_count().completed_ok();
         let mut ackable = false;
@@ -2220,6 +2243,11 @@ impl DownstairsClient {
             None
         }
     }
+
+    /// Sets the per-client delay
+    pub(crate) fn set_delay_us(&self, delay: u64) {
+        self.client_delay_us.store(delay, Ordering::Relaxed);
+    }
 }
 
 /// How to handle "promote to active" requests
@@ -2419,6 +2447,9 @@ struct ClientIoTask {
 
     /// Handle for the rx task
     recv_task: ClientRxTask,
+
+    /// Shared handle to receive per-client backpressure delay
+    client_delay_us: Arc<AtomicU64>,
 
     log: Logger,
 }
@@ -2692,6 +2723,24 @@ impl ClientIoTask {
             + std::marker::Send
             + 'static,
     {
+        // Delay communication with this client based on backpressure, to keep
+        // the three clients relatively in sync with each other.
+        //
+        // We don't need to delay writes, because they're already constrained by
+        // the global backpressure system and cannot build up an unbounded
+        // queue.  This is admittedly quite subtle; see crucible#1167 for
+        // discussions and graphs.
+        if !matches!(
+            m,
+            ClientRequest::Message(Message::Write { .. })
+                | ClientRequest::RawMessage(RawMessage::Write { .. }, ..)
+        ) {
+            let d = self.client_delay_us.load(Ordering::Relaxed);
+            if d > 0 {
+                tokio::time::sleep(Duration::from_micros(d)).await;
+            }
+        }
+
         // There's some duplication between this function and `cmd_loop` above,
         // but it's not obvious whether there's a cleaner way to organize stuff.
         tokio::select! {

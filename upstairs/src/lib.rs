@@ -889,6 +889,9 @@ struct DownstairsIO {
     /// Map of work status, tracked on a per-client basis
     state: ClientData<IOState>,
 
+    /// At what time did we hear a reply?
+    reply_time: ClientData<Option<std::time::Instant>>,
+
     /*
      * Has this been acked to the guest yet?
      */

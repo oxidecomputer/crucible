@@ -1326,6 +1326,7 @@ impl Downstairs {
             guest_id: gw_id,
             work: noop_ioop,
             state: ClientData::new(IOState::New),
+            reply_time: ClientData::new(None),
             acked: false,
             replay: false,
             data: None,
@@ -1449,6 +1450,7 @@ impl Downstairs {
             guest_id: gw_id,
             work: repair_ioop,
             state: ClientData::new(IOState::New),
+            reply_time: ClientData::new(None),
             acked: false,
             replay: false,
             data: None,
@@ -1589,6 +1591,7 @@ impl Downstairs {
             guest_id: gw_id,
             work: reopen_ioop,
             state: ClientData::new(IOState::New),
+            reply_time: ClientData::new(None),
             acked: false,
             replay: false,
             data: None,
@@ -1662,6 +1665,7 @@ impl Downstairs {
             guest_id: gw_id,
             work: aread,
             state: ClientData::new(IOState::New),
+            reply_time: ClientData::new(None),
             acked: false,
             replay: false,
             data: None,
@@ -1732,6 +1736,7 @@ impl Downstairs {
             guest_id: gw_id,
             work: awrite,
             state: ClientData::new(IOState::New),
+            reply_time: ClientData::new(None),
             acked: false,
             replay: false,
             data: None,
@@ -1762,6 +1767,7 @@ impl Downstairs {
             guest_id: gw_id,
             work: close_ioop,
             state: ClientData::new(IOState::New),
+            reply_time: ClientData::new(None),
             acked: false,
             replay: false,
             data: None,
@@ -2087,6 +2093,7 @@ impl Downstairs {
             guest_id: gw_id,
             work: flush,
             state: ClientData::new(IOState::New),
+            reply_time: ClientData::new(None),
             acked: false,
             replay: false,
             data: None,
@@ -2211,6 +2218,7 @@ impl Downstairs {
             guest_id,
             work: aread,
             state: ClientData::new(IOState::New),
+            reply_time: ClientData::new(None),
             acked: false,
             replay: false,
             data: None,
@@ -3164,6 +3172,30 @@ impl Downstairs {
             extent_info,
         ) {
             self.ackable_work.insert(ds_id);
+        }
+
+        if job.reply_time.iter().all(Option::is_some) && !job.replay {
+            let fastest_id = ClientId::iter()
+                .min_by_key(|i| job.reply_time[*i].unwrap())
+                .unwrap();
+            let slowest_time = *job.reply_time.iter().flatten().max().unwrap();
+
+            // Apply a delay to the fastest client, and clear the delay for the
+            // other two clients.
+            for i in ClientId::iter() {
+                let delay_time_us: u64 = if i == fastest_id {
+                    // 0 delay below 10ms of lead time, then linearly increasing
+                    // to a maximum of 10 ms.  These are all roughly-eyeballed
+                    // numbers!
+                    let dt = slowest_time - job.reply_time[i].unwrap();
+                    let lead_time_us: u64 = dt.as_micros().try_into().unwrap();
+                    (lead_time_us.saturating_sub(10_000) / 100).min(10_000)
+                } else {
+                    0
+                };
+
+                self.clients[i].set_delay_us(delay_time_us);
+            }
         }
 
         /*
