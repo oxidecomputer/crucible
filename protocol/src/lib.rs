@@ -709,6 +709,9 @@ pub trait RawMessageDiscriminant {
 pub struct WireMessageWriter<W, T> {
     writer: W,
 
+    /// Scratch space for `Message` encoding
+    scratch: BytesMut,
+
     /// Scratch space for the raw header
     header: Vec<u8>,
     _phantom: std::marker::PhantomData<T>,
@@ -724,6 +727,7 @@ where
     pub fn new(writer: W) -> Self {
         Self {
             writer,
+            scratch: BytesMut::new(),
             header: vec![],
             _phantom: std::marker::PhantomData,
         }
@@ -745,10 +749,11 @@ where
         let m = m.into();
         match m {
             WireMessage::Message(m) => {
-                let mut out = bytes::BytesMut::new();
+                // Serialize into our local BytesMut, to avoid allocation churn
+                self.scratch.clear();
                 let mut e = CrucibleEncoder::new();
-                e.encode(m, &mut out)?;
-                self.writer.write_all(&out).await?;
+                e.encode(m, &mut self.scratch)?;
+                self.writer.write_all(&self.scratch).await?;
             }
             WireMessage::RawMessage(m, data) => {
                 // Manual implementation of CrucibleEncoder, for situations
