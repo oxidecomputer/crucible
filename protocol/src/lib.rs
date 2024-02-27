@@ -678,8 +678,19 @@ impl Message {
 #[derive(Debug)]
 pub enum WireMessage<M> {
     /// Normal message to be sent down the wire
+    ///
+    /// This is serialized with the existing [`CrucibleEncoder`]
     Message(Message),
+
     /// Pre-serialized message to be sent down the wire
+    ///
+    /// This is sent by sending
+    /// - total len (u32)
+    /// - M (serialized with bincode)
+    /// - The raw contents of the byte array
+    ///
+    /// The values of `M` and the byte array must match the equivalent
+    /// [`Message`] serialized with a [`CrucibleEncoder`].
     RawMessage(M, bytes::Bytes),
 }
 
