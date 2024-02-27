@@ -7,9 +7,10 @@ use crate::{
     },
     integrity_hash, mkdir_for_file,
     region::{BatchedPwritev, JobOrReconciliationId},
-    Block, BlockContext, CrucibleError, JobId, ReadResponse, RegionDefinition,
+    Block, BlockContext, CrucibleError, JobId, RegionDefinition,
 };
 
+use bytes::{BufMut, BytesMut};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use slog::{error, Logger};
@@ -183,12 +184,16 @@ impl ExtentInner for RawInner {
         Ok(())
     }
 
-    fn read(
+    fn read_raw(
         &mut self,
         job_id: JobId,
         requests: &[crucible_protocol::ReadRequest],
         iov_max: usize,
-    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
+        out_orig: &mut BytesMut,
+    ) -> Result<(), CrucibleError> {
+        // We'll cut off any preceeding data, to make indexing easier.
+        let mut out = out_orig.split_off(out_orig.len());
+
         // This code batches up operations for contiguous regions of
         // ReadRequests, so we can perform larger read syscalls queries. This
         // significantly improves read throughput.
@@ -198,7 +203,7 @@ impl ExtentInner for RawInner {
         // request.
         let mut req_run_start = 0;
         let block_size = self.extent_size.block_size_in_bytes();
-        let mut responses = Vec::with_capacity(requests.len());
+        let mut big_chunks = vec![];
         while req_run_start < requests.len() {
             let first_req = &requests[req_run_start];
 
@@ -220,24 +225,73 @@ impl ExtentInner for RawInner {
                 }
             }
 
+            // At this point, we're ready to start reading data.  How exciting!
+            //
+            // We're going to read `n_contiguous_requests` worth of data,
+            // starting at `req_run_start`.
+
+            // We'll start by querying the block metadata
+            cdt::extent__read__get__contexts__start!(|| {
+                (job_id.0, self.extent_number, n_contiguous_requests as u64)
+            });
+            let block_contexts = self.get_block_contexts(
+                first_req.offset.value,
+                n_contiguous_requests as u64,
+            )?;
+            cdt::extent__read__get__contexts__done!(|| {
+                (job_id.0, self.extent_number, n_contiguous_requests as u64)
+            });
+
+            // Now, we'll begin to construct the ReadResponses in-place
+            let mut chunks = vec![];
+            for (ctx, req) in block_contexts
+                .into_iter()
+                .zip(requests[req_run_start..][..n_contiguous_requests].iter())
+            {
+                out.put_u64_le(req.eid);
+                out.put_u64_le(req.offset.value);
+                out.put_u32_le(req.offset.shift);
+
+                // Inner BytesMut, serialized as size + data
+                out.put_u64_le(block_size.into());
+                let data_start = out.len();
+                out.resize(data_start + block_size as usize, 1);
+                check_input(self.extent_size, req.offset, &out[data_start..])?;
+
+                // Vec<BlockContext>
+                if let Some(ctx) = ctx {
+                    out.put_u64_le(1);
+                    bincode::serialize_into(
+                        (&mut out).writer(),
+                        &ctx.block_context,
+                    )
+                    .unwrap();
+                } else {
+                    out.put_u64_le(0);
+                }
+
+                // Split off this chunk, so that we can issue a read to many
+                // mutable chunks in a single syscall
+                let next = out.split_off(out.len());
+                chunks.push(out);
+                out = next;
+            }
+
+            // This is the fun part.  We're going to iterate over our block
+            // contexts, copying them into the output buffer, and also borrowing
+            // chunks of the output buffer
+
             // Create our responses and push them into the output. While we're
             // at it, check for overflows.
-            let resp_run_start = responses.len();
             let mut iovecs = Vec::with_capacity(n_contiguous_requests);
-            for req in requests[req_run_start..][..n_contiguous_requests].iter()
-            {
-                let resp = ReadResponse::from_request(req, block_size as usize);
-                check_input(self.extent_size, req.offset, &resp.data)?;
-                responses.push(resp);
-            }
 
             // Create what amounts to an iovec for each response data buffer.
             let mut expected_bytes = 0;
-            for resp in
-                &mut responses[resp_run_start..][..n_contiguous_requests]
-            {
-                expected_bytes += resp.data.len();
-                iovecs.push(IoSliceMut::new(&mut resp.data[..]));
+            for chunk in &mut chunks {
+                expected_bytes += block_size as usize;
+                iovecs.push(IoSliceMut::new(
+                    &mut chunk[28..][..block_size as usize],
+                ));
             }
 
             // Finally we get to read the actual data. That's why we're here
@@ -271,36 +325,28 @@ impl ExtentInner for RawInner {
                 (job_id.0, self.extent_number, n_contiguous_requests as u64)
             });
 
-            // Query the block metadata
-            cdt::extent__read__get__contexts__start!(|| {
-                (job_id.0, self.extent_number, n_contiguous_requests as u64)
-            });
-            let block_contexts = self.get_block_contexts(
-                first_req.offset.value,
-                n_contiguous_requests as u64,
-            )?;
-            cdt::extent__read__get__contexts__done!(|| {
-                (job_id.0, self.extent_number, n_contiguous_requests as u64)
-            });
-
-            // Now it's time to put block contexts into the responses.
-            // We use into_iter here to move values out of enc_ctxts/hashes,
-            // avoiding a clone(). For code consistency, we use iters for the
-            // response and data chunks too. These iters will be the same length
-            // (equal to n_contiguous_requests) so zipping is fine
-            let resp_iter =
-                responses[resp_run_start..][..n_contiguous_requests].iter_mut();
-            let ctx_iter = block_contexts.into_iter();
-
-            for (resp, r_ctx) in resp_iter.zip(ctx_iter) {
-                resp.block_contexts =
-                    r_ctx.into_iter().map(|x| x.block_context).collect();
+            // Recombine all of the chunks, which should still be contiguous
+            while let Some(mut chunk) = chunks.pop() {
+                chunk.unsplit(out);
+                out = chunk;
             }
 
             req_run_start += n_contiguous_requests;
+            let next = out.split_off(out.len());
+            big_chunks.push(out);
+            out = next;
         }
 
-        Ok(responses)
+        // Recombine the buffers here
+        while let Some(mut chunk) = big_chunks.pop() {
+            chunk.unsplit(out);
+            out = chunk;
+        }
+
+        // Stitch our new buffer back into the end of the old one
+        out_orig.unsplit(out);
+
+        Ok(())
     }
 
     fn flush(
@@ -383,6 +429,18 @@ impl ExtentInner for RawInner {
     ) -> Result<Vec<Vec<DownstairsBlockContext>>, CrucibleError> {
         let out = RawInner::get_block_contexts(self, block, count)?;
         Ok(out.into_iter().map(|v| v.into_iter().collect()).collect())
+    }
+
+    fn read(
+        &mut self,
+        job_id: JobId,
+        requests: &[crucible_protocol::ReadRequest],
+        iov_max: usize,
+    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
+        let mut b = BytesMut::new();
+        b.put_u64_le(requests.len() as u64);
+        self.read_raw(job_id, requests, iov_max, &mut b)?;
+        Ok(bincode::deserialize(&b).unwrap())
     }
 }
 
@@ -1463,7 +1521,7 @@ mod test {
     use anyhow::Result;
     use bytes::{Bytes, BytesMut};
     use crucible_protocol::EncryptionContext;
-    use crucible_protocol::ReadRequest;
+    use crucible_protocol::{ReadRequest, ReadResponse};
     use rand::Rng;
     use tempfile::tempdir;
 

@@ -5,6 +5,7 @@ use std::fmt::Debug;
 use std::fs::{File, OpenOptions};
 
 use anyhow::{anyhow, bail, Context, Result};
+use bytes::BufMut;
 use nix::unistd::{sysconf, SysconfVar};
 
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,30 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
         job_id: JobOrReconciliationId,
     ) -> Result<(), CrucibleError>;
 
+    /// Simultaneously read and serialize a set of read requests
+    ///
+    /// This function should update `out` with a set of individually serialized
+    /// `ReadResponse`s.  However, it **should not** precede them with a size;
+    /// that's added by the caller because it may be building a
+    /// `Vec<ReadResponse>` across many extents in a single buffer.
+    fn read_raw(
+        &mut self,
+        job_id: JobId,
+        requests: &[crucible_protocol::ReadRequest],
+        iov_max: usize,
+        out: &mut BytesMut,
+    ) -> Result<(), CrucibleError> {
+        // Call the existing read implementation, then do serialization by hand
+        // here.  Note that we serialize the individual ReadResponse values, but
+        // not the leading size, because that's already placed into the buffer.
+        let data = self.read(job_id, requests, iov_max)?;
+        let mut w = out.writer();
+        for d in data {
+            bincode::serialize_into(&mut w, &d).unwrap();
+        }
+        Ok(())
+    }
+
     fn read(
         &mut self,
         job_id: JobId,
@@ -75,7 +100,7 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
 }
 
 /// BlockContext, with the addition of block index and on_disk_hash
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct DownstairsBlockContext {
     pub block_context: BlockContext,
 
@@ -518,17 +543,18 @@ impl Extent {
         &mut self,
         job_id: JobId,
         requests: &[crucible_protocol::ReadRequest],
-    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
+        out: &mut BytesMut,
+    ) -> Result<(), CrucibleError> {
         cdt::extent__read__start!(|| {
             (job_id.0, self.number, requests.len() as u64)
         });
 
-        let responses = self.inner.read(job_id, requests, self.iov_max)?;
+        self.inner.read_raw(job_id, requests, self.iov_max, out)?;
         cdt::extent__read__done!(|| {
             (job_id.0, self.number, requests.len() as u64)
         });
 
-        Ok(responses)
+        Ok(())
     }
 
     #[instrument]

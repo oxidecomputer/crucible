@@ -19,21 +19,22 @@ use crucible_common::{
     MAX_ACTIVE_COUNT, MAX_BLOCK_SIZE,
 };
 use crucible_protocol::{
-    BlockContext, CrucibleDecoder, CrucibleEncoder, JobId, Message,
+    BlockContext, CrucibleDecoder, JobId, Message, MessageDiscriminants,
     ReadRequest, ReadResponse, ReconciliationId, SnapshotDetails,
-    CRUCIBLE_MESSAGE_VERSION,
+    WireMessageWriter, CRUCIBLE_MESSAGE_VERSION,
 };
 use repair_client::Client;
 
 use anyhow::{bail, Result};
 use bytes::BytesMut;
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use rand::prelude::*;
+use serde::Serialize;
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep_until, Instant};
-use tokio_util::codec::{FramedRead, FramedWrite};
+use tokio_util::codec::FramedRead;
 use uuid::Uuid;
 
 pub mod admin;
@@ -126,6 +127,31 @@ impl IOop {
     }
 }
 
+/// Raw message header, which is used for zero-copy serialization
+///
+/// These variants must contain the same fields as their `Message` equivalents
+/// in the same order.
+#[derive(Debug, PartialEq, Serialize)]
+enum RawMessage {
+    ReadResponse {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: JobId,
+    },
+}
+
+impl crucible_protocol::RawMessageDiscriminant for RawMessage {
+    fn discriminant(&self) -> MessageDiscriminants {
+        match self {
+            RawMessage::ReadResponse { .. } => {
+                MessageDiscriminants::ReadResponse
+            }
+        }
+    }
+}
+
+type ClientResponse = crucible_protocol::WireMessage<RawMessage>;
+
 /*
  * Export the contents or partial contents of a Downstairs Region to
  * the file indicated.
@@ -172,8 +198,8 @@ pub async fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
             if (extent_offset + block_offset) >= start_block {
                 blocks_copied += 1;
 
-                let mut responses = region
-                    .region_read(
+                let raw = region
+                    .region_read_raw(
                         &[ReadRequest {
                             eid: eid as u64,
                             offset: Block::new_with_ddef(
@@ -184,7 +210,9 @@ pub async fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
                         JobId(0),
                     )
                     .await?;
-                let response = responses.pop().unwrap();
+                let responses: Result<Vec<ReadResponse>, CrucibleError> =
+                    bincode::deserialize(&raw)?;
+                let response = responses?.pop().unwrap();
 
                 out_file.write_all(&response.data).unwrap();
 
@@ -545,20 +573,26 @@ async fn is_message_valid(
     upstairs_connection: UpstairsConnection,
     upstairs_id: Uuid,
     session_id: Uuid,
-    resp_tx: &mpsc::Sender<Message>,
+    resp_tx: &mpsc::Sender<ClientResponse>,
 ) -> Result<bool> {
     if upstairs_connection.upstairs_id != upstairs_id {
         resp_tx
-            .send(Message::UuidMismatch {
-                expected_id: upstairs_connection.upstairs_id,
-            })
+            .send(
+                Message::UuidMismatch {
+                    expected_id: upstairs_connection.upstairs_id,
+                }
+                .into(),
+            )
             .await?;
         Ok(false)
     } else if upstairs_connection.session_id != session_id {
         resp_tx
-            .send(Message::UuidMismatch {
-                expected_id: upstairs_connection.session_id,
-            })
+            .send(
+                Message::UuidMismatch {
+                    expected_id: upstairs_connection.session_id,
+                }
+                .into(),
+            )
             .await?;
         Ok(false)
     } else {
@@ -570,7 +604,7 @@ async fn do_work_task(
     ads: &Mutex<Downstairs>,
     upstairs_connection: UpstairsConnection,
     mut job_channel_rx: mpsc::Receiver<()>,
-    resp_tx: mpsc::Sender<Message>,
+    resp_tx: mpsc::Sender<ClientResponse>,
 ) -> Result<()> {
     // The lossy attribute currently does not change at runtime. To avoid
     // continually locking the downstairs, cache the result here.
@@ -602,7 +636,7 @@ async fn proc_stream(
             let (read, write) = sock.into_split();
 
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = FramedWrite::new(write, CrucibleEncoder::new());
+            let fw = WireMessageWriter::new(write);
 
             proc(ads, fr, fw).await
         }
@@ -610,7 +644,7 @@ async fn proc_stream(
             let (read, write) = tokio::io::split(stream);
 
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = FramedWrite::new(write, CrucibleEncoder::new());
+            let fw = WireMessageWriter::new(write);
 
             proc(ads, fr, fw).await
         }
@@ -634,7 +668,7 @@ pub struct UpstairsConnection {
 async fn proc<RT, WT>(
     ads: &Arc<Mutex<Downstairs>>,
     mut fr: FramedRead<RT, CrucibleDecoder>,
-    mut fw: FramedWrite<WT, CrucibleEncoder>,
+    mut fw: WireMessageWriter<WT, RawMessage>,
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
@@ -1081,8 +1115,8 @@ where
 }
 
 async fn reply_task<WT>(
-    mut resp_channel_rx: mpsc::Receiver<Message>,
-    mut fw: FramedWrite<WT, CrucibleEncoder>,
+    mut resp_channel_rx: mpsc::Receiver<ClientResponse>,
+    mut fw: WireMessageWriter<WT, RawMessage>,
 ) -> Result<()>
 where
     WT: tokio::io::AsyncWrite
@@ -1104,7 +1138,7 @@ where
 async fn resp_loop<RT, WT>(
     ads: &Arc<Mutex<Downstairs>>,
     mut fr: FramedRead<RT, CrucibleDecoder>,
-    fw: FramedWrite<WT, CrucibleEncoder>,
+    fw: WireMessageWriter<WT, RawMessage>,
     mut another_upstairs_active_rx: oneshot::Receiver<UpstairsConnection>,
     upstairs_connection: UpstairsConnection,
 ) -> Result<()>
@@ -1131,7 +1165,7 @@ where
      * Create tasks for:
      *  Doing the work then sending the ACK
      *  Pulling work off the socket and putting on the work queue.
-     *  Sending messages back on the FramedWrite
+     *  Sending messages back on the WireMessageWriter
      *
      * These tasks and this function must be able to handle the
      * Upstairs connection going away at any time, as well as a forced
@@ -1145,9 +1179,9 @@ where
      *
      * Tasks are organized as follows, with tasks in `snake_case`
      *
-     *   ┌──────────┐              ┌───────────┐
-     *   │FramedRead│              │FramedWrite│
-     *   └────┬─────┘              └─────▲─────┘
+     *   ┌──────────┐              ┌─────────────────┐
+     *   │FramedRead│              │WireMessageWriter│
+     *   └────┬─────┘              └─────▲───────────┘
      *        │                          │
      *        │         ┌────────────────┴────────────────────┐
      *        │         │         framed_write_task           │
@@ -1293,7 +1327,7 @@ where
                                 new_session_id:
                                     new_upstairs_connection.session_id,
                                 new_gen: new_upstairs_connection.gen,
-                            }).await
+                            }.into()).await
                         {
                             warn!(log, "Failed sending YouAreNoLongerActive: {}", e);
                         }
@@ -1326,7 +1360,9 @@ where
                     Some(Ok(msg)) => {
                         if matches!(msg, Message::Ruok) {
                             // Respond instantly to pings, don't wait.
-                            if let Err(e) = resp_channel_tx.send(Message::Imok).await {
+                            if let Err(e) = resp_channel_tx.send(
+                                Message::Imok.into()).await
+                            {
                                 bail!("Failed sending Imok: {}", e);
                             }
                         } else if let Err(e) = message_channel_tx.send(msg).await {
@@ -1639,7 +1675,7 @@ impl Downstairs {
         &mut self,
         upstairs_connection: UpstairsConnection,
         job_id: JobId,
-    ) -> Result<Option<Message>> {
+    ) -> Result<Option<ClientResponse>> {
         let job = {
             let work = self.work_mut(upstairs_connection)?;
             let job = work.get_ready_job(job_id);
@@ -1672,7 +1708,7 @@ impl Downstairs {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    self.region.region_read(requests, job_id).await
+                    self.region.region_read_raw(requests, job_id).await
                 };
                 debug!(
                     self.log,
@@ -1682,12 +1718,23 @@ impl Downstairs {
                     responses.is_ok(),
                 );
 
-                Ok(Some(Message::ReadResponse {
-                    upstairs_id: job.upstairs_connection.upstairs_id,
-                    session_id: job.upstairs_connection.session_id,
-                    job_id,
-                    responses,
-                }))
+                let out = match responses {
+                    Ok(raw) => ClientResponse::RawMessage(
+                        RawMessage::ReadResponse {
+                            upstairs_id: job.upstairs_connection.upstairs_id,
+                            session_id: job.upstairs_connection.session_id,
+                            job_id,
+                        },
+                        raw,
+                    ),
+                    Err(e) => ClientResponse::Message(Message::ReadResponse {
+                        upstairs_id: job.upstairs_connection.upstairs_id,
+                        session_id: job.upstairs_connection.session_id,
+                        job_id,
+                        responses: Err(e),
+                    }),
+                };
+                Ok(Some(out))
             }
             IOop::WriteUnwritten { writes, .. } => {
                 /*
@@ -1706,12 +1753,15 @@ impl Downstairs {
                     self.region.region_write(writes, job_id, true).await
                 };
 
-                Ok(Some(Message::WriteUnwrittenAck {
-                    upstairs_id: job.upstairs_connection.upstairs_id,
-                    session_id: job.upstairs_connection.session_id,
-                    job_id,
-                    result,
-                }))
+                Ok(Some(
+                    Message::WriteUnwrittenAck {
+                        upstairs_id: job.upstairs_connection.upstairs_id,
+                        session_id: job.upstairs_connection.session_id,
+                        job_id,
+                        result,
+                    }
+                    .into(),
+                ))
             }
             IOop::Write {
                 dependencies,
@@ -1734,12 +1784,15 @@ impl Downstairs {
                     result.is_ok(),
                 );
 
-                Ok(Some(Message::WriteAck {
-                    upstairs_id: job.upstairs_connection.upstairs_id,
-                    session_id: job.upstairs_connection.session_id,
-                    job_id,
-                    result,
-                }))
+                Ok(Some(
+                    Message::WriteAck {
+                        upstairs_id: job.upstairs_connection.upstairs_id,
+                        session_id: job.upstairs_connection.session_id,
+                        job_id,
+                        result,
+                    }
+                    .into(),
+                ))
             }
             IOop::Flush {
                 dependencies,
@@ -1772,12 +1825,15 @@ impl Downstairs {
                     flush_number, gen_number,
                 );
 
-                Ok(Some(Message::FlushAck {
-                    upstairs_id: job.upstairs_connection.upstairs_id,
-                    session_id: job.upstairs_connection.session_id,
-                    job_id,
-                    result,
-                }))
+                Ok(Some(
+                    Message::FlushAck {
+                        upstairs_id: job.upstairs_connection.upstairs_id,
+                        session_id: job.upstairs_connection.session_id,
+                        job_id,
+                        result,
+                    }
+                    .into(),
+                ))
             }
             IOop::ExtentClose {
                 dependencies,
@@ -1798,12 +1854,15 @@ impl Downstairs {
                     result.is_ok(),
                 );
 
-                Ok(Some(Message::ExtentLiveCloseAck {
-                    upstairs_id: job.upstairs_connection.upstairs_id,
-                    session_id: job.upstairs_connection.session_id,
-                    job_id: job.ds_id,
-                    result,
-                }))
+                Ok(Some(
+                    Message::ExtentLiveCloseAck {
+                        upstairs_id: job.upstairs_connection.upstairs_id,
+                        session_id: job.upstairs_connection.session_id,
+                        job_id: job.ds_id,
+                        result,
+                    }
+                    .into(),
+                ))
             }
             IOop::ExtentFlushClose {
                 dependencies,
@@ -1844,12 +1903,15 @@ impl Downstairs {
                     gen_number,
                 );
 
-                Ok(Some(Message::ExtentLiveCloseAck {
-                    upstairs_id: job.upstairs_connection.upstairs_id,
-                    session_id: job.upstairs_connection.session_id,
-                    job_id: job.ds_id,
-                    result,
-                }))
+                Ok(Some(
+                    Message::ExtentLiveCloseAck {
+                        upstairs_id: job.upstairs_connection.upstairs_id,
+                        session_id: job.upstairs_connection.session_id,
+                        job_id: job.ds_id,
+                        result,
+                    }
+                    .into(),
+                ))
             }
             IOop::ExtentLiveRepair {
                 dependencies,
@@ -1879,12 +1941,15 @@ impl Downstairs {
                     result.is_ok(),
                 );
 
-                Ok(Some(Message::ExtentLiveRepairAckId {
-                    upstairs_id: job.upstairs_connection.upstairs_id,
-                    session_id: job.upstairs_connection.session_id,
-                    job_id,
-                    result,
-                }))
+                Ok(Some(
+                    Message::ExtentLiveRepairAckId {
+                        upstairs_id: job.upstairs_connection.upstairs_id,
+                        session_id: job.upstairs_connection.session_id,
+                        job_id,
+                        result,
+                    }
+                    .into(),
+                ))
             }
             IOop::ExtentLiveReopen {
                 dependencies,
@@ -1904,12 +1969,15 @@ impl Downstairs {
                     dependencies,
                     result.is_ok(),
                 );
-                Ok(Some(Message::ExtentLiveAckId {
-                    upstairs_id: job.upstairs_connection.upstairs_id,
-                    session_id: job.upstairs_connection.session_id,
-                    job_id,
-                    result,
-                }))
+                Ok(Some(
+                    Message::ExtentLiveAckId {
+                        upstairs_id: job.upstairs_connection.upstairs_id,
+                        session_id: job.upstairs_connection.session_id,
+                        job_id,
+                        result,
+                    }
+                    .into(),
+                ))
             }
             IOop::ExtentLiveNoOp { dependencies } => {
                 debug!(self.log, "Work of: LiveNoOp {}", job_id);
@@ -1926,12 +1994,15 @@ impl Downstairs {
                     dependencies,
                     result.is_ok(),
                 );
-                Ok(Some(Message::ExtentLiveAckId {
-                    upstairs_id: job.upstairs_connection.upstairs_id,
-                    session_id: job.upstairs_connection.session_id,
-                    job_id,
-                    result,
-                }))
+                Ok(Some(
+                    Message::ExtentLiveAckId {
+                        upstairs_id: job.upstairs_connection.upstairs_id,
+                        session_id: job.upstairs_connection.session_id,
+                        job_id,
+                        result,
+                    }
+                    .into(),
+                ))
             }
         }
     }
@@ -1942,9 +2013,10 @@ impl Downstairs {
         &mut self,
         upstairs_connection: UpstairsConnection,
         ds_id: JobId,
-        m: Message,
+        m: ClientResponse,
     ) -> Result<()> {
-        let is_flush = matches!(m, Message::FlushAck { .. });
+        let is_flush =
+            matches!(m, ClientResponse::Message(Message::FlushAck { .. }));
         self.complete_work_inner(upstairs_connection, ds_id, is_flush)
     }
 
@@ -1990,40 +2062,44 @@ impl Downstairs {
     fn complete_work_stat(
         &mut self,
         _upstairs_connection: UpstairsConnection,
-        m: &Message,
+        m: &ClientResponse,
         ds_id: JobId,
     ) -> Result<()> {
         // XXX dss per upstairs connection?
         match m {
-            Message::FlushAck { .. } => {
+            ClientResponse::Message(Message::FlushAck { .. }) => {
                 cdt::submit__flush__done!(|| ds_id.0);
                 self.dss.add_flush();
             }
-            Message::WriteAck { .. } => {
+            ClientResponse::Message(Message::WriteAck { .. }) => {
                 cdt::submit__write__done!(|| ds_id.0);
                 self.dss.add_write();
             }
-            Message::WriteUnwrittenAck { .. } => {
+            ClientResponse::Message(Message::WriteUnwrittenAck { .. }) => {
                 cdt::submit__writeunwritten__done!(|| ds_id.0);
                 self.dss.add_write();
             }
-            Message::ReadResponse { .. } => {
+            ClientResponse::Message(Message::ReadResponse { .. })
+            | ClientResponse::RawMessage(RawMessage::ReadResponse { .. }, ..) =>
+            {
                 cdt::submit__read__done!(|| ds_id.0);
                 self.dss.add_read();
             }
-            Message::ExtentLiveClose { .. } => {
+            ClientResponse::Message(Message::ExtentLiveClose { .. }) => {
                 cdt::submit__el__close__done!(|| ds_id.0);
             }
-            Message::ExtentLiveFlushClose { .. } => {
+            ClientResponse::Message(Message::ExtentLiveFlushClose {
+                ..
+            }) => {
                 cdt::submit__el__flush__close__done!(|| ds_id.0);
             }
-            Message::ExtentLiveRepair { .. } => {
+            ClientResponse::Message(Message::ExtentLiveRepair { .. }) => {
                 cdt::submit__el__repair__done!(|| ds_id.0);
             }
-            Message::ExtentLiveReopen { .. } => {
+            ClientResponse::Message(Message::ExtentLiveReopen { .. }) => {
                 cdt::submit__el__reopen__done!(|| ds_id.0);
             }
-            Message::ExtentLiveNoOp { .. } => {
+            ClientResponse::Message(Message::ExtentLiveNoOp { .. }) => {
                 cdt::submit__el__noop__done!(|| ds_id.0);
             }
             _ => (),
@@ -2331,7 +2407,7 @@ impl Downstairs {
         ad: &Mutex<Downstairs>,
         upstairs_connection: UpstairsConnection,
         m: Message,
-        resp_tx: &mpsc::Sender<Message>,
+        resp_tx: &mpsc::Sender<ClientResponse>,
     ) -> Result<Option<JobId>> {
         // Initial check against upstairs and session ID
         match m {
@@ -2596,7 +2672,7 @@ impl Downstairs {
                         },
                     }
                 };
-                resp_tx.send(msg).await?;
+                resp_tx.send(msg.into()).await?;
                 None
             }
             Message::ExtentClose {
@@ -2615,7 +2691,7 @@ impl Downstairs {
                         },
                     }
                 };
-                resp_tx.send(msg).await?;
+                resp_tx.send(msg.into()).await?;
                 None
             }
             Message::ExtentRepair {
@@ -2649,7 +2725,7 @@ impl Downstairs {
                         },
                     }
                 };
-                resp_tx.send(msg).await?;
+                resp_tx.send(msg.into()).await?;
                 None
             }
             Message::ExtentReopen {
@@ -2668,7 +2744,7 @@ impl Downstairs {
                         },
                     }
                 };
-                resp_tx.send(msg).await?;
+                resp_tx.send(msg.into()).await?;
                 None
             }
             x => bail!("unexpected frame {:?}", x),
@@ -2679,7 +2755,7 @@ impl Downstairs {
     async fn do_work_for(
         ads: &Mutex<Downstairs>,
         upstairs_connection: UpstairsConnection,
-        resp_tx: &mpsc::Sender<Message>,
+        resp_tx: &mpsc::Sender<ClientResponse>,
     ) -> Result<()> {
         let ds = ads.lock().await;
         if !ds.is_active(upstairs_connection) {
@@ -2744,14 +2820,28 @@ impl Downstairs {
                 continue;
             };
 
-            if let Some(error) = m.err() {
+            let err = match &m {
+                ClientResponse::Message(m) => m.err(),
+                ClientResponse::RawMessage(_m, data) => {
+                    // All RawMessage types have an initial 0 byte indicating
+                    // that they represent the Ok(..) branch, because we reply
+                    // with a normal Message if there was an error.
+                    assert_eq!(data[0], 0, "bad encoded data");
+                    None
+                }
+            };
+
+            if let Some(error) = err {
                 resp_tx
-                    .send(Message::ErrorReport {
-                        upstairs_id: upstairs_connection.upstairs_id,
-                        session_id: upstairs_connection.session_id,
-                        job_id: new_id,
-                        error: error.clone(),
-                    })
+                    .send(
+                        Message::ErrorReport {
+                            upstairs_id: upstairs_connection.upstairs_id,
+                            session_id: upstairs_connection.session_id,
+                            job_id: new_id,
+                            error: error.clone(),
+                        }
+                        .into(),
+                    )
                     .await?;
 
                 // If the job errored, do not consider it completed.
@@ -2768,7 +2858,12 @@ impl Downstairs {
                 //
                 // If you change this, change how the Upstairs processes
                 // ErrorReports!
-                if matches!(m, Message::ExtentLiveRepairAckId { .. }) {
+                if matches!(
+                    m,
+                    ClientResponse::Message(
+                        Message::ExtentLiveRepairAckId { .. }
+                    )
+                ) {
                     bail!("Repair has failed, exiting task");
                 }
             } else {
@@ -2784,7 +2879,10 @@ impl Downstairs {
                 // Notify the upstairs before completing work, which
                 // consumes the message (so we'll check whether it's
                 // a FlushAck beforehand)
-                let is_flush = matches!(m, Message::FlushAck { .. });
+                let is_flush = matches!(
+                    m,
+                    ClientResponse::Message(Message::FlushAck { .. })
+                );
                 resp_tx.send(m).await?;
 
                 ads.lock().await.complete_work_inner(
@@ -3813,12 +3911,12 @@ mod test {
         // changed the generation number nor flush number, and dirty bit
         // should be false.
         match m {
-            Message::ExtentLiveCloseAck {
+            ClientResponse::Message(Message::ExtentLiveCloseAck {
                 upstairs_id,
                 session_id,
                 job_id,
                 ref result,
-            } => {
+            }) => {
                 assert_eq!(upstairs_id, upstairs_connection.upstairs_id);
                 assert_eq!(session_id, upstairs_connection.session_id);
                 assert_eq!(job_id, JobId(1000));
@@ -3842,12 +3940,12 @@ mod test {
         // changed the generation number nor flush number, and dirty bit
         // should be false.
         match m {
-            Message::ExtentLiveCloseAck {
+            ClientResponse::Message(Message::ExtentLiveCloseAck {
                 upstairs_id,
                 session_id,
                 job_id,
                 ref result,
-            } => {
+            }) => {
                 assert_eq!(upstairs_id, upstairs_connection.upstairs_id);
                 assert_eq!(session_id, upstairs_connection.session_id);
                 assert_eq!(job_id, JobId(1001));
@@ -3867,12 +3965,12 @@ mod test {
             ds.in_progress(upstairs_connection, id)?.unwrap();
             let m = ds.do_work(upstairs_connection, id).await?.unwrap();
             match m {
-                Message::ExtentLiveAckId {
+                ClientResponse::Message(Message::ExtentLiveAckId {
                     upstairs_id,
                     session_id,
                     job_id,
                     ref result,
-                } => {
+                }) => {
                     assert_eq!(upstairs_id, upstairs_connection.upstairs_id);
                     assert_eq!(session_id, upstairs_connection.session_id);
                     assert_eq!(job_id, id);
@@ -4011,12 +4109,12 @@ mod test {
         // not have changed the generation number nor flush number But, the
         // dirty bit should be true.
         match m {
-            Message::ExtentLiveCloseAck {
+            ClientResponse::Message(Message::ExtentLiveCloseAck {
                 upstairs_id,
                 session_id,
                 job_id,
                 ref result,
-            } => {
+            }) => {
                 assert_eq!(upstairs_id, upstairs_connection.upstairs_id);
                 assert_eq!(session_id, upstairs_connection.session_id);
                 assert_eq!(job_id, JobId(1003));
@@ -4090,12 +4188,12 @@ mod test {
         // Verify that we not only have composed the correct ACK, but the
         // result inside that ACK is also what we expect.
         match m {
-            Message::WriteAck {
+            ClientResponse::Message(Message::WriteAck {
                 upstairs_id,
                 session_id,
                 job_id,
                 ref result,
-            } => {
+            }) => {
                 assert_eq!(upstairs_id, upstairs_connection.upstairs_id);
                 assert_eq!(session_id, upstairs_connection.session_id);
                 assert_eq!(job_id, JobId(1000));
@@ -4119,12 +4217,12 @@ mod test {
         // not have changed the generation number nor flush number But, the
         // dirty bit should be true.
         match m {
-            Message::ExtentLiveCloseAck {
+            ClientResponse::Message(Message::ExtentLiveCloseAck {
                 upstairs_id,
                 session_id,
                 job_id,
                 ref result,
-            } => {
+            }) => {
                 assert_eq!(upstairs_id, upstairs_connection.upstairs_id);
                 assert_eq!(session_id, upstairs_connection.session_id);
                 assert_eq!(job_id, JobId(1001));
@@ -4202,12 +4300,12 @@ mod test {
         // Verify that we not only have composed the correct ACK, but the
         // result inside that ACK is also what we expect.
         match m {
-            Message::WriteAck {
+            ClientResponse::Message(Message::WriteAck {
                 upstairs_id,
                 session_id,
                 job_id,
                 ref result,
-            } => {
+            }) => {
                 assert_eq!(upstairs_id, upstairs_connection.upstairs_id);
                 assert_eq!(session_id, upstairs_connection.session_id);
                 assert_eq!(job_id, JobId(1000));
@@ -4231,12 +4329,12 @@ mod test {
         // the data that we wrote should be committed and our flush should
         // have persisted that data.
         match m {
-            Message::ExtentLiveCloseAck {
+            ClientResponse::Message(Message::ExtentLiveCloseAck {
                 upstairs_id,
                 session_id,
                 job_id,
                 ref result,
-            } => {
+            }) => {
                 assert_eq!(upstairs_id, upstairs_connection.upstairs_id);
                 assert_eq!(session_id, upstairs_connection.session_id);
                 assert_eq!(job_id, JobId(1001));
@@ -4339,12 +4437,12 @@ mod test {
         // the data that we wrote should be committed and our flush should
         // have persisted that data.
         match m {
-            Message::ExtentLiveCloseAck {
+            ClientResponse::Message(Message::ExtentLiveCloseAck {
                 upstairs_id,
                 session_id,
                 job_id,
                 ref result,
-            } => {
+            }) => {
                 assert_eq!(upstairs_id, upstairs_connection.upstairs_id);
                 assert_eq!(session_id, upstairs_connection.session_id);
                 assert_eq!(job_id, JobId(1002));
@@ -4368,12 +4466,12 @@ mod test {
         // the data that we wrote should be committed and our flush should
         // have persisted that data.
         match m {
-            Message::ExtentLiveCloseAck {
+            ClientResponse::Message(Message::ExtentLiveCloseAck {
                 upstairs_id,
                 session_id,
                 job_id,
                 ref result,
-            } => {
+            }) => {
                 assert_eq!(upstairs_id, upstairs_connection.upstairs_id);
                 assert_eq!(session_id, upstairs_connection.session_id);
                 assert_eq!(job_id, JobId(1003));
@@ -6193,7 +6291,8 @@ mod test {
         let tcp = start_ds_and_connect(5555, 5556).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
-        let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
+        let mut fw: WireMessageWriter<_, RawMessage> =
+            WireMessageWriter::new(write);
 
         // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
         let m = Message::HereIAm {
@@ -6231,7 +6330,8 @@ mod test {
         let tcp = start_ds_and_connect(5557, 5558).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
-        let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
+        let mut fw: WireMessageWriter<_, RawMessage> =
+            WireMessageWriter::new(write);
 
         // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
         let m = Message::HereIAm {
@@ -6265,7 +6365,8 @@ mod test {
         let tcp = start_ds_and_connect(5579, 5560).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
-        let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
+        let mut fw: WireMessageWriter<_, RawMessage> =
+            WireMessageWriter::new(write);
 
         // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
         let m = Message::HereIAm {
@@ -6299,7 +6400,8 @@ mod test {
         let tcp = start_ds_and_connect(5561, 5562).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
-        let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
+        let mut fw: WireMessageWriter<_, RawMessage> =
+            WireMessageWriter::new(write);
 
         // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
         let m = Message::HereIAm {
@@ -6340,7 +6442,8 @@ mod test {
         let tcp = start_ds_and_connect(5563, 5564).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
-        let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
+        let mut fw: WireMessageWriter<_, RawMessage> =
+            WireMessageWriter::new(write);
 
         // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
         let m = Message::HereIAm {

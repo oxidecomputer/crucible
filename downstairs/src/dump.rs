@@ -537,8 +537,8 @@ async fn show_extent(
                 Region::open(dir, Default::default(), false, true, &log)
                     .await?;
 
-            let mut responses = region
-                .region_read(
+            let raw = region
+                .region_read_raw(
                     &[ReadRequest {
                         eid: cmp_extent as u64,
                         offset: Block::new_with_ddef(block, &region.def()),
@@ -546,7 +546,9 @@ async fn show_extent(
                     JobId(0),
                 )
                 .await?;
-            let response = responses.pop().unwrap();
+            let responses: Result<Vec<ReadResponse>, CrucibleError> =
+                bincode::deserialize(&raw)?;
+            let response = responses?.pop().unwrap();
 
             dvec.insert(index, response);
         }
@@ -652,8 +654,8 @@ async fn show_extent_block(
         let mut region =
             Region::open(dir, Default::default(), false, true, &log).await?;
 
-        let mut responses = region
-            .region_read(
+        let raw = region
+            .region_read_raw(
                 &[ReadRequest {
                     eid: cmp_extent as u64,
                     offset: Block::new_with_ddef(
@@ -664,7 +666,9 @@ async fn show_extent_block(
                 JobId(0),
             )
             .await?;
-        let response = responses.pop().unwrap();
+        let responses: Result<Vec<ReadResponse>, CrucibleError> =
+            bincode::deserialize(&raw)?;
+        let response = responses?.pop().unwrap();
 
         dvec.insert(index, response);
     }

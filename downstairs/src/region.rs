@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
+use bytes::{BufMut, Bytes, BytesMut};
 use futures::TryStreamExt;
 
 use tracing::instrument;
@@ -841,13 +842,54 @@ impl Region {
         Ok(())
     }
 
-    #[instrument]
+    /// Reads a region, returning a `Vec<ReadResponse>`
+    ///
+    /// (instead of a pre-serialized `Bytes` object)
+    #[cfg(test)]
     pub async fn region_read(
         &mut self,
         requests: &[crucible_protocol::ReadRequest],
         job_id: JobId,
-    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
-        let mut responses = Vec::with_capacity(requests.len());
+    ) -> Result<Vec<ReadResponse>, CrucibleError> {
+        let out = self.region_read_raw(requests, job_id).await?;
+        bincode::deserialize(&out).unwrap()
+    }
+
+    /// Reads data from a region
+    ///
+    /// Returns either an error or the bincode-serialized representation of a
+    /// `Result<Vec<ReadResponse>, CrucibleError>`, which will always be
+    /// `Ok(..)`.
+    #[instrument]
+    pub async fn region_read_raw(
+        &mut self,
+        requests: &[crucible_protocol::ReadRequest],
+        job_id: JobId,
+    ) -> Result<Bytes, CrucibleError> {
+        // We want to avoid an extra memcpy when serializing into the socket,
+        // which means we get to pre-serialize our data into a form that matches
+        // that of bincode.  By hand.  Sorry.
+
+        // We'll estimate capacity here, assuming 0 or 1 context per read.  This
+        // always true for the raw file extents; the SQLite extents may have to
+        // reallocate, but they're not optimized for speed anyways.
+        let capacity = core::mem::size_of::<u32>() // Ok(..)
+            + core::mem::size_of::<usize>() // Vec(..)
+            + requests.len()
+                * (core::mem::size_of::<u64>() // eid
+                    + core::mem::size_of::<u64>()  // block.value
+                    + core::mem::size_of::<u32>()  // block.shift
+                    + core::mem::size_of::<usize>()  // data size
+                    + self.def.block_size() as usize // read data
+                    + core::mem::size_of::<usize>() // context count
+                    + core::mem::size_of::<u64>() // hash
+                    + core::mem::size_of::<u8>() // option tag
+                    + core::mem::size_of::<[u8; 12]>() // nonce
+                    + core::mem::size_of::<[u8; 16]>()); // tag
+
+        let mut out = BytesMut::with_capacity(capacity);
+        out.put_u32_le(0); // Ok(..)
+        out.put_u64_le(requests.len() as u64); // Vec<..>
 
         /*
          * Batch reads so they can all be sent to the appropriate extent
@@ -867,8 +909,7 @@ impl Region {
                     batched_reads.push(request.clone());
                 } else {
                     let extent = self.get_opened_extent_mut(_eid as usize);
-                    responses
-                        .extend(extent.read(job_id, &batched_reads[..]).await?);
+                    extent.read(job_id, &batched_reads[..], &mut out).await?;
 
                     eid = Some(request.eid);
                     batched_reads.clear();
@@ -883,11 +924,11 @@ impl Region {
 
         if let Some(_eid) = eid {
             let extent = self.get_opened_extent_mut(_eid as usize);
-            responses.extend(extent.read(job_id, &batched_reads[..]).await?);
+            extent.read(job_id, &batched_reads[..], &mut out).await?;
         }
         cdt::os__read__done!(|| job_id.0);
 
-        Ok(responses)
+        Ok(out.freeze())
     }
 
     /*
