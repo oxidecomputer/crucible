@@ -9,6 +9,7 @@ use crate::{
 use crucible_protocol::EncryptionContext;
 
 use anyhow::{bail, Result};
+use bytes::{BufMut, BytesMut};
 use rusqlite::{params, Connection, Transaction};
 use slog::{error, Logger};
 
@@ -41,13 +42,22 @@ impl ExtentInner for SqliteInner {
         self.0.lock().unwrap().flush(new_flush, new_gen, job_id)
     }
 
-    fn read(
+    fn read_raw(
         &mut self,
         job_id: JobId,
         requests: &[crucible_protocol::ReadRequest],
         iov_max: usize,
-    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
-        self.0.lock().unwrap().read(job_id, requests, iov_max)
+        out: &mut BytesMut,
+    ) -> Result<(), CrucibleError> {
+        // Call the existing read implementation, then do serialization by hand
+        // here.  Note that we serialize the individual ReadResponse values, but
+        // not the leading size, because that's already placed into the buffer.
+        let data = self.0.lock().unwrap().read(job_id, requests, iov_max)?;
+        let mut w = out.writer();
+        for d in data {
+            bincode::serialize_into(&mut w, &d).unwrap();
+        }
+        Ok(())
     }
 
     fn write(

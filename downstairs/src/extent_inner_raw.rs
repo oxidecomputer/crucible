@@ -430,18 +430,6 @@ impl ExtentInner for RawInner {
         let out = RawInner::get_block_contexts(self, block, count)?;
         Ok(out.into_iter().map(|v| v.into_iter().collect()).collect())
     }
-
-    fn read(
-        &mut self,
-        job_id: JobId,
-        requests: &[crucible_protocol::ReadRequest],
-        iov_max: usize,
-    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
-        let mut b = BytesMut::new();
-        b.put_u64_le(requests.len() as u64);
-        self.read_raw(job_id, requests, iov_max, &mut b)?;
-        Ok(bincode::deserialize(&b).unwrap())
-    }
 }
 
 impl RawInner {

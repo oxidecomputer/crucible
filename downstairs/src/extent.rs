@@ -5,7 +5,6 @@ use std::fmt::Debug;
 use std::fs::{File, OpenOptions};
 
 use anyhow::{anyhow, bail, Context, Result};
-use bytes::BufMut;
 use nix::unistd::{sysconf, SysconfVar};
 
 use serde::{Deserialize, Serialize};
@@ -54,24 +53,28 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
         requests: &[crucible_protocol::ReadRequest],
         iov_max: usize,
         out: &mut BytesMut,
-    ) -> Result<(), CrucibleError> {
-        // Call the existing read implementation, then do serialization by hand
-        // here.  Note that we serialize the individual ReadResponse values, but
-        // not the leading size, because that's already placed into the buffer.
-        let data = self.read(job_id, requests, iov_max)?;
-        let mut w = out.writer();
-        for d in data {
-            bincode::serialize_into(&mut w, &d).unwrap();
-        }
-        Ok(())
-    }
+    ) -> Result<(), CrucibleError>;
 
+    /// Read the given requests into a `Vec<ReadResponse>`
+    ///
+    /// The default implementation defers to `read_raw`, then deserializes the
+    /// resulting buffer.
+    ///
+    /// This function is only built during unit tests, because it's less
+    /// efficient than `read_raw`.
+    #[cfg(test)]
     fn read(
         &mut self,
         job_id: JobId,
         requests: &[crucible_protocol::ReadRequest],
         iov_max: usize,
-    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError>;
+    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
+        use bytes::BufMut;
+        let mut b = BytesMut::new();
+        b.put_u64_le(requests.len() as u64);
+        self.read_raw(job_id, requests, iov_max, &mut b)?;
+        Ok(bincode::deserialize(&b).unwrap())
+    }
 
     fn write(
         &mut self,
