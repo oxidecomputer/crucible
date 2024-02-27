@@ -706,7 +706,13 @@ pub trait RawMessageDiscriminant {
 }
 
 /// Writer to encode and send a `WireMessage`
-pub struct WireMessageWriter<W, T>(W, std::marker::PhantomData<T>);
+pub struct WireMessageWriter<W, T> {
+    writer: W,
+
+    /// Scratch space for the raw header
+    header: Vec<u8>,
+    _phantom: std::marker::PhantomData<T>,
+}
 
 impl<W, T> WireMessageWriter<W, T>
 where
@@ -715,14 +721,18 @@ where
 {
     /// Builds a new `WireMessageWriter`
     #[inline]
-    pub fn new(w: W) -> Self {
-        Self(w, std::marker::PhantomData)
+    pub fn new(writer: W) -> Self {
+        Self {
+            writer,
+            header: vec![],
+            _phantom: std::marker::PhantomData,
+        }
     }
 
     /// Removes the inner type
     #[inline]
     pub fn into_inner(self) -> W {
-        self.0
+        self.writer
     }
 
     /// Sends the given message down the wire
@@ -738,29 +748,40 @@ where
                 let mut out = bytes::BytesMut::new();
                 let mut e = CrucibleEncoder::new();
                 e.encode(m, &mut out)?;
-                self.0.write_all(&out).await?;
+                self.writer.write_all(&out).await?;
             }
             WireMessage::RawMessage(m, data) => {
                 // Manual implementation of CrucibleEncoder, for situations
                 // where the bulk of the message has already been
                 // pre-serialized.
-                let mut header = bincode::serialize(&(
-                    0u32, // dummy length, to be patched later
-                    &m,
-                ))
+
+                // Write the length + M into our header scratch space
+                self.header.clear();
+                let mut cursor = std::io::Cursor::new(&mut self.header);
+                bincode::serialize_into(
+                    &mut cursor,
+                    &(
+                        0u32, // dummy length, to be patched later
+                        &m,
+                    ),
+                )
                 .unwrap();
 
                 // Patch the length
-                let len: u32 = (header.len() + data.len()).try_into().unwrap();
-                header[0..4].copy_from_slice(&len.to_le_bytes());
+                let len: u32 =
+                    (self.header.len() + data.len()).try_into().unwrap();
+                self.header[0..4].copy_from_slice(&len.to_le_bytes());
 
-                // Patch the discriminant
-                bincode::serialize_into(&mut header[4..8], &m.discriminant())
-                    .unwrap();
+                // Patch the discriminant in the header
+                bincode::serialize_into(
+                    &mut self.header[4..8],
+                    &m.discriminant(),
+                )
+                .unwrap();
 
                 // write_all_vectored would save a syscall, but is nightly-only
-                self.0.write_all(&header).await?;
-                self.0.write_all(&data).await?;
+                self.writer.write_all(&self.header).await?;
+                self.writer.write_all(&data).await?;
             }
         }
         Ok(())
