@@ -738,6 +738,8 @@ impl Upstairs {
             self.downstairs.collect_stats(|c| c.stats.extents_repaired);
         let ds_extents_confirmed =
             self.downstairs.collect_stats(|c| c.stats.extents_confirmed);
+        let ds_delay_us =
+            self.downstairs.collect_stats(|c| c.get_delay_us() as usize);
         let ds_ro_lr_skipped =
             self.downstairs.collect_stats(|c| c.stats.ro_lr_skipped);
 
@@ -762,6 +764,7 @@ impl Upstairs {
                 ds_flow_control,
                 ds_extents_repaired,
                 ds_extents_confirmed,
+                ds_delay_us,
                 ds_ro_lr_skipped,
             };
             ("stats", arg)

@@ -2248,6 +2248,11 @@ impl DownstairsClient {
     pub(crate) fn set_delay_us(&self, delay: u64) {
         self.client_delay_us.store(delay, Ordering::Relaxed);
     }
+
+    /// Looks up the per-client delay
+    pub(crate) fn get_delay_us(&self) -> u64 {
+        self.client_delay_us.load(Ordering::Relaxed)
+    }
 }
 
 /// How to handle "promote to active" requests

@@ -2027,6 +2027,8 @@ pub struct Arg {
     pub ds_extents_repaired: [usize; 3],
     /// Times we have live confirmed  an extent on this downstairs.
     pub ds_extents_confirmed: [usize; 3],
+    /// Per-client delay to keep them roughly in sync
+    pub ds_delay_us: [usize; 3],
     /// Times we skipped repairing a downstairs because we are read_only.
     pub ds_ro_lr_skipped: [usize; 3],
 }
