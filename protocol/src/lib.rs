@@ -677,6 +677,11 @@ impl Message {
 /// Message to be sent down the wire
 #[derive(Debug)]
 pub enum WireMessage<M> {
+    /// Normal message to be sent down the wire
+    ///
+    /// This is serialized with the existing [`CrucibleEncoder`]
+    Message(Message),
+
     /// Pre-serialized message to be sent down the wire
     ///
     /// This is sent by sending
@@ -686,9 +691,6 @@ pub enum WireMessage<M> {
     ///
     /// The values of `M` and the byte array must match the equivalent
     /// [`Message`] serialized with a [`CrucibleEncoder`].
-    Message(Message),
-
-    /// Pre-serialized message to be sent down the wire
     RawMessage(M, bytes::Bytes),
 }
 
