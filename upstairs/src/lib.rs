@@ -1131,7 +1131,7 @@ enum RawMessage {
     },
 }
 
-impl RawMessage {
+impl crucible_protocol::RawMessageDiscriminant for RawMessage {
     /// Returns the discriminant used by the equivalent `Message`
     ///
     /// This is hard-coded and exhaustively checked by a unit test.
