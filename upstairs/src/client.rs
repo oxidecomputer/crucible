@@ -643,6 +643,10 @@ impl DownstairsClient {
         }
 
         self.connection_id.update();
+
+        // Clear per-client delay, because we're starting a new session
+        self.set_delay_us(0);
+
         // Restart with a short delay
         self.start_task(true, auto_promote);
     }
