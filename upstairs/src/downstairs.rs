@@ -659,6 +659,11 @@ impl Downstairs {
         // Restart the IO task for that specific client
         self.clients[client_id].reinitialize(auto_promote);
 
+        for i in ClientId::iter() {
+            // Clear per-client delay, because we're starting a new session
+            self.clients[i].set_delay_us(0);
+        }
+
         // Special-case: if a Downstairs goes away midway through initial
         // reconciliation, then we have to manually abort reconciliation.
         if self.clients.iter().any(|c| c.state() == DsState::Reconcile) {
