@@ -1334,6 +1334,23 @@ impl IOop {
             false
         }
     }
+
+    /// Returns the number of bytes written or read in this job
+    fn job_bytes(&self) -> u64 {
+        match &self {
+            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
+                data.io_size_bytes as u64
+            }
+            IOop::Read { requests, .. } => {
+                requests
+                    .first()
+                    .map(|r| r.offset.block_size_in_bytes())
+                    .unwrap_or(0) as u64
+                    * requests.len() as u64
+            }
+            _ => 0,
+        }
+    }
 }
 
 /*

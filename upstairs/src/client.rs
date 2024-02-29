@@ -161,6 +161,12 @@ pub(crate) struct DownstairsClient {
     /// IO state counters
     pub(crate) io_state_count: ClientIOStateCount,
 
+    /// Bytes in queues for this client
+    ///
+    /// This includes read, write, and write-unwritten jobs, and is used to
+    /// estimate per-client backpressure to keep the 3x downstairs in sync.
+    pub(crate) bytes_outstanding: u64,
+
     /// UUID for this downstairs region
     ///
     /// Unpopulated until provided by `Message::RegionInfo`
@@ -264,6 +270,7 @@ impl DownstairsClient {
             region_metadata: None,
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
+            bytes_outstanding: 0,
             connection_id: ConnectionId(0),
             client_delay_us,
         }
@@ -303,6 +310,7 @@ impl DownstairsClient {
             region_metadata: None,
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
+            bytes_outstanding: 0,
             connection_id: ConnectionId(0),
             client_delay_us,
         }
@@ -422,9 +430,26 @@ impl DownstairsClient {
         job: &mut DownstairsIO,
         new_state: IOState,
     ) -> IOState {
+        let is_running =
+            matches!(new_state, IOState::New | IOState::InProgress);
         self.io_state_count.incr(&new_state);
         let old_state = job.state.insert(self.client_id, new_state);
+        let was_running =
+            matches!(old_state, IOState::New | IOState::InProgress);
         self.io_state_count.decr(&old_state);
+
+        // Update our bytes-in-flight counter
+        if was_running && !is_running {
+            self.bytes_outstanding = self
+                .bytes_outstanding
+                .checked_sub(job.work.job_bytes())
+                .unwrap();
+        } else if is_running && !was_running {
+            // This should only happen if a job is replayed, but that still
+            // counts!
+            self.bytes_outstanding += job.work.job_bytes();
+        }
+
         old_state
     }
 
@@ -486,8 +511,12 @@ impl DownstairsClient {
     }
 
     /// Sets this job as skipped and moves it to `skipped_jobs`
+    ///
+    /// # Panics
+    /// If the job is not new or in-progress
     pub(crate) fn skip_job(&mut self, job: &mut DownstairsIO) {
-        self.set_job_state(job, IOState::Skipped);
+        let prev_state = self.set_job_state(job, IOState::Skipped);
+        assert!(matches!(prev_state, IOState::New | IOState::InProgress));
         self.skipped_jobs.insert(job.ds_id);
     }
 
@@ -967,6 +996,9 @@ impl DownstairsClient {
                 IOState::New
             }
         };
+        if r == IOState::New {
+            self.bytes_outstanding += io.work.job_bytes();
+        }
         self.io_state_count.incr(&r);
         r
     }
@@ -1285,9 +1317,8 @@ impl DownstairsClient {
             }
         };
 
-        let old_state = job.state.insert(self.client_id, new_state.clone());
-        self.io_state_count.decr(&old_state);
-        self.io_state_count.incr(&new_state);
+        // Update the state, maintaining various counters
+        let old_state = self.set_job_state(job, new_state.clone());
 
         /*
          * Verify the job was InProgress
@@ -2231,6 +2262,10 @@ impl DownstairsClient {
 
     pub(crate) fn total_live_work(&self) -> usize {
         (self.io_state_count.new + self.io_state_count.in_progress) as usize
+    }
+
+    pub(crate) fn total_bytes_outstanding(&self) -> usize {
+        self.bytes_outstanding as usize
     }
 
     /// Returns a unique ID for the current connection, or `None`
