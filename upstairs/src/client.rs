@@ -1296,8 +1296,6 @@ impl DownstairsClient {
             return false;
         }
 
-        job.reply_time[self.client_id] = Some(std::time::Instant::now());
-
         let mut jobs_completed_ok = job.state_count().completed_ok();
         let mut ackable = false;
 

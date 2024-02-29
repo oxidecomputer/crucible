@@ -2019,6 +2019,7 @@ impl Upstairs {
             .reinitialize(client_id, auto_promote, &self.state);
     }
 
+    /// Sets both guest and per-client backpressure
     fn set_backpressure(&self) {
         let dsw_max = self
             .downstairs
@@ -2030,6 +2031,8 @@ impl Upstairs {
         let ratio = dsw_max as f64 / crate::IO_OUTSTANDING_MAX as f64;
         self.guest
             .set_backpressure(self.downstairs.write_bytes_outstanding(), ratio);
+
+        self.downstairs.set_client_backpressure();
     }
 
     /// Returns the `RegionDefinition`
