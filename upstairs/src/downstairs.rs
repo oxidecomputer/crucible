@@ -226,16 +226,16 @@ impl Downstairs {
             clients: ClientData(clients),
             backpressure_config: DownstairsBackpressureConfig {
                 // start byte-based backpressure at 25 MiB of difference
-                bytes_start: 25 * 1024 * 1024, // 25 MiB
-                // bytes_scale is chosen to have 10 ms of delay at 100 MiB of
+                bytes_start: 25 * 1024 * 1024,
+                // bytes_scale is chosen to have 1.5 ms of delay at 100 MiB of
                 // discrepancy
-                bytes_scale: 1e-6,
+                bytes_scale: 5e-7,
 
-                // start job-based backpressure at 200 jobs of discrepancy
+                // start job-based backpressure at 100 jobs of discrepancy
                 jobs_start: 100,
-                // job_scale is chosen to have 10 ms of delay at 200 jobs of
-                // discrepancy
-                jobs_scale: 0.5,
+                // job_scale is chosen to have 1 ms of of per-job delay at 900
+                // jobs of discrepancy
+                jobs_scale: 0.04,
 
                 // max delay is 10 ms.  This is meant to be a gentle nudge, not
                 // a giant shove, and even 10 ms may be too high.
