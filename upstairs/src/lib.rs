@@ -2090,12 +2090,20 @@ pub fn up_main(
         None
     };
 
+    #[cfg(test)]
+    let disable_backpressure = guest.is_queue_backpressure_disabled();
+
     /*
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
      */
     let mut up =
         upstairs::Upstairs::new(&opt, gen, region_def, guest, tls_context);
+
+    #[cfg(test)]
+    if disable_backpressure {
+        up.disable_client_backpressure();
+    }
 
     if let Some(pr) = producer_registry {
         let ups = up.stats.clone();

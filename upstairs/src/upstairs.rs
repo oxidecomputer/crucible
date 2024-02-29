@@ -397,6 +397,11 @@ impl Upstairs {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn disable_client_backpressure(&mut self) {
+        self.downstairs.disable_client_backpressure();
+    }
+
     /// Build an Upstairs for simple tests
     #[cfg(test)]
     pub fn test_default(ddef: Option<RegionDefinition>) -> Self {

@@ -3552,6 +3552,11 @@ impl Downstairs {
         (gw, ds)
     }
 
+    #[cfg(test)]
+    pub(crate) fn disable_client_backpressure(&mut self) {
+        self.backpressure_config.max_delay = Duration::ZERO;
+    }
+
     pub(crate) fn set_client_backpressure(&self) {
         let mut jobs = vec![];
         let mut bytes = vec![];
