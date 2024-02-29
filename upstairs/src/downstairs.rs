@@ -3552,7 +3552,7 @@ impl Downstairs {
         (gw, ds)
     }
 
-    pub(crate) fn set_client_backpressure(&mut self) {
+    pub(crate) fn set_client_backpressure(&self) {
         let mut jobs = vec![];
         let mut bytes = vec![];
         for c in self.clients.iter() {
@@ -3564,7 +3564,7 @@ impl Downstairs {
         // If none of the clients are active, then disable per-client
         // backpressure
         if jobs.is_empty() {
-            for c in self.clients.iter_mut() {
+            for c in self.clients.iter() {
                 c.set_delay_us(0);
             }
             return;
