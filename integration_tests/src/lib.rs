@@ -66,17 +66,13 @@ mod test {
             )
             .await?;
 
-            let downstairs = build_downstairs_for_region_with_backend(
-                tempdir.path(),
-                problematic, /* lossy */
-                problematic, /* read errors */
-                problematic, /* write errors */
-                problematic, /* flush errors */
-                read_only,
-                backend,
-                Some(csl()),
-            )
-            .await?;
+            let downstairs = Downstairs::new_builder(tempdir.path(), read_only)
+                .set_lossy(problematic)
+                .set_logger(csl())
+                .set_test_errors(problematic, problematic, problematic)
+                .set_backend(backend)
+                .build()
+                .await?;
 
             let _join_handle = start_downstairs(
                 downstairs.clone(),
@@ -98,16 +94,11 @@ mod test {
         }
 
         pub async fn reboot_read_only(&mut self) -> Result<()> {
-            self.downstairs = build_downstairs_for_region(
-                self.tempdir.path(),
-                false, /* lossy */
-                false, /* read errors */
-                false, /* write errors */
-                false, /* flush errors */
-                true,
-                Some(csl()),
-            )
-            .await?;
+            self.downstairs =
+                Downstairs::new_builder(self.tempdir.path(), true)
+                    .set_logger(csl())
+                    .build()
+                    .await?;
 
             let _join_handle = start_downstairs(
                 self.downstairs.clone(),
@@ -125,16 +116,11 @@ mod test {
         }
 
         pub async fn reboot_read_write(&mut self) -> Result<()> {
-            self.downstairs = build_downstairs_for_region(
-                self.tempdir.path(),
-                false, /* lossy */
-                false, /* read errors */
-                false, /* write errors */
-                false, /* flush errors */
-                false,
-                Some(csl()),
-            )
-            .await?;
+            self.downstairs =
+                Downstairs::new_builder(self.tempdir.path(), false)
+                    .set_logger(csl())
+                    .build()
+                    .await?;
 
             let _join_handle = start_downstairs(
                 self.downstairs.clone(),
@@ -156,17 +142,11 @@ mod test {
         //
         // The Result is returned to the caller.
         pub async fn reboot_clone(&mut self, source: SocketAddr) -> Result<()> {
-            let log = csl();
-            self.downstairs = build_downstairs_for_region(
-                self.tempdir.path(),
-                false, /* lossy */
-                false, /* read errors */
-                false, /* write errors */
-                false, /* flush errors */
-                true,
-                Some(log.clone()),
-            )
-            .await?;
+            self.downstairs =
+                Downstairs::new_builder(self.tempdir.path(), true)
+                    .set_logger(csl())
+                    .build()
+                    .await?;
 
             clone_region(self.downstairs.clone(), source).await
         }

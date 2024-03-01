@@ -272,16 +272,10 @@ async fn main() -> Result<()> {
                     .expect("Error init tracing subscriber");
             }
 
-            let d = build_downstairs_for_region(
-                &data,
-                false,
-                false,
-                false,
-                false,
-                true, // read_only
-                Some(log),
-            )
-            .await?;
+            let d = Downstairs::new_builder(&data, true)
+                .set_logger(log)
+                .build()
+                .await?;
 
             clone_region(d, source).await
         }
@@ -394,16 +388,13 @@ async fn main() -> Result<()> {
             }
 
             let read_only = mode == Mode::Ro;
-            let d = build_downstairs_for_region(
-                &data,
-                lossy,
-                read_errors,
-                write_errors,
-                flush_errors,
-                read_only,
-                Some(log),
-            )
-            .await?;
+
+            let d = Downstairs::new_builder(&data, read_only)
+                .set_lossy(lossy)
+                .set_logger(log)
+                .set_test_errors(read_errors, write_errors, flush_errors)
+                .build()
+                .await?;
 
             let downstairs_join_handle = start_downstairs(
                 d,
