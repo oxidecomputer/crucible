@@ -142,17 +142,11 @@ mod test {
         //
         // The Result is returned to the caller.
         pub async fn reboot_clone(&mut self, source: SocketAddr) -> Result<()> {
-            let log = csl();
-            self.downstairs = build_downstairs_for_region(
-                self.tempdir.path(),
-                false, /* lossy */
-                false, /* read errors */
-                false, /* write errors */
-                false, /* flush errors */
-                true,
-                Some(log.clone()),
-            )
-            .await?;
+            self.downstairs =
+                Downstairs::new_builder(self.tempdir.path(), true)
+                    .set_logger(csl())
+                    .build()
+                    .await?;
 
             clone_region(self.downstairs.clone(), source).await
         }
