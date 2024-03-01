@@ -19,7 +19,128 @@ use std::os::fd::AsFd;
 use std::path::Path;
 
 #[derive(Debug)]
-pub struct SqliteInner {
+pub struct SqliteInner(std::sync::Mutex<SqliteMoreInner>);
+
+impl ExtentInner for SqliteInner {
+    fn gen_number(&self) -> Result<u64, CrucibleError> {
+        self.0.lock().unwrap().gen_number()
+    }
+    fn flush_number(&self) -> Result<u64, CrucibleError> {
+        self.0.lock().unwrap().flush_number()
+    }
+    fn dirty(&self) -> Result<bool, CrucibleError> {
+        self.0.lock().unwrap().dirty()
+    }
+
+    fn flush(
+        &mut self,
+        new_flush: u64,
+        new_gen: u64,
+        job_id: JobOrReconciliationId,
+    ) -> Result<(), CrucibleError> {
+        self.0.lock().unwrap().flush(new_flush, new_gen, job_id)
+    }
+
+    fn read(
+        &mut self,
+        job_id: JobId,
+        requests: &[crucible_protocol::ReadRequest],
+        iov_max: usize,
+    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
+        self.0.lock().unwrap().read(job_id, requests, iov_max)
+    }
+
+    fn write(
+        &mut self,
+        job_id: JobId,
+        writes: &[crucible_protocol::Write],
+        only_write_unwritten: bool,
+        iov_max: usize,
+    ) -> Result<(), CrucibleError> {
+        self.0.lock().unwrap().write(
+            job_id,
+            writes,
+            only_write_unwritten,
+            iov_max,
+        )
+    }
+
+    #[cfg(test)]
+    fn get_block_contexts(
+        &mut self,
+        block: u64,
+        count: u64,
+    ) -> Result<Vec<Vec<DownstairsBlockContext>>, CrucibleError> {
+        self.0.lock().unwrap().get_block_contexts(block, count)
+    }
+
+    #[cfg(test)]
+    fn set_dirty_and_block_context(
+        &mut self,
+        block_context: &DownstairsBlockContext,
+    ) -> Result<(), CrucibleError> {
+        self.0
+            .lock()
+            .unwrap()
+            .set_dirty_and_block_context(block_context)
+    }
+}
+
+impl SqliteInner {
+    #[cfg(any(test, feature = "integration-tests"))]
+    pub fn create(
+        dir: &Path,
+        def: &RegionDefinition,
+        extent_number: u32,
+    ) -> Result<Self> {
+        let i = SqliteMoreInner::create(dir, def, extent_number)?;
+        Ok(Self(i.into()))
+    }
+
+    pub fn open(
+        dir: &Path,
+        def: &RegionDefinition,
+        extent_number: u32,
+        read_only: bool,
+        log: &Logger,
+    ) -> Result<Self> {
+        let i = SqliteMoreInner::open(dir, def, extent_number, read_only, log)?;
+        Ok(Self(i.into()))
+    }
+
+    pub fn export_contexts(
+        &mut self,
+    ) -> Result<Vec<Option<DownstairsBlockContext>>> {
+        self.0.lock().unwrap().export_contexts()
+    }
+
+    #[cfg(test)]
+    pub fn fully_rehash_and_clean_all_stale_contexts(
+        &mut self,
+        force_override_dirty: bool,
+    ) -> Result<(), CrucibleError> {
+        self.0
+            .lock()
+            .unwrap()
+            .fully_rehash_and_clean_all_stale_contexts(force_override_dirty)
+    }
+
+    #[cfg(test)]
+    fn truncate_encryption_contexts_and_hashes(
+        &self,
+        extent_block_indexes_and_hashes: &[(usize, u64)],
+    ) -> Result<()> {
+        self.0
+            .lock()
+            .unwrap()
+            .truncate_encryption_contexts_and_hashes(
+                extent_block_indexes_and_hashes,
+            )
+    }
+}
+
+#[derive(Debug)]
+struct SqliteMoreInner {
     file: File,
     metadb: Connection,
 
@@ -42,7 +163,7 @@ pub struct SqliteInner {
     dirty_blocks: BTreeMap<usize, Option<u64>>,
 }
 
-impl ExtentInner for SqliteInner {
+impl SqliteMoreInner {
     fn gen_number(&self) -> Result<u64, CrucibleError> {
         let mut stmt = self.metadb.prepare_cached(
             "SELECT value FROM metadata where name='gen_number'",
@@ -480,19 +601,6 @@ impl ExtentInner for SqliteInner {
         Ok(())
     }
 
-    /// For a given block range, return all context rows since the last flush.
-    /// `get_block_contexts` returns a `Vec<Vec<DownstairsBlockContext>>` of
-    /// length equal to `count`. Each `Vec<DownstairsBlockContext>` inside this
-    /// parent Vec contains all contexts for a single block.
-    #[cfg(test)]
-    fn get_block_contexts(
-        &mut self,
-        block: u64,
-        count: u64,
-    ) -> Result<Vec<Vec<DownstairsBlockContext>>, CrucibleError> {
-        SqliteInner::get_block_contexts(self, block, count)
-    }
-
     #[cfg(test)]
     fn set_dirty_and_block_context(
         &mut self,
@@ -502,14 +610,12 @@ impl ExtentInner for SqliteInner {
         self.set_block_context(block_context)?;
         Ok(())
     }
-}
 
-impl SqliteInner {
     /// Exports context slots for every block in the file
     ///
     /// Unlike `get_block_contexts`, this function ensures that only a single
     /// context per block is present (or `None`, if the block is unwritten).
-    pub fn export_contexts(
+    fn export_contexts(
         &mut self,
     ) -> Result<Vec<Option<DownstairsBlockContext>>> {
         // Check whether we need to rehash.  This is theoretically represented
@@ -594,7 +700,7 @@ impl SqliteInner {
     // because we should be using raw extents everywhere.  However, we'll create
     // them during tests to check that our automatic migration system works.
     #[cfg(any(test, feature = "integration-tests"))]
-    pub fn create(
+    fn create(
         dir: &Path,
         def: &RegionDefinition,
         extent_number: u32,
@@ -748,7 +854,7 @@ impl SqliteInner {
         })
     }
 
-    pub fn open(
+    fn open(
         dir: &Path,
         def: &RegionDefinition,
         extent_number: u32,

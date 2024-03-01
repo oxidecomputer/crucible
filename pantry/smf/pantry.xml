@@ -13,8 +13,13 @@
     <service_fmri value='svc:/milestone/multi-user' />
   </dependency>
 
+  <dependency name='zone_network_setup' grouping='require_all' restart_on='none'
+    type='service'>
+    <service_fmri value='svc:/oxide/zone-network-setup:default' />
+  </dependency>
+
   <exec_method type='method' name='start'
-    exec='/opt/oxide/lib/svc/manifest/crucible/pantry.sh'
+    exec='/opt/oxide/pantry/bin/crucible-pantry run -l [%{config/listen_addr}]:%{config/listen_port}'
     timeout_seconds='30'
     />
 
@@ -25,8 +30,6 @@
   </property_group>
 
   <property_group name='config' type='application'>
-    <propval name='datalink' type='astring' value='unknown' />
-    <propval name='gateway' type='astring' value='unknown' />
     <propval name='listen_addr' type='astring' value='127.0.0.1' />
     <propval name='listen_port' type='astring' value='17000' />
   </property_group>

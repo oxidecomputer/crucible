@@ -83,7 +83,10 @@ pub struct ZFSDataset {
 }
 
 impl ZFSDataset {
-    // From either dataset name or path, create the ZFSDataset object
+    /// From either dataset name or path, create the ZFSDataset object.
+    ///
+    /// Fails if the dataset name does not exist, or the path does not exist (or
+    /// belong to a dataset).
     pub fn new(dataset: String) -> Result<ZFSDataset> {
         // Validate the argument is a dataset
         let cmd = std::process::Command::new("zfs")
@@ -95,7 +98,9 @@ impl ZFSDataset {
             .output()?;
 
         if !cmd.status.success() {
-            bail!("zfs list failed!");
+            let stderr =
+                String::from_utf8_lossy(&cmd.stderr).trim_end().to_string();
+            bail!("zfs list failed! {stderr}");
         }
 
         Ok(ZFSDataset {
@@ -229,16 +234,6 @@ impl ZFSDataset {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    /*
-     * If any of our async tasks in our runtime panic, then we should exit
-     * the program right away.
-     */
-    let default_panic = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        default_panic(info);
-        std::process::exit(1);
-    }));
-
     let args = Args::try_parse()?;
 
     match args {

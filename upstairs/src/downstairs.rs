@@ -504,7 +504,6 @@ impl Downstairs {
                     extent,
                     flush_number,
                     gen_number,
-                    source_downstairs: _,
                     repair_downstairs,
                 } => {
                     cdt::ds__close__start!(|| (
@@ -1558,7 +1557,6 @@ impl Downstairs {
                 close_deps,
                 close_id,
                 gw_close_id,
-                source_downstairs,
                 repair_downstairs,
             )
         };
@@ -1743,14 +1741,12 @@ impl Downstairs {
         ds_id
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn create_close_io(
         &mut self,
         eid: usize,
         ds_id: JobId,
         dependencies: Vec<JobId>,
         gw_id: GuestWorkId,
-        source: ClientId,
         repair: Vec<ClientId>,
     ) -> DownstairsIO {
         let close_ioop = IOop::ExtentFlushClose {
@@ -1758,7 +1754,6 @@ impl Downstairs {
             extent: eid,
             flush_number: self.next_flush_id(),
             gen_number: self.cfg.generation(),
-            source_downstairs: source,
             repair_downstairs: repair,
         };
 
@@ -1774,7 +1769,6 @@ impl Downstairs {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn create_and_enqueue_close_io(
         &mut self,
         gw: &mut GuestWork,
@@ -1782,7 +1776,6 @@ impl Downstairs {
         deps: Vec<JobId>,
         close_id: JobId,
         gw_close_id: GuestWorkId,
-        source: ClientId,
         repair: &[ClientId],
     ) {
         let close_io = self.create_close_io(
@@ -1790,7 +1783,6 @@ impl Downstairs {
             close_id,
             deps,
             gw_close_id,
-            source,
             repair.to_vec(),
         );
 
@@ -2831,8 +2823,7 @@ impl Downstairs {
         read_response_hashes: Vec<Option<u64>>,
         up_state: &UpstairsState,
     ) -> Result<(), CrucibleError> {
-        let (upstairs_id, session_id, ds_id, read_data, extent_info) = match &m
-        {
+        let (upstairs_id, session_id, ds_id, read_data, extent_info) = match m {
             Message::WriteAck {
                 upstairs_id,
                 session_id,
@@ -2841,10 +2832,10 @@ impl Downstairs {
             } => {
                 cdt::ds__write__io__done!(|| (job_id.0, client_id.get()));
                 (
-                    *upstairs_id,
-                    *session_id,
-                    *job_id,
-                    result.clone().map(|_| Vec::new()),
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    result.map(|_| Vec::new()),
                     None,
                 )
             }
@@ -2859,10 +2850,10 @@ impl Downstairs {
                     client_id.get()
                 ));
                 (
-                    *upstairs_id,
-                    *session_id,
-                    *job_id,
-                    result.clone().map(|_| Vec::new()),
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    result.map(|_| Vec::new()),
                     None,
                 )
             }
@@ -2874,10 +2865,10 @@ impl Downstairs {
             } => {
                 cdt::ds__flush__io__done!(|| (job_id.0, client_id.get()));
                 (
-                    *upstairs_id,
-                    *session_id,
-                    *job_id,
-                    result.clone().map(|_| Vec::new()),
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    result.map(|_| Vec::new()),
                     None,
                 )
             }
@@ -2888,7 +2879,7 @@ impl Downstairs {
                 responses,
             } => {
                 cdt::ds__read__io__done!(|| (job_id.0, client_id.get()));
-                (*upstairs_id, *session_id, *job_id, responses.clone(), None)
+                (upstairs_id, session_id, job_id, responses, None)
             }
 
             Message::ExtentLiveCloseAck {
@@ -2898,7 +2889,7 @@ impl Downstairs {
                 result,
             } => {
                 // Take the result from the live close and store it away.
-                let extent_info = match result {
+                let extent_info = match &result {
                     Ok((g, f, d)) => {
                         debug!(
                             self.log,
@@ -2921,10 +2912,10 @@ impl Downstairs {
                 };
                 cdt::ds__close__done!(|| (job_id.0, client_id.get()));
                 (
-                    *upstairs_id,
-                    *session_id,
-                    *job_id,
-                    result.clone().map(|_| Vec::new()),
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    result.map(|_| Vec::new()),
                     extent_info,
                 )
             }
@@ -2937,10 +2928,10 @@ impl Downstairs {
                 cdt::ds__noop__done!(|| (job_id.0, client_id.get()));
                 cdt::ds__reopen__done!(|| (job_id.0, client_id.get()));
                 (
-                    *upstairs_id,
-                    *session_id,
-                    *job_id,
-                    result.clone().map(|_| Vec::new()),
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    result.map(|_| Vec::new()),
                     None,
                 )
             }
@@ -2952,10 +2943,10 @@ impl Downstairs {
             } => {
                 cdt::ds__repair__done!(|| (job_id.0, client_id.get()));
                 (
-                    *upstairs_id,
-                    *session_id,
-                    *job_id,
-                    result.clone().map(|_| Vec::new()),
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    result.map(|_| Vec::new()),
                     None,
                 )
             }
@@ -2979,18 +2970,12 @@ impl Downstairs {
                 // downstairs/src/lib.rs) where the Upstairs **does** need to
                 // act: when a repair job in the Downstairs fails, that
                 // Downstairs aborts itself and reconnects.
-                if let Some(job) = self.ds_active.get(job_id) {
+                if let Some(job) = self.ds_active.get(&job_id) {
                     if job.work.is_repair() {
                         // Return the error and let the previously written error
                         // processing code work.
                         cdt::ds__repair__done!(|| (job_id.0, client_id.get()));
-                        (
-                            *upstairs_id,
-                            *session_id,
-                            *job_id,
-                            Err(error.clone()),
-                            None,
-                        )
+                        (upstairs_id, session_id, job_id, Err(error), None)
 
                         // XXX return Ok(()) here to make the upstairs stuck in
                         // test_error_during_live_repair_no_halt
@@ -8146,7 +8131,6 @@ pub(crate) mod test {
         // incorrect flush number
         ds.next_flush = 0x1DE;
         let next_flush = ds.next_flush;
-        let source = ClientId::new(1);
         let repair = vec![ClientId::new(0), ClientId::new(2)];
         ds.create_and_enqueue_close_io(
             &mut gw,
@@ -8154,7 +8138,6 @@ pub(crate) mod test {
             deps,
             repair_ids.close_id,
             gw_close_id,
-            source,
             &repair,
         );
 
@@ -8167,7 +8150,6 @@ pub(crate) mod test {
                 extent,
                 flush_number,
                 gen_number,
-                source_downstairs,
                 repair_downstairs,
             } => {
                 assert_eq!(
@@ -8177,7 +8159,6 @@ pub(crate) mod test {
                 assert_eq!(*extent, eid as usize);
                 assert_eq!(*flush_number, next_flush);
                 assert_eq!(*gen_number, ds.cfg.generation());
-                assert_eq!(*source_downstairs, source);
                 assert_eq!(*repair_downstairs, repair);
             }
             x => {
@@ -8383,7 +8364,6 @@ pub(crate) mod test {
             deps,
             extent_repair_ids.close_id,
             gw_close_id,
-            ClientId::new(0),    // source downstairs
             &[ClientId::new(1)], // repair downstairs
         );
         let gw_repair_id = gw.next_gw_id();

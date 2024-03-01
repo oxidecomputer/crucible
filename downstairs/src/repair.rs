@@ -23,6 +23,9 @@ use crate::extent::{extent_dir, extent_file_name, extent_path, ExtentType};
  */
 pub struct FileServerContext {
     region_dir: PathBuf,
+    read_only: bool,
+    region_definition: RegionDefinition,
+    downstairs: Arc<Mutex<Downstairs>>,
 }
 
 pub fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
@@ -35,13 +38,16 @@ fn build_api() -> ApiDescription<Arc<FileServerContext>> {
     let mut api = ApiDescription::new();
     api.register(get_extent_file).unwrap();
     api.register(get_files_for_extent).unwrap();
+    api.register(get_region_info).unwrap();
+    api.register(get_region_mode).unwrap();
+    api.register(extent_repair_ready).unwrap();
 
     api
 }
 
 /// Returns Ok(listen address) if everything launched ok, Err otherwise
 pub async fn repair_main(
-    ds: &Mutex<Downstairs>,
+    downstairs: Arc<Mutex<Downstairs>>,
     addr: SocketAddr,
     log: &Logger,
 ) -> Result<SocketAddr, String> {
@@ -63,13 +69,20 @@ pub async fn repair_main(
      * Record the region directory where all the extents and metadata
      * files live.
      */
-    let ds = ds.lock().await;
+    let ds = downstairs.lock().await;
     let region_dir = ds.region.dir.clone();
+    let read_only = ds.read_only;
+    let region_definition = ds.region.def();
     drop(ds);
 
-    let context = FileServerContext { region_dir };
+    info!(log, "Repair listens on {} for path:{:?}", addr, region_dir);
+    let context = FileServerContext {
+        region_dir,
+        read_only,
+        region_definition,
+        downstairs,
+    };
 
-    info!(log, "Repair listens on {}", addr);
     /*
      * Set up the server.
      */
@@ -126,10 +139,10 @@ async fn get_extent_file(
             extent_path.set_extension("db");
         }
         FileType::DatabaseSharedMemory => {
-            extent_path.set_extension("db-wal");
+            extent_path.set_extension("db-shm");
         }
         FileType::DatabaseLog => {
-            extent_path.set_extension("db-shm");
+            extent_path.set_extension("db-wal");
         }
         FileType::Data => (),
     };
@@ -174,6 +187,31 @@ async fn get_a_file(path: PathBuf) -> Result<Response<Body>, HttpError> {
             .header(http::header::CONTENT_TYPE, content_type)
             .body(file_stream.into_body())?)
     }
+}
+
+/// Return true if the provided extent is closed or the region is read only
+#[endpoint {
+    method = GET,
+    path = "/extent/{eid}/repair-ready",
+}]
+async fn extent_repair_ready(
+    rqctx: RequestContext<Arc<FileServerContext>>,
+    path: Path<Eid>,
+) -> Result<HttpResponseOk<bool>, HttpError> {
+    let eid: usize = path.into_inner().eid as usize;
+    let downstairs = &rqctx.context().downstairs;
+
+    // If the region is read only, the extent is always ready.
+    if rqctx.context().read_only {
+        return Ok(HttpResponseOk(true));
+    }
+
+    let res = {
+        let ds = downstairs.lock().await;
+        matches!(ds.region.extents[eid], ExtentState::Closed)
+    };
+
+    Ok(HttpResponseOk(res))
 }
 
 /**
@@ -226,19 +264,50 @@ fn extent_file_list(
     eid: u32,
 ) -> Result<Vec<String>, HttpError> {
     let mut files = Vec::new();
-    let possible_files = vec![(extent_file_name(eid, ExtentType::Data), true)];
+    let possible_files = [
+        (ExtentType::Data, true),
+        (ExtentType::Db, false),
+        (ExtentType::DbShm, false),
+        (ExtentType::DbWal, false),
+    ];
 
     for (file, required) in possible_files.into_iter() {
         let mut fullname = extent_dir.clone();
-        fullname.push(file.clone());
+        let file_name = extent_file_name(eid, file);
+        fullname.push(file_name.clone());
         if fullname.exists() {
-            files.push(file);
+            files.push(file_name);
         } else if required {
             return Err(HttpError::for_bad_request(None, "EBADF".to_string()));
         }
     }
 
     Ok(files)
+}
+/// Return the RegionDefinition describing our region.
+#[endpoint {
+    method = GET,
+    path = "/region-info",
+}]
+async fn get_region_info(
+    rqctx: RequestContext<Arc<FileServerContext>>,
+) -> Result<HttpResponseOk<crucible_common::RegionDefinition>, HttpError> {
+    let region_definition = rqctx.context().region_definition;
+
+    Ok(HttpResponseOk(region_definition))
+}
+
+/// Return the region-mode describing our region.
+#[endpoint {
+    method = GET,
+    path = "/region-mode",
+}]
+async fn get_region_mode(
+    rqctx: RequestContext<Arc<FileServerContext>>,
+) -> Result<HttpResponseOk<bool>, HttpError> {
+    let read_only = rqctx.context().read_only;
+
+    Ok(HttpResponseOk(read_only))
 }
 
 #[cfg(test)]

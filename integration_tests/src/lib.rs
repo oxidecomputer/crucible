@@ -16,6 +16,7 @@ mod test {
     use futures::lock::Mutex;
     use httptest::{matchers::*, responders::*, Expectation, Server};
     use rand::Rng;
+    use repair_client::Client;
     use sha2::Digest;
     use slog::{info, o, warn, Drain, Logger};
     use tempfile::*;
@@ -136,9 +137,35 @@ mod test {
             Ok(())
         }
 
+        // Take a downstairs and start it with clone option.  This should
+        // attempt to clone extents from the provided source IP:Port downstairs.
+        //
+        // The Result is returned to the caller.
+        pub async fn reboot_clone(&mut self, source: SocketAddr) -> Result<()> {
+            let log = csl();
+            self.downstairs = build_downstairs_for_region(
+                self.tempdir.path(),
+                false, /* lossy */
+                false, /* read errors */
+                false, /* write errors */
+                false, /* flush errors */
+                true,
+                Some(log.clone()),
+            )
+            .await?;
+
+            clone_region(self.downstairs.clone(), source).await
+        }
+
         pub async fn address(&self) -> SocketAddr {
             // If start_downstairs returned Ok, then address will be populated
             self.downstairs.lock().await.address.unwrap()
+        }
+
+        // Return the repair address for a running downstairs
+        pub async fn repair_address(&self) -> SocketAddr {
+            // If start_downstairs returned Ok, then address will be populated
+            self.downstairs.lock().await.repair_address.unwrap()
         }
     }
 
@@ -2557,6 +2584,438 @@ mod test {
     }
 
     #[tokio::test]
+    async fn integration_test_clone_raw() -> Result<()> {
+        // Test downstairs region clone.
+        // Create three downstairs with raw backend, write some data to them.
+        // Restart them all read only.
+        // Create a new downstairs.
+        // Clone a read only downstairs to the new downstairs
+        // Make a new volume with two old and the one new downstairs and verify
+        // the original data we wrote.
+        const BLOCK_SIZE: usize = 512;
+
+        // boot three downstairs, write some data to them, then change to
+        // read-only.
+        let mut test_downstairs_set = TestDownstairsSet::small(false).await?;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        let random_buffer = {
+            let mut random_buffer =
+                vec![0u8; volume.total_size().await? as usize];
+            rand::thread_rng().fill(&mut random_buffer[..]);
+            random_buffer
+        };
+
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(random_buffer.clone()),
+            )
+            .await?;
+
+        volume.deactivate().await.unwrap();
+        drop(volume);
+
+        // Restart all the downstairs read only
+        test_downstairs_set.reboot_read_only().await?;
+
+        // Make the new downstairs
+        let mut new_ds = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            5,
+            2,
+            false,
+            Backend::RawFile,
+        )
+        .await
+        .unwrap();
+
+        // Clone an original downstairs to our new downstairs
+        let clone_source =
+            test_downstairs_set.downstairs1.repair_address().await;
+        new_ds.reboot_clone(clone_source).await.unwrap();
+
+        // Restart the new downstairs read only.
+        new_ds.reboot_read_only().await.unwrap();
+        let new_target = new_ds.address().await;
+
+        // Take our original opts, and replace a target with the downstairs
+        // we just cloned.
+        let mut new_opts = test_downstairs_set.opts();
+        new_opts.target[0] = new_target;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                new_opts,
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                3,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        // Verify our volume still has the random data we wrote.
+        let volume_size = volume.total_size().await? as usize;
+        let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+            .await?;
+
+        assert_eq!(&buffer[BLOCK_SIZE..], &random_buffer[BLOCK_SIZE..]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_clone_sql() -> Result<()> {
+        // Test downstairs region clone.
+        // Create three downstairs with sql backend, write some data to them.
+        // Restart them all read only.
+        // Create a new downstairs.
+        // Clone a read only downstairs to the new downstairs
+        // Make a new volume with two old and the one new downstairs and verify
+        // the original data we wrote.
+        const BLOCK_SIZE: usize = 512;
+
+        // boot three downstairs, write some data to them, then change to
+        // read-only.
+        let mut test_downstairs_set =
+            TestDownstairsSet::small_sqlite(false).await?;
+
+        // This must be a SQLite extent!
+        assert!(test_downstairs_set
+            .downstairs1
+            .tempdir
+            .path()
+            .join("00/000/000.db")
+            .exists());
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        let random_buffer = {
+            let mut random_buffer =
+                vec![0u8; volume.total_size().await? as usize];
+            rand::thread_rng().fill(&mut random_buffer[..]);
+            random_buffer
+        };
+
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(random_buffer.clone()),
+            )
+            .await?;
+
+        volume.deactivate().await.unwrap();
+        drop(volume);
+
+        // Restart the original downstairs read only.
+        test_downstairs_set.reboot_read_only().await?;
+
+        // Make the new downstairs
+        let mut new_ds = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            5,
+            2,
+            false,
+            Backend::RawFile,
+        )
+        .await
+        .unwrap();
+
+        // Clone a read only downstairs to our new downstairs.
+        let clone_source =
+            test_downstairs_set.downstairs1.repair_address().await;
+        new_ds.reboot_clone(clone_source).await.unwrap();
+
+        new_ds.reboot_read_only().await.unwrap();
+        let new_target = new_ds.address().await;
+
+        // The cloned region should have the .db file
+        assert!(new_ds.tempdir.path().join("00/000/000.db").exists());
+
+        // Replace one of the targets in our original with the new downstairs.
+        let mut new_opts = test_downstairs_set.opts();
+        new_opts.target[0] = new_target;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                new_opts,
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                3,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        // Verify our volume still has the random data we wrote.
+        let volume_size = volume.total_size().await? as usize;
+        let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+            .await?;
+
+        assert_eq!(&buffer[BLOCK_SIZE..], &random_buffer[BLOCK_SIZE..]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_repair_ready_not_closed() -> Result<()> {
+        // Create a new downstairs.
+        // Verify repair ready returns false when an extent is open
+
+        // Create a downstairs
+        let new_ds = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,  // encrypted
+            false, // read only
+            5,
+            2,
+            false,
+            Backend::RawFile,
+        )
+        .await
+        .unwrap();
+
+        let repair_addr = new_ds.repair_address().await;
+
+        let url = format!("http://{:?}", repair_addr);
+        let repair_server = Client::new(&url);
+
+        // Extent are open, so the repair ready request should return false.
+        let rc = repair_server.extent_repair_ready(0).await;
+        assert!(!rc.unwrap().into_inner());
+
+        let rc = repair_server.extent_repair_ready(1).await;
+        assert!(!rc.unwrap().into_inner());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_repair_ready_read_only() -> Result<()> {
+        // Create a new downstairs.
+        // Verify repair ready returns true for read only downstairs,
+        // even when extents are open.
+
+        // Create a downstairs
+        let new_ds = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true, // encrypted
+            true, // read only
+            5,
+            2,
+            false,
+            Backend::RawFile,
+        )
+        .await
+        .unwrap();
+
+        let repair_addr = new_ds.repair_address().await;
+
+        let url = format!("http://{:?}", repair_addr);
+        let repair_server = Client::new(&url);
+
+        // Extent are not open, but the region is read only, so the requests
+        // should all return true.
+        let rc = repair_server.extent_repair_ready(0).await;
+        assert!(rc.unwrap().into_inner());
+
+        let rc = repair_server.extent_repair_ready(1).await;
+        assert!(rc.unwrap().into_inner());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_clone_diff_ec() -> Result<()> {
+        // Test downstairs region clone.
+        // Verify different extent count will fail.
+
+        let mut ds_one = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            5,
+            3,
+            false,
+            Backend::RawFile,
+        )
+        .await
+        .unwrap();
+
+        ds_one.reboot_read_only().await.unwrap();
+        let clone_source = ds_one.repair_address().await;
+
+        let mut ds_two = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            5,
+            2, // <- Different than above
+            false,
+            Backend::RawFile,
+        )
+        .await
+        .unwrap();
+
+        assert!(ds_two.reboot_clone(clone_source).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_clone_diff_es() -> Result<()> {
+        // Test downstairs region clone.
+        // Verify different extent size will fail.
+
+        let mut ds_one = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            9,
+            2,
+            false,
+            Backend::RawFile,
+        )
+        .await
+        .unwrap();
+
+        ds_one.reboot_read_only().await.unwrap();
+        let clone_source = ds_one.repair_address().await;
+
+        let mut ds_two = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            5, // <- Different than above
+            2,
+            false,
+            Backend::RawFile,
+        )
+        .await
+        .unwrap();
+
+        assert!(ds_two.reboot_clone(clone_source).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_clone_not_ro() -> Result<()> {
+        // Test downstairs region clone.
+        // Verify you can't clone from a RW downstairs
+
+        let ds_one = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            false, // <- RO is false.
+            5,
+            2,
+            false,
+            Backend::RawFile,
+        )
+        .await
+        .unwrap();
+
+        let clone_source = ds_one.repair_address().await;
+
+        let mut ds_two = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            5,
+            2,
+            false,
+            Backend::RawFile,
+        )
+        .await
+        .unwrap();
+
+        assert!(ds_two.reboot_clone(clone_source).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_clone_diff_encrypted() -> Result<()> {
+        // Test downstairs region clone.
+        // Verify downstairs encryption state must match.
+
+        let ds_one = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            false,
+            true,
+            5,
+            2,
+            false,
+            Backend::RawFile,
+        )
+        .await
+        .unwrap();
+
+        let clone_source = ds_one.repair_address().await;
+
+        let mut ds_two = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true, // <- Encrypted is different
+            true,
+            5,
+            2,
+            false,
+            Backend::RawFile,
+        )
+        .await
+        .unwrap();
+
+        assert!(ds_two.reboot_clone(clone_source).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn integration_test_volume_replace_downstairs() -> Result<()> {
         // Replace a downstairs with a new one
         const BLOCK_SIZE: usize = 512;
@@ -2618,6 +3077,142 @@ mod test {
                     test_downstairs_set.opts().id,
                     test_downstairs_set.downstairs1_address().await,
                     new_downstairs.address().await,
+                )
+                .await
+                .unwrap()
+            {
+                ReplaceResult::StartedAlready => {
+                    println!("Waiting for replacement to finish");
+                }
+                ReplaceResult::CompletedAlready => {
+                    println!("Downstairs replacement completed");
+                    break;
+                }
+                x => {
+                    panic!("Bad result from replace_downstairs: {:?}", x);
+                }
+            }
+        }
+
+        // Read back what we wrote.
+        let volume_size = volume.total_size().await? as usize;
+        assert_eq!(volume_size % BLOCK_SIZE, 0);
+        let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+            .await?;
+
+        assert_eq!(&buffer[BLOCK_SIZE..], &random_buffer[BLOCK_SIZE..]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_volume_clone_replace_ro_downstairs() -> Result<()>
+    {
+        // Replace a read only downstairs with a new one, that we cloned
+        // from the original ro downstairs.
+        const BLOCK_SIZE: usize = 512;
+
+        // boot three downstairs, write some data to them, then change to
+        // read-only.
+        let mut test_downstairs_set = TestDownstairsSet::small(false).await?;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        let random_buffer = {
+            let mut random_buffer =
+                vec![0u8; volume.total_size().await? as usize];
+            rand::thread_rng().fill(&mut random_buffer[..]);
+            random_buffer
+        };
+
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                Bytes::from(random_buffer.clone()),
+            )
+            .await?;
+
+        volume.deactivate().await.unwrap();
+
+        // Restart the three downstairs in read only mode.
+        test_downstairs_set.reboot_read_only().await?;
+
+        // Restart our volume with the restarted read-only downstairs.
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                2,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        // Make the new downstairs, but don't start it
+        let mut new_ds = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            5,
+            2,
+            false,
+            Backend::RawFile,
+        )
+        .await
+        .unwrap();
+
+        let clone_source =
+            test_downstairs_set.downstairs1.repair_address().await;
+
+        // Clone a read only downstairs into the new downstairs region.
+        new_ds.reboot_clone(clone_source).await.unwrap();
+        // Start the new downstairs read only.
+        new_ds.reboot_read_only().await.unwrap();
+
+        // Replace a downstairs in our RO volume with the new downstairs we
+        // just cloned.
+        let res = volume
+            .replace_downstairs(
+                test_downstairs_set.opts().id,
+                test_downstairs_set.downstairs1.address().await,
+                new_ds.address().await,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res, ReplaceResult::Started);
+
+        // We can use the result from calling replace_downstairs to
+        // intuit status on progress of the replacement.
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            match volume
+                .replace_downstairs(
+                    test_downstairs_set.opts().id,
+                    test_downstairs_set.downstairs1.address().await,
+                    new_ds.address().await,
                 )
                 .await
                 .unwrap()

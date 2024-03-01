@@ -6,7 +6,6 @@ source.rust.release = true
 source.paths = [
   { from = "agent/smf", to = "/var/svc/manifest/site/crucible" },
   { from = "agent/downstairs_method_script.sh", to = "/opt/oxide/lib/svc/manifest/crucible/downstairs.sh" },
-  { from = "agent/agent_method_script.sh", to = "/opt/oxide/lib/svc/manifest/crucible/agent.sh" }
 ]
 output.type = "zone"
 
@@ -17,6 +16,5 @@ source.rust.binary_names = ["crucible-pantry"]
 source.rust.release = true
 source.paths = [
   { from = "pantry/smf/pantry.xml", to = "/var/svc/manifest/site/crucible/pantry.xml" },
-  { from = "pantry/pantry_method_script.sh", to = "/opt/oxide/lib/svc/manifest/crucible/pantry.sh" }
 ]
 output.type = "zone"

@@ -59,8 +59,7 @@ use guest::{GuestIoHandle, GuestWorkId};
 
 mod stats;
 
-mod impacted_blocks;
-pub use impacted_blocks::*;
+pub use crucible_common::impacted_blocks::*;
 
 mod deferred;
 mod live_repair;
@@ -1179,7 +1178,6 @@ enum IOop {
         extent: usize,
         flush_number: u64,
         gen_number: u64,
-        source_downstairs: ClientId,
         repair_downstairs: Vec<ClientId>,
     },
     ExtentLiveRepair {
@@ -1265,7 +1263,6 @@ impl IOop {
                 extent,
                 flush_number: _,
                 gen_number: _,
-                source_downstairs: _,
                 repair_downstairs: _,
             } => {
                 let job_type = "FClose".to_string();

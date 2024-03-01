@@ -112,6 +112,24 @@ struct ClientTaskHandle {
     client_stop_tx: Option<oneshot::Sender<ClientStopReason>>,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct ConnectionId(pub u64);
+
+impl std::fmt::Display for ConnectionId {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> Result<(), std::fmt::Error> {
+        self.0.fmt(f)
+    }
+}
+
+impl ConnectionId {
+    fn update(&mut self) {
+        self.0 += 1;
+    }
+}
+
 /// Per-client data
 ///
 /// This data structure contains client-specific state and manages communication
@@ -195,6 +213,9 @@ pub(crate) struct DownstairsClient {
 
     /// State for startup negotiation
     negotiation_state: NegotiationState,
+
+    /// Session ID for a clients connection to a downstairs.
+    connection_id: ConnectionId,
 }
 
 impl DownstairsClient {
@@ -231,6 +252,7 @@ impl DownstairsClient {
             region_metadata: None,
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
+            connection_id: ConnectionId(0),
         }
     }
 
@@ -267,6 +289,7 @@ impl DownstairsClient {
             region_metadata: None,
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
+            connection_id: ConnectionId(0),
         }
     }
 
@@ -604,6 +627,7 @@ impl DownstairsClient {
             self.state = DsState::New;
         }
 
+        self.connection_id.update();
         // Restart with a short delay
         self.start_task(true, auto_promote);
     }
@@ -1247,8 +1271,8 @@ impl DownstairsClient {
         if old_state != IOState::InProgress {
             // This job is in an unexpected state.
             panic!(
-                "[{}] Job {} completed while not InProgress: {:?}",
-                self.client_id, ds_id, old_state
+                "[{}] Job {} completed while not InProgress: {:?} {:?}",
+                self.client_id, ds_id, old_state, job
             );
         }
 
@@ -2185,13 +2209,13 @@ impl DownstairsClient {
         (self.io_state_count.new + self.io_state_count.in_progress) as usize
     }
 
-    /// Returns a unique ID for the current connect, or `None`
+    /// Returns a unique ID for the current connection, or `None`
     ///
     /// This can be used to disambiguate between messages returned from
     /// different connections to the same Downstairs.
-    pub(crate) fn get_connection_id(&self) -> Option<u64> {
+    pub(crate) fn get_connection_id(&self) -> Option<ConnectionId> {
         if self.client_task.client_stop_tx.is_some() {
-            Some(self.stats.connected as u64)
+            Some(self.connection_id)
         } else {
             None
         }

@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use crate::{
-    upstairs::UpstairsConfig, BlockContext, BlockReq, BlockRes, ClientId,
-    ImpactedBlocks, Message, SerializedWrite,
+    client::ConnectionId, upstairs::UpstairsConfig, BlockContext, BlockReq,
+    BlockRes, ClientId, ImpactedBlocks, Message, SerializedWrite,
 };
 use bytes::{Bytes, BytesMut};
 use crucible_common::{integrity_hash, CrucibleError, RegionDefinition};
@@ -241,7 +241,7 @@ pub(crate) struct DeferredMessage {
     pub client_id: ClientId,
 
     /// See `DeferredRead::connection_id`
-    pub connection_id: u64,
+    pub connection_id: ConnectionId,
 }
 
 /// Standalone data structure which can perform decryption
@@ -255,7 +255,7 @@ pub(crate) struct DeferredRead {
     /// complete after we have disconnected from the client, which would make
     /// handling the decrypted value incorrect (because it may have been skipped
     /// or re-sent).
-    pub connection_id: u64,
+    pub connection_id: ConnectionId,
 
     pub client_id: ClientId,
     pub cfg: Arc<UpstairsConfig>,

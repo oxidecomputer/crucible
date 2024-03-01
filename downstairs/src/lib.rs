@@ -2,7 +2,7 @@
 #![cfg_attr(usdt_need_asm, feature(asm))]
 #![cfg_attr(all(target_os = "macos", usdt_need_asm_sym), feature(asm_sym))]
 
-use futures::lock::{Mutex, MutexGuard};
+use futures::lock::Mutex;
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -13,8 +13,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crucible::*;
-use crucible_common::{build_logger, Block, CrucibleError, MAX_BLOCK_SIZE};
+use crucible_common::{
+    build_logger, crucible_bail, impacted_blocks::extent_from_offset,
+    integrity_hash, mkdir_for_file, Block, CrucibleError, RegionDefinition,
+    MAX_ACTIVE_COUNT, MAX_BLOCK_SIZE,
+};
+use crucible_protocol::{
+    BlockContext, CrucibleDecoder, CrucibleEncoder, JobId, Message,
+    ReadRequest, ReadResponse, ReconciliationId, SnapshotDetails,
+    CRUCIBLE_MESSAGE_VERSION,
+};
+use repair_client::Client;
 
 use anyhow::{bail, Result};
 use bytes::BytesMut;
@@ -38,6 +47,7 @@ mod stats;
 mod extent_inner_raw;
 mod extent_inner_sqlite;
 
+use extent::ExtentState;
 use region::Region;
 
 pub use admin::run_dropshot;
@@ -85,15 +95,11 @@ enum IOop {
         extent: usize,
         flush_number: u64,
         gen_number: u64,
-        source_downstairs: ClientId,
-        repair_downstairs: Vec<ClientId>,
     },
     ExtentLiveRepair {
         dependencies: Vec<JobId>, // Jobs that must finish before this
         extent: usize,
-        source_downstairs: ClientId,
         source_repair_address: SocketAddr,
-        repair_downstairs: Vec<ClientId>,
     },
     ExtentLiveReopen {
         dependencies: Vec<JobId>, // Jobs that must finish before this
@@ -341,7 +347,7 @@ pub async fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
 /*
  * Debug function to dump the work list.
  */
-pub async fn show_work(ds: &mut Downstairs) {
+pub fn show_work(ds: &mut Downstairs) {
     let active_upstairs_connections = ds.active_upstairs();
     println!(
         "Active Upstairs connections: {:?}",
@@ -349,7 +355,7 @@ pub async fn show_work(ds: &mut Downstairs) {
     );
 
     for upstairs_connection in active_upstairs_connections {
-        let work = ds.work_lock(upstairs_connection).await.unwrap();
+        let work = ds.work(upstairs_connection).unwrap();
 
         let mut kvec: Vec<JobId> = work.active.keys().cloned().collect();
 
@@ -399,7 +405,6 @@ pub async fn show_work(ds: &mut Downstairs) {
 // DTrace probes for the downstairs
 #[usdt::provider(provider = "crucible_downstairs")]
 pub mod cdt {
-    use crate::Arg;
     fn submit__read__start(_: u64) {}
     fn submit__writeunwritten__start(_: u64) {}
     fn submit__write__start(_: u64) {}
@@ -561,417 +566,6 @@ async fn is_message_valid(
     }
 }
 
-/*
- * A new IO request has been received.
- * If the message is a ping, send the correct response. If the message is an IO,
- * then put the new IO the work hashmap. If the message is a repair message,
- * then we handle it right here.
- */
-async fn proc_frame(
-    upstairs_connection: UpstairsConnection,
-    ad: &Mutex<Downstairs>,
-    m: Message,
-    resp_tx: &mpsc::Sender<Message>,
-    job_channel_tx: &mpsc::Sender<()>,
-) -> Result<()> {
-    let new_ds_id = match m {
-        Message::Write {
-            upstairs_id,
-            session_id,
-            job_id,
-            dependencies,
-            writes,
-        } => {
-            if !is_message_valid(
-                upstairs_connection,
-                upstairs_id,
-                session_id,
-                resp_tx,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-            cdt::submit__write__start!(|| job_id.0);
-
-            let new_write = IOop::Write {
-                dependencies,
-                writes,
-            };
-
-            let d = ad.lock().await;
-            d.add_work(upstairs_connection, job_id, new_write).await?;
-            Some(job_id)
-        }
-        Message::Flush {
-            upstairs_id,
-            session_id,
-            job_id,
-            dependencies,
-            flush_number,
-            gen_number,
-            snapshot_details,
-            extent_limit,
-        } => {
-            if !is_message_valid(
-                upstairs_connection,
-                upstairs_id,
-                session_id,
-                resp_tx,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-            cdt::submit__flush__start!(|| job_id.0);
-
-            let new_flush = IOop::Flush {
-                dependencies,
-                flush_number,
-                gen_number,
-                snapshot_details,
-                extent_limit,
-            };
-
-            let d = ad.lock().await;
-            d.add_work(upstairs_connection, job_id, new_flush).await?;
-            Some(job_id)
-        }
-        Message::WriteUnwritten {
-            upstairs_id,
-            session_id,
-            job_id,
-            dependencies,
-            writes,
-        } => {
-            if !is_message_valid(
-                upstairs_connection,
-                upstairs_id,
-                session_id,
-                resp_tx,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-            cdt::submit__writeunwritten__start!(|| job_id.0);
-
-            let new_write = IOop::WriteUnwritten {
-                dependencies,
-                writes,
-            };
-
-            let d = ad.lock().await;
-            d.add_work(upstairs_connection, job_id, new_write).await?;
-            Some(job_id)
-        }
-        Message::ReadRequest {
-            upstairs_id,
-            session_id,
-            job_id,
-            dependencies,
-            requests,
-        } => {
-            if !is_message_valid(
-                upstairs_connection,
-                upstairs_id,
-                session_id,
-                resp_tx,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-            cdt::submit__read__start!(|| job_id.0);
-
-            let new_read = IOop::Read {
-                dependencies,
-                requests,
-            };
-
-            let d = ad.lock().await;
-            d.add_work(upstairs_connection, job_id, new_read).await?;
-            Some(job_id)
-        }
-        // These are for repair while taking live IO
-        Message::ExtentLiveClose {
-            upstairs_id,
-            session_id,
-            job_id,
-            dependencies,
-            extent_id,
-        } => {
-            if !is_message_valid(
-                upstairs_connection,
-                upstairs_id,
-                session_id,
-                resp_tx,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-
-            cdt::submit__el__close__start!(|| job_id.0);
-            // TODO: Add dtrace probes
-            let ext_close = IOop::ExtentClose {
-                dependencies,
-                extent: extent_id,
-            };
-
-            let d = ad.lock().await;
-            d.add_work(upstairs_connection, job_id, ext_close).await?;
-            Some(job_id)
-        }
-        Message::ExtentLiveFlushClose {
-            upstairs_id,
-            session_id,
-            job_id,
-            dependencies,
-            extent_id,
-            flush_number,
-            gen_number,
-        } => {
-            if !is_message_valid(
-                upstairs_connection,
-                upstairs_id,
-                session_id,
-                resp_tx,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-
-            cdt::submit__el__flush__close__start!(|| job_id.0);
-            // Do both the flush, and then the close
-            let new_flush = IOop::ExtentFlushClose {
-                dependencies,
-                extent: extent_id,
-                flush_number,
-                gen_number,
-                source_downstairs: ClientId::new(0), // Unused in the downstairs
-                repair_downstairs: vec![],           // Unused in the downstairs
-            };
-
-            let d = ad.lock().await;
-            d.add_work(upstairs_connection, job_id, new_flush).await?;
-            Some(job_id)
-        }
-        Message::ExtentLiveRepair {
-            upstairs_id,
-            session_id,
-            job_id,
-            dependencies,
-            extent_id,
-            source_client_id,
-            source_repair_address,
-        } => {
-            if !is_message_valid(
-                upstairs_connection,
-                upstairs_id,
-                session_id,
-                resp_tx,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-
-            cdt::submit__el__repair__start!(|| job_id.0);
-            // Do both the flush, and then the close
-            let new_repair = IOop::ExtentLiveRepair {
-                dependencies,
-                extent: extent_id,
-                source_downstairs: source_client_id,
-                source_repair_address,
-                repair_downstairs: vec![],
-            };
-
-            let d = ad.lock().await;
-            debug!(d.log, "Received ExtentLiveRepair {}", job_id);
-            d.add_work(upstairs_connection, job_id, new_repair).await?;
-            Some(job_id)
-        }
-        Message::ExtentLiveReopen {
-            upstairs_id,
-            session_id,
-            job_id,
-            dependencies,
-            extent_id,
-        } => {
-            if !is_message_valid(
-                upstairs_connection,
-                upstairs_id,
-                session_id,
-                resp_tx,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-
-            cdt::submit__el__reopen__start!(|| job_id.0);
-            let new_open = IOop::ExtentLiveReopen {
-                dependencies,
-                extent: extent_id,
-            };
-
-            let d = ad.lock().await;
-            d.add_work(upstairs_connection, job_id, new_open).await?;
-            Some(job_id)
-        }
-        Message::ExtentLiveNoOp {
-            upstairs_id,
-            session_id,
-            job_id,
-            dependencies,
-        } => {
-            if !is_message_valid(
-                upstairs_connection,
-                upstairs_id,
-                session_id,
-                resp_tx,
-            )
-            .await?
-            {
-                return Ok(());
-            }
-            cdt::submit__el__noop__start!(|| job_id.0);
-            let new_open = IOop::ExtentLiveNoOp { dependencies };
-
-            let d = ad.lock().await;
-            debug!(d.log, "Received NoOP {}", job_id);
-            d.add_work(upstairs_connection, job_id, new_open).await?;
-            Some(job_id)
-        }
-
-        // These messages arrive during initial reconciliation.
-        Message::ExtentFlush {
-            repair_id,
-            extent_id,
-            client_id: _,
-            flush_number,
-            gen_number,
-        } => {
-            let msg = {
-                let d = ad.lock().await;
-                debug!(
-                    d.log,
-                    "{} Flush extent {} with f:{} g:{}",
-                    repair_id,
-                    extent_id,
-                    flush_number,
-                    gen_number
-                );
-
-                match d
-                    .region
-                    .region_flush_extent(
-                        extent_id,
-                        gen_number,
-                        flush_number,
-                        repair_id,
-                    )
-                    .await
-                {
-                    Ok(()) => Message::RepairAckId { repair_id },
-                    Err(error) => Message::ExtentError {
-                        repair_id,
-                        extent_id,
-                        error,
-                    },
-                }
-            };
-            resp_tx.send(msg).await?;
-            return Ok(());
-        }
-        Message::ExtentClose {
-            repair_id,
-            extent_id,
-        } => {
-            let msg = {
-                let d = ad.lock().await;
-                debug!(d.log, "{} Close extent {}", repair_id, extent_id);
-                match d.region.close_extent(extent_id).await {
-                    Ok(_) => Message::RepairAckId { repair_id },
-                    Err(error) => Message::ExtentError {
-                        repair_id,
-                        extent_id,
-                        error,
-                    },
-                }
-            };
-            resp_tx.send(msg).await?;
-            return Ok(());
-        }
-        Message::ExtentRepair {
-            repair_id,
-            extent_id,
-            source_client_id,
-            source_repair_address,
-            dest_clients,
-        } => {
-            let msg = {
-                let d = ad.lock().await;
-                debug!(
-                    d.log,
-                    "{} Repair extent {} source:[{}] {:?} dest:{:?}",
-                    repair_id,
-                    extent_id,
-                    source_client_id,
-                    source_repair_address,
-                    dest_clients
-                );
-                match d
-                    .region
-                    .repair_extent(extent_id, source_repair_address)
-                    .await
-                {
-                    Ok(()) => Message::RepairAckId { repair_id },
-                    Err(error) => Message::ExtentError {
-                        repair_id,
-                        extent_id,
-                        error,
-                    },
-                }
-            };
-            resp_tx.send(msg).await?;
-            return Ok(());
-        }
-        Message::ExtentReopen {
-            repair_id,
-            extent_id,
-        } => {
-            let msg = {
-                let mut d = ad.lock().await;
-                debug!(d.log, "{} Reopen extent {}", repair_id, extent_id);
-                match d.region.reopen_extent(extent_id).await {
-                    Ok(()) => Message::RepairAckId { repair_id },
-                    Err(error) => Message::ExtentError {
-                        repair_id,
-                        extent_id,
-                        error,
-                    },
-                }
-            };
-            resp_tx.send(msg).await?;
-            return Ok(());
-        }
-        x => bail!("unexpected frame {:?}", x),
-    };
-
-    /*
-     * If we added work, tell the work task to get busy.
-     */
-    if let Some(new_ds_id) = new_ds_id {
-        cdt::work__start!(|| new_ds_id.0);
-        job_channel_tx.send(()).await?;
-    }
-
-    Ok(())
-}
-
 async fn do_work_task(
     ads: &Mutex<Downstairs>,
     upstairs_connection: UpstairsConnection,
@@ -992,122 +586,7 @@ async fn do_work_task(
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
 
-        if !ads.lock().await.is_active(upstairs_connection) {
-            // We are not an active downstairs, wait until we are
-            continue;
-        }
-
-        /*
-         * Build ourselves a list of all the jobs on the work hashmap that
-         * are New or DepWait.
-         */
-        let mut new_work: VecDeque<JobId> = {
-            if let Ok(new_work) =
-                ads.lock().await.new_work(upstairs_connection).await
-            {
-                new_work.into_iter().collect()
-            } else {
-                // This means we couldn't unblock jobs for this UUID
-                continue;
-            }
-        };
-
-        /*
-         * We don't have to do jobs in order, but the dependencies are, at
-         * least for now, always going to be in order of job id. `new_work` is
-         * sorted before it is returned so this function iterates through jobs
-         * in order.
-         */
-        while let Some(new_id) = new_work.pop_front() {
-            if is_lossy && random() && random() {
-                // Skip a job that needs to be done, moving it to the back of
-                // the list.  This exercises job dependency tracking in the face
-                // of arbitrary reordering.
-                info!(ads.lock().await.log, "[lossy] skipping {}", new_id);
-                new_work.push_back(new_id);
-                continue;
-            }
-
-            /*
-             * If this job is still new, take it and go to work. The
-             * in_progress method will only return a job if all
-             * dependencies are met.
-             */
-            let job_id = ads
-                .lock()
-                .await
-                .in_progress(upstairs_connection, new_id)
-                .await?;
-
-            // If the job's dependencies aren't met, then keep going
-            let Some(job_id) = job_id else {
-                continue;
-            };
-
-            cdt::work__process!(|| job_id.0);
-            let m = ads
-                .lock()
-                .await
-                .do_work(upstairs_connection, job_id)
-                .await?;
-
-            // If a different downstairs was promoted, then `do_work` returns
-            // `None` and we ignore the job.
-            let Some(m) = m else {
-                continue;
-            };
-
-            if let Some(error) = m.err() {
-                resp_tx
-                    .send(Message::ErrorReport {
-                        upstairs_id: upstairs_connection.upstairs_id,
-                        session_id: upstairs_connection.session_id,
-                        job_id: new_id,
-                        error: error.clone(),
-                    })
-                    .await?;
-
-                // If the job errored, do not consider it completed.
-                // Retry it.
-                new_work.push_back(new_id);
-
-                // If this is a repair job, and that repair failed, we
-                // can do no more work on this downstairs and should
-                // force everything to come down before more work arrives.
-                //
-                // We have replied to the Upstairs above, which lets the
-                // upstairs take action to abort the repair and continue
-                // working in some degraded state.
-                //
-                // If you change this, change how the Upstairs processes
-                // ErrorReports!
-                if matches!(m, Message::ExtentLiveRepairAckId { .. }) {
-                    bail!("Repair has failed, exiting task");
-                }
-            } else {
-                // The job completed successfully, so inform the
-                // Upstairs
-
-                ads.lock().await.complete_work_stat(
-                    upstairs_connection,
-                    &m,
-                    job_id,
-                )?;
-
-                // Notify the upstairs before completing work, which
-                // consumes the message (so we'll check whether it's
-                // a FlushAck beforehand)
-                let is_flush = matches!(m, Message::FlushAck { .. });
-                resp_tx.send(m).await?;
-
-                ads.lock()
-                    .await
-                    .complete_work_inner(upstairs_connection, job_id, is_flush)
-                    .await?;
-
-                cdt::work__done!(|| job_id.0);
-            }
-        }
+        Downstairs::do_work_for(ads, upstairs_connection, &resp_tx).await?;
     }
 
     // None means the channel is closed
@@ -1280,7 +759,7 @@ where
                             // If our upstairs never completed activation,
                             // or some other upstairs activated, we won't
                             // be able to report how many jobs.
-                            match ds.jobs(upstairs_connection).await {
+                            match ds.jobs(upstairs_connection){
                                 Ok(jobs) => {
                                     info!(
                                         log,
@@ -1303,7 +782,7 @@ where
                                     log,
                                     "upstairs {:?} was previously \
                                     active, clearing", upstairs_connection);
-                                ds.clear_active(upstairs_connection).await?;
+                                ds.clear_active(upstairs_connection)?;
                             }
                         } else {
                             info!(log, "unknown upstairs disconnected");
@@ -1512,10 +991,10 @@ where
                         negotiated = NegotiationState::Ready;
 
                         {
-                            let ds = ads.lock().await;
-                            let mut work = ds.work_lock(
+                            let mut ds = ads.lock().await;
+                            let work = ds.work_mut(
                                 upstairs_connection.unwrap(),
-                            ).await?;
+                            )?;
                             work.last_flush = last_flush_number;
                             info!(
                                 log,
@@ -1711,18 +1190,27 @@ where
         let resp_channel_tx = resp_channel_tx.clone();
         tokio::spawn(async move {
             while let Some(m) = message_channel_rx.recv().await {
-                if let Err(e) = proc_frame(
-                    upstairs_connection,
+                match Downstairs::proc_frame(
                     &adc,
+                    upstairs_connection,
                     m,
                     &resp_channel_tx,
-                    &tx,
                 )
                 .await
                 {
-                    bail!("Proc frame returns error: {}", e);
+                    // If we added work, tell the work task to get busy.
+                    Ok(Some(new_ds_id)) => {
+                        cdt::work__start!(|| new_ds_id.0);
+                        tx.send(()).await?;
+                    }
+                    // If we handled the job locally, nothing to do here
+                    Ok(None) => (),
+                    Err(e) => {
+                        bail!("Proc frame returns error: {}", e);
+                    }
                 }
             }
+
             Ok(())
         })
     };
@@ -1824,13 +1312,13 @@ where
                             log,
                             "upstairs {:?} disconnected, {} jobs left",
                             upstairs_connection,
-                            ds.jobs(upstairs_connection).await?,
+                            ds.jobs(upstairs_connection)?,
                         );
 
                         if ds.is_active(upstairs_connection) {
                             warn!(log, "upstairs {:?} was previously \
                                 active, clearing", upstairs_connection);
-                            ds.clear_active(upstairs_connection).await?;
+                            ds.clear_active(upstairs_connection)?;
                         }
 
                         return Ok(());
@@ -1859,7 +1347,7 @@ where
 #[derive(Debug)]
 pub struct ActiveUpstairs {
     pub upstairs_connection: UpstairsConnection,
-    pub work: Mutex<Work>,
+    pub work: Work,
     pub terminate_sender: oneshot::Sender<UpstairsConnection>,
 }
 
@@ -1992,49 +1480,43 @@ impl Downstairs {
         }
     }
 
-    /*
-     * Only grab the lock if the UpstairsConnection matches.
-     *
-     * Multiple Upstairs connecting to this Downstairs will spawn multiple
-     * threads that all can potentially add work to the same `active` hash
-     * map. Only one Upstairs can be "active" at any one time though.
-     * When promote_to_active takes the work lock, it will clear out the
-     * `active` hash map and (if applicable) will signal to the currently
-     * active Upstairs to terminate the connection.
-     *
-     * `new_work` and `add_work` both grab their work lock through this
-     * function. Let's say `promote_to_active` and `add_work` are racing for
-     * the work lock. If `add_work` wins the race it will put work into
-     * `active`, then `promote_to_active` will clear it out. If
-     * `promote_to_active` wins the race, it will change the Downstairs'
-     * active UpstairsConnection, and send the terminate signal to the
-     * tasks that are communicating to the previously active Upstairs
-     * (along with terminating the Downstairs tasks). If `add_work` for
-     * the previous Upstairs then does fire, it will fail to
-     * grab the lock because the UpstairsConnection is no longer active, and
-     * that `add_work` thread should close.
-     *
-     * Let's say `new_work` and `promote_to_active` are racing. If `new_work`
-     * wins, then it will return and run those jobs in `do_work_task`.
-     * However, `promote_to_active` will grab the lock and change the
-     * active UpstairsConnection, causing `do_work` to return
-     * UpstairsInactive for the jobs that were just returned. If
-     * `promote_to_active` wins, it will clear out the jobs of the old
-     * Upstairs.
-     *
-     * Grabbing the lock in this way should properly clear out the previously
-     * active Upstairs without causing jobs to be incorrectly sent to the
-     * newly active Upstairs.
-     */
-    async fn work_lock(
+    /// Mutably borrow a connection's `Work` if the `UpstairsConnection` matches
+    ///
+    /// Because this function takes a `&mut self` and returns a `&mut Work`
+    /// (extending the lifetime of the initial borrow), it is impossible for
+    /// anyone else to interfere with the work map for the lifetime of the
+    /// borrow.
+    fn work_mut(
+        &mut self,
+        upstairs_connection: UpstairsConnection,
+    ) -> Result<&mut Work> {
+        self.check_upstairs_active(upstairs_connection)?;
+        let active_upstairs = self
+            .active_upstairs
+            .get_mut(&upstairs_connection.upstairs_id)
+            .unwrap();
+        Ok(&mut active_upstairs.work)
+    }
+
+    /// Borrow a connection's `Work` if the `UpstairsConnection` matches
+    fn work(&self, upstairs_connection: UpstairsConnection) -> Result<&Work> {
+        self.check_upstairs_active(upstairs_connection)?;
+        let active_upstairs = self
+            .active_upstairs
+            .get(&upstairs_connection.upstairs_id)
+            .unwrap();
+        Ok(&active_upstairs.work)
+    }
+
+    fn check_upstairs_active(
         &self,
         upstairs_connection: UpstairsConnection,
-    ) -> Result<MutexGuard<'_, Work>> {
+    ) -> Result<()> {
         let upstairs_uuid = upstairs_connection.upstairs_id;
         if !self.active_upstairs.contains_key(&upstairs_uuid) {
             warn!(
                 self.log,
-                "{:?} cannot grab work lock, {} is not active!",
+                "{:?} cannot get active upstairs, {} is not active!",
                 upstairs_connection,
                 upstairs_uuid,
             );
@@ -2047,36 +1529,32 @@ impl Downstairs {
         if active_upstairs.upstairs_connection != upstairs_connection {
             warn!(
                 self.log,
-                "{:?} cannot grab lock, does not match {:?}!",
+                "{:?} cannot get active upstairs, does not match {:?}!",
                 upstairs_connection,
                 active_upstairs.upstairs_connection,
             );
 
             bail!(CrucibleError::UpstairsInactive)
         }
-
-        Ok(active_upstairs.work.lock().await)
+        Ok(())
     }
 
-    async fn jobs(
-        &self,
-        upstairs_connection: UpstairsConnection,
-    ) -> Result<usize> {
-        let work = self.work_lock(upstairs_connection).await?;
+    fn jobs(&self, upstairs_connection: UpstairsConnection) -> Result<usize> {
+        let work = self.work(upstairs_connection)?;
         Ok(work.jobs())
     }
 
-    async fn new_work(
+    fn new_work(
         &self,
         upstairs_connection: UpstairsConnection,
     ) -> Result<Vec<JobId>> {
-        let work = self.work_lock(upstairs_connection).await?;
+        let work = self.work(upstairs_connection)?;
         Ok(work.new_work(upstairs_connection))
     }
 
     // Add work to the Downstairs
-    async fn add_work(
-        &self,
+    fn add_work(
+        &mut self,
         upstairs_connection: UpstairsConnection,
         ds_id: JobId,
         work: IOop,
@@ -2108,31 +1586,31 @@ impl Downstairs {
             state: WorkState::New,
         };
 
-        let mut work = self.work_lock(upstairs_connection).await?;
+        let work = self.work_mut(upstairs_connection)?;
         work.add_work(ds_id, dsw);
 
         Ok(())
     }
 
     #[cfg(test)]
-    async fn get_job(
+    fn get_job(
         &self,
         upstairs_connection: UpstairsConnection,
         ds_id: JobId,
     ) -> Result<DownstairsWork> {
-        let mut work = self.work_lock(upstairs_connection).await?;
+        let work = self.work(upstairs_connection)?;
         Ok(work.get_job(ds_id))
     }
 
     // Downstairs, move a job to in_progress, if we can
-    async fn in_progress(
-        &self,
+    fn in_progress(
+        &mut self,
         upstairs_connection: UpstairsConnection,
         ds_id: JobId,
     ) -> Result<Option<JobId>> {
         let job = {
             let log = self.log.new(o!("role" => "work".to_string()));
-            let mut work = self.work_lock(upstairs_connection).await?;
+            let work = self.work_mut(upstairs_connection)?;
             work.in_progress(ds_id, log)
         };
 
@@ -2163,7 +1641,7 @@ impl Downstairs {
         job_id: JobId,
     ) -> Result<Option<Message>> {
         let job = {
-            let mut work = self.work_lock(upstairs_connection).await?;
+            let work = self.work_mut(upstairs_connection)?;
             let job = work.get_ready_job(job_id);
 
             // `promote_to_active` can clear out the Work struct for this
@@ -2332,8 +1810,6 @@ impl Downstairs {
                 extent,
                 flush_number,
                 gen_number,
-                source_downstairs: _,
-                repair_downstairs: _,
             } => {
                 let result = if !self.is_active(job.upstairs_connection) {
                     error!(self.log, "Upstairs inactive error");
@@ -2378,9 +1854,7 @@ impl Downstairs {
             IOop::ExtentLiveRepair {
                 dependencies,
                 extent,
-                source_downstairs: _,
                 source_repair_address,
-                repair_downstairs: _,
             } => {
                 debug!(
                     self.log,
@@ -2393,7 +1867,7 @@ impl Downstairs {
                     Err(CrucibleError::UpstairsInactive)
                 } else {
                     self.region
-                        .repair_extent(*extent, *source_repair_address)
+                        .repair_extent(*extent, *source_repair_address, false)
                         .await
                 };
                 debug!(
@@ -2464,15 +1938,14 @@ impl Downstairs {
 
     /// Helper function to call `complete_work` if the `Message` is available
     #[cfg(test)]
-    async fn complete_work(
-        &self,
+    fn complete_work(
+        &mut self,
         upstairs_connection: UpstairsConnection,
         ds_id: JobId,
         m: Message,
     ) -> Result<()> {
         let is_flush = matches!(m, Message::FlushAck { .. });
         self.complete_work_inner(upstairs_connection, ds_id, is_flush)
-            .await
     }
 
     /*
@@ -2482,15 +1955,15 @@ impl Downstairs {
      * - removing the response
      * - putting the id on the completed list.
      */
-    async fn complete_work_inner(
-        &self,
+    fn complete_work_inner(
+        &mut self,
         upstairs_connection: UpstairsConnection,
         ds_id: JobId,
         is_flush: bool,
     ) -> Result<()> {
-        let mut work = self.work_lock(upstairs_connection).await?;
+        let work = self.work_mut(upstairs_connection)?;
 
-        // If upstairs_connection grabs the work lock, it is the active
+        // If upstairs_connection borrows the work map, it is the active
         // connection for this Upstairs UUID. The job should exist in the Work
         // struct. If it does not, then we're in the case where the same
         // Upstairs has reconnected and been promoted to active, meaning
@@ -2567,14 +2040,14 @@ impl Downstairs {
         if self.read_only {
             // Multiple active read-only sessions are allowed, but multiple
             // sessions for the same Upstairs UUID are not. Kick out a
-            // previously active session for this UUID if one exists. Do this
-            // while holding the work lock so the previously active Upstairs
+            // previously active session for this UUID if one exists. This
+            // function is called on a `&mut self`, so we're guaranteed that the
             // isn't adding more work.
             if let Some(active_upstairs) = self
                 .active_upstairs
                 .remove(&upstairs_connection.upstairs_id)
             {
-                let mut work = active_upstairs.work.lock().await;
+                let work = &active_upstairs.work;
 
                 info!(
                     self.log,
@@ -2624,7 +2097,6 @@ impl Downstairs {
                 // working on outstanding jobs, or a way to merge. But for now,
                 // we just throw out what we have and let the upstairs resend
                 // anything to us that it did not get an ACK for.
-                work.clear();
             } else {
                 // There is no current session for this Upstairs UUID.
             }
@@ -2635,7 +2107,7 @@ impl Downstairs {
                 upstairs_connection.upstairs_id,
                 ActiveUpstairs {
                     upstairs_connection,
-                    work: Mutex::new(Work::new()),
+                    work: Work::new(),
                     terminate_sender: tx,
                 },
             );
@@ -2654,7 +2126,7 @@ impl Downstairs {
                         upstairs_connection.upstairs_id,
                         ActiveUpstairs {
                             upstairs_connection,
-                            work: Mutex::new(Work::new()),
+                            work: Work::new(),
                             terminate_sender: tx,
                         },
                     );
@@ -2732,7 +2204,7 @@ impl Downstairs {
                         .remove(&currently_active_upstairs_uuids[0])
                         .unwrap();
 
-                    let mut work = active_upstairs.work.lock().await;
+                    let work = &active_upstairs.work;
 
                     warn!(
                         self.log,
@@ -2785,7 +2257,6 @@ impl Downstairs {
                     // But for now, we just throw out what we have and let the
                     // upstairs resend anything to us that it did not get an ACK
                     // for.
-                    work.clear();
 
                     // Insert or replace the session
 
@@ -2793,7 +2264,7 @@ impl Downstairs {
                         upstairs_connection.upstairs_id,
                         ActiveUpstairs {
                             upstairs_connection,
-                            work: Mutex::new(Work::new()),
+                            work: Work::new(),
                             terminate_sender: tx,
                         },
                     );
@@ -2839,17 +2310,492 @@ impl Downstairs {
             .collect()
     }
 
-    async fn clear_active(
+    fn clear_active(
         &mut self,
         upstairs_connection: UpstairsConnection,
     ) -> Result<()> {
-        let mut work = self.work_lock(upstairs_connection).await?;
+        let work = self.work_mut(upstairs_connection)?;
         work.clear();
-        drop(work);
 
         self.active_upstairs
             .remove(&upstairs_connection.upstairs_id);
 
+        Ok(())
+    }
+
+    /// Handle a new message from the upstairs
+    ///
+    /// If the message is an IO, then put the new IO the work hashmap. If the
+    /// message is a repair message, then we handle it right here.
+    async fn proc_frame(
+        ad: &Mutex<Downstairs>,
+        upstairs_connection: UpstairsConnection,
+        m: Message,
+        resp_tx: &mpsc::Sender<Message>,
+    ) -> Result<Option<JobId>> {
+        // Initial check against upstairs and session ID
+        match m {
+            Message::Write {
+                upstairs_id,
+                session_id,
+                ..
+            }
+            | Message::WriteUnwritten {
+                upstairs_id,
+                session_id,
+                ..
+            }
+            | Message::Flush {
+                upstairs_id,
+                session_id,
+                ..
+            }
+            | Message::ReadRequest {
+                upstairs_id,
+                session_id,
+                ..
+            }
+            | Message::ExtentLiveClose {
+                upstairs_id,
+                session_id,
+                ..
+            }
+            | Message::ExtentLiveFlushClose {
+                upstairs_id,
+                session_id,
+                ..
+            }
+            | Message::ExtentLiveRepair {
+                upstairs_id,
+                session_id,
+                ..
+            }
+            | Message::ExtentLiveReopen {
+                upstairs_id,
+                session_id,
+                ..
+            }
+            | Message::ExtentLiveNoOp {
+                upstairs_id,
+                session_id,
+                ..
+            } => {
+                if !is_message_valid(
+                    upstairs_connection,
+                    upstairs_id,
+                    session_id,
+                    resp_tx,
+                )
+                .await?
+                {
+                    return Ok(None);
+                }
+            }
+            _ => (),
+        }
+
+        let r = match m {
+            Message::Write {
+                job_id,
+                dependencies,
+                writes,
+                ..
+            } => {
+                cdt::submit__write__start!(|| job_id.0);
+
+                let new_write = IOop::Write {
+                    dependencies,
+                    writes,
+                };
+
+                let mut d = ad.lock().await;
+                d.add_work(upstairs_connection, job_id, new_write)?;
+                Some(job_id)
+            }
+            Message::Flush {
+                job_id,
+                dependencies,
+                flush_number,
+                gen_number,
+                snapshot_details,
+                extent_limit,
+                ..
+            } => {
+                cdt::submit__flush__start!(|| job_id.0);
+
+                let new_flush = IOop::Flush {
+                    dependencies,
+                    flush_number,
+                    gen_number,
+                    snapshot_details,
+                    extent_limit,
+                };
+
+                let mut d = ad.lock().await;
+                d.add_work(upstairs_connection, job_id, new_flush)?;
+                Some(job_id)
+            }
+            Message::WriteUnwritten {
+                job_id,
+                dependencies,
+                writes,
+                ..
+            } => {
+                cdt::submit__writeunwritten__start!(|| job_id.0);
+
+                let new_write = IOop::WriteUnwritten {
+                    dependencies,
+                    writes,
+                };
+
+                let mut d = ad.lock().await;
+                d.add_work(upstairs_connection, job_id, new_write)?;
+                Some(job_id)
+            }
+            Message::ReadRequest {
+                job_id,
+                dependencies,
+                requests,
+                ..
+            } => {
+                cdt::submit__read__start!(|| job_id.0);
+
+                let new_read = IOop::Read {
+                    dependencies,
+                    requests,
+                };
+
+                let mut d = ad.lock().await;
+                d.add_work(upstairs_connection, job_id, new_read)?;
+                Some(job_id)
+            }
+            // These are for repair while taking live IO
+            Message::ExtentLiveClose {
+                job_id,
+                dependencies,
+                extent_id,
+                ..
+            } => {
+                cdt::submit__el__close__start!(|| job_id.0);
+                // TODO: Add dtrace probes
+                let ext_close = IOop::ExtentClose {
+                    dependencies,
+                    extent: extent_id,
+                };
+
+                let mut d = ad.lock().await;
+                d.add_work(upstairs_connection, job_id, ext_close)?;
+                Some(job_id)
+            }
+            Message::ExtentLiveFlushClose {
+                job_id,
+                dependencies,
+                extent_id,
+                flush_number,
+                gen_number,
+                ..
+            } => {
+                cdt::submit__el__flush__close__start!(|| job_id.0);
+                // Do both the flush, and then the close
+                let new_flush = IOop::ExtentFlushClose {
+                    dependencies,
+                    extent: extent_id,
+                    flush_number,
+                    gen_number,
+                };
+
+                let mut d = ad.lock().await;
+                d.add_work(upstairs_connection, job_id, new_flush)?;
+                Some(job_id)
+            }
+            Message::ExtentLiveRepair {
+                job_id,
+                dependencies,
+                extent_id,
+                source_repair_address,
+                ..
+            } => {
+                cdt::submit__el__repair__start!(|| job_id.0);
+                // Do both the flush, and then the close
+                let new_repair = IOop::ExtentLiveRepair {
+                    dependencies,
+                    extent: extent_id,
+
+                    source_repair_address,
+                };
+
+                let mut d = ad.lock().await;
+                debug!(d.log, "Received ExtentLiveRepair {}", job_id);
+                d.add_work(upstairs_connection, job_id, new_repair)?;
+                Some(job_id)
+            }
+            Message::ExtentLiveReopen {
+                job_id,
+                dependencies,
+                extent_id,
+                ..
+            } => {
+                cdt::submit__el__reopen__start!(|| job_id.0);
+                let new_open = IOop::ExtentLiveReopen {
+                    dependencies,
+                    extent: extent_id,
+                };
+
+                let mut d = ad.lock().await;
+                d.add_work(upstairs_connection, job_id, new_open)?;
+                Some(job_id)
+            }
+            Message::ExtentLiveNoOp {
+                job_id,
+                dependencies,
+                ..
+            } => {
+                cdt::submit__el__noop__start!(|| job_id.0);
+                let new_open = IOop::ExtentLiveNoOp { dependencies };
+
+                let mut d = ad.lock().await;
+                debug!(d.log, "Received NoOP {}", job_id);
+                d.add_work(upstairs_connection, job_id, new_open)?;
+                Some(job_id)
+            }
+
+            // These messages arrive during initial reconciliation.
+            Message::ExtentFlush {
+                repair_id,
+                extent_id,
+                client_id: _,
+                flush_number,
+                gen_number,
+            } => {
+                let msg = {
+                    let mut d = ad.lock().await;
+                    debug!(
+                        d.log,
+                        "{} Flush extent {} with f:{} g:{}",
+                        repair_id,
+                        extent_id,
+                        flush_number,
+                        gen_number
+                    );
+
+                    match d
+                        .region
+                        .region_flush_extent(
+                            extent_id,
+                            gen_number,
+                            flush_number,
+                            repair_id,
+                        )
+                        .await
+                    {
+                        Ok(()) => Message::RepairAckId { repair_id },
+                        Err(error) => Message::ExtentError {
+                            repair_id,
+                            extent_id,
+                            error,
+                        },
+                    }
+                };
+                resp_tx.send(msg).await?;
+                None
+            }
+            Message::ExtentClose {
+                repair_id,
+                extent_id,
+            } => {
+                let msg = {
+                    let mut d = ad.lock().await;
+                    debug!(d.log, "{} Close extent {}", repair_id, extent_id);
+                    match d.region.close_extent(extent_id).await {
+                        Ok(_) => Message::RepairAckId { repair_id },
+                        Err(error) => Message::ExtentError {
+                            repair_id,
+                            extent_id,
+                            error,
+                        },
+                    }
+                };
+                resp_tx.send(msg).await?;
+                None
+            }
+            Message::ExtentRepair {
+                repair_id,
+                extent_id,
+                source_client_id,
+                source_repair_address,
+                dest_clients,
+            } => {
+                let msg = {
+                    let d = ad.lock().await;
+                    debug!(
+                        d.log,
+                        "{} Repair extent {} source:[{}] {:?} dest:{:?}",
+                        repair_id,
+                        extent_id,
+                        source_client_id,
+                        source_repair_address,
+                        dest_clients
+                    );
+                    match d
+                        .region
+                        .repair_extent(extent_id, source_repair_address, false)
+                        .await
+                    {
+                        Ok(()) => Message::RepairAckId { repair_id },
+                        Err(error) => Message::ExtentError {
+                            repair_id,
+                            extent_id,
+                            error,
+                        },
+                    }
+                };
+                resp_tx.send(msg).await?;
+                None
+            }
+            Message::ExtentReopen {
+                repair_id,
+                extent_id,
+            } => {
+                let msg = {
+                    let mut d = ad.lock().await;
+                    debug!(d.log, "{} Reopen extent {}", repair_id, extent_id);
+                    match d.region.reopen_extent(extent_id).await {
+                        Ok(()) => Message::RepairAckId { repair_id },
+                        Err(error) => Message::ExtentError {
+                            repair_id,
+                            extent_id,
+                            error,
+                        },
+                    }
+                };
+                resp_tx.send(msg).await?;
+                None
+            }
+            x => bail!("unexpected frame {:?}", x),
+        };
+        Ok(r)
+    }
+
+    async fn do_work_for(
+        ads: &Mutex<Downstairs>,
+        upstairs_connection: UpstairsConnection,
+        resp_tx: &mpsc::Sender<Message>,
+    ) -> Result<()> {
+        let ds = ads.lock().await;
+        if !ds.is_active(upstairs_connection) {
+            // We are not an active downstairs, wait until we are
+            return Ok(());
+        }
+
+        /*
+         * Build ourselves a list of all the jobs on the work hashmap that
+         * are New or DepWait.
+         */
+        let mut new_work: VecDeque<JobId> = {
+            if let Ok(new_work) = ds.new_work(upstairs_connection) {
+                new_work.into_iter().collect()
+            } else {
+                // This means we couldn't unblock jobs for this UUID
+                return Ok(());
+            }
+        };
+        let is_lossy = ds.lossy;
+        drop(ds);
+
+        /*
+         * We don't have to do jobs in order, but the dependencies are, at
+         * least for now, always going to be in order of job id. `new_work` is
+         * sorted before it is returned so this function iterates through jobs
+         * in order.
+         */
+        while let Some(new_id) = new_work.pop_front() {
+            if is_lossy && random() && random() {
+                // Skip a job that needs to be done, moving it to the back of
+                // the list.  This exercises job dependency tracking in the face
+                // of arbitrary reordering.
+                info!(ads.lock().await.log, "[lossy] skipping {}", new_id);
+                new_work.push_back(new_id);
+                continue;
+            }
+
+            /*
+             * If this job is still new, take it and go to work. The
+             * in_progress method will only return a job if all
+             * dependencies are met.
+             */
+            let job_id =
+                ads.lock().await.in_progress(upstairs_connection, new_id)?;
+
+            // If the job's dependencies aren't met, then keep going
+            let Some(job_id) = job_id else {
+                continue;
+            };
+
+            cdt::work__process!(|| job_id.0);
+            let m = ads
+                .lock()
+                .await
+                .do_work(upstairs_connection, job_id)
+                .await?;
+
+            // If a different downstairs was promoted, then `do_work` returns
+            // `None` and we ignore the job.
+            let Some(m) = m else {
+                continue;
+            };
+
+            if let Some(error) = m.err() {
+                resp_tx
+                    .send(Message::ErrorReport {
+                        upstairs_id: upstairs_connection.upstairs_id,
+                        session_id: upstairs_connection.session_id,
+                        job_id: new_id,
+                        error: error.clone(),
+                    })
+                    .await?;
+
+                // If the job errored, do not consider it completed.
+                // Retry it.
+                new_work.push_back(new_id);
+
+                // If this is a repair job, and that repair failed, we
+                // can do no more work on this downstairs and should
+                // force everything to come down before more work arrives.
+                //
+                // We have replied to the Upstairs above, which lets the
+                // upstairs take action to abort the repair and continue
+                // working in some degraded state.
+                //
+                // If you change this, change how the Upstairs processes
+                // ErrorReports!
+                if matches!(m, Message::ExtentLiveRepairAckId { .. }) {
+                    bail!("Repair has failed, exiting task");
+                }
+            } else {
+                // The job completed successfully, so inform the
+                // Upstairs
+
+                ads.lock().await.complete_work_stat(
+                    upstairs_connection,
+                    &m,
+                    job_id,
+                )?;
+
+                // Notify the upstairs before completing work, which
+                // consumes the message (so we'll check whether it's
+                // a FlushAck beforehand)
+                let is_flush = matches!(m, Message::FlushAck { .. });
+                resp_tx.send(m).await?;
+
+                ads.lock().await.complete_work_inner(
+                    upstairs_connection,
+                    job_id,
+                    is_flush,
+                )?;
+
+                cdt::work__done!(|| job_id.0);
+            }
+        }
         Ok(())
     }
 }
@@ -2928,7 +2874,7 @@ impl Work {
     }
 
     #[cfg(test)]
-    fn get_job(&mut self, ds_id: JobId) -> DownstairsWork {
+    fn get_job(&self, ds_id: JobId) -> DownstairsWork {
         self.active.get(&ds_id).unwrap().clone()
     }
 
@@ -2957,9 +2903,9 @@ impl Work {
         if let Some(job) = self.active.get_mut(&ds_id) {
             if job.state == WorkState::New || job.state == WorkState::DepWait {
                 /*
-                 * Before we can make this in_progress, we have to, while
-                 * holding this locked, check the dep list if there is one
-                 * and make sure all dependencies are completed.
+                 * Before we can make this in_progress, we have to check the dep
+                 * list if there is one and make sure all dependencies are
+                 * completed.
                  */
                 let dep_list = job.work.deps();
 
@@ -3269,7 +3215,7 @@ pub async fn start_downstairs(
     let repair_log = d.lock().await.log.new(o!("task" => "repair".to_string()));
 
     let repair_listener =
-        match repair::repair_main(&dss, repair_address, &repair_log).await {
+        match repair::repair_main(dss, repair_address, &repair_log).await {
             Err(e) => {
                 // TODO tear down other things if repair server can't be
                 // started?
@@ -3314,7 +3260,7 @@ pub async fn start_downstairs(
          * it and wait for another connection. Downstairs can handle
          * multiple Upstairs connecting but only one active one.
          */
-        info!(log, "listening on {}", listen_on);
+        info!(log, "downstairs listening on {}", listen_on);
         loop {
             let (sock, raddr) = listener.accept().await?;
 
@@ -3371,6 +3317,72 @@ pub async fn start_downstairs(
     });
 
     Ok(join_handle)
+}
+
+/// Clone the extent files in a region from another running downstairs.
+///
+/// Use the reconcile/repair extent methods to copy another downstairs.
+/// The source downstairs must have the same RegionDefinition as we do,
+/// and both downstairs must be running in read only mode.
+pub async fn clone_region(
+    d: Arc<Mutex<Downstairs>>,
+    source: SocketAddr,
+) -> Result<()> {
+    let info = crucible_common::BuildInfo::default();
+    let log = d.lock().await.log.new(o!("task" => "clone".to_string()));
+    info!(log, "Crucible Version: {}", info);
+    info!(
+        log,
+        "Upstairs <-> Downstairs Message Version: {}", CRUCIBLE_MESSAGE_VERSION
+    );
+
+    info!(log, "Connecting to {source} to obtain our extent files.");
+
+    let url = format!("http://{:?}", source);
+    let repair_server = Client::new(&url);
+    let source_def = match repair_server.get_region_info().await {
+        Ok(def) => def.into_inner(),
+        Err(e) => {
+            bail!("Failed to get source region definition: {e}");
+        }
+    };
+    info!(log, "The source RegionDefinition is: {:?}", source_def);
+
+    let source_ro_mode = match repair_server.get_region_mode().await {
+        Ok(ro) => ro.into_inner(),
+        Err(e) => {
+            bail!("Failed to get source mode: {e}");
+        }
+    };
+
+    info!(log, "The source mode is: {:?}", source_ro_mode);
+    if !source_ro_mode {
+        bail!("Source downstairs is not read only");
+    }
+
+    let mut ds = d.lock().await;
+
+    let my_def = ds.region.def();
+    info!(log, "my def is {:?}", my_def);
+
+    if let Err(e) = my_def.compatible(source_def) {
+        bail!("Incompatible region definitions: {e}");
+    }
+
+    if let Err(e) = ds.region.close_all_extents().await {
+        bail!("Failed to close all extents: {e}");
+    }
+
+    for eid in 0..my_def.extent_count() as usize {
+        info!(log, "Repair extent {eid}");
+
+        if let Err(e) = ds.region.repair_extent(eid, source, true).await {
+            bail!("repair extent {eid} returned: {e}");
+        }
+    }
+    info!(log, "Region has been cloned");
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3584,7 +3596,7 @@ mod test {
                 offset: Block::new_512(1),
             }],
         };
-        ds.add_work(upstairs_connection, JobId(1000), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1000), rio)?;
 
         let deps = vec![JobId(1000)];
         let rio = IOop::Read {
@@ -3594,25 +3606,24 @@ mod test {
                 offset: Block::new_512(1),
             }],
         };
-        ds.add_work(upstairs_connection, JobId(1001), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1001), rio)?;
 
-        show_work(&mut ds).await;
+        show_work(&mut ds);
 
         // Now we mimic what happens in the do_work_task()
-        let new_work = ds.new_work(upstairs_connection).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection).unwrap();
         println!("Got new work: {:?}", new_work);
         assert_eq!(new_work.len(), 2);
 
         for id in new_work.iter() {
-            let ip_id =
-                ds.in_progress(upstairs_connection, *id).await?.unwrap();
+            let ip_id = ds.in_progress(upstairs_connection, *id)?.unwrap();
             assert_eq!(ip_id, *id);
             println!("Do IOop {}", *id);
             let m = ds.do_work(upstairs_connection, *id).await?.unwrap();
             println!("Got m: {:?}", m);
-            ds.complete_work(upstairs_connection, *id, m).await?;
+            ds.complete_work(upstairs_connection, *id, m)?;
         }
-        show_work(&mut ds).await;
+        show_work(&mut ds);
         Ok(())
     }
 
@@ -3681,17 +3692,15 @@ mod test {
             dependencies: Vec::new(),
             extent: 0,
         };
-        ds.add_work(upstairs_connection, JobId(1000), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1000), rio)?;
 
         let rio = IOop::ExtentFlushClose {
             dependencies: vec![],
             extent: 1,
             flush_number: 1,
             gen_number: 2,
-            source_downstairs: ClientId::new(0),
-            repair_downstairs: vec![ClientId::new(1)],
         };
-        ds.add_work(upstairs_connection, JobId(1001), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1001), rio)?;
 
         let deps = vec![JobId(1000), JobId(1001)];
         let rio = IOop::Read {
@@ -3701,38 +3710,37 @@ mod test {
                 offset: Block::new_512(1),
             }],
         };
-        ds.add_work(upstairs_connection, JobId(1002), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1002), rio)?;
 
         let deps = vec![JobId(1000), JobId(1001), JobId(1002)];
         let rio = IOop::ExtentLiveNoOp { dependencies: deps };
-        ds.add_work(upstairs_connection, JobId(1003), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1003), rio)?;
 
         let deps = vec![JobId(1000), JobId(1001), JobId(1002), JobId(1003)];
         let rio = IOop::ExtentLiveReopen {
             dependencies: deps,
             extent: 0,
         };
-        ds.add_work(upstairs_connection, JobId(1004), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1004), rio)?;
 
         println!("Before doing work we have:");
-        show_work(&mut ds).await;
+        show_work(&mut ds);
 
         // Now we mimic what happens in the do_work_task()
-        let new_work = ds.new_work(upstairs_connection).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection).unwrap();
         println!("Got new work: {:?}", new_work);
         assert_eq!(new_work.len(), 5);
 
         for id in new_work.iter() {
-            let ip_id =
-                ds.in_progress(upstairs_connection, *id).await?.unwrap();
+            let ip_id = ds.in_progress(upstairs_connection, *id)?.unwrap();
             assert_eq!(ip_id, *id);
             println!("Do IOop {}", *id);
             let m = ds.do_work(upstairs_connection, *id).await?.unwrap();
             println!("Got m: {:?}", m);
-            ds.complete_work(upstairs_connection, *id, m).await?;
+            ds.complete_work(upstairs_connection, *id, m)?;
         }
 
-        let new_work = ds.new_work(upstairs_connection).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection).unwrap();
         assert_eq!(new_work.len(), 0);
         Ok(())
     }
@@ -3769,39 +3777,35 @@ mod test {
             dependencies: Vec::new(),
             extent: 0,
         };
-        ds.add_work(upstairs_connection, JobId(1000), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1000), rio)?;
 
         let rio = IOop::ExtentFlushClose {
             dependencies: vec![],
             extent: 1,
             flush_number: 1,
             gen_number: gen,
-            source_downstairs: ClientId::new(0),
-            repair_downstairs: vec![ClientId::new(1)],
         };
-        ds.add_work(upstairs_connection, JobId(1001), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1001), rio)?;
 
         // Add the two reopen commands for the two extents we closed.
         let rio = IOop::ExtentLiveReopen {
             dependencies: vec![JobId(1000)],
             extent: 0,
         };
-        ds.add_work(upstairs_connection, JobId(1002), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1002), rio)?;
         let rio = IOop::ExtentLiveReopen {
             dependencies: vec![JobId(1001)],
             extent: 1,
         };
-        ds.add_work(upstairs_connection, JobId(1003), rio).await?;
-        show_work(&mut ds).await;
+        ds.add_work(upstairs_connection, JobId(1003), rio)?;
+        show_work(&mut ds);
 
-        let new_work = ds.new_work(upstairs_connection).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection).unwrap();
         println!("Got new work: {:?}", new_work);
         assert_eq!(new_work.len(), 4);
 
         // Process the ExtentClose
-        ds.in_progress(upstairs_connection, JobId(1000))
-            .await?
-            .unwrap();
+        ds.in_progress(upstairs_connection, JobId(1000))?.unwrap();
         let m = ds.do_work(upstairs_connection, JobId(1000)).await?.unwrap();
         // Verify that we not only have composed the correct ACK, but the
         // result inside that ACK is also what we expect.  In this case
@@ -3827,13 +3831,10 @@ mod test {
                 panic!("Incorrect message: {:?}", m);
             }
         }
-        ds.complete_work(upstairs_connection, JobId(1000), m)
-            .await?;
+        ds.complete_work(upstairs_connection, JobId(1000), m)?;
 
         // Process the ExtentFlushClose
-        ds.in_progress(upstairs_connection, JobId(1001))
-            .await?
-            .unwrap();
+        ds.in_progress(upstairs_connection, JobId(1001))?.unwrap();
         let m = ds.do_work(upstairs_connection, JobId(1001)).await?.unwrap();
         // Verify that we not only have composed the correct ACK, but the
         // result inside that ACK is also what we expect.  In this case
@@ -3859,12 +3860,11 @@ mod test {
                 panic!("Incorrect message: {:?}", m);
             }
         }
-        ds.complete_work(upstairs_connection, JobId(1001), m)
-            .await?;
+        ds.complete_work(upstairs_connection, JobId(1001), m)?;
 
         // Process the two ExtentReopen commands
         for id in (1002..=1003).map(JobId) {
-            ds.in_progress(upstairs_connection, id).await?.unwrap();
+            ds.in_progress(upstairs_connection, id)?.unwrap();
             let m = ds.do_work(upstairs_connection, id).await?.unwrap();
             match m {
                 Message::ExtentLiveAckId {
@@ -3882,11 +3882,11 @@ mod test {
                     panic!("Incorrect message: {:?} for id: {}", m, id);
                 }
             }
-            ds.complete_work(upstairs_connection, id, m).await?;
+            ds.complete_work(upstairs_connection, id, m)?;
         }
 
         // Nothing should be left on the queue.
-        let new_work = ds.new_work(upstairs_connection).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection).unwrap();
         assert_eq!(new_work.len(), 0);
         Ok(())
     }
@@ -3950,7 +3950,7 @@ mod test {
             dependencies: Vec::new(),
             writes,
         };
-        ds.add_work(upstairs_connection, JobId(1000), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1000), rio)?;
 
         // add work for flush 1001
         let rio = IOop::Flush {
@@ -3960,7 +3960,7 @@ mod test {
             snapshot_details: None,
             extent_limit: None,
         };
-        ds.add_work(upstairs_connection, JobId(1001), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1001), rio)?;
 
         // Add work for 2nd write 1002
         let writes = create_generic_test_write(eid);
@@ -3969,52 +3969,41 @@ mod test {
             dependencies: vec![JobId(1000), JobId(1001)],
             writes,
         };
-        ds.add_work(upstairs_connection, JobId(1002), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1002), rio)?;
 
         // Now close the extent
         let rio = IOop::ExtentClose {
             dependencies: vec![JobId(1000), JobId(1001), JobId(1002)],
             extent: eid as usize,
         };
-        ds.add_work(upstairs_connection, JobId(1003), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1003), rio)?;
 
-        show_work(&mut ds).await;
+        show_work(&mut ds);
 
-        let new_work = ds.new_work(upstairs_connection).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection).unwrap();
         println!("Got new work: {:?}", new_work);
         assert_eq!(new_work.len(), 4);
 
         // Process the first Write
-        ds.in_progress(upstairs_connection, JobId(1000))
-            .await?
-            .unwrap();
+        ds.in_progress(upstairs_connection, JobId(1000))?.unwrap();
         let m = ds.do_work(upstairs_connection, JobId(1000)).await?.unwrap();
-        ds.complete_work(upstairs_connection, JobId(1000), m)
-            .await?;
+        ds.complete_work(upstairs_connection, JobId(1000), m)?;
 
         // Process the flush
-        ds.in_progress(upstairs_connection, JobId(1001))
-            .await?
-            .unwrap();
+        ds.in_progress(upstairs_connection, JobId(1001))?.unwrap();
         let m = ds.do_work(upstairs_connection, JobId(1001)).await?.unwrap();
-        ds.complete_work(upstairs_connection, JobId(1001), m)
-            .await?;
+        ds.complete_work(upstairs_connection, JobId(1001), m)?;
 
         // Process write 2
-        ds.in_progress(upstairs_connection, JobId(1002))
-            .await?
-            .unwrap();
+        ds.in_progress(upstairs_connection, JobId(1002))?.unwrap();
         let m = ds.do_work(upstairs_connection, JobId(1002)).await?.unwrap();
-        ds.complete_work(upstairs_connection, JobId(1002), m)
-            .await?;
+        ds.complete_work(upstairs_connection, JobId(1002), m)?;
 
-        let new_work = ds.new_work(upstairs_connection).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection).unwrap();
         assert_eq!(new_work.len(), 1);
 
         // Process the ExtentClose
-        ds.in_progress(upstairs_connection, JobId(1003))
-            .await?
-            .unwrap();
+        ds.in_progress(upstairs_connection, JobId(1003))?.unwrap();
         let m = ds.do_work(upstairs_connection, JobId(1003)).await?.unwrap();
         // Verify that we not only have composed the correct ACK, but the
         // result inside that ACK is also what we expect.  In this case
@@ -4040,11 +4029,10 @@ mod test {
                 panic!("Incorrect message: {:?}", m);
             }
         }
-        ds.complete_work(upstairs_connection, JobId(1003), m)
-            .await?;
+        ds.complete_work(upstairs_connection, JobId(1003), m)?;
 
         // Nothing should be left on the queue.
-        let new_work = ds.new_work(upstairs_connection).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection).unwrap();
         assert_eq!(new_work.len(), 0);
         Ok(())
     }
@@ -4082,24 +4070,22 @@ mod test {
             dependencies: Vec::new(),
             writes,
         };
-        ds.add_work(upstairs_connection, JobId(1000), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1000), rio)?;
 
         let rio = IOop::ExtentClose {
             dependencies: vec![JobId(1000)],
             extent: eid as usize,
         };
-        ds.add_work(upstairs_connection, JobId(1001), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1001), rio)?;
 
-        show_work(&mut ds).await;
+        show_work(&mut ds);
 
-        let new_work = ds.new_work(upstairs_connection).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection).unwrap();
         println!("Got new work: {:?}", new_work);
         assert_eq!(new_work.len(), 2);
 
         // Process the Write
-        ds.in_progress(upstairs_connection, JobId(1000))
-            .await?
-            .unwrap();
+        ds.in_progress(upstairs_connection, JobId(1000))?.unwrap();
         let m = ds.do_work(upstairs_connection, JobId(1000)).await?.unwrap();
         // Verify that we not only have composed the correct ACK, but the
         // result inside that ACK is also what we expect.
@@ -4119,16 +4105,13 @@ mod test {
                 panic!("Incorrect message: {:?}", m);
             }
         }
-        ds.complete_work(upstairs_connection, JobId(1000), m)
-            .await?;
+        ds.complete_work(upstairs_connection, JobId(1000), m)?;
 
-        let new_work = ds.new_work(upstairs_connection).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection).unwrap();
         assert_eq!(new_work.len(), 1);
 
         // Process the ExtentClose
-        ds.in_progress(upstairs_connection, JobId(1001))
-            .await?
-            .unwrap();
+        ds.in_progress(upstairs_connection, JobId(1001))?.unwrap();
         let m = ds.do_work(upstairs_connection, JobId(1001)).await?.unwrap();
         // Verify that we not only have composed the correct ACK, but the
         // result inside that ACK is also what we expect.  In this case
@@ -4154,11 +4137,10 @@ mod test {
                 panic!("Incorrect message: {:?}", m);
             }
         }
-        ds.complete_work(upstairs_connection, JobId(1001), m)
-            .await?;
+        ds.complete_work(upstairs_connection, JobId(1001), m)?;
 
         // Nothing should be left on the queue.
-        let new_work = ds.new_work(upstairs_connection).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection).unwrap();
         assert_eq!(new_work.len(), 0);
         Ok(())
     }
@@ -4198,28 +4180,24 @@ mod test {
             dependencies: Vec::new(),
             writes,
         };
-        ds.add_work(upstairs_connection, JobId(1000), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1000), rio)?;
 
         let rio = IOop::ExtentFlushClose {
             dependencies: vec![JobId(1000)],
             extent: eid as usize,
             flush_number: 3,
             gen_number: gen,
-            source_downstairs: ClientId::new(0),
-            repair_downstairs: vec![ClientId::new(1)],
         };
-        ds.add_work(upstairs_connection, JobId(1001), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1001), rio)?;
 
-        show_work(&mut ds).await;
+        show_work(&mut ds);
 
-        let new_work = ds.new_work(upstairs_connection).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection).unwrap();
         println!("Got new work: {:?}", new_work);
         assert_eq!(new_work.len(), 2);
 
         // Process the Write
-        ds.in_progress(upstairs_connection, JobId(1000))
-            .await?
-            .unwrap();
+        ds.in_progress(upstairs_connection, JobId(1000))?.unwrap();
         let m = ds.do_work(upstairs_connection, JobId(1000)).await?.unwrap();
         // Verify that we not only have composed the correct ACK, but the
         // result inside that ACK is also what we expect.
@@ -4239,16 +4217,13 @@ mod test {
                 panic!("Incorrect message: {:?}", m);
             }
         }
-        ds.complete_work(upstairs_connection, JobId(1000), m)
-            .await?;
+        ds.complete_work(upstairs_connection, JobId(1000), m)?;
 
-        let new_work = ds.new_work(upstairs_connection).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection).unwrap();
         assert_eq!(new_work.len(), 1);
 
         // Process the ExtentFlushClose
-        ds.in_progress(upstairs_connection, JobId(1001))
-            .await?
-            .unwrap();
+        ds.in_progress(upstairs_connection, JobId(1001))?.unwrap();
         let m = ds.do_work(upstairs_connection, JobId(1001)).await?.unwrap();
         // Verify that we not only have composed the correct ACK, but the
         // result inside that ACK is also what we expect.  In this case
@@ -4274,11 +4249,10 @@ mod test {
                 panic!("Incorrect message: {:?}", m);
             }
         }
-        ds.complete_work(upstairs_connection, JobId(1001), m)
-            .await?;
+        ds.complete_work(upstairs_connection, JobId(1001), m)?;
 
         // Nothing should be left on the queue.
-        let new_work = ds.new_work(upstairs_connection).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection).unwrap();
         assert_eq!(new_work.len(), 0);
         Ok(())
     }
@@ -4317,7 +4291,7 @@ mod test {
             dependencies: Vec::new(),
             writes,
         };
-        ds.add_work(upstairs_connection, JobId(1000), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1000), rio)?;
 
         // Create the write for extent 2
         let writes = create_generic_test_write(eid_two);
@@ -4325,7 +4299,7 @@ mod test {
             dependencies: Vec::new(),
             writes,
         };
-        ds.add_work(upstairs_connection, JobId(1001), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1001), rio)?;
 
         // Flush and close extent 1
         let rio = IOop::ExtentFlushClose {
@@ -4333,35 +4307,31 @@ mod test {
             extent: eid_one as usize,
             flush_number: 6,
             gen_number: gen,
-            source_downstairs: ClientId::new(0),
-            repair_downstairs: vec![ClientId::new(1)],
         };
-        ds.add_work(upstairs_connection, JobId(1002), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1002), rio)?;
 
         // Just close extent 2
         let rio = IOop::ExtentClose {
             dependencies: vec![JobId(1001)],
             extent: eid_two as usize,
         };
-        ds.add_work(upstairs_connection, JobId(1003), rio).await?;
+        ds.add_work(upstairs_connection, JobId(1003), rio)?;
 
-        show_work(&mut ds).await;
+        show_work(&mut ds);
 
-        let new_work = ds.new_work(upstairs_connection).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection).unwrap();
         println!("Got new work: {:?}", new_work);
         assert_eq!(new_work.len(), 4);
 
         // Process the Writes
         for id in (1000..=1001).map(JobId) {
-            ds.in_progress(upstairs_connection, id).await?.unwrap();
+            ds.in_progress(upstairs_connection, id)?.unwrap();
             let m = ds.do_work(upstairs_connection, id).await?.unwrap();
-            ds.complete_work(upstairs_connection, id, m).await?;
+            ds.complete_work(upstairs_connection, id, m)?;
         }
 
         // Process the ExtentFlushClose
-        ds.in_progress(upstairs_connection, JobId(1002))
-            .await?
-            .unwrap();
+        ds.in_progress(upstairs_connection, JobId(1002))?.unwrap();
         let m = ds.do_work(upstairs_connection, JobId(1002)).await?.unwrap();
         // Verify that we not only have composed the correct ACK, but the
         // result inside that ACK is also what we expect.  In this case
@@ -4387,13 +4357,10 @@ mod test {
                 panic!("Incorrect message: {:?}", m);
             }
         }
-        ds.complete_work(upstairs_connection, JobId(1002), m)
-            .await?;
+        ds.complete_work(upstairs_connection, JobId(1002), m)?;
 
         // Process the ExtentClose
-        ds.in_progress(upstairs_connection, JobId(1003))
-            .await?
-            .unwrap();
+        ds.in_progress(upstairs_connection, JobId(1003))?.unwrap();
         let m = ds.do_work(upstairs_connection, JobId(1003)).await?.unwrap();
         // Verify that we not only have composed the correct ACK, but the
         // result inside that ACK is also what we expect.  In this case
@@ -4419,10 +4386,9 @@ mod test {
                 panic!("Incorrect message: {:?}", m);
             }
         }
-        ds.complete_work(upstairs_connection, JobId(1003), m)
-            .await?;
+        ds.complete_work(upstairs_connection, JobId(1003), m)?;
         // Nothing should be left on the queue.
-        let new_work = ds.new_work(upstairs_connection).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection).unwrap();
         assert_eq!(new_work.len(), 0);
         Ok(())
     }
@@ -4503,8 +4469,6 @@ mod test {
             extent: eid,
             flush_number: 1,
             gen_number: 2,
-            source_downstairs: ClientId::new(0),
-            repair_downstairs: vec![ClientId::new(1)],
         };
         test_misc_work_through_work_queue(JobId(1000), ioop);
     }
@@ -4520,9 +4484,7 @@ mod test {
         let ioop = IOop::ExtentLiveRepair {
             dependencies: vec![],
             extent: eid,
-            source_downstairs: ClientId::new(0),
             source_repair_address,
-            repair_downstairs: vec![ClientId::new(1)],
         };
         test_misc_work_through_work_queue(JobId(1000), ioop);
     }
@@ -5880,8 +5842,7 @@ mod test {
                 offset: Block::new_512(1),
             }],
         };
-        ds.add_work(upstairs_connection_1, JobId(1000), read_1.clone())
-            .await?;
+        ds.add_work(upstairs_connection_1, JobId(1000), read_1.clone())?;
 
         let read_2 = IOop::Read {
             dependencies: Vec::new(),
@@ -5890,16 +5851,15 @@ mod test {
                 offset: Block::new_512(2),
             }],
         };
-        ds.add_work(upstairs_connection_2, JobId(1000), read_2.clone())
-            .await?;
+        ds.add_work(upstairs_connection_2, JobId(1000), read_2.clone())?;
 
-        let work_1 = ds.new_work(upstairs_connection_1).await?;
-        let work_2 = ds.new_work(upstairs_connection_2).await?;
+        let work_1 = ds.new_work(upstairs_connection_1)?;
+        let work_2 = ds.new_work(upstairs_connection_2)?;
 
         assert_eq!(work_1, work_2);
 
-        let job_1 = ds.get_job(upstairs_connection_1, JobId(1000)).await?;
-        let job_2 = ds.get_job(upstairs_connection_2, JobId(1000)).await?;
+        let job_1 = ds.get_job(upstairs_connection_1, JobId(1000))?;
+        let job_2 = ds.get_job(upstairs_connection_2, JobId(1000))?;
 
         assert_eq!(job_1.upstairs_connection, upstairs_connection_1);
         assert_eq!(job_1.ds_id, JobId(1000));
@@ -5966,16 +5926,14 @@ mod test {
                 offset: Block::new_512(1),
             }],
         };
-        ds.add_work(upstairs_connection_1, JobId(1000), rio).await?;
+        ds.add_work(upstairs_connection_1, JobId(1000), rio)?;
 
         // Now we mimic what happens in the do_work_task()
-        let new_work = ds.new_work(upstairs_connection_1).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection_1).unwrap();
         assert_eq!(new_work.len(), 1);
 
-        let ip_id = ds
-            .in_progress(upstairs_connection_1, JobId(1000))
-            .await?
-            .unwrap();
+        let ip_id =
+            ds.in_progress(upstairs_connection_1, JobId(1000))?.unwrap();
         assert_eq!(ip_id, JobId(1000));
         let m = ds
             .do_work(upstairs_connection_1, JobId(1000))
@@ -5996,10 +5954,8 @@ mod test {
         assert_eq!(rx1.try_recv().unwrap(), upstairs_connection_2);
 
         // This should error with UpstairsInactive - upstairs_connection_1 isn't
-        // active anymore and can't grab the work lock.
-        let result = ds
-            .complete_work(upstairs_connection_1, JobId(1000), m)
-            .await;
+        // active anymore and can't borrow the work map.
+        let result = ds.complete_work(upstairs_connection_1, JobId(1000), m);
         assert!(matches!(
             result.unwrap_err().downcast::<CrucibleError>().unwrap(),
             CrucibleError::UpstairsInactive,
@@ -6060,16 +6016,14 @@ mod test {
                 offset: Block::new_512(1),
             }],
         };
-        ds.add_work(upstairs_connection_1, JobId(1000), rio).await?;
+        ds.add_work(upstairs_connection_1, JobId(1000), rio)?;
 
         // Now we mimic what happens in the do_work_task()
-        let new_work = ds.new_work(upstairs_connection_1).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection_1).unwrap();
         assert_eq!(new_work.len(), 1);
 
-        let ip_id = ds
-            .in_progress(upstairs_connection_1, JobId(1000))
-            .await?
-            .unwrap();
+        let ip_id =
+            ds.in_progress(upstairs_connection_1, JobId(1000))?.unwrap();
         assert_eq!(ip_id, JobId(1000));
         let m = ds
             .do_work(upstairs_connection_1, JobId(1000))
@@ -6090,10 +6044,8 @@ mod test {
         assert_eq!(rx1.try_recv().unwrap(), upstairs_connection_2);
 
         // This should error with UpstairsInactive - upstairs_connection_1 isn't
-        // active anymore and can't grab the work lock.
-        let result = ds
-            .complete_work(upstairs_connection_1, JobId(1000), m)
-            .await;
+        // active anymore and can't borrow the work map.
+        let result = ds.complete_work(upstairs_connection_1, JobId(1000), m);
         assert!(matches!(
             result.unwrap_err().downcast::<CrucibleError>().unwrap(),
             CrucibleError::UpstairsInactive,
@@ -6154,16 +6106,14 @@ mod test {
                 offset: Block::new_512(1),
             }],
         };
-        ds.add_work(upstairs_connection_1, JobId(1000), rio).await?;
+        ds.add_work(upstairs_connection_1, JobId(1000), rio)?;
 
         // Now we mimic what happens in the do_work_task()
-        let new_work = ds.new_work(upstairs_connection_1).await.unwrap();
+        let new_work = ds.new_work(upstairs_connection_1).unwrap();
         assert_eq!(new_work.len(), 1);
 
-        let ip_id = ds
-            .in_progress(upstairs_connection_1, JobId(1000))
-            .await?
-            .unwrap();
+        let ip_id =
+            ds.in_progress(upstairs_connection_1, JobId(1000))?.unwrap();
         assert_eq!(ip_id, JobId(1000));
         let m = ds
             .do_work(upstairs_connection_1, JobId(1000))
@@ -6185,9 +6135,7 @@ mod test {
         // If the original set of tasks don't end right away, they'll try to run
         // complete_work:
 
-        let result = ds
-            .complete_work(upstairs_connection_1, JobId(1000), m)
-            .await;
+        let result = ds.complete_work(upstairs_connection_1, JobId(1000), m);
 
         // `complete_work` will return Ok(()) despite not doing anything to the
         // Work struct.
@@ -6344,7 +6292,7 @@ mod test {
         Ok(())
     }
     #[tokio::test]
-    async fn test_version_uprev_compatable() -> Result<()> {
+    async fn test_version_uprev_compatible() -> Result<()> {
         // Test sending the +1 version to the DS, but also include the
         // current version on the supported list.  The downstairs should
         // see that and respond with the version it does support.

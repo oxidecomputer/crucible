@@ -244,7 +244,7 @@ impl GuestWork {
      * This may include moving data buffers from completed reads.
      */
     #[instrument]
-    pub async fn gw_ds_complete(
+    pub(crate) async fn gw_ds_complete(
         &mut self,
         gw_id: GuestWorkId,
         ds_id: JobId,
@@ -343,6 +343,8 @@ struct BackpressureConfig {
     bytes_start: u64,
     /// Scale for byte-based quadratic backpressure
     bytes_scale: f64,
+    /// Maximum bytes-based backpressure
+    bytes_max_delay: Duration,
 
     /// When should queue-based backpressure start?
     queue_start: f64,
@@ -393,8 +395,12 @@ impl Guest {
             bw_tokens: 0,
             backpressure_us: backpressure_us.clone(),
             backpressure_config: BackpressureConfig {
-                bytes_start: 1024u64.pow(3), // Start at 1 GiB
-                bytes_scale: 9.3e-8,         // Delay of 10ms at 2 GiB in-flight
+                // Byte-based backpressure
+                bytes_start: 100 * 1024u64.pow(2), // Start at 100 MiB
+                bytes_scale: 6e-8, // Delay of 15ms at 2 GiB in-flight
+                bytes_max_delay: Duration::from_millis(15),
+
+                // Queue-based backpressure
                 queue_start: 0.05,
                 queue_max_delay: Duration::from_millis(5),
             },
@@ -918,10 +924,13 @@ impl GuestIoHandle {
         // the upstairs and downstairs) is particularly high.  If so,
         // apply some backpressure by delaying host operations, with a
         // quadratically-increasing delay.
-        let d1 = (bytes.saturating_sub(self.backpressure_config.bytes_start)
-            as f64
-            * self.backpressure_config.bytes_scale)
-            .powf(2.0) as u64;
+        let d1 = (self.backpressure_config.bytes_max_delay.as_micros() as u64)
+            .min(
+                (bytes.saturating_sub(self.backpressure_config.bytes_start)
+                    as f64
+                    * self.backpressure_config.bytes_scale)
+                    .powf(2.0) as u64,
+            );
 
         // Compute an alternate delay based on queue length
         let d2 = self
