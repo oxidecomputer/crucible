@@ -397,6 +397,11 @@ impl Upstairs {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn disable_client_backpressure(&mut self) {
+        self.downstairs.disable_client_backpressure();
+    }
+
     /// Build an Upstairs for simple tests
     #[cfg(test)]
     pub fn test_default(ddef: Option<RegionDefinition>) -> Self {
@@ -738,6 +743,8 @@ impl Upstairs {
             self.downstairs.collect_stats(|c| c.stats.extents_repaired);
         let ds_extents_confirmed =
             self.downstairs.collect_stats(|c| c.stats.extents_confirmed);
+        let ds_delay_us =
+            self.downstairs.collect_stats(|c| c.get_delay_us() as usize);
         let ds_ro_lr_skipped =
             self.downstairs.collect_stats(|c| c.stats.ro_lr_skipped);
 
@@ -762,6 +769,7 @@ impl Upstairs {
                 ds_flow_control,
                 ds_extents_repaired,
                 ds_extents_confirmed,
+                ds_delay_us,
                 ds_ro_lr_skipped,
             };
             ("stats", arg)
@@ -2016,6 +2024,7 @@ impl Upstairs {
             .reinitialize(client_id, auto_promote, &self.state);
     }
 
+    /// Sets both guest and per-client backpressure
     fn set_backpressure(&self) {
         let dsw_max = self
             .downstairs
@@ -2027,6 +2036,8 @@ impl Upstairs {
         let ratio = dsw_max as f64 / crate::IO_OUTSTANDING_MAX as f64;
         self.guest
             .set_backpressure(self.downstairs.write_bytes_outstanding(), ratio);
+
+        self.downstairs.set_client_backpressure();
     }
 
     /// Returns the `RegionDefinition`

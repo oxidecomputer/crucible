@@ -1331,6 +1331,23 @@ impl IOop {
             false
         }
     }
+
+    /// Returns the number of bytes written or read in this job
+    fn job_bytes(&self) -> u64 {
+        match &self {
+            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
+                data.io_size_bytes as u64
+            }
+            IOop::Read { requests, .. } => {
+                requests
+                    .first()
+                    .map(|r| r.offset.block_size_in_bytes())
+                    .unwrap_or(0) as u64
+                    * requests.len() as u64
+            }
+            _ => 0,
+        }
+    }
 }
 
 /*
@@ -2024,6 +2041,8 @@ pub struct Arg {
     pub ds_extents_repaired: [usize; 3],
     /// Times we have live confirmed  an extent on this downstairs.
     pub ds_extents_confirmed: [usize; 3],
+    /// Per-client delay to keep them roughly in sync
+    pub ds_delay_us: [usize; 3],
     /// Times we skipped repairing a downstairs because we are read_only.
     pub ds_ro_lr_skipped: [usize; 3],
 }
@@ -2071,12 +2090,20 @@ pub fn up_main(
         None
     };
 
+    #[cfg(test)]
+    let disable_backpressure = guest.is_queue_backpressure_disabled();
+
     /*
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
      */
     let mut up =
         upstairs::Upstairs::new(&opt, gen, region_def, guest, tls_context);
+
+    #[cfg(test)]
+    if disable_backpressure {
+        up.disable_client_backpressure();
+    }
 
     if let Some(pr) = producer_registry {
         let ups = up.stats.clone();

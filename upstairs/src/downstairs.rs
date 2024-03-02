@@ -3,6 +3,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     net::SocketAddr,
     sync::Arc,
+    time::Duration,
 };
 
 use crate::{
@@ -38,6 +39,9 @@ pub(crate) struct Downstairs {
 
     /// Per-client data
     pub(crate) clients: ClientData<DownstairsClient>,
+
+    /// Per-client backpressure configuration
+    backpressure_config: DownstairsBackpressureConfig,
 
     /// The active list of IO for the downstairs.
     pub(crate) ds_active: ActiveJobs,
@@ -220,6 +224,23 @@ impl Downstairs {
         let clients = clients.map(Option::unwrap);
         Self {
             clients: ClientData(clients),
+            backpressure_config: DownstairsBackpressureConfig {
+                // start byte-based backpressure at 25 MiB of difference
+                bytes_start: 25 * 1024 * 1024,
+                // bytes_scale is chosen to have 1.5 ms of delay at 100 MiB of
+                // discrepancy
+                bytes_scale: 5e-7,
+
+                // start job-based backpressure at 100 jobs of discrepancy
+                jobs_start: 100,
+                // job_scale is chosen to have 1 ms of of per-job delay at 900
+                // jobs of discrepancy
+                jobs_scale: 0.04,
+
+                // max delay is 10 ms.  This is meant to be a gentle nudge, not
+                // a giant shove, and even 10 ms may be too high.
+                max_delay: Duration::from_millis(10),
+            },
             cfg,
             next_flush: 0,
             ds_active: ActiveJobs::new(),
@@ -658,6 +679,11 @@ impl Downstairs {
 
         // Restart the IO task for that specific client
         self.clients[client_id].reinitialize(auto_promote);
+
+        for i in ClientId::iter() {
+            // Clear per-client delay, because we're starting a new session
+            self.clients[i].set_delay_us(0);
+        }
 
         // Special-case: if a Downstairs goes away midway through initial
         // reconciliation, then we have to manually abort reconciliation.
@@ -2293,6 +2319,8 @@ impl Downstairs {
                 self.clients[cid].enqueue(&mut io, last_repair_extent);
             if matches!(job_state, IOState::Skipped) {
                 skipped += 1;
+            } else {
+                assert_eq!(job_state, IOState::New);
             }
         }
 
@@ -3523,6 +3551,109 @@ impl Downstairs {
 
         (gw, ds)
     }
+
+    #[cfg(test)]
+    pub(crate) fn disable_client_backpressure(&mut self) {
+        self.backpressure_config.max_delay = Duration::ZERO;
+    }
+
+    pub(crate) fn set_client_backpressure(&self) {
+        let mut jobs = vec![];
+        let mut bytes = vec![];
+        for c in self.clients.iter() {
+            if matches!(c.state(), DsState::Active) {
+                jobs.push(c.total_live_work());
+                bytes.push(c.total_bytes_outstanding());
+            }
+        }
+        // If none of the clients are active, then disable per-client
+        // backpressure
+        if jobs.is_empty() {
+            for c in self.clients.iter() {
+                c.set_delay_us(0);
+            }
+            return;
+        }
+
+        // The "slowest" Downstairs will have the highest values for jobs and
+        // bytes, which we calculate here.  Then, we'll apply delays to clients
+        // based on those values.
+        let max_jobs = jobs.into_iter().max().unwrap();
+        let max_bytes = bytes.into_iter().max().unwrap();
+
+        let mut delays = ClientData::new(None);
+        for i in ClientId::iter() {
+            let c = &self.clients[i];
+            if matches!(c.state(), DsState::Active) {
+                // These values represent how much **faster** we are than the
+                // slowest downstairs, and hence cause us to exert backpressure
+                // on this client (to slow it down).
+                let job_gap = (max_jobs - c.total_live_work()) as u64;
+                let bytes_gap =
+                    (max_bytes - c.total_bytes_outstanding()) as u64;
+
+                let job_delay_us = (job_gap
+                    .saturating_sub(self.backpressure_config.jobs_start)
+                    as f64
+                    * self.backpressure_config.jobs_scale)
+                    .powf(2.0);
+
+                let bytes_delay_us = (bytes_gap
+                    .saturating_sub(self.backpressure_config.bytes_start)
+                    as f64
+                    * self.backpressure_config.bytes_scale)
+                    .powf(2.0);
+
+                let delay_us = (job_delay_us.max(bytes_delay_us) as u64)
+                    .min(self.backpressure_config.max_delay.as_micros() as u64);
+
+                delays[i] = Some(delay_us);
+            }
+        }
+        // Cancel out any common delay, because it wouldn't be useful.
+        //
+        // (Seeing common delay would be unusual, because it would indicate that
+        // one Downstairs is ahead by the bytes-based metric and another is
+        // ahead by the jobs-based metric)
+        let min_delay = *delays.iter().flatten().min().unwrap();
+        delays.iter_mut().flatten().for_each(|c| *c -= min_delay);
+
+        // Apply delay to clients
+        for i in ClientId::iter() {
+            if let Some(delay) = delays[i] {
+                self.clients[i].set_delay_us(delay);
+            } else {
+                self.clients[i].set_delay_us(0);
+            }
+        }
+    }
+}
+
+/// Configuration for per-client backpressure
+///
+/// Per-client backpressure adds an artificial delay to the client queues, to
+/// keep the three clients relatively in sync.  The delay is varied based on two
+/// metrics:
+///
+/// - number of write bytes outstanding
+/// - queue length
+///
+/// These metrics are _relative_ to the slowest downstairs; the goal is to slow
+/// down the faster Downstairs to keep the gap bounded.
+#[derive(Copy, Clone, Debug)]
+struct DownstairsBackpressureConfig {
+    /// When should backpressure start (in bytes)?
+    bytes_start: u64,
+    /// Scale for byte-based quadratic backpressure
+    bytes_scale: f64,
+
+    /// When should job-count-based backpressure start?
+    jobs_start: u64,
+    /// Scale for job-count-based quadratic backpressure
+    jobs_scale: f64,
+
+    /// Maximum delay
+    max_delay: Duration,
 }
 
 #[cfg(test)]

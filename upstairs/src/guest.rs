@@ -918,6 +918,11 @@ impl GuestIoHandle {
         self.backpressure_config.queue_max_delay = Duration::ZERO;
     }
 
+    #[cfg(test)]
+    pub fn is_queue_backpressure_disabled(&self) -> bool {
+        self.backpressure_config.queue_max_delay == Duration::ZERO
+    }
+
     /// Set `self.backpressure_us` based on outstanding IO ratio
     pub fn set_backpressure(&self, bytes: u64, ratio: f64) {
         // Check to see if the number of outstanding write bytes (between
