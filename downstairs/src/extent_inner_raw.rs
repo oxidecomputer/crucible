@@ -387,20 +387,12 @@ impl ExtentInner for RawInner {
         Ok(ExtentReadResponse { data: buf, blocks })
     }
 
-    fn flush(
+    fn pre_flush(
         &mut self,
         new_flush: u64,
         new_gen: u64,
         job_id: JobOrReconciliationId,
     ) -> Result<(), CrucibleError> {
-        if !self.dirty()? {
-            /*
-             * If we have made no writes to this extent since the last flush,
-             * we do not need to update the extent on disk
-             */
-            return Ok(());
-        }
-
         cdt::extent__flush__start!(|| {
             (job_id.get(), self.extent_number.0, 0)
         });
@@ -409,10 +401,17 @@ impl ExtentInner for RawInner {
         // operation atomic.
         self.set_flush_number(new_flush, new_gen)?;
 
+        Ok(())
+    }
+
+    fn flush_inner(
+        &mut self,
+        job_id: JobOrReconciliationId,
+    ) -> Result<(), CrucibleError> {
         // Now, we fsync to ensure data is flushed to disk.  It's okay to crash
         // before this point, because setting the flush number is atomic.
         cdt::extent__flush__file__start!(|| {
-            (job_id.get(), self.extent_number.0, 0)
+            (job_id.get(), self.extent_number.0)
         });
         if let Err(e) = self.file.sync_all() {
             /*
@@ -425,9 +424,17 @@ impl ExtentInner for RawInner {
         }
         self.context_slot_dirty.fill(0);
         cdt::extent__flush__file__done!(|| {
-            (job_id.get(), self.extent_number.0, 0)
+            (job_id.get(), self.extent_number.0)
         });
+        Ok(())
+    }
 
+    fn post_flush(
+        &mut self,
+        _new_flush: u64,
+        _new_gen: u64,
+        job_id: JobOrReconciliationId,
+    ) -> Result<(), CrucibleError> {
         // Check for fragmentation in the context slots leading to worse
         // performance, and defragment if that's the case.
         let extra_syscalls_per_rw = self
@@ -442,9 +449,7 @@ impl ExtentInner for RawInner {
             Ok(())
         };
 
-        cdt::extent__flush__done!(|| {
-            (job_id.get(), self.extent_number.0, 0)
-        });
+        cdt::extent__flush__done!(|| { (job_id.get(), self.extent_number.0) });
 
         r
     }

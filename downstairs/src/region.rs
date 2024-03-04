@@ -114,6 +114,7 @@ pub struct Region {
     log: Logger,
 
     /// Thread pool for doing long-running CPU work outside the Tokio runtime
+    #[allow(unused)]
     pool: rayon::ThreadPool,
 }
 
@@ -871,7 +872,7 @@ impl Region {
      */
     #[instrument]
     pub(crate) fn region_flush_extent<
-        I: Into<JobOrReconciliationId> + Debug,
+        I: Into<JobOrReconciliationId> + Copy + Clone + Debug,
     >(
         &mut self,
         eid: ExtentId,
@@ -934,48 +935,8 @@ impl Region {
             }
         };
 
-        // This is a bit sneaky: we want to perform each flush in a separate
-        // task for *parallelism*, but can't call `self.get_opened_extent_mut`
-        // multiple times.  In addition, we can't use the tokio thread pool to
-        // spawn a task, because that requires a 'static lifetime, which we
-        // can't get from a borrowed Extent.
-        //
-        // We'll combine two tricks to work around the issue:
-        // - Do the work in the rayon thread pool instead of using tokio tasks
-        // - Carefully walk self.extents.as_mut_slice() to mutably borrow
-        //   multiple at the same time.
-        let mut results = vec![Ok(()); dirty_extents.len()];
-        let log = self.log.clone();
-        run_blocking(|| {
-            let mut slice_start = 0;
-            let mut slice = self.extents.as_mut_slice();
-            self.pool.scope(|s| {
-                for (eid, r) in dirty_extents.iter().zip(results.iter_mut()) {
-                    let next = eid.0 - slice_start;
-                    slice = &mut slice[next as usize..];
-                    let (extent, rest) = slice.split_first_mut().unwrap();
-                    let ExtentState::Opened(extent) = extent else {
-                        panic!("can't flush closed extent");
-                    };
-                    slice = rest;
-                    slice_start += next + 1;
-                    let log = log.clone();
-                    s.spawn(move |_| {
-                        *r =
-                            extent.flush(flush_number, gen_number, job_id, &log)
-                    });
-                }
-            })
-        });
-
+        self.flush_extents(&dirty_extents, flush_number, gen_number, job_id)?;
         cdt::os__flush__done!(|| job_id.0);
-
-        for result in results {
-            // If any extent flush failed, then return that as an error. Because
-            // the results were all collected above, each extent flush has
-            // completed at this point.
-            result?;
-        }
 
         // Now everything has succeeded, we can remove these extents from the
         // flush candidates
@@ -1053,6 +1014,136 @@ impl Region {
         Ok(())
     }
 
+    #[cfg(not(feature = "omicron-build"))]
+    #[allow(clippy::unused_async)]
+    fn flush_extents(
+        &mut self,
+        dirty_extents: &BTreeSet<ExtentId>,
+        flush_number: u64,
+        gen_number: u64,
+        job_id: JobId,
+    ) -> Result<()> {
+        // This is a bit sneaky: we want to perform each flush in a separate
+        // task for *parallelism*, but can't call `self.get_opened_extent_mut`
+        // multiple times.  In addition, we can't use the tokio thread pool to
+        // spawn a task, because that requires a 'static lifetime, which we
+        // can't get from a borrowed Extent.
+        //
+        // We'll combine two tricks to work around the issue:
+        // - Do the work in the rayon thread pool instead of using tokio tasks
+        // - Carefully walk self.extents.as_mut_slice() to mutably borrow
+        //   multiple at the same time.
+        let mut results = vec![Ok(()); dirty_extents.len()];
+        let log = self.log.clone();
+        run_blocking(|| {
+            let mut slice_start = 0;
+            let mut slice = self.extents.as_mut_slice();
+            self.pool.scope(|s| {
+                for (eid, r) in dirty_extents.iter().zip(results.iter_mut()) {
+                    let next = eid.0 - slice_start;
+                    slice = &mut slice[next as usize..];
+                    let (extent, rest) = slice.split_first_mut().unwrap();
+                    let ExtentState::Opened(extent) = extent else {
+                        panic!("can't flush closed extent");
+                    };
+                    slice = rest;
+                    slice_start += next + 1;
+                    let log = log.clone();
+                    s.spawn(move |_| {
+                        *r =
+                            extent.flush(flush_number, gen_number, job_id, &log)
+                    });
+                }
+            })
+        });
+
+        for result in results {
+            // If any extent flush failed, then return that as an error. Because
+            // the results were all collected above, each extent flush has
+            // completed at this point.
+            result?;
+        }
+        Ok(())
+    }
+
+    /// Flush extents using the `syncfs` syscall
+    ///
+    /// If using `omicron-build`, then we're running on illumos and the
+    /// region is backed by a ZFS dataset. Issue a `syncfs` syscall, which
+    /// will result in a `zfs_sync` to the entire region dataset.
+    ///
+    /// The codepath is roughly as follows
+    /// - The syscall calls `fdsync(.., FDSYNC_FS)`
+    /// - `fdsync` calls `VFS_SYNCFS` for the appropriate filesystem
+    /// - For ZFS, this calls `zfs_syncfs`
+    /// - `zfs_syncfs` calls `zfs_sync(vfsp, 0, cr)`
+    /// - `zfs_sync` calls `zil_commit(zfsvfs->z_log, 0)` if `zfsvfs->z_log` is
+    ///   present; it should always be present, because it's only set to `NULL`
+    ///   during `zfsvfs_teardown`.
+    ///
+    /// Quoth the `zil_commit` docstring:
+    ///
+    /// > If "foid" is zero, this means all "synchronous" and "asynchronous"
+    /// > txs, for all objects in the dataset, will be committed to stable
+    /// > storage prior to zil_commit() returning.
+    ///
+    /// The extents all live within the same dataset, so this is what we want!
+    #[cfg(feature = "omicron-build")]
+    fn flush_extents(
+        &mut self,
+        dirty_extents: &BTreeSet<ExtentId>,
+        flush_number: u64,
+        gen_number: u64,
+        job_id: JobId,
+    ) -> Result<(), CrucibleError> {
+        #[cfg(not(target_os = "illumos"))]
+        compile_error!("syncfs-based flush is only supported on illumos");
+        use std::os::fd::AsRawFd;
+
+        // Prepare to flush extents by writing metadata to files (if needed)
+        //
+        // Some extents may not _actually_ be dirty, so we'll skip them here
+        let mut flushed_extents = vec![];
+        let log = self.log.clone();
+        for eid in dirty_extents {
+            let extent = self.get_opened_extent_mut(*eid);
+            if extent.pre_flush(flush_number, gen_number, job_id, &log)? {
+                flushed_extents.push(*eid);
+            } else {
+                warn!(
+                    self.log,
+                    "extent {eid} was in dirty_extents but not actually dirty"
+                );
+            }
+        }
+
+        // Execute the syscall
+        let dir = self.dir.clone();
+
+        // Do the flush in a worker thread if possible, to avoid blocking the
+        // main tokio thread pool.
+        run_blocking(move || -> Result<(), CrucibleError> {
+            let file = File::open(&dir)?;
+            let rc = unsafe { syncfs(file.as_raw_fd()) };
+            if rc != 0 {
+                let e = nix::errno::Errno::from_raw(rc);
+                let e: std::io::Error = e.into();
+                Err(CrucibleError::from(e))
+            } else {
+                Ok(())
+            }
+        })?;
+
+        // After the bits have been committed to durable storage, execute any
+        // post flush routine that needs to happen
+        for eid in flushed_extents {
+            let extent = self.get_opened_extent_mut(eid);
+            extent.post_flush(flush_number, gen_number, job_id)?;
+        }
+
+        Ok(())
+    }
+
     /**
      * Create the copy directory for this extent.
      */
@@ -1106,6 +1197,11 @@ impl Region {
     pub fn read_only(&self) -> bool {
         self.read_only
     }
+}
+
+#[cfg(feature = "omicron-build")]
+extern "C" {
+    fn syncfs(fd: std::ffi::c_int) -> std::ffi::c_int;
 }
 
 /**
