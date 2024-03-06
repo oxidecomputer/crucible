@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 anyhow.workspace = true
 atty.workspace = true
+futures.workspace = true
 nix.workspace = true
 rusqlite.workspace = true
 rustls-pemfile.workspace = true
@@ -21,6 +22,7 @@ slog-dtrace.workspace = true
 slog-term.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tokio-rustls.workspace = true
 toml.workspace = true
 twox-hash.workspace = true

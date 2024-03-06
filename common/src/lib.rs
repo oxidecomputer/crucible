@@ -8,10 +8,16 @@ use std::path::Path;
 use ErrorKind::NotFound;
 
 use anyhow::{anyhow, bail, Context, Result};
+use futures::{
+    future::{ready, Either, Ready},
+    stream::FuturesOrdered,
+    StreamExt,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use slog::Drain;
 use tempfile::NamedTempFile;
+use tokio::sync::oneshot;
 
 mod region;
 pub use region::{
@@ -411,5 +417,89 @@ impl From<CrucibleError> for dropshot::HttpError {
                 dropshot::HttpError::for_internal_error(e.to_string())
             }
         }
+    }
+}
+
+/// Future stored in a [`DeferredQueue`]
+///
+/// This is either an immediately-ready `T` or a oneshot channel which returns a
+/// `T` when an off-task job finishes.
+type DeferredQueueFuture<T> =
+    Either<Ready<Result<T, oneshot::error::RecvError>>, oneshot::Receiver<T>>;
+
+/// A `DeferredQueue` stores pending work (optionally executed off-task)
+pub struct DeferredQueue<T> {
+    /// Ordered stream of deferred futures
+    stream: FuturesOrdered<DeferredQueueFuture<T>>,
+
+    /// Stores whether it is known that there are no futures in `self.stream`
+    ///
+    /// This is tracked separately because `FuturesOrdered::next` will
+    /// immediately return `None` if the queue is empty; we don't want that when
+    /// it's one of many options in a `tokio::select!`.
+    empty: bool,
+}
+
+impl<T> Default for DeferredQueue<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> DeferredQueue<T> {
+    /// Build a new empty `FuturesOrdered`
+    pub fn new() -> Self {
+        Self {
+            stream: FuturesOrdered::new(),
+            empty: true,
+        }
+    }
+
+    /// Stores a new future in the queue, marking it as non-empty
+    fn push_back(&mut self, f: DeferredQueueFuture<T>) {
+        self.stream.push_back(f);
+        self.empty = false;
+    }
+
+    /// Returns the next future from the queue
+    ///
+    /// If the future is `None`, then the queue is marked as empty
+    ///
+    /// This function is cancel safe: if a result is taken from the internal
+    /// `FuturesOrdered`, then it is guaranteed to be returned.
+    pub async fn next(&mut self) -> Option<T> {
+        // Early exit if we know the stream is empty
+        if self.empty {
+            return None;
+        }
+
+        // Cancel-safety: there can't be any yield points after this!
+        let t = self.stream.next().await;
+        self.empty |= t.is_none();
+
+        // The oneshot is managed by a worker thread, which should never be
+        // dropped, so we don't expect the oneshot to fail
+        t.map(|t| t.expect("oneshot failed"))
+    }
+
+    /// Stores a new future in the queue, marking it as non-empty
+    pub fn push_immediate(&mut self, t: T) {
+        self.push_back(Either::Left(ready(Ok(t))));
+    }
+
+    /// Stores a new pending oneshot in the queue, returning the sender
+    pub fn push_oneshot(&mut self) -> oneshot::Sender<T> {
+        let (rx, tx) = oneshot::channel();
+        self.push_back(Either::Right(tx));
+        rx
+    }
+
+    /// Check whether the queue is known to be empty
+    ///
+    /// It is possible for this to return `false` if the queue is actually
+    /// empty; in that case, a subsequent call to `next()` will return `None`
+    /// and *later* calls to `is_empty()` will return `true`.
+    pub fn is_empty(&self) -> bool {
+        self.empty
     }
 }
