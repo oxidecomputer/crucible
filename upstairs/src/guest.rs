@@ -934,6 +934,11 @@ impl GuestIoHandle {
     }
 
     #[cfg(test)]
+    pub fn disable_byte_backpressure(&mut self) {
+        self.backpressure_config.bytes_max_delay = Duration::ZERO;
+    }
+
+    #[cfg(test)]
     pub fn is_queue_backpressure_disabled(&self) -> bool {
         self.backpressure_config.queue_max_delay == Duration::ZERO
     }

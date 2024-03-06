@@ -2503,12 +2503,25 @@ impl Downstairs {
         client_id: ClientId,
         up_state: &UpstairsState,
     ) {
+        let byte_count = self.clients[client_id].total_bytes_outstanding();
         let work_count = self.clients[client_id].total_live_work();
-        if work_count > crate::IO_OUTSTANDING_MAX {
+        let failed = if work_count > crate::IO_OUTSTANDING_MAX_JOBS {
             warn!(
                 self.log,
-                "downstairs failed, too many outstanding jobs {}", work_count,
+                "downstairs failed, too many outstanding jobs {work_count}"
             );
+            true
+        } else if byte_count as u64 > crate::IO_OUTSTANDING_MAX_BYTES {
+            warn!(
+                self.log,
+                "downstairs failed, too many outstanding bytes {byte_count}"
+            );
+            true
+        } else {
+            false
+        };
+
+        if failed {
             self.skip_all_jobs(client_id);
             self.clients[client_id]
                 .fault(up_state, ClientStopReason::TooManyOutstandingJobs);
