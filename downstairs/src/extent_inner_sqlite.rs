@@ -54,12 +54,14 @@ impl ExtentInner for SqliteInner {
         &mut self,
         job_id: JobId,
         writes: &[crucible_protocol::Write],
+        ctxs: &[DownstairsBlockContext],
         only_write_unwritten: bool,
         iov_max: usize,
     ) -> Result<(), CrucibleError> {
         self.0.lock().unwrap().write(
             job_id,
             writes,
+            ctxs,
             only_write_unwritten,
             iov_max,
         )
@@ -383,9 +385,11 @@ impl SqliteMoreInner {
         &mut self,
         job_id: JobId,
         writes: &[crucible_protocol::Write],
+        ctxs: &[DownstairsBlockContext],
         only_write_unwritten: bool,
         iov_max: usize,
     ) -> Result<(), CrucibleError> {
+        assert_eq!(writes.len(), ctxs.len());
         for write in writes {
             check_input(self.extent_size, write.offset, &write.data)?;
         }
@@ -501,21 +505,13 @@ impl SqliteMoreInner {
         });
 
         let mut hashes_to_write = Vec::with_capacity(writes.len());
-        for write in writes {
+        for (write, ctx) in writes.iter().zip(ctxs.iter()) {
             if writes_to_skip.contains(&write.offset.value) {
                 hashes_to_write.push(None);
                 continue;
             }
 
-            // TODO it would be nice if we could profile what % of time we're
-            // spending on hashes locally vs sqlite
-            let on_disk_hash = integrity_hash(&[&write.data[..]]);
-
-            self.set_block_context(&DownstairsBlockContext {
-                block_context: write.block_context,
-                block: write.offset.value,
-                on_disk_hash,
-            })?;
+            self.set_block_context(ctx)?;
 
             // Worth some thought: this could happen inside
             // tx_set_block_context, if we passed a reference to dirty_blocks
@@ -527,7 +523,7 @@ impl SqliteMoreInner {
             // Could make another function that wraps tx_set_block_context
             // and handles this as well.
             self.dirty_blocks.insert(write.offset.value as usize, None);
-            hashes_to_write.push(Some(on_disk_hash));
+            hashes_to_write.push(Some(ctx.on_disk_hash));
         }
         tx.commit()?;
 
@@ -1626,7 +1622,12 @@ mod test {
                 hash,
             },
         };
-        inner.write(JobId(10), &[write], false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(10),
+            &[write],
+            false,
+            IOV_MAX_TEST,
+        )?;
 
         // We haven't flushed, but this should leave our context in place.
         inner.fully_rehash_and_clean_all_stale_contexts(false)?;
@@ -1646,7 +1647,12 @@ mod test {
                 data: data.clone(),
                 block_context,
             };
-            inner.write(JobId(20), &[write], true, IOV_MAX_TEST)?;
+            inner.write_without_precomputed_contexts(
+                JobId(20),
+                &[write],
+                true,
+                IOV_MAX_TEST,
+            )?;
 
             let read = ReadRequest {
                 eid: 0,
@@ -1680,7 +1686,12 @@ mod test {
                 data: data.clone(),
                 block_context,
             };
-            inner.write(JobId(30), &[write], true, IOV_MAX_TEST)?;
+            inner.write_without_precomputed_contexts(
+                JobId(30),
+                &[write],
+                true,
+                IOV_MAX_TEST,
+            )?;
 
             let read = ReadRequest {
                 eid: 0,
@@ -1746,7 +1757,12 @@ mod test {
                 data: data.clone(),
                 block_context,
             };
-            inner.write(JobId(30), &[write], true, IOV_MAX_TEST)?;
+            inner.write_without_precomputed_contexts(
+                JobId(30),
+                &[write],
+                true,
+                IOV_MAX_TEST,
+            )?;
 
             let read = ReadRequest {
                 eid: 0,

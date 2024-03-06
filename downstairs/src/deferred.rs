@@ -1,4 +1,5 @@
 // Copyright 2023 Oxide Computer Company
+use crate::extent::DownstairsBlockContext;
 use crucible_common::{integrity_hash, CrucibleError};
 use crucible_protocol::Message;
 
@@ -16,6 +17,7 @@ pub(crate) enum DeferredMessage {
 pub(crate) struct PrecomputedWrite {
     /// Checks whether incoming hashes are valid
     pub validate_hashes_result: Result<(), CrucibleError>,
+    pub block_contexts: Vec<DownstairsBlockContext>,
 }
 
 impl PrecomputedWrite {
@@ -23,15 +25,37 @@ impl PrecomputedWrite {
     pub(crate) fn empty() -> Self {
         PrecomputedWrite {
             validate_hashes_result: Ok(()),
+            block_contexts: vec![],
         }
     }
 
     /// Precomputes relevant data from a set of writes
     pub(crate) fn from_writes(writes: &[crucible_protocol::Write]) -> Self {
         let validate_hashes_result = Self::validate_hashes(writes);
+        let block_contexts = Self::compute_block_contexts(writes);
         PrecomputedWrite {
             validate_hashes_result,
+            block_contexts,
         }
+    }
+
+    fn compute_block_contexts(
+        writes: &[crucible_protocol::Write],
+    ) -> Vec<DownstairsBlockContext> {
+        writes
+            .iter()
+            .map(|write| {
+                // TODO it would be nice if we could profile what % of time we're
+                // spending on hashes locally vs writing to disk
+                let on_disk_hash = integrity_hash(&[&write.data[..]]);
+
+                DownstairsBlockContext {
+                    block_context: write.block_context,
+                    block: write.offset.value,
+                    on_disk_hash,
+                }
+            })
+            .collect()
     }
 
     fn validate_hashes(

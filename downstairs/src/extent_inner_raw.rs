@@ -152,9 +152,11 @@ impl ExtentInner for RawInner {
         &mut self,
         job_id: JobId,
         writes: &[crucible_protocol::Write],
+        ctxs: &[DownstairsBlockContext],
         only_write_unwritten: bool,
         iov_max: usize,
     ) -> Result<(), CrucibleError> {
+        assert_eq!(writes.len(), ctxs.len());
         // If the same block is written multiple times in a single write, then
         // (1) that's weird, and (2) we need to handle it specially.  To handle
         // such cases, we split the `writes` slice into sub-slices of unique
@@ -169,6 +171,7 @@ impl ExtentInner for RawInner {
                 self.write_without_overlaps(
                     job_id,
                     &writes[start..i],
+                    &ctxs[start..i],
                     only_write_unwritten,
                     iov_max,
                 )?;
@@ -998,13 +1001,18 @@ impl RawInner {
     /// first, then block data; if a single block is written multiple times,
     /// then we'd write multiple contexts, then multiple block data, and it
     /// would be possible for them to get out of sync.
+    ///
+    /// # Panics
+    /// If `writes.len() != ctxs.len()`
     fn write_without_overlaps(
         &mut self,
         job_id: JobId,
         writes: &[crucible_protocol::Write],
+        ctxs: &[DownstairsBlockContext],
         only_write_unwritten: bool,
         iov_max: usize,
     ) -> Result<(), CrucibleError> {
+        assert_eq!(writes.len(), ctxs.len());
         /*
          * In order to be crash consistent, perform the following steps in
          * order:
@@ -1109,18 +1117,11 @@ impl RawInner {
         // Compute block contexts, then write them to disk
         let block_ctx: Vec<_> = writes
             .iter()
-            .filter(|write| !writes_to_skip.contains(&write.offset.value))
-            .map(|write| {
-                // TODO it would be nice if we could profile what % of time we're
-                // spending on hashes locally vs writing to disk
-                let on_disk_hash = integrity_hash(&[&write.data[..]]);
-
-                DownstairsBlockContext {
-                    block_context: write.block_context,
-                    block: write.offset.value,
-                    on_disk_hash,
-                }
+            .zip(ctxs.iter())
+            .filter(|(write, _ctx)| {
+                !writes_to_skip.contains(&write.offset.value)
             })
+            .map(|(_write, ctx)| *ctx)
             .collect();
 
         self.set_block_contexts(&block_ctx)?;
@@ -1694,7 +1695,12 @@ mod test {
                 hash,
             },
         };
-        inner.write(JobId(10), &[write], false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(10),
+            &[write],
+            false,
+            IOV_MAX_TEST,
+        )?;
 
         // The context should be in place, though we haven't flushed yet
 
@@ -1713,7 +1719,12 @@ mod test {
                 data: data.clone(),
                 block_context,
             };
-            inner.write(JobId(20), &[write], true, IOV_MAX_TEST)?;
+            inner.write_without_precomputed_contexts(
+                JobId(20),
+                &[write],
+                true,
+                IOV_MAX_TEST,
+            )?;
 
             let read = ReadRequest {
                 eid: 0,
@@ -1747,7 +1758,12 @@ mod test {
                 data: data.clone(),
                 block_context,
             };
-            inner.write(JobId(30), &[write], true, IOV_MAX_TEST)?;
+            inner.write_without_precomputed_contexts(
+                JobId(30),
+                &[write],
+                true,
+                IOV_MAX_TEST,
+            )?;
 
             let read = ReadRequest {
                 eid: 0,
@@ -1796,28 +1812,48 @@ mod test {
             offset: Block::new_512(1),
             ..write.clone()
         };
-        inner.write(JobId(10), &[write1], false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(10),
+            &[write1],
+            false,
+            IOV_MAX_TEST,
+        )?;
         assert_eq!(inner.context_slot_dirty[0], 0b00);
         assert_eq!(inner.active_context[0], ContextSlot::A);
         assert_eq!(inner.context_slot_dirty[1], 0b10);
         assert_eq!(inner.active_context[1], ContextSlot::B);
 
         // The context should be written to block 0, slot B
-        inner.write(JobId(10), &[write.clone()], false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(10),
+            &[write.clone()],
+            false,
+            IOV_MAX_TEST,
+        )?;
         assert_eq!(inner.context_slot_dirty[0], 0b10);
         assert_eq!(inner.active_context[0], ContextSlot::B);
         assert_eq!(inner.context_slot_dirty[1], 0b10); // unchanged
         assert_eq!(inner.active_context[1], ContextSlot::B); // unchanged
 
         // The context should be written to block 0, slot A
-        inner.write(JobId(11), &[write.clone()], false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(11),
+            &[write.clone()],
+            false,
+            IOV_MAX_TEST,
+        )?;
         assert_eq!(inner.context_slot_dirty[0], 0b11);
         assert_eq!(inner.active_context[0], ContextSlot::A);
         assert_eq!(inner.context_slot_dirty[1], 0b10); // unchanged
         assert_eq!(inner.active_context[1], ContextSlot::B); // unchanged
 
         // The context should be written to slot B, forcing a sync
-        inner.write(JobId(12), &[write], false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(12),
+            &[write],
+            false,
+            IOV_MAX_TEST,
+        )?;
         assert_eq!(inner.context_slot_dirty[0], 0b10);
         assert_eq!(inner.active_context[0], ContextSlot::B);
         assert_eq!(inner.context_slot_dirty[1], 0b00);
@@ -1846,7 +1882,12 @@ mod test {
             },
         };
         // The context should be written to slot B
-        inner.write(JobId(10), &[write.clone()], false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(10),
+            &[write.clone()],
+            false,
+            IOV_MAX_TEST,
+        )?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
         assert_eq!(inner.context_slot_dirty[0], 0b10);
 
@@ -1856,17 +1897,32 @@ mod test {
         assert_eq!(inner.context_slot_dirty[0], 0b00);
 
         // The context should be written to slot A
-        inner.write(JobId(11), &[write.clone()], false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(11),
+            &[write.clone()],
+            false,
+            IOV_MAX_TEST,
+        )?;
         assert_eq!(inner.active_context[0], ContextSlot::A);
         assert_eq!(inner.context_slot_dirty[0], 0b01);
 
         // The context should be written to slot B
-        inner.write(JobId(12), &[write.clone()], false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(12),
+            &[write.clone()],
+            false,
+            IOV_MAX_TEST,
+        )?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
         assert_eq!(inner.context_slot_dirty[0], 0b11);
 
         // The context should be written to slot A, forcing a sync
-        inner.write(JobId(12), &[write.clone()], false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(12),
+            &[write.clone()],
+            false,
+            IOV_MAX_TEST,
+        )?;
         assert_eq!(inner.active_context[0], ContextSlot::A);
         assert_eq!(inner.context_slot_dirty[0], 0b01);
 
@@ -1893,12 +1949,22 @@ mod test {
             },
         };
         // The context should be written to slot B
-        inner.write(JobId(10), &[write.clone()], false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(10),
+            &[write.clone()],
+            false,
+            IOV_MAX_TEST,
+        )?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
         assert_eq!(inner.context_slot_dirty[0], 0b10);
 
         // The context should be written to slot A
-        inner.write(JobId(11), &[write.clone()], false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(11),
+            &[write.clone()],
+            false,
+            IOV_MAX_TEST,
+        )?;
         assert_eq!(inner.active_context[0], ContextSlot::A);
         assert_eq!(inner.context_slot_dirty[0], 0b11);
 
@@ -1908,17 +1974,32 @@ mod test {
         assert_eq!(inner.context_slot_dirty[0], 0b00);
 
         // The context should be written to slot B
-        inner.write(JobId(12), &[write.clone()], false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(12),
+            &[write.clone()],
+            false,
+            IOV_MAX_TEST,
+        )?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
         assert_eq!(inner.context_slot_dirty[0], 0b10);
 
         // The context should be written to slot A
-        inner.write(JobId(12), &[write.clone()], false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(12),
+            &[write.clone()],
+            false,
+            IOV_MAX_TEST,
+        )?;
         assert_eq!(inner.active_context[0], ContextSlot::A);
         assert_eq!(inner.context_slot_dirty[0], 0b11);
 
         // The context should be written to slot B, forcing a sync
-        inner.write(JobId(11), &[write.clone()], false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(11),
+            &[write.clone()],
+            false,
+            IOV_MAX_TEST,
+        )?;
         assert_eq!(inner.active_context[0], ContextSlot::B);
         assert_eq!(inner.context_slot_dirty[0], 0b10);
 
@@ -1970,7 +2051,12 @@ mod test {
                 data: data.clone(),
                 block_context,
             };
-            inner.write(JobId(30), &[write], true, IOV_MAX_TEST)?;
+            inner.write_without_precomputed_contexts(
+                JobId(30),
+                &[write],
+                true,
+                IOV_MAX_TEST,
+            )?;
 
             let read = ReadRequest {
                 eid: 0,
@@ -2013,7 +2099,12 @@ mod test {
                     hash,
                 },
             };
-            inner.write(JobId(30), &[write], false, IOV_MAX_TEST)?;
+            inner.write_without_precomputed_contexts(
+                JobId(30),
+                &[write],
+                false,
+                IOV_MAX_TEST,
+            )?;
         }
 
         for i in 0..10 {
@@ -2061,7 +2152,12 @@ mod test {
             writes.push(write);
         }
         // This write has toggled every single context slot
-        inner.write(JobId(30), &writes, false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(30),
+            &writes,
+            false,
+            IOV_MAX_TEST,
+        )?;
         for i in 0..10 {
             assert_eq!(
                 inner.active_context[i],
@@ -2113,7 +2209,12 @@ mod test {
                     hash,
                 },
             };
-            inner.write(JobId(30), &[write], false, IOV_MAX_TEST)?;
+            inner.write_without_precomputed_contexts(
+                JobId(30),
+                &[write],
+                false,
+                IOV_MAX_TEST,
+            )?;
         }
         // 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
         // --|---|---|---|---|---|---|---|---|---
@@ -2166,7 +2267,12 @@ mod test {
         // 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
         // --|---|---|---|---|---|---|---|---|---
         // A | B | A | B | A | B | B | B | B | B
-        inner.write(JobId(30), &writes, false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(30),
+            &writes,
+            false,
+            IOV_MAX_TEST,
+        )?;
         for i in 0..10 {
             assert_eq!(
                 inner.active_context[i],
@@ -2220,7 +2326,12 @@ mod test {
                     hash,
                 },
             };
-            inner.write(JobId(30), &[write], false, IOV_MAX_TEST)?;
+            inner.write_without_precomputed_contexts(
+                JobId(30),
+                &[write],
+                false,
+                IOV_MAX_TEST,
+            )?;
         }
         // 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
         // --|---|---|---|---|---|---|---|---|---
@@ -2269,8 +2380,18 @@ mod test {
             };
             writes.push(write);
         }
-        inner.write(JobId(30), &writes, false, IOV_MAX_TEST)?;
-        inner.write(JobId(30), &writes, false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(30),
+            &writes,
+            false,
+            IOV_MAX_TEST,
+        )?;
+        inner.write_without_precomputed_contexts(
+            JobId(30),
+            &writes,
+            false,
+            IOV_MAX_TEST,
+        )?;
         // This write should toggled every single context slot:
         // 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
         // --|---|---|---|---|---|---|---|---|---
@@ -2328,7 +2449,12 @@ mod test {
                     hash,
                 },
             };
-            inner.write(JobId(30), &[write], false, IOV_MAX_TEST)?;
+            inner.write_without_precomputed_contexts(
+                JobId(30),
+                &[write],
+                false,
+                IOV_MAX_TEST,
+            )?;
         }
         // 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
         // --|---|---|---|---|---|---|---|---|---
@@ -2377,8 +2503,18 @@ mod test {
             };
             writes.push(write);
         }
-        inner.write(JobId(30), &writes, false, IOV_MAX_TEST)?;
-        inner.write(JobId(30), &writes, false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(30),
+            &writes,
+            false,
+            IOV_MAX_TEST,
+        )?;
+        inner.write_without_precomputed_contexts(
+            JobId(30),
+            &writes,
+            false,
+            IOV_MAX_TEST,
+        )?;
         // This write should toggled every single context slot:
         // 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
         // --|---|---|---|---|---|---|---|---|---
@@ -2470,7 +2606,12 @@ mod test {
             .collect();
 
         assert_eq!(inner.context_slot_dirty[0], 0b00);
-        inner.write(JobId(30), &writes, false, IOV_MAX_TEST)?;
+        inner.write_without_precomputed_contexts(
+            JobId(30),
+            &writes,
+            false,
+            IOV_MAX_TEST,
+        )?;
 
         // The write should be split into four separate calls to
         // `write_without_overlaps`, triggering one bonus fsync.

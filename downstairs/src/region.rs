@@ -22,7 +22,8 @@ use crate::{
     deferred::PrecomputedWrite,
     extent::{
         copy_dir, extent_dir, extent_file_name, move_replacement_extent,
-        replace_dir, sync_path, Extent, ExtentMeta, ExtentState, ExtentType,
+        replace_dir, sync_path, DownstairsBlockContext, Extent, ExtentMeta,
+        ExtentState, ExtentType,
     },
 };
 
@@ -799,13 +800,16 @@ impl Region {
          * Batch writes so they can all be sent to the appropriate extent
          * together.
          */
-        let mut batched_writes: HashMap<usize, Vec<crucible_protocol::Write>> =
-            HashMap::new();
+        let mut batched_writes: HashMap<
+            usize,
+            (Vec<crucible_protocol::Write>, Vec<DownstairsBlockContext>),
+        > = HashMap::new();
 
-        for write in writes {
+        for (write, ctx) in writes.iter().zip(&precomputed.block_contexts) {
             let extent_vec =
                 batched_writes.entry(write.eid as usize).or_default();
-            extent_vec.push(write.clone());
+            extent_vec.0.push(write.clone());
+            extent_vec.1.push(*ctx);
         }
 
         if only_write_unwritten {
@@ -815,9 +819,9 @@ impl Region {
         }
         for eid in batched_writes.keys() {
             let extent = self.get_opened_extent_mut(*eid);
-            let writes = batched_writes.get(eid).unwrap();
+            let (writes, ctxs) = batched_writes.get(eid).unwrap();
             extent
-                .write(job_id, &writes[..], only_write_unwritten)
+                .write(job_id, &writes, &ctxs, only_write_unwritten)
                 .await?;
         }
 
