@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use crucible_common::{
     build_logger, crucible_bail, impacted_blocks::extent_from_offset,
-    integrity_hash, mkdir_for_file, Block, CrucibleError, RegionDefinition,
-    MAX_ACTIVE_COUNT, MAX_BLOCK_SIZE,
+    integrity_hash, mkdir_for_file, Block, CrucibleError, DeferredQueue,
+    RegionDefinition, MAX_ACTIVE_COUNT, MAX_BLOCK_SIZE,
 };
 use crucible_protocol::{
     BlockContext, CrucibleDecoder, CrucibleEncoder, JobId, Message,
@@ -43,6 +43,9 @@ mod extent;
 pub mod region;
 pub mod repair;
 mod stats;
+
+mod deferred;
+use deferred::DeferredMessage;
 
 mod extent_inner_raw;
 mod extent_inner_sqlite;
@@ -1218,6 +1221,7 @@ where
     // The lossy attribute currently does not change at runtime. To avoid
     // continually locking the downstairs, cache the result here.
     let lossy = ads.lock().await.lossy;
+    let mut deferred_msgs: DeferredQueue<DeferredMessage> = Default::default();
 
     loop {
         tokio::select! {
@@ -1302,6 +1306,22 @@ where
                     }
                 }
             }
+            m = deferred_msgs.next(), if !deferred_msgs.is_empty() => {
+                match m {
+                    Some(DeferredMessage::Other(msg)) => {
+                        if let Err(e) = message_channel_tx.send(msg).await {
+                            bail!(
+                                "Failed sending message to proc_frame: {}",
+                                e
+                            );
+                        }
+                    }
+                    None => {
+                        // Retrieving None should set the queue to empty
+                        assert!(deferred_msgs.is_empty());
+                    }
+                }
+            }
             new_read = fr.next() => {
                 match new_read {
                     None => {
@@ -1329,8 +1349,17 @@ where
                             if let Err(e) = resp_channel_tx.send(Message::Imok).await {
                                 bail!("Failed sending Imok: {}", e);
                             }
-                        } else if let Err(e) = message_channel_tx.send(msg).await {
-                            bail!("Failed sending message to proc_frame: {}", e);
+                        } else if deferred_msgs.is_empty() {
+                            if let Err(e) = message_channel_tx.send(msg).await {
+                                bail!(
+                                    "Failed sending message to proc_frame: {}",
+                                    e
+                                );
+                            }
+                        } else {
+                            deferred_msgs.push_immediate(
+                                DeferredMessage::Other(msg)
+                            );
                         }
                     }
                     Some(Err(e)) => {
