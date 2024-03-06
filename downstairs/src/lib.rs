@@ -1308,8 +1308,8 @@ where
             }
             m = deferred_msgs.next(), if !deferred_msgs.is_empty() => {
                 match m {
-                    Some(DeferredMessage::Other(msg)) => {
-                        if let Err(e) = message_channel_tx.send(msg).await {
+                    Some(d) => {
+                        if let Err(e) = message_channel_tx.send(d).await {
                             bail!(
                                 "Failed sending message to proc_frame: {}",
                                 e
@@ -1344,13 +1344,16 @@ where
                         return Ok(());
                     }
                     Some(Ok(msg)) => {
+                        let should_defer = !deferred_msgs.is_empty();
                         if matches!(msg, Message::Ruok) {
                             // Respond instantly to pings, don't wait.
                             if let Err(e) = resp_channel_tx.send(Message::Imok).await {
                                 bail!("Failed sending Imok: {}", e);
                             }
-                        } else if deferred_msgs.is_empty() {
-                            if let Err(e) = message_channel_tx.send(msg).await {
+                        } else if !should_defer {
+                            if let Err(e) = message_channel_tx.send(
+                                DeferredMessage::Other(msg)
+                            ).await {
                                 bail!(
                                     "Failed sending message to proc_frame: {}",
                                     e
@@ -2359,10 +2362,11 @@ impl Downstairs {
     async fn proc_frame(
         ad: &Mutex<Downstairs>,
         upstairs_connection: UpstairsConnection,
-        m: Message,
+        m: DeferredMessage,
         resp_tx: &mpsc::Sender<Message>,
     ) -> Result<Option<JobId>> {
         // Initial check against upstairs and session ID
+        let (m, _write_metadata) = m.into_parts();
         match m {
             Message::Write {
                 upstairs_id,

@@ -7,3 +7,15 @@ use crucible_protocol::Message;
 pub(crate) enum DeferredMessage {
     Other(Message),
 }
+
+/// TODO
+pub(crate) struct PrecomputedWrite;
+
+impl DeferredMessage {
+    /// Returns a reference to the original message
+    pub(crate) fn into_parts(self) -> (Message, Option<PrecomputedWrite>) {
+        match self {
+            DeferredMessage::Other(msg) => (msg, None),
+        }
+    }
+}
