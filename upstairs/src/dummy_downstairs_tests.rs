@@ -1980,7 +1980,7 @@ pub(crate) mod protocol_test {
 
         // Send enough bytes to hit the IO_OUTSTANDING_MAX_BYTES condition on
         // downstairs 1, which should mark it as faulted and kick it out.
-        let write_buf = Bytes::from(vec![1; 50 * 1024]); // 1 MiB
+        let write_buf = Bytes::from(vec![1; 50 * 1024]); // 50 KiB
         let num_jobs = IO_OUTSTANDING_MAX_BYTES as usize / write_buf.len() + 10;
         let mut job_ids = Vec::with_capacity(num_jobs);
         assert!(num_jobs < IO_OUTSTANDING_MAX_JOBS);
@@ -1989,7 +1989,7 @@ pub(crate) mod protocol_test {
             {
                 let harness = harness.clone();
 
-                // We must tokio::spawn here because `read` will wait for the
+                // We must tokio::spawn here because `write` will wait for the
                 // response to come back before returning
                 let write_buf = write_buf.clone();
                 tokio::spawn(async move {
@@ -2002,7 +2002,7 @@ pub(crate) mod protocol_test {
             }
 
             if i < MAX_ACTIVE_COUNT {
-                // Before flow control kicks in, assert we're seeing the read
+                // Before flow control kicks in, assert we're seeing the write
                 // requests
                 bail_assert!(matches!(
                     ds1_messages.recv().await.unwrap(),
@@ -2032,11 +2032,11 @@ pub(crate) mod protocol_test {
 
             match ds2_messages.recv().await.unwrap() {
                 Message::Write { job_id, .. } => {
-                    // Record the job ids of the read requests
+                    // Record the job ids of the write requests
                     job_ids.push(job_id);
                 }
 
-                _ => bail!("saw non read request!"),
+                _ => bail!("saw non write request!"),
             }
 
             bail_assert!(matches!(
@@ -2044,7 +2044,7 @@ pub(crate) mod protocol_test {
                 Message::Write { .. },
             ));
 
-            // Respond with read responses for downstairs 2 and 3
+            // Respond with write responses for downstairs 2 and 3
             harness
                 .ds2
                 .fw
