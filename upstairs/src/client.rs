@@ -2,13 +2,14 @@
 use crate::{
     cdt, deadline_secs, integrity_hash, live_repair::ExtentInfo,
     upstairs::UpstairsConfig, upstairs::UpstairsState, ClientIOStateCount,
-    ClientId, CrucibleDecoder, CrucibleEncoder, CrucibleError, DownstairsIO,
-    DsState, EncryptionContext, IOState, IOop, JobId, Message, RawMessage,
-    ReadResponse, ReconcileIO, RegionDefinitionStatus, RegionMetadata,
-    MAX_ACTIVE_COUNT,
+    ClientId, CrucibleDecoder, CrucibleError, DownstairsIO, DsState,
+    EncryptionContext, IOState, IOop, JobId, Message, RawMessage, ReadResponse,
+    ReconcileIO, RegionDefinitionStatus, RegionMetadata, MAX_ACTIVE_COUNT,
 };
 use crucible_common::x509::TLSContext;
-use crucible_protocol::{ReconciliationId, CRUCIBLE_MESSAGE_VERSION};
+use crucible_protocol::{
+    ReconciliationId, WireMessage, WireMessageWriter, CRUCIBLE_MESSAGE_VERSION,
+};
 
 use std::{
     collections::BTreeSet,
@@ -22,67 +23,17 @@ use std::{
 use futures::StreamExt;
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::{
-    io::AsyncWriteExt,
     net::{TcpSocket, TcpStream},
     sync::{mpsc, oneshot},
     time::{sleep_until, Duration},
 };
-use tokio_util::codec::{Encoder, FramedRead};
+use tokio_util::codec::FramedRead;
 use uuid::Uuid;
 
 const TIMEOUT_SECS: f32 = 50.0;
 const PING_INTERVAL_SECS: f32 = 5.0;
 
-#[derive(Debug)]
-pub(crate) enum ClientRequest {
-    /// Normal message to be sent down the wire
-    Message(Message),
-    /// Pre-serialized message to be sent down the wire
-    RawMessage(RawMessage, bytes::Bytes),
-}
-
-impl ClientRequest {
-    /// Write the given message to an `AsyncWrite` sink
-    async fn write<W>(&self, fw: &mut W) -> Result<(), CrucibleError>
-    where
-        W: tokio::io::AsyncWrite
-            + std::marker::Unpin
-            + std::marker::Send
-            + 'static,
-    {
-        match self {
-            ClientRequest::Message(m) => {
-                let mut out = bytes::BytesMut::new();
-                let mut e = CrucibleEncoder::new();
-                e.encode(m, &mut out)?;
-                fw.write_all(&out).await?;
-            }
-            ClientRequest::RawMessage(m, data) => {
-                // Manual implementation of CrucibleEncoder, for situations
-                // where the bulk of the message has already been
-                // pre-serialized.
-                let mut header = bincode::serialize(&(
-                    0u32, // dummy length, to be patched later
-                    &m,
-                ))
-                .unwrap();
-
-                // Patch the length
-                let len: u32 = (header.len() + data.len()).try_into().unwrap();
-                header[0..4].copy_from_slice(&len.to_le_bytes());
-
-                // Patch the discriminant
-                bincode::serialize_into(&mut header[4..8], &m.discriminant())
-                    .unwrap();
-
-                // write_all_vectored would save a syscall, but is nightly-only
-                fw.write_all(&header).await?;
-                fw.write_all(data).await?;
-            }
-        }
-        Ok(())
-    }
-}
+pub type ClientRequest = WireMessage<RawMessage>;
 
 /// Handle to a running I/O task
 ///
@@ -352,7 +303,7 @@ impl DownstairsClient {
 
     /// Send a `Message::HereIAm` via the client IO task
     pub(crate) async fn send_here_i_am(&mut self) {
-        self.send_message(Message::HereIAm {
+        self.send(Message::HereIAm {
             version: CRUCIBLE_MESSAGE_VERSION,
             upstairs_id: self.cfg.upstairs_id,
             session_id: self.cfg.session_id,
@@ -404,18 +355,15 @@ impl DownstairsClient {
         self.new_jobs.insert(work);
     }
 
-    pub(crate) async fn send_message(&mut self, m: Message) {
-        self.send(ClientRequest::Message(m)).await
-    }
-
-    pub(crate) async fn send(&mut self, m: ClientRequest) {
+    pub(crate) async fn send<M: Into<ClientRequest>>(&mut self, m: M) {
         // Normally, the client task continues running until
         // `self.client_task.client_request_tx` is dropped; as such, we should
         // always be able to send it a message.
         //
         // However, during Tokio shutdown, tasks may stop in arbitrary order.
         // We log an error but don't panic, because panicking is uncouth.
-        if let Err(e) = self.client_task.client_request_tx.send(m).await {
+        if let Err(e) = self.client_task.client_request_tx.send(m.into()).await
+        {
             error!(
                 self.log,
                 "failed to send message: {e};
@@ -869,7 +817,7 @@ impl DownstairsClient {
                 // If the client task has stopped, then print a warning but
                 // otherwise continue (because we'll be cleaned up by the
                 // JoinHandle watcher).
-                self.send_message(Message::PromoteToActive {
+                self.send(Message::PromoteToActive {
                     upstairs_id: self.cfg.upstairs_id,
                     session_id: self.cfg.session_id,
                     gen: self.cfg.generation(),
@@ -1767,7 +1715,7 @@ impl DownstairsClient {
                 self.repair_addr = Some(repair_addr);
                 match self.promote_state {
                     Some(PromoteState::Waiting) => {
-                        self.send_message(Message::PromoteToActive {
+                        self.send(Message::PromoteToActive {
                             upstairs_id: self.cfg.upstairs_id,
                             session_id: self.cfg.session_id,
                             gen: self.cfg.generation(),
@@ -1906,7 +1854,7 @@ impl DownstairsClient {
                 }
 
                 self.negotiation_state = NegotiationState::WaitForRegionInfo;
-                self.send_message(Message::RegionInfoPlease).await;
+                self.send(Message::RegionInfoPlease).await;
             }
             Message::RegionInfo { region_def } => {
                 if self.negotiation_state != NegotiationState::WaitForRegionInfo
@@ -2037,7 +1985,7 @@ impl DownstairsClient {
                         );
                         self.negotiation_state = NegotiationState::GetLastFlush;
 
-                        self.send_message(Message::LastFlush {
+                        self.send(Message::LastFlush {
                             last_flush_number: lf,
                         })
                         .await;
@@ -2050,7 +1998,7 @@ impl DownstairsClient {
                          */
                         self.negotiation_state =
                             NegotiationState::GetExtentVersions;
-                        self.send_message(Message::ExtentVersionsPlease).await;
+                        self.send(Message::ExtentVersionsPlease).await;
                     }
                     DsState::Replacing => {
                         warn!(
@@ -2207,7 +2155,7 @@ impl DownstairsClient {
                 assert!(!dest_clients.is_empty());
                 if dest_clients.iter().any(|d| *d == self.client_id) {
                     info!(self.log, "sending reconcile request {repair_id:?}");
-                    self.send_message(job.op.clone()).await;
+                    self.send(job.op.clone()).await;
                 } else {
                     // Skip this job for this Downstairs, since only the target
                     // clients need to do the reconcile.
@@ -2224,7 +2172,7 @@ impl DownstairsClient {
             } => {
                 if *client_id == self.client_id {
                     info!(self.log, "sending flush request {repair_id:?}");
-                    self.send_message(job.op.clone()).await;
+                    self.send(job.op.clone()).await;
                 } else {
                     info!(self.log, "skipping flush request {repair_id:?}");
                     // Skip this job for this Downstairs, since it's narrowly
@@ -2236,7 +2184,7 @@ impl DownstairsClient {
             }
             Message::ExtentReopen { .. } | Message::ExtentClose { .. } => {
                 // All other reconcile ops are sent as-is
-                self.send_message(job.op.clone()).await;
+                self.send(job.op.clone()).await;
             }
             m => panic!("invalid reconciliation request {m:?}"),
         }
@@ -2648,18 +2596,20 @@ impl ClientIoTask {
             let sock = connector.connect(server_name, tcp).await.unwrap();
             let (read, write) = tokio::io::split(sock);
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            self.cmd_loop(fr, write).await
+            let fw = WireMessageWriter::new(write);
+            self.cmd_loop(fr, fw).await
         } else {
             let (read, write) = tcp.into_split();
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            self.cmd_loop(fr, write).await
+            let fw = WireMessageWriter::new(write);
+            self.cmd_loop(fr, fw).await
         }
     }
 
     async fn cmd_loop<R, W>(
         &mut self,
         fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
-        mut fw: W,
+        mut fw: WireMessageWriter<W, RawMessage>,
     ) -> ClientRunResult
     where
         R: tokio::io::AsyncRead
@@ -2753,7 +2703,7 @@ impl ClientIoTask {
     /// stop immediately.
     async fn write<W>(
         &mut self,
-        fw: &mut W,
+        fw: &mut WireMessageWriter<W, RawMessage>,
         m: ClientRequest,
     ) -> Result<(), ClientRunResult>
     where
@@ -2783,7 +2733,7 @@ impl ClientIoTask {
         // There's some duplication between this function and `cmd_loop` above,
         // but it's not obvious whether there's a cleaner way to organize stuff.
         tokio::select! {
-            r = m.write(fw) => {
+            r = fw.send(m) => {
                 if let Err(e) = r {
                     Err(ClientRunResult::WriteFailed(e.into()))
                 } else {
@@ -3522,11 +3472,12 @@ mod test {
         );
 
         // Write the raw message to an in-memory buffer
-        let mut cursor = std::io::Cursor::new(vec![]);
-        msg.write(&mut cursor).await.unwrap();
+        let cursor = std::io::Cursor::new(vec![]);
+        let mut w = WireMessageWriter::new(cursor);
+        w.send(msg).await.unwrap();
 
         let mut out = bytes::BytesMut::new();
-        out.extend(cursor.into_inner());
+        out.extend(w.into_inner().into_inner());
 
         let mut decoder = CrucibleDecoder::new();
         let out = decoder.decode(&mut out).unwrap().unwrap();
@@ -3622,11 +3573,12 @@ mod test {
         );
 
         // Write the raw message to an in-memory buffer
-        let mut cursor = std::io::Cursor::new(vec![]);
-        msg.write(&mut cursor).await.unwrap();
+        let cursor = std::io::Cursor::new(vec![]);
+        let mut w = WireMessageWriter::new(cursor);
+        w.send(msg).await.unwrap();
 
         let mut out = bytes::BytesMut::new();
-        out.extend(cursor.into_inner());
+        out.extend(w.into_inner().into_inner());
 
         let mut decoder = CrucibleDecoder::new();
         let out = decoder.decode(&mut out).unwrap().unwrap();

@@ -674,6 +674,125 @@ impl Message {
     }
 }
 
+/// Message to be sent down the wire
+#[derive(Debug)]
+pub enum WireMessage<M> {
+    /// Normal message to be sent down the wire
+    ///
+    /// This is serialized with the existing [`CrucibleEncoder`]
+    Message(Message),
+
+    /// Pre-serialized message to be sent down the wire
+    ///
+    /// This is sent by sending
+    /// - total len (u32)
+    /// - M (serialized with bincode)
+    /// - The raw contents of the byte array
+    ///
+    /// The values of `M` and the byte array must match the equivalent
+    /// [`Message`] serialized with a [`CrucibleEncoder`].
+    RawMessage(M, bytes::Bytes),
+}
+
+impl<M> From<Message> for WireMessage<M> {
+    fn from(m: Message) -> Self {
+        WireMessage::Message(m)
+    }
+}
+
+/// Trait for a type that can be used in `WireMessage::RawMessage`
+pub trait RawMessageDiscriminant {
+    fn discriminant(&self) -> MessageDiscriminants;
+}
+
+/// Writer to encode and send a `WireMessage`
+pub struct WireMessageWriter<W, T> {
+    writer: W,
+
+    /// Scratch space for `Message` encoding
+    scratch: BytesMut,
+
+    /// Scratch space for the raw header
+    header: Vec<u8>,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<W, T> WireMessageWriter<W, T>
+where
+    W: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
+    T: Serialize + RawMessageDiscriminant,
+{
+    /// Builds a new `WireMessageWriter`
+    #[inline]
+    pub fn new(writer: W) -> Self {
+        Self {
+            writer,
+            scratch: BytesMut::new(),
+            header: vec![],
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Removes the inner type
+    #[inline]
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+
+    /// Sends the given message down the wire
+    #[inline]
+    pub async fn send<M: Into<WireMessage<T>>>(
+        &mut self,
+        m: M,
+    ) -> Result<(), CrucibleError> {
+        use tokio::io::AsyncWriteExt;
+        let m = m.into();
+        match m {
+            WireMessage::Message(m) => {
+                // Serialize into our local BytesMut, to avoid allocation churn
+                self.scratch.clear();
+                let mut e = CrucibleEncoder::new();
+                e.encode(m, &mut self.scratch)?;
+                self.writer.write_all(&self.scratch).await?;
+            }
+            WireMessage::RawMessage(m, data) => {
+                // Manual implementation of CrucibleEncoder, for situations
+                // where the bulk of the message has already been
+                // pre-serialized.
+
+                // Write the length + M into our header scratch space
+                self.header.clear();
+                let mut cursor = std::io::Cursor::new(&mut self.header);
+                bincode::serialize_into(
+                    &mut cursor,
+                    &(
+                        0u32, // dummy length, to be patched later
+                        &m,
+                    ),
+                )
+                .unwrap();
+
+                // Patch the length
+                let len: u32 =
+                    (self.header.len() + data.len()).try_into().unwrap();
+                self.header[0..4].copy_from_slice(&len.to_le_bytes());
+
+                // Patch the discriminant in the header
+                bincode::serialize_into(
+                    &mut self.header[4..8],
+                    &m.discriminant(),
+                )
+                .unwrap();
+
+                // write_all_vectored would save a syscall, but is nightly-only
+                self.writer.write_all(&self.header).await?;
+                self.writer.write_all(&data).await?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub struct CrucibleEncoder {}
 
