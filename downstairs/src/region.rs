@@ -18,9 +18,12 @@ use crucible_protocol::SnapshotDetails;
 use repair_client::Client;
 
 use super::*;
-use crate::extent::{
-    copy_dir, extent_dir, extent_file_name, move_replacement_extent,
-    replace_dir, sync_path, Extent, ExtentMeta, ExtentState, ExtentType,
+use crate::{
+    deferred::PrecomputedWrite,
+    extent::{
+        copy_dir, extent_dir, extent_file_name, move_replacement_extent,
+        replace_dir, sync_path, Extent, ExtentMeta, ExtentState, ExtentType,
+    },
 };
 
 /**
@@ -791,6 +794,19 @@ impl Region {
     pub async fn region_write(
         &mut self,
         writes: &[crucible_protocol::Write],
+        job_id: JobId,
+        only_write_unwritten: bool,
+    ) -> Result<(), CrucibleError> {
+        let pre = PrecomputedWrite::from_writes(writes);
+        self.region_write_pre(writes, &pre, job_id, only_write_unwritten)
+            .await
+    }
+
+    #[instrument]
+    pub async fn region_write_pre(
+        &mut self,
+        writes: &[crucible_protocol::Write],
+        precomputed: &PrecomputedWrite,
         job_id: JobId,
         only_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {

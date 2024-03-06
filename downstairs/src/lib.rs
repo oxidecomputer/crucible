@@ -45,7 +45,7 @@ pub mod repair;
 mod stats;
 
 mod deferred;
-use deferred::DeferredMessage;
+use deferred::{DeferredMessage, PrecomputedWrite};
 
 mod extent_inner_raw;
 mod extent_inner_sqlite;
@@ -70,10 +70,12 @@ enum IOop {
     Write {
         dependencies: Vec<JobId>, // Jobs that must finish before this
         writes: Vec<crucible_protocol::Write>,
+        pre: PrecomputedWrite,
     },
     WriteUnwritten {
         dependencies: Vec<JobId>, // Jobs that must finish before this
         writes: Vec<crucible_protocol::Write>,
+        pre: PrecomputedWrite,
     },
     Read {
         dependencies: Vec<JobId>, // Jobs that must finish before this
@@ -1350,6 +1352,23 @@ where
                             if let Err(e) = resp_channel_tx.send(Message::Imok).await {
                                 bail!("Failed sending Imok: {}", e);
                             }
+                        } else if matches!(msg,
+                                           Message::Write { .. } |
+                                           Message::WriteUnwritten { .. }) {
+                            // Defer the precomputation of write hashes to the
+                            // rayon thread pool, to spare the tokio tasks.
+                            let tx = deferred_msgs.push_oneshot();
+                            rayon::spawn(move || {
+                                let pre = match &msg {
+                                    Message::Write { writes, .. } |
+                                    Message::WriteUnwritten { writes, .. } => {
+                                        PrecomputedWrite::from_writes(writes)
+                                    }
+                                    _ => unreachable!(), // checked above
+                                };
+                                let _ = tx.send(
+                                    DeferredMessage::Write(msg, pre));
+                            });
                         } else if !should_defer {
                             if let Err(e) = message_channel_tx.send(
                                 DeferredMessage::Other(msg)
@@ -1721,7 +1740,7 @@ impl Downstairs {
                     responses,
                 }))
             }
-            IOop::WriteUnwritten { writes, .. } => {
+            IOop::WriteUnwritten { writes, pre, .. } => {
                 /*
                  * Any error from an IO should be intercepted here and passed
                  * back to the upstairs.
@@ -1735,7 +1754,9 @@ impl Downstairs {
                 } else {
                     // The region_write will handle what happens to each block
                     // based on if they have data or not.
-                    self.region.region_write(writes, job_id, true).await
+                    self.region
+                        .region_write_pre(writes, pre, job_id, true)
+                        .await
                 };
 
                 Ok(Some(Message::WriteUnwrittenAck {
@@ -1748,6 +1769,7 @@ impl Downstairs {
             IOop::Write {
                 dependencies,
                 writes,
+                pre,
             } => {
                 let result = if self.write_errors && random() && random() {
                     warn!(self.log, "returning error on write!");
@@ -1756,7 +1778,9 @@ impl Downstairs {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    self.region.region_write(writes, job_id, false).await
+                    self.region
+                        .region_write_pre(writes, pre, job_id, false)
+                        .await
                 };
                 debug!(
                     self.log,
@@ -2366,7 +2390,7 @@ impl Downstairs {
         resp_tx: &mpsc::Sender<Message>,
     ) -> Result<Option<JobId>> {
         // Initial check against upstairs and session ID
-        let (m, _write_metadata) = m.into_parts();
+        let (m, write_metadata) = m.into_parts();
         match m {
             Message::Write {
                 upstairs_id,
@@ -2439,6 +2463,7 @@ impl Downstairs {
                 let new_write = IOop::Write {
                     dependencies,
                     writes,
+                    pre: write_metadata.expect("must have write metadata"),
                 };
 
                 let mut d = ad.lock().await;
@@ -2479,6 +2504,7 @@ impl Downstairs {
                 let new_write = IOop::WriteUnwritten {
                     dependencies,
                     writes,
+                    pre: write_metadata.expect("must have write metadata"),
                 };
 
                 let mut d = ad.lock().await;
@@ -3466,6 +3492,7 @@ mod test {
         );
     }
 
+    #[cfg(test)]
     fn add_work_rf(
         work: &mut Work,
         upstairs_connection: UpstairsConnection,
@@ -3480,6 +3507,7 @@ mod test {
                 work: IOop::WriteUnwritten {
                     dependencies: deps,
                     writes: Vec::with_capacity(1),
+                    pre: PrecomputedWrite::empty(),
                 },
                 state: WorkState::New,
             },
@@ -3981,6 +4009,7 @@ mod test {
         let writes = create_generic_test_write(eid);
         let rio = IOop::Write {
             dependencies: Vec::new(),
+            pre: PrecomputedWrite::from_writes(&writes),
             writes,
         };
         ds.add_work(upstairs_connection, JobId(1000), rio)?;
@@ -4000,6 +4029,7 @@ mod test {
 
         let rio = IOop::Write {
             dependencies: vec![JobId(1000), JobId(1001)],
+            pre: PrecomputedWrite::from_writes(&writes),
             writes,
         };
         ds.add_work(upstairs_connection, JobId(1002), rio)?;
@@ -4101,6 +4131,7 @@ mod test {
         let writes = create_generic_test_write(eid);
         let rio = IOop::Write {
             dependencies: Vec::new(),
+            pre: PrecomputedWrite::from_writes(&writes),
             writes,
         };
         ds.add_work(upstairs_connection, JobId(1000), rio)?;
@@ -4211,6 +4242,7 @@ mod test {
         let writes = create_generic_test_write(eid);
         let rio = IOop::Write {
             dependencies: Vec::new(),
+            pre: PrecomputedWrite::from_writes(&writes),
             writes,
         };
         ds.add_work(upstairs_connection, JobId(1000), rio)?;
@@ -4322,6 +4354,7 @@ mod test {
         let writes = create_generic_test_write(eid_one);
         let rio = IOop::Write {
             dependencies: Vec::new(),
+            pre: PrecomputedWrite::from_writes(&writes),
             writes,
         };
         ds.add_work(upstairs_connection, JobId(1000), rio)?;
@@ -4330,6 +4363,7 @@ mod test {
         let writes = create_generic_test_write(eid_two);
         let rio = IOop::Write {
             dependencies: Vec::new(),
+            pre: PrecomputedWrite::from_writes(&writes),
             writes,
         };
         ds.add_work(upstairs_connection, JobId(1001), rio)?;
