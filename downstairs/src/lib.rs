@@ -327,7 +327,10 @@ pub async fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
         }
 
         // We have no job ID, so it makes no sense for accounting.
-        region.region_write(&writes, JobId(0), false).await?;
+        let pre = PrecomputedWrite::from_writes(&writes);
+        region
+            .region_write_pre(&writes, &pre, JobId(0), false)
+            .await?;
 
         assert_eq!(nblocks, pos);
         assert_eq!(total, pos.bytes());
@@ -1164,9 +1167,13 @@ where
      *        │  │              │                  │
      *   ┌────▼──┴─┐ message   ┌┴──────┐  job     ┌┴────────┐
      *   │resp_loop├──────────►│pf_task├─────────►│ dw_task │
-     *   └─────────┘ channel   └──┬────┘ channel  └▲────────┘
+     *   └──┬───▲──┘ channel   └──┬────┘ channel  └▲────────┘
+     *      │   │                 │                │
+     * defer│   │oneshot          │                │
+     *     ┌▼───┴┐                │                │
+     *     │rayon│             add│work         new│work
+     *     └─────┘                │                │
      *                            │                │
-     *                         add│work         new│work
      *   per-connection           │                │
      *  ========================= │ ============== │ ===============
      *   shared state          ┌──▼────────────────┴────────────┐

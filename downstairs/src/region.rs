@@ -764,6 +764,10 @@ impl Region {
         Ok(result)
     }
 
+    /// Perform a region write, without precomputed data
+    ///
+    /// This is only allowed in unit tests
+    #[cfg(test)]
     #[instrument]
     pub async fn region_write(
         &mut self,
@@ -821,7 +825,7 @@ impl Region {
             let extent = self.get_opened_extent_mut(*eid);
             let (writes, ctxs) = batched_writes.get(eid).unwrap();
             extent
-                .write(job_id, &writes, &ctxs, only_write_unwritten)
+                .write(job_id, writes, ctxs, only_write_unwritten)
                 .await?;
         }
 
