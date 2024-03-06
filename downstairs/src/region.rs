@@ -763,33 +763,6 @@ impl Region {
         Ok(result)
     }
 
-    pub fn validate_hashes(
-        &self,
-        writes: &[crucible_protocol::Write],
-    ) -> Result<(), CrucibleError> {
-        for write in writes {
-            let computed_hash = if let Some(encryption_context) =
-                &write.block_context.encryption_context
-            {
-                integrity_hash(&[
-                    &encryption_context.nonce[..],
-                    &encryption_context.tag[..],
-                    &write.data[..],
-                ])
-            } else {
-                integrity_hash(&[&write.data[..]])
-            };
-
-            if computed_hash != write.block_context.hash {
-                error!(self.log, "Failed write hash validation");
-                // TODO: print out the extent and block where this failed!!
-                crucible_bail!(HashMismatch);
-            }
-        }
-
-        Ok(())
-    }
-
     #[instrument]
     pub async fn region_write(
         &mut self,
@@ -817,7 +790,10 @@ impl Region {
         /*
          * Before anything, validate hashes
          */
-        self.validate_hashes(writes)?;
+        if let Err(e) = &precomputed.validate_hashes_result {
+            error!(self.log, "Failed write hash validation");
+            return Err(e.clone());
+        }
 
         /*
          * Batch writes so they can all be sent to the appropriate extent
