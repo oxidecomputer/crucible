@@ -2030,9 +2030,10 @@ impl Upstairs {
             .map(|c| c.total_live_work())
             .max()
             .unwrap_or(0);
-        let ratio = dsw_max as f64 / crate::IO_OUTSTANDING_MAX_JOBS as f64;
-        self.guest
-            .set_backpressure(self.downstairs.write_bytes_outstanding(), ratio);
+        self.guest.set_backpressure(
+            self.downstairs.write_bytes_outstanding(),
+            dsw_max as u64,
+        );
 
         self.downstairs.set_client_backpressure();
     }

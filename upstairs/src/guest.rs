@@ -332,17 +332,15 @@ pub struct Guest {
 /// otherwise acked immediately, before actually being complete).  The delay is
 /// varied based on two metrics:
 ///
-/// - number of write bytes outstanding
+/// - number of write bytes outstanding (as a fraction of max)
 /// - queue length as a fraction (where 1.0 is full)
 ///
 /// These two metrics are used for quadratic backpressure, picking the larger of
 /// the two delays.
 #[derive(Copy, Clone, Debug)]
 struct BackpressureConfig {
-    /// When should backpressure start (in bytes)?
-    bytes_start: u64,
-    /// Scale for byte-based quadratic backpressure
-    bytes_scale: f64,
+    /// When should backpressure start?
+    bytes_start: f64,
     /// Maximum bytes-based backpressure
     bytes_max_delay: Duration,
 
@@ -396,8 +394,7 @@ impl Guest {
             backpressure_us: backpressure_us.clone(),
             backpressure_config: BackpressureConfig {
                 // Byte-based backpressure
-                bytes_start: 100 * 1024u64.pow(2), // Start at 100 MiB
-                bytes_scale: 6e-8, // Delay of 15ms at 2 GiB in-flight
+                bytes_start: 0.05,
                 bytes_max_delay: Duration::from_millis(15),
 
                 // Queue-based backpressure
@@ -944,30 +941,36 @@ impl GuestIoHandle {
     }
 
     /// Set `self.backpressure_us` based on outstanding IO ratio
-    pub fn set_backpressure(&self, bytes: u64, ratio: f64) {
+    pub fn set_backpressure(&self, bytes: u64, jobs: u64) {
+        let jobs_frac = jobs as f64 / crate::IO_OUTSTANDING_MAX_JOBS as f64;
+        let bytes_frac = bytes as f64 / crate::IO_OUTSTANDING_MAX_BYTES as f64;
+
         // Check to see if the number of outstanding write bytes (between
         // the upstairs and downstairs) is particularly high.  If so,
         // apply some backpressure by delaying host operations, with a
         // quadratically-increasing delay.
-        let d1 = (self.backpressure_config.bytes_max_delay.as_micros() as u64)
-            .min(
-                (bytes.saturating_sub(self.backpressure_config.bytes_start)
-                    as f64
-                    * self.backpressure_config.bytes_scale)
-                    .powf(2.0) as u64,
-            );
+        let delay_bytes = self
+            .backpressure_config
+            .bytes_max_delay
+            .mul_f64(
+                ((bytes_frac - self.backpressure_config.bytes_start).max(0.0)
+                    / (1.0 - self.backpressure_config.bytes_start))
+                    .powf(2.0),
+            )
+            .as_micros() as u64;
 
         // Compute an alternate delay based on queue length
-        let d2 = self
+        let delay_jobs = self
             .backpressure_config
             .queue_max_delay
             .mul_f64(
-                ((ratio - self.backpressure_config.queue_start).max(0.0)
+                ((jobs_frac - self.backpressure_config.queue_start).max(0.0)
                     / (1.0 - self.backpressure_config.queue_start))
                     .powf(2.0),
             )
             .as_micros() as u64;
-        self.backpressure_us.store(d1.max(d2), Ordering::SeqCst);
+        self.backpressure_us
+            .store(delay_jobs.max(delay_bytes), Ordering::SeqCst);
     }
 
     pub fn set_iop_limit(&mut self, bytes_per_iop: usize, limit: usize) {
