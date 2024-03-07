@@ -1816,10 +1816,7 @@ impl Upstairs {
                 .iter()
                 .any(|c| c.state() != DsState::WaitQuorum);
             if not_ready {
-                info!(
-                    self.log,
-                    "Waiting for {} more clients to be ready", not_ready
-                );
+                info!(self.log, "Waiting for more clients to be ready");
                 return false;
             }
 
