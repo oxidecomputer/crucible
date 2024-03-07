@@ -2346,6 +2346,9 @@ pub(crate) enum ClientStopReason {
     /// Too many jobs in the queue
     TooManyOutstandingJobs,
 
+    /// Too many bytes in the queue
+    TooManyOutstandingBytes,
+
     /// The upstairs has requested that we deactivate
     Deactivated,
 }
