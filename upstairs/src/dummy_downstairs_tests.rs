@@ -3123,7 +3123,6 @@ pub(crate) mod protocol_test {
         // will also fail, because we're still in deactivating.
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         assert_eq!(reconnected.load(Ordering::Acquire), RECONNECT_TRYING);
-        println!("MATT activate 1");
         assert!(harness.guest.activate().await.is_err());
 
         // Finish deactivation on ds2 / ds3
@@ -3136,7 +3135,6 @@ pub(crate) mod protocol_test {
             .await
             .unwrap();
         assert_eq!(reconnected.load(Ordering::Acquire), RECONNECT_TRYING);
-        println!("MATT activate call");
         assert!(harness.guest.activate().await.is_err());
         harness
             .ds3
