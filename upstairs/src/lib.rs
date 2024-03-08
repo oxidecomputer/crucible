@@ -1550,38 +1550,37 @@ impl fmt::Display for AckStatus {
 #[derive(Debug, PartialEq, Default)]
 pub struct Buffer {
     block_size: usize,
-    data: Vec<u8>,
+    data: BytesMut,
 
-    /// Per-block ownership data
+    /// Per-block ownership data, using 0 = false and 1 = true
     ///
     /// `owned.len() == data.len() / block_size`
-    owned: Vec<bool>,
+    owned: BytesMut,
 }
 
 impl Buffer {
     pub fn new(block_count: usize, block_size: usize) -> Buffer {
-        let len = block_count * block_size;
-        Buffer {
-            block_size,
-            data: vec![0; len],
-            owned: vec![false; block_count],
-        }
+        Self::repeat(0, block_count, block_size)
     }
 
     /// Builds a new buffer that repeats the given value
     pub fn repeat(v: u8, block_count: usize, block_size: usize) -> Self {
         let len = block_count * block_size;
+        let mut data = BytesMut::with_capacity(len);
+        data.resize(len, v);
+        let mut owned = BytesMut::with_capacity(block_count);
+        owned.resize(block_count, 0);
         Buffer {
             block_size,
-            data: vec![v; len],
-            owned: vec![false; block_count],
+            data,
+            owned,
         }
     }
 
     pub fn with_capacity(block_count: usize, block_size: usize) -> Buffer {
         let len = block_count * block_size;
-        let data = Vec::with_capacity(len);
-        let owned = Vec::with_capacity(block_count);
+        let data = BytesMut::with_capacity(len);
+        let owned = BytesMut::with_capacity(block_count);
 
         Buffer {
             block_size,
@@ -1590,9 +1589,15 @@ impl Buffer {
         }
     }
 
-    /// Extract the underlying `Vec<u8>` bearing buffered data.
+    /// Extracts and freezes the underlying `BytesMut` bearing buffered data.
     #[must_use]
-    pub fn into_vec(self) -> Vec<u8> {
+    pub fn into_bytes(self) -> Bytes {
+        self.data.freeze()
+    }
+
+    /// Extracts the underlying `BytesMut`
+    #[must_use]
+    pub fn into_bytes_mut(self) -> BytesMut {
         self.data
     }
 
@@ -1619,7 +1624,7 @@ impl Buffer {
 
         self.data[offset..][..data.len()].copy_from_slice(data);
         self.owned[offset / self.block_size..][..data.len() / self.block_size]
-            .fill(true);
+            .fill(1);
     }
 
     /// Writes data to the buffer where `owned` is true
@@ -1649,7 +1654,7 @@ impl Buffer {
             debug_assert_eq!(chunk.len(), self.block_size);
             if owned[b] {
                 let block = start_block + b;
-                self.owned[block] = true;
+                self.owned[block] = 1;
                 self.block_mut(block).copy_from_slice(chunk);
             }
         }
@@ -1675,7 +1680,7 @@ impl Buffer {
         assert_eq!(response.data.len(), self.block_size);
         if !response.block_contexts.is_empty() {
             let block = offset / self.block_size;
-            self.owned[block] = true;
+            self.owned[block] = 1;
             self.block_mut(block).copy_from_slice(&response.data);
         }
     }
@@ -1700,17 +1705,18 @@ impl Buffer {
         for (b, chunk) in data.chunks_mut(self.block_size).enumerate() {
             debug_assert_eq!(chunk.len(), self.block_size);
             let block = start_block + b;
-            if self.owned[block] {
+            if self.owned[block] != 0 {
                 chunk.copy_from_slice(self.block(block));
             }
         }
     }
 
-    /// Consumes the buffer and returns a `Bytes` object
+    /// Consumes the buffer and returns a `Vec<u8>` object
     ///
-    /// The allocation from the `Vec<u8>` is reused for efficiency
-    pub fn into_bytes(self) -> Bytes {
-        Bytes::from(self.data)
+    /// This is inefficient and should only be used during testing
+    #[cfg(test)]
+    pub fn into_vec(self) -> Vec<u8> {
+        self.data.into_iter().collect()
     }
 
     /// Consume and layer buffer contents on top of this one
@@ -1731,7 +1737,7 @@ impl Buffer {
         for (b, (owned, chunk)) in buffer.blocks().enumerate() {
             if owned {
                 let block = start_block + b;
-                self.owned[block] = true;
+                self.owned[block] = 1;
                 self.block_mut(block).copy_from_slice(chunk);
             }
         }
@@ -1739,7 +1745,7 @@ impl Buffer {
         buffer.reset(0, self.block_size);
     }
 
-    pub fn owned_ref(&self) -> &[bool] {
+    pub fn owned_ref(&self) -> &[u8] {
         &self.owned
     }
 
@@ -1749,7 +1755,7 @@ impl Buffer {
 
         let len = block_count * block_size;
         self.data.resize(len, 0u8);
-        self.owned.resize(block_count, false);
+        self.owned.resize(block_count, 0);
         self.block_size = block_size;
     }
 
@@ -1767,7 +1773,7 @@ impl Buffer {
     pub fn blocks(&self) -> impl Iterator<Item = (bool, &[u8])> {
         self.owned
             .iter()
-            .cloned()
+            .map(|v| *v != 0)
             .zip(self.data.chunks(self.block_size))
     }
 }

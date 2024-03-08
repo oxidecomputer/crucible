@@ -1041,6 +1041,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "base64",
+ "bytes",
  "chrono",
  "clap",
  "crucible",

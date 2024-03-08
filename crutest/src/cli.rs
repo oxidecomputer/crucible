@@ -219,7 +219,7 @@ async fn cli_read(
     ri: &mut RegionInfo,
     block_index: usize,
     size: usize,
-) -> Result<Vec<u8>, CrucibleError> {
+) -> Result<Bytes, CrucibleError> {
     /*
      * Convert offset to its byte value.
      */
@@ -229,7 +229,7 @@ async fn cli_read(
     println!("Read  at block {:5}, len:{:7}", offset.value, data.len());
     guest.read(offset, &mut data).await?;
 
-    let mut dl = data.into_vec();
+    let mut dl = data.into_bytes();
     match validate_vec(
         dl.clone(),
         block_index,
