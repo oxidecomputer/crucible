@@ -633,11 +633,7 @@ impl BlockIO for Guest {
         const MDTS: usize = 1024 * 1024; // 1 MiB
 
         while !data.is_empty() {
-            let buf = if data.len() > MDTS {
-                data.split_to(MDTS)
-            } else {
-                data.split_to(data.len())
-            };
+            let buf = data.split_to(MDTS.min(data.len()));
             assert_eq!(buf.len() as u64 % bs, 0);
             let offset_change = buf.len() as u64 / bs;
             let wio = BlockOp::Write { offset, data: buf };
