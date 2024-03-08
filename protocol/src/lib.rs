@@ -1067,6 +1067,66 @@ impl CrucibleDecoder {
         };
         Ok(out)
     }
+
+    /// Manual deserialization of `Message::ReadResponse`
+    ///
+    /// Unlike `bincode::deserialize`, this function reuses the incoming `Bytes`
+    /// object, so it performs less allocation and data copying for large
+    /// reads.
+    fn deserialize_read_response(
+        mut bytes: BytesMut,
+    ) -> Result<Message, anyhow::Error> {
+        #[derive(Serialize, Deserialize)]
+        struct Header {
+            tag: MessageDiscriminants,
+            upstairs_id: Uuid,
+            session_id: Uuid,
+            job_id: JobId,
+            num_responses: Result<usize, CrucibleError>,
+        }
+
+        let h: Header = bincode::deserialize(&bytes)?;
+
+        // Early exit if there are no responses to deserialize
+        if h.num_responses.is_err() {
+            return Ok(Message::ReadResponse {
+                upstairs_id: h.upstairs_id,
+                session_id: h.session_id,
+                job_id: h.job_id,
+                responses: Err(h.num_responses.unwrap_err()),
+            });
+        }
+
+        let _ = bytes.split_to(bincode::serialized_size(&h)? as usize);
+        let num_responses = h.num_responses.unwrap();
+        let mut responses = Vec::with_capacity(num_responses);
+        for _ in 0..num_responses {
+            let d: (u64, Block, usize) = bincode::deserialize(&bytes)?;
+            let _ = bytes.split_to(bincode::serialized_size(&d)? as usize);
+            let (eid, offset, data_len) = d;
+
+            let data = bytes.split_to(data_len);
+            let block_contexts: Vec<BlockContext> =
+                bincode::deserialize(&bytes)?;
+            let _ = bytes
+                .split_to(bincode::serialized_size(&block_contexts)? as usize);
+
+            responses.push(ReadResponse {
+                eid,
+                offset,
+                data,
+                block_contexts,
+            });
+        }
+
+        assert_eq!(h.tag, MessageDiscriminants::ReadResponse);
+        Ok(Message::ReadResponse {
+            upstairs_id: h.upstairs_id,
+            session_id: h.session_id,
+            job_id: h.job_id,
+            responses: Ok(responses),
+        })
+    }
 }
 
 impl Default for CrucibleDecoder {
@@ -1112,20 +1172,22 @@ impl Decoder for CrucibleDecoder {
         // Remove the message portion of the buffer
         //
         // This leaves `src` at the start of the next message (if present)
-        let buf = src.split_to(len).freeze().split_off(4);
+        let buf = src.split_to(len).split_off(4);
 
-        // The buffer contains a `Message` serialized using bincode's
-        // function-style serialization, i.e. the `fixint` encoding.  We'll
-        // examine the first `u32` to see if it's a type which we know how to
-        // deserialize more efficiently.
+        // We'll examine the message's tag to see whether we can use an
+        // optimizezd deserialization routine.
         let tag: MessageDiscriminants = bincode::deserialize(&buf)?;
-        let message = if matches!(
-            tag,
-            MessageDiscriminants::Write | MessageDiscriminants::WriteUnwritten
-        ) {
-            Self::deserialize_write(buf)
-        } else {
-            bincode::deserialize_from(&buf[..]).map_err(anyhow::Error::from)
+        let message = match tag {
+            MessageDiscriminants::Write
+            | MessageDiscriminants::WriteUnwritten => {
+                Self::deserialize_write(buf.freeze())
+            }
+            MessageDiscriminants::ReadResponse => {
+                Self::deserialize_read_response(buf)
+            }
+            _ => {
+                bincode::deserialize_from(&buf[..]).map_err(anyhow::Error::from)
+            }
         };
 
         Ok(Some(message?))
