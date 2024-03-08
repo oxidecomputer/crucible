@@ -33,7 +33,7 @@ use uuid::Uuid;
 const TIMEOUT_SECS: f32 = 50.0;
 const PING_INTERVAL_SECS: f32 = 5.0;
 
-pub type ClientRequest = WireMessage<RawMessage>;
+pub(crate) type ClientRequest = WireMessage<RawMessage>;
 
 /// Handle to a running I/O task
 ///
