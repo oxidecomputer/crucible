@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use std::net::SocketAddr;
 
 use anyhow::bail;
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use num_enum::IntoPrimitive;
 use serde::{Deserialize, Serialize};
 use strum_macros::EnumDiscriminants;
@@ -286,7 +286,7 @@ pub const CRUCIBLE_MESSAGE_VERSION: u32 = 5;
 #[derive(
     Debug, PartialEq, Clone, Serialize, Deserialize, EnumDiscriminants,
 )]
-#[strum_discriminants(derive(Serialize))]
+#[strum_discriminants(derive(Serialize, Deserialize))]
 #[repr(u16)]
 pub enum Message {
     /**
@@ -1008,6 +1008,65 @@ impl CrucibleDecoder {
     pub fn new() -> Self {
         CrucibleDecoder {}
     }
+
+    /// Manual deserialization of `Message::Write` or `Message::WriteUnwritten`
+    ///
+    /// Unlike `bincode::deserialize`, this function reuses the incoming `Bytes`
+    /// object, so it performs less allocation and data copying for large
+    /// writes.
+    fn deserialize_write(mut bytes: Bytes) -> Result<Message, anyhow::Error> {
+        #[derive(Serialize, Deserialize)]
+        struct Header {
+            tag: MessageDiscriminants,
+            upstairs_id: Uuid,
+            session_id: Uuid,
+            job_id: JobId,
+            dependencies: Vec<JobId>,
+            num_writes: usize,
+        }
+        let h: Header = bincode::deserialize(&bytes)?;
+        let _ = bytes.split_to(bincode::serialized_size(&h)? as usize);
+
+        let mut writes = Vec::with_capacity(h.num_writes);
+        for _ in 0..h.num_writes {
+            let d: (u64, Block, usize) = bincode::deserialize(&bytes)?;
+            let _ = bytes.split_to(bincode::serialized_size(&d)? as usize);
+            let (eid, offset, data_len) = d;
+
+            let data = bytes.split_to(data_len);
+            let block_context: BlockContext = bincode::deserialize(&bytes)?;
+            let _ = bytes
+                .split_to(bincode::serialized_size(&block_context)? as usize);
+
+            writes.push(Write {
+                eid,
+                offset,
+                data,
+                block_context,
+            });
+        }
+
+        let out = if h.tag == MessageDiscriminants::Write {
+            Message::Write {
+                upstairs_id: h.upstairs_id,
+                session_id: h.session_id,
+                job_id: h.job_id,
+                dependencies: h.dependencies,
+                writes,
+            }
+        } else if h.tag == MessageDiscriminants::WriteUnwritten {
+            Message::WriteUnwritten {
+                upstairs_id: h.upstairs_id,
+                session_id: h.session_id,
+                job_id: h.job_id,
+                dependencies: h.dependencies,
+                writes,
+            }
+        } else {
+            panic!("invalid tag, must be Write or WriteUnwritten");
+        };
+        Ok(out)
+    }
 }
 
 impl Default for CrucibleDecoder {
@@ -1050,12 +1109,24 @@ impl Decoder for CrucibleDecoder {
             return Ok(None);
         }
 
-        let message = bincode::deserialize_from(&src[4..len]);
-        if len == src.len() {
-            src.clear();
+        // Remove the message portion of the buffer
+        //
+        // This leaves `src` at the start of the next message (if present)
+        let buf = src.split_to(len).freeze().split_off(4);
+
+        // The buffer contains a `Message` serialized using bincode's
+        // function-style serialization, i.e. the `fixint` encoding.  We'll
+        // examine the first `u32` to see if it's a type which we know how to
+        // deserialize more efficiently.
+        let tag: MessageDiscriminants = bincode::deserialize(&buf)?;
+        let message = if matches!(
+            tag,
+            MessageDiscriminants::Write | MessageDiscriminants::WriteUnwritten
+        ) {
+            Self::deserialize_write(buf)
         } else {
-            src.advance(len);
-        }
+            bincode::deserialize_from(&buf[..]).map_err(anyhow::Error::from)
+        };
 
         Ok(Some(message?))
     }
