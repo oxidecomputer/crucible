@@ -1174,8 +1174,8 @@ impl Decoder for CrucibleDecoder {
         // This leaves `src` at the start of the next message (if present)
         let buf = src.split_to(len).split_off(4);
 
-        // We'll examine the message's tag to see whether we can use an
-        // optimizezd deserialization routine.
+        // We'll examine the message's tag to see whether we should use a
+        // reduced-memcpy deserialization routine.
         let tag: MessageDiscriminants = bincode::deserialize(&buf)?;
         let message = match tag {
             MessageDiscriminants::Write
