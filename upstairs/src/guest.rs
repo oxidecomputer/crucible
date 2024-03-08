@@ -613,8 +613,8 @@ impl BlockIO for Guest {
 
     async fn write(
         &self,
-        offset: Block,
-        data: Bytes,
+        mut offset: Block,
+        mut data: Bytes,
     ) -> Result<(), CrucibleError> {
         let bs = self.check_data_size(data.len()).await?;
 
@@ -625,13 +625,32 @@ impl BlockIO for Guest {
         if data.is_empty() {
             return Ok(());
         }
-        let wio = BlockOp::Write { offset, data };
 
-        self.backpressure_sleep().await;
+        // We split writes into chunks to bound the maximum (typical) latency of
+        // any single `BlockOp::Write`.  Otherwise, the host could send writes
+        // which are large enough that our maximum backpressure delay wouldn't
+        // compensate for them.
+        const MDTS: usize = 1024 * 1024; // 1 MiB
 
-        let reply = self.send_and_wait(wio).await;
-        assert!(reply.buffer.is_none());
-        reply.result
+        while !data.is_empty() {
+            let buf = if data.len() > MDTS {
+                data.split_to(MDTS)
+            } else {
+                data.split_to(data.len())
+            };
+            assert_eq!(buf.len() as u64 % bs, 0);
+            let offset_change = buf.len() as u64 / bs;
+            let wio = BlockOp::Write { offset, data: buf };
+
+            self.backpressure_sleep().await;
+
+            let reply = self.send_and_wait(wio).await;
+            assert!(reply.buffer.is_none());
+            reply.result?;
+            offset.value += offset_change;
+        }
+
+        Ok(())
     }
 
     async fn write_unwritten(
