@@ -1014,7 +1014,11 @@ impl CrucibleDecoder {
     /// Unlike `bincode::deserialize`, this function reuses the incoming `Bytes`
     /// object, so it performs less allocation and data copying for large
     /// writes.
+    ///
+    /// # Panics
+    /// If the message's tag is not `Write` or `WriteUnwritten`
     fn deserialize_write(mut bytes: Bytes) -> Result<Message, anyhow::Error> {
+        // This must match the layout of `Message::Write/WriteUnwritten`
         #[derive(Serialize, Deserialize)]
         struct Header {
             tag: MessageDiscriminants,
@@ -1025,15 +1029,22 @@ impl CrucibleDecoder {
             num_writes: usize,
         }
         let h: Header = bincode::deserialize(&bytes)?;
+
+        // Trim the header, so that `bytes` is at the start of read responses
         let _ = bytes.split_to(bincode::serialized_size(&h)? as usize);
 
+        // Prepare to deserialize writes
         let mut writes = Vec::with_capacity(h.num_writes);
         for _ in 0..h.num_writes {
+            // There's fixed-size metadata preceding the write data
             let d: (u64, Block, usize) = bincode::deserialize(&bytes)?;
             let _ = bytes.split_to(bincode::serialized_size(&d)? as usize);
             let (eid, offset, data_len) = d;
 
+            // Claim the raw write data by splitting the buffer
             let data = bytes.split_to(data_len);
+
+            // Deserialize the trailing `BlockContext`
             let block_context: BlockContext = bincode::deserialize(&bytes)?;
             let _ = bytes
                 .split_to(bincode::serialized_size(&block_context)? as usize);
@@ -1073,39 +1084,51 @@ impl CrucibleDecoder {
     /// Unlike `bincode::deserialize`, this function reuses the incoming `Bytes`
     /// object, so it performs less allocation and data copying for large
     /// reads.
+    ///
+    /// # Panics
+    /// If the message's tag is not `ReadResponse`
     fn deserialize_read_response(
         mut bytes: BytesMut,
     ) -> Result<Message, anyhow::Error> {
+        // This must match the layout of `Message::ReadResponse`
         #[derive(Serialize, Deserialize)]
         struct Header {
             tag: MessageDiscriminants,
             upstairs_id: Uuid,
             session_id: Uuid,
             job_id: JobId,
+
+            // Only read the size of the `Vec`, skipping the data
             num_responses: Result<usize, CrucibleError>,
         }
 
         let h: Header = bincode::deserialize(&bytes)?;
 
         // Early exit if there are no responses to deserialize
-        if h.num_responses.is_err() {
+        let Ok(num_responses) = h.num_responses else {
             return Ok(Message::ReadResponse {
                 upstairs_id: h.upstairs_id,
                 session_id: h.session_id,
                 job_id: h.job_id,
                 responses: Err(h.num_responses.unwrap_err()),
             });
-        }
+        };
 
+        // Trim the header, so that `bytes` is at the start of read responses
         let _ = bytes.split_to(bincode::serialized_size(&h)? as usize);
-        let num_responses = h.num_responses.unwrap();
+
+        // Prepare to deserialize responses
         let mut responses = Vec::with_capacity(num_responses);
         for _ in 0..num_responses {
+            // There's fixed-size metadata preceding the read data
             let d: (u64, Block, usize) = bincode::deserialize(&bytes)?;
             let _ = bytes.split_to(bincode::serialized_size(&d)? as usize);
             let (eid, offset, data_len) = d;
 
+            // Claim the raw read response by splitting the buffer
             let data = bytes.split_to(data_len);
+
+            // Finally, there's a trailing `Vec<BlockContext>`
             let block_contexts: Vec<BlockContext> =
                 bincode::deserialize(&bytes)?;
             let _ = bytes
