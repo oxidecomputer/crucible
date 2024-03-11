@@ -540,7 +540,7 @@ impl Extent {
 
     /// Read the real data off underlying storage, and get block metadata. If
     /// an error occurs while processing any of the requests, the state of
-    /// `responses` is undefined.
+    /// `out` is undefined.
     #[instrument]
     pub async fn read(
         &mut self,
