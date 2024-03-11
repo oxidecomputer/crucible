@@ -18,6 +18,7 @@ use slog::{error, Logger};
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, IoSliceMut, Read};
+use std::mem::size_of;
 use std::os::fd::AsFd;
 use std::path::Path;
 
@@ -242,19 +243,34 @@ impl ExtentInner for RawInner {
                 (job_id.0, self.extent_number, n_contiguous_requests as u64)
             });
 
+            // Constant representing the position of bulk data within a chunk
+            const DATA_OFFSET: usize = size_of::<u64>() // req.eid
+                + size_of::<u64>() // req.offset.value
+                + size_of::<u32>() // req.offset.shift
+                + size_of::<u64>(); // block_size (data length)
+
             // Now, we'll begin to construct the ReadResponses in-place
             let mut chunks = vec![];
             for (ctx, req) in block_contexts
                 .into_iter()
                 .zip(requests[req_run_start..][..n_contiguous_requests].iter())
             {
+                let start = out.len();
+                assert_eq!(start, 0);
+
+                // Serialize the ReadResponse header
                 out.put_u64_le(req.eid);
                 out.put_u64_le(req.offset.value);
                 out.put_u32_le(req.offset.shift);
 
                 // Inner BytesMut, serialized as size + data
                 out.put_u64_le(block_size.into());
+
+                // Confirm that our internal cursor is at the correct position
                 let data_start = out.len();
+                assert_eq!(data_start - start, DATA_OFFSET);
+
+                // Add room for the bulk data
                 out.resize(data_start + block_size as usize, 1);
                 check_input(self.extent_size, req.offset, &out[data_start..])?;
 
@@ -290,7 +306,7 @@ impl ExtentInner for RawInner {
             for chunk in &mut chunks {
                 expected_bytes += block_size as usize;
                 iovecs.push(IoSliceMut::new(
-                    &mut chunk[28..][..block_size as usize],
+                    &mut chunk[DATA_OFFSET..][..block_size as usize],
                 ));
             }
 
