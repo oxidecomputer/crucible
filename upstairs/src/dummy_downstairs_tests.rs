@@ -13,7 +13,8 @@ pub(crate) mod protocol_test {
     use crate::BlockIO;
     use crate::Buffer;
     use crate::CrucibleError;
-    use crate::IO_OUTSTANDING_MAX;
+    use crate::IO_OUTSTANDING_MAX_BYTES;
+    use crate::IO_OUTSTANDING_MAX_JOBS;
     use crate::MAX_ACTIVE_COUNT;
     use crucible_client_types::CrucibleOpts;
     use crucible_common::Block;
@@ -520,10 +521,11 @@ pub(crate) mod protocol_test {
                 ds3.set_read_only();
             }
 
-            // Configure our guest without queue backpressure, to speed up tests
-            // which require triggering a timeout
+            // Configure our guest without backpressure, to speed up tests which
+            // require triggering a timeout
             let (g, mut io) = Guest::new(Some(log.clone()));
             io.disable_queue_backpressure();
+            io.disable_byte_backpressure();
             let guest = Arc::new(g);
 
             let crucible_opts = CrucibleOpts {
@@ -937,11 +939,11 @@ pub(crate) mod protocol_test {
         let (_jh2, mut ds2_messages) = harness.ds2.spawn_message_receiver();
         let (_jh3, mut ds3_messages) = harness.ds3.spawn_message_receiver();
 
-        // Send 200 more than IO_OUTSTANDING_MAX jobs. Flow control will kick in
+        // Send 200 more than IO_OUTSTANDING_MAX_JOBS jobs. Flow control will kick in
         // at MAX_ACTIVE_COUNT messages, so we need to be sending read responses
-        // while reads are being sent. After IO_OUTSTANDING_MAX jobs, the
+        // while reads are being sent. After IO_OUTSTANDING_MAX_JOBS jobs, the
         // Upstairs will set ds1 to faulted, and send it no more work.
-        const NUM_JOBS: usize = IO_OUTSTANDING_MAX + 200;
+        const NUM_JOBS: usize = IO_OUTSTANDING_MAX_JOBS + 200;
         let mut job_ids = Vec::with_capacity(NUM_JOBS);
 
         for i in 0..NUM_JOBS {
@@ -1966,6 +1968,145 @@ pub(crate) mod protocol_test {
         Ok(())
     }
 
+    /// Test that we will mark a Downstairs as failed if we hit the byte limit
+    #[tokio::test]
+    async fn test_byte_fault_condition() -> Result<()> {
+        let harness = Arc::new(TestHarness::new().await?);
+
+        let (_jh1, mut ds1_messages) =
+            harness.ds1().await.spawn_message_receiver();
+        let (_jh2, mut ds2_messages) = harness.ds2.spawn_message_receiver();
+        let (_jh3, mut ds3_messages) = harness.ds3.spawn_message_receiver();
+
+        // Send enough bytes to hit the IO_OUTSTANDING_MAX_BYTES condition on
+        // downstairs 1, which should mark it as faulted and kick it out.
+        let write_buf = Bytes::from(vec![1; 50 * 1024]); // 50 KiB
+        let num_jobs = IO_OUTSTANDING_MAX_BYTES as usize / write_buf.len() + 10;
+        let mut job_ids = Vec::with_capacity(num_jobs);
+        assert!(num_jobs < IO_OUTSTANDING_MAX_JOBS);
+
+        for i in 0..num_jobs {
+            {
+                let harness = harness.clone();
+
+                // We must tokio::spawn here because `write` will wait for the
+                // response to come back before returning
+                let write_buf = write_buf.clone();
+                tokio::spawn(async move {
+                    harness
+                        .guest
+                        .write(Block::new_512(0), write_buf)
+                        .await
+                        .unwrap();
+                });
+            }
+
+            if i < MAX_ACTIVE_COUNT {
+                // Before flow control kicks in, assert we're seeing the write
+                // requests
+                bail_assert!(matches!(
+                    ds1_messages.recv().await.unwrap(),
+                    Message::Write { .. },
+                ));
+            } else {
+                // After flow control kicks in, we shouldn't see any more
+                // messages
+                match ds1_messages.try_recv() {
+                    // This can return either Empty or Disconnected, depending
+                    // on whether the upstairs has kicked us out.
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {}
+                    x => {
+                        info!(
+                            harness.log,
+                            "Read {i} should return EMPTY, but we got:{:?}", x
+                        );
+
+                        bail!(
+                            "Read {i} should return EMPTY, but we got:{:?}",
+                            x
+                        );
+                    }
+                }
+            }
+
+            match ds2_messages.recv().await.unwrap() {
+                Message::Write { job_id, .. } => {
+                    // Record the job ids of the write requests
+                    job_ids.push(job_id);
+                }
+
+                _ => bail!("saw non write request!"),
+            }
+
+            bail_assert!(matches!(
+                ds3_messages.recv().await.unwrap(),
+                Message::Write { .. },
+            ));
+
+            // Respond with write responses for downstairs 2 and 3
+            harness
+                .ds2
+                .fw
+                .lock()
+                .await
+                .send(Message::WriteAck {
+                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                    session_id: harness
+                        .ds2
+                        .upstairs_session_id
+                        .lock()
+                        .await
+                        .unwrap(),
+                    job_id: job_ids[i],
+                    result: Ok(()),
+                })
+                .await
+                .unwrap();
+
+            harness
+                .ds3
+                .fw
+                .lock()
+                .await
+                .send(Message::WriteAck {
+                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                    session_id: harness
+                        .ds3
+                        .upstairs_session_id
+                        .lock()
+                        .await
+                        .unwrap(),
+                    job_id: job_ids[i],
+
+                    result: Ok(()),
+                })
+                .await
+                .unwrap();
+        }
+
+        // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
+        // flush_timeout set to 24 hours, we shouldn't see anything else
+        bail_assert!(matches!(
+            ds2_messages.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        bail_assert!(matches!(
+            ds3_messages.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+
+        // Assert the Upstairs isn't sending ds1 more work, because it is
+        // Faulted
+        let v = ds1_messages.try_recv();
+        assert_eq!(
+            v,
+            Err(TryRecvError::Disconnected),
+            "ds1 message queue must be disconnected"
+        );
+        Ok(())
+    }
+
     /// Test that an error during the live repair doesn't halt indefinitely
     #[tokio::test]
     async fn test_error_during_live_repair_no_halt() -> Result<()> {
@@ -1976,11 +2117,11 @@ pub(crate) mod protocol_test {
         let (_jh2, mut ds2_messages) = harness.ds2.spawn_message_receiver();
         let (_jh3, mut ds3_messages) = harness.ds3.spawn_message_receiver();
 
-        // Send 200 more than IO_OUTSTANDING_MAX jobs. Flow control will kick in
-        // at MAX_ACTIVE_COUNT messages, so we need to be sending read responses
-        // while reads are being sent. After IO_OUTSTANDING_MAX jobs, the
-        // Upstairs will set ds1 to faulted, and send it no more work.
-        const NUM_JOBS: usize = IO_OUTSTANDING_MAX + 200;
+        // Send 200 more than IO_OUTSTANDING_MAX_JOBS jobs. Flow control will
+        // kick in at MAX_ACTIVE_COUNT messages, so we need to be sending read
+        // responses while reads are being sent. After IO_OUTSTANDING_MAX_JOBS
+        // jobs, the Upstairs will set ds1 to faulted, and send it no more work.
+        const NUM_JOBS: usize = IO_OUTSTANDING_MAX_JOBS + 200;
         let mut job_ids = Vec::with_capacity(NUM_JOBS);
 
         for i in 0..NUM_JOBS {
@@ -2680,11 +2821,11 @@ pub(crate) mod protocol_test {
         let (_jh2, mut ds2_messages) = harness.ds2.spawn_message_receiver();
         let (_jh3, mut ds3_messages) = harness.ds3.spawn_message_receiver();
 
-        // Send 200 more than IO_OUTSTANDING_MAX jobs. Flow control will kick in
-        // at MAX_ACTIVE_COUNT messages, so we need to be sending read responses
-        // while reads are being sent. After IO_OUTSTANDING_MAX jobs, the
-        // Upstairs will set ds1 to faulted, and send it no more work.
-        const NUM_JOBS: usize = IO_OUTSTANDING_MAX + 200;
+        // Send 200 more than IO_OUTSTANDING_MAX_JOBS jobs. Flow control will
+        // kick in at MAX_ACTIVE_COUNT messages, so we need to be sending read
+        // responses while reads are being sent. After IO_OUTSTANDING_MAX_JOBS
+        // jobs, the Upstairs will set ds1 to faulted, and send it no more work.
+        const NUM_JOBS: usize = IO_OUTSTANDING_MAX_JOBS + 200;
         let mut job_ids = Vec::with_capacity(NUM_JOBS);
 
         for i in 0..NUM_JOBS {
