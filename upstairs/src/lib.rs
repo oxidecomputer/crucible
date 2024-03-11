@@ -1781,6 +1781,65 @@ impl Buffer {
             .map(|v| *v != 0)
             .zip(self.data.chunks(self.block_size))
     }
+
+    /// Splits the buffer into two at the given index.
+    ///
+    /// Afterwards `self` contains elements `[0, at)`, and the returned `Buffer`
+    /// contains elements `[at, capacity)`.
+    ///
+    /// This is an `O(1)` operation that just increases the reference count and
+    /// sets a few indices.
+    ///
+    /// # Panics
+    /// The `index` must be an even multiple of block size
+    pub fn split_off(&mut self, index: usize) -> Self {
+        assert_eq!(index % self.block_size, 0);
+        let data = self.data.split_off(index);
+        let owned = self.owned.split_off(index / self.block_size);
+        Self {
+            block_size: self.block_size,
+            data,
+            owned,
+        }
+    }
+
+    /// Splits the buffer into two at the given index.
+    ///
+    /// Afterwards `self` contains elements `[at, len)`, and the returned
+    /// `Buffer` contains elements `[0, at)`.
+    ///
+    /// This is an `O(1)` operation that just increases the reference count and
+    /// sets a few indices.
+    ///
+    /// # Panics
+    /// The `index` must be an even multiple of block size
+    pub fn split_to(&mut self, index: usize) -> Self {
+        assert_eq!(index % self.block_size, 0);
+        let data = self.data.split_to(index);
+        let owned = self.owned.split_to(index / self.block_size);
+        Self {
+            block_size: self.block_size,
+            data,
+            owned,
+        }
+    }
+
+    /// Absorbs a `Buffer` that was previously split off
+    ///
+    /// If the two `Buffer` objects were previously contiguous and not mutated
+    /// in a way that causes re-allocation i.e., if other was created by calling
+    /// `split_off` on this `BytesMut`, then this is an `O(1)` operation that
+    /// just decreases a reference count and sets a few indices. Otherwise, this
+    /// method calls `extend_from_slice` on both the data and ownership
+    /// `BytesMut`.
+    ///
+    /// # Panics
+    /// If `self.block_size != other.block_size`
+    pub fn unsplit(&mut self, other: Buffer) {
+        assert_eq!(self.block_size, other.block_size);
+        self.data.unsplit(other.data);
+        self.owned.unsplit(other.owned);
+    }
 }
 
 impl std::ops::Deref for Buffer {

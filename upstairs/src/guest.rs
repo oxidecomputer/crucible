@@ -580,7 +580,7 @@ impl BlockIO for Guest {
 
     async fn read(
         &self,
-        offset: Block,
+        mut offset: Block,
         data: &mut Buffer,
     ) -> Result<(), CrucibleError> {
         let bs = self.check_data_size(data.len()).await?;
@@ -593,19 +593,50 @@ impl BlockIO for Guest {
             return Ok(());
         }
 
-        let buffer = std::mem::take(data);
-        let rio = BlockOp::Read {
-            offset,
-            data: buffer,
-        };
+        // We split reads into chunks to bound the maximum (typical) latency of
+        // any single `BlockOp::Read`.
+        const MDTS: usize = 1024 * 1024; // 1 MiB
 
-        // We've replaced `data` with a blank Buffer, and sent it over the
-        // channel. Replace it regardless of the outcome of the read so that the
-        // caller will not have to reallocate it.
-        let reply = self.send_and_wait(rio).await;
-        *data = reply.buffer.unwrap();
+        // Leave `data` as a 0-byte buffer rooted at the original address.
+        // `buffer` contains data that will be actively processed.
+        //
+        // [][-------------buffer---------------]
+        // ^ data
+        let mut buffer = data.split_off(0);
 
-        reply.result
+        while !buffer.is_empty() {
+            // Split this particular chunk from the front of `buffer:
+            //
+            // [][-chunk-][--------buffer-------]
+            // ^ data
+            let chunk = buffer.split_to(MDTS.min(buffer.len()));
+            assert_eq!(chunk.len() as u64 % bs, 0);
+
+            let offset_change = chunk.len() as u64 / bs;
+            let rio = BlockOp::Read {
+                offset,
+                data: chunk,
+            };
+
+            let reply = self.send_and_wait(rio).await;
+
+            // Reattach the chunk to `data`
+            //
+            // [---data---][--------buffer-------]
+            data.unsplit(reply.buffer.unwrap());
+
+            // If this is an error, then reattach the rest of the buffer so that
+            // the caller doesn't have to reallocate anything.  Otherwise, the
+            // buffer will be reattached piece by piece as we loop here.
+            if let Err(e) = reply.result {
+                data.unsplit(buffer);
+                return Err(e);
+            }
+
+            offset.value += offset_change;
+        }
+
+        Ok(())
     }
 
     async fn write(
