@@ -5,6 +5,7 @@ use std::convert::TryInto;
 use std::fmt::Debug;
 use std::fs::{rename, File, OpenOptions};
 use std::io::{IoSlice, Write};
+use std::mem::size_of;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -873,19 +874,8 @@ impl Region {
         // We'll estimate capacity here, assuming 0 or 1 context per read.  This
         // always true for the raw file extents; the SQLite extents may have to
         // reallocate, but they're not optimized for speed anyways.
-        let capacity = core::mem::size_of::<u32>() // Ok(..)
-            + core::mem::size_of::<usize>() // Vec(..)
-            + requests.len()
-                * (core::mem::size_of::<u64>() // eid
-                    + core::mem::size_of::<u64>()  // block.value
-                    + core::mem::size_of::<u32>()  // block.shift
-                    + core::mem::size_of::<usize>()  // data size
-                    + self.def.block_size() as usize // read data
-                    + core::mem::size_of::<usize>() // context count
-                    + core::mem::size_of::<u64>() // hash
-                    + core::mem::size_of::<u8>() // option tag
-                    + core::mem::size_of::<[u8; 12]>() // nonce
-                    + core::mem::size_of::<[u8; 16]>()); // tag
+        let capacity =
+            estimate_read_size(requests.len(), self.def.block_size());
 
         let mut out = BytesMut::with_capacity(capacity);
         out.put_u32_le(0); // Ok(..)
@@ -1212,6 +1202,30 @@ pub async fn save_stream_to_file(
         crucible_bail!(IoError, "repair {:?}: fsync failure: {:?}", file, e);
     }
     Ok(())
+}
+
+/// Returns an upper bound for `Message::ReadResponse::responses`
+///
+/// `responses` is a `Result<Vec<ReadResponse>, CrucibleError>`; the header of
+/// `Message::ReadResponse` is sent separately.
+///
+/// This upper bound assumes 0 or 1 contexts per read.  This is always true for
+/// the raw file extent; the SQLite extents may have to reallocate, but they're
+/// not optimized for speed anyways.
+fn estimate_read_size(request_count: usize, block_size: u64) -> usize {
+    size_of::<u32>() // Ok(..)
+        + size_of::<usize>() // Vec(..)
+        + request_count
+            * (size_of::<u64>() // eid
+                + size_of::<u64>()  // block.value
+                + size_of::<u32>()  // block.shift
+                + size_of::<usize>()  // data size
+                + block_size as usize // read data
+                + size_of::<usize>() // context count
+                + size_of::<u64>() // hash
+                + size_of::<u8>() // option tag
+                + size_of::<[u8; 12]>() // nonce
+                + size_of::<[u8; 16]>()) // tag
 }
 
 struct BatchedPwritevState<'a> {
@@ -4531,5 +4545,30 @@ pub(crate) mod test {
         // Validate written data by reading everything back and comparing with
         // data buffer
         validate_whole_region(&mut region, &data).await
+    }
+
+    #[test]
+    fn test_read_size() {
+        let resp = (0..10)
+            .map(|i| ReadResponse {
+                eid: 0,
+                offset: Block::new_512(i),
+                data: BytesMut::from([i as u8; 512].as_slice()),
+                block_contexts: vec![BlockContext {
+                    hash: 1234,
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: [1; 12],
+                            tag: [2; 16],
+                        },
+                    ),
+                }],
+            })
+            .collect::<Vec<_>>();
+
+        let est = estimate_read_size(resp.len(), 512);
+        let r: Result<Vec<ReadResponse>, CrucibleError> = Ok(resp);
+
+        assert_eq!(bincode::serialized_size(&r).unwrap() as usize, est);
     }
 }
