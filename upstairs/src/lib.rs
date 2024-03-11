@@ -1565,16 +1565,9 @@ impl Buffer {
 
     /// Builds a new buffer that repeats the given value
     pub fn repeat(v: u8, block_count: usize, block_size: usize) -> Self {
-        let len = block_count * block_size;
-        let mut data = BytesMut::with_capacity(len);
-        data.resize(len, v);
-        let mut owned = BytesMut::with_capacity(block_count);
-        owned.resize(block_count, 0);
-        Buffer {
-            block_size,
-            data,
-            owned,
-        }
+        let mut out = Self::default();
+        out.reset_with(v, block_count, block_size);
+        out
     }
 
     pub fn with_capacity(block_count: usize, block_size: usize) -> Buffer {
@@ -1749,14 +1742,18 @@ impl Buffer {
         &self.owned
     }
 
-    pub fn reset(&mut self, block_count: usize, block_size: usize) {
+    fn reset_with(&mut self, v: u8, block_count: usize, block_size: usize) {
         self.data.clear();
         self.owned.clear();
 
         let len = block_count * block_size;
-        self.data.resize(len, 0u8);
+        self.data.resize(len, v);
         self.owned.resize(block_count, 0);
         self.block_size = block_size;
+    }
+
+    pub fn reset(&mut self, block_count: usize, block_size: usize) {
+        self.reset_with(0, block_count, block_size);
     }
 
     /// Returns a reference to a particular block
