@@ -2087,7 +2087,7 @@ mod test {
             .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
             .await?;
 
-        assert_eq!(buffer.owned_ref(), &[false, false]);
+        assert_eq!(buffer.owned_ref(), &[0, 0]);
 
         // Ownership is set by writing to blocks
 
@@ -2109,7 +2109,7 @@ mod test {
         expected.extend(vec![0u8; 512]);
 
         assert_eq!(&*buffer, &expected);
-        let expected_ownership = [true, false];
+        let expected_ownership = [1, 0];
         assert_eq!(buffer.owned_ref(), &expected_ownership);
 
         // Ownership through a volume should be the same!!

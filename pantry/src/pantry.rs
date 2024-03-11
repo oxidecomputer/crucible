@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use anyhow::Result;
+use bytes::Bytes;
 use dropshot::HttpError;
 use sha2::Digest;
 use sha2::Sha256;
@@ -294,7 +295,7 @@ impl PantryEntry {
         &self,
         offset: u64,
         size: usize,
-    ) -> Result<Vec<u8>, CrucibleError> {
+    ) -> Result<Bytes, CrucibleError> {
         if size > Self::MAX_CHUNK_SIZE {
             crucible_bail!(
                 InvalidNumberOfBlocks,
@@ -314,7 +315,7 @@ impl PantryEntry {
             .read_from_byte_offset(offset, &mut buffer)
             .await?;
 
-        Ok(buffer.into_vec())
+        Ok(buffer.into_bytes())
     }
 
     pub async fn scrub(&self) -> Result<(), CrucibleError> {
@@ -601,7 +602,7 @@ impl Pantry {
         volume_id: String,
         offset: u64,
         size: usize,
-    ) -> Result<Vec<u8>, HttpError> {
+    ) -> Result<Bytes, HttpError> {
         let entry = self.entry(volume_id).await?;
         entry.bulk_read(offset, size).await.map_err(|e| e.into())
     }

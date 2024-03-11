@@ -1117,7 +1117,7 @@ async fn verify_volume(
         );
         guest.read(offset, &mut data).await?;
 
-        let dl = data.into_vec();
+        let dl = data.into_bytes();
         match validate_vec(
             dl,
             block_index,
@@ -1228,13 +1228,15 @@ enum ValidateStatus {
  * range:       If the validation should consider the write log range
  *              for acceptable values in the data buffer.
  */
-fn validate_vec(
-    data: Vec<u8>,
+fn validate_vec<V: AsRef<[u8]>>(
+    data: V,
     block_index: usize,
     wl: &mut WriteLog,
     bs: u64,
     range: bool,
 ) -> ValidateStatus {
+    let data = data.as_ref();
+
     let bs = bs as usize;
     assert_eq!(data.len() % bs, 0);
     if data.is_empty() {
@@ -1356,7 +1358,7 @@ async fn balloon_workload(
                 crucible::Buffer::repeat(255, size, ri.block_size as usize);
             guest.read(offset, &mut data).await?;
 
-            let dl = data.into_vec();
+            let dl = data.into_bytes();
             match validate_vec(
                 dl,
                 block_index,
@@ -1596,7 +1598,7 @@ async fn generic_workload(
                 guest.read(offset, &mut data).await?;
 
                 let data_len = data.len();
-                let dl = data.into_vec();
+                let dl = data.into_bytes();
                 match validate_vec(
                     dl,
                     block_index,
@@ -2229,7 +2231,7 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     println!("Read  at block {:5}, len:{:7}", offset.value, data.len());
     guest.read(offset, &mut data).await?;
 
-    let dl = data.into_vec();
+    let dl = data.into_bytes();
     match validate_vec(dl, block_index, &mut ri.write_log, ri.block_size, false)
     {
         ValidateStatus::Bad | ValidateStatus::InRange => {
@@ -2381,7 +2383,7 @@ async fn write_flush_read_workload(
             crucible::Buffer::repeat(255, size, ri.block_size as usize);
         guest.read(offset, &mut data).await?;
 
-        let dl = data.into_vec();
+        let dl = data.into_bytes();
         match validate_vec(
             dl,
             block_index,
@@ -2697,7 +2699,7 @@ async fn span_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     println!("Sending a read spanning two extents");
     guest.read(offset, &mut data).await?;
 
-    let dl = data.into_vec();
+    let dl = data.into_bytes();
     match validate_vec(dl, block_index, &mut ri.write_log, ri.block_size, false)
     {
         ValidateStatus::Bad | ValidateStatus::InRange => {
@@ -2734,7 +2736,7 @@ async fn big_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         let mut data = crucible::Buffer::repeat(255, 1, ri.block_size as usize);
         guest.read(offset, &mut data).await?;
 
-        let dl = data.into_vec();
+        let dl = data.into_bytes();
         match validate_vec(
             dl,
             block_index,
