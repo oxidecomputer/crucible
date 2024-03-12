@@ -349,9 +349,9 @@ pub async fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
  */
 pub fn show_work(ds: &mut Downstairs) {
     let active_upstairs_connections = ds.active_upstairs();
-    println!(
-        "Active Upstairs connections: {:?}",
-        active_upstairs_connections
+    info!(
+        ds.log,
+        "Active Upstairs connections: {:?}", active_upstairs_connections
     );
 
     for upstairs_connection in active_upstairs_connections {
@@ -360,9 +360,13 @@ pub fn show_work(ds: &mut Downstairs) {
         let mut kvec: Vec<JobId> = work.active.keys().cloned().collect();
 
         if kvec.is_empty() {
-            println!("Crucible Downstairs work queue:  Empty");
+            info!(ds.log, "Crucible Downstairs work queue:  Empty");
         } else {
-            println!("Crucible Downstairs work queue:");
+            info!(ds.log, "Crucible Downstairs work queue:");
+            info!(
+                ds.log,
+                "{:8} {:>7} {:>5} {}", "  JOB_ID", "IO_TYPE", "STATE", "DEPS"
+            );
             kvec.sort_unstable();
             for id in kvec.iter() {
                 let dsw = work.active.get(id).unwrap();
@@ -389,16 +393,15 @@ pub fn show_work(ds: &mut Downstairs) {
                         ("NoOp", dependencies)
                     }
                 };
-                println!(
-                    "DSW:[{:04}] {:>07} {:>05} deps:{:?}",
-                    id, dsw_type, dsw.state, dep_list,
+                info!(
+                    ds.log,
+                    "{:8} {:>7}  {:>5} {:?}", id, dsw_type, dsw.state, dep_list,
                 );
             }
         }
 
-        println!("Done tasks {:?}", work.completed);
-        println!("last_flush: {:?}", work.last_flush);
-        println!("--------------------------------------");
+        info!(ds.log, "Completed work {:?}", work.completed);
+        info!(ds.log, "Last flush: {:?}", work.last_flush);
     }
 }
 
