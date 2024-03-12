@@ -41,6 +41,7 @@ fn build_api() -> ApiDescription<Arc<FileServerContext>> {
     api.register(get_region_info).unwrap();
     api.register(get_region_mode).unwrap();
     api.register(extent_repair_ready).unwrap();
+    api.register(get_work).unwrap();
 
     api
 }
@@ -308,6 +309,21 @@ async fn get_region_mode(
     let read_only = rqctx.context().read_only;
 
     Ok(HttpResponseOk(read_only))
+}
+
+/// Work queue
+#[endpoint {
+    method = GET,
+    path = "/work",
+}]
+async fn get_work(
+    rqctx: RequestContext<Arc<FileServerContext>>,
+) -> Result<HttpResponseOk<bool>, HttpError> {
+    let downstairs = &rqctx.context().downstairs;
+    let mut ds = downstairs.lock().await;
+
+    show_work(&mut ds);
+    Ok(HttpResponseOk(true))
 }
 
 #[cfg(test)]
