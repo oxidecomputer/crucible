@@ -4341,7 +4341,7 @@ pub(crate) mod test {
                     job_id: JobId(1000),
                     blocks: r1,
                 },
-                data,
+                data: data.clone(),
             }),
         }))
         .await;

@@ -25,10 +25,12 @@ pub(crate) mod protocol_test {
     use crucible_protocol::CrucibleEncoder;
     use crucible_protocol::JobId;
     use crucible_protocol::Message;
+    use crucible_protocol::ReadResponseBlockMetadata;
+    use crucible_protocol::ReadResponseHeader;
+    use crucible_protocol::WriteHeader;
 
     use anyhow::bail;
     use anyhow::Result;
-    use bytes::Bytes;
     use bytes::BytesMut;
     use futures::SinkExt;
     use futures::StreamExt;
@@ -614,19 +616,21 @@ pub(crate) mod protocol_test {
         }
     }
 
-    fn make_blank_read_response() -> crucible_protocol::ReadResponse {
+    fn make_blank_read_response() -> (ReadResponseBlockMetadata, BytesMut) {
         let data = vec![0u8; 512];
         let hash = crucible_common::integrity_hash(&[&data]);
 
-        crucible_protocol::ReadResponse {
-            eid: 0,
-            offset: Block::new_512(0),
-            data: BytesMut::from(&data[..]),
-            block_contexts: vec![BlockContext {
-                hash,
-                encryption_context: None,
-            }],
-        }
+        (
+            ReadResponseBlockMetadata {
+                eid: 0,
+                offset: Block::new_512(0),
+                block_contexts: vec![BlockContext {
+                    hash,
+                    encryption_context: None,
+                }],
+            },
+            BytesMut::from(&data[..]),
+        )
     }
 
     /// Filter the first element that matches some predicate out of a list
@@ -736,6 +740,7 @@ pub(crate) mod protocol_test {
         // Once the downstairs respond with a ReadRequest for a job, then more
         // work will be sent downstairs
 
+        let (block, data) = make_blank_read_response();
         harness
             .ds1()
             .await
@@ -743,16 +748,19 @@ pub(crate) mod protocol_test {
             .lock()
             .await
             .send(Message::ReadResponse {
-                upstairs_id: harness.guest.get_uuid().await.unwrap(),
-                session_id: harness
-                    .ds1()
-                    .await
-                    .upstairs_session_id
-                    .lock()
-                    .await
-                    .unwrap(),
-                job_id: job_ids[0],
-                responses: Ok(vec![make_blank_read_response()]),
+                header: ReadResponseHeader {
+                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                    session_id: harness
+                        .ds1()
+                        .await
+                        .upstairs_session_id
+                        .lock()
+                        .await
+                        .unwrap(),
+                    job_id: job_ids[0],
+                    blocks: Ok(vec![block.clone()]),
+                },
+                data: data.clone(),
             })
             .await
             .unwrap();
@@ -763,15 +771,18 @@ pub(crate) mod protocol_test {
             .lock()
             .await
             .send(Message::ReadResponse {
-                upstairs_id: harness.guest.get_uuid().await.unwrap(),
-                session_id: harness
-                    .ds2
-                    .upstairs_session_id
-                    .lock()
-                    .await
-                    .unwrap(),
-                job_id: job_ids[0],
-                responses: Ok(vec![make_blank_read_response()]),
+                header: ReadResponseHeader {
+                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                    session_id: harness
+                        .ds2
+                        .upstairs_session_id
+                        .lock()
+                        .await
+                        .unwrap(),
+                    job_id: job_ids[0],
+                    blocks: Ok(vec![block.clone()]),
+                },
+                data: data.clone(),
             })
             .await
             .unwrap();
@@ -782,15 +793,18 @@ pub(crate) mod protocol_test {
             .lock()
             .await
             .send(Message::ReadResponse {
-                upstairs_id: harness.guest.get_uuid().await.unwrap(),
-                session_id: harness
-                    .ds3
-                    .upstairs_session_id
-                    .lock()
-                    .await
-                    .unwrap(),
-                job_id: job_ids[0],
-                responses: Ok(vec![make_blank_read_response()]),
+                header: ReadResponseHeader {
+                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                    session_id: harness
+                        .ds3
+                        .upstairs_session_id
+                        .lock()
+                        .await
+                        .unwrap(),
+                    job_id: job_ids[0],
+                    blocks: Ok(vec![block.clone()]),
+                },
+                data: data.clone(),
             })
             .await
             .unwrap();
@@ -1004,21 +1018,25 @@ pub(crate) mod protocol_test {
             ));
 
             // Respond with read responses for downstairs 2 and 3
+            let (block, data) = make_blank_read_response();
             harness
                 .ds2
                 .fw
                 .lock()
                 .await
                 .send(Message::ReadResponse {
-                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
-                    session_id: harness
-                        .ds2
-                        .upstairs_session_id
-                        .lock()
-                        .await
-                        .unwrap(),
-                    job_id: job_ids[i],
-                    responses: Ok(vec![make_blank_read_response()]),
+                    header: ReadResponseHeader {
+                        upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                        session_id: harness
+                            .ds2
+                            .upstairs_session_id
+                            .lock()
+                            .await
+                            .unwrap(),
+                        job_id: job_ids[i],
+                        blocks: Ok(vec![block.clone()]),
+                    },
+                    data: data.clone(),
                 })
                 .await
                 .unwrap();
@@ -1029,15 +1047,18 @@ pub(crate) mod protocol_test {
                 .lock()
                 .await
                 .send(Message::ReadResponse {
-                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
-                    session_id: harness
-                        .ds3
-                        .upstairs_session_id
-                        .lock()
-                        .await
-                        .unwrap(),
-                    job_id: job_ids[i],
-                    responses: Ok(vec![make_blank_read_response()]),
+                    header: ReadResponseHeader {
+                        upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                        session_id: harness
+                            .ds3
+                            .upstairs_session_id
+                            .lock()
+                            .await
+                            .unwrap(),
+                        job_id: job_ids[i],
+                        blocks: Ok(vec![block.clone()]),
+                    },
+                    data: data.clone(),
                 })
                 .await
                 .unwrap();
@@ -1121,6 +1142,7 @@ pub(crate) mod protocol_test {
 
         // Send ds1 responses for the jobs it saw
         for (i, job_id) in job_ids.iter().enumerate().take(MAX_ACTIVE_COUNT) {
+            let (block, data) = make_blank_read_response();
             match harness
                 .ds1()
                 .await
@@ -1128,16 +1150,19 @@ pub(crate) mod protocol_test {
                 .lock()
                 .await
                 .send(Message::ReadResponse {
-                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
-                    session_id: harness
-                        .ds1()
-                        .await
-                        .upstairs_session_id
-                        .lock()
-                        .await
-                        .unwrap(),
-                    job_id: *job_id,
-                    responses: Ok(vec![make_blank_read_response()]),
+                    header: ReadResponseHeader {
+                        upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                        session_id: harness
+                            .ds1()
+                            .await
+                            .upstairs_session_id
+                            .lock()
+                            .await
+                            .unwrap(),
+                        job_id: *job_id,
+                        blocks: Ok(vec![block.clone()]),
+                    },
+                    data: data.clone(),
                 })
                 .await
             {
@@ -1288,11 +1313,15 @@ pub(crate) mod protocol_test {
                                 );
                             }
 
+                            let (block, data) = make_blank_read_response();
                             responses[0].push(Message::ReadResponse {
-                                upstairs_id: *upstairs_id,
-                                session_id: *session_id,
-                                job_id: *job_id,
-                                responses: Ok(vec![make_blank_read_response()]),
+                                header: ReadResponseHeader {
+                                    upstairs_id: *upstairs_id,
+                                    session_id: *session_id,
+                                    job_id: *job_id,
+                                    blocks: Ok(vec![block.clone()]),
+                                },
+                                data,
                             });
 
                             // At this point, the next operation is going to be
@@ -1330,11 +1359,15 @@ pub(crate) mod protocol_test {
                             bail_assert!(dependencies.contains(&dep_job_id[1]));
                         }
 
+                        let (block, data) = make_blank_read_response();
                         responses[1].push(Message::ReadResponse {
-                            upstairs_id: *upstairs_id,
-                            session_id: *session_id,
-                            job_id: *job_id,
-                            responses: Ok(vec![make_blank_read_response()]),
+                            header: ReadResponseHeader {
+                                upstairs_id: *upstairs_id,
+                                session_id: *session_id,
+                                job_id: *job_id,
+                                blocks: Ok(vec![block.clone()]),
+                            },
+                            data,
                         });
                         dep_job_id[1] = *job_id;
                     }
@@ -1354,11 +1387,15 @@ pub(crate) mod protocol_test {
                             bail_assert!(dependencies.contains(&dep_job_id[2]));
                         }
 
+                        let (block, data) = make_blank_read_response();
                         responses[2].push(Message::ReadResponse {
-                            upstairs_id: *upstairs_id,
-                            session_id: *session_id,
-                            job_id: *job_id,
-                            responses: Ok(vec![make_blank_read_response()]),
+                            header: ReadResponseHeader {
+                                upstairs_id: *upstairs_id,
+                                session_id: *session_id,
+                                job_id: *job_id,
+                                blocks: Ok(vec![block.clone()]),
+                            },
+                            data,
                         });
                         dep_job_id[2] = *job_id;
                     }
@@ -1371,7 +1408,7 @@ pub(crate) mod protocol_test {
                 {
                     let harness = harness.clone();
                     tokio::spawn(async move {
-                        let bytes = Bytes::from(vec![1u8; 512]);
+                        let bytes = BytesMut::from(vec![1u8; 512].as_slice());
                         harness
                             .guest
                             .write(Block::new_512(io_eid as u64 * 10), bytes)
@@ -1387,10 +1424,14 @@ pub(crate) mod protocol_test {
 
                     match &m1 {
                         Message::Write {
-                            upstairs_id,
-                            session_id,
-                            job_id,
-                            dependencies,
+                            header:
+                                WriteHeader {
+                                    upstairs_id,
+                                    session_id,
+                                    job_id,
+                                    dependencies,
+                                    ..
+                                },
                             ..
                         } => {
                             if io_eid == eid {
@@ -1426,10 +1467,14 @@ pub(crate) mod protocol_test {
 
                 match &m2 {
                     Message::Write {
-                        upstairs_id,
-                        session_id,
-                        job_id,
-                        dependencies,
+                        header:
+                            WriteHeader {
+                                upstairs_id,
+                                session_id,
+                                job_id,
+                                dependencies,
+                                ..
+                            },
                         ..
                     } => {
                         if io_eid == eid {
@@ -1450,10 +1495,14 @@ pub(crate) mod protocol_test {
 
                 match &m3 {
                     Message::Write {
-                        upstairs_id,
-                        session_id,
-                        job_id,
-                        dependencies,
+                        header:
+                            WriteHeader {
+                                upstairs_id,
+                                session_id,
+                                job_id,
+                                dependencies,
+                                ..
+                            },
                         ..
                     } => {
                         if io_eid == eid {
@@ -1980,7 +2029,7 @@ pub(crate) mod protocol_test {
 
         // Send enough bytes to hit the IO_OUTSTANDING_MAX_BYTES condition on
         // downstairs 1, which should mark it as faulted and kick it out.
-        let write_buf = Bytes::from(vec![1; 50 * 1024]); // 50 KiB
+        let write_buf = BytesMut::from(vec![1; 50 * 1024].as_slice()); // 50 KiB
         let num_jobs = IO_OUTSTANDING_MAX_BYTES as usize / write_buf.len() + 10;
         let mut job_ids = Vec::with_capacity(num_jobs);
         assert!(num_jobs < IO_OUTSTANDING_MAX_JOBS);
@@ -2031,7 +2080,10 @@ pub(crate) mod protocol_test {
             }
 
             match ds2_messages.recv().await.unwrap() {
-                Message::Write { job_id, .. } => {
+                Message::Write {
+                    header: WriteHeader { job_id, .. },
+                    ..
+                } => {
                     // Record the job ids of the write requests
                     job_ids.push(job_id);
                 }
@@ -2182,21 +2234,25 @@ pub(crate) mod protocol_test {
             ));
 
             // Respond with read responses for downstairs 2 and 3
+            let (block, data) = make_blank_read_response();
             harness
                 .ds2
                 .fw
                 .lock()
                 .await
                 .send(Message::ReadResponse {
-                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
-                    session_id: harness
-                        .ds2
-                        .upstairs_session_id
-                        .lock()
-                        .await
-                        .unwrap(),
-                    job_id: job_ids[i],
-                    responses: Ok(vec![make_blank_read_response()]),
+                    header: ReadResponseHeader {
+                        upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                        session_id: harness
+                            .ds2
+                            .upstairs_session_id
+                            .lock()
+                            .await
+                            .unwrap(),
+                        job_id: job_ids[i],
+                        blocks: Ok(vec![block.clone()]),
+                    },
+                    data: data.clone(),
                 })
                 .await
                 .unwrap();
@@ -2207,15 +2263,18 @@ pub(crate) mod protocol_test {
                 .lock()
                 .await
                 .send(Message::ReadResponse {
-                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
-                    session_id: harness
-                        .ds3
-                        .upstairs_session_id
-                        .lock()
-                        .await
-                        .unwrap(),
-                    job_id: job_ids[i],
-                    responses: Ok(vec![make_blank_read_response()]),
+                    header: ReadResponseHeader {
+                        upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                        session_id: harness
+                            .ds3
+                            .upstairs_session_id
+                            .lock()
+                            .await
+                            .unwrap(),
+                        job_id: job_ids[i],
+                        blocks: Ok(vec![block.clone()]),
+                    },
+                    data: data.clone(),
                 })
                 .await
                 .unwrap();
@@ -2299,6 +2358,7 @@ pub(crate) mod protocol_test {
 
         // Send ds1 responses for the jobs it saw
         for (i, job_id) in job_ids.iter().enumerate().take(MAX_ACTIVE_COUNT) {
+            let (block, data) = make_blank_read_response();
             match harness
                 .ds1()
                 .await
@@ -2306,16 +2366,19 @@ pub(crate) mod protocol_test {
                 .lock()
                 .await
                 .send(Message::ReadResponse {
-                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
-                    session_id: harness
-                        .ds1()
-                        .await
-                        .upstairs_session_id
-                        .lock()
-                        .await
-                        .unwrap(),
-                    job_id: *job_id,
-                    responses: Ok(vec![make_blank_read_response()]),
+                    header: ReadResponseHeader {
+                        upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                        session_id: harness
+                            .ds1()
+                            .await
+                            .upstairs_session_id
+                            .lock()
+                            .await
+                            .unwrap(),
+                        job_id: *job_id,
+                        blocks: Ok(vec![block.clone()]),
+                    },
+                    data: data.clone(),
                 })
                 .await
             {
@@ -2886,21 +2949,25 @@ pub(crate) mod protocol_test {
             ));
 
             // Respond with read responses for downstairs 2 and 3
+            let (block, data) = make_blank_read_response();
             harness
                 .ds2
                 .fw
                 .lock()
                 .await
                 .send(Message::ReadResponse {
-                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
-                    session_id: harness
-                        .ds2
-                        .upstairs_session_id
-                        .lock()
-                        .await
-                        .unwrap(),
-                    job_id: job_ids[i],
-                    responses: Ok(vec![make_blank_read_response()]),
+                    header: ReadResponseHeader {
+                        upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                        session_id: harness
+                            .ds2
+                            .upstairs_session_id
+                            .lock()
+                            .await
+                            .unwrap(),
+                        job_id: job_ids[i],
+                        blocks: Ok(vec![block.clone()]),
+                    },
+                    data: data.clone(),
                 })
                 .await
                 .unwrap();
@@ -2911,15 +2978,18 @@ pub(crate) mod protocol_test {
                 .lock()
                 .await
                 .send(Message::ReadResponse {
-                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
-                    session_id: harness
-                        .ds3
-                        .upstairs_session_id
-                        .lock()
-                        .await
-                        .unwrap(),
-                    job_id: job_ids[i],
-                    responses: Ok(vec![make_blank_read_response()]),
+                    header: ReadResponseHeader {
+                        upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                        session_id: harness
+                            .ds3
+                            .upstairs_session_id
+                            .lock()
+                            .await
+                            .unwrap(),
+                        job_id: job_ids[i],
+                        blocks: Ok(vec![block.clone()]),
+                    },
+                    data: data.clone(),
                 })
                 .await
                 .unwrap();
@@ -3003,6 +3073,7 @@ pub(crate) mod protocol_test {
 
         // Send ds1 responses for the jobs it saw
         for (i, job_id) in job_ids.iter().enumerate().take(MAX_ACTIVE_COUNT) {
+            let (block, data) = make_blank_read_response();
             match harness
                 .ds1()
                 .await
@@ -3010,16 +3081,19 @@ pub(crate) mod protocol_test {
                 .lock()
                 .await
                 .send(Message::ReadResponse {
-                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
-                    session_id: harness
-                        .ds1()
-                        .await
-                        .upstairs_session_id
-                        .lock()
-                        .await
-                        .unwrap(),
-                    job_id: *job_id,
-                    responses: Ok(vec![make_blank_read_response()]),
+                    header: ReadResponseHeader {
+                        upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                        session_id: harness
+                            .ds1()
+                            .await
+                            .upstairs_session_id
+                            .lock()
+                            .await
+                            .unwrap(),
+                        job_id: *job_id,
+                        blocks: Ok(vec![block.clone()]),
+                    },
+                    data: data.clone(),
                 })
                 .await
             {
@@ -3150,17 +3224,21 @@ pub(crate) mod protocol_test {
             Message::ReadRequest { .. },
         ));
 
+        let (block, data) = make_blank_read_response();
         let response = Message::ReadResponse {
-            upstairs_id: harness.guest.get_uuid().await.unwrap(),
-            session_id: harness
-                .ds1()
-                .await
-                .upstairs_session_id
-                .lock()
-                .await
-                .unwrap(),
-            job_id,
-            responses: Ok(vec![make_blank_read_response()]),
+            header: ReadResponseHeader {
+                upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                session_id: harness
+                    .ds1()
+                    .await
+                    .upstairs_session_id
+                    .lock()
+                    .await
+                    .unwrap(),
+                job_id,
+                blocks: Ok(vec![block.clone()]),
+            },
+            data,
         };
         harness
             .ds1()

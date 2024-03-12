@@ -3439,9 +3439,9 @@ impl Downstairs {
         blocks: ImpactedBlocks,
         is_write_unwritten: bool,
     ) -> JobId {
-        use bytes::Bytes;
+        use bytes::BytesMut;
         use crucible_common::Block;
-        use crucible_protocol::{BlockContext, Write};
+        use crucible_protocol::{BlockContext, WriteBlockMetadata};
 
         // ddef is used in submit_read for enumerating the individual blocks.
         // values here dont matter as long as the ddef can contain
@@ -3451,20 +3451,27 @@ impl Downstairs {
         ddef.set_extent_size(Block::new_512(extent_size));
         ddef.set_extent_count(u32::MAX);
 
-        let writes = blocks.blocks(&ddef).map(|(eid, b)| Write {
-            eid,
-            offset: b,
-            data: Bytes::from(vec![0xff; 512]),
-            block_context: BlockContext {
-                hash: crucible_common::integrity_hash(&[&vec![0xff; 512]]),
-                encryption_context: None,
-            },
-        });
+        let write_blocks: Vec<_> = blocks
+            .blocks(&ddef)
+            .map(|(eid, b)| WriteBlockMetadata {
+                eid,
+                offset: b,
+                block_context: BlockContext {
+                    hash: crucible_common::integrity_hash(&[&vec![0xff; 512]]),
+                    encryption_context: None,
+                },
+            })
+            .collect();
+        let data =
+            BytesMut::from(vec![0xff; 512 * write_blocks.len()].as_slice());
 
         self.submit_write(
             gwid,
             blocks,
-            RawWrite::from_writes(writes.collect()),
+            RawWrite {
+                blocks: write_blocks,
+                data,
+            },
             is_write_unwritten,
         )
     }
