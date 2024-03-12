@@ -674,6 +674,56 @@ impl Message {
     }
 }
 
+// In our `Display` implementation, we skip printing large chunks of data but
+// otherwise delegate to the `Debug` formatter.
+impl std::fmt::Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        match self {
+            Message::Write {
+                upstairs_id,
+                session_id,
+                job_id,
+                dependencies,
+                writes: _,
+            } => f
+                .debug_struct("Message::Write")
+                .field("upstairs_id", &upstairs_id)
+                .field("session_id", &session_id)
+                .field("job_id", &job_id)
+                .field("dependencies", &dependencies)
+                .field("writes", &"..")
+                .finish(),
+            Message::WriteUnwritten {
+                upstairs_id,
+                session_id,
+                job_id,
+                dependencies,
+                writes: _,
+            } => f
+                .debug_struct("Message::WriteUnwritten")
+                .field("upstairs_id", &upstairs_id)
+                .field("session_id", &session_id)
+                .field("job_id", &job_id)
+                .field("dependencies_id", &dependencies)
+                .field("writes", &"..")
+                .finish(),
+            Message::ReadResponse {
+                upstairs_id,
+                session_id,
+                job_id,
+                responses: _,
+            } => f
+                .debug_struct("Message::ReadResponse")
+                .field("upstairs_id", &upstairs_id)
+                .field("session_id", &session_id)
+                .field("job_id", &job_id)
+                .field("responses", &"..")
+                .finish(),
+            m => std::fmt::Debug::fmt(m, f),
+        }
+    }
+}
+
 /// Message to be sent down the wire
 #[derive(Debug)]
 pub enum WireMessage<M> {
@@ -692,6 +742,24 @@ pub enum WireMessage<M> {
     /// The values of `M` and the byte array must match the equivalent
     /// [`Message`] serialized with a [`CrucibleEncoder`].
     RawMessage(M, bytes::Bytes),
+}
+
+impl<M: std::fmt::Debug> std::fmt::Display for WireMessage<M> {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> Result<(), std::fmt::Error> {
+        match self {
+            WireMessage::Message(m) => {
+                f.debug_tuple("WireMessage::Message").field(&m).finish()
+            }
+            WireMessage::RawMessage(m, _data) => f
+                .debug_tuple("WireMessage::RawMessage")
+                .field(&m)
+                .field(&"..")
+                .finish(),
+        }
+    }
 }
 
 impl<M> From<Message> for WireMessage<M> {
