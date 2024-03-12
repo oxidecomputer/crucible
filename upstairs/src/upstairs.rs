@@ -4273,7 +4273,7 @@ pub(crate) mod test {
         // Send back a second response with more data (2 blocks instead of 1);
         // the first block matches.
         let data = BytesMut::from([1u8; 512 * 2].as_slice());
-        let hash = integrity_hash(&[&data]);
+        let hash = integrity_hash(&[&data[0..512]]);
         let response = ReadResponseBlockMetadata {
             eid: 0,
             offset,
