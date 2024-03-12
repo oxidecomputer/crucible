@@ -1672,7 +1672,7 @@ impl Downstairs {
                 );
 
                 let (blocks, data) = match responses {
-                    Ok(r) => (Ok(r.blocks), r.data.freeze()),
+                    Ok(r) => (Ok(r.blocks), r.data),
                     Err(e) => (Err(e), Default::default()),
                 };
                 Ok(Some(Message::ReadResponse {

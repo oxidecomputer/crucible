@@ -141,7 +141,7 @@ async fn main() -> Result<()> {
     'outer: loop {
         enum RandomOp {
             Read(u64, Buffer),
-            Write(u64, Bytes),
+            Write(u64, BytesMut),
         }
 
         let mut ops = Vec::with_capacity(io_depth);
@@ -155,13 +155,14 @@ async fn main() -> Result<()> {
                     Buffer::new(io_size / bsz as usize, bsz as usize),
                 ));
             } else {
-                let bytes = Bytes::from(if opt.all_zeroes {
-                    vec![0u8; io_size]
+                let mut bytes = BytesMut::with_capacity(io_size);
+                if opt.all_zeroes {
+                    bytes.resize(io_size, 0);
                 } else {
-                    (0..io_size)
-                        .map(|_| rng.sample(rand::distributions::Standard))
-                        .collect::<Vec<u8>>()
-                });
+                    bytes.extend((0..io_size).map(|_| -> u8 {
+                        rng.sample(rand::distributions::Standard)
+                    }));
+                }
                 ops.push(RandomOp::Write(offset, bytes));
             }
         }
