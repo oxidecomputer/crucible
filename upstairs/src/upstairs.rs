@@ -722,7 +722,7 @@ impl Upstairs {
     fn on_stat_update(&self) {
         let up_count = self.guest.guest_work.len() as u32;
         let up_counters = self.counters;
-        let next_job = self.downstairs.peek_next_id();
+        let next_job_id = self.downstairs.peek_next_id();
         let ds_count = self.downstairs.active_count() as u32;
         let ds_state = self.downstairs.collect_stats(|c| c.state());
 
@@ -755,7 +755,7 @@ impl Upstairs {
             let arg = Arg {
                 up_count,
                 up_counters,
-                next_job,
+                next_job_id,
                 up_backpressure,
                 write_bytes_out,
                 ds_count,

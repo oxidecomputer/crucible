@@ -2025,7 +2025,7 @@ pub struct Arg {
     /// Apply loop counter
     pub up_counters: UpCounters,
     /// Next JobID
-    pub next_job: JobId,
+    pub next_job_id: JobId,
     /// Backpressure value
     pub up_backpressure: u64,
     /// Jobs on the downstairs work queue.

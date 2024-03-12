@@ -49,7 +49,7 @@ crucible_upstairs*:::up-status
     /*
      * Job ID delta and backpressure
      */
-    current_str = json(copyinstr(arg1), "ok.next_job");
+    current_str = json(copyinstr(arg1), "ok.next_job_id");
     current = strtoll(current_str, 10);
     if (last == 0)
         delta = current;
