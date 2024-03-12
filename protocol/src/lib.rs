@@ -693,19 +693,6 @@ impl std::fmt::Display for Message {
                 .field("dependencies", &dependencies)
                 .field("writes", &"..")
                 .finish(),
-            Message::ReadResponse {
-                upstairs_id,
-                session_id,
-                job_id,
-                responses: _,
-            } => f
-                .debug_struct("Message::ReadResponse")
-                .field("upstairs_id", &upstairs_id)
-                .field("session_id", &session_id)
-                .field("job_id", &job_id)
-                .field("responses", &"..")
-                .finish(),
-
             Message::WriteUnwritten {
                 upstairs_id,
                 session_id,
@@ -719,6 +706,18 @@ impl std::fmt::Display for Message {
                 .field("job_id", &job_id)
                 .field("dependencies_id", &dependencies)
                 .field("writes", &"..")
+                .finish(),
+            Message::ReadResponse {
+                upstairs_id,
+                session_id,
+                job_id,
+                responses: _,
+            } => f
+                .debug_struct("Message::ReadResponse")
+                .field("upstairs_id", &upstairs_id)
+                .field("session_id", &session_id)
+                .field("job_id", &job_id)
+                .field("responses", &"..")
                 .finish(),
             m => std::fmt::Debug::fmt(m, f),
         }
