@@ -41,12 +41,31 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
         job_id: JobOrReconciliationId,
     ) -> Result<(), CrucibleError>;
 
+    fn read_into(
+        &mut self,
+        job_id: JobId,
+        requests: &[crucible_protocol::ReadRequest],
+        out: &mut crucible_protocol::RawReadResponse,
+    ) -> Result<(), CrucibleError>;
+
+    /// Performs a read then destructures into a `Vec<ReadResponse>`
+    #[cfg(test)]
     fn read(
         &mut self,
         job_id: JobId,
         requests: &[crucible_protocol::ReadRequest],
-        iov_max: usize,
-    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError>;
+    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
+        if requests.is_empty() {
+            return Ok(vec![]);
+        }
+        let block_size = requests[0].offset.block_size_in_bytes();
+        let mut out = crucible_protocol::RawReadResponse::with_capacity(
+            requests.len(),
+            block_size as u64,
+        );
+        self.read_into(job_id, requests, &mut out)?;
+        Ok(out.into_read_responses())
+    }
 
     fn write(
         &mut self,
@@ -514,21 +533,22 @@ impl Extent {
     /// an error occurs while processing any of the requests, the state of
     /// `responses` is undefined.
     #[instrument]
-    pub async fn read(
+    pub async fn read_into(
         &mut self,
         job_id: JobId,
         requests: &[crucible_protocol::ReadRequest],
-    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
+        out: &mut crucible_protocol::RawReadResponse,
+    ) -> Result<(), CrucibleError> {
         cdt::extent__read__start!(|| {
             (job_id.0, self.number, requests.len() as u64)
         });
 
-        let responses = self.inner.read(job_id, requests, self.iov_max)?;
+        self.inner.read_into(job_id, requests, out)?;
         cdt::extent__read__done!(|| {
             (job_id.0, self.number, requests.len() as u64)
         });
 
-        Ok(responses)
+        Ok(())
     }
 
     #[instrument]
@@ -804,7 +824,7 @@ pub(crate) fn check_input(
     /*
      * Only accept block sized operations
      */
-    if data.len() != block_size as usize {
+    if data.len() % block_size as usize != 0 {
         crucible_bail!(DataLenUnaligned);
     }
 

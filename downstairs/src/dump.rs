@@ -537,7 +537,7 @@ async fn show_extent(
                 Region::open(dir, Default::default(), false, true, &log)
                     .await?;
 
-            let mut responses = region
+            let mut response = region
                 .region_read(
                     &[ReadRequest {
                         eid: cmp_extent as u64,
@@ -546,7 +546,13 @@ async fn show_extent(
                     JobId(0),
                 )
                 .await?;
-            let response = responses.pop().unwrap();
+            let b = response.blocks.pop().unwrap();
+            let response = ReadResponse {
+                eid: b.eid,
+                offset: b.offset,
+                data: response.data,
+                block_contexts: b.block_contexts,
+            };
 
             dvec.insert(index, response);
         }
@@ -652,7 +658,7 @@ async fn show_extent_block(
         let mut region =
             Region::open(dir, Default::default(), false, true, &log).await?;
 
-        let mut responses = region
+        let mut response = region
             .region_read(
                 &[ReadRequest {
                     eid: cmp_extent as u64,
@@ -664,7 +670,13 @@ async fn show_extent_block(
                 JobId(0),
             )
             .await?;
-        let response = responses.pop().unwrap();
+        let b = response.blocks.pop().unwrap();
+        let response = ReadResponse {
+            eid: b.eid,
+            offset: b.offset,
+            data: response.data,
+            block_contexts: b.block_contexts,
+        };
 
         dvec.insert(index, response);
     }

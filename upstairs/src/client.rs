@@ -8,7 +8,8 @@ use crate::{
 };
 use crucible_common::{deadline_secs, verbose_timeout, x509::TLSContext};
 use crucible_protocol::{
-    ReconciliationId, WireMessage, WireMessageWriter, CRUCIBLE_MESSAGE_VERSION,
+    ReadResponseBlockMetadata, ReconciliationId, WireMessage,
+    WireMessageWriter, CRUCIBLE_MESSAGE_VERSION,
 };
 
 use std::{
@@ -1228,14 +1229,12 @@ impl DownstairsClient {
     ///
     /// Returns `true` if the job is now ackable, `false` otherwise
     ///
-    /// If this is a read response, then the values in `responses` must
-    /// _already_ be decrypted (with corresponding hashes stored in
-    /// `read_response_hashes`).
+    /// If this is a read response, then the values in `response` contain
+    /// already-decrypted bulk data and its corresponding hashes.
     pub(crate) fn process_io_completion(
         &mut self,
         job: &mut DownstairsIO,
-        responses: Result<Vec<ReadResponse>, CrucibleError>,
-        read_response_hashes: Vec<Option<u64>>,
+        response: Result<ReadResponse, CrucibleError>,
         deactivate: bool,
         extent_info: Option<ExtentInfo>,
     ) -> bool {
@@ -1251,7 +1250,7 @@ impl DownstairsClient {
         let mut jobs_completed_ok = job.state_count().completed_ok();
         let mut ackable = false;
 
-        let new_state = match &responses {
+        let new_state = match &response {
             Ok(..) => {
                 // Messages have already been decrypted out-of-band
                 jobs_completed_ok += 1;
@@ -3420,207 +3419,5 @@ mod test {
             &UpstairsState::Initializing,
             DsState::Faulted,
         );
-    }
-
-    /// Confirms that `RawMessage` serialization works for a `Write`
-    #[tokio::test]
-    async fn test_raw_write_serialization() -> anyhow::Result<()> {
-        let mut ddef = RegionDefinition::default();
-        ddef.set_block_size(512);
-        ddef.set_extent_size(Block::new_512(25));
-        ddef.set_extent_count(4);
-
-        let mut data = vec![0u8; 512 * 10];
-        rand::thread_rng().fill(&mut data[..]);
-
-        let impacted_blocks = ImpactedBlocks::InclusiveRange(
-            ImpactedAddr {
-                extent_id: 1,
-                block: 7,
-            },
-            ImpactedAddr {
-                extent_id: 1,
-                block: 16,
-            },
-        );
-
-        let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
-        let context = EncryptionContext::new(key_bytes.to_vec(), 512);
-        let cfg = Arc::new(UpstairsConfig {
-            upstairs_id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
-            generation: std::sync::atomic::AtomicU64::new(10),
-            read_only: false,
-            encryption_context: Some(context),
-            lossy: false,
-        });
-
-        let dr = crate::deferred::DeferredWrite {
-            ddef,
-            impacted_blocks,
-            data: data.clone().into(),
-            res: None,
-            is_write_unwritten: false,
-            cfg: cfg.clone(),
-        };
-        let write_data = dr.run().unwrap();
-
-        let msg = ClientRequest::RawMessage(
-            RawMessage::Write {
-                upstairs_id: cfg.upstairs_id,
-                session_id: cfg.session_id,
-                job_id: JobId(1234),
-                dependencies: vec![JobId(100), JobId(300), JobId(6000)],
-            },
-            write_data.data.data,
-        );
-
-        // Write the raw message to an in-memory buffer
-        let cursor = std::io::Cursor::new(vec![]);
-        let mut w = WireMessageWriter::new(cursor);
-        w.send(msg).await.unwrap();
-
-        let mut out = bytes::BytesMut::new();
-        out.extend(w.into_inner().into_inner());
-
-        let mut decoder = CrucibleDecoder::new();
-        let out = decoder.decode(&mut out).unwrap().unwrap();
-
-        let Message::Write {
-            upstairs_id,
-            session_id,
-            job_id,
-            dependencies,
-            writes,
-        } = out
-        else {
-            panic!("bad serialization");
-        };
-        assert_eq!(upstairs_id, cfg.upstairs_id);
-        assert_eq!(session_id, cfg.session_id);
-        assert_eq!(job_id, JobId(1234));
-        assert_eq!(dependencies, vec![JobId(100), JobId(300), JobId(6000)]);
-
-        // Check that all of the writes worked
-        assert_eq!(writes.len(), 10);
-        for (i, w) in writes.iter().enumerate() {
-            assert_eq!(w.eid, 1);
-            assert_eq!(w.offset, Block::new_512(7 + i as u64));
-            let mut out = bytes::BytesMut::from(&*w.data);
-
-            let ctx = w.block_context.encryption_context.unwrap();
-            cfg.encryption_context
-                .as_ref()
-                .unwrap()
-                .decrypt_in_place(&mut out, &ctx.nonce.into(), &ctx.tag.into())
-                .unwrap();
-            assert_eq!(out, &data[i * 512..(i + 1) * 512]);
-
-            let hash = integrity_hash(&[&ctx.nonce, &ctx.tag, &w.data]);
-            assert_eq!(w.block_context.hash, hash);
-        }
-
-        Ok(())
-    }
-
-    /// Confirms that `RawMessage` serialization works for a `WriteUnwritten`
-    #[tokio::test]
-    async fn test_raw_write_unwritten_serialization() -> anyhow::Result<()> {
-        let mut ddef = RegionDefinition::default();
-        ddef.set_block_size(512);
-        ddef.set_extent_size(Block::new_512(25));
-        ddef.set_extent_count(4);
-
-        let mut data = vec![0u8; 512 * 10];
-        rand::thread_rng().fill(&mut data[..]);
-
-        let impacted_blocks = ImpactedBlocks::InclusiveRange(
-            ImpactedAddr {
-                extent_id: 1,
-                block: 7,
-            },
-            ImpactedAddr {
-                extent_id: 1,
-                block: 16,
-            },
-        );
-
-        let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
-        let context = EncryptionContext::new(key_bytes.to_vec(), 512);
-        let cfg = Arc::new(UpstairsConfig {
-            upstairs_id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
-            generation: std::sync::atomic::AtomicU64::new(10),
-            read_only: false,
-            encryption_context: Some(context),
-            lossy: false,
-        });
-
-        let dr = crate::deferred::DeferredWrite {
-            ddef,
-            impacted_blocks,
-            data: data.clone().into(),
-            res: None,
-            is_write_unwritten: true,
-            cfg: cfg.clone(),
-        };
-        let write_data = dr.run().unwrap();
-
-        let msg = ClientRequest::RawMessage(
-            RawMessage::WriteUnwritten {
-                upstairs_id: cfg.upstairs_id,
-                session_id: cfg.session_id,
-                job_id: JobId(1234),
-                dependencies: vec![JobId(100), JobId(300), JobId(6000)],
-            },
-            write_data.data.data,
-        );
-
-        // Write the raw message to an in-memory buffer
-        let cursor = std::io::Cursor::new(vec![]);
-        let mut w = WireMessageWriter::new(cursor);
-        w.send(msg).await.unwrap();
-
-        let mut out = bytes::BytesMut::new();
-        out.extend(w.into_inner().into_inner());
-
-        let mut decoder = CrucibleDecoder::new();
-        let out = decoder.decode(&mut out).unwrap().unwrap();
-
-        let Message::WriteUnwritten {
-            upstairs_id,
-            session_id,
-            job_id,
-            dependencies,
-            writes,
-        } = out
-        else {
-            panic!("bad serialization");
-        };
-        assert_eq!(upstairs_id, cfg.upstairs_id);
-        assert_eq!(session_id, cfg.session_id);
-        assert_eq!(job_id, JobId(1234));
-        assert_eq!(dependencies, vec![JobId(100), JobId(300), JobId(6000)]);
-
-        // Check that all of the writes worked
-        assert_eq!(writes.len(), 10);
-        for (i, w) in writes.iter().enumerate() {
-            assert_eq!(w.eid, 1);
-            assert_eq!(w.offset, Block::new_512(7 + i as u64));
-            let mut out = bytes::BytesMut::from(&*w.data);
-
-            let ctx = w.block_context.encryption_context.unwrap();
-            cfg.encryption_context
-                .as_ref()
-                .unwrap()
-                .decrypt_in_place(&mut out, &ctx.nonce.into(), &ctx.tag.into())
-                .unwrap();
-            assert_eq!(out, &data[i * 512..(i + 1) * 512]);
-
-            let hash = integrity_hash(&[&ctx.nonce, &ctx.tag, &w.data]);
-            assert_eq!(w.block_context.hash, hash);
-        }
-
-        Ok(())
     }
 }

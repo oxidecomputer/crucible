@@ -1,6 +1,4 @@
-// Copyright 2023 Oxide Computer Company
-use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::convert::TryInto;
 use std::fmt::Debug;
 use std::fs::{rename, File, OpenOptions};
@@ -14,7 +12,7 @@ use futures::TryStreamExt;
 use tracing::instrument;
 
 use crucible_common::*;
-use crucible_protocol::SnapshotDetails;
+use crucible_protocol::{RawReadResponse, SnapshotDetails};
 use repair_client::Client;
 
 use super::*;
@@ -846,8 +844,11 @@ impl Region {
         &mut self,
         requests: &[crucible_protocol::ReadRequest],
         job_id: JobId,
-    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
-        let mut responses = Vec::with_capacity(requests.len());
+    ) -> Result<RawReadResponse, CrucibleError> {
+        let mut response = RawReadResponse::with_capacity(
+            requests.len(),
+            self.def.block_size(),
+        );
 
         /*
          * Batch reads so they can all be sent to the appropriate extent
@@ -867,8 +868,9 @@ impl Region {
                     batched_reads.push(request.clone());
                 } else {
                     let extent = self.get_opened_extent_mut(_eid as usize);
-                    responses
-                        .extend(extent.read(job_id, &batched_reads[..]).await?);
+                    extent
+                        .read_into(job_id, &batched_reads[..], &mut response)
+                        .await?;
 
                     eid = Some(request.eid);
                     batched_reads.clear();
@@ -883,11 +885,13 @@ impl Region {
 
         if let Some(_eid) = eid {
             let extent = self.get_opened_extent_mut(_eid as usize);
-            responses.extend(extent.read(job_id, &batched_reads[..]).await?);
+            extent
+                .read_into(job_id, &batched_reads[..], &mut response)
+                .await?;
         }
         cdt::os__read__done!(|| job_id.0);
 
-        Ok(responses)
+        Ok(response)
     }
 
     /*
@@ -2023,7 +2027,8 @@ pub(crate) mod test {
                 ],
                 JobId(0),
             )
-            .await?;
+            .await?
+            .into_read_responses();
         assert_eq!(out[0].data.as_ref(), [1; 512]);
         assert_eq!(out[1].data.as_ref(), [2; 512]);
 
@@ -2124,7 +2129,8 @@ pub(crate) mod test {
                 ],
                 JobId(0),
             )
-            .await?;
+            .await?
+            .into_read_responses();
         assert_eq!(out[0].data.as_ref(), [1; 512]);
         assert_eq!(out[1].data.as_ref(), [2; 512]);
 
@@ -2499,14 +2505,8 @@ pub(crate) mod test {
 
         let responses = region.region_read(&requests, JobId(0)).await?;
 
-        let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
-
-        for response in &responses {
-            read_from_region.append(&mut response.data.to_vec());
-        }
-
-        assert_eq!(buffer.len(), read_from_region.len());
-        assert_eq!(buffer, read_from_region);
+        assert_eq!(buffer.len(), responses.data.len());
+        assert_eq!(buffer, responses.data);
 
         Ok(())
     }
@@ -2593,12 +2593,8 @@ pub(crate) mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let read_from_region: Vec<u8> = region
-            .region_read(&requests, JobId(0))
-            .await?
-            .into_iter()
-            .flat_map(|i| i.data.to_vec())
-            .collect();
+        let read_from_region =
+            region.region_read(&requests, JobId(0)).await?.data;
 
         assert_eq!(buffer.len(), read_from_region.len());
         assert_eq!(buffer, read_from_region);
@@ -2617,12 +2613,8 @@ pub(crate) mod test {
                 .join(extent_file_name(i, ExtentType::Db))
                 .exists());
         }
-        let read_from_region: Vec<u8> = region
-            .region_read(&requests, JobId(0))
-            .await?
-            .into_iter()
-            .flat_map(|i| i.data.to_vec())
-            .collect();
+        let read_from_region =
+            region.region_read(&requests, JobId(0)).await?.data;
 
         assert_eq!(buffer.len(), read_from_region.len());
         assert_eq!(buffer, read_from_region);
@@ -2708,9 +2700,7 @@ pub(crate) mod test {
             )
             .await?;
 
-        let response = &responses[0];
-
-        assert_eq!(response.data.to_vec(), vec![0x55; 512]);
+        assert_eq!(responses.data, vec![0x55; 512]);
 
         Ok(())
     }
@@ -2795,9 +2785,9 @@ pub(crate) mod test {
             )
             .await?;
 
-        assert_eq!(responses.len(), 1);
-        assert_eq!(responses[0].hashes().len(), 1);
-        assert_eq!(responses[0].data[..], [9u8; 512][..]);
+        assert_eq!(responses.blocks.len(), 1);
+        assert_eq!(responses.blocks[0].hashes().len(), 1);
+        assert_eq!(responses.data[..], [9u8; 512][..]);
 
         Ok(())
     }
@@ -2870,11 +2860,11 @@ pub(crate) mod test {
             .await?;
 
         // We should still have one response.
-        assert_eq!(responses.len(), 1);
+        assert_eq!(responses.blocks.len(), 1);
         // Hash should be just 1
-        assert_eq!(responses[0].hashes().len(), 1);
+        assert_eq!(responses.blocks[0].hashes().len(), 1);
         // Data should match first write
-        assert_eq!(responses[0].data[..], [9u8; 512][..]);
+        assert_eq!(responses.data[..], [9u8; 512][..]);
 
         Ok(())
     }
@@ -2963,11 +2953,11 @@ pub(crate) mod test {
             .await?;
 
         // We should still have one response.
-        assert_eq!(responses.len(), 1);
+        assert_eq!(responses.blocks.len(), 1);
         // Hash should be just 1
-        assert_eq!(responses[0].hashes().len(), 1);
+        assert_eq!(responses.blocks[0].hashes().len(), 1);
         // Data should match first write
-        assert_eq!(responses[0].data[..], [9u8; 512][..]);
+        assert_eq!(responses.data[..], [9u8; 512][..]);
 
         Ok(())
     }
@@ -3045,13 +3035,7 @@ pub(crate) mod test {
 
         let responses = region.region_read(&requests, JobId(0)).await?;
 
-        let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
-
-        for response in &responses {
-            read_from_region.append(&mut response.data.to_vec());
-        }
-
-        assert_eq!(buffer, read_from_region);
+        assert_eq!(buffer, responses.data);
 
         Ok(())
     }
@@ -3165,13 +3149,7 @@ pub(crate) mod test {
 
         let responses = region.region_read(&requests, JobId(0)).await?;
 
-        let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
-
-        for response in &responses {
-            read_from_region.append(&mut response.data.to_vec());
-        }
-
-        assert_eq!(buffer, read_from_region);
+        assert_eq!(buffer, responses.data);
 
         Ok(())
     }
@@ -3286,13 +3264,7 @@ pub(crate) mod test {
 
         let responses = region.region_read(&requests, JobId(0)).await?;
 
-        let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
-
-        for response in &responses {
-            read_from_region.append(&mut response.data.to_vec());
-        }
-
-        assert_eq!(buffer, read_from_region);
+        assert_eq!(buffer, responses.data);
 
         Ok(())
     }
@@ -3398,14 +3370,7 @@ pub(crate) mod test {
 
         let responses = region.region_read(&requests, JobId(0)).await?;
 
-        let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
-
-        for response in &responses {
-            read_from_region.append(&mut response.data.to_vec());
-            println!("Read a region, append");
-        }
-
-        assert_eq!(buffer, read_from_region);
+        assert_eq!(buffer, responses.data);
 
         Ok(())
     }
@@ -3512,13 +3477,7 @@ pub(crate) mod test {
 
         let responses = region.region_read(&requests, JobId(0)).await?;
 
-        let mut read_from_region: Vec<u8> = Vec::with_capacity(total_size);
-
-        for response in &responses {
-            read_from_region.append(&mut response.data.to_vec());
-        }
-
-        assert_eq!(buffer, read_from_region);
+        assert_eq!(buffer, responses.data);
 
         Ok(())
     }
@@ -4053,9 +4012,9 @@ pub(crate) mod test {
             )
             .await?;
 
-        assert_eq!(responses.len(), 1);
-        assert_eq!(responses[0].hashes().len(), 0);
-        assert_eq!(responses[0].data[..], [0u8; 512][..]);
+        assert_eq!(responses.blocks.len(), 1);
+        assert_eq!(responses.blocks[0].hashes().len(), 0);
+        assert_eq!(responses.data[..], [0u8; 512][..]);
 
         Ok(())
     }
@@ -4123,13 +4082,7 @@ pub(crate) mod test {
         let responses = region.region_read(&requests, JobId(0)).await?;
 
         // Validate returned data
-        assert_eq!(
-            &responses
-                .iter()
-                .flat_map(|resp| resp.data.to_vec())
-                .collect::<Vec<u8>>(),
-            &data[512..(8 * 512)],
-        );
+        assert_eq!(responses.data, &data[512..(8 * 512)],);
 
         Ok(())
     }
@@ -4150,13 +4103,7 @@ pub(crate) mod test {
         let responses = region.region_read(&requests, JobId(0)).await?;
 
         // Validate returned data
-        assert_eq!(
-            &responses
-                .iter()
-                .flat_map(|resp| resp.data.to_vec())
-                .collect::<Vec<u8>>(),
-            &data[(9 * 512)..(28 * 512)],
-        );
+        assert_eq!(&responses.data, &data[(9 * 512)..(28 * 512)],);
 
         Ok(())
     }
@@ -4194,10 +4141,7 @@ pub(crate) mod test {
 
         // Validate returned data
         assert_eq!(
-            &responses
-                .iter()
-                .flat_map(|resp| resp.data.to_vec())
-                .collect::<Vec<u8>>(),
+            &responses.data,
             &[
                 &data[512..(4 * 512)],
                 &data[(15 * 512)..(24 * 512)],
@@ -4237,10 +4181,7 @@ pub(crate) mod test {
 
         // Validate returned data
         assert_eq!(
-            &responses
-                .iter()
-                .flat_map(|resp| resp.data.to_vec())
-                .collect::<Vec<u8>>(),
+            &responses.data,
             &[
                 &data[0..512],
                 &data[(14 * 512)..(15 * 512)],
@@ -4302,13 +4243,7 @@ pub(crate) mod test {
 
         let responses = region.region_read(&requests, JobId(1)).await?;
 
-        assert_eq!(
-            &responses
-                .iter()
-                .flat_map(|resp| resp.data.to_vec())
-                .collect::<Vec<u8>>(),
-            &data,
-        );
+        assert_eq!(&responses.data, &data,);
 
         Ok(())
     }

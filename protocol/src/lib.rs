@@ -115,6 +115,10 @@ impl std::fmt::Display for ClientId {
     }
 }
 
+/// Deserialized write operation
+///
+/// `data` should be a borrowed section of the received `Message::Write`, to
+/// reduce memory copies.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct Write {
@@ -134,6 +138,10 @@ pub struct ReadRequest {
 
 // Note: if you change this, you may have to add to the dump commands that show
 // block specific data.
+/// Deserialized read response
+///
+/// `data` should be a borrowed section of the incoming `Message::ReadResponse`,
+/// to reduce memory copies.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReadResponse {
@@ -194,42 +202,6 @@ pub struct EncryptionContext {
     pub tag: [u8; 16],
 }
 
-impl ReadResponse {
-    pub fn from_request(request: &ReadRequest, bs: usize) -> ReadResponse {
-        /*
-         * XXX Some thought will need to be given to where the read
-         * data buffer is created, both on this side and the remote.
-         * Also, we (I) need to figure out how to read data into an
-         * uninitialized buffer. Until then, we have this workaround.
-         */
-        let sz = bs;
-        let mut data = BytesMut::with_capacity(sz);
-        data.resize(sz, 1);
-
-        ReadResponse {
-            eid: request.eid,
-            offset: request.offset,
-            data,
-            block_contexts: vec![],
-        }
-    }
-
-    pub fn from_request_with_data(
-        request: &ReadRequest,
-        data: &[u8],
-    ) -> ReadResponse {
-        ReadResponse {
-            eid: request.eid,
-            offset: request.offset,
-            data: BytesMut::from(data),
-            block_contexts: vec![BlockContext {
-                hash: crucible_common::integrity_hash(&[data]),
-                encryption_context: None,
-            }],
-        }
-    }
-}
-
 /**
  * These enums are for messages sent between an Upstairs and a Downstairs
  */
@@ -246,6 +218,10 @@ pub struct SnapshotDetails {
 #[repr(u32)]
 #[derive(IntoPrimitive)]
 pub enum MessageVersion {
+    /// Changed `Write`, `WriteUnwritten`, and `ReadResponse` variants to have a
+    /// clean split between header and bulk data, to reduce `memcpy`
+    V6 = 6,
+
     /// Switched to raw file extents
     ///
     /// The message format remains the same, but live repair between SQLite and
@@ -266,7 +242,7 @@ pub enum MessageVersion {
 }
 impl MessageVersion {
     pub const fn current() -> Self {
-        Self::V5
+        Self::V6
     }
 }
 
@@ -275,7 +251,7 @@ impl MessageVersion {
  * This, along with the MessageVersion enum above should be updated whenever
  * changes are made to the Message enum below.
  */
-pub const CRUCIBLE_MESSAGE_VERSION: u32 = 5;
+pub const CRUCIBLE_MESSAGE_VERSION: u32 = 6;
 
 /*
  * If you add or change the Message enum, you must also increment the
@@ -535,14 +511,9 @@ pub enum Message {
     /*
      * IO related
      */
-    // Message::Write must contain the same fields in the same order as
-    // RawMessage::Write which is used for zero-copy serialization.
     Write {
-        upstairs_id: Uuid,
-        session_id: Uuid,
-        job_id: JobId,
-        dependencies: Vec<JobId>,
-        writes: Vec<Write>,
+        header: WriteHeader,
+        data: bytes::Bytes,
     },
     WriteAck {
         upstairs_id: Uuid,
@@ -580,20 +551,13 @@ pub enum Message {
         requests: Vec<ReadRequest>,
     },
     ReadResponse {
-        upstairs_id: Uuid,
-        session_id: Uuid,
-        job_id: JobId,
-        responses: Result<Vec<ReadResponse>, CrucibleError>,
+        header: ReadResponseHeader,
+        data: bytes::Bytes,
     },
 
-    // Message::WriteUnwritten must contain the same fields in the same order as
-    // RawMessage::WriteUnwritten, which is used for zero-copy serialization.
     WriteUnwritten {
-        upstairs_id: Uuid,
-        session_id: Uuid,
-        job_id: JobId,
-        dependencies: Vec<JobId>,
-        writes: Vec<Write>,
+        header: WriteHeader,
+        data: bytes::Bytes,
     },
     WriteUnwrittenAck {
         upstairs_id: Uuid,
@@ -613,6 +577,138 @@ pub enum Message {
      * Misc
      */
     Unknown(u32, BytesMut),
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct WriteHeader {
+    pub upstairs_id: Uuid,
+    pub session_id: Uuid,
+    pub job_id: JobId,
+    pub dependencies: Vec<JobId>,
+    pub blocks: Vec<WriteBlockMetadata>,
+}
+
+impl WriteHeader {
+    /// Destructures into a list of block-size writes
+    ///
+    /// # Panics
+    /// `buf.len()` must be an even multiple of `self.blocks.len()`, which is
+    /// assumed to be the block size.
+    pub fn into_writes(&self, mut buf: bytes::Bytes) -> Vec<Write> {
+        assert_eq!(buf.len() % self.blocks.len(), 0);
+        let block_size = buf.len() / self.blocks.len();
+        let mut out = Vec::with_capacity(self.blocks.len());
+        for b in &self.blocks {
+            let data = buf.split_to(block_size);
+            out.push(Write {
+                eid: b.eid,
+                offset: b.offset,
+                block_context: b.block_context,
+                data,
+            })
+        }
+        out
+    }
+}
+
+#[derive(Debug, PartialEq, Copy, Clone, Serialize, Deserialize)]
+pub struct WriteBlockMetadata {
+    pub eid: u64,
+    pub offset: Block,
+    pub block_context: BlockContext,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct ReadResponseHeader {
+    pub upstairs_id: Uuid,
+    pub session_id: Uuid,
+    pub job_id: JobId,
+    pub blocks: Result<Vec<ReadResponseBlockMetadata>, CrucibleError>,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct ReadResponseBlockMetadata {
+    pub eid: u64,
+    pub offset: Block,
+    pub block_contexts: Vec<BlockContext>,
+}
+
+impl ReadResponseBlockMetadata {
+    pub fn hashes(&self) -> Vec<u64> {
+        self.block_contexts.iter().map(|x| x.hash).collect()
+    }
+
+    pub fn first_hash(&self) -> Option<u64> {
+        self.block_contexts.first().map(|ctx| ctx.hash)
+    }
+
+    pub fn encryption_contexts(&self) -> Vec<Option<&EncryptionContext>> {
+        self.block_contexts
+            .iter()
+            .map(|x| x.encryption_context.as_ref())
+            .collect()
+    }
+}
+
+/// Read response data, containing data from all blocks
+#[derive(Debug)]
+pub struct RawReadResponse {
+    /// Per-block metadata
+    pub blocks: Vec<ReadResponseBlockMetadata>,
+    /// Raw data
+    pub data: bytes::BytesMut,
+}
+
+impl RawReadResponse {
+    /// Builds a new empty `RawReadResponse` with the given capacity
+    pub fn with_capacity(block_count: usize, block_size: u64) -> Self {
+        Self {
+            blocks: Vec::with_capacity(block_count),
+            data: bytes::BytesMut::with_capacity(
+                block_count * block_size as usize,
+            ),
+        }
+    }
+
+    /// Destructures into a `Vec<ReadResponse>`
+    ///
+    /// This is useful for backwards compatibility
+    pub fn into_read_responses(mut self) -> Vec<ReadResponse> {
+        assert_eq!(self.data.len() % self.blocks.len(), 0);
+        let block_size = self.data.len() / self.blocks.len();
+        let mut out = Vec::with_capacity(self.blocks.len());
+        for b in self.blocks {
+            let data = self.data.split_to(block_size);
+            out.push(ReadResponse {
+                eid: b.eid,
+                offset: b.offset,
+                block_contexts: b.block_contexts,
+                data,
+            })
+        }
+        assert!(self.data.is_empty());
+        out
+    }
+}
+
+/// Write data, containing data from all blocks
+pub struct RawWrite {
+    /// Per-block metadata
+    pub blocks: Vec<WriteBlockMetadata>,
+    /// Raw data
+    pub data: bytes::BytesMut,
+}
+
+impl RawWrite {
+    /// Builds a new empty `RawWrite` with the given capacity
+    pub fn with_capacity(block_count: usize, block_size: u64) -> Self {
+        Self {
+            blocks: Vec::with_capacity(block_count),
+            data: bytes::BytesMut::with_capacity(
+                block_count * block_size as usize,
+            ),
+        }
+    }
 }
 
 /*
@@ -668,7 +764,9 @@ impl Message {
             Message::ExtentLiveAckId { result, .. } => result.as_ref().err(),
             Message::WriteAck { result, .. } => result.as_ref().err(),
             Message::FlushAck { result, .. } => result.as_ref().err(),
-            Message::ReadResponse { responses, .. } => responses.as_ref().err(),
+            Message::ReadResponse { header, .. } => {
+                header.blocks.as_ref().err()
+            }
             Message::WriteUnwrittenAck { result, .. } => result.as_ref().err(),
         }
     }
@@ -680,43 +778,58 @@ impl std::fmt::Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         match self {
             Message::Write {
-                upstairs_id,
-                session_id,
-                job_id,
-                dependencies,
-                writes: _,
+                header:
+                    WriteHeader {
+                        upstairs_id,
+                        session_id,
+                        job_id,
+                        dependencies,
+                        blocks,
+                    },
+                data: _,
             } => f
                 .debug_struct("Message::Write")
                 .field("upstairs_id", &upstairs_id)
                 .field("session_id", &session_id)
                 .field("job_id", &job_id)
                 .field("dependencies", &dependencies)
+                .field("blocks", &blocks)
                 .field("writes", &"..")
                 .finish(),
             Message::WriteUnwritten {
-                upstairs_id,
-                session_id,
-                job_id,
-                dependencies,
-                writes: _,
+                header:
+                    WriteHeader {
+                        upstairs_id,
+                        session_id,
+                        job_id,
+                        dependencies,
+                        blocks,
+                    },
+                data: _,
             } => f
                 .debug_struct("Message::WriteUnwritten")
                 .field("upstairs_id", &upstairs_id)
                 .field("session_id", &session_id)
                 .field("job_id", &job_id)
-                .field("dependencies_id", &dependencies)
+                .field("dependencies", &dependencies)
+                .field("blocks", &blocks)
                 .field("writes", &"..")
                 .finish(),
             Message::ReadResponse {
-                upstairs_id,
-                session_id,
-                job_id,
-                responses: _,
+                header:
+                    ReadResponseHeader {
+                        upstairs_id,
+                        session_id,
+                        job_id,
+                        blocks,
+                    },
+                data: _,
             } => f
                 .debug_struct("Message::ReadResponse")
                 .field("upstairs_id", &upstairs_id)
                 .field("session_id", &session_id)
                 .field("job_id", &job_id)
+                .field("blocks", &blocks)
                 .field("responses", &"..")
                 .finish(),
             m => std::fmt::Debug::fmt(m, f),
@@ -724,57 +837,8 @@ impl std::fmt::Display for Message {
     }
 }
 
-/// Message to be sent down the wire
-#[derive(Debug)]
-pub enum WireMessage<M> {
-    /// Normal message to be sent down the wire
-    ///
-    /// This is serialized with the existing [`CrucibleEncoder`]
-    Message(Message),
-
-    /// Pre-serialized message to be sent down the wire
-    ///
-    /// This is sent by sending
-    /// - total len (u32)
-    /// - M (serialized with bincode)
-    /// - The raw contents of the byte array
-    ///
-    /// The values of `M` and the byte array must match the equivalent
-    /// [`Message`] serialized with a [`CrucibleEncoder`].
-    RawMessage(M, bytes::Bytes),
-}
-
-impl<M: std::fmt::Debug> std::fmt::Display for WireMessage<M> {
-    fn fmt(
-        &self,
-        f: &mut std::fmt::Formatter<'_>,
-    ) -> Result<(), std::fmt::Error> {
-        match self {
-            WireMessage::Message(m) => {
-                f.debug_tuple("WireMessage::Message").field(&m).finish()
-            }
-            WireMessage::RawMessage(m, _data) => f
-                .debug_tuple("WireMessage::RawMessage")
-                .field(&m)
-                .field(&"..")
-                .finish(),
-        }
-    }
-}
-
-impl<M> From<Message> for WireMessage<M> {
-    fn from(m: Message) -> Self {
-        WireMessage::Message(m)
-    }
-}
-
-/// Trait for a type that can be used in `WireMessage::RawMessage`
-pub trait RawMessageDiscriminant {
-    fn discriminant(&self) -> MessageDiscriminants;
-}
-
-/// Writer to encode and send a `WireMessage`
-pub struct WireMessageWriter<W, T> {
+/// Writer to efficiently encode and send a `Message`
+pub struct MessageWriter<W> {
     writer: W,
 
     /// Scratch space for `Message` encoding
@@ -782,13 +846,11 @@ pub struct WireMessageWriter<W, T> {
 
     /// Scratch space for the raw header
     header: Vec<u8>,
-    _phantom: std::marker::PhantomData<T>,
 }
 
-impl<W, T> WireMessageWriter<W, T>
+impl<W> MessageWriter<W>
 where
     W: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
-    T: Serialize + RawMessageDiscriminant,
 {
     /// Builds a new `WireMessageWriter`
     #[inline]
@@ -797,7 +859,6 @@ where
             writer,
             scratch: BytesMut::new(),
             header: vec![],
-            _phantom: std::marker::PhantomData,
         }
     }
 
@@ -807,57 +868,66 @@ where
         self.writer
     }
 
-    /// Sends the given message down the wire
-    #[inline]
-    pub async fn send<M: Into<WireMessage<T>>>(
+    async fn send_raw<H: Serialize>(
         &mut self,
-        m: M,
+        discriminant: MessageDiscriminants,
+        header: H,
+        data: bytes::Bytes,
     ) -> Result<(), CrucibleError> {
         use tokio::io::AsyncWriteExt;
-        let m = m.into();
+
+        self.header.clear();
+        let mut cursor = std::io::Cursor::new(&mut self.header);
+        bincode::serialize_into(
+            &mut cursor,
+            &(
+                0u32, // dummy length, to be patched later
+                0u32, // discriminant, to be patched later
+                &header,
+                data.len(),
+            ),
+        )
+        .unwrap();
+
+        // Patch the length
+        let len: u32 = (self.header.len() + data.len()).try_into().unwrap();
+        self.header[0..4].copy_from_slice(&len.to_le_bytes());
+
+        // Patch the discriminant in the header
+        bincode::serialize_into(&mut self.header[4..8], &discriminant).unwrap();
+
+        // write_all_vectored would save a syscall, but is nightly-only
+        self.writer.write_all(&self.header).await?;
+        self.writer.write_all(&data).await?;
+
+        Ok(())
+    }
+
+    /// Sends the given message down the wire
+    #[inline]
+    pub async fn send(&mut self, m: Message) -> Result<(), CrucibleError> {
+        use tokio::io::AsyncWriteExt;
+
+        let discriminant = MessageDiscriminants::from(&m);
         match m {
-            WireMessage::Message(m) => {
+            Message::Write { header, data } => {
+                self.send_raw(discriminant, header, data).await
+            }
+            Message::WriteUnwritten { header, data } => {
+                self.send_raw(discriminant, header, data).await
+            }
+            Message::ReadResponse { header, data } => {
+                self.send_raw(discriminant, header, data).await
+            }
+            m => {
                 // Serialize into our local BytesMut, to avoid allocation churn
                 self.scratch.clear();
                 let mut e = CrucibleEncoder::new();
                 e.encode(m, &mut self.scratch)?;
                 self.writer.write_all(&self.scratch).await?;
-            }
-            WireMessage::RawMessage(m, data) => {
-                // Manual implementation of CrucibleEncoder, for situations
-                // where the bulk of the message has already been
-                // pre-serialized.
-
-                // Write the length + M into our header scratch space
-                self.header.clear();
-                let mut cursor = std::io::Cursor::new(&mut self.header);
-                bincode::serialize_into(
-                    &mut cursor,
-                    &(
-                        0u32, // dummy length, to be patched later
-                        &m,
-                    ),
-                )
-                .unwrap();
-
-                // Patch the length
-                let len: u32 =
-                    (self.header.len() + data.len()).try_into().unwrap();
-                self.header[0..4].copy_from_slice(&len.to_le_bytes());
-
-                // Patch the discriminant in the header
-                bincode::serialize_into(
-                    &mut self.header[4..8],
-                    &m.discriminant(),
-                )
-                .unwrap();
-
-                // write_all_vectored would save a syscall, but is nightly-only
-                self.writer.write_all(&self.header).await?;
-                self.writer.write_all(&data).await?;
+                Ok(())
             }
         }
-        Ok(())
     }
 }
 
@@ -878,16 +948,10 @@ impl CrucibleEncoder {
         Ok(len)
     }
 
-    fn a_write(bs: usize) -> Write {
-        Write {
+    fn a_write(bs: usize) -> WriteBlockMetadata {
+        WriteBlockMetadata {
             eid: 1,
             offset: Block::new(1, bs.trailing_zeros()),
-            data: {
-                let sz = bs;
-                let mut data = Vec::with_capacity(sz);
-                data.resize(sz, 1);
-                bytes::Bytes::from(data)
-            },
             block_context: BlockContext {
                 hash: 0,
                 encryption_context: Some(EncryptionContext {
@@ -907,19 +971,23 @@ impl CrucibleEncoder {
      * given our constant MAX_FRM_LEN.
      */
     pub fn max_io_blocks(bs: usize) -> Result<usize, anyhow::Error> {
+        let block_meta = CrucibleEncoder::a_write(bs);
         let size_of_write_message =
-            CrucibleEncoder::serialized_size(CrucibleEncoder::a_write(bs))?;
+            CrucibleEncoder::serialized_size(CrucibleEncoder::a_write(bs))?
+                + bs;
 
         // Maximum frame length divided by a write of one block is the lower
         // bound.
+        let n = MAX_FRM_LEN / size_of_write_message;
         let lower_size_write_message = Message::Write {
-            upstairs_id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
-            job_id: JobId(1),
-            dependencies: vec![JobId(1)],
-            writes: (0..(MAX_FRM_LEN / size_of_write_message))
-                .map(|_| CrucibleEncoder::a_write(bs))
-                .collect(),
+            header: WriteHeader {
+                upstairs_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                job_id: JobId(1),
+                dependencies: vec![JobId(1)],
+                blocks: vec![block_meta; n],
+            },
+            data: vec![0; n * bs].into(),
         };
 
         assert!(
@@ -929,14 +997,16 @@ impl CrucibleEncoder {
 
         // The upper bound is the maximum frame length divided by the block
         // size.
+        let n = MAX_FRM_LEN / bs;
         let upper_size_write_message = Message::Write {
-            upstairs_id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
-            job_id: JobId(1),
-            dependencies: vec![JobId(1)],
-            writes: (0..(MAX_FRM_LEN / bs))
-                .map(|_| CrucibleEncoder::a_write(bs))
-                .collect(),
+            header: WriteHeader {
+                upstairs_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                job_id: JobId(1),
+                dependencies: vec![JobId(1)],
+                blocks: vec![block_meta; n],
+            },
+            data: vec![0; n * bs].into(),
         };
 
         assert!(
@@ -948,26 +1018,14 @@ impl CrucibleEncoder {
         // given MAX_FRM_LEN.
 
         let mut lower = match lower_size_write_message {
-            Message::Write {
-                upstairs_id: _,
-                session_id: _,
-                job_id: _,
-                dependencies: _,
-                writes,
-            } => writes.len(),
+            Message::Write { header, .. } => header.blocks.len(),
             _ => {
                 bail!("wat");
             }
         };
 
         let mut upper = match upper_size_write_message {
-            Message::Write {
-                upstairs_id: _,
-                session_id: _,
-                job_id: _,
-                dependencies: _,
-                writes,
-            } => writes.len(),
+            Message::Write { header, .. } => header.blocks.len(),
             _ => {
                 bail!("wat");
             }
@@ -981,13 +1039,14 @@ impl CrucibleEncoder {
             }
 
             let mid_size_write_message = Message::Write {
-                upstairs_id: Uuid::new_v4(),
-                session_id: Uuid::new_v4(),
-                job_id: JobId(1),
-                dependencies: vec![JobId(1)],
-                writes: (0..mid)
-                    .map(|_| CrucibleEncoder::a_write(bs))
-                    .collect(),
+                header: WriteHeader {
+                    upstairs_id: Uuid::new_v4(),
+                    session_id: Uuid::new_v4(),
+                    job_id: JobId(1),
+                    dependencies: vec![JobId(1)],
+                    blocks: vec![block_meta; mid],
+                },
+                data: vec![0; mid * bs].into(),
             };
 
             let mid_size =
@@ -1267,19 +1326,21 @@ mod tests {
         let hash = crucible_common::integrity_hash(&[&data]);
 
         let input = Message::Write {
-            upstairs_id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
-            job_id: JobId(1),
-            dependencies: vec![],
-            writes: vec![Write {
-                eid: 0,
-                offset: Block::new_512(0),
-                data,
-                block_context: BlockContext {
-                    hash,
-                    encryption_context: None,
-                },
-            }],
+            header: WriteHeader {
+                upstairs_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                job_id: JobId(1),
+                dependencies: vec![],
+                blocks: vec![WriteBlockMetadata {
+                    eid: 0,
+                    offset: Block::new_512(0),
+                    block_context: BlockContext {
+                        hash,
+                        encryption_context: None,
+                    },
+                }],
+            },
+            data,
         };
 
         let mut buffer = BytesMut::new();
