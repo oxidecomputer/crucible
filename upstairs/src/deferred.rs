@@ -4,10 +4,11 @@ use std::sync::Arc;
 
 use crate::{
     client::ConnectionId, upstairs::UpstairsConfig, BlockContext, BlockReq,
-    BlockRes, ClientId, ImpactedBlocks, Message, SerializedWrite,
+    BlockRes, ClientId, ImpactedBlocks, Message,
 };
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use crucible_common::{integrity_hash, CrucibleError, RegionDefinition};
+use crucible_protocol::{RawWrite, WriteBlockMetadata};
 use futures::{
     future::{ready, Either, Ready},
     stream::FuturesOrdered,
@@ -103,7 +104,7 @@ impl<T> DeferredQueue<T> {
 pub(crate) struct DeferredWrite {
     pub ddef: RegionDefinition,
     pub impacted_blocks: ImpactedBlocks,
-    pub data: Bytes,
+    pub data: BytesMut,
     pub res: Option<BlockRes>,
     pub is_write_unwritten: bool,
     pub cfg: Arc<UpstairsConfig>,
@@ -123,59 +124,27 @@ pub(crate) enum DeferredBlockReq {
 
 #[derive(Debug)]
 pub(crate) struct EncryptedWrite {
-    /// Raw data to be written, along with extra metadata
-    ///
-    /// This is equivalent to a pre-serialized `Vec<Write>`, but avoids
-    /// superfluous memory copies.
-    pub data: SerializedWrite,
+    /// An `RawWrite` containing our encrypted data
+    pub data: RawWrite,
     pub impacted_blocks: ImpactedBlocks,
     pub res: Option<BlockRes>,
     pub is_write_unwritten: bool,
 }
 
 impl DeferredWrite {
-    pub fn run(self) -> Option<EncryptedWrite> {
-        // Build up all of the Write operations, encrypting data here
-        let byte_len: usize = self.ddef.block_size() as usize;
-        let mut serialized = {
-            let block_count = self.impacted_blocks.blocks(&self.ddef).len();
-            // TODO I think is an overestimation?
-            let bytes_per_block =
-                byte_len + std::mem::size_of::<crucible_protocol::Write>();
-            BytesMut::with_capacity(
-                block_count * bytes_per_block + std::mem::size_of::<usize>(),
-            )
-        };
-
-        // First, serialize the length of the Vec<Write>
+    pub fn run(mut self) -> Option<EncryptedWrite> {
         let num_blocks = self.impacted_blocks.blocks(&self.ddef).len();
-        serialized.extend(bincode::serialize(&num_blocks).unwrap());
+        let mut blocks = Vec::with_capacity(num_blocks);
+        let block_size = self.ddef.block_size() as usize;
 
-        // Metadata to store
-        let mut eids = Vec::with_capacity(num_blocks);
-
-        let mut cur_offset: usize = 0;
+        // In-place encryption into `self.data`
+        let mut pos: usize = 0;
         for (eid, offset) in self.impacted_blocks.blocks(&self.ddef) {
-            if eids.last().map(|e| *e != eid).unwrap_or(true) {
-                eids.push(eid);
-            }
-
-            // Write the header for this section
-            let header = bincode::serialize(&(eid, offset, byte_len)).unwrap();
-            serialized.extend(header);
-
-            // Copy over raw data, since we need exclusive ownership to mutate
-            // it (doing in-place encryption).
-            let pos = serialized.len();
-            serialized.extend_from_slice(
-                &self.data[cur_offset..(cur_offset + byte_len)],
-            );
-
             let (encryption_context, hash) = if let Some(ctx) =
                 &self.cfg.encryption_context
             {
                 // Encrypt here
-                let mut_data = &mut serialized[pos..];
+                let mut_data = &mut self.data[pos..][..block_size];
                 let (nonce, tag, hash) = match ctx.encrypt_in_place(mut_data) {
                     Ok(v) => v,
                     Err(e) => {
@@ -197,27 +166,24 @@ impl DeferredWrite {
                 )
             } else {
                 // Unencrypted
-                let hash = integrity_hash(&[&serialized[pos..]]);
+                let hash = integrity_hash(&[&self.data[pos..][..block_size]]);
 
                 (None, hash)
             };
-
-            // Write the trailing data for this chunk
-            let trailer = bincode::serialize(&BlockContext {
-                hash,
-                encryption_context,
-            })
-            .unwrap();
-            serialized.extend(trailer);
-
-            cur_offset += byte_len;
+            blocks.push(WriteBlockMetadata {
+                eid,
+                offset,
+                block_context: BlockContext {
+                    hash,
+                    encryption_context,
+                },
+            });
+            pos += block_size;
         }
 
-        let data = SerializedWrite {
-            data: serialized.freeze(),
-            num_blocks,
-            io_size_bytes: self.data.len(),
-            eids,
+        let data = RawWrite {
+            blocks,
+            data: self.data,
         };
 
         Some(EncryptedWrite {
@@ -272,23 +238,34 @@ impl DeferredRead {
             validate_encrypted_read_response,
             validate_unencrypted_read_response,
         };
-        let Message::ReadResponse { responses, .. } = &mut self.message else {
+        let Message::ReadResponse { header, data } = &mut self.message else {
             panic!("invalid DeferredRead");
         };
         let mut hashes = vec![];
 
-        if let Ok(rs) = responses {
-            for r in rs.iter_mut() {
+        if let Ok(rs) = header.blocks.as_mut() {
+            assert_eq!(data.len() % rs.len(), 0);
+            let block_size = data.len() / rs.len();
+            for (i, r) in rs.iter_mut().enumerate() {
                 let v = if let Some(ctx) = &self.cfg.encryption_context {
-                    validate_encrypted_read_response(r, ctx, &self.log)
+                    validate_encrypted_read_response(
+                        &mut r.block_contexts,
+                        &mut data[i * block_size..][..block_size],
+                        ctx,
+                        &self.log,
+                    )
                 } else {
-                    validate_unencrypted_read_response(r, &self.log)
+                    validate_unencrypted_read_response(
+                        &mut r.block_contexts,
+                        &mut data[i * block_size..][..block_size],
+                        &self.log,
+                    )
                 };
                 match v {
                     Ok(hash) => hashes.push(hash),
                     Err(e) => {
                         error!(self.log, "decryption failure: {e:?}");
-                        *responses = Err(e);
+                        header.blocks = Err(e);
                         hashes.clear();
                         break;
                     }

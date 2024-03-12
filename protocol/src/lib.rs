@@ -202,6 +202,42 @@ pub struct EncryptionContext {
     pub tag: [u8; 16],
 }
 
+impl ReadResponse {
+    pub fn from_request(request: &ReadRequest, bs: usize) -> ReadResponse {
+        /*
+         * XXX Some thought will need to be given to where the read
+         * data buffer is created, both on this side and the remote.
+         * Also, we (I) need to figure out how to read data into an
+         * uninitialized buffer. Until then, we have this workaround.
+         */
+        let sz = bs;
+        let mut data = BytesMut::with_capacity(sz);
+        data.resize(sz, 1);
+
+        ReadResponse {
+            eid: request.eid,
+            offset: request.offset,
+            data,
+            block_contexts: vec![],
+        }
+    }
+
+    pub fn from_request_with_data(
+        request: &ReadRequest,
+        data: &[u8],
+    ) -> ReadResponse {
+        ReadResponse {
+            eid: request.eid,
+            offset: request.offset,
+            data: BytesMut::from(data),
+            block_contexts: vec![BlockContext {
+                hash: crucible_common::integrity_hash(&[data]),
+                encryption_context: None,
+            }],
+        }
+    }
+}
+
 /**
  * These enums are for messages sent between an Upstairs and a Downstairs
  */
@@ -552,7 +588,7 @@ pub enum Message {
     },
     ReadResponse {
         header: ReadResponseHeader,
-        data: bytes::Bytes,
+        data: bytes::BytesMut,
     },
 
     WriteUnwritten {
@@ -626,6 +662,33 @@ pub struct ReadResponseHeader {
     pub blocks: Result<Vec<ReadResponseBlockMetadata>, CrucibleError>,
 }
 
+impl ReadResponseHeader {
+    /// Destructures into a list of block-size read responses
+    ///
+    /// # Panics
+    /// `buf.len()` must be an even multiple of `self.blocks.len()`, which is
+    /// assumed to be the block size.
+    pub fn into_read_responses(
+        self,
+        mut buf: bytes::BytesMut,
+    ) -> Result<Vec<ReadResponse>, CrucibleError> {
+        let blocks = self.blocks?;
+        assert_eq!(buf.len() % blocks.len(), 0);
+        let block_size = buf.len() / blocks.len();
+        let mut out = Vec::with_capacity(blocks.len());
+        for b in blocks {
+            let data = buf.split_to(block_size);
+            out.push(ReadResponse {
+                eid: b.eid,
+                offset: b.offset,
+                block_contexts: b.block_contexts,
+                data,
+            })
+        }
+        Ok(out)
+    }
+}
+
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReadResponseBlockMetadata {
     pub eid: u64,
@@ -692,6 +755,7 @@ impl RawReadResponse {
 }
 
 /// Write data, containing data from all blocks
+#[derive(Debug)]
 pub struct RawWrite {
     /// Per-block metadata
     pub blocks: Vec<WriteBlockMetadata>,
@@ -868,12 +932,13 @@ where
         self.writer
     }
 
-    async fn send_raw<H: Serialize>(
+    async fn send_raw<H: Serialize, B: AsRef<[u8]>>(
         &mut self,
         discriminant: MessageDiscriminants,
         header: H,
-        data: bytes::Bytes,
+        data: B,
     ) -> Result<(), CrucibleError> {
+        let data = data.as_ref();
         use tokio::io::AsyncWriteExt;
 
         self.header.clear();
@@ -898,7 +963,7 @@ where
 
         // write_all_vectored would save a syscall, but is nightly-only
         self.writer.write_all(&self.header).await?;
-        self.writer.write_all(&data).await?;
+        self.writer.write_all(data).await?;
 
         Ok(())
     }

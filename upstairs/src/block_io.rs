@@ -81,7 +81,7 @@ impl BlockIO for FileBlockIO {
     async fn write(
         &self,
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
     ) -> Result<(), CrucibleError> {
         self.check_data_size(data.len()).await?;
         let start = offset.value * self.block_size;
@@ -96,7 +96,7 @@ impl BlockIO for FileBlockIO {
     async fn write_unwritten(
         &self,
         _offset: Block,
-        _data: Bytes,
+        _data: BytesMut,
     ) -> Result<(), CrucibleError> {
         crucible_bail!(
             Unsupported,
@@ -262,7 +262,7 @@ impl BlockIO for ReqwestBlockIO {
     async fn write(
         &self,
         _offset: Block,
-        _data: Bytes,
+        _data: BytesMut,
     ) -> Result<(), CrucibleError> {
         crucible_bail!(Unsupported, "write unsupported for ReqwestBlockIO")
     }
@@ -270,7 +270,7 @@ impl BlockIO for ReqwestBlockIO {
     async fn write_unwritten(
         &self,
         _offset: Block,
-        _data: Bytes,
+        _data: BytesMut,
     ) -> Result<(), CrucibleError> {
         crucible_bail!(
             Unsupported,

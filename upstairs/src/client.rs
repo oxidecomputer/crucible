@@ -3,13 +3,12 @@ use crate::{
     cdt, integrity_hash, live_repair::ExtentInfo, upstairs::UpstairsConfig,
     upstairs::UpstairsState, ClientIOStateCount, ClientId, CrucibleDecoder,
     CrucibleError, DownstairsIO, DsState, EncryptionContext, IOState, IOop,
-    JobId, Message, RawMessage, ReadResponse, ReconcileIO,
-    RegionDefinitionStatus, RegionMetadata, MAX_ACTIVE_COUNT,
+    JobId, Message, ReadResponse, ReconcileIO, RegionDefinitionStatus,
+    RegionMetadata, MAX_ACTIVE_COUNT,
 };
 use crucible_common::{deadline_secs, verbose_timeout, x509::TLSContext};
 use crucible_protocol::{
-    ReadResponseBlockMetadata, ReconciliationId, WireMessage,
-    WireMessageWriter, CRUCIBLE_MESSAGE_VERSION,
+    BlockContext, MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
 };
 
 use std::{
@@ -38,8 +37,6 @@ const TIMEOUT_SECS: f32 = 15.0;
 const TIMEOUT_LIMIT: usize = 3;
 const PING_INTERVAL_SECS: f32 = 5.0;
 
-pub(crate) type ClientRequest = WireMessage<RawMessage>;
-
 /// Handle to a running I/O task
 ///
 /// The I/O task is "thin"; it simply forwards messages around.  The task
@@ -51,7 +48,7 @@ struct ClientTaskHandle {
     ///
     /// The only thing that we send to the client is [`Message`], which is then
     /// sent out over the network.
-    client_request_tx: mpsc::Sender<ClientRequest>,
+    client_request_tx: mpsc::Sender<Message>,
 
     /// Handle to receive data from the I/O task
     ///
@@ -360,7 +357,7 @@ impl DownstairsClient {
         self.new_jobs.insert(work);
     }
 
-    pub(crate) async fn send<M: Into<ClientRequest>>(&mut self, m: M) {
+    pub(crate) async fn send(&mut self, m: Message) {
         // Normally, the client task continues running until
         // `self.client_task.client_request_tx` is dropped; as such, we should
         // always be able to send it a message.
@@ -1229,12 +1226,14 @@ impl DownstairsClient {
     ///
     /// Returns `true` if the job is now ackable, `false` otherwise
     ///
-    /// If this is a read response, then the values in `response` contain
-    /// already-decrypted bulk data and its corresponding hashes.
+    /// If this is a read response, then the values in `responses` must
+    /// _already_ be decrypted (with corresponding hashes stored in
+    /// `read_response_hashes`).
     pub(crate) fn process_io_completion(
         &mut self,
         job: &mut DownstairsIO,
-        response: Result<ReadResponse, CrucibleError>,
+        responses: Result<Vec<ReadResponse>, CrucibleError>,
+        read_response_hashes: Vec<Option<u64>>,
         deactivate: bool,
         extent_info: Option<ExtentInfo>,
     ) -> bool {
@@ -1250,7 +1249,7 @@ impl DownstairsClient {
         let mut jobs_completed_ok = job.state_count().completed_ok();
         let mut ackable = false;
 
-        let new_state = match &response {
+        let new_state = match &responses {
             Ok(..) => {
                 // Messages have already been decrypted out-of-band
                 jobs_completed_ok += 1;
@@ -2424,7 +2423,7 @@ struct ClientIoTask {
     target: SocketAddr,
 
     /// Request channel from the main task
-    request_rx: mpsc::Receiver<ClientRequest>,
+    request_rx: mpsc::Receiver<Message>,
 
     /// Reply channel to the main task
     response_tx: mpsc::Sender<ClientResponse>,
@@ -2602,12 +2601,12 @@ impl ClientIoTask {
             let sock = connector.connect(server_name, tcp).await.unwrap();
             let (read, write) = tokio::io::split(sock);
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = WireMessageWriter::new(write);
+            let fw = MessageWriter::new(write);
             self.cmd_loop(fr, fw).await
         } else {
             let (read, write) = tcp.into_split();
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = WireMessageWriter::new(write);
+            let fw = MessageWriter::new(write);
             self.cmd_loop(fr, fw).await
         }
     }
@@ -2615,7 +2614,7 @@ impl ClientIoTask {
     async fn cmd_loop<R, W>(
         &mut self,
         fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
-        mut fw: WireMessageWriter<W, RawMessage>,
+        mut fw: MessageWriter<W>,
     ) -> ClientRunResult
     where
         R: tokio::io::AsyncRead
@@ -2668,7 +2667,7 @@ impl ClientIoTask {
                     ping_count += 1;
                     cdt::ds__ping__sent!(|| (ping_count, self.client_id.get()));
 
-                    let m = ClientRequest::Message(Message::Ruok);
+                    let m = Message::Ruok;
                     if let Err(e) = self.write(&mut fw, m).await {
                         break e;
                     }
@@ -2709,8 +2708,8 @@ impl ClientIoTask {
     /// stop immediately.
     async fn write<W>(
         &mut self,
-        fw: &mut WireMessageWriter<W, RawMessage>,
-        m: ClientRequest,
+        fw: &mut MessageWriter<W>,
+        m: Message,
     ) -> Result<(), ClientRunResult>
     where
         W: tokio::io::AsyncWrite
@@ -2725,11 +2724,7 @@ impl ClientIoTask {
         // the global backpressure system and cannot build up an unbounded
         // queue.  This is admittedly quite subtle; see crucible#1167 for
         // discussions and graphs.
-        if !matches!(
-            m,
-            ClientRequest::Message(Message::Write { .. })
-                | ClientRequest::RawMessage(RawMessage::Write { .. }, ..)
-        ) {
+        if !matches!(m, Message::Write { .. }) {
             let d = self.client_delay_us.load(Ordering::Relaxed);
             if d > 0 {
                 tokio::time::sleep(Duration::from_micros(d)).await;
@@ -2818,7 +2813,8 @@ where
 /// The return value of this will be stored with the job, and compared
 /// between each read.
 pub(crate) fn validate_encrypted_read_response(
-    response: &mut ReadResponse,
+    block_contexts: &mut Vec<BlockContext>,
+    data: &mut [u8],
     encryption_context: &EncryptionContext,
     log: &Logger,
 ) -> Result<Option<u64>, CrucibleError> {
@@ -2831,7 +2827,7 @@ pub(crate) fn validate_encrypted_read_response(
     // check that this read response contains block contexts that contain
     // (at least one) encryption context.
 
-    if response.block_contexts.is_empty() {
+    if block_contexts.is_empty() {
         // No block context(s) in the response!
         //
         // Either this is a read of an unwritten block, or an attacker
@@ -2842,7 +2838,7 @@ pub(crate) fn validate_encrypted_read_response(
         // expect to see this case unless this is a blank block.
         //
         // XXX if it's not a blank block, we may be under attack?
-        if response.data[..].iter().all(|&x| x == 0) {
+        if data.iter().all(|&x| x == 0) {
             return Ok(None);
         } else {
             error!(log, "got empty block context with non-blank block");
@@ -2856,7 +2852,7 @@ pub(crate) fn validate_encrypted_read_response(
     // Attempt decryption with each encryption context, and fail if all
     // do not work. The most recent encryption context will most likely
     // be the correct one so start there.
-    for ctx in response.block_contexts.iter().rev() {
+    for ctx in block_contexts.iter().rev() {
         let block_encryption_ctx =
             if let Some(block_encryption_ctx) = &ctx.encryption_context {
                 block_encryption_ctx
@@ -2872,7 +2868,7 @@ pub(crate) fn validate_encrypted_read_response(
         let computed_hash = integrity_hash(&[
             &block_encryption_ctx.nonce[..],
             &block_encryption_ctx.tag[..],
-            &response.data[..],
+            data,
         ]);
 
         if computed_hash == ctx.hash {
@@ -2886,7 +2882,7 @@ pub(crate) fn validate_encrypted_read_response(
             // unit test to validate this behaviour.
             use aes_gcm_siv::{Nonce, Tag};
             let decryption_result = encryption_context.decrypt_in_place(
-                &mut response.data[..],
+                data,
                 Nonce::from_slice(&block_encryption_ctx.nonce[..]),
                 Tag::from_slice(&block_encryption_ctx.tag[..]),
             );
@@ -2925,15 +2921,13 @@ pub(crate) fn validate_encrypted_read_response(
         } else {
             // Filter out contexts that don't match, and return the successful
             // hash.
-            response
-                .block_contexts
-                .retain(|context| context.hash == valid_hash);
+            block_contexts.retain(|context| context.hash == valid_hash);
 
             Ok(Some(valid_hash))
         }
     } else {
         error!(log, "No match for integrity hash");
-        for ctx in response.block_contexts.iter() {
+        for ctx in block_contexts.iter() {
             let block_encryption_ctx =
                 if let Some(block_encryption_ctx) = &ctx.encryption_context {
                     block_encryption_ctx
@@ -2945,7 +2939,7 @@ pub(crate) fn validate_encrypted_read_response(
             let computed_hash = integrity_hash(&[
                 &block_encryption_ctx.nonce[..],
                 &block_encryption_ctx.tag[..],
-                &response.data[..],
+                data,
             ]);
             error!(
                 log,
@@ -2964,16 +2958,17 @@ pub(crate) fn validate_encrypted_read_response(
 ///   block is all 0
 /// - Err otherwise
 pub(crate) fn validate_unencrypted_read_response(
-    response: &mut ReadResponse,
+    block_contexts: &mut Vec<BlockContext>,
+    data: &mut [u8],
     log: &Logger,
 ) -> Result<Option<u64>, CrucibleError> {
-    if !response.block_contexts.is_empty() {
+    if !block_contexts.is_empty() {
         // check integrity hashes - make sure at least one is correct.
         let mut successful_hash = false;
-        let computed_hash = integrity_hash(&[&response.data[..]]);
+        let computed_hash = integrity_hash(&[&data[..]]);
 
         // The most recent hash is probably going to be the right one.
-        for context in response.block_contexts.iter().rev() {
+        for context in block_contexts.iter().rev() {
             if computed_hash == context.hash {
                 successful_hash = true;
                 break;
@@ -2983,26 +2978,24 @@ pub(crate) fn validate_unencrypted_read_response(
         if successful_hash {
             // Filter out contexts that don't match, and return the
             // successful hash.
-            response
-                .block_contexts
-                .retain(|context| context.hash == computed_hash);
+            block_contexts.retain(|context| context.hash == computed_hash);
 
             Ok(Some(computed_hash))
         } else {
             // No integrity hash was correct for this response
             error!(log, "No match computed hash:0x{:x}", computed_hash,);
-            for context in response.block_contexts.iter().rev() {
+            for context in block_contexts.iter().rev() {
                 error!(log, "No match          hash:0x{:x}", context.hash);
             }
             error!(log, "Data from hash:");
             for i in 0..6 {
-                error!(log, "[{}]:{}", i, response.data[i]);
+                error!(log, "[{}]:{}", i, data[i]);
             }
 
             Err(CrucibleError::HashMismatch)
         }
     } else {
-        // No block context(s) in the response!
+        // No block context(s) in the
         //
         // Either this is a read of an unwritten block, or an attacker
         // removed the hashes from the db. Because the Upstairs will perform
@@ -3012,7 +3005,7 @@ pub(crate) fn validate_unencrypted_read_response(
         // this case unless this is a blank block.
         //
         // XXX if it's not a blank block, we may be under attack?
-        if response.data[..].iter().all(|&x| x == 0) {
+        if data[..].iter().all(|&x| x == 0) {
             Ok(None)
         } else {
             error!(log, "got empty block context with non-blank block");
@@ -3024,12 +3017,6 @@ pub(crate) fn validate_unencrypted_read_response(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{
-        Block, EncryptionContext, ImpactedAddr, ImpactedBlocks,
-        RegionDefinition,
-    };
-    use rand::prelude::*;
-    use tokio_util::codec::Decoder;
 
     #[test]
     fn downstairs_transition_normal() {

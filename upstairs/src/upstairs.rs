@@ -12,7 +12,7 @@ use crate::{
     downstairs::{Downstairs, DownstairsAction},
     extent_from_offset,
     stats::UpStatOuter,
-    Block, BlockOp, BlockReq, BlockRes, Buffer, Bytes, ClientId, ClientMap,
+    Block, BlockOp, BlockReq, BlockRes, Buffer, ClientId, ClientMap,
     CrucibleOpts, DsState, EncryptionContext, GuestIoHandle, Message,
     RegionDefinition, RegionDefinitionStatus, SnapshotDetails, WQCounts,
 };
@@ -24,6 +24,7 @@ use std::sync::{
     Arc,
 };
 
+use bytes::BytesMut;
 use futures::future::{pending, Either};
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::{
@@ -1346,7 +1347,7 @@ impl Upstairs {
     fn submit_deferred_write(
         &mut self,
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
         res: BlockRes,
         is_write_unwritten: bool,
     ) {
@@ -1365,7 +1366,7 @@ impl Upstairs {
     pub(crate) fn submit_dummy_write(
         &mut self,
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
         is_write_unwritten: bool,
     ) {
         if let Some(w) = self
@@ -1383,7 +1384,7 @@ impl Upstairs {
     fn submit_deferred_write_inner(
         &mut self,
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
         res: Option<BlockRes>,
         is_write_unwritten: bool,
     ) {
@@ -1405,7 +1406,7 @@ impl Upstairs {
     fn compute_deferred_write(
         &mut self,
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
         res: Option<BlockRes>,
         is_write_unwritten: bool,
     ) -> Option<DeferredWrite> {
@@ -1524,13 +1525,13 @@ impl Upstairs {
                 // Defer the message if it's a (large) read that needs
                 // decryption, or there are other deferred messages in the queue
                 // (to preserve order).  Otherwise, handle it immediately.
-                if let Message::ReadResponse { responses, .. } = &m {
+                if let Message::ReadResponse { header, .. } = &m {
                     // Any read larger than this constant should be deferred to
                     // the worker pool; smaller reads can be processed in-thread
                     // (since the overhead isn't worth it)
                     const MIN_DEFER_SIZE_BYTES: u64 = 8192;
                     let should_defer = !self.deferred_msgs.is_empty()
-                        || match responses {
+                        || match &header.blocks {
                             Ok(rs) => {
                                 // Find the number of bytes being decrypted
                                 let response_size = rs.len() as u64
@@ -2292,14 +2293,14 @@ pub(crate) mod test {
         // op 0
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from([0xff; 512].as_slice()),
             false,
         );
 
         // op 1
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0x00; 512]),
+            BytesMut::from([0x00; 512].as_slice()),
             false,
         );
 
@@ -2327,21 +2328,21 @@ pub(crate) mod test {
         // op 0
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from([0xff; 512].as_slice()),
             false,
         );
 
         // op 1
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0x00; 512]),
+            BytesMut::from([0x00; 512].as_slice()),
             false,
         );
 
         // op 2
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0x55; 512]),
+            BytesMut::from([0x55; 512].as_slice()),
             false,
         );
 
@@ -2370,7 +2371,7 @@ pub(crate) mod test {
         // op 0
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from([0xff; 512].as_slice()),
             false,
         );
 
@@ -2380,7 +2381,7 @@ pub(crate) mod test {
         // op 2
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0x55; 512]),
+            BytesMut::from([0x55; 512].as_slice()),
             false,
         );
 
@@ -2414,7 +2415,7 @@ pub(crate) mod test {
         for i in 0..3 {
             upstairs.submit_dummy_write(
                 Block::new_512(i),
-                Bytes::from(vec![0xff; 512]),
+                BytesMut::from([0xff; 512].as_slice()),
                 false,
             );
         }
@@ -2426,7 +2427,7 @@ pub(crate) mod test {
         for i in 3..6 {
             upstairs.submit_dummy_write(
                 Block::new_512(i),
-                Bytes::from(vec![0xff; 512]),
+                BytesMut::from([0xff; 512].as_slice()),
                 false,
             );
         }
@@ -2466,7 +2467,7 @@ pub(crate) mod test {
         // op 0
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512 * 3]),
+            BytesMut::from([0xff; 512 * 3].as_slice()),
             false,
         );
 
@@ -2474,7 +2475,7 @@ pub(crate) mod test {
         for i in 0..3 {
             upstairs.submit_dummy_write(
                 Block::new_512(i),
-                Bytes::from(vec![0xff; 512]),
+                BytesMut::from([0xff; 512].as_slice()),
                 false,
             );
         }
@@ -2510,7 +2511,7 @@ pub(crate) mod test {
         // op 0
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512 * 3]),
+            BytesMut::from([0xff; 512 * 3].as_slice()),
             false,
         );
 
@@ -2518,7 +2519,7 @@ pub(crate) mod test {
         for i in 0..3 {
             upstairs.submit_dummy_write(
                 Block::new_512(i),
-                Bytes::from(vec![0xff; 512]),
+                BytesMut::from([0xff; 512].as_slice()),
                 false,
             );
         }
@@ -2527,7 +2528,7 @@ pub(crate) mod test {
         for i in 0..3 {
             upstairs.submit_dummy_write(
                 Block::new_512(i),
-                Bytes::from(vec![0xff; 512]),
+                BytesMut::from([0xff; 512].as_slice()),
                 false,
             );
         }
@@ -2574,7 +2575,7 @@ pub(crate) mod test {
         for i in 0..3 {
             upstairs.submit_dummy_write(
                 Block::new_512(i),
-                Bytes::from(vec![0xff; 512]),
+                BytesMut::from([0xff; 512].as_slice()),
                 false,
             );
         }
@@ -2582,7 +2583,7 @@ pub(crate) mod test {
         // op 3
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512 * 3]),
+            BytesMut::from([0xff; 512 * 3].as_slice()),
             false,
         );
 
@@ -2615,7 +2616,7 @@ pub(crate) mod test {
         // op 0
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from([0xff; 512].as_slice()),
             false,
         );
 
@@ -2648,7 +2649,7 @@ pub(crate) mod test {
         for i in 0..3 {
             upstairs.submit_dummy_write(
                 Block::new_512(i),
-                Bytes::from(vec![0xff; 512]),
+                BytesMut::from([0xff; 512].as_slice()),
                 false,
             );
         }
@@ -2714,7 +2715,7 @@ pub(crate) mod test {
         // op 0
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from([0xff; 512].as_slice()),
             false,
         );
 
@@ -2749,7 +2750,7 @@ pub(crate) mod test {
         // op 0
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from([0xff; 512].as_slice()),
             false,
         );
 
@@ -2821,7 +2822,7 @@ pub(crate) mod test {
         for i in 0..2 {
             upstairs.submit_dummy_write(
                 Block::new_512(i),
-                Bytes::from(vec![0xff; 512]),
+                BytesMut::from([0xff; 512].as_slice()),
                 false,
             );
         }
@@ -2833,7 +2834,7 @@ pub(crate) mod test {
         for i in 0..3 {
             upstairs.submit_dummy_write(
                 Block::new_512(i),
-                Bytes::from(vec![0xff; 512]),
+                BytesMut::from([0xff; 512].as_slice()),
                 false,
             );
         }
@@ -2883,7 +2884,7 @@ pub(crate) mod test {
         // op 1
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from([0xff; 512].as_slice()),
             false,
         );
 
@@ -2914,7 +2915,7 @@ pub(crate) mod test {
         // op 1
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from([0xff; 512].as_slice()),
             true,
         );
 
@@ -2952,7 +2953,7 @@ pub(crate) mod test {
         // op 1
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from([0xff; 512].as_slice()),
             true,
         );
 
@@ -2962,7 +2963,7 @@ pub(crate) mod test {
         // op 3
         upstairs.submit_dummy_write(
             Block::new_512(1),
-            Bytes::from(vec![0xff; 512 * 2]),
+            BytesMut::from([0xff; 512 * 2].as_slice()),
             false,
         );
 
@@ -2972,7 +2973,7 @@ pub(crate) mod test {
         // op 5
         upstairs.submit_dummy_write(
             Block::new_512(3),
-            Bytes::from(vec![0xff; 512 * 2]),
+            BytesMut::from([0xff; 512 * 2].as_slice()),
             true,
         );
 
@@ -3009,7 +3010,7 @@ pub(crate) mod test {
         for i in 0..5 {
             upstairs.submit_dummy_write(
                 Block::new_512(i),
-                Bytes::from(vec![0xff; 512 * 2]),
+                BytesMut::from([0xff; 512 * 2].as_slice()),
                 true,
             );
         }
@@ -3044,7 +3045,7 @@ pub(crate) mod test {
         for i in (0..5).rev() {
             upstairs.submit_dummy_write(
                 Block::new_512(i),
-                Bytes::from(vec![0xff; 512 * 2]),
+                BytesMut::from([0xff; 512 * 2].as_slice()),
                 false,
             );
         }
@@ -3078,21 +3079,21 @@ pub(crate) mod test {
         // op 0
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512 * 2]),
+            BytesMut::from([0xff; 512 * 2].as_slice()),
             false,
         );
 
         // op 1
         upstairs.submit_dummy_write(
             Block::new_512(4),
-            Bytes::from(vec![0xff; 512 * 2]),
+            BytesMut::from([0xff; 512 * 2].as_slice()),
             false,
         );
 
         // op 2
         upstairs.submit_dummy_write(
             Block::new_512(1),
-            Bytes::from(vec![0xff; 512 * 4]),
+            BytesMut::from([0xff; 512 * 4].as_slice()),
             false,
         );
 
@@ -3121,21 +3122,21 @@ pub(crate) mod test {
         // op 0
         upstairs.submit_dummy_write(
             Block::new_512(95),
-            Bytes::from(vec![0xff; 512 * 2]),
+            BytesMut::from([0xff; 512 * 2].as_slice()),
             false,
         );
 
         // op 1
         upstairs.submit_dummy_write(
             Block::new_512(96),
-            Bytes::from(vec![0xff; 512 * 7]),
+            BytesMut::from([0xff; 512 * 7].as_slice()),
             false,
         );
 
         // op 2
         upstairs.submit_dummy_write(
             Block::new_512(102),
-            Bytes::from(vec![0xff; 512 * 2]),
+            BytesMut::from([0xff; 512 * 2].as_slice()),
             false,
         );
 
@@ -3174,28 +3175,28 @@ pub(crate) mod test {
         // op 0
         upstairs.submit_dummy_write(
             Block::new_512(95),
-            Bytes::from(vec![0xff; 512 * 2]),
+            BytesMut::from([0xff; 512 * 2].as_slice()),
             false,
         );
 
         // op 1
         upstairs.submit_dummy_write(
             Block::new_512(96),
-            Bytes::from(vec![0xff; 512 * 7]),
+            BytesMut::from([0xff; 512 * 7].as_slice()),
             false,
         );
 
         // op 2
         upstairs.submit_dummy_write(
             Block::new_512(101),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from([0xff; 512].as_slice()),
             false,
         );
 
         // op 3
         upstairs.submit_dummy_write(
             Block::new_512(99),
-            Bytes::from(vec![0xff; 512 * 3]),
+            BytesMut::from([0xff; 512 * 3].as_slice()),
             true,
         );
 
@@ -3240,21 +3241,21 @@ pub(crate) mod test {
         // op 0
         upstairs.submit_dummy_write(
             Block::new_512(95),
-            Bytes::from(vec![0xff; 512 * 2]),
+            BytesMut::from([0xff; 512 * 2].as_slice()),
             false,
         );
 
         // op 1
         upstairs.submit_dummy_write(
             Block::new_512(102),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from([0xff; 512].as_slice()),
             false,
         );
 
         // op 2
         upstairs.submit_dummy_write(
             Block::new_512(96),
-            Bytes::from(vec![0xff; 512 * 7]),
+            BytesMut::from([0xff; 512 * 7].as_slice()),
             true,
         );
 
@@ -3297,7 +3298,7 @@ pub(crate) mod test {
         // op 2
         upstairs.submit_dummy_write(
             Block::new_512(96),
-            Bytes::from(vec![0xff; 512 * 2]),
+            BytesMut::from([0xff; 512 * 2].as_slice()),
             false,
         );
 
@@ -3327,7 +3328,7 @@ pub(crate) mod test {
 
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from([0xff; 512].as_slice()),
             false,
         );
 
@@ -3345,7 +3346,7 @@ pub(crate) mod test {
 
         upstairs.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from([0xff; 512].as_slice()),
             false,
         );
 
@@ -3519,7 +3520,7 @@ pub(crate) mod test {
 
         // Build a write, put it on the work queue.
         let offset = Block::new_512(7);
-        let data = Bytes::from(vec![1; 512]);
+        let data = BytesMut::from([1; 512].as_slice());
         let op = if is_write_unwritten {
             BlockOp::WriteUnwritten { offset, data }
         } else {
@@ -3667,7 +3668,7 @@ pub(crate) mod test {
             eid: 0,
             offset,
 
-            data: BytesMut::from(&data[..]),
+            data: BytesMut::from(data[..].as_slice()),
             block_contexts: vec![BlockContext {
                 encryption_context: Some(
                     crucible_protocol::EncryptionContext {
@@ -3732,7 +3733,7 @@ pub(crate) mod test {
             responses.push(ReadResponse {
                 eid: 0,
                 offset: Block::new_512(offset.value + i as u64),
-                data: BytesMut::from(&data[..]),
+                data: BytesMut::from(data[..]),
                 block_contexts: vec![BlockContext {
                     encryption_context: Some(
                         crucible_protocol::EncryptionContext { nonce, tag },
@@ -3811,7 +3812,7 @@ pub(crate) mod test {
             responses.push(ReadResponse {
                 eid: 0,
                 offset: Block::new_512(offset.value + i as u64),
-                data: BytesMut::from(&data[..]),
+                data: BytesMut::from(data[..].as_slice()),
                 block_contexts: vec![BlockContext {
                     encryption_context: Some(
                         crucible_protocol::EncryptionContext { nonce, tag },
@@ -3897,7 +3898,7 @@ pub(crate) mod test {
             eid: 0,
             offset,
 
-            data: BytesMut::from(&data[..]),
+            data: BytesMut::from(data[..].as_slice()),
             block_contexts: vec![BlockContext {
                 encryption_context: Some(
                     crucible_protocol::EncryptionContext { nonce, tag },
@@ -3966,7 +3967,7 @@ pub(crate) mod test {
             eid: 0,
             offset,
 
-            data: BytesMut::from(&data[..]),
+            data: BytesMut::from(data[..].as_slice()),
             block_contexts: vec![BlockContext {
                 encryption_context: Some(
                     crucible_protocol::EncryptionContext { nonce, tag },
