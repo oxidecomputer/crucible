@@ -2505,7 +2505,7 @@ impl ClientIoTask {
             );
         }
         while let Some(v) = self.request_rx.recv().await {
-            warn!(self.log, "exiting client task is ignoring message {v:?}");
+            warn!(self.log, "exiting client task is ignoring message {v}");
         }
         info!(self.log, "client task is exiting");
     }
