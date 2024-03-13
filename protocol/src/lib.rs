@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use std::net::SocketAddr;
 
 use anyhow::bail;
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 use num_enum::IntoPrimitive;
 use serde::{Deserialize, Serialize};
 use strum_macros::EnumDiscriminants;
@@ -298,7 +298,7 @@ pub const CRUCIBLE_MESSAGE_VERSION: u32 = 6;
 #[derive(
     Debug, PartialEq, Clone, Serialize, Deserialize, EnumDiscriminants,
 )]
-#[strum_discriminants(derive(Serialize))]
+#[strum_discriminants(derive(Serialize, Deserialize))]
 #[repr(u16)]
 pub enum Message {
     /**
@@ -1141,6 +1141,21 @@ impl CrucibleDecoder {
     pub fn new() -> Self {
         CrucibleDecoder {}
     }
+
+    fn decode_raw<H: for<'a> Deserialize<'a>, F: Fn(H, BytesMut) -> Message>(
+        mut bytes: BytesMut,
+        f: F,
+    ) -> Result<Message, bincode::Error> {
+        // Deserialize header and data length, skipping the tag
+        let (header, data_len): (H, usize) = bincode::deserialize(&bytes[4..])?;
+
+        // Slice out the bulk data
+        let data_start = bytes.len() - data_len;
+        let data = bytes.split_off(data_start);
+
+        // Build our message from header + bulk data
+        Ok(f(header, data))
+    }
 }
 
 impl Default for CrucibleDecoder {
@@ -1183,14 +1198,42 @@ impl Decoder for CrucibleDecoder {
             return Ok(None);
         }
 
-        let message = bincode::deserialize_from(&src[4..len]);
-        if len == src.len() {
-            src.clear();
-        } else {
-            src.advance(len);
-        }
+        // Slice the buffer so that it contains only our bincode-serialized
+        // `Message` (without any trailing data or the leading length).
+        //
+        // This leaves `src` pointing to the beginning of the next packet (which
+        // may not exist yet).
+        let buf = src.split_to(len).split_off(4);
 
-        Ok(Some(message?))
+        // Deserialize just the discriminant.  This will let us decide whether
+        // to use a specialized strategy for deserializing Messages that contain
+        // bulk data.
+        let discriminant: MessageDiscriminants =
+            bincode::deserialize_from(&buf[..])?;
+
+        let message = match discriminant {
+            MessageDiscriminants::Write => {
+                Self::decode_raw(buf, |header, data| Message::Write {
+                    header,
+                    data: data.freeze(),
+                })
+            }
+            MessageDiscriminants::WriteUnwritten => {
+                Self::decode_raw(buf, |header, data| Message::WriteUnwritten {
+                    header,
+                    data: data.freeze(),
+                })
+            }
+            MessageDiscriminants::ReadResponse => {
+                Self::decode_raw(buf, |header, data| Message::ReadResponse {
+                    header,
+                    data,
+                })
+            }
+            _ => bincode::deserialize_from(&buf[..]),
+        }?;
+
+        Ok(Some(message))
     }
 }
 
