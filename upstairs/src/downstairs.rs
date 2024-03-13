@@ -805,7 +805,6 @@ impl Downstairs {
     }
 
     /// What would next_id return, if we called it?
-    #[cfg(test)]
     pub(crate) fn peek_next_id(&self) -> JobId {
         self.next_id
     }
