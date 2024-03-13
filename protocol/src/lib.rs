@@ -840,10 +840,13 @@ impl std::fmt::Display for Message {
 }
 
 /// Writer to efficiently encode and send a `Message`
+///
+/// In contrast with `CrucibleEncoder`, this writer will send bulk data in a
+/// separate syscall (rather than copying it into an intermediate buffer).
 pub struct MessageWriter<W> {
     writer: W,
 
-    /// Scratch space for `Message` encoding
+    /// Scratch space for full `Message` encoding
     scratch: BytesMut,
 
     /// Scratch space for the raw header
