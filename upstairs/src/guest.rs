@@ -609,7 +609,9 @@ impl BlockIO for Guest {
             //
             // [][-chunk-][--------buffer-------]
             // ^ data
-            let chunk = buffer.split_to(MDTS.min(buffer.len()));
+            let num_bytes = MDTS.min(buffer.len());
+            assert_eq!(num_bytes % bs as usize, 0);
+            let chunk = buffer.split_to(num_bytes / bs as usize);
             assert_eq!(chunk.len() as u64 % bs, 0);
 
             let offset_change = chunk.len() as u64 / bs;

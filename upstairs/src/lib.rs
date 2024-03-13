@@ -1782,20 +1782,16 @@ impl Buffer {
             .zip(self.data.chunks(self.block_size))
     }
 
-    /// Splits the buffer into two at the given index.
+    /// Splits the buffer into two at the given block index.
     ///
-    /// Afterwards `self` contains elements `[0, at)`, and the returned `Buffer`
-    /// contains elements `[at, capacity)`.
+    /// Afterwards `self` contains blocks `[0, block_index)`, and the returned
+    /// `Buffer` contains blocks `[block_index, capacity)`.
     ///
     /// This is an `O(1)` operation that just increases the reference count and
     /// sets a few indices.
-    ///
-    /// # Panics
-    /// The `index` must be an even multiple of block size
-    pub fn split_off(&mut self, index: usize) -> Self {
-        assert_eq!(index % self.block_size, 0);
-        let data = self.data.split_off(index);
-        let owned = self.owned.split_off(index / self.block_size);
+    pub fn split_off(&mut self, block_index: usize) -> Self {
+        let data = self.data.split_off(block_index * self.block_size);
+        let owned = self.owned.split_off(block_index);
         Self {
             block_size: self.block_size,
             data,
@@ -1803,20 +1799,16 @@ impl Buffer {
         }
     }
 
-    /// Splits the buffer into two at the given index.
+    /// Splits the buffer into two at the given block index.
     ///
-    /// Afterwards `self` contains elements `[at, len)`, and the returned
-    /// `Buffer` contains elements `[0, at)`.
+    /// Afterwards `self` contains blocks `[block_index, len)`, and the returned
+    /// `Buffer` contains blocks `[0, block_index)`.
     ///
     /// This is an `O(1)` operation that just increases the reference count and
     /// sets a few indices.
-    ///
-    /// # Panics
-    /// The `index` must be an even multiple of block size
-    pub fn split_to(&mut self, index: usize) -> Self {
-        assert_eq!(index % self.block_size, 0);
-        let data = self.data.split_to(index);
-        let owned = self.owned.split_to(index / self.block_size);
+    pub fn split_to(&mut self, block_index: usize) -> Self {
+        let data = self.data.split_to(block_index * self.block_size);
+        let owned = self.owned.split_to(block_index);
         Self {
             block_size: self.block_size,
             data,
