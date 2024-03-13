@@ -476,7 +476,7 @@ impl Downstairs {
                             dependencies,
                             blocks,
                         },
-                        data: data.into(),
+                        data,
                     }
                 }
                 IOop::WriteUnwritten {
@@ -496,7 +496,7 @@ impl Downstairs {
                             dependencies,
                             blocks,
                         },
-                        data: data.into(),
+                        data,
                     }
                 }
                 IOop::Flush {
@@ -1762,13 +1762,13 @@ impl Downstairs {
         let awrite = if is_write_unwritten {
             IOop::WriteUnwritten {
                 dependencies,
-                data: write.data,
+                data: write.data.freeze(),
                 blocks: write.blocks,
             }
         } else {
             IOop::Write {
                 dependencies,
-                data: write.data,
+                data: write.data.freeze(),
                 blocks: write.blocks,
             }
         };

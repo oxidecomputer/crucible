@@ -769,13 +769,13 @@ pub(crate) mod up_test {
             IOop::WriteUnwritten {
                 dependencies: vec![],
                 blocks,
-                data,
+                data: data.freeze(),
             }
         } else {
             IOop::Write {
                 dependencies: vec![],
                 blocks,
-                data,
+                data: data.freeze(),
             }
         }
     }

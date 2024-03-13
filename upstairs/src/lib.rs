@@ -1094,12 +1094,12 @@ enum IOop {
     Write {
         dependencies: Vec<JobId>, // Jobs that must finish before this
         blocks: Vec<WriteBlockMetadata>,
-        data: bytes::BytesMut,
+        data: bytes::Bytes,
     },
     WriteUnwritten {
         dependencies: Vec<JobId>, // Jobs that must finish before this
         blocks: Vec<WriteBlockMetadata>,
-        data: bytes::BytesMut,
+        data: bytes::Bytes,
     },
     Read {
         dependencies: Vec<JobId>, // Jobs that must finish before this
