@@ -890,8 +890,8 @@ where
             &mut cursor,
             &(
                 0u32, // dummy length, to be patched later
-                0u32, // discriminant, to be patched later
-                &header,
+                discriminant,
+                header,
                 data.len(),
             ),
         )
@@ -900,9 +900,6 @@ where
         // Patch the length
         let len: u32 = (self.header.len() + data.len()).try_into().unwrap();
         self.header[0..4].copy_from_slice(&len.to_le_bytes());
-
-        // Patch the discriminant in the header
-        bincode::serialize_into(&mut self.header[4..8], &discriminant).unwrap();
 
         // write_all_vectored would save a syscall, but is nightly-only
         self.writer.write_all(&self.header).await?;
