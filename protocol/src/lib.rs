@@ -256,6 +256,9 @@ pub struct SnapshotDetails {
 pub enum MessageVersion {
     /// Changed `Write`, `WriteUnwritten`, and `ReadResponse` variants to have a
     /// clean split between header and bulk data, to reduce `memcpy`
+    ///
+    /// Removed `#[repr(u16)]` and explicit variant numbering from `Message`,
+    /// because those are misleading; they're ignored during serialization.
     V6 = 6,
 
     /// Switched to raw file extents
@@ -299,7 +302,6 @@ pub const CRUCIBLE_MESSAGE_VERSION: u32 = 6;
     Debug, PartialEq, Clone, Serialize, Deserialize, EnumDiscriminants,
 )]
 #[strum_discriminants(derive(Serialize, Deserialize))]
-#[repr(u16)]
 pub enum Message {
     /**
      * Initial negotiation messages
@@ -321,7 +323,7 @@ pub enum Message {
         encrypted: bool,
         // Additional Message versions this upstairs supports.
         alternate_versions: Vec<u32>,
-    } = 0,
+    },
     /**
      * This is the first message (when things are good) that the downstairs
      * will reply to the upstairs with.
@@ -331,7 +333,7 @@ pub enum Message {
         version: u32,
         // The IP:Port that repair commands will use to communicate.
         repair_addr: SocketAddr,
-    } = 1,
+    },
 
     /*
      * These messages indicate that there is an incompatibility between the
@@ -340,13 +342,13 @@ pub enum Message {
     VersionMismatch {
         // Version of Message this downstairs wanted.
         version: u32,
-    } = 2,
+    },
     ReadOnlyMismatch {
         expected: bool,
-    } = 3,
+    },
     EncryptedMismatch {
         expected: bool,
-    } = 4,
+    },
 
     /**
      * Forcefully tell this downstairs to promote us (an Upstairs) to
