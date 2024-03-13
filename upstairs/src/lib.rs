@@ -1816,10 +1816,10 @@ impl Buffer {
     ///
     /// If the two `Buffer` objects were previously contiguous and not mutated
     /// in a way that causes re-allocation i.e., if other was created by calling
-    /// `split_off` on this `BytesMut`, then this is an `O(1)` operation that
+    /// `split_off` on this `Buffer`, then this is an `O(1)` operation that
     /// just decreases a reference count and sets a few indices. Otherwise, this
     /// method calls `extend_from_slice` on both the data and ownership
-    /// `BytesMut`.
+    /// `Buffer`.
     ///
     /// # Panics
     /// If `self.block_size != other.block_size`
