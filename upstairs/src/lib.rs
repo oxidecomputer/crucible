@@ -1785,7 +1785,7 @@ impl Buffer {
     ///
     /// This is an `O(1)` operation that just increases the reference count and
     /// sets a few indices.
-    pub fn split_off(&mut self, block_index: usize) -> Self {
+    pub(crate) fn split_off(&mut self, block_index: usize) -> Self {
         let data = self.data.split_off(block_index * self.block_size);
         let owned = self.owned.split_off(block_index);
         Self {
@@ -1802,7 +1802,7 @@ impl Buffer {
     ///
     /// This is an `O(1)` operation that just increases the reference count and
     /// sets a few indices.
-    pub fn split_to(&mut self, block_index: usize) -> Self {
+    pub(crate) fn split_to(&mut self, block_index: usize) -> Self {
         let data = self.data.split_to(block_index * self.block_size);
         let owned = self.owned.split_to(block_index);
         Self {
@@ -1823,7 +1823,7 @@ impl Buffer {
     ///
     /// # Panics
     /// If `self.block_size != other.block_size`
-    pub fn unsplit(&mut self, other: Buffer) {
+    pub(crate) fn unsplit(&mut self, other: Buffer) {
         assert_eq!(self.block_size, other.block_size);
         self.data.unsplit(other.data);
         self.owned.unsplit(other.owned);
