@@ -1529,10 +1529,6 @@ impl fmt::Display for AckStatus {
 /*
  * Provides a strongly-owned Buffer that Read operations will write into.
  *
- * Originally BytesMut was used here, but it didn't guarantee that memory was
- * shared between cloned BytesMut objects. Additionally, we added the idea of
- * ownership and that necessitated another field.
- *
  * Ownership of a block is defined as true if that block has been written to: we
  * say a block is "owned" if the bytes were written to by something, rather than
  * having been initialized to zero. For an Upstairs, a block is owned if it was
