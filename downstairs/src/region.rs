@@ -12,13 +12,16 @@ use futures::TryStreamExt;
 use tracing::instrument;
 
 use crucible_common::*;
-use crucible_protocol::{RawReadResponse, SnapshotDetails};
+use crucible_protocol::SnapshotDetails;
 use repair_client::Client;
 
 use super::*;
-use crate::extent::{
-    copy_dir, extent_dir, extent_file_name, move_replacement_extent,
-    replace_dir, sync_path, Extent, ExtentMeta, ExtentState, ExtentType,
+use crate::{
+    extent::{
+        copy_dir, extent_dir, extent_file_name, move_replacement_extent,
+        replace_dir, sync_path, Extent, ExtentMeta, ExtentState, ExtentType,
+    },
+    RawReadResponse,
 };
 
 /**

@@ -713,68 +713,6 @@ impl ReadResponseBlockMetadata {
     }
 }
 
-/// Read response data, containing data from all blocks
-#[derive(Debug)]
-pub struct RawReadResponse {
-    /// Per-block metadata
-    pub blocks: Vec<ReadResponseBlockMetadata>,
-    /// Raw data
-    pub data: bytes::BytesMut,
-}
-
-impl RawReadResponse {
-    /// Builds a new empty `RawReadResponse` with the given capacity
-    pub fn with_capacity(block_count: usize, block_size: u64) -> Self {
-        Self {
-            blocks: Vec::with_capacity(block_count),
-            data: bytes::BytesMut::with_capacity(
-                block_count * block_size as usize,
-            ),
-        }
-    }
-
-    /// Destructures into a `Vec<ReadResponse>`
-    ///
-    /// This is useful for backwards compatibility
-    pub fn into_read_responses(mut self) -> Vec<ReadResponse> {
-        assert_eq!(self.data.len() % self.blocks.len(), 0);
-        let block_size = self.data.len() / self.blocks.len();
-        let mut out = Vec::with_capacity(self.blocks.len());
-        for b in self.blocks {
-            let data = self.data.split_to(block_size);
-            out.push(ReadResponse {
-                eid: b.eid,
-                offset: b.offset,
-                block_contexts: b.block_contexts,
-                data,
-            })
-        }
-        assert!(self.data.is_empty());
-        out
-    }
-}
-
-/// Write data, containing data from all blocks
-#[derive(Debug)]
-pub struct RawWrite {
-    /// Per-block metadata
-    pub blocks: Vec<WriteBlockMetadata>,
-    /// Raw data
-    pub data: bytes::BytesMut,
-}
-
-impl RawWrite {
-    /// Builds a new empty `RawWrite` with the given capacity
-    pub fn with_capacity(block_count: usize, block_size: u64) -> Self {
-        Self {
-            blocks: Vec::with_capacity(block_count),
-            data: bytes::BytesMut::with_capacity(
-                block_count * block_size as usize,
-            ),
-        }
-    }
-}
-
 /*
  * If you just added or changed the Message enum above, you must also
  * increment the CRUCIBLE_MESSAGE_VERSION.  Go do that right now before you

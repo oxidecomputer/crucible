@@ -4,7 +4,8 @@ use crate::{
     extent::{check_input, extent_path, DownstairsBlockContext, ExtentInner},
     integrity_hash,
     region::{BatchedPwritev, JobOrReconciliationId},
-    Block, BlockContext, CrucibleError, JobId, RegionDefinition,
+    Block, BlockContext, CrucibleError, JobId, RawReadResponse,
+    RegionDefinition,
 };
 use crucible_protocol::{EncryptionContext, ReadResponseBlockMetadata};
 
@@ -45,7 +46,7 @@ impl ExtentInner for SqliteInner {
         &mut self,
         job_id: JobId,
         requests: &[crucible_protocol::ReadRequest],
-        out: &mut crucible_protocol::RawReadResponse,
+        out: &mut RawReadResponse,
     ) -> Result<(), CrucibleError> {
         self.0.lock().unwrap().read_into(job_id, requests, out)
     }
@@ -281,7 +282,7 @@ impl SqliteMoreInner {
         &mut self,
         job_id: JobId,
         requests: &[crucible_protocol::ReadRequest],
-        out: &mut crucible_protocol::RawReadResponse,
+        out: &mut RawReadResponse,
     ) -> Result<(), CrucibleError> {
         // This code batches up operations for contiguous regions of
         // ReadRequests, so we can perform larger read syscalls and sqlite

@@ -4,11 +4,11 @@ use std::sync::Arc;
 
 use crate::{
     client::ConnectionId, upstairs::UpstairsConfig, BlockContext, BlockReq,
-    BlockRes, ClientId, ImpactedBlocks, Message,
+    BlockRes, ClientId, ImpactedBlocks, Message, RawWrite,
 };
 use bytes::BytesMut;
 use crucible_common::{integrity_hash, CrucibleError, RegionDefinition};
-use crucible_protocol::{RawWrite, WriteBlockMetadata};
+use crucible_protocol::WriteBlockMetadata;
 use futures::{
     future::{ready, Either, Ready},
     stream::FuturesOrdered,

@@ -7,7 +7,8 @@ use crate::{
     },
     integrity_hash, mkdir_for_file,
     region::{BatchedPwritev, JobOrReconciliationId},
-    Block, BlockContext, CrucibleError, JobId, RegionDefinition,
+    Block, BlockContext, CrucibleError, JobId, RawReadResponse,
+    RegionDefinition,
 };
 
 use crucible_protocol::ReadResponseBlockMetadata;
@@ -188,7 +189,7 @@ impl ExtentInner for RawInner {
         &mut self,
         job_id: JobId,
         requests: &[crucible_protocol::ReadRequest],
-        out: &mut crucible_protocol::RawReadResponse,
+        out: &mut RawReadResponse,
     ) -> Result<(), CrucibleError> {
         // This code batches up operations for contiguous regions of
         // ReadRequests, so we can perform larger read syscalls queries. This

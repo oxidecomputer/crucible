@@ -16,12 +16,12 @@ use crate::{
     AckStatus, ActiveJobs, AllocRingBuffer, ClientData, ClientIOStateCount,
     ClientId, ClientMap, CrucibleError, DownstairsIO, DownstairsMend, DsState,
     ExtentFix, ExtentRepairIDs, GuestWorkId, IOState, IOStateCount, IOop,
-    ImpactedBlocks, JobId, Message, ReadRequest, ReadResponse, ReconcileIO,
-    ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
-    WorkSummary,
+    ImpactedBlocks, JobId, Message, RawWrite, ReadRequest, ReadResponse,
+    ReconcileIO, ReconciliationId, RegionDefinition, ReplaceResult,
+    SnapshotDetails, WorkSummary,
 };
 use crucible_common::MAX_ACTIVE_COUNT;
-use crucible_protocol::{RawWrite, WriteHeader};
+use crucible_protocol::WriteHeader;
 
 use rand::prelude::*;
 use ringbuffer::RingBuffer;
@@ -1715,7 +1715,7 @@ impl Downstairs {
         use crate::impacted_blocks::ImpactedAddr;
         use crucible_common::Block;
         use crucible_protocol::{BlockContext, WriteBlockMetadata};
-        let request = crucible_protocol::RawWrite {
+        let request = RawWrite {
             data: bytes::BytesMut::from(vec![1].as_slice()),
             blocks: vec![WriteBlockMetadata {
                 eid: 0,

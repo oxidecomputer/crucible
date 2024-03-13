@@ -10,7 +10,7 @@ use nix::unistd::{sysconf, SysconfVar};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
-use crate::region::JobOrReconciliationId;
+use crate::{region::JobOrReconciliationId, RawReadResponse};
 use crucible_common::*;
 use repair_client::types::FileType;
 
@@ -45,7 +45,7 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
         &mut self,
         job_id: JobId,
         requests: &[crucible_protocol::ReadRequest],
-        out: &mut crucible_protocol::RawReadResponse,
+        out: &mut RawReadResponse,
     ) -> Result<(), CrucibleError>;
 
     /// Performs a read then destructures into a `Vec<ReadResponse>`
@@ -59,10 +59,8 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
             return Ok(vec![]);
         }
         let block_size = requests[0].offset.block_size_in_bytes();
-        let mut out = crucible_protocol::RawReadResponse::with_capacity(
-            requests.len(),
-            block_size as u64,
-        );
+        let mut out =
+            RawReadResponse::with_capacity(requests.len(), block_size as u64);
         self.read_into(job_id, requests, &mut out)?;
         Ok(out.into_read_responses())
     }
@@ -537,7 +535,7 @@ impl Extent {
         &mut self,
         job_id: JobId,
         requests: &[crucible_protocol::ReadRequest],
-        out: &mut crucible_protocol::RawReadResponse,
+        out: &mut RawReadResponse,
     ) -> Result<(), CrucibleError> {
         cdt::extent__read__start!(|| {
             (job_id.0, self.number, requests.len() as u64)
