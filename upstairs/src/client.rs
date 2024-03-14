@@ -1,12 +1,12 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
-    cdt, deadline_secs, integrity_hash, live_repair::ExtentInfo,
-    upstairs::UpstairsConfig, upstairs::UpstairsState, ClientIOStateCount,
-    ClientId, CrucibleDecoder, CrucibleError, DownstairsIO, DsState,
-    EncryptionContext, IOState, IOop, JobId, Message, RawMessage, ReadResponse,
-    ReconcileIO, RegionDefinitionStatus, RegionMetadata, MAX_ACTIVE_COUNT,
+    cdt, integrity_hash, live_repair::ExtentInfo, upstairs::UpstairsConfig,
+    upstairs::UpstairsState, ClientIOStateCount, ClientId, CrucibleDecoder,
+    CrucibleError, DownstairsIO, DsState, EncryptionContext, IOState, IOop,
+    JobId, Message, RawMessage, ReadResponse, ReconcileIO,
+    RegionDefinitionStatus, RegionMetadata, MAX_ACTIVE_COUNT,
 };
-use crucible_common::x509::TLSContext;
+use crucible_common::{deadline_secs, x509::TLSContext};
 use crucible_protocol::{
     ReconciliationId, WireMessage, WireMessageWriter, CRUCIBLE_MESSAGE_VERSION,
 };
@@ -30,7 +30,11 @@ use tokio::{
 use tokio_util::codec::FramedRead;
 use uuid::Uuid;
 
-const TIMEOUT_SECS: f32 = 50.0;
+// How long we wait before logging a message that we have not heard from
+// the downstairs.
+const TIMEOUT_SECS: f32 = 15.0;
+// How many timeouts will we tolerate before we disconnect from a downstairs.
+const TIMEOUT_LIMIT: u8 = 3;
 const PING_INTERVAL_SECS: f32 = 5.0;
 
 pub(crate) type ClientRequest = WireMessage<RawMessage>;
@@ -2774,6 +2778,7 @@ where
     R: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send + 'static,
 {
     let mut timeout = deadline_secs(TIMEOUT_SECS);
+    let mut timeout_trip = 0;
     loop {
         tokio::select! {
             f = fr.next() => {
@@ -2781,6 +2786,7 @@ where
                     Some(Ok(m)) => {
                         // reset the timeout, since we've received a message
                         timeout = deadline_secs(TIMEOUT_SECS);
+                        timeout_trip = 0;
                         if let Err(e) =
                             response_tx.send(ClientResponse::Message(m)).await
                         {
@@ -2803,8 +2809,18 @@ where
                 }
             }
             _ = sleep_until(timeout) => {
-                warn!(log, "downstairs timed out");
-                break ClientRunResult::Timeout;
+                timeout_trip += 1;
+                warn!(
+                    log,
+                    "Nothing received from downstairs, timeout {}/{}",
+                    timeout_trip,
+                    TIMEOUT_LIMIT,
+                );
+                if timeout_trip >= TIMEOUT_LIMIT {
+                    break ClientRunResult::Timeout;
+                } else {
+                    timeout = deadline_secs(TIMEOUT_SECS);
+                }
             }
         }
     }

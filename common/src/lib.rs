@@ -12,6 +12,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use slog::Drain;
 use tempfile::NamedTempFile;
+use tokio::time::{Duration, Instant};
 
 mod region;
 pub use region::{
@@ -412,4 +413,10 @@ impl From<CrucibleError> for dropshot::HttpError {
             }
         }
     }
+}
+
+pub fn deadline_secs(secs: f32) -> Instant {
+    Instant::now()
+        .checked_add(Duration::from_secs_f32(secs))
+        .unwrap()
 }

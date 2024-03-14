@@ -21,6 +21,7 @@ slog-dtrace.workspace = true
 slog-term.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tokio-rustls.workspace = true
 toml.workspace = true
 twox-hash.workspace = true

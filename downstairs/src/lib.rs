@@ -14,9 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crucible_common::{
-    build_logger, crucible_bail, impacted_blocks::extent_from_offset,
-    integrity_hash, mkdir_for_file, Block, CrucibleError, RegionDefinition,
-    MAX_ACTIVE_COUNT, MAX_BLOCK_SIZE,
+    build_logger, crucible_bail, deadline_secs,
+    impacted_blocks::extent_from_offset, integrity_hash, mkdir_for_file, Block,
+    CrucibleError, RegionDefinition, MAX_ACTIVE_COUNT, MAX_BLOCK_SIZE,
 };
 use crucible_protocol::{
     BlockContext, CrucibleDecoder, CrucibleEncoder, JobId, Message,
@@ -54,12 +54,6 @@ pub use admin::run_dropshot;
 pub use dump::dump_region;
 pub use dynamometer::*;
 pub use stats::{DsCountStat, DsStatOuter};
-
-fn deadline_secs(secs: u64) -> Instant {
-    Instant::now()
-        .checked_add(Duration::from_secs(secs))
-        .unwrap()
-}
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, PartialEq)]
@@ -685,7 +679,7 @@ where
              * XXX Timeouts, timeouts: always wrong!  Some too short and
              * some too long.
              */
-            _ = sleep_until(deadline_secs(50)) => {
+            _ = sleep_until(deadline_secs(50.0)) => {
                 bail!("did not negotiate a protocol");
             }
 
@@ -1118,7 +1112,7 @@ where
         + std::marker::Send
         + 'static,
 {
-    let mut lossy_interval = deadline_secs(5);
+    let mut lossy_interval = deadline_secs(5.0);
     // Create the log for this task to use.
     let log = ads.lock().await.log.new(o!("task" => "main".to_string()));
 
@@ -1222,6 +1216,12 @@ where
     // continually locking the downstairs, cache the result here.
     let lossy = ads.lock().await.lossy;
 
+    // How long we wait before logging a message that we have not heard from
+    // the upstairs.
+    const TIMEOUT_SECS: f32 = 15.0;
+    // How many timeouts will we tolerate before we disconnect from the upstairs.
+    const TIMEOUT_LIMIT: u8 = 3;
+    let mut timeout_trip = 0;
     loop {
         tokio::select! {
             e = &mut dw_task => {
@@ -1241,15 +1241,25 @@ where
              */
             _ = sleep_until(lossy_interval), if lossy => {
                 job_channel_tx.send(()).await?;
-                lossy_interval = deadline_secs(5);
+                lossy_interval = deadline_secs(5.0);
             }
             /*
-             * Don't wait more than 50 seconds to hear from the other side.
+             * Don't wait more than TIMEOUT_SECS * TIMEOUT_LIMIT seconds to hear
+             * from the other side.
              * XXX Timeouts, timeouts: always wrong!  Some too short and
              * some too long.
              */
-            _ = sleep_until(deadline_secs(50)) => {
-                bail!("inactivity timeout");
+            _ = sleep_until(deadline_secs(TIMEOUT_SECS)) => {
+                timeout_trip += 1;
+                warn!(
+                    log,
+                    "Nothing received from upstairs, timeout {}/{}",
+                    timeout_trip,
+                    TIMEOUT_LIMIT,
+                );
+                if timeout_trip >= TIMEOUT_LIMIT {
+                    bail!("inactivity timeout");
+                }
             }
 
             /*
@@ -1306,6 +1316,7 @@ where
                 }
             }
             new_read = fr.next() => {
+                timeout_trip = 0;
                 match new_read {
                     None => {
                         // Upstairs disconnected
