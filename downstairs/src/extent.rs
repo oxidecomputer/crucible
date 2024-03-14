@@ -52,9 +52,28 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
         &mut self,
         job_id: JobId,
         writes: &[crucible_protocol::Write],
+        ctxs: &[DownstairsBlockContext],
         only_write_unwritten: bool,
         iov_max: usize,
     ) -> Result<(), CrucibleError>;
+
+    #[cfg(test)]
+    fn write_without_precomputed_contexts(
+        &mut self,
+        job_id: JobId,
+        writes: &[crucible_protocol::Write],
+        only_write_unwritten: bool,
+        iov_max: usize,
+    ) -> Result<(), CrucibleError> {
+        let pre = PrecomputedWrite::from_writes(writes);
+        self.write(
+            job_id,
+            writes,
+            &pre.block_contexts,
+            only_write_unwritten,
+            iov_max,
+        )
+    }
 
     #[cfg(test)]
     fn get_block_contexts(
@@ -75,7 +94,7 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
 }
 
 /// BlockContext, with the addition of block index and on_disk_hash
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct DownstairsBlockContext {
     pub block_context: BlockContext,
 
@@ -536,6 +555,7 @@ impl Extent {
         &mut self,
         job_id: JobId,
         writes: &[crucible_protocol::Write],
+        ctxs: &[DownstairsBlockContext],
         only_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
         if self.read_only {
@@ -546,8 +566,13 @@ impl Extent {
             (job_id.0, self.number, writes.len() as u64)
         });
 
-        self.inner
-            .write(job_id, writes, only_write_unwritten, self.iov_max)?;
+        self.inner.write(
+            job_id,
+            writes,
+            ctxs,
+            only_write_unwritten,
+            self.iov_max,
+        )?;
 
         cdt::extent__write__done!(|| {
             (job_id.0, self.number, writes.len() as u64)

@@ -18,9 +18,13 @@ use crucible_protocol::SnapshotDetails;
 use repair_client::Client;
 
 use super::*;
-use crate::extent::{
-    copy_dir, extent_dir, extent_file_name, move_replacement_extent,
-    replace_dir, sync_path, Extent, ExtentMeta, ExtentState, ExtentType,
+use crate::{
+    deferred::PrecomputedWrite,
+    extent::{
+        copy_dir, extent_dir, extent_file_name, move_replacement_extent,
+        replace_dir, sync_path, DownstairsBlockContext, Extent, ExtentMeta,
+        ExtentState, ExtentType,
+    },
 };
 
 /**
@@ -760,37 +764,27 @@ impl Region {
         Ok(result)
     }
 
-    pub fn validate_hashes(
-        &self,
-        writes: &[crucible_protocol::Write],
-    ) -> Result<(), CrucibleError> {
-        for write in writes {
-            let computed_hash = if let Some(encryption_context) =
-                &write.block_context.encryption_context
-            {
-                integrity_hash(&[
-                    &encryption_context.nonce[..],
-                    &encryption_context.tag[..],
-                    &write.data[..],
-                ])
-            } else {
-                integrity_hash(&[&write.data[..]])
-            };
-
-            if computed_hash != write.block_context.hash {
-                error!(self.log, "Failed write hash validation");
-                // TODO: print out the extent and block where this failed!!
-                crucible_bail!(HashMismatch);
-            }
-        }
-
-        Ok(())
-    }
-
+    /// Perform a region write, without precomputed data
+    ///
+    /// This is only allowed in unit tests
+    #[cfg(test)]
     #[instrument]
     pub async fn region_write(
         &mut self,
         writes: &[crucible_protocol::Write],
+        job_id: JobId,
+        only_write_unwritten: bool,
+    ) -> Result<(), CrucibleError> {
+        let pre = PrecomputedWrite::from_writes(writes);
+        self.region_write_pre(writes, &pre, job_id, only_write_unwritten)
+            .await
+    }
+
+    #[instrument]
+    pub async fn region_write_pre(
+        &mut self,
+        writes: &[crucible_protocol::Write],
+        precomputed: &PrecomputedWrite,
         job_id: JobId,
         only_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
@@ -801,19 +795,25 @@ impl Region {
         /*
          * Before anything, validate hashes
          */
-        self.validate_hashes(writes)?;
+        if let Err(e) = &precomputed.validate_hashes_result {
+            error!(self.log, "Failed write hash validation");
+            return Err(e.clone());
+        }
 
         /*
          * Batch writes so they can all be sent to the appropriate extent
          * together.
          */
-        let mut batched_writes: HashMap<usize, Vec<crucible_protocol::Write>> =
-            HashMap::new();
+        let mut batched_writes: HashMap<
+            usize,
+            (Vec<crucible_protocol::Write>, Vec<DownstairsBlockContext>),
+        > = HashMap::new();
 
-        for write in writes {
+        for (write, ctx) in writes.iter().zip(&precomputed.block_contexts) {
             let extent_vec =
                 batched_writes.entry(write.eid as usize).or_default();
-            extent_vec.push(write.clone());
+            extent_vec.0.push(write.clone());
+            extent_vec.1.push(*ctx);
         }
 
         if only_write_unwritten {
@@ -823,9 +823,9 @@ impl Region {
         }
         for eid in batched_writes.keys() {
             let extent = self.get_opened_extent_mut(*eid);
-            let writes = batched_writes.get(eid).unwrap();
+            let (writes, ctxs) = batched_writes.get(eid).unwrap();
             extent
-                .write(job_id, &writes[..], only_write_unwritten)
+                .write(job_id, writes, ctxs, only_write_unwritten)
                 .await?;
         }
 

@@ -6,8 +6,8 @@ use crate::{
     control::ControlRequest,
     deadline_secs,
     deferred::{
-        DeferredBlockReq, DeferredMessage, DeferredQueue, DeferredRead,
-        DeferredWrite, EncryptedWrite,
+        DeferredBlockReq, DeferredMessage, DeferredRead, DeferredWrite,
+        EncryptedWrite,
     },
     downstairs::{Downstairs, DownstairsAction},
     extent_from_offset,
@@ -16,7 +16,7 @@ use crate::{
     CrucibleOpts, DsState, EncryptionContext, GuestIoHandle, Message,
     RegionDefinition, RegionDefinitionStatus, SnapshotDetails, WQCounts,
 };
-use crucible_common::CrucibleError;
+use crucible_common::{CrucibleError, DeferredQueue};
 use serde::{Deserialize, Serialize};
 
 use std::sync::{
