@@ -1529,10 +1529,6 @@ impl fmt::Display for AckStatus {
 /*
  * Provides a strongly-owned Buffer that Read operations will write into.
  *
- * Originally BytesMut was used here, but it didn't guarantee that memory was
- * shared between cloned BytesMut objects. Additionally, we added the idea of
- * ownership and that necessitated another field.
- *
  * Ownership of a block is defined as true if that block has been written to: we
  * say a block is "owned" if the bytes were written to by something, rather than
  * having been initialized to zero. For an Upstairs, a block is owned if it was
@@ -1780,6 +1776,57 @@ impl Buffer {
             .iter()
             .map(|v| *v != 0)
             .zip(self.data.chunks(self.block_size))
+    }
+
+    /// Splits the buffer into two at the given block index.
+    ///
+    /// Afterwards `self` contains blocks `[0, block_index)`, and the returned
+    /// `Buffer` contains blocks `[block_index, capacity)`.
+    ///
+    /// This is an `O(1)` operation that just increases the reference count and
+    /// sets a few indices.
+    pub(crate) fn split_off(&mut self, block_index: usize) -> Self {
+        let data = self.data.split_off(block_index * self.block_size);
+        let owned = self.owned.split_off(block_index);
+        Self {
+            block_size: self.block_size,
+            data,
+            owned,
+        }
+    }
+
+    /// Splits the buffer into two at the given block index.
+    ///
+    /// Afterwards `self` contains blocks `[block_index, len)`, and the returned
+    /// `Buffer` contains blocks `[0, block_index)`.
+    ///
+    /// This is an `O(1)` operation that just increases the reference count and
+    /// sets a few indices.
+    pub(crate) fn split_to(&mut self, block_index: usize) -> Self {
+        let data = self.data.split_to(block_index * self.block_size);
+        let owned = self.owned.split_to(block_index);
+        Self {
+            block_size: self.block_size,
+            data,
+            owned,
+        }
+    }
+
+    /// Absorbs a `Buffer` that was previously split off
+    ///
+    /// If the two `Buffer` objects were previously contiguous and not mutated
+    /// in a way that causes re-allocation i.e., if other was created by calling
+    /// `split_off` on this `Buffer`, then this is an `O(1)` operation that
+    /// just decreases a reference count and sets a few indices. Otherwise, this
+    /// method calls `extend_from_slice` on both the data and ownership
+    /// `Buffer`.
+    ///
+    /// # Panics
+    /// If `self.block_size != other.block_size`
+    pub(crate) fn unsplit(&mut self, other: Buffer) {
+        assert_eq!(self.block_size, other.block_size);
+        self.data.unsplit(other.data);
+        self.owned.unsplit(other.owned);
     }
 }
 

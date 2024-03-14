@@ -431,6 +431,77 @@ mod test {
     }
 
     #[tokio::test]
+    async fn integration_test_region_huge_io() -> Result<()> {
+        // Test a simple single layer volume with a read, write, read, with IOs
+        // that exceed our MDTS (and should be split automatically)
+        const BLOCK_SIZE: usize = 512;
+
+        let tds = TestDownstairsSet::big(false).await?;
+        let opts = tds.opts();
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: Uuid::new_v4(),
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
+                    opts,
+                    gen: 1,
+                }],
+                read_only_parent: None,
+            };
+
+        let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
+
+        volume.activate().await?;
+
+        // We'll do a 4 MiB read, which is > 1 MiB (our MDTS)
+        const NUM_BLOCKS: usize = (4 * 1024 * 1024) / BLOCK_SIZE + 1;
+
+        // Verify contents are zero on init
+        let mut buffer = Buffer::new(NUM_BLOCKS, BLOCK_SIZE);
+        for i in 0..10 {
+            volume
+                .read(Block::new(i, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+                .await?;
+            assert_eq!(vec![0x00_u8; BLOCK_SIZE * NUM_BLOCKS], &buffer[..]);
+        }
+
+        for i in 0..10 {
+            let mut data = vec![0; BLOCK_SIZE * NUM_BLOCKS];
+            rand::thread_rng().fill(&mut data[..]);
+            volume
+                .write(
+                    Block::new(i, BLOCK_SIZE.trailing_zeros()),
+                    Bytes::from(data.clone()),
+                )
+                .await?;
+
+            // Read parent, verify contents
+            let mut buffer = Buffer::new(NUM_BLOCKS, BLOCK_SIZE);
+            volume
+                .read(Block::new(i, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+                .await?;
+            assert_eq!(&data, &buffer[..]);
+
+            // Do a shifted read, to detect any block shuffling that's
+            // consistent between reads and writes (which would be weird!)
+            let mut buffer = Buffer::new(NUM_BLOCKS - 1, BLOCK_SIZE);
+            volume
+                .read(
+                    Block::new(i + 1, BLOCK_SIZE.trailing_zeros()),
+                    &mut buffer,
+                )
+                .await?;
+            assert_eq!(&data[BLOCK_SIZE..], &buffer[..]);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn volume_zero_length_io() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
