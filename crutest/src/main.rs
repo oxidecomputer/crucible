@@ -1168,7 +1168,7 @@ fn fill_vec(
     blocks: usize,
     wl: &WriteLog,
     bs: u64,
-) -> Vec<u8> {
+) -> BytesMut {
     if blocks == 0 {
         println!("Warning: fill requested of zero length buffer");
     }
@@ -1179,19 +1179,17 @@ fn fill_vec(
      * seed value.  For multiple block sized writes, we need to create
      * the write buffer with the correct seed value.
      */
-    let mut vec: Vec<u8> = Vec::with_capacity(blocks * bs as usize);
+    let mut vec = BytesMut::with_capacity(blocks * bs as usize);
     for block_offset in block_index..(block_index + blocks) {
         /*
          * The start of each block contains that blocks index mod 255
          */
-        vec.push((block_offset % 255) as u8);
+        vec.extend(&[(block_offset % 255) as u8]);
         /*
          * Fill the rest of the buffer with the new write count
          */
         let seed = wl.get_seed(block_offset);
-        for _ in 1..bs {
-            vec.push(seed);
-        }
+        vec.extend(std::iter::repeat(seed).take(bs as usize - 1));
     }
     vec
 }
@@ -1342,8 +1340,8 @@ async fn balloon_workload(
                 ri.write_log.update_wc(block_index + i);
             }
 
-            let vec = fill_vec(block_index, size, &ri.write_log, ri.block_size);
-            let data = Bytes::from(vec);
+            let data =
+                fill_vec(block_index, size, &ri.write_log, ri.block_size);
             /*
              * Convert block_index to its byte value.
              */
@@ -1410,9 +1408,8 @@ async fn fill_workload(
             ri.write_log.update_wc(block_index + i);
         }
 
-        let vec =
+        let data =
             fill_vec(block_index, next_io_blocks, &ri.write_log, ri.block_size);
-        let data = Bytes::from(vec);
 
         guest.write(offset, data).await?;
 
@@ -1454,8 +1451,7 @@ async fn fill_sparse_workload(
 
         ri.write_log.update_wc(block_index);
 
-        let vec = fill_vec(block_index, 1, &ri.write_log, ri.block_size);
-        let data = Bytes::from(vec);
+        let data = fill_vec(block_index, 1, &ri.write_log, ri.block_size);
 
         println!("[{extent}/{extents}] Write to block {}", block_index);
         guest.write(offset, data).await?;
@@ -1531,9 +1527,8 @@ async fn generic_workload(
                     ri.write_log.update_wc(block_index + i);
                 }
 
-                let vec =
+                let data =
                     fill_vec(block_index, size, &ri.write_log, ri.block_size);
-                let data = Bytes::from(vec);
 
                 if !quiet {
                     match wtq {
@@ -1849,8 +1844,7 @@ async fn dirty_workload(
          */
         ri.write_log.update_wc(block_index);
 
-        let vec = fill_vec(block_index, size, &ri.write_log, ri.block_size);
-        let data = Bytes::from(vec);
+        let data = fill_vec(block_index, size, &ri.write_log, ri.block_size);
 
         println!(
             "[{:>0width$}/{:>0width$}] Write at block {}, len:{}",
@@ -2051,15 +2045,16 @@ async fn perf_workload(
     let mut rng = rand::thread_rng();
     let io_size = blocks_per_io * ri.block_size as usize;
 
-    let write_buffers: Vec<Bytes> = (0..io_depth)
-        .map(|_| {
-            Bytes::from(
-                (0..io_size)
-                    .map(|_| rng.sample(rand::distributions::Standard))
-                    .collect::<Vec<u8>>(),
-            )
-        })
-        .collect();
+    let write_buffers: Vec<BytesMut> =
+        (0..io_depth)
+            .map(|_| {
+                let mut out = BytesMut::with_capacity(io_size);
+                out.extend((0..io_size).map(|_| -> u8 {
+                    rng.sample(rand::distributions::Standard)
+                }));
+                out
+            })
+            .collect();
 
     let mut read_buffers: Vec<Buffer> = (0..io_depth)
         .map(|_| Buffer::new(blocks_per_io, ri.block_size as usize))
@@ -2219,8 +2214,7 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
      */
     ri.write_log.update_wc(block_index);
 
-    let vec = fill_vec(block_index, size, &ri.write_log, ri.block_size);
-    let data = Bytes::from(vec);
+    let data = fill_vec(block_index, size, &ri.write_log, ri.block_size);
 
     println!("Write at block {:5}, len:{:7}", offset.value, data.len());
 
@@ -2364,8 +2358,7 @@ async fn write_flush_read_workload(
             ri.write_log.update_wc(block_index + i);
         }
 
-        let vec = fill_vec(block_index, size, &ri.write_log, ri.block_size);
-        let data = Bytes::from(vec);
+        let data = fill_vec(block_index, size, &ri.write_log, ri.block_size);
 
         println!(
             "{:>0width$}/{:>0width$} IO at block {:5}, len:{:7}",
@@ -2516,9 +2509,8 @@ async fn repair_workload(
                     ri.write_log.update_wc(block_index + i);
                 }
 
-                let vec =
+                let data =
                     fill_vec(block_index, size, &ri.write_log, ri.block_size);
-                let data = Bytes::from(vec);
 
                 print!(
                     "{:>0width$}/{:>0width$} Write \
@@ -2614,9 +2606,8 @@ async fn demo_workload(
                     ri.write_log.update_wc(block_index + i);
                 }
 
-                let vec =
+                let data =
                     fill_vec(block_index, size, &ri.write_log, ri.block_size);
-                let data = Bytes::from(vec);
 
                 let future = guest.write(offset, data);
                 futures.push(future);
@@ -2685,8 +2676,7 @@ async fn span_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     ri.write_log.update_wc(block_index + 1);
 
     let offset = Block::new(block_index as u64, ri.block_size.trailing_zeros());
-    let vec = fill_vec(block_index, 2, &ri.write_log, ri.block_size);
-    let data = Bytes::from(vec);
+    let data = fill_vec(block_index, 2, &ri.write_log, ri.block_size);
 
     println!("Sending a write spanning two extents");
     guest.write(offset, data).await?;
@@ -2721,8 +2711,7 @@ async fn big_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
          */
         ri.write_log.update_wc(block_index);
 
-        let vec = fill_vec(block_index, 1, &ri.write_log, ri.block_size);
-        let data = Bytes::from(vec);
+        let data = fill_vec(block_index, 1, &ri.write_log, ri.block_size);
         /*
          * Convert block_index to its byte value.
          */
@@ -2802,9 +2791,8 @@ async fn biggest_io_workload(
             ri.write_log.update_wc(block_index + i);
         }
 
-        let vec =
+        let data =
             fill_vec(block_index, next_io_blocks, &ri.write_log, ri.block_size);
-        let data = Bytes::from(vec);
 
         println!(
             "IO at block:{}  size in blocks:{}",
@@ -2845,13 +2833,11 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
                 /*
                  * Generate a write buffer with a locally unique value.
                  */
-                let mut vec: Vec<u8> =
-                    Vec::with_capacity(ri.block_size as usize);
+                let mut data = BytesMut::with_capacity(ri.block_size as usize);
                 let seed = ((my_offset % 254) + 1) as u8;
-                for _ in 0..ri.block_size {
-                    vec.push(seed);
-                }
-                let data = Bytes::from(vec);
+                data.extend(
+                    std::iter::repeat(seed).take(ri.block_size as usize),
+                );
 
                 println!(
                     "Loop:{} send write {} @ offset:{}  len:{}",

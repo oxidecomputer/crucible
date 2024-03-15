@@ -121,13 +121,13 @@ pub trait BlockIO: Sync {
     async fn write(
         &self,
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
     ) -> Result<(), CrucibleError>;
 
     async fn write_unwritten(
         &self,
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
     ) -> Result<(), CrucibleError>;
 
     async fn flush(
@@ -188,7 +188,7 @@ pub trait BlockIO: Sync {
     async fn write_to_byte_offset(
         &self,
         offset: u64,
-        data: Bytes,
+        data: BytesMut,
     ) -> Result<(), CrucibleError> {
         if !self.query_is_active().await? {
             return Err(CrucibleError::UpstairsInactive);
@@ -935,7 +935,7 @@ impl DownstairsIO {
     pub fn io_size(&self) -> usize {
         match &self.work {
             IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
-                data.io_size_bytes
+                data.len()
             }
             IOop::Read { .. } => {
                 if self.data.is_some() {
@@ -1064,88 +1064,6 @@ impl ReconcileIO {
     }
 }
 
-/// Pre-serialized write, to avoid extra memory copies / allocation
-///
-/// The actual data to be written on the wire is in `self.data`; everything else
-/// is metadata used for logging, etc.
-#[derive(Debug, Clone, PartialEq)]
-pub struct SerializedWrite {
-    /// Number of blocks written (used for logging)
-    num_blocks: usize,
-
-    /// Extents to be written
-    eids: Vec<u64>,
-
-    /// Number of bytes written
-    io_size_bytes: usize,
-
-    /// Pre-serialized write data, to avoid extra memcpys
-    data: bytes::Bytes,
-}
-
-impl SerializedWrite {
-    /// Helper function to build a `SerializedWrite` from a list of `Writes`
-    ///
-    /// This is only used during unit tests; normally, the conversion is
-    /// performed during the handling of the write request.
-    #[cfg(test)]
-    fn from_writes(writes: Vec<Write>) -> Self {
-        use bytes::BufMut;
-
-        let out = BytesMut::new();
-        let mut w = out.writer();
-        bincode::serialize_into(&mut w, &writes).unwrap();
-
-        let mut eids: Vec<_> = writes.iter().map(|w| w.eid).collect();
-        eids.dedup();
-
-        let num_blocks = writes.len();
-        let io_size_bytes = writes.iter().map(|w| w.data.len()).sum();
-
-        Self {
-            num_blocks,
-            io_size_bytes,
-            eids,
-            data: w.into_inner().freeze(),
-        }
-    }
-}
-
-/// Raw message header, which is used for zero-copy serialization
-///
-/// These variants must contain the same fields as their `Message` equivalents
-/// in the same order.
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-#[repr(u16)]
-enum RawMessage {
-    Write {
-        upstairs_id: Uuid,
-        session_id: Uuid,
-        job_id: JobId,
-        dependencies: Vec<JobId>,
-    },
-    WriteUnwritten {
-        upstairs_id: Uuid,
-        session_id: Uuid,
-        job_id: JobId,
-        dependencies: Vec<JobId>,
-    },
-}
-
-impl crucible_protocol::RawMessageDiscriminant for RawMessage {
-    /// Returns the discriminant used by the equivalent `Message`
-    ///
-    /// This is hard-coded and exhaustively checked by a unit test.
-    fn discriminant(&self) -> MessageDiscriminants {
-        match self {
-            RawMessage::Write { .. } => MessageDiscriminants::Write,
-            RawMessage::WriteUnwritten { .. } => {
-                MessageDiscriminants::WriteUnwritten
-            }
-        }
-    }
-}
-
 /*
  * Crucible to storage IO operations.
  */
@@ -1154,11 +1072,13 @@ impl crucible_protocol::RawMessageDiscriminant for RawMessage {
 enum IOop {
     Write {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        data: SerializedWrite,
+        blocks: Vec<WriteBlockMetadata>,
+        data: bytes::Bytes,
     },
     WriteUnwritten {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        data: SerializedWrite,
+        blocks: Vec<WriteBlockMetadata>,
+        data: bytes::Bytes,
     },
     Read {
         dependencies: Vec<JobId>, // Jobs that must finish before this
@@ -1241,13 +1161,21 @@ impl IOop {
                 let num_blocks = requests.len();
                 (job_type, num_blocks, dependencies.clone())
             }
-            IOop::Write { dependencies, data } => {
+            IOop::Write {
+                dependencies,
+                blocks,
+                ..
+            } => {
                 let job_type = "Write".to_string();
-                (job_type, data.num_blocks, dependencies.clone())
+                (job_type, blocks.len(), dependencies.clone())
             }
-            IOop::WriteUnwritten { dependencies, data } => {
+            IOop::WriteUnwritten {
+                dependencies,
+                blocks,
+                ..
+            } => {
                 let job_type = "WriteU".to_string();
-                (job_type, data.num_blocks, dependencies.clone())
+                (job_type, blocks.len(), dependencies.clone())
             }
             IOop::Flush {
                 dependencies,
@@ -1309,9 +1237,9 @@ impl IOop {
             // repaired is handled with dependencies, and IOs should arrive
             // here with those dependencies already set.
             match &self {
-                IOop::Write { data, .. }
-                | IOop::WriteUnwritten { data, .. } => {
-                    data.eids.iter().any(|eid| *eid <= extent_limit)
+                IOop::Write { blocks, .. }
+                | IOop::WriteUnwritten { blocks, .. } => {
+                    blocks.iter().any(|b| b.eid <= extent_limit)
                 }
                 IOop::Flush { .. } => {
                     // If we have set extent limit, then we go ahead and
@@ -1337,7 +1265,7 @@ impl IOop {
     fn job_bytes(&self) -> u64 {
         match &self {
             IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
-                data.io_size_bytes as u64
+                data.len() as u64
             }
             IOop::Read { requests, .. } => {
                 requests
@@ -1929,11 +1857,11 @@ pub enum BlockOp {
     },
     Write {
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
     },
     WriteUnwritten {
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
     },
     Flush {
         snapshot_details: Option<SnapshotDetails>,

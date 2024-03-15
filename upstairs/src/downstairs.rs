@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     cdt,
-    client::{ClientAction, ClientRequest, ClientStopReason, DownstairsClient},
+    client::{ClientAction, ClientStopReason, DownstairsClient},
     guest::GuestWork,
     live_repair::ExtentInfo,
     stats::UpStatOuter,
@@ -16,11 +16,12 @@ use crate::{
     AckStatus, ActiveJobs, AllocRingBuffer, ClientData, ClientIOStateCount,
     ClientId, ClientMap, CrucibleError, DownstairsIO, DownstairsMend, DsState,
     ExtentFix, ExtentRepairIDs, GuestWorkId, IOState, IOStateCount, IOop,
-    ImpactedBlocks, JobId, Message, RawMessage, ReadRequest, ReadResponse,
-    ReconcileIO, ReconciliationId, RegionDefinition, ReplaceResult,
-    SerializedWrite, SnapshotDetails, WorkSummary,
+    ImpactedBlocks, JobId, Message, ReadRequest, ReadResponse, ReconcileIO,
+    ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
+    WorkSummary,
 };
 use crucible_common::MAX_ACTIVE_COUNT;
+use crucible_protocol::{RawWrite, WriteHeader};
 
 use rand::prelude::*;
 use ringbuffer::RingBuffer;
@@ -461,32 +462,42 @@ impl Downstairs {
             };
 
             let message = match job {
-                IOop::Write { dependencies, data } => {
+                IOop::Write {
+                    dependencies,
+                    blocks,
+                    data,
+                } => {
                     cdt::ds__write__io__start!(|| (new_id.0, client_id.get()));
-                    ClientRequest::RawMessage(
-                        RawMessage::Write {
+                    Message::Write {
+                        header: WriteHeader {
                             upstairs_id: self.cfg.upstairs_id,
                             session_id: self.cfg.session_id,
                             job_id: new_id,
                             dependencies,
+                            blocks,
                         },
-                        data.data,
-                    )
+                        data,
+                    }
                 }
-                IOop::WriteUnwritten { dependencies, data } => {
+                IOop::WriteUnwritten {
+                    blocks,
+                    dependencies,
+                    data,
+                } => {
                     cdt::ds__write__unwritten__io__start!(|| (
                         new_id.0,
                         client_id.get()
                     ));
-                    ClientRequest::RawMessage(
-                        RawMessage::WriteUnwritten {
+                    Message::WriteUnwritten {
+                        header: WriteHeader {
                             upstairs_id: self.cfg.upstairs_id,
                             session_id: self.cfg.session_id,
                             job_id: new_id,
                             dependencies,
+                            blocks,
                         },
-                        data.data,
-                    )
+                        data,
+                    }
                 }
                 IOop::Flush {
                     dependencies,
@@ -496,7 +507,7 @@ impl Downstairs {
                     extent_limit,
                 } => {
                     cdt::ds__flush__io__start!(|| (new_id.0, client_id.get()));
-                    ClientRequest::Message(Message::Flush {
+                    Message::Flush {
                         upstairs_id: self.cfg.upstairs_id,
                         session_id: self.cfg.session_id,
                         job_id: new_id,
@@ -505,20 +516,20 @@ impl Downstairs {
                         gen_number,
                         snapshot_details,
                         extent_limit,
-                    })
+                    }
                 }
                 IOop::Read {
                     dependencies,
                     requests,
                 } => {
                     cdt::ds__read__io__start!(|| (new_id.0, client_id.get()));
-                    ClientRequest::Message(Message::ReadRequest {
+                    Message::ReadRequest {
                         upstairs_id: self.cfg.upstairs_id,
                         session_id: self.cfg.session_id,
                         job_id: new_id,
                         dependencies,
                         requests,
-                    })
+                    }
                 }
                 IOop::ExtentFlushClose {
                     dependencies,
@@ -534,15 +545,15 @@ impl Downstairs {
                     ));
                     if repair_downstairs.contains(&client_id) {
                         // We are the downstairs being repaired, so just close.
-                        ClientRequest::Message(Message::ExtentLiveClose {
+                        Message::ExtentLiveClose {
                             upstairs_id: self.cfg.upstairs_id,
                             session_id: self.cfg.session_id,
                             job_id: new_id,
                             dependencies,
                             extent_id: extent,
-                        })
+                        }
                     } else {
-                        ClientRequest::Message(Message::ExtentLiveFlushClose {
+                        Message::ExtentLiveFlushClose {
                             upstairs_id: self.cfg.upstairs_id,
                             session_id: self.cfg.session_id,
                             job_id: new_id,
@@ -550,7 +561,7 @@ impl Downstairs {
                             extent_id: extent,
                             flush_number,
                             gen_number,
-                        })
+                        }
                     }
                 }
                 IOop::ExtentLiveRepair {
@@ -566,7 +577,7 @@ impl Downstairs {
                         extent
                     ));
                     if repair_downstairs.contains(&client_id) {
-                        ClientRequest::Message(Message::ExtentLiveRepair {
+                        Message::ExtentLiveRepair {
                             upstairs_id: self.cfg.upstairs_id,
                             session_id: self.cfg.session_id,
                             job_id: new_id,
@@ -574,14 +585,14 @@ impl Downstairs {
                             extent_id: extent,
                             source_client_id: source_downstairs,
                             source_repair_address,
-                        })
+                        }
                     } else {
-                        ClientRequest::Message(Message::ExtentLiveNoOp {
+                        Message::ExtentLiveNoOp {
                             upstairs_id: self.cfg.upstairs_id,
                             session_id: self.cfg.session_id,
                             job_id: new_id,
                             dependencies,
-                        })
+                        }
                     }
                 }
                 IOop::ExtentLiveReopen {
@@ -593,22 +604,22 @@ impl Downstairs {
                         client_id.get(),
                         extent
                     ));
-                    ClientRequest::Message(Message::ExtentLiveReopen {
+                    Message::ExtentLiveReopen {
                         upstairs_id: self.cfg.upstairs_id,
                         session_id: self.cfg.session_id,
                         job_id: new_id,
                         dependencies,
                         extent_id: extent,
-                    })
+                    }
                 }
                 IOop::ExtentLiveNoOp { dependencies } => {
                     cdt::ds__noop__start!(|| (new_id.0, client_id.get()));
-                    ClientRequest::Message(Message::ExtentLiveNoOp {
+                    Message::ExtentLiveNoOp {
                         upstairs_id: self.cfg.upstairs_id,
                         session_id: self.cfg.session_id,
                         job_id: new_id,
                         dependencies,
-                    })
+                    }
                 }
             };
             self.clients[client_id].send(message).await
@@ -1703,15 +1714,17 @@ impl Downstairs {
     ) -> JobId {
         use crate::impacted_blocks::ImpactedAddr;
         use crucible_common::Block;
-        use crucible_protocol::BlockContext;
-        let request = crucible_protocol::Write {
-            eid: 0,
-            offset: Block::new_512(7),
-            data: bytes::Bytes::from(vec![1]),
-            block_context: BlockContext {
-                encryption_context: None,
-                hash: 0,
-            },
+        use crucible_protocol::{BlockContext, WriteBlockMetadata};
+        let request = RawWrite {
+            data: bytes::BytesMut::from(vec![1].as_slice()),
+            blocks: vec![WriteBlockMetadata {
+                eid: 0,
+                offset: Block::new_512(7),
+                block_context: BlockContext {
+                    encryption_context: None,
+                    hash: 0,
+                },
+            }],
         };
         let iblocks = ImpactedBlocks::new(
             ImpactedAddr {
@@ -1726,7 +1739,7 @@ impl Downstairs {
         self.create_and_enqueue_write_eob(
             iblocks,
             GuestWorkId(10),
-            SerializedWrite::from_writes(vec![request.clone()]),
+            request,
             is_write_unwritten,
         )
     }
@@ -1735,7 +1748,7 @@ impl Downstairs {
         &mut self,
         blocks: ImpactedBlocks,
         gw_id: GuestWorkId,
-        data: SerializedWrite,
+        write: RawWrite,
         is_write_unwritten: bool,
     ) -> JobId {
         let ds_id = self.next_id();
@@ -1747,9 +1760,17 @@ impl Downstairs {
         debug!(self.log, "IO Write {} has deps {:?}", ds_id, dependencies);
 
         let awrite = if is_write_unwritten {
-            IOop::WriteUnwritten { dependencies, data }
+            IOop::WriteUnwritten {
+                dependencies,
+                data: write.data.freeze(),
+                blocks: write.blocks,
+            }
         } else {
-            IOop::Write { dependencies, data }
+            IOop::Write {
+                dependencies,
+                data: write.data.freeze(),
+                blocks: write.blocks,
+            }
         };
 
         let io = DownstairsIO {
@@ -2251,7 +2272,7 @@ impl Downstairs {
         &mut self,
         guest_id: GuestWorkId,
         blocks: ImpactedBlocks,
-        serialized_write: SerializedWrite,
+        write: RawWrite,
         is_write_unwritten: bool,
     ) -> JobId {
         // If there is a live-repair in progress that intersects with this read,
@@ -2261,7 +2282,7 @@ impl Downstairs {
         self.create_and_enqueue_write_eob(
             blocks,
             guest_id,
-            serialized_write,
+            write,
             is_write_unwritten,
         )
     }
@@ -2327,7 +2348,7 @@ impl Downstairs {
         // counter for backpressure calculations.
         match &io.work {
             IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
-                self.write_bytes_outstanding += data.io_size_bytes as u64;
+                self.write_bytes_outstanding += data.len() as u64;
             }
             _ => (),
         };
@@ -2711,9 +2732,7 @@ impl Downstairs {
                 // Update pending bytes when this job is retired
                 let change = match &job.work {
                     IOop::Write { data, .. }
-                    | IOop::WriteUnwritten { data, .. } => {
-                        data.io_size_bytes as u64
-                    }
+                    | IOop::WriteUnwritten { data, .. } => data.len() as u64,
                     _ => 0,
                 };
                 self.write_bytes_outstanding =
@@ -2766,13 +2785,13 @@ impl Downstairs {
                     let num_blocks = requests.len();
                     (job_type, num_blocks)
                 }
-                IOop::Write { data, .. } => {
+                IOop::Write { blocks, .. } => {
                     let job_type = "Write".to_string();
-                    (job_type, data.num_blocks)
+                    (job_type, blocks.len())
                 }
-                IOop::WriteUnwritten { data, .. } => {
+                IOop::WriteUnwritten { blocks, .. } => {
                     let job_type = "WriteU".to_string();
-                    (job_type, data.num_blocks)
+                    (job_type, blocks.len())
                 }
                 IOop::Flush { .. } => {
                     let job_type = "Flush".to_string();
@@ -2911,13 +2930,13 @@ impl Downstairs {
                     None,
                 )
             }
-            Message::ReadResponse {
-                upstairs_id,
-                session_id,
-                job_id,
-                responses,
-            } => {
-                cdt::ds__read__io__done!(|| (job_id.0, client_id.get()));
+            Message::ReadResponse { header, data } => {
+                cdt::ds__read__io__done!(|| (header.job_id.0, client_id.get()));
+                let upstairs_id = header.upstairs_id;
+                let session_id = header.session_id;
+                let job_id = header.job_id;
+                let responses = header.into_read_responses(data);
+
                 (upstairs_id, session_id, job_id, responses, None)
             }
 
@@ -3420,9 +3439,9 @@ impl Downstairs {
         blocks: ImpactedBlocks,
         is_write_unwritten: bool,
     ) -> JobId {
-        use bytes::Bytes;
+        use bytes::BytesMut;
         use crucible_common::Block;
-        use crucible_protocol::{BlockContext, Write};
+        use crucible_protocol::{BlockContext, WriteBlockMetadata};
 
         // ddef is used in submit_read for enumerating the individual blocks.
         // values here dont matter as long as the ddef can contain
@@ -3432,20 +3451,27 @@ impl Downstairs {
         ddef.set_extent_size(Block::new_512(extent_size));
         ddef.set_extent_count(u32::MAX);
 
-        let writes = blocks.blocks(&ddef).map(|(eid, b)| Write {
-            eid,
-            offset: b,
-            data: Bytes::from(vec![0xff; 512]),
-            block_context: BlockContext {
-                hash: crucible_common::integrity_hash(&[&vec![0xff; 512]]),
-                encryption_context: None,
-            },
-        });
+        let write_blocks: Vec<_> = blocks
+            .blocks(&ddef)
+            .map(|(eid, b)| WriteBlockMetadata {
+                eid,
+                offset: b,
+                block_context: BlockContext {
+                    hash: crucible_common::integrity_hash(&[&vec![0xff; 512]]),
+                    encryption_context: None,
+                },
+            })
+            .collect();
+        let data =
+            BytesMut::from(vec![0xff; 512 * write_blocks.len()].as_slice());
 
         self.submit_write(
             gwid,
             blocks,
-            SerializedWrite::from_writes(writes.collect()),
+            RawWrite {
+                blocks: write_blocks,
+                data,
+            },
             is_write_unwritten,
         )
     }

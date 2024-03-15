@@ -167,7 +167,7 @@ pub async fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
             if (extent_offset + block_offset) >= start_block {
                 blocks_copied += 1;
 
-                let mut responses = region
+                let response = region
                     .region_read(
                         &[ReadRequest {
                             eid: eid as u64,
@@ -179,7 +179,6 @@ pub async fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
                         JobId(0),
                     )
                     .await?;
-                let response = responses.pop().unwrap();
 
                 out_file.write_all(&response.data).unwrap();
 
@@ -1672,11 +1671,18 @@ impl Downstairs {
                     responses.is_ok(),
                 );
 
+                let (blocks, data) = match responses {
+                    Ok(r) => (Ok(r.blocks), r.data),
+                    Err(e) => (Err(e), Default::default()),
+                };
                 Ok(Some(Message::ReadResponse {
-                    upstairs_id: job.upstairs_connection.upstairs_id,
-                    session_id: job.upstairs_connection.session_id,
-                    job_id,
-                    responses,
+                    header: crucible_protocol::ReadResponseHeader {
+                        upstairs_id: job.upstairs_connection.upstairs_id,
+                        session_id: job.upstairs_connection.session_id,
+                        job_id,
+                        blocks,
+                    },
+                    data,
                 }))
             }
             IOop::WriteUnwritten { writes, .. } => {
@@ -2326,13 +2332,21 @@ impl Downstairs {
         // Initial check against upstairs and session ID
         match m {
             Message::Write {
-                upstairs_id,
-                session_id,
+                header:
+                    crucible_protocol::WriteHeader {
+                        upstairs_id,
+                        session_id,
+                        ..
+                    },
                 ..
             }
             | Message::WriteUnwritten {
-                upstairs_id,
-                session_id,
+                header:
+                    crucible_protocol::WriteHeader {
+                        upstairs_id,
+                        session_id,
+                        ..
+                    },
                 ..
             }
             | Message::Flush {
@@ -2385,22 +2399,18 @@ impl Downstairs {
         }
 
         let r = match m {
-            Message::Write {
-                job_id,
-                dependencies,
-                writes,
-                ..
-            } => {
-                cdt::submit__write__start!(|| job_id.0);
+            Message::Write { header, data } => {
+                cdt::submit__write__start!(|| header.job_id.0);
+                let writes = header.get_writes(data);
 
                 let new_write = IOop::Write {
-                    dependencies,
+                    dependencies: header.dependencies,
                     writes,
                 };
 
                 let mut d = ad.lock().await;
-                d.add_work(upstairs_connection, job_id, new_write)?;
-                Some(job_id)
+                d.add_work(upstairs_connection, header.job_id, new_write)?;
+                Some(header.job_id)
             }
             Message::Flush {
                 job_id,
@@ -2425,22 +2435,18 @@ impl Downstairs {
                 d.add_work(upstairs_connection, job_id, new_flush)?;
                 Some(job_id)
             }
-            Message::WriteUnwritten {
-                job_id,
-                dependencies,
-                writes,
-                ..
-            } => {
-                cdt::submit__writeunwritten__start!(|| job_id.0);
+            Message::WriteUnwritten { header, data } => {
+                cdt::submit__writeunwritten__start!(|| header.job_id.0);
+                let writes = header.get_writes(data);
 
                 let new_write = IOop::WriteUnwritten {
-                    dependencies,
+                    dependencies: header.dependencies,
                     writes,
                 };
 
                 let mut d = ad.lock().await;
-                d.add_work(upstairs_connection, job_id, new_write)?;
-                Some(job_id)
+                d.add_work(upstairs_connection, header.job_id, new_write)?;
+                Some(header.job_id)
             }
             Message::ReadRequest {
                 job_id,
@@ -5436,7 +5442,7 @@ mod test {
         let mut read_data = Vec::with_capacity(total_bytes as usize);
         for eid in 0..region.def().extent_count() {
             for offset in 0..region.def().extent_size().value {
-                let responses = region
+                let response = region
                     .region_read(
                         &[crucible_protocol::ReadRequest {
                             eid: eid.into(),
@@ -5446,13 +5452,13 @@ mod test {
                     )
                     .await?;
 
-                assert_eq!(responses.len(), 1);
+                assert_eq!(response.blocks.len(), 1);
 
-                let response = &responses[0];
-                assert_eq!(response.hashes().len(), 1);
+                let r = &response.blocks[0];
+                assert_eq!(r.hashes().len(), 1);
                 assert_eq!(
                     integrity_hash(&[&response.data[..]]),
-                    response.hashes()[0],
+                    r.hashes()[0],
                 );
 
                 read_data.extend_from_slice(&response.data[..]);

@@ -410,7 +410,7 @@ impl Volume {
                 // TODO: Nexus needs to know about this failure.
                 self.write_unwritten(
                     Block::new(offset, bs.trailing_zeros()),
-                    buffer.into_bytes(),
+                    buffer.into_bytes_mut(),
                 )
                 .await?;
 
@@ -465,7 +465,7 @@ impl Volume {
     async fn volume_write_op(
         &self,
         offset: Block,
-        data: Bytes,
+        mut data: BytesMut,
         is_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
         // In the case that this volume only has a read only parent,
@@ -501,7 +501,6 @@ impl Volume {
         }
 
         // TODO parallel dispatch!
-        let mut data_index = 0;
         for (coverage, sub_volume) in affected_sub_volumes {
             let sub_offset = Block::new(
                 sub_volume.compute_sub_volume_lba(coverage.start),
@@ -509,22 +508,14 @@ impl Volume {
             );
             let sz = (coverage.end - coverage.start) as usize
                 * self.block_size as usize;
-            let slice_range = Range::<usize> {
-                start: data_index,
-                end: data_index + sz,
-            };
-            let slice = data.slice(slice_range);
+            let slice = data.split_to(sz);
 
             // Take the write or write_unwritten path here.
             if is_write_unwritten {
-                sub_volume
-                    .write_unwritten(sub_offset, slice.clone())
-                    .await?;
+                sub_volume.write_unwritten(sub_offset, slice).await?;
             } else {
-                sub_volume.write(sub_offset, slice.clone()).await?;
+                sub_volume.write(sub_offset, slice).await?;
             }
-
-            data_index += sz;
         }
 
         if is_write_unwritten {
@@ -710,7 +701,7 @@ impl BlockIO for Volume {
     async fn write(
         &self,
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
     ) -> Result<(), CrucibleError> {
         // Make use of the volume specific write_op method to avoid
         // code duplication with volume.write_unwritten.
@@ -720,7 +711,7 @@ impl BlockIO for Volume {
     async fn write_unwritten(
         &self,
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
     ) -> Result<(), CrucibleError> {
         // Make use of the volume specific write_op method to avoid
         // code duplication with volume.write.
@@ -923,7 +914,7 @@ impl BlockIO for SubVolume {
     async fn write(
         &self,
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
     ) -> Result<(), CrucibleError> {
         self.block_io.write(offset, data).await
     }
@@ -931,7 +922,7 @@ impl BlockIO for SubVolume {
     async fn write_unwritten(
         &self,
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
     ) -> Result<(), CrucibleError> {
         self.block_io.write_unwritten(offset, data).await
     }
@@ -1765,7 +1756,7 @@ mod test {
         // Write ones to second block
         disk.write(
             Block::new(1, BLOCK_SIZE.trailing_zeros()),
-            Bytes::from(vec![1; 512]),
+            BytesMut::from(vec![1; 512].as_slice()),
         )
         .await?;
 
@@ -1773,7 +1764,7 @@ mod test {
         // This should not change the block.
         disk.write_unwritten(
             Block::new(1, BLOCK_SIZE.trailing_zeros()),
-            Bytes::from(vec![2; 512]),
+            BytesMut::from(vec![2; 512].as_slice()),
         )
         .await?;
 
@@ -1790,7 +1781,7 @@ mod test {
         // Write twos to first block
         disk.write(
             Block::new(0, BLOCK_SIZE.trailing_zeros()),
-            Bytes::from(vec![2; 512]),
+            BytesMut::from(vec![2; 512].as_slice()),
         )
         .await?;
 
@@ -1807,14 +1798,14 @@ mod test {
         // Write sevens to third and fourth blocks
         disk.write(
             Block::new(2, BLOCK_SIZE.trailing_zeros()),
-            Bytes::from(vec![7; 1024]),
+            BytesMut::from(vec![7; 1024].as_slice()),
         )
         .await?;
 
         // Write_unwritten eights to fifth and six blocks
         disk.write_unwritten(
             Block::new(4, BLOCK_SIZE.trailing_zeros()),
-            Bytes::from(vec![8; 1024]),
+            BytesMut::from(vec![8; 1024].as_slice()),
         )
         .await?;
 
@@ -1879,7 +1870,7 @@ mod test {
         parent
             .write(
                 Block::new(0, block_size.trailing_zeros()),
-                Bytes::from(vec![1; 512]),
+                BytesMut::from(vec![1; 512].as_slice()),
             )
             .await?;
 
@@ -1903,7 +1894,7 @@ mod test {
         volume
             .write(
                 Block::new(1, block_size.trailing_zeros()),
-                Bytes::from(vec![2; 1024]),
+                BytesMut::from(vec![2; 1024].as_slice()),
             )
             .await?;
 
@@ -1941,7 +1932,7 @@ mod test {
         volume
             .write(
                 Block::new(0, block_size.trailing_zeros()),
-                Bytes::from(vec![3; 512 * 2]),
+                BytesMut::from(vec![3; 512 * 2].as_slice()),
             )
             .await?;
 
@@ -1979,7 +1970,7 @@ mod test {
         parent
             .write(
                 Block::new(0, block_size.trailing_zeros()),
-                Bytes::from(vec![4; 2048]),
+                BytesMut::from(vec![4; 2048].as_slice()),
             )
             .await?;
 
@@ -2018,7 +2009,7 @@ mod test {
         volume
             .write(
                 Block::new(0, block_size.trailing_zeros()),
-                Bytes::from(vec![9; 4096]),
+                BytesMut::from(vec![9; 4096].as_slice()),
             )
             .await?;
 
@@ -2053,7 +2044,7 @@ mod test {
             parent
                 .write(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    Bytes::from(vec![i; 2048]),
+                    BytesMut::from(vec![i; 2048].as_slice()),
                 )
                 .await?;
 
@@ -2095,7 +2086,7 @@ mod test {
         parent
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![9; 512]),
+                BytesMut::from(vec![9; 512].as_slice()),
             )
             .await?;
 
@@ -2180,7 +2171,7 @@ mod test {
             parent
                 .write(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    Bytes::from(vec![i; 2048]),
+                    BytesMut::from(vec![i; 2048].as_slice()),
                 )
                 .await?;
 
@@ -2259,7 +2250,7 @@ mod test {
             parent
                 .write(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    Bytes::from(vec![i; 2048]),
+                    BytesMut::from(vec![i; 2048].as_slice()),
                 )
                 .await?;
 
@@ -2337,7 +2328,7 @@ mod test {
         parent
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![128; 2048]),
+                BytesMut::from(vec![128; 2048].as_slice()),
             )
             .await?;
 
@@ -2403,7 +2394,7 @@ mod test {
         let res = volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![128; 2048]),
+                BytesMut::from(vec![128; 2048].as_slice()),
             )
             .await;
         assert!(res.is_err());
@@ -2438,7 +2429,7 @@ mod test {
         let res = volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![128; 2048]),
+                BytesMut::from(vec![128; 2048].as_slice()),
             )
             .await;
 
@@ -2458,7 +2449,7 @@ mod test {
         parent
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -2485,7 +2476,7 @@ mod test {
             volume
                 .write(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    Bytes::from(vec![0xFF; BLOCK_SIZE * 10]),
+                    BytesMut::from(vec![0xFF; BLOCK_SIZE * 10].as_slice()),
                 )
                 .await?;
 
@@ -2526,7 +2517,7 @@ mod test {
         parent
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -2576,7 +2567,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0xFF; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0xFF; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -2648,7 +2639,7 @@ mod test {
         parent
             .write(
                 Block::new(0, block_size.trailing_zeros()),
-                Bytes::from(vec![11; block_size * 5]),
+                BytesMut::from(vec![11; block_size * 5].as_slice()),
             )
             .await?;
 
@@ -2687,7 +2678,7 @@ mod test {
         volume
             .write(
                 Block::new(0, block_size.trailing_zeros()),
-                Bytes::from(vec![55; block_size * 10]),
+                BytesMut::from(vec![55; block_size * 10].as_slice()),
             )
             .await?;
 
@@ -3061,7 +3052,7 @@ mod test {
                     out_of_bounds / BLOCK_SIZE,
                     BLOCK_SIZE.trailing_zeros(),
                 ),
-                Bytes::from(vec![128; 2048]),
+                BytesMut::from(vec![128; 2048].as_slice()),
             )
             .await;
 
@@ -3073,7 +3064,7 @@ mod test {
                     out_of_bounds / BLOCK_SIZE,
                     BLOCK_SIZE.trailing_zeros(),
                 ),
-                Bytes::from(vec![128; 2048]),
+                BytesMut::from(vec![128; 2048].as_slice()),
             )
             .await;
 

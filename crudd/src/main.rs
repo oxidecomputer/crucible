@@ -298,7 +298,7 @@ async fn write_remainder_and_finalize<'a, T: BlockIO>(
     if uflow_remainder == 0 {
         // no need to RMW, just write
         w_buf.resize(n_read, 0);
-        let w_future = crucible.write(offset, w_buf.freeze());
+        let w_future = crucible.write(offset, w_buf);
         futures.push_back(w_future);
     } else {
         // RMW oof
@@ -323,7 +323,7 @@ async fn write_remainder_and_finalize<'a, T: BlockIO>(
             .copy_from_slice(&r_bytes[uflow_remainder as usize..]);
 
         // Issue the write
-        let w_future = crucible.write(offset, w_buf.freeze());
+        let w_future = crucible.write(offset, w_buf);
         futures.push_back(w_future);
     }
 
@@ -412,9 +412,7 @@ async fn cmd_write<T: BlockIO>(
         )?;
         total_bytes_written += bytes_read;
 
-        let w_bytes = Bytes::from(w_vec);
-
-        crucible.write(offset, w_bytes).await?;
+        crucible.write(offset, w_vec).await?;
 
         if bytes_read != alignment_bytes as usize {
             // underrun, exit early
@@ -478,7 +476,7 @@ async fn cmd_write<T: BlockIO>(
             return Ok(total_bytes_written);
         } else {
             // good to go for a write
-            let w_future = crucible.write(offset, w_buf.freeze());
+            let w_future = crucible.write(offset, w_buf);
             futures.push_back(w_future);
         }
 

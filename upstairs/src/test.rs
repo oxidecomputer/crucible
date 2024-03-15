@@ -397,7 +397,8 @@ pub(crate) mod up_test {
 
         // Validate it
         let successful_hash = validate_encrypted_read_response(
-            &mut read_response,
+            &mut read_response.block_contexts,
+            &mut read_response.data,
             &Arc::new(context),
             &csl(),
         )?;
@@ -477,7 +478,8 @@ pub(crate) mod up_test {
 
         // Validate it
         let successful_hash = validate_encrypted_read_response(
-            &mut read_response,
+            &mut read_response.block_contexts,
+            &mut read_response.data,
             &Arc::new(context),
             &csl(),
         )?;
@@ -530,7 +532,8 @@ pub(crate) mod up_test {
 
         // Validate it
         let successful_hash = validate_encrypted_read_response(
-            &mut read_response,
+            &mut read_response.block_contexts,
+            &mut read_response.data,
             &Arc::new(context),
             &csl(),
         )?;
@@ -565,8 +568,11 @@ pub(crate) mod up_test {
         };
 
         // Validate it
-        let successful_hash =
-            validate_unencrypted_read_response(&mut read_response, &csl())?;
+        let successful_hash = validate_unencrypted_read_response(
+            &mut read_response.block_contexts,
+            &mut read_response.data,
+            &csl(),
+        )?;
 
         assert_eq!(successful_hash, Some(read_response_hash));
         assert_eq!(read_response.data, original_data);
@@ -591,8 +597,11 @@ pub(crate) mod up_test {
         };
 
         // Validate it
-        let successful_hash =
-            validate_unencrypted_read_response(&mut read_response, &csl())?;
+        let successful_hash = validate_unencrypted_read_response(
+            &mut read_response.block_contexts,
+            &mut read_response.data,
+            &csl(),
+        )?;
 
         assert_eq!(successful_hash, None);
         assert_eq!(read_response.data, original_data);
@@ -642,8 +651,11 @@ pub(crate) mod up_test {
         };
 
         // Validate it
-        let successful_hash =
-            validate_unencrypted_read_response(&mut read_response, &csl())?;
+        let successful_hash = validate_unencrypted_read_response(
+            &mut read_response.block_contexts,
+            &mut read_response.data,
+            &csl(),
+        )?;
 
         assert_eq!(successful_hash, Some(read_response_hash));
         assert_eq!(read_response.data, original_data);
@@ -686,8 +698,11 @@ pub(crate) mod up_test {
         };
 
         // Validate it
-        let successful_hash =
-            validate_unencrypted_read_response(&mut read_response, &csl())?;
+        let successful_hash = validate_unencrypted_read_response(
+            &mut read_response.block_contexts,
+            &mut read_response.data,
+            &csl(),
+        )?;
 
         assert_eq!(successful_hash, Some(read_response_hash));
         assert_eq!(read_response.data, original_data);
@@ -739,27 +754,28 @@ pub(crate) mod up_test {
 
     // Construct an IOop::Write or IOop::WriteUnwritten at the given extent
     fn write_at_extent(eid: u64, wu: bool) -> IOop {
-        let request = crucible_protocol::Write {
+        let request = crucible_protocol::WriteBlockMetadata {
             eid,
             offset: Block::new_512(7),
-            data: Bytes::from(vec![1]),
             block_context: BlockContext {
                 encryption_context: None,
                 hash: 0,
             },
         };
-
-        let writes = vec![request];
+        let data = BytesMut::from(vec![1].as_slice());
+        let blocks = vec![request];
 
         if wu {
             IOop::WriteUnwritten {
                 dependencies: vec![],
-                data: SerializedWrite::from_writes(writes),
+                blocks,
+                data: data.freeze(),
             }
         } else {
             IOop::Write {
                 dependencies: vec![],
-                data: SerializedWrite::from_writes(writes),
+                blocks,
+                data: data.freeze(),
             }
         }
     }

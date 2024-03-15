@@ -3,12 +3,12 @@ use crate::{
     cdt, integrity_hash, live_repair::ExtentInfo, upstairs::UpstairsConfig,
     upstairs::UpstairsState, ClientIOStateCount, ClientId, CrucibleDecoder,
     CrucibleError, DownstairsIO, DsState, EncryptionContext, IOState, IOop,
-    JobId, Message, RawMessage, ReadResponse, ReconcileIO,
-    RegionDefinitionStatus, RegionMetadata, MAX_ACTIVE_COUNT,
+    JobId, Message, ReadResponse, ReconcileIO, RegionDefinitionStatus,
+    RegionMetadata, MAX_ACTIVE_COUNT,
 };
 use crucible_common::{deadline_secs, verbose_timeout, x509::TLSContext};
 use crucible_protocol::{
-    ReconciliationId, WireMessage, WireMessageWriter, CRUCIBLE_MESSAGE_VERSION,
+    BlockContext, MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
 };
 
 use std::{
@@ -37,8 +37,6 @@ const TIMEOUT_SECS: f32 = 15.0;
 const TIMEOUT_LIMIT: usize = 3;
 const PING_INTERVAL_SECS: f32 = 5.0;
 
-pub(crate) type ClientRequest = WireMessage<RawMessage>;
-
 /// Handle to a running I/O task
 ///
 /// The I/O task is "thin"; it simply forwards messages around.  The task
@@ -50,7 +48,7 @@ struct ClientTaskHandle {
     ///
     /// The only thing that we send to the client is [`Message`], which is then
     /// sent out over the network.
-    client_request_tx: mpsc::Sender<ClientRequest>,
+    client_request_tx: mpsc::Sender<Message>,
 
     /// Handle to receive data from the I/O task
     ///
@@ -359,7 +357,7 @@ impl DownstairsClient {
         self.new_jobs.insert(work);
     }
 
-    pub(crate) async fn send<M: Into<ClientRequest>>(&mut self, m: M) {
+    pub(crate) async fn send(&mut self, m: Message) {
         // Normally, the client task continues running until
         // `self.client_task.client_request_tx` is dropped; as such, we should
         // always be able to send it a message.
@@ -2425,7 +2423,7 @@ struct ClientIoTask {
     target: SocketAddr,
 
     /// Request channel from the main task
-    request_rx: mpsc::Receiver<ClientRequest>,
+    request_rx: mpsc::Receiver<Message>,
 
     /// Reply channel to the main task
     response_tx: mpsc::Sender<ClientResponse>,
@@ -2603,12 +2601,12 @@ impl ClientIoTask {
             let sock = connector.connect(server_name, tcp).await.unwrap();
             let (read, write) = tokio::io::split(sock);
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = WireMessageWriter::new(write);
+            let fw = MessageWriter::new(write);
             self.cmd_loop(fr, fw).await
         } else {
             let (read, write) = tcp.into_split();
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = WireMessageWriter::new(write);
+            let fw = MessageWriter::new(write);
             self.cmd_loop(fr, fw).await
         }
     }
@@ -2616,7 +2614,7 @@ impl ClientIoTask {
     async fn cmd_loop<R, W>(
         &mut self,
         fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
-        mut fw: WireMessageWriter<W, RawMessage>,
+        mut fw: MessageWriter<W>,
     ) -> ClientRunResult
     where
         R: tokio::io::AsyncRead
@@ -2669,7 +2667,7 @@ impl ClientIoTask {
                     ping_count += 1;
                     cdt::ds__ping__sent!(|| (ping_count, self.client_id.get()));
 
-                    let m = ClientRequest::Message(Message::Ruok);
+                    let m = Message::Ruok;
                     if let Err(e) = self.write(&mut fw, m).await {
                         break e;
                     }
@@ -2710,8 +2708,8 @@ impl ClientIoTask {
     /// stop immediately.
     async fn write<W>(
         &mut self,
-        fw: &mut WireMessageWriter<W, RawMessage>,
-        m: ClientRequest,
+        fw: &mut MessageWriter<W>,
+        m: Message,
     ) -> Result<(), ClientRunResult>
     where
         W: tokio::io::AsyncWrite
@@ -2726,11 +2724,7 @@ impl ClientIoTask {
         // the global backpressure system and cannot build up an unbounded
         // queue.  This is admittedly quite subtle; see crucible#1167 for
         // discussions and graphs.
-        if !matches!(
-            m,
-            ClientRequest::Message(Message::Write { .. })
-                | ClientRequest::RawMessage(RawMessage::Write { .. }, ..)
-        ) {
+        if !matches!(m, Message::Write { .. }) {
             let d = self.client_delay_us.load(Ordering::Relaxed);
             if d > 0 {
                 tokio::time::sleep(Duration::from_micros(d)).await;
@@ -2819,7 +2813,8 @@ where
 /// The return value of this will be stored with the job, and compared
 /// between each read.
 pub(crate) fn validate_encrypted_read_response(
-    response: &mut ReadResponse,
+    block_contexts: &mut Vec<BlockContext>,
+    data: &mut [u8],
     encryption_context: &EncryptionContext,
     log: &Logger,
 ) -> Result<Option<u64>, CrucibleError> {
@@ -2832,7 +2827,7 @@ pub(crate) fn validate_encrypted_read_response(
     // check that this read response contains block contexts that contain
     // (at least one) encryption context.
 
-    if response.block_contexts.is_empty() {
+    if block_contexts.is_empty() {
         // No block context(s) in the response!
         //
         // Either this is a read of an unwritten block, or an attacker
@@ -2843,7 +2838,7 @@ pub(crate) fn validate_encrypted_read_response(
         // expect to see this case unless this is a blank block.
         //
         // XXX if it's not a blank block, we may be under attack?
-        if response.data[..].iter().all(|&x| x == 0) {
+        if data.iter().all(|&x| x == 0) {
             return Ok(None);
         } else {
             error!(log, "got empty block context with non-blank block");
@@ -2857,7 +2852,7 @@ pub(crate) fn validate_encrypted_read_response(
     // Attempt decryption with each encryption context, and fail if all
     // do not work. The most recent encryption context will most likely
     // be the correct one so start there.
-    for ctx in response.block_contexts.iter().rev() {
+    for ctx in block_contexts.iter().rev() {
         let block_encryption_ctx =
             if let Some(block_encryption_ctx) = &ctx.encryption_context {
                 block_encryption_ctx
@@ -2873,7 +2868,7 @@ pub(crate) fn validate_encrypted_read_response(
         let computed_hash = integrity_hash(&[
             &block_encryption_ctx.nonce[..],
             &block_encryption_ctx.tag[..],
-            &response.data[..],
+            data,
         ]);
 
         if computed_hash == ctx.hash {
@@ -2887,7 +2882,7 @@ pub(crate) fn validate_encrypted_read_response(
             // unit test to validate this behaviour.
             use aes_gcm_siv::{Nonce, Tag};
             let decryption_result = encryption_context.decrypt_in_place(
-                &mut response.data[..],
+                data,
                 Nonce::from_slice(&block_encryption_ctx.nonce[..]),
                 Tag::from_slice(&block_encryption_ctx.tag[..]),
             );
@@ -2926,15 +2921,13 @@ pub(crate) fn validate_encrypted_read_response(
         } else {
             // Filter out contexts that don't match, and return the successful
             // hash.
-            response
-                .block_contexts
-                .retain(|context| context.hash == valid_hash);
+            block_contexts.retain(|context| context.hash == valid_hash);
 
             Ok(Some(valid_hash))
         }
     } else {
         error!(log, "No match for integrity hash");
-        for ctx in response.block_contexts.iter() {
+        for ctx in block_contexts.iter() {
             let block_encryption_ctx =
                 if let Some(block_encryption_ctx) = &ctx.encryption_context {
                     block_encryption_ctx
@@ -2946,7 +2939,7 @@ pub(crate) fn validate_encrypted_read_response(
             let computed_hash = integrity_hash(&[
                 &block_encryption_ctx.nonce[..],
                 &block_encryption_ctx.tag[..],
-                &response.data[..],
+                data,
             ]);
             error!(
                 log,
@@ -2965,16 +2958,17 @@ pub(crate) fn validate_encrypted_read_response(
 ///   block is all 0
 /// - Err otherwise
 pub(crate) fn validate_unencrypted_read_response(
-    response: &mut ReadResponse,
+    block_contexts: &mut Vec<BlockContext>,
+    data: &mut [u8],
     log: &Logger,
 ) -> Result<Option<u64>, CrucibleError> {
-    if !response.block_contexts.is_empty() {
+    if !block_contexts.is_empty() {
         // check integrity hashes - make sure at least one is correct.
         let mut successful_hash = false;
-        let computed_hash = integrity_hash(&[&response.data[..]]);
+        let computed_hash = integrity_hash(&[&data[..]]);
 
         // The most recent hash is probably going to be the right one.
-        for context in response.block_contexts.iter().rev() {
+        for context in block_contexts.iter().rev() {
             if computed_hash == context.hash {
                 successful_hash = true;
                 break;
@@ -2984,20 +2978,18 @@ pub(crate) fn validate_unencrypted_read_response(
         if successful_hash {
             // Filter out contexts that don't match, and return the
             // successful hash.
-            response
-                .block_contexts
-                .retain(|context| context.hash == computed_hash);
+            block_contexts.retain(|context| context.hash == computed_hash);
 
             Ok(Some(computed_hash))
         } else {
             // No integrity hash was correct for this response
             error!(log, "No match computed hash:0x{:x}", computed_hash,);
-            for context in response.block_contexts.iter().rev() {
+            for context in block_contexts.iter().rev() {
                 error!(log, "No match          hash:0x{:x}", context.hash);
             }
             error!(log, "Data from hash:");
             for i in 0..6 {
-                error!(log, "[{}]:{}", i, response.data[i]);
+                error!(log, "[{}]:{}", i, data[i]);
             }
 
             Err(CrucibleError::HashMismatch)
@@ -3013,7 +3005,7 @@ pub(crate) fn validate_unencrypted_read_response(
         // this case unless this is a blank block.
         //
         // XXX if it's not a blank block, we may be under attack?
-        if response.data[..].iter().all(|&x| x == 0) {
+        if data[..].iter().all(|&x| x == 0) {
             Ok(None)
         } else {
             error!(log, "got empty block context with non-blank block");
@@ -3025,12 +3017,6 @@ pub(crate) fn validate_unencrypted_read_response(
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{
-        Block, EncryptionContext, ImpactedAddr, ImpactedBlocks,
-        RegionDefinition,
-    };
-    use rand::prelude::*;
-    use tokio_util::codec::Decoder;
 
     #[test]
     fn downstairs_transition_normal() {
@@ -3420,207 +3406,5 @@ mod test {
             &UpstairsState::Initializing,
             DsState::Faulted,
         );
-    }
-
-    /// Confirms that `RawMessage` serialization works for a `Write`
-    #[tokio::test]
-    async fn test_raw_write_serialization() -> anyhow::Result<()> {
-        let mut ddef = RegionDefinition::default();
-        ddef.set_block_size(512);
-        ddef.set_extent_size(Block::new_512(25));
-        ddef.set_extent_count(4);
-
-        let mut data = vec![0u8; 512 * 10];
-        rand::thread_rng().fill(&mut data[..]);
-
-        let impacted_blocks = ImpactedBlocks::InclusiveRange(
-            ImpactedAddr {
-                extent_id: 1,
-                block: 7,
-            },
-            ImpactedAddr {
-                extent_id: 1,
-                block: 16,
-            },
-        );
-
-        let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
-        let context = EncryptionContext::new(key_bytes.to_vec(), 512);
-        let cfg = Arc::new(UpstairsConfig {
-            upstairs_id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
-            generation: std::sync::atomic::AtomicU64::new(10),
-            read_only: false,
-            encryption_context: Some(context),
-            lossy: false,
-        });
-
-        let dr = crate::deferred::DeferredWrite {
-            ddef,
-            impacted_blocks,
-            data: data.clone().into(),
-            res: None,
-            is_write_unwritten: false,
-            cfg: cfg.clone(),
-        };
-        let write_data = dr.run().unwrap();
-
-        let msg = ClientRequest::RawMessage(
-            RawMessage::Write {
-                upstairs_id: cfg.upstairs_id,
-                session_id: cfg.session_id,
-                job_id: JobId(1234),
-                dependencies: vec![JobId(100), JobId(300), JobId(6000)],
-            },
-            write_data.data.data,
-        );
-
-        // Write the raw message to an in-memory buffer
-        let cursor = std::io::Cursor::new(vec![]);
-        let mut w = WireMessageWriter::new(cursor);
-        w.send(msg).await.unwrap();
-
-        let mut out = bytes::BytesMut::new();
-        out.extend(w.into_inner().into_inner());
-
-        let mut decoder = CrucibleDecoder::new();
-        let out = decoder.decode(&mut out).unwrap().unwrap();
-
-        let Message::Write {
-            upstairs_id,
-            session_id,
-            job_id,
-            dependencies,
-            writes,
-        } = out
-        else {
-            panic!("bad serialization");
-        };
-        assert_eq!(upstairs_id, cfg.upstairs_id);
-        assert_eq!(session_id, cfg.session_id);
-        assert_eq!(job_id, JobId(1234));
-        assert_eq!(dependencies, vec![JobId(100), JobId(300), JobId(6000)]);
-
-        // Check that all of the writes worked
-        assert_eq!(writes.len(), 10);
-        for (i, w) in writes.iter().enumerate() {
-            assert_eq!(w.eid, 1);
-            assert_eq!(w.offset, Block::new_512(7 + i as u64));
-            let mut out = bytes::BytesMut::from(&*w.data);
-
-            let ctx = w.block_context.encryption_context.unwrap();
-            cfg.encryption_context
-                .as_ref()
-                .unwrap()
-                .decrypt_in_place(&mut out, &ctx.nonce.into(), &ctx.tag.into())
-                .unwrap();
-            assert_eq!(out, &data[i * 512..(i + 1) * 512]);
-
-            let hash = integrity_hash(&[&ctx.nonce, &ctx.tag, &w.data]);
-            assert_eq!(w.block_context.hash, hash);
-        }
-
-        Ok(())
-    }
-
-    /// Confirms that `RawMessage` serialization works for a `WriteUnwritten`
-    #[tokio::test]
-    async fn test_raw_write_unwritten_serialization() -> anyhow::Result<()> {
-        let mut ddef = RegionDefinition::default();
-        ddef.set_block_size(512);
-        ddef.set_extent_size(Block::new_512(25));
-        ddef.set_extent_count(4);
-
-        let mut data = vec![0u8; 512 * 10];
-        rand::thread_rng().fill(&mut data[..]);
-
-        let impacted_blocks = ImpactedBlocks::InclusiveRange(
-            ImpactedAddr {
-                extent_id: 1,
-                block: 7,
-            },
-            ImpactedAddr {
-                extent_id: 1,
-                block: 16,
-            },
-        );
-
-        let key_bytes = rand::thread_rng().gen::<[u8; 32]>();
-        let context = EncryptionContext::new(key_bytes.to_vec(), 512);
-        let cfg = Arc::new(UpstairsConfig {
-            upstairs_id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
-            generation: std::sync::atomic::AtomicU64::new(10),
-            read_only: false,
-            encryption_context: Some(context),
-            lossy: false,
-        });
-
-        let dr = crate::deferred::DeferredWrite {
-            ddef,
-            impacted_blocks,
-            data: data.clone().into(),
-            res: None,
-            is_write_unwritten: true,
-            cfg: cfg.clone(),
-        };
-        let write_data = dr.run().unwrap();
-
-        let msg = ClientRequest::RawMessage(
-            RawMessage::WriteUnwritten {
-                upstairs_id: cfg.upstairs_id,
-                session_id: cfg.session_id,
-                job_id: JobId(1234),
-                dependencies: vec![JobId(100), JobId(300), JobId(6000)],
-            },
-            write_data.data.data,
-        );
-
-        // Write the raw message to an in-memory buffer
-        let cursor = std::io::Cursor::new(vec![]);
-        let mut w = WireMessageWriter::new(cursor);
-        w.send(msg).await.unwrap();
-
-        let mut out = bytes::BytesMut::new();
-        out.extend(w.into_inner().into_inner());
-
-        let mut decoder = CrucibleDecoder::new();
-        let out = decoder.decode(&mut out).unwrap().unwrap();
-
-        let Message::WriteUnwritten {
-            upstairs_id,
-            session_id,
-            job_id,
-            dependencies,
-            writes,
-        } = out
-        else {
-            panic!("bad serialization");
-        };
-        assert_eq!(upstairs_id, cfg.upstairs_id);
-        assert_eq!(session_id, cfg.session_id);
-        assert_eq!(job_id, JobId(1234));
-        assert_eq!(dependencies, vec![JobId(100), JobId(300), JobId(6000)]);
-
-        // Check that all of the writes worked
-        assert_eq!(writes.len(), 10);
-        for (i, w) in writes.iter().enumerate() {
-            assert_eq!(w.eid, 1);
-            assert_eq!(w.offset, Block::new_512(7 + i as u64));
-            let mut out = bytes::BytesMut::from(&*w.data);
-
-            let ctx = w.block_context.encryption_context.unwrap();
-            cfg.encryption_context
-                .as_ref()
-                .unwrap()
-                .decrypt_in_place(&mut out, &ctx.nonce.into(), &ctx.tag.into())
-                .unwrap();
-            assert_eq!(out, &data[i * 512..(i + 1) * 512]);
-
-            let hash = integrity_hash(&[&ctx.nonce, &ctx.tag, &w.data]);
-            assert_eq!(w.block_context.hash, hash);
-        }
-
-        Ok(())
     }
 }

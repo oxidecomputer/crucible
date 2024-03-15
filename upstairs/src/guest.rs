@@ -17,7 +17,7 @@ use crucible_common::{build_logger, crucible_bail, Block, CrucibleError};
 use crucible_protocol::{ReadResponse, SnapshotDetails};
 
 use async_trait::async_trait;
-use bytes::Bytes;
+use bytes::BytesMut;
 use ringbuffer::{AllocRingBuffer, RingBuffer};
 use slog::{info, warn, Logger};
 use tokio::sync::{mpsc, Mutex};
@@ -644,7 +644,7 @@ impl BlockIO for Guest {
     async fn write(
         &self,
         mut offset: Block,
-        mut data: Bytes,
+        mut data: BytesMut,
     ) -> Result<(), CrucibleError> {
         let bs = self.check_data_size(data.len()).await?;
 
@@ -682,7 +682,7 @@ impl BlockIO for Guest {
     async fn write_unwritten(
         &self,
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
     ) -> Result<(), CrucibleError> {
         let bs = self.check_data_size(data.len()).await?;
 

@@ -7,16 +7,17 @@ use crate::{
     },
     integrity_hash, mkdir_for_file,
     region::{BatchedPwritev, JobOrReconciliationId},
-    Block, BlockContext, CrucibleError, JobId, ReadResponse, RegionDefinition,
+    Block, BlockContext, CrucibleError, JobId, RegionDefinition,
 };
 
+use crucible_protocol::{RawReadResponse, ReadResponseBlockMetadata};
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use slog::{error, Logger};
 
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
-use std::io::{BufReader, IoSliceMut, Read};
+use std::io::{BufReader, Read};
 use std::os::fd::AsFd;
 use std::path::Path;
 
@@ -183,12 +184,12 @@ impl ExtentInner for RawInner {
         Ok(())
     }
 
-    fn read(
+    fn read_into(
         &mut self,
         job_id: JobId,
         requests: &[crucible_protocol::ReadRequest],
-        iov_max: usize,
-    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
+        out: &mut RawReadResponse,
+    ) -> Result<(), CrucibleError> {
         // This code batches up operations for contiguous regions of
         // ReadRequests, so we can perform larger read syscalls queries. This
         // significantly improves read throughput.
@@ -198,7 +199,8 @@ impl ExtentInner for RawInner {
         // request.
         let mut req_run_start = 0;
         let block_size = self.extent_size.block_size_in_bytes();
-        let mut responses = Vec::with_capacity(requests.len());
+
+        let mut buf = out.data.split_off(out.data.len());
         while req_run_start < requests.len() {
             let first_req = &requests[req_run_start];
 
@@ -207,14 +209,13 @@ impl ExtentInner for RawInner {
             // contiguous with the request before it. Since we're counting
             // pairs, and the number of pairs is one less than the number of
             // requests, we need to add 1 to get our actual run length.
-            let mut n_contiguous_requests = 1;
+            let mut n_contiguous_blocks = 1;
 
             for request_window in requests[req_run_start..].windows(2) {
-                if (request_window[0].offset.value + 1
-                    == request_window[1].offset.value)
-                    && ((n_contiguous_requests + 1) < iov_max)
+                if request_window[0].offset.value + 1
+                    == request_window[1].offset.value
                 {
-                    n_contiguous_requests += 1;
+                    n_contiguous_blocks += 1;
                 } else {
                     break;
                 }
@@ -222,35 +223,36 @@ impl ExtentInner for RawInner {
 
             // Create our responses and push them into the output. While we're
             // at it, check for overflows.
-            let resp_run_start = responses.len();
-            let mut iovecs = Vec::with_capacity(n_contiguous_requests);
-            for req in requests[req_run_start..][..n_contiguous_requests].iter()
-            {
-                let resp = ReadResponse::from_request(req, block_size as usize);
-                check_input(self.extent_size, req.offset, &resp.data)?;
-                responses.push(resp);
+            let resp_run_start = out.blocks.len();
+            for req in requests[req_run_start..][..n_contiguous_blocks].iter() {
+                let resp = ReadResponseBlockMetadata {
+                    eid: req.eid,
+                    offset: req.offset,
+                    block_contexts: Vec::with_capacity(1),
+                };
+                out.blocks.push(resp);
             }
 
-            // Create what amounts to an iovec for each response data buffer.
-            let mut expected_bytes = 0;
-            for resp in
-                &mut responses[resp_run_start..][..n_contiguous_requests]
-            {
-                expected_bytes += resp.data.len();
-                iovecs.push(IoSliceMut::new(&mut resp.data[..]));
-            }
+            // Calculate the number of expected bytes, then resize our buffer
+            //
+            // This should fill memory, but should not reallocate
+            let expected_bytes = n_contiguous_blocks * block_size as usize;
+            buf.resize(expected_bytes, 1);
+
+            let first_resp = &out.blocks[resp_run_start];
+            check_input(self.extent_size, first_resp.offset, &buf)?;
 
             // Finally we get to read the actual data. That's why we're here
             cdt::extent__read__file__start!(|| {
-                (job_id.0, self.extent_number, n_contiguous_requests as u64)
+                (job_id.0, self.extent_number, n_contiguous_blocks as u64)
             });
 
             // Perform the bulk read, then check against the expected number of
             // bytes.  We could do more robust error handling here (e.g.
             // retrying in a loop), but for now, simply bailing out seems wise.
-            let num_bytes = nix::sys::uio::preadv(
+            let num_bytes = nix::sys::uio::pread(
                 self.file.as_fd(),
-                &mut iovecs,
+                &mut buf,
                 first_req.offset.value as i64 * block_size as i64,
             )
             .map_err(|e| {
@@ -268,39 +270,46 @@ impl ExtentInner for RawInner {
             }
 
             cdt::extent__read__file__done!(|| {
-                (job_id.0, self.extent_number, n_contiguous_requests as u64)
+                (job_id.0, self.extent_number, n_contiguous_blocks as u64)
             });
+
+            // Reattach this chunk to the main `BytesMut` array
+            //
+            // This should be O(1), because we allocated enough space to not
+            // reallocate anywhere in the process.
+            let chunk = buf.split_to(expected_bytes);
+            out.data.unsplit(chunk);
 
             // Query the block metadata
             cdt::extent__read__get__contexts__start!(|| {
-                (job_id.0, self.extent_number, n_contiguous_requests as u64)
+                (job_id.0, self.extent_number, n_contiguous_blocks as u64)
             });
             let block_contexts = self.get_block_contexts(
                 first_req.offset.value,
-                n_contiguous_requests as u64,
+                n_contiguous_blocks as u64,
             )?;
             cdt::extent__read__get__contexts__done!(|| {
-                (job_id.0, self.extent_number, n_contiguous_requests as u64)
+                (job_id.0, self.extent_number, n_contiguous_blocks as u64)
             });
 
             // Now it's time to put block contexts into the responses.
             // We use into_iter here to move values out of enc_ctxts/hashes,
             // avoiding a clone(). For code consistency, we use iters for the
             // response and data chunks too. These iters will be the same length
-            // (equal to n_contiguous_requests) so zipping is fine
+            // (equal to n_contiguous_blocks) so zipping is fine
             let resp_iter =
-                responses[resp_run_start..][..n_contiguous_requests].iter_mut();
+                out.blocks[resp_run_start..][..n_contiguous_blocks].iter_mut();
             let ctx_iter = block_contexts.into_iter();
 
             for (resp, r_ctx) in resp_iter.zip(ctx_iter) {
-                resp.block_contexts =
-                    r_ctx.into_iter().map(|x| x.block_context).collect();
+                assert!(resp.block_contexts.is_empty());
+                resp.block_contexts
+                    .extend(r_ctx.into_iter().map(|x| x.block_context));
             }
 
-            req_run_start += n_contiguous_requests;
+            req_run_start += n_contiguous_blocks;
         }
-
-        Ok(responses)
+        Ok(())
     }
 
     fn flush(
@@ -1719,18 +1728,18 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(0),
             };
-            let resp = inner.read(JobId(21), &[read], IOV_MAX_TEST)?;
+            let resp = inner.read(JobId(21), &[read])?;
 
             // We should not get back our data, because block 0 was written.
             assert_ne!(
-                resp,
-                vec![ReadResponse {
+                resp.blocks,
+                vec![ReadResponseBlockMetadata {
                     eid: 0,
                     offset: Block::new_512(0),
-                    data: BytesMut::from(data.as_ref()),
                     block_contexts: vec![block_context]
                 }]
             );
+            assert_ne!(resp.data, BytesMut::from(data.as_ref()));
         }
 
         // But, writing to the second block still should!
@@ -1753,18 +1762,18 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(1),
             };
-            let resp = inner.read(JobId(31), &[read], IOV_MAX_TEST)?;
+            let resp = inner.read(JobId(31), &[read])?;
 
             // We should get back our data! Block 1 was never written.
             assert_eq!(
-                resp,
-                vec![ReadResponse {
+                resp.blocks,
+                vec![ReadResponseBlockMetadata {
                     eid: 0,
                     offset: Block::new_512(1),
-                    data: BytesMut::from(data.as_ref()),
                     block_contexts: vec![block_context]
                 }]
             );
+            assert_eq!(resp.data, BytesMut::from(data.as_ref()));
         }
 
         Ok(())
@@ -1976,18 +1985,18 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(0),
             };
-            let resp = inner.read(JobId(31), &[read], IOV_MAX_TEST)?;
+            let resp = inner.read(JobId(31), &[read])?;
 
             // We should get back our data! Block 1 was never written.
             assert_eq!(
-                resp,
-                vec![ReadResponse {
+                resp.blocks,
+                vec![ReadResponseBlockMetadata {
                     eid: 0,
                     offset: Block::new_512(0),
-                    data: BytesMut::from(data.as_ref()),
                     block_contexts: vec![block_context]
                 }]
             );
+            assert_eq!(resp.data, BytesMut::from(data.as_ref()));
         }
 
         Ok(())
@@ -2481,7 +2490,7 @@ mod test {
             eid: 0,
             offset: Block::new_512(0),
         };
-        let resp = inner.read(JobId(31), &[read], IOV_MAX_TEST)?;
+        let resp = inner.read(JobId(31), &[read])?;
 
         let data = Bytes::from(vec![0x03; 512]);
         let hash = integrity_hash(&[&data[..]]);
@@ -2491,15 +2500,15 @@ mod test {
         };
 
         assert_eq!(
-            resp,
-            vec![ReadResponse {
+            resp.blocks,
+            vec![ReadResponseBlockMetadata {
                 eid: 0,
                 offset: Block::new_512(0),
-                data: BytesMut::from(data.as_ref()),
                 // Only the most recent block context should be returned
                 block_contexts: vec![block_context],
             }]
         );
+        assert_eq!(resp.data, BytesMut::from(data.as_ref()));
 
         Ok(())
     }

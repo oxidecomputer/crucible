@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use anyhow::Result;
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use dropshot::HttpError;
 use sha2::Digest;
 use sha2::Sha256;
@@ -231,6 +231,7 @@ impl PantryEntry {
                 .bytes()
                 .await
                 .map_err(|e| CrucibleError::GenericError(e.to_string()))?;
+            let bytes = BytesMut::from(bytes.as_ref());
 
             if let Some(ref mut hasher) = hasher {
                 hasher.update(&bytes);
@@ -288,7 +289,8 @@ impl PantryEntry {
             );
         }
 
-        self.volume.write_to_byte_offset(offset, data.into()).await
+        let bytes = BytesMut::from(data.as_slice());
+        self.volume.write_to_byte_offset(offset, bytes).await
     }
 
     pub async fn bulk_read(

@@ -8,7 +8,7 @@ mod test {
 
     use anyhow::*;
     use base64::{engine, Engine};
-    use crucible::{Bytes, *};
+    use crucible::*;
     use crucible_client_types::VolumeConstructionRequest;
     use crucible_downstairs::*;
     use crucible_pantry::pantry::Pantry;
@@ -415,7 +415,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -475,7 +475,7 @@ mod test {
             volume
                 .write(
                     Block::new(i, BLOCK_SIZE.trailing_zeros()),
-                    Bytes::from(data.clone()),
+                    BytesMut::from(data.as_slice()),
                 )
                 .await?;
 
@@ -536,7 +536,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; 0]),
+                BytesMut::from(vec![0x55; 0].as_slice()),
             )
             .await?;
 
@@ -573,7 +573,7 @@ mod test {
         in_memory_data
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![11; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -614,14 +614,14 @@ mod test {
             volume
                 .write_unwritten(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    Bytes::from(vec![55; BLOCK_SIZE * 10]),
+                    BytesMut::from(vec![55; BLOCK_SIZE * 10].as_slice()),
                 )
                 .await?;
         } else {
             volume
                 .write(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    Bytes::from(vec![55; BLOCK_SIZE * 10]),
+                    BytesMut::from(vec![55; BLOCK_SIZE * 10].as_slice()),
                 )
                 .await?;
         }
@@ -662,7 +662,7 @@ mod test {
         in_memory_data
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![11; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -713,7 +713,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -798,7 +798,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x01; BLOCK_SIZE]),
+                BytesMut::from(vec![0x01; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -891,7 +891,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -907,7 +907,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x22; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x22; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -962,7 +962,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -978,7 +978,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x22; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x22; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -1035,7 +1035,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x33; BLOCK_SIZE]),
+                BytesMut::from(vec![0x33; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -1043,7 +1043,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -1119,7 +1119,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; full_volume_size]),
+                BytesMut::from(vec![0x55; full_volume_size].as_slice()),
             )
             .await?;
 
@@ -1135,7 +1135,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x22; full_volume_size]),
+                BytesMut::from(vec![0x22; full_volume_size].as_slice()),
             )
             .await?;
 
@@ -1207,7 +1207,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(9, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 2].as_slice()),
             )
             .await?;
 
@@ -1225,7 +1225,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x22; full_volume_size]),
+                BytesMut::from(vec![0x22; full_volume_size].as_slice()),
             )
             .await?;
 
@@ -1313,7 +1313,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(9, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 2].as_slice()),
             )
             .await?;
 
@@ -1323,7 +1323,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x22; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x22; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -1331,7 +1331,7 @@ mod test {
         volume
             .write(
                 Block::new(7, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x11; BLOCK_SIZE * 13]),
+                BytesMut::from(vec![0x11; BLOCK_SIZE * 13].as_slice()),
             )
             .await?;
 
@@ -1387,7 +1387,7 @@ mod test {
         in_memory_data
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 5]),
+                BytesMut::from(vec![11; BLOCK_SIZE * 5].as_slice()),
             )
             .await?;
 
@@ -1428,7 +1428,7 @@ mod test {
 
         // One big write!
         let write_offset = Block::new(0, BLOCK_SIZE.trailing_zeros());
-        let write_data = Bytes::from(vec![55; BLOCK_SIZE * 10]);
+        let write_data = BytesMut::from(vec![55; BLOCK_SIZE * 10].as_slice());
         if is_write_unwritten {
             volume.write(write_offset, write_data).await?;
         } else {
@@ -1475,7 +1475,7 @@ mod test {
         in_memory_data
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![11; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -1513,7 +1513,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -1558,7 +1558,7 @@ mod test {
         in_memory_data
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 5]),
+                BytesMut::from(vec![11; BLOCK_SIZE * 5].as_slice()),
             )
             .await?;
 
@@ -1604,7 +1604,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -1659,7 +1659,7 @@ mod test {
         in_memory_data
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 5]),
+                BytesMut::from(vec![11; BLOCK_SIZE * 5].as_slice()),
             )
             .await?;
 
@@ -1684,7 +1684,7 @@ mod test {
         volume
             .write(
                 Block::new(2, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![22; BLOCK_SIZE]),
+                BytesMut::from(vec![22; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -1692,7 +1692,7 @@ mod test {
         volume
             .write(
                 Block::new(7, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![33; BLOCK_SIZE]),
+                BytesMut::from(vec![33; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -1754,7 +1754,7 @@ mod test {
         in_memory_data
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![11; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -1787,7 +1787,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -1837,7 +1837,7 @@ mod test {
         in_memory_data
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![11; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -1887,7 +1887,7 @@ mod test {
         volume
             .write(
                 Block::new(9, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![22; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![22; BLOCK_SIZE * 2].as_slice()),
             )
             .await?;
 
@@ -1903,7 +1903,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![33; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![33; BLOCK_SIZE * 2].as_slice()),
             )
             .await?;
 
@@ -1963,7 +1963,7 @@ mod test {
         in_memory_data
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 15]),
+                BytesMut::from(vec![11; BLOCK_SIZE * 15].as_slice()),
             )
             .await?;
 
@@ -2014,7 +2014,7 @@ mod test {
         volume
             .write(
                 Block::new(9, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![22; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![22; BLOCK_SIZE * 2].as_slice()),
             )
             .await?;
 
@@ -2031,7 +2031,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![33; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![33; BLOCK_SIZE * 2].as_slice()),
             )
             .await?;
 
@@ -2040,7 +2040,7 @@ mod test {
         volume
             .write(
                 Block::new(14, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![44; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![44; BLOCK_SIZE * 2].as_slice()),
             )
             .await?;
 
@@ -2186,7 +2186,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![55; BLOCK_SIZE * 5]),
+                BytesMut::from(vec![55; BLOCK_SIZE * 5].as_slice()),
             )
             .await?;
 
@@ -2246,7 +2246,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(random_buffer.clone()),
+                BytesMut::from(random_buffer.as_slice()),
             )
             .await?;
 
@@ -2287,7 +2287,7 @@ mod test {
             assert!(volume
                 .write(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    Bytes::from(vec![0u8; BLOCK_SIZE]),
+                    BytesMut::from(vec![0u8; BLOCK_SIZE].as_slice()),
                 )
                 .await
                 .is_err());
@@ -2351,7 +2351,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0u8; BLOCK_SIZE]),
+                BytesMut::from(vec![0u8; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -2418,7 +2418,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(random_buffer.clone()),
+                BytesMut::from(random_buffer.as_slice()),
             )
             .await?;
 
@@ -2467,7 +2467,7 @@ mod test {
             assert!(volume
                 .write(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    Bytes::from(vec![0u8; BLOCK_SIZE]),
+                    BytesMut::from(vec![0u8; BLOCK_SIZE].as_slice()),
                 )
                 .await
                 .is_err());
@@ -2539,7 +2539,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0u8; BLOCK_SIZE]),
+                BytesMut::from(vec![0u8; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -2603,7 +2603,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(random_buffer.clone()),
+                BytesMut::from(random_buffer.as_slice()),
             )
             .await?;
 
@@ -2689,7 +2689,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(random_buffer.clone()),
+                BytesMut::from(random_buffer.as_slice()),
             )
             .await?;
 
@@ -2804,7 +2804,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(random_buffer.clone()),
+                BytesMut::from(random_buffer.as_slice()),
             )
             .await?;
 
@@ -3114,7 +3114,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(random_buffer.clone()),
+                BytesMut::from(random_buffer.as_slice()),
             )
             .await?;
 
@@ -3209,7 +3209,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(random_buffer.clone()),
+                BytesMut::from(random_buffer.as_slice()),
             )
             .await?;
 
@@ -3533,7 +3533,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(random_buffer.clone()),
+                BytesMut::from(random_buffer.as_slice()),
             )
             .await?;
 
@@ -3665,7 +3665,7 @@ mod test {
                 volume
                     .write(
                         Block::new(*i as u64, BLOCK_SIZE.trailing_zeros()),
-                        Bytes::from(random_buffer.clone()),
+                        BytesMut::from(random_buffer.as_slice()),
                     )
                     .await?;
             }
@@ -3723,7 +3723,7 @@ mod test {
         guest
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -3784,7 +3784,7 @@ mod test {
         guest
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -3826,10 +3826,7 @@ mod test {
 
         // Write of length 0
         guest
-            .write(
-                Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(Vec::new()),
-            )
+            .write(Block::new(0, BLOCK_SIZE.trailing_zeros()), BytesMut::new())
             .await?;
 
         Ok(())
@@ -3855,7 +3852,7 @@ mod test {
         guest
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -3930,7 +3927,7 @@ mod test {
         let write_result = guest
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await;
         assert!(write_result.is_err());
@@ -4009,7 +4006,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -4025,7 +4022,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x99; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x99; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -4042,7 +4039,7 @@ mod test {
         guest
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x89; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x89; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -4081,7 +4078,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -4090,7 +4087,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x99; BLOCK_SIZE * 3]),
+                BytesMut::from(vec![0x99; BLOCK_SIZE * 3].as_slice()),
             )
             .await?;
 
@@ -4138,7 +4135,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(1, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -4147,7 +4144,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x99; BLOCK_SIZE * 3]),
+                BytesMut::from(vec![0x99; BLOCK_SIZE * 3].as_slice()),
             )
             .await?;
 
@@ -4196,7 +4193,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(2, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -4205,7 +4202,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x99; BLOCK_SIZE * 3]),
+                BytesMut::from(vec![0x99; BLOCK_SIZE * 3].as_slice()),
             )
             .await?;
 
@@ -4249,7 +4246,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(4, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -4258,7 +4255,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(4, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x99; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![0x99; BLOCK_SIZE * 2].as_slice()),
             )
             .await?;
 
@@ -4302,7 +4299,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(4, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -4311,7 +4308,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(4, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x99; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![0x99; BLOCK_SIZE * 2].as_slice()),
             )
             .await?;
 
@@ -4352,7 +4349,7 @@ mod test {
         let res = guest
             .write(
                 Block::new(11, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE].as_slice()),
             )
             .await;
 
@@ -4387,7 +4384,7 @@ mod test {
         let res = guest
             .write(
                 Block::new(10, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 2].as_slice()),
             )
             .await;
 
@@ -5567,7 +5564,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await
             .unwrap();

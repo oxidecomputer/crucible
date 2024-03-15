@@ -83,7 +83,7 @@ impl BlockIO for InMemoryBlockIO {
     async fn write(
         &self,
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
     ) -> Result<(), CrucibleError> {
         let bs = self.check_data_size(data.len()).await? as usize;
         let mut inner = self.inner.lock().await;
@@ -101,7 +101,7 @@ impl BlockIO for InMemoryBlockIO {
     async fn write_unwritten(
         &self,
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
     ) -> Result<(), CrucibleError> {
         let bs = self.check_data_size(data.len()).await? as usize;
         let mut inner = self.inner.lock().await;

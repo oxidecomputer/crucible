@@ -1165,7 +1165,7 @@ pub mod repair_test {
 
         up.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from(vec![0xff; 512].as_slice()),
             false,
         );
 
@@ -1174,7 +1174,7 @@ pub mod repair_test {
         // WriteUnwritten
         up.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from(vec![0xff; 512].as_slice()),
             true,
         );
 
@@ -1200,7 +1200,7 @@ pub mod repair_test {
 
         up.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from(vec![0xff; 512].as_slice()),
             false,
         );
 
@@ -1209,7 +1209,7 @@ pub mod repair_test {
         // WriteUnwritten
         up.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from(vec![0xff; 512].as_slice()),
             true,
         );
 
@@ -1231,7 +1231,7 @@ pub mod repair_test {
 
         up.submit_dummy_write(
             Block::new_512(3),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from(vec![0xff; 512].as_slice()),
             false,
         );
 
@@ -1240,7 +1240,7 @@ pub mod repair_test {
         // WriteUnwritten
         up.submit_dummy_write(
             Block::new_512(3),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from(vec![0xff; 512].as_slice()),
             true,
         );
 
@@ -1313,7 +1313,7 @@ pub mod repair_test {
         // Our default extent size is 3, so 9 blocks will span 3 extents
         up.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512 * 9]),
+            BytesMut::from(vec![0xff; 512 * 9].as_slice()),
             false,
         );
 
@@ -1322,7 +1322,7 @@ pub mod repair_test {
         // WriteUnwritten
         up.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512 * 9]),
+            BytesMut::from(vec![0xff; 512 * 9].as_slice()),
             true,
         );
 
@@ -1440,7 +1440,7 @@ pub mod repair_test {
         // Our default extent size is 3, so 9 blocks will span 3 extents
         up.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512 * 9]),
+            BytesMut::from(vec![0xff; 512 * 9].as_slice()),
             false,
         );
 
@@ -1504,7 +1504,7 @@ pub mod repair_test {
         // Our default extent size is 3, so block 3 will be on extent 1
         up.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512 * 9]),
+            BytesMut::from(vec![0xff; 512 * 9].as_slice()),
             false,
         );
 
