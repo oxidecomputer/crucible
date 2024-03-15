@@ -2272,7 +2272,7 @@ impl Downstairs {
         &mut self,
         guest_id: GuestWorkId,
         blocks: ImpactedBlocks,
-        serialized_write: RawWrite,
+        write: RawWrite,
         is_write_unwritten: bool,
     ) -> JobId {
         // If there is a live-repair in progress that intersects with this read,
@@ -2282,7 +2282,7 @@ impl Downstairs {
         self.create_and_enqueue_write_eob(
             blocks,
             guest_id,
-            serialized_write,
+            write,
             is_write_unwritten,
         )
     }
