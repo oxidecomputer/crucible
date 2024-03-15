@@ -3,12 +3,12 @@ use crate::{
     cdt, integrity_hash, live_repair::ExtentInfo, upstairs::UpstairsConfig,
     upstairs::UpstairsState, ClientIOStateCount, ClientId, CrucibleDecoder,
     CrucibleError, DownstairsIO, DsState, EncryptionContext, IOState, IOop,
-    JobId, Message, ReadResponse, ReconcileIO, RegionDefinitionStatus,
-    RegionMetadata,
+    JobId, Message, ReconcileIO, RegionDefinitionStatus, RegionMetadata,
 };
 use crucible_common::{deadline_secs, verbose_timeout, x509::TLSContext};
 use crucible_protocol::{
-    BlockContext, MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
+    BlockContext, MessageWriter, RawReadResponse, ReconciliationId,
+    CRUCIBLE_MESSAGE_VERSION,
 };
 
 use std::{
@@ -1215,7 +1215,7 @@ impl DownstairsClient {
     pub(crate) fn process_io_completion(
         &mut self,
         job: &mut DownstairsIO,
-        responses: Result<Vec<ReadResponse>, CrucibleError>,
+        responses: Result<RawReadResponse, CrucibleError>,
         read_response_hashes: Vec<Option<u64>>,
         deactivate: bool,
         extent_info: Option<ExtentInfo>,
@@ -1353,8 +1353,8 @@ impl DownstairsClient {
                      * For a read, make sure the data from a previous read
                      * has the same hash
                      */
-                    let read_data: Vec<ReadResponse> = responses.unwrap();
-                    assert!(!read_data.is_empty());
+                    let read_data = responses.unwrap();
+                    assert!(!read_data.blocks.is_empty());
                     if job.read_response_hashes != read_response_hashes {
                         // XXX This error needs to go to Nexus
                         // XXX This will become the "force all downstairs
@@ -1401,7 +1401,7 @@ impl DownstairsClient {
             assert_eq!(new_state, IOState::Done);
             assert!(!job.acked);
 
-            let read_data: Vec<ReadResponse> = responses.unwrap();
+            let read_data = responses.unwrap();
 
             /*
              * Transition this job from Done to AckReady if enough have
@@ -1409,7 +1409,7 @@ impl DownstairsClient {
              */
             match &job.work {
                 IOop::Read { .. } => {
-                    assert!(!read_data.is_empty());
+                    assert!(!read_data.blocks.is_empty());
                     assert!(extent_info.is_none());
                     if jobs_completed_ok == 1 {
                         assert!(job.data.is_none());
@@ -1446,7 +1446,8 @@ impl DownstairsClient {
                     }
                 }
                 IOop::Write { .. } => {
-                    assert!(read_data.is_empty());
+                    assert!(read_data.blocks.is_empty());
+                    assert!(read_data.data.is_empty());
                     assert!(extent_info.is_none());
                     if jobs_completed_ok == 2 {
                         ackable = true;
@@ -1454,7 +1455,8 @@ impl DownstairsClient {
                     }
                 }
                 IOop::WriteUnwritten { .. } => {
-                    assert!(read_data.is_empty());
+                    assert!(read_data.blocks.is_empty());
+                    assert!(read_data.data.is_empty());
                     assert!(extent_info.is_none());
                     if jobs_completed_ok == 2 {
                         ackable = true;
@@ -1466,7 +1468,8 @@ impl DownstairsClient {
                 IOop::Flush {
                     snapshot_details, ..
                 } => {
-                    assert!(read_data.is_empty());
+                    assert!(read_data.blocks.is_empty());
+                    assert!(read_data.data.is_empty());
                     assert!(extent_info.is_none());
                     /*
                      * If we are deactivating or have requested a
@@ -1493,7 +1496,8 @@ impl DownstairsClient {
                     self.last_flush = ds_id;
                 }
                 IOop::ExtentFlushClose { .. } => {
-                    assert!(read_data.is_empty());
+                    assert!(read_data.blocks.is_empty());
+                    assert!(read_data.data.is_empty());
 
                     let ci = self.repair_info.replace(extent_info.unwrap());
                     if ci.is_some() {
@@ -1509,21 +1513,24 @@ impl DownstairsClient {
                     }
                 }
                 IOop::ExtentLiveRepair { .. } => {
-                    assert!(read_data.is_empty());
+                    assert!(read_data.blocks.is_empty());
+                    assert!(read_data.data.is_empty());
                     if jobs_completed_ok == 3 {
                         debug!(self.log, "ExtentLiveRepair AckReady {ds_id}");
                         ackable = true;
                     }
                 }
                 IOop::ExtentLiveReopen { .. } => {
-                    assert!(read_data.is_empty());
+                    assert!(read_data.blocks.is_empty());
+                    assert!(read_data.data.is_empty());
                     if jobs_completed_ok == 3 {
                         debug!(self.log, "ExtentLiveReopen AckReady {ds_id}");
                         ackable = true;
                     }
                 }
                 IOop::ExtentLiveNoOp { .. } => {
-                    assert!(read_data.is_empty());
+                    assert!(read_data.blocks.is_empty());
+                    assert!(read_data.data.is_empty());
                     if jobs_completed_ok == 3 {
                         debug!(self.log, "ExtentLiveNoOp AckReady {ds_id}");
                         ackable = true;
@@ -3009,7 +3016,7 @@ pub(crate) fn validate_unencrypted_read_response(
                 error!(log, "No match          hash:0x{:x}", context.hash);
             }
             error!(log, "Data from hash:");
-            for (i, d) in data.iter().enumerate().take(6) {
+            for (i, d) in data[..6].iter().enumerate() {
                 error!(log, "[{i}]:{d}");
             }
 

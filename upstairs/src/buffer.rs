@@ -1,6 +1,7 @@
 // Copyright 2023 Oxide Computer Company
-use crate::ReadResponse;
+use crate::RawReadResponse;
 use bytes::{Bytes, BytesMut};
+use itertools::Itertools;
 
 /*
  * Provides a strongly-owned Buffer that Read operations will write into.
@@ -133,28 +134,46 @@ impl Buffer {
         }
     }
 
-    /// Writes a `ReadResponse` into the buffer, setting `owned` to true
-    ///
-    /// The `ReadResponse` must contain a single block's worth of data.
+    /// Writes a `RawReadResponse` into the buffer, setting `owned` to true for
+    /// any block which has a context in the response.
     ///
     /// # Panics
-    /// - The offset must be block-aligned
-    /// - The response data length must be block size
-    /// - Data cannot exceed the buffer's length
-    ///
-    /// If any of these conditions are not met, the function will panic.
-    pub(crate) fn write_read_response(
-        &mut self,
-        offset: usize,
-        response: &ReadResponse,
-    ) {
-        assert!(offset + response.data.len() <= self.data.len());
-        assert_eq!(offset % self.block_size, 0);
-        assert_eq!(response.data.len(), self.block_size);
-        if !response.block_contexts.is_empty() {
-            let block = offset / self.block_size;
-            self.owned[block] = 1;
-            self.block_mut(block).copy_from_slice(&response.data);
+    /// The response data length must be the same as our buffer length (which
+    /// must be an even multiple of block size, ensured at construction)
+    pub(crate) fn write_read_response(&mut self, response: RawReadResponse) {
+        assert!(response.data.len() == self.data.len());
+        assert_eq!(response.data.len() % self.block_size, 0);
+        let bs = self.block_size;
+
+        // Build contiguous chunks which are all owned, to copy in bulk
+        for (empty, mut group) in &response
+            .blocks
+            .iter()
+            .enumerate()
+            .group_by(|(_i, b)| b.block_contexts.is_empty())
+        {
+            if empty {
+                continue;
+            }
+            let (block, _b) = group.next().unwrap();
+            let count = 1 + group.count();
+
+            // Mark the owned flag (on a per-block basis)
+            self.owned[block..][..count].fill(1);
+
+            // Special case: if the entire buffer is owned, then we swap it
+            // instead of copying element-by-element.
+            if count == response.blocks.len()
+                && self.data.len() == response.data.len()
+            {
+                self.data = response.data;
+                break;
+            } else {
+                // Otherwise, just copy the sub-region
+                self.data[(block * bs)..][..(count * bs)].copy_from_slice(
+                    &response.data[(block * bs)..][..(count * bs)],
+                );
+            }
         }
     }
 

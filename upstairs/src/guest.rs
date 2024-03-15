@@ -14,7 +14,7 @@ use crate::{
     UpstairsAction, IO_OUTSTANDING_MAX_BYTES, IO_OUTSTANDING_MAX_JOBS,
 };
 use crucible_common::{build_logger, crucible_bail, Block, CrucibleError};
-use crucible_protocol::{ReadResponse, SnapshotDetails};
+use crucible_protocol::{RawReadResponse, SnapshotDetails};
 
 use async_trait::async_trait;
 use bytes::BytesMut;
@@ -77,7 +77,7 @@ impl GtoS {
     #[instrument]
     fn transfer_and_notify(
         self,
-        downstairs_responses: Option<Vec<ReadResponse>>,
+        downstairs_response: Option<RawReadResponse>,
         result: Result<(), CrucibleError>,
     ) {
         /*
@@ -92,21 +92,13 @@ impl GtoS {
          */
         match self.res {
             Some(GuestBlockRes::Read(mut buffer, res)) => {
-                if let Some(downstairs_responses) = downstairs_responses {
-                    let mut offset = 0;
-
+                if let Some(downstairs_response) = downstairs_response {
                     // XXX don't do if result.is_err()?
-                    for response in &downstairs_responses {
-                        // Copy over into guest memory.
-                        {
-                            let _ignored =
-                                span!(Level::TRACE, "copy to guest buffer")
-                                    .entered();
+                    // Copy over into guest memory.
+                    let _ignored =
+                        span!(Level::TRACE, "copy to guest buffer").entered();
 
-                            buffer.write_read_response(offset, response);
-                            offset += response.data.len();
-                        }
-                    }
+                    buffer.write_read_response(downstairs_response);
                 } else {
                     // Should this panic?  If the caller is requesting a
                     // transfer, the guest_buffer should exist. If it does not
@@ -227,7 +219,7 @@ impl GuestWork {
         &mut self,
         gw_id: GuestWorkId,
         ds_id: JobId,
-        data: Option<Vec<ReadResponse>>,
+        data: Option<RawReadResponse>,
         result: Result<(), CrucibleError>,
     ) {
         if let Some(gtos_job) = self.active.remove(&gw_id) {

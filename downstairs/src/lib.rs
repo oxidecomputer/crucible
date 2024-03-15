@@ -20,8 +20,7 @@ use crucible_common::{
 };
 use crucible_protocol::{
     BlockContext, CrucibleDecoder, CrucibleEncoder, JobId, Message,
-    ReadRequest, ReadResponse, ReconciliationId, SnapshotDetails,
-    CRUCIBLE_MESSAGE_VERSION,
+    ReadRequest, ReconciliationId, SnapshotDetails, CRUCIBLE_MESSAGE_VERSION,
 };
 use repair_client::Client;
 

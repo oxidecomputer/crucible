@@ -16,11 +16,10 @@ use crate::{
     AckStatus, ActiveJobs, AllocRingBuffer, ClientData, ClientIOStateCount,
     ClientId, ClientMap, CrucibleError, DownstairsIO, DownstairsMend, DsState,
     ExtentFix, ExtentRepairIDs, GuestWorkId, IOState, IOStateCount, IOop,
-    ImpactedBlocks, JobId, Message, ReadRequest, ReadResponse, ReconcileIO,
-    ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
-    WorkSummary,
+    ImpactedBlocks, JobId, Message, ReadRequest, ReconcileIO, ReconciliationId,
+    RegionDefinition, ReplaceResult, SnapshotDetails, WorkSummary,
 };
-use crucible_protocol::{RawWrite, WriteHeader};
+use crucible_protocol::{RawReadResponse, RawWrite, WriteHeader};
 
 use rand::prelude::*;
 use ringbuffer::RingBuffer;
@@ -3091,7 +3090,7 @@ impl Downstairs {
                     upstairs_id,
                     session_id,
                     job_id,
-                    result.map(|_| Vec::new()),
+                    result.map(|_| Default::default()),
                     None,
                 )
             }
@@ -3109,7 +3108,7 @@ impl Downstairs {
                     upstairs_id,
                     session_id,
                     job_id,
-                    result.map(|_| Vec::new()),
+                    result.map(|_| Default::default()),
                     None,
                 )
             }
@@ -3124,7 +3123,7 @@ impl Downstairs {
                     upstairs_id,
                     session_id,
                     job_id,
-                    result.map(|_| Vec::new()),
+                    result.map(|_| Default::default()),
                     None,
                 )
             }
@@ -3133,9 +3132,16 @@ impl Downstairs {
                 let upstairs_id = header.upstairs_id;
                 let session_id = header.session_id;
                 let job_id = header.job_id;
-                let responses = header.into_read_responses(data);
 
-                (upstairs_id, session_id, job_id, responses, None)
+                (
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    header
+                        .blocks
+                        .map(|blocks| RawReadResponse { blocks, data }),
+                    None,
+                )
             }
 
             Message::ExtentLiveCloseAck {
@@ -3171,7 +3177,7 @@ impl Downstairs {
                     upstairs_id,
                     session_id,
                     job_id,
-                    result.map(|_| Vec::new()),
+                    result.map(|_| Default::default()),
                     extent_info,
                 )
             }
@@ -3187,7 +3193,7 @@ impl Downstairs {
                     upstairs_id,
                     session_id,
                     job_id,
-                    result.map(|_| Vec::new()),
+                    result.map(|_| Default::default()),
                     None,
                 )
             }
@@ -3202,7 +3208,7 @@ impl Downstairs {
                     upstairs_id,
                     session_id,
                     job_id,
-                    result.map(|_| Vec::new()),
+                    result.map(|_| Default::default()),
                     None,
                 )
             }
@@ -3346,7 +3352,7 @@ impl Downstairs {
         &mut self,
         ds_id: JobId,
         client_id: ClientId,
-        responses: Result<Vec<ReadResponse>, CrucibleError>,
+        responses: Result<RawReadResponse, CrucibleError>,
         up_state: &UpstairsState,
         extent_info: Option<ExtentInfo>,
     ) -> bool {
@@ -3355,7 +3361,7 @@ impl Downstairs {
         // Make up dummy values for hashes, since they're not actually checked
         // here (besides confirming that we have the correct number).
         let hashes = match &responses {
-            Ok(r) => vec![Some(0); r.len()],
+            Ok(r) => vec![Some(0); r.blocks.len()],
             Err(..) => vec![],
         };
         self.process_io_completion_inner(
@@ -3375,7 +3381,7 @@ impl Downstairs {
         &mut self,
         ds_id: JobId,
         client_id: ClientId,
-        responses: Result<Vec<ReadResponse>, CrucibleError>,
+        responses: Result<RawReadResponse, CrucibleError>,
         read_response_hashes: Vec<Option<u64>>,
         up_state: &UpstairsState,
         extent_info: Option<ExtentInfo>,
@@ -3409,7 +3415,7 @@ impl Downstairs {
         // If we didn't get one hash per read block, then `responses` must
         // have been converted into `Err(..)`.
         if let Ok(reads) = &responses {
-            assert_eq!(reads.len(), read_response_hashes.len());
+            assert_eq!(reads.blocks.len(), read_response_hashes.len());
         }
 
         if self.clients[client_id].process_io_completion(
@@ -4463,12 +4469,15 @@ pub(crate) mod test {
         live_repair::ExtentInfo,
         upstairs::UpstairsState,
         ClientId, CrucibleError, DownstairsIO, DsState, ExtentFix, GuestWorkId,
-        IOState, IOop, ImpactedAddr, ImpactedBlocks, JobId, ReadResponse,
-        ReconcileIO, ReconciliationId, SnapshotDetails,
+        IOState, IOop, ImpactedAddr, ImpactedBlocks, JobId, ReconcileIO,
+        ReconciliationId, SnapshotDetails,
     };
-    use bytes::Bytes;
 
-    use crucible_protocol::Message;
+    use bytes::BytesMut;
+    use crucible_protocol::{
+        BlockContext, Message, RawReadResponse, ReadRequest,
+        ReadResponseBlockMetadata,
+    };
     use ringbuffer::RingBuffer;
 
     use std::{
@@ -4477,6 +4486,24 @@ pub(crate) mod test {
     };
 
     use uuid::Uuid;
+
+    /// Builds a single-block reply from the given request and response data
+    pub fn build_read_response(
+        request: &ReadRequest,
+        data: &[u8],
+    ) -> RawReadResponse {
+        RawReadResponse {
+            data: BytesMut::from(data),
+            blocks: vec![ReadResponseBlockMetadata {
+                eid: request.eid,
+                offset: request.offset,
+                block_contexts: vec![BlockContext {
+                    hash: crucible_common::integrity_hash(&[data]),
+                    encryption_context: None,
+                }],
+            }],
+        }
+    }
 
     /// Forces the given job to completion and acks it
     ///
@@ -4489,7 +4516,7 @@ pub(crate) mod test {
             ds.process_ds_completion(
                 ds_id,
                 client_id,
-                Ok(vec![]),
+                Ok(RawReadResponse::default()),
                 &UpstairsState::Active,
                 None,
             );
@@ -4546,7 +4573,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(RawReadResponse::default()),
             &UpstairsState::Active,
             None,
         ));
@@ -4556,7 +4583,7 @@ pub(crate) mod test {
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(1),
-            Ok(vec![]),
+            Ok(RawReadResponse::default()),
             &UpstairsState::Active,
             None,
         ));
@@ -4569,7 +4596,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
-            Ok(vec![]),
+            Ok(RawReadResponse::default()),
             &UpstairsState::Active,
             None,
         ));
@@ -4594,7 +4621,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(RawReadResponse::default()),
             &UpstairsState::Active,
             None,
         ));
@@ -4605,7 +4632,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
-            Ok(vec![]),
+            Ok(RawReadResponse::default()),
             &UpstairsState::Active,
             None,
         ));
@@ -4616,7 +4643,7 @@ pub(crate) mod test {
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(2),
-            Ok(vec![]),
+            Ok(RawReadResponse::default()),
             &UpstairsState::Active,
             None,
         ));
@@ -4653,7 +4680,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
-            Ok(vec![]),
+            Ok(RawReadResponse::default()),
             &UpstairsState::Active,
             None,
         ));
@@ -4663,7 +4690,7 @@ pub(crate) mod test {
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(2),
-            Ok(vec![]),
+            Ok(RawReadResponse::default()),
             &UpstairsState::Active,
             None,
         ));
@@ -4703,7 +4730,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
-            Ok(vec![]),
+            Ok(RawReadResponse::default()),
             &UpstairsState::Active,
             None,
         ));
@@ -4735,8 +4762,7 @@ pub(crate) mod test {
         ds.in_progress(next_id, ClientId::new(1));
         ds.in_progress(next_id, ClientId::new(2));
 
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let response = Ok(build_read_response(&request, &[]));
 
         assert!(ds.process_ds_completion(
             next_id,
@@ -4750,8 +4776,7 @@ pub(crate) mod test {
 
         ds.ack(next_id);
 
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let response = Ok(build_read_response(&request, &[]));
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -4763,8 +4788,7 @@ pub(crate) mod test {
         assert!(ds.ackable_work.is_empty());
         assert!(ds.completed.is_empty());
 
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let response = Ok(build_read_response(&request, &[]));
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -4798,8 +4822,7 @@ pub(crate) mod test {
         assert!(ds.ackable_work.is_empty());
         assert!(ds.completed.is_empty());
 
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let response = Ok(build_read_response(&request, &[]));
 
         assert!(ds.process_ds_completion(
             next_id,
@@ -4813,8 +4836,7 @@ pub(crate) mod test {
 
         ds.ack(next_id);
 
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let response = Ok(build_read_response(&request, &[]));
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -4859,8 +4881,7 @@ pub(crate) mod test {
         assert!(ds.ackable_work.is_empty());
         assert!(ds.completed.is_empty());
 
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let response = Ok(build_read_response(&request, &[]));
 
         assert!(ds.process_ds_completion(
             next_id,
@@ -4936,13 +4957,12 @@ pub(crate) mod test {
         ds.in_progress(next_id, ClientId::new(1));
         ds.in_progress(next_id, ClientId::new(2));
 
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let response = || Ok(build_read_response(&request, &[]));
 
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(2),
-            response.clone(),
+            response(),
             &UpstairsState::Active,
             None,
         ));
@@ -4950,7 +4970,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
-            response,
+            response(),
             &UpstairsState::Active,
             None,
         ));
@@ -5023,7 +5043,7 @@ pub(crate) mod test {
         // write_unwritten is not.
         assert_eq!(ds.ackable_work.len(), !is_write_unwritten as usize);
 
-        let response = Ok(vec![]);
+        let response = Ok(Default::default());
         let res = ds.process_ds_completion(
             next_id,
             ClientId::new(2),
@@ -5082,7 +5102,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             id1,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         ));
@@ -5090,7 +5110,7 @@ pub(crate) mod test {
             ds.process_ds_completion(
                 id1,
                 ClientId::new(1),
-                Ok(vec![]),
+                Ok(Default::default()),
                 &UpstairsState::Active,
                 None,
             ),
@@ -5099,7 +5119,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             id2,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         ));
@@ -5107,7 +5127,7 @@ pub(crate) mod test {
             ds.process_ds_completion(
                 id2,
                 ClientId::new(1),
-                Ok(vec![]),
+                Ok(Default::default()),
                 &UpstairsState::Active,
                 None,
             ),
@@ -5133,14 +5153,14 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             flush_id,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         ));
         assert!(ds.process_ds_completion(
             flush_id,
             ClientId::new(1),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         ));
@@ -5168,14 +5188,14 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             id1,
             ClientId::new(2),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         ));
         assert!(!ds.process_ds_completion(
             id2,
             ClientId::new(2),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         ));
@@ -5188,7 +5208,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             flush_id,
             ClientId::new(2),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         ));
@@ -5231,8 +5251,7 @@ pub(crate) mod test {
 
         assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
 
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[3])]);
+        let response = Ok(build_read_response(&request, &[3]));
 
         assert!(ds.process_ds_completion(
             next_id,
@@ -5245,11 +5264,8 @@ pub(crate) mod test {
         let responses = ds.ds_active.get(&next_id).unwrap().data.as_ref();
         assert!(responses.is_some());
         assert_eq!(
-            responses.map(|responses| responses
-                .iter()
-                .map(|response| response.data.clone().freeze())
-                .collect()),
-            Some(vec![Bytes::from_static(&[3])]),
+            responses.map(|responses| &responses.data[..]),
+            Some([3].as_slice())
         );
 
         assert_eq!(ds.clients[ClientId::new(0)].stats.downstairs_errors, 0);
@@ -5285,8 +5301,7 @@ pub(crate) mod test {
 
         assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
 
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[6])]);
+        let response = Ok(build_read_response(&request, &[6]));
 
         assert!(ds.process_ds_completion(
             next_id,
@@ -5299,11 +5314,8 @@ pub(crate) mod test {
         let responses = ds.ds_active.get(&next_id).unwrap().data.as_ref();
         assert!(responses.is_some());
         assert_eq!(
-            responses.map(|responses| responses
-                .iter()
-                .map(|response| response.data.clone().freeze())
-                .collect()),
-            Some(vec![Bytes::from_static(&[6])]),
+            responses.map(|responses| &responses.data[..]),
+            Some([6].as_slice())
         );
     }
 
@@ -5322,8 +5334,7 @@ pub(crate) mod test {
         ds.in_progress(next_id, ClientId::new(2));
 
         // Downstairs 0 now has completed this work.
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let response = Ok(build_read_response(&request, &[]));
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -5336,8 +5347,7 @@ pub(crate) mod test {
         assert_eq!(ds.ackable_work.len(), 1);
 
         // Complete downstairs 1 and 2
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let response = Ok(build_read_response(&request, &[]));
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
@@ -5346,8 +5356,7 @@ pub(crate) mod test {
             None
         ));
 
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let response = Ok(build_read_response(&request, &[]));
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
@@ -5378,7 +5387,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         ));
@@ -5386,14 +5395,14 @@ pub(crate) mod test {
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(1),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
@@ -5423,8 +5432,7 @@ pub(crate) mod test {
         ds.in_progress(next_id, ClientId::new(2));
 
         // Downstairs 0 now has completed this work.
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let response = Ok(build_read_response(&request, &[]));
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -5451,7 +5459,7 @@ pub(crate) mod test {
             ds.process_ds_completion(
                 next_id,
                 cid,
-                Ok(vec![]),
+                Ok(Default::default()),
                 &UpstairsState::Active,
                 None,
             );
@@ -5498,7 +5506,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
@@ -5506,7 +5514,7 @@ pub(crate) mod test {
             ds.process_ds_completion(
                 next_id,
                 ClientId::new(1),
-                Ok(vec![]),
+                Ok(Default::default()),
                 &UpstairsState::Active,
                 None
             ),
@@ -5515,7 +5523,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
@@ -5539,21 +5547,21 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(1),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
@@ -5599,7 +5607,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             id1,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
@@ -5607,7 +5615,7 @@ pub(crate) mod test {
             ds.process_ds_completion(
                 id1,
                 ClientId::new(1),
-                Ok(vec![]),
+                Ok(Default::default()),
                 &UpstairsState::Active,
                 None
             ),
@@ -5616,7 +5624,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             id2,
             ClientId::new(1),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
@@ -5624,7 +5632,7 @@ pub(crate) mod test {
             ds.process_ds_completion(
                 id2,
                 ClientId::new(2),
-                Ok(vec![]),
+                Ok(Default::default()),
                 &UpstairsState::Active,
                 None
             ),
@@ -5650,14 +5658,14 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             flush_id,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
         assert!(ds.process_ds_completion(
             flush_id,
             ClientId::new(2),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
@@ -5683,14 +5691,14 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             id1,
             ClientId::new(2),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
         assert!(!ds.process_ds_completion(
             id2,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
@@ -5703,7 +5711,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             flush_id,
             ClientId::new(1),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
@@ -5729,8 +5737,7 @@ pub(crate) mod test {
         ds.in_progress(next_id, ClientId::new(2));
 
         // Complete the read on one downstairs.
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let response = Ok(build_read_response(&request, &[]));
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -5773,10 +5780,7 @@ pub(crate) mod test {
         ds.in_progress(next_id, ClientId::new(2));
 
         // Complete the read on one downstairs, verify it is ack ready.
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &[1, 2, 3, 4],
-        )]);
+        let response = Ok(build_read_response(&request, &[1, 2, 3, 4]));
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -5788,10 +5792,7 @@ pub(crate) mod test {
         ds.ack(next_id);
 
         // Complete the read on a 2nd downstairs.
-        let response = Ok(vec![ReadResponse::from_request_with_data(
-            &request,
-            &[1, 2, 3, 4],
-        )]);
+        let response = Ok(build_read_response(&request, &[1, 2, 3, 4]));
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
@@ -5813,8 +5814,7 @@ pub(crate) mod test {
         // Redo the read on DS 0, IO should remain acked
         ds.in_progress(next_id, ClientId::new(0));
 
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let response = Ok(build_read_response(&request, &[]));
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -5841,8 +5841,7 @@ pub(crate) mod test {
         ds.in_progress(next_id, ClientId::new(2));
 
         // Complete the read on one downstairs.
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let response = Ok(build_read_response(&request, &[]));
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -5869,8 +5868,7 @@ pub(crate) mod test {
 
         // Redo on DS 0, IO should remain acked.
         ds.in_progress(next_id, ClientId::new(0));
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let response = Ok(build_read_response(&request, &[]));
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -5916,10 +5914,10 @@ pub(crate) mod test {
         ds.in_progress(next_id, ClientId::new(2));
 
         // Construct our fake response
-        let response = Ok(vec![ReadResponse::from_request_with_data(
+        let response = Ok(build_read_response(
             &request,
             &[122], // Original data.
-        )]);
+        ));
 
         // Complete the read on one downstairs.
         assert!(ds.process_ds_completion(
@@ -5945,10 +5943,10 @@ pub(crate) mod test {
 
         // Now, create a new response that has different data, and will
         // produce a different hash.
-        let response = Ok(vec![ReadResponse::from_request_with_data(
+        let response = Ok(build_read_response(
             &request,
             &[123], // Different data than before
-        )]);
+        ));
 
         // Process the new read (with different data), make sure we don't
         // trigger the hash mismatch check.
@@ -5996,10 +5994,10 @@ pub(crate) mod test {
         ds.in_progress(next_id, ClientId::new(2));
 
         // Construct our fake response
-        let response = Ok(vec![ReadResponse::from_request_with_data(
+        let response = Ok(build_read_response(
             &request,
             &[122], // Original data.
-        )]);
+        ));
 
         // Complete the read on one downstairs.
         assert!(ds.process_ds_completion(
@@ -6011,10 +6009,10 @@ pub(crate) mod test {
         ));
 
         // Construct our fake response for another downstairs.
-        let response = Ok(vec![ReadResponse::from_request_with_data(
+        let response = Ok(build_read_response(
             &request,
             &[122], // Original data.
-        )]);
+        ));
 
         // Complete the read on the this downstairs as well
         assert!(!ds.process_ds_completion(
@@ -6038,10 +6036,10 @@ pub(crate) mod test {
 
         // Now, create a new response that has different data, and will
         // produce a different hash.
-        let response = Ok(vec![ReadResponse::from_request_with_data(
+        let response = Ok(build_read_response(
             &request,
             &[123], // Different data than before
-        )]);
+        ));
 
         // Process the new read (with different data), make sure we don't
         // trigger the hash mismatch check.
@@ -6085,7 +6083,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             id1,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
@@ -6093,7 +6091,7 @@ pub(crate) mod test {
             ds.process_ds_completion(
                 id1,
                 ClientId::new(1),
-                Ok(vec![]),
+                Ok(Default::default()),
                 &UpstairsState::Active,
                 None
             ),
@@ -6118,7 +6116,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             id1,
             ClientId::new(1),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
@@ -6154,7 +6152,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             id1,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
@@ -6162,7 +6160,7 @@ pub(crate) mod test {
             ds.process_ds_completion(
                 id1,
                 ClientId::new(1),
-                Ok(vec![]),
+                Ok(Default::default()),
                 &UpstairsState::Active,
                 None
             ),
@@ -6191,14 +6189,14 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             id1,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
         assert!(!ds.process_ds_completion(
             id1,
             ClientId::new(2),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
@@ -6847,11 +6845,11 @@ pub(crate) mod test {
         assert!(ds.in_progress(next_id, ClientId::new(2)).is_some());
 
         // Process resplies from the two running downstairs
-        let response = Ok(vec![]);
+        let response = || Ok(Default::default());
         ds.process_ds_completion(
             next_id,
             ClientId::new(0),
-            response.clone(),
+            response(),
             &UpstairsState::Active,
             None,
         );
@@ -6859,7 +6857,7 @@ pub(crate) mod test {
         ds.process_ds_completion(
             next_id,
             ClientId::new(2),
-            response,
+            response(),
             &UpstairsState::Active,
             None,
         );
@@ -6914,7 +6912,7 @@ pub(crate) mod test {
         ds.process_ds_completion(
             next_id,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         );
@@ -6966,7 +6964,7 @@ pub(crate) mod test {
         ds.process_ds_completion(
             next_id,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         );
@@ -7014,11 +7012,11 @@ pub(crate) mod test {
         assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
         assert!(ds.in_progress(next_id, ClientId::new(2)).is_some());
 
-        let response = Ok(vec![]);
+        let response = || Ok(Default::default());
         ds.process_ds_completion(
             next_id,
             ClientId::new(0),
-            response.clone(),
+            response(),
             &UpstairsState::Active,
             None,
         );
@@ -7026,7 +7024,7 @@ pub(crate) mod test {
         ds.process_ds_completion(
             next_id,
             ClientId::new(2),
-            response,
+            response(),
             &UpstairsState::Active,
             None,
         );
@@ -7064,7 +7062,7 @@ pub(crate) mod test {
         ds.process_ds_completion(
             next_id,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         );
@@ -7113,7 +7111,7 @@ pub(crate) mod test {
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(2),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
@@ -7152,13 +7150,13 @@ pub(crate) mod test {
         };
 
         // Set the error that everyone will use.
-        let response = Err(CrucibleError::GenericError("bad".to_string()));
+        let response = || Err(CrucibleError::GenericError("bad".to_string()));
 
         // Process the operation for client 0
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
-            response.clone(),
+            response(),
             &UpstairsState::Active,
             None,
         ));
@@ -7171,7 +7169,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
-            response.clone(),
+            response(),
             &UpstairsState::Active,
             None,
         ));
@@ -7185,7 +7183,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
-            response,
+            response(),
             &UpstairsState::Active,
             None,
         ));
@@ -7232,12 +7230,12 @@ pub(crate) mod test {
         // client 0 should be marked failed.
         assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::Faulted);
 
-        let ok_response = Ok(vec![]);
+        let ok_response = || Ok(Default::default());
         // Process the good operation for client 1
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
-            ok_response.clone(),
+            ok_response(),
             &UpstairsState::Active,
             None
         ));
@@ -7246,7 +7244,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
-            ok_response,
+            ok_response(),
             &UpstairsState::Active,
             None
         ));
@@ -7273,14 +7271,13 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
 
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let response = || Ok(build_read_response(&request, &[]));
 
         // Process the operation for client 1 this should return true
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(1),
-            response.clone(),
+            response(),
             &UpstairsState::Active,
             None,
         ));
@@ -7289,7 +7286,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
-            response,
+            response(),
             &UpstairsState::Active,
             None
         ));
@@ -7310,12 +7307,12 @@ pub(crate) mod test {
             next_id
         };
 
-        let ok_response = Ok(vec![]);
+        let ok_response = || Ok(Default::default());
         // Process the operation for client 1
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
-            ok_response.clone(),
+            ok_response(),
             &UpstairsState::Active,
             None,
         ));
@@ -7324,7 +7321,7 @@ pub(crate) mod test {
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(2),
-            ok_response,
+            ok_response(),
             &UpstairsState::Active,
             None
         ));
@@ -7361,13 +7358,14 @@ pub(crate) mod test {
         }
 
         // Set the error that everyone will use.
-        let err_response = Err(CrucibleError::GenericError("bad".to_string()));
+        let err_response =
+            || Err(CrucibleError::GenericError("bad".to_string()));
 
         // Process the operation for client 0
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
-            err_response.clone(),
+            err_response(),
             &UpstairsState::Active,
             None,
         ));
@@ -7380,7 +7378,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
-            err_response,
+            err_response(),
             &UpstairsState::Active,
             None
         ));
@@ -7388,7 +7386,7 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
-        let ok_response = Ok(vec![]);
+        let ok_response = Ok(Default::default());
         // Because we ACK writes, this op will always return false
         assert!(!ds.process_ds_completion(
             next_id,
@@ -7417,8 +7415,7 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
 
-        let response =
-            Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let response = Ok(build_read_response(&request, &[]));
 
         // Process the operation for client 2, which makes the job ackable
         assert!(ds.process_ds_completion(
@@ -7445,14 +7442,15 @@ pub(crate) mod test {
         }
 
         // Make the error and ok responses
-        let err_response = Err(CrucibleError::GenericError("bad".to_string()));
-        let ok_response = Ok(vec![]);
+        let err_response =
+            || Err(CrucibleError::GenericError("bad".to_string()));
+        let ok_response = || Ok(Default::default());
 
         // Process the operation for client 0
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
-            ok_response.clone(),
+            ok_response(),
             &UpstairsState::Active,
             None
         ));
@@ -7461,7 +7459,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
-            err_response,
+            err_response(),
             &UpstairsState::Active,
             None
         ));
@@ -7471,7 +7469,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
-            ok_response.clone(),
+            ok_response(),
             &UpstairsState::Active,
             None
         ));
@@ -7502,7 +7500,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
-            ok_response.clone(),
+            ok_response(),
             &UpstairsState::Active,
             None
         ));
@@ -7512,7 +7510,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
-            ok_response,
+            ok_response(),
             &UpstairsState::Active,
             None
         ));
@@ -7535,12 +7533,12 @@ pub(crate) mod test {
         assert_eq!(ds.in_progress(flush_id, ClientId::new(1)), None);
         assert!(ds.in_progress(flush_id, ClientId::new(2)).is_some());
 
-        let ok_response = Ok(vec![]);
+        let ok_response = || Ok(Default::default());
         // Process the operation for client 0
         assert!(!ds.process_ds_completion(
             flush_id,
             ClientId::new(0),
-            ok_response.clone(),
+            ok_response(),
             &UpstairsState::Active,
             None
         ));
@@ -7549,7 +7547,7 @@ pub(crate) mod test {
         assert!(ds.process_ds_completion(
             flush_id,
             ClientId::new(2),
-            ok_response,
+            ok_response(),
             &UpstairsState::Active,
             None
         ));
@@ -7608,7 +7606,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             write_id,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
@@ -7627,7 +7625,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             write_id,
             ClientId::new(2),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None
         ));
@@ -7673,14 +7671,15 @@ pub(crate) mod test {
         }
 
         // Make the error and ok responses
-        let err_response = Err(CrucibleError::GenericError("bad".to_string()));
-        let ok_res = Ok(vec![]);
+        let err_response =
+            || Err(CrucibleError::GenericError("bad".to_string()));
+        let ok_res = || Ok(Default::default());
 
         // Process the operation for client 0
         assert!(!ds.process_ds_completion(
             write_id,
             ClientId::new(0),
-            ok_res.clone(),
+            ok_res(),
             &UpstairsState::Active,
             None,
         ));
@@ -7689,7 +7688,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             write_id,
             ClientId::new(1),
-            err_response,
+            err_response(),
             &UpstairsState::Active,
             None,
         ));
@@ -7699,7 +7698,7 @@ pub(crate) mod test {
         assert!(!ds.process_ds_completion(
             write_id,
             ClientId::new(2),
-            ok_res,
+            ok_res(),
             &UpstairsState::Active,
             None
         ));
@@ -7754,20 +7753,20 @@ pub(crate) mod test {
         }
 
         // Make the read ok response
-        let rr = Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let rr = || Ok(build_read_response(&request, &[]));
 
         for cid in ClientId::iter() {
             ds.process_ds_completion(
                 write_one,
                 cid,
-                Ok(vec![]),
+                Ok(Default::default()),
                 &UpstairsState::Active,
                 None,
             );
             ds.process_ds_completion(
                 read_one,
                 cid,
-                rr.clone(),
+                rr(),
                 &UpstairsState::Active,
                 None,
             );
@@ -7801,14 +7800,14 @@ pub(crate) mod test {
         ds.process_ds_completion(
             write_fail,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         );
         ds.process_ds_completion(
             write_fail,
             ClientId::new(1),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         );
@@ -7872,20 +7871,20 @@ pub(crate) mod test {
         }
 
         // Make the read ok response
-        let rr = Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let rr = || Ok(build_read_response(&request, &[]));
 
         for cid in ClientId::iter() {
             ds.process_ds_completion(
                 write_one,
                 cid,
-                Ok(vec![]),
+                Ok(Default::default()),
                 &UpstairsState::Active,
                 None,
             );
             ds.process_ds_completion(
                 read_one,
                 cid,
-                rr.clone(),
+                rr(),
                 &UpstairsState::Active,
                 None,
             );
@@ -7922,14 +7921,14 @@ pub(crate) mod test {
         ds.process_ds_completion(
             write_fail,
             ClientId::new(0),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         );
         ds.process_ds_completion(
             write_fail,
             ClientId::new(1),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         );
@@ -8073,32 +8072,32 @@ pub(crate) mod test {
         ds.process_ds_completion(
             write_one,
             ClientId::new(1),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         );
         ds.process_ds_completion(
             write_one,
             ClientId::new(2),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         );
 
         // Make the read ok response, do the read
-        let rr = Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let rr = || Ok(build_read_response(&request, &[]));
 
         ds.process_ds_completion(
             read_one,
             ClientId::new(1),
-            rr.clone(),
+            rr(),
             &UpstairsState::Active,
             None,
         );
         ds.process_ds_completion(
             read_one,
             ClientId::new(2),
-            rr.clone(),
+            rr(),
             &UpstairsState::Active,
             None,
         );
@@ -8107,14 +8106,14 @@ pub(crate) mod test {
         ds.process_ds_completion(
             flush_one,
             ClientId::new(1),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         );
         ds.process_ds_completion(
             flush_one,
             ClientId::new(2),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         );
@@ -8207,18 +8206,18 @@ pub(crate) mod test {
         ds.process_ds_completion(
             write_one,
             ClientId::new(1),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         );
 
         // Make the read ok response, do the read
-        let rr = Ok(vec![ReadResponse::from_request_with_data(&request, &[])]);
+        let rr = Ok(build_read_response(&request, &[]));
 
         ds.process_ds_completion(
             read_one,
             ClientId::new(1),
-            rr.clone(),
+            rr,
             &UpstairsState::Active,
             None,
         );
@@ -8227,7 +8226,7 @@ pub(crate) mod test {
         ds.process_ds_completion(
             flush_one,
             ClientId::new(1),
-            Ok(vec![]),
+            Ok(Default::default()),
             &UpstairsState::Active,
             None,
         );
