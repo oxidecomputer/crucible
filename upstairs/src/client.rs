@@ -6,7 +6,7 @@ use crate::{
     JobId, Message, RawMessage, ReadResponse, ReconcileIO,
     RegionDefinitionStatus, RegionMetadata, MAX_ACTIVE_COUNT,
 };
-use crucible_common::{deadline_secs, x509::TLSContext};
+use crucible_common::{deadline_secs, verbose_timeout, x509::TLSContext};
 use crucible_protocol::{
     ReconciliationId, WireMessage, WireMessageWriter, CRUCIBLE_MESSAGE_VERSION,
 };
@@ -34,7 +34,7 @@ use uuid::Uuid;
 // the downstairs.
 const TIMEOUT_SECS: f32 = 15.0;
 // How many timeouts will we tolerate before we disconnect from a downstairs.
-const TIMEOUT_LIMIT: u8 = 3;
+const TIMEOUT_LIMIT: usize = 3;
 const PING_INTERVAL_SECS: f32 = 5.0;
 
 pub(crate) type ClientRequest = WireMessage<RawMessage>;
@@ -2777,16 +2777,11 @@ async fn rx_loop<R>(
 where
     R: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send + 'static,
 {
-    let mut timeout = deadline_secs(TIMEOUT_SECS);
-    let mut timeout_trip = 0;
     loop {
         tokio::select! {
             f = fr.next() => {
                 match f {
                     Some(Ok(m)) => {
-                        // reset the timeout, since we've received a message
-                        timeout = deadline_secs(TIMEOUT_SECS);
-                        timeout_trip = 0;
                         if let Err(e) =
                             response_tx.send(ClientResponse::Message(m)).await
                         {
@@ -2808,19 +2803,9 @@ where
                     }
                 }
             }
-            _ = sleep_until(timeout) => {
-                timeout_trip += 1;
-                warn!(
-                    log,
-                    "Nothing received from downstairs, timeout {}/{}",
-                    timeout_trip,
-                    TIMEOUT_LIMIT,
-                );
-                if timeout_trip >= TIMEOUT_LIMIT {
-                    break ClientRunResult::Timeout;
-                } else {
-                    timeout = deadline_secs(TIMEOUT_SECS);
-                }
+            _ = verbose_timeout(TIMEOUT_SECS, TIMEOUT_LIMIT, log.clone()) => {
+                warn!(log, "inactivity timeout");
+                break ClientRunResult::Timeout;
             }
         }
     }

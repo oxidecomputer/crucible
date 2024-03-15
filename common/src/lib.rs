@@ -420,3 +420,11 @@ pub fn deadline_secs(secs: f32) -> Instant {
         .checked_add(Duration::from_secs_f32(secs))
         .unwrap()
 }
+
+pub async fn verbose_timeout(secs: f32, n: usize, log: slog::Logger) {
+    let d = Duration::from_secs_f32(secs);
+    for i in 0..n {
+        tokio::time::sleep(d).await;
+        slog::warn!(log, "timeout {}/{n}", i + 1,);
+    }
+}
