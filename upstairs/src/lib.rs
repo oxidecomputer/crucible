@@ -25,7 +25,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use slog::{error, info, o, warn, Logger};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
-use tokio::time::Instant;
 use tracing::instrument;
 use usdt::register_probes;
 use uuid::Uuid;
@@ -397,12 +396,6 @@ mod cdt {
     fn volume__write__done(_: u32, _: Uuid) {}
     fn volume__writeunwritten__done(_: u32, _: Uuid) {}
     fn volume__flush__done(_: u32, _: Uuid) {}
-}
-
-pub fn deadline_secs(secs: f32) -> Instant {
-    Instant::now()
-        .checked_add(Duration::from_secs_f32(secs))
-        .unwrap()
 }
 
 /// Array of data associated with three clients, indexed by `ClientId`

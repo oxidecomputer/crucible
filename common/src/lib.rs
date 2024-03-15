@@ -12,6 +12,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use slog::Drain;
 use tempfile::NamedTempFile;
+use tokio::time::{Duration, Instant};
 
 mod region;
 pub use region::{
@@ -411,5 +412,19 @@ impl From<CrucibleError> for dropshot::HttpError {
                 dropshot::HttpError::for_internal_error(e.to_string())
             }
         }
+    }
+}
+
+pub fn deadline_secs(secs: f32) -> Instant {
+    Instant::now()
+        .checked_add(Duration::from_secs_f32(secs))
+        .unwrap()
+}
+
+pub async fn verbose_timeout(secs: f32, n: usize, log: slog::Logger) {
+    let d = Duration::from_secs_f32(secs);
+    for i in 0..n {
+        tokio::time::sleep(d).await;
+        slog::warn!(log, "timeout {}/{n}", i + 1,);
     }
 }
