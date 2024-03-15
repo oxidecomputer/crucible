@@ -648,12 +648,12 @@ pub struct WriteHeader {
 }
 
 impl WriteHeader {
-    /// Destructures into a list of block-size writes
+    /// Destructures into a list of block-size writes which borrow our data
     ///
     /// # Panics
     /// `buf.len()` must be an even multiple of `self.blocks.len()`, which is
     /// assumed to be the block size.
-    pub fn into_writes(&self, mut buf: bytes::Bytes) -> Vec<Write> {
+    pub fn get_writes(&self, mut buf: bytes::Bytes) -> Vec<Write> {
         assert_eq!(buf.len() % self.blocks.len(), 0);
         let block_size = buf.len() / self.blocks.len();
         let mut out = Vec::with_capacity(self.blocks.len());

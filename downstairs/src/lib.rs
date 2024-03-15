@@ -2401,7 +2401,7 @@ impl Downstairs {
         let r = match m {
             Message::Write { header, data } => {
                 cdt::submit__write__start!(|| header.job_id.0);
-                let writes = header.into_writes(data);
+                let writes = header.get_writes(data);
 
                 let new_write = IOop::Write {
                     dependencies: header.dependencies,
@@ -2437,7 +2437,7 @@ impl Downstairs {
             }
             Message::WriteUnwritten { header, data } => {
                 cdt::submit__writeunwritten__start!(|| header.job_id.0);
-                let writes = header.into_writes(data);
+                let writes = header.get_writes(data);
 
                 let new_write = IOop::WriteUnwritten {
                     dependencies: header.dependencies,
