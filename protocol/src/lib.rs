@@ -658,6 +658,11 @@ pub enum Message {
      */
     Unknown(u32, BytesMut),
 }
+/*
+ * If you just added or changed the Message enum above, you must also
+ * increment the CRUCIBLE_MESSAGE_VERSION.  Go do that right now before you
+ * forget.
+ */
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct WriteHeader {
@@ -756,12 +761,6 @@ impl ReadResponseBlockMetadata {
             .collect()
     }
 }
-
-/*
- * If you just added or changed the Message enum above, you must also
- * increment the CRUCIBLE_MESSAGE_VERSION.  Go do that right now before you
- * forget.
- */
 
 impl Message {
     /// Return true if this message contains an Error result
