@@ -1064,27 +1064,6 @@ impl ReconcileIO {
     }
 }
 
-/// Write data, containing data from all blocks
-#[derive(Debug)]
-pub struct RawWrite {
-    /// Per-block metadata
-    pub blocks: Vec<WriteBlockMetadata>,
-    /// Raw data
-    pub data: bytes::BytesMut,
-}
-
-impl RawWrite {
-    /// Builds a new empty `RawWrite` with the given capacity
-    pub fn with_capacity(block_count: usize, block_size: u64) -> Self {
-        Self {
-            blocks: Vec::with_capacity(block_count),
-            data: bytes::BytesMut::with_capacity(
-                block_count * block_size as usize,
-            ),
-        }
-    }
-}
-
 /*
  * Crucible to storage IO operations.
  */

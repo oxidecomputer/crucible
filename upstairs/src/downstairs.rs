@@ -16,12 +16,12 @@ use crate::{
     AckStatus, ActiveJobs, AllocRingBuffer, ClientData, ClientIOStateCount,
     ClientId, ClientMap, CrucibleError, DownstairsIO, DownstairsMend, DsState,
     ExtentFix, ExtentRepairIDs, GuestWorkId, IOState, IOStateCount, IOop,
-    ImpactedBlocks, JobId, Message, RawWrite, ReadRequest, ReadResponse,
-    ReconcileIO, ReconciliationId, RegionDefinition, ReplaceResult,
-    SnapshotDetails, WorkSummary,
+    ImpactedBlocks, JobId, Message, ReadRequest, ReadResponse, ReconcileIO,
+    ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
+    WorkSummary,
 };
 use crucible_common::MAX_ACTIVE_COUNT;
-use crucible_protocol::WriteHeader;
+use crucible_protocol::{RawWrite, WriteHeader};
 
 use rand::prelude::*;
 use ringbuffer::RingBuffer;
