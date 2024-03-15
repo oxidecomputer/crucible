@@ -2728,15 +2728,7 @@ impl Downstairs {
             }
             // Now that we've collected jobs to retire, remove them from the map
             for &id in &retired {
-                let job = self.ds_active.remove(&id);
-                // Update pending bytes when this job is retired
-                let change = match &job.work {
-                    IOop::Write { data, .. }
-                    | IOop::WriteUnwritten { data, .. } => data.len() as u64,
-                    _ => 0,
-                };
-                self.write_bytes_outstanding =
-                    self.write_bytes_outstanding.checked_sub(change).unwrap();
+                let _ = self.ds_active.remove(&id);
             }
 
             debug!(self.log, "[rc] retire {} clears {:?}", ds_id, retired);
@@ -3224,6 +3216,24 @@ impl Downstairs {
             self.ackable_work.insert(ds_id);
         }
 
+        // Write bytes no longer count for backpressure once all 3x downstairs
+        // have returned (although they'll continue to be stored until they are
+        // retired by the next flush).
+        let wc = job.state_count();
+        if (wc.error + wc.skipped + wc.done) == 3 {
+            match &job.work {
+                IOop::Write { data, .. }
+                | IOop::WriteUnwritten { data, .. } => {
+                    let change = data.len() as u64;
+                    self.write_bytes_outstanding = self
+                        .write_bytes_outstanding
+                        .checked_sub(change)
+                        .unwrap();
+                }
+                _ => (),
+            };
+        }
+
         /*
          * If all 3 jobs are done, we can check here to see if we can
          * remove this job from the DS list. If we have completed the ack
@@ -3237,7 +3247,6 @@ impl Downstairs {
             // hasn't acked back yet. We check for NotAcked so we don't
             // double count three done and return true if we already have
             // AckReady set.
-            let wc = job.state_count();
 
             // If we are a write or a flush with one success, then
             // we must switch our state to failed.  This condition is
