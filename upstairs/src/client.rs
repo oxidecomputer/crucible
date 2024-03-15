@@ -2995,7 +2995,7 @@ pub(crate) fn validate_unencrypted_read_response(
             Err(CrucibleError::HashMismatch)
         }
     } else {
-        // No block context(s) in the
+        // No block context(s) in the response!
         //
         // Either this is a read of an unwritten block, or an attacker
         // removed the hashes from the db. Because the Upstairs will perform
