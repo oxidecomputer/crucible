@@ -820,7 +820,7 @@ pub(crate) fn check_input(
 ) -> Result<(), CrucibleError> {
     let block_size = extent_size.block_size_in_bytes() as u64;
     /*
-     * Only accept block sized operations
+     * Only accept block-aligned operations
      */
     if data.len() % block_size as usize != 0 {
         crucible_bail!(DataLenUnaligned);
