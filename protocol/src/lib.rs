@@ -169,6 +169,27 @@ impl ReadResponse {
     }
 }
 
+/// Read response data, containing data from all blocks
+#[derive(Debug)]
+pub struct RawReadResponse {
+    /// Per-block metadata
+    pub blocks: Vec<ReadResponseBlockMetadata>,
+    /// Raw data
+    pub data: bytes::BytesMut,
+}
+
+impl RawReadResponse {
+    /// Builds a new empty `RawReadResponse` with the given capacity
+    pub fn with_capacity(block_count: usize, block_size: u64) -> Self {
+        Self {
+            blocks: Vec::with_capacity(block_count),
+            data: bytes::BytesMut::with_capacity(
+                block_count * block_size as usize,
+            ),
+        }
+    }
+}
+
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BlockContext {

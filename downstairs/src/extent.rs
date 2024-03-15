@@ -10,8 +10,9 @@ use nix::unistd::{sysconf, SysconfVar};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
-use crate::{region::JobOrReconciliationId, RawReadResponse};
+use crate::region::JobOrReconciliationId;
 use crucible_common::*;
+use crucible_protocol::RawReadResponse;
 use repair_client::types::FileType;
 
 use super::*;
@@ -54,15 +55,14 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
         &mut self,
         job_id: JobId,
         requests: &[crucible_protocol::ReadRequest],
-    ) -> Result<Vec<crucible_protocol::ReadResponse>, CrucibleError> {
-        if requests.is_empty() {
-            return Ok(vec![]);
-        }
+    ) -> Result<RawReadResponse, CrucibleError> {
         let block_size = requests[0].offset.block_size_in_bytes();
         let mut out =
             RawReadResponse::with_capacity(requests.len(), block_size as u64);
-        self.read_into(job_id, requests, &mut out)?;
-        Ok(out.into_read_responses())
+        if !requests.is_empty() {
+            self.read_into(job_id, requests, &mut out)?;
+        }
+        Ok(out)
     }
 
     fn write(

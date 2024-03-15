@@ -12,16 +12,13 @@ use futures::TryStreamExt;
 use tracing::instrument;
 
 use crucible_common::*;
-use crucible_protocol::SnapshotDetails;
+use crucible_protocol::{RawReadResponse, SnapshotDetails};
 use repair_client::Client;
 
 use super::*;
-use crate::{
-    extent::{
-        copy_dir, extent_dir, extent_file_name, move_replacement_extent,
-        replace_dir, sync_path, Extent, ExtentMeta, ExtentState, ExtentType,
-    },
-    RawReadResponse,
+use crate::extent::{
+    copy_dir, extent_dir, extent_file_name, move_replacement_extent,
+    replace_dir, sync_path, Extent, ExtentMeta, ExtentState, ExtentType,
 };
 
 /**
@@ -2030,10 +2027,9 @@ pub(crate) mod test {
                 ],
                 JobId(0),
             )
-            .await?
-            .into_read_responses();
-        assert_eq!(out[0].data.as_ref(), [1; 512]);
-        assert_eq!(out[1].data.as_ref(), [2; 512]);
+            .await?;
+        assert_eq!(&out.data[..512], [1; 512]);
+        assert_eq!(&out.data[512..], [2; 512]);
 
         Ok(())
     }
@@ -2132,10 +2128,9 @@ pub(crate) mod test {
                 ],
                 JobId(0),
             )
-            .await?
-            .into_read_responses();
-        assert_eq!(out[0].data.as_ref(), [1; 512]);
-        assert_eq!(out[1].data.as_ref(), [2; 512]);
+            .await?;
+        assert_eq!(&out.data[..512], [1; 512]);
+        assert_eq!(&out.data[512..], [2; 512]);
 
         Ok(())
     }

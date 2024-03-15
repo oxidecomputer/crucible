@@ -4,10 +4,11 @@ use crate::{
     extent::{check_input, extent_path, DownstairsBlockContext, ExtentInner},
     integrity_hash,
     region::{BatchedPwritev, JobOrReconciliationId},
-    Block, BlockContext, CrucibleError, JobId, RawReadResponse,
-    RegionDefinition,
+    Block, BlockContext, CrucibleError, JobId, RegionDefinition,
 };
-use crucible_protocol::{EncryptionContext, ReadResponseBlockMetadata};
+use crucible_protocol::{
+    EncryptionContext, RawReadResponse, ReadResponseBlockMetadata,
+};
 
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, Transaction};
@@ -1225,7 +1226,7 @@ fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
 mod test {
     use super::*;
     use bytes::{Bytes, BytesMut};
-    use crucible_protocol::{ReadRequest, ReadResponse};
+    use crucible_protocol::ReadRequest;
     use rand::Rng;
     use tempfile::tempdir;
 
@@ -1666,14 +1667,14 @@ mod test {
 
             // We should not get back our data, because block 0 was written.
             assert_ne!(
-                resp,
-                vec![ReadResponse {
+                resp.blocks,
+                vec![ReadResponseBlockMetadata {
                     eid: 0,
                     offset: Block::new_512(0),
-                    data: BytesMut::from(data.as_ref()),
                     block_contexts: vec![block_context]
                 }]
             );
+            assert_ne!(resp.data, BytesMut::from(data.as_ref()));
         }
 
         // But, writing to the second block still should!
@@ -1700,14 +1701,14 @@ mod test {
 
             // We should get back our data! Block 1 was never written.
             assert_eq!(
-                resp,
-                vec![ReadResponse {
+                resp.blocks,
+                vec![ReadResponseBlockMetadata {
                     eid: 0,
                     offset: Block::new_512(1),
-                    data: BytesMut::from(data.as_ref()),
                     block_contexts: vec![block_context]
                 }]
             );
+            assert_eq!(resp.data, BytesMut::from(data.as_ref()));
         }
 
         Ok(())
@@ -1766,14 +1767,14 @@ mod test {
 
             // We should get back our data! Block 1 was never written.
             assert_eq!(
-                resp,
-                vec![ReadResponse {
+                resp.blocks,
+                vec![ReadResponseBlockMetadata {
                     eid: 0,
                     offset: Block::new_512(0),
-                    data: BytesMut::from(data.as_ref()),
                     block_contexts: vec![block_context]
                 }]
             );
+            assert_eq!(resp.data, BytesMut::from(data.as_ref()));
         }
 
         Ok(())
