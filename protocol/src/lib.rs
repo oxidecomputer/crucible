@@ -859,7 +859,7 @@ impl<W> MessageWriter<W>
 where
     W: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
 {
-    /// Builds a new `WireMessageWriter`
+    /// Builds a new `MessageWriter`
     #[inline]
     pub fn new(writer: W) -> Self {
         Self {
