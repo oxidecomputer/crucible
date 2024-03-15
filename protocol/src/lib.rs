@@ -157,41 +157,11 @@ pub struct ReadRequest {
     pub offset: Block,
 }
 
-// Note: if you change this, you may have to add to the dump commands that show
-// block specific data.
-/// Deserialized read response
-///
-/// `data` should be a borrowed section of the incoming `Message::ReadResponse`,
-/// to reduce memory copies.
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-pub struct ReadResponse {
-    pub eid: u64,
-    pub offset: Block,
-
-    pub data: bytes::BytesMut,
-    pub block_contexts: Vec<BlockContext>,
-}
-
-impl ReadResponse {
-    pub fn hashes(&self) -> Vec<u64> {
-        self.block_contexts.iter().map(|x| x.hash).collect()
-    }
-
-    pub fn first_hash(&self) -> Option<u64> {
-        self.block_contexts.first().map(|ctx| ctx.hash)
-    }
-
-    pub fn encryption_contexts(&self) -> Vec<Option<&EncryptionContext>> {
-        self.block_contexts
-            .iter()
-            .map(|x| x.encryption_context.as_ref())
-            .collect()
-    }
-}
-
 /// Read response data, containing data from all blocks
-#[derive(Debug)]
+///
+/// Do not derive `Clone` on this type; it will be expensive and tempting to
+/// call by accident!
+#[derive(Debug, Default)]
 pub struct RawReadResponse {
     /// Per-block metadata
     pub blocks: Vec<ReadResponseBlockMetadata>,
@@ -208,6 +178,21 @@ impl RawReadResponse {
                 block_count * block_size as usize,
             ),
         }
+    }
+
+    pub fn hashes(&self, i: usize) -> Vec<u64> {
+        self.blocks[i].hashes()
+    }
+
+    pub fn first_hash(&self, i: usize) -> Option<u64> {
+        self.blocks[i].first_hash()
+    }
+
+    pub fn encryption_contexts(
+        &self,
+        i: usize,
+    ) -> Vec<Option<&EncryptionContext>> {
+        self.blocks[i].encryption_contexts()
     }
 }
 
@@ -242,42 +227,6 @@ pub struct BlockContext {
 pub struct EncryptionContext {
     pub nonce: [u8; 12],
     pub tag: [u8; 16],
-}
-
-impl ReadResponse {
-    pub fn from_request(request: &ReadRequest, bs: usize) -> ReadResponse {
-        /*
-         * XXX Some thought will need to be given to where the read
-         * data buffer is created, both on this side and the remote.
-         * Also, we (I) need to figure out how to read data into an
-         * uninitialized buffer. Until then, we have this workaround.
-         */
-        let sz = bs;
-        let mut data = BytesMut::with_capacity(sz);
-        data.resize(sz, 1);
-
-        ReadResponse {
-            eid: request.eid,
-            offset: request.offset,
-            data,
-            block_contexts: vec![],
-        }
-    }
-
-    pub fn from_request_with_data(
-        request: &ReadRequest,
-        data: &[u8],
-    ) -> ReadResponse {
-        ReadResponse {
-            eid: request.eid,
-            offset: request.offset,
-            data: BytesMut::from(data),
-            block_contexts: vec![BlockContext {
-                hash: crucible_common::integrity_hash(&[data]),
-                encryption_context: None,
-            }],
-        }
-    }
 }
 
 /**
@@ -709,33 +658,6 @@ pub struct ReadResponseHeader {
     pub session_id: Uuid,
     pub job_id: JobId,
     pub blocks: Result<Vec<ReadResponseBlockMetadata>, CrucibleError>,
-}
-
-impl ReadResponseHeader {
-    /// Destructures into a list of block-size read responses
-    ///
-    /// # Panics
-    /// `buf.len()` must be an even multiple of `self.blocks.len()`, which is
-    /// assumed to be the block size.
-    pub fn into_read_responses(
-        self,
-        mut buf: bytes::BytesMut,
-    ) -> Result<Vec<ReadResponse>, CrucibleError> {
-        let blocks = self.blocks?;
-        assert_eq!(buf.len() % blocks.len(), 0);
-        let block_size = buf.len() / blocks.len();
-        let mut out = Vec::with_capacity(blocks.len());
-        for b in blocks {
-            let data = buf.split_to(block_size);
-            out.push(ReadResponse {
-                eid: b.eid,
-                offset: b.offset,
-                block_contexts: b.block_contexts,
-                data,
-            })
-        }
-        Ok(out)
-    }
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
