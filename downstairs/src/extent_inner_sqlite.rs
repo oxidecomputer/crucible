@@ -32,13 +32,32 @@ impl ExtentInner for SqliteInner {
         self.0.lock().unwrap().dirty()
     }
 
-    fn flush(
+    fn pre_flush(
         &mut self,
         new_flush: u64,
         new_gen: u64,
         job_id: JobOrReconciliationId,
     ) -> Result<(), CrucibleError> {
-        self.0.lock().unwrap().flush(new_flush, new_gen, job_id)
+        self.0.lock().unwrap().pre_flush(new_flush, new_gen, job_id)
+    }
+
+    fn flush_inner(
+        &mut self,
+        job_id: JobOrReconciliationId,
+    ) -> Result<(), CrucibleError> {
+        self.0.lock().unwrap().flush_inner(job_id)
+    }
+
+    fn post_flush(
+        &mut self,
+        new_flush: u64,
+        new_gen: u64,
+        job_id: JobOrReconciliationId,
+    ) -> Result<(), CrucibleError> {
+        self.0
+            .lock()
+            .unwrap()
+            .post_flush(new_flush, new_gen, job_id)
     }
 
     fn read(
@@ -190,10 +209,10 @@ impl SqliteMoreInner {
         Ok(self.dirty.get())
     }
 
-    fn flush(
+    fn pre_flush(
         &mut self,
-        new_flush: u64,
-        new_gen: u64,
+        _new_flush: u64,
+        _new_gen: u64,
         job_id: JobOrReconciliationId,
     ) -> Result<(), CrucibleError> {
         // Used for profiling
@@ -203,13 +222,18 @@ impl SqliteMoreInner {
             (job_id.get(), self.extent_number, n_dirty_blocks)
         });
 
+        Ok(())
+    }
+
+    fn flush_inner(
+        &mut self,
+        job_id: JobOrReconciliationId,
+    ) -> Result<(), CrucibleError> {
         /*
          * We must first fsync to get any outstanding data written to disk.
          * This must be done before we update the flush number.
          */
-        cdt::extent__flush__file__start!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
-        });
+        cdt::extent__flush__file__start!(|| (job_id.get(), self.extent_number));
         if let Err(e) = self.file.sync_all() {
             /*
              * XXX Retry?  Mark extent as broken?
@@ -220,10 +244,17 @@ impl SqliteMoreInner {
                 self.extent_number,
             );
         }
-        cdt::extent__flush__file__done!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
-        });
+        cdt::extent__flush__file__done!(|| (job_id.get(), self.extent_number));
 
+        Ok(())
+    }
+
+    fn post_flush(
+        &mut self,
+        new_flush: u64,
+        new_gen: u64,
+        job_id: JobOrReconciliationId,
+    ) -> Result<(), CrucibleError> {
         // Clear old block contexts. In order to be crash consistent, only
         // perform this after the extent fsync is done. For each block
         // written since the last flush, remove all block context rows where
@@ -232,9 +263,10 @@ impl SqliteMoreInner {
         // values were written. When the region is first opened, the entire
         // file is rehashed, since in that case we don't have that luxury.
 
-        cdt::extent__flush__collect__hashes__start!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
-        });
+        cdt::extent__flush__collect__hashes__start!(|| (
+            job_id.get(),
+            self.extent_number
+        ));
 
         // Rehash any parts of the file that we *may have written* data to since
         // the last flush.  (If we know that we wrote the data, then we don't
@@ -245,9 +277,10 @@ impl SqliteMoreInner {
             (job_id.get(), self.extent_number, n_rehashed as u64)
         });
 
-        cdt::extent__flush__sqlite__insert__start!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
-        });
+        cdt::extent__flush__sqlite__insert__start!(|| (
+            job_id.get(),
+            self.extent_number
+        ));
 
         // We put all of our metadb updates into a single transaction to
         // assure that we have a single sync.
@@ -260,9 +293,10 @@ impl SqliteMoreInner {
             &tx,
         )?;
 
-        cdt::extent__flush__sqlite__insert__done!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
-        });
+        cdt::extent__flush__sqlite__insert__done!(|| (
+            job_id.get(),
+            self.extent_number
+        ));
 
         self.set_flush_number(new_flush, new_gen)?;
         tx.commit()?;
@@ -271,9 +305,7 @@ impl SqliteMoreInner {
         // Finally, reset the file's seek offset to 0
         self.file.seek(SeekFrom::Start(0))?;
 
-        cdt::extent__flush__done!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
-        });
+        cdt::extent__flush__done!(|| (job_id.get(), self.extent_number));
         Ok(())
     }
 
