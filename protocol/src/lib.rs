@@ -1239,10 +1239,11 @@ impl Decoder for CrucibleDecoder {
         }
 
         // Slice the buffer so that it contains only our bincode-serialized
-        // `Message` (without any trailing data or the leading length).
+        // `Message` (without any trailing data or the leading 4-byte length).
         //
         // This leaves `src` pointing to the beginning of the next packet (which
-        // may not exist yet).
+        // may not exist yet), and `buf` pointing to just our bincode-serialized
+        // `Message`.
         let buf = src.split_to(len).split_off(4);
 
         // Deserialize just the discriminant.  This will let us decide whether
