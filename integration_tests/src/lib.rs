@@ -475,7 +475,7 @@ mod test {
             volume
                 .write(
                     Block::new(i, BLOCK_SIZE.trailing_zeros()),
-                    Bytes::from(data.clone()),
+                    BytesMut::from(data.as_slice()),
                 )
                 .await?;
 
