@@ -97,8 +97,8 @@ async fn main() -> Result<()> {
 
     // NBD server
 
-    guest.activate().await?;
     let mut cpf = crucible::CruciblePseudoFile::from(guest)?;
+    cpf.activate().await?;
 
     let listener = TcpListener::bind("127.0.0.1:10809").unwrap();
 
