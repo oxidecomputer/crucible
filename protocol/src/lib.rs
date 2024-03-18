@@ -1436,4 +1436,66 @@ mod tests {
         let mut buffer = BytesMut::new();
         assert!(encoder.encode(input, &mut buffer).is_err());
     }
+
+    /// Test that the `Message::HereIAm { version, .. }` encoding is stable
+    ///
+    /// This encoding is used to check for compatibility, so it cannot change
+    /// even upon protocol version bumps.
+    #[test]
+    fn here_i_am_version() {
+        let upstairs_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let m = Message::HereIAm {
+            version: 123,
+            upstairs_id,
+            session_id,
+            gen: 567,
+            read_only: true,
+            encrypted: false,
+            alternate_versions: vec![8, 9],
+        };
+        let encoded = bincode::serialize(&m).unwrap();
+        assert_eq!(
+            &encoded[0..16],
+            [
+                0, 0, 0, 0, // tag
+                123, 0, 0, 0, // version
+                16, 0, 0, 0, 0, 0, 0, 0, // UUID length
+            ]
+        );
+        assert_eq!(&encoded[16..32], upstairs_id.into_bytes());
+        assert_eq!(&encoded[32..40], [16, 0, 0, 0, 0, 0, 0, 0]); // UUID length
+        assert_eq!(&encoded[40..56], session_id.into_bytes());
+        assert_eq!(
+            &encoded[56..],
+            [
+                55, 2, 0, 0, 0, 0, 0, 0, // gen
+                1, // read_only
+                0, // encrypted
+                2, 0, 0, 0, 0, 0, 0, 0, // alternate_versions.len()
+                8, 0, 0, 0, // alternate_versions[0]
+                9, 0, 0, 0, // alternate_versions[1]
+            ]
+        );
+    }
+
+    /// Test that the `Message::YesItsMe { version, .. }` encoding is stable
+    ///
+    /// This encoding is used to check for compatibility, so it cannot change
+    /// even upon protocol version bumps.
+    #[test]
+    fn yes_its_me_version() {
+        let m = Message::YesItsMe {
+            version: 123,
+            repair_addr: "127.0.0.1:123".parse().unwrap(),
+        };
+        let encoded = bincode::serialize(&m).unwrap();
+        assert_eq!(
+            &encoded[0..8],
+            [
+                1, 0, 0, 0, // tag
+                123, 0, 0, 0 // version
+            ]
+        );
+    }
 }
