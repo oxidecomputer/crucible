@@ -821,4 +821,25 @@ pub(crate) mod up_test {
         // Back to being below the limit
         assert!(wr.send_io_live_repair(Some(3)));
     }
+
+    #[test]
+    fn block_eat_without_memcpy() {
+        let mut upper = Buffer::new(10, 512);
+        let mut lower = Buffer::new(10, 512);
+
+        // Write block 1
+        lower.write(512, &[0xFE; 512]);
+        let prev_ptr = upper.as_ptr();
+
+        // Eating a partially owned buffer requires a memcpy
+        upper.eat(0, &mut lower);
+        assert_eq!(prev_ptr, upper.as_ptr());
+
+        // Eating the entire owned buffer just swaps pointers
+        lower.reset(10, 512);
+        lower.write(0, &[0xFE; 512 * 10]);
+        let prev_ptr = lower.as_ptr();
+        upper.eat(0, &mut lower);
+        assert_eq!(prev_ptr, upper.as_ptr());
+    }
 }

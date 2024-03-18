@@ -1639,8 +1639,8 @@ impl Buffer {
 
     /// Consume and layer buffer contents on top of this one
     ///
-    /// The `buffer` argument will be reset to zero size, but preserves its
-    /// allocations for reuse.
+    /// The `buffer` argument will be left in an unknown state, and should be
+    /// reset before reuse.
     ///
     /// # Panics
     /// - The offset must be block-aligned
@@ -1652,15 +1652,23 @@ impl Buffer {
         assert_eq!(self.block_size, buffer.block_size);
 
         let start_block = offset / self.block_size;
-        for (b, (owned, chunk)) in buffer.blocks().enumerate() {
-            if owned {
-                let block = start_block + b;
-                self.owned[block] = 1;
-                self.block_mut(block).copy_from_slice(chunk);
+
+        // Special case: if we're reading the entire buffer and the incoming
+        // buffer is fully owned, then swap pointers instead of copying data.
+        if start_block == 0
+            && self.len() == buffer.len()
+            && buffer.owned.iter().all(|o| *o != 0)
+        {
+            std::mem::swap(self, buffer);
+        } else {
+            for (b, (owned, chunk)) in buffer.blocks().enumerate() {
+                if owned {
+                    let block = start_block + b;
+                    self.owned[block] = 1;
+                    self.block_mut(block).copy_from_slice(chunk);
+                }
             }
         }
-
-        buffer.reset(0, self.block_size);
     }
 
     pub fn owned_ref(&self) -> &[u8] {
@@ -1679,6 +1687,23 @@ impl Buffer {
 
     pub fn reset(&mut self, block_count: usize, block_size: usize) {
         self.reset_with(0, block_count, block_size);
+    }
+
+    /// Resets to the given size, clearing the `owned` array
+    ///
+    /// The data array is resized (padding with 0s) but is not cleared; it is
+    /// expected that this function will be called right before reading into it,
+    /// so clearing it is unnecessary.
+    pub(crate) fn reset_owned(
+        &mut self,
+        block_count: usize,
+        block_size: usize,
+    ) {
+        let len = block_count * block_size;
+        self.data.resize(len, 0u8);
+        self.owned.fill(0u8);
+        self.owned.resize(block_count, 0u8);
+        self.block_size = block_size;
     }
 
     /// Returns a reference to a particular block
