@@ -53,7 +53,7 @@ jobpid=$$; (sleep $(( 2 * 60 * 60 )); ps -ef; zfs list;kill $jobpid) &
 echo "Setup debug logging"
 mkdir /tmp/debug
 psrinfo -v > /tmp/debug/psrinfo.txt
-df -h > /tmp/debug/df.txt
+df -h > /tmp/debug/df.txt || true
 prstat -d d -mLc 1 > /tmp/debug/prstat.txt 2>&1 &
 iostat -T d -xn 1 > /tmp/debug/iostat.txt 2>&1 &
 mpstat -T d 1 > /tmp/debug/mpstat.txt 2>&1 &
