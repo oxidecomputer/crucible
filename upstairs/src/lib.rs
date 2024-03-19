@@ -2130,7 +2130,7 @@ pub(crate) async fn get_nexus_client(
     for target_addr in target_addrs {
         match &target_addr {
             SocketAddr::V6(target_addr) => {
-                addr = Some(target_addr.ip().clone());
+                addr = Some(*target_addr.ip());
                 break;
             }
 

@@ -2086,7 +2086,7 @@ impl Downstairs {
         {
             // If building for production, then notify Nexus of reconciliation
             // progress.
-            let reconcile_id = reconcile.id.clone();
+            let reconcile_id = reconcile.id;
             let current_task = reconcile.reconcile_task_list_index;
             let task_count = self.reconcile_repair_needed;
 
@@ -3846,8 +3846,7 @@ impl Downstairs {
     fn get_target_addrs(&self) -> Vec<SocketAddr> {
         self.clients
             .iter()
-            .map(|client| client.target_addr.clone())
-            .flat_map(|x| x)
+            .filter_map(|client| client.target_addr)
             .collect()
     }
 
@@ -3908,9 +3907,9 @@ impl Downstairs {
                         &upstairs_id,
                         &RepairStartInfo {
                             time: now,
-                            repair_id: repair_id.clone(),
+                            repair_id,
                             repair_type: UpstairsRepairType::Live,
-                            session_id: session_id.clone(),
+                            session_id,
                             repairs: repairs.clone(),
                         },
                     )
@@ -3988,9 +3987,9 @@ impl Downstairs {
                         &upstairs_id,
                         &RepairFinishInfo {
                             time: now,
-                            repair_id: repair_id.clone(),
+                            repair_id,
                             repair_type: UpstairsRepairType::Live,
-                            session_id: session_id.clone(),
+                            session_id,
                             repairs: repairs.clone(),
                             aborted,
                         },
@@ -4130,9 +4129,9 @@ impl Downstairs {
                         &upstairs_id,
                         &RepairStartInfo {
                             time: now,
-                            repair_id: repair_id.clone(),
+                            repair_id,
                             repair_type: UpstairsRepairType::Reconciliation,
-                            session_id: session_id.clone(),
+                            session_id,
                             repairs: repairs.clone(),
                         },
                     )
@@ -4216,9 +4215,9 @@ impl Downstairs {
                         &upstairs_id,
                         &RepairFinishInfo {
                             time: now,
-                            repair_id: repair_id.clone(),
+                            repair_id,
                             repair_type: UpstairsRepairType::Reconciliation,
-                            session_id: session_id.clone(),
+                            session_id,
                             repairs: repairs.clone(),
                             aborted,
                         },
