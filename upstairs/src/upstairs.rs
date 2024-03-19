@@ -2011,7 +2011,7 @@ impl Upstairs {
             "downstairs task for {client_id} stopped due to {reason:?}"
         );
 
-        #[cfg(feature = "omicron-build")]
+        #[cfg(feature = "notify-nexus")]
         self.downstairs
             .notify_nexus_of_client_task_stopped(client_id, reason);
 

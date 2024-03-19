@@ -2114,7 +2114,7 @@ pub fn up_main(
 }
 
 /// Gets a Nexus client based on any IPv6 address
-#[cfg(feature = "omicron-build")]
+#[cfg(feature = "notify-nexus")]
 pub(crate) async fn get_nexus_client(
     log: &Logger,
     target_addrs: &[SocketAddr],
@@ -2135,7 +2135,7 @@ pub(crate) async fn get_nexus_client(
             }
 
             SocketAddr::V4(_) => {
-                // This branch is seen if compiling with the `omicron-build`
+                // This branch is seen if compiling with the `notify-nexus`
                 // feature but deploying in an ipv4 environment, usually during
                 // development. `Resolver::new_from_ip` only accepts IPv6
                 // addresses, so we can't use it to look up an address for the

@@ -6,8 +6,6 @@ use std::{
     time::Duration,
 };
 
-#[cfg(feature = "omicron-build")]
-use crate::client::ClientRunResult;
 use crate::{
     cdt,
     client::{ClientAction, ClientStopReason, DownstairsClient},
@@ -31,8 +29,10 @@ use slog::{debug, error, info, o, warn, Logger};
 use uuid::Uuid;
 
 cfg_if::cfg_if! {
-    if #[cfg(feature = "omicron-build")] {
+    if #[cfg(feature = "notify-nexus")] {
         use chrono::Utc;
+
+        use crate::client::ClientRunResult;
         use crate::get_nexus_client;
 
         use nexus_client::types::DownstairsClientStopped;
@@ -1009,7 +1009,7 @@ impl Downstairs {
                 reconcile_task_list_index: 0,
             });
 
-            #[cfg(feature = "omicron-build")]
+            #[cfg(feature = "notify-nexus")]
             {
                 // If building for production, then notify Nexus when any
                 // reconciliation starts.
@@ -1143,7 +1143,7 @@ impl Downstairs {
             self.repair.as_ref().unwrap().id
         );
 
-        #[cfg(feature = "omicron-build")]
+        #[cfg(feature = "notify-nexus")]
         {
             // If building for production, then notify Nexus when any
             // live repair starts.
@@ -1379,7 +1379,7 @@ impl Downstairs {
                     let aborting = repair.aborting_repair;
                     let source_downstairs = repair.source_downstairs;
 
-                    #[cfg(feature = "omicron-build")]
+                    #[cfg(feature = "notify-nexus")]
                     {
                         let repair_id = repair.id;
                         let extent_count = repair.extent_count;
@@ -1418,7 +1418,7 @@ impl Downstairs {
                     }
                 }
 
-                #[cfg(feature = "omicron-build")]
+                #[cfg(feature = "notify-nexus")]
                 {
                     // If building for production, then notify Nexus when any
                     // live repair completes.
@@ -2082,7 +2082,7 @@ impl Downstairs {
             self.reconcile_repair_needed,
         );
 
-        #[cfg(feature = "omicron-build")]
+        #[cfg(feature = "notify-nexus")]
         {
             // If building for production, then notify Nexus of reconciliation
             // progress.
@@ -2201,7 +2201,7 @@ impl Downstairs {
 
         assert!(self.reconcile.is_some());
 
-        #[cfg(feature = "omicron-build")]
+        #[cfg(feature = "notify-nexus")]
         {
             // If building for production, then notify Nexus when any
             // reconciliation finishes.
@@ -2231,7 +2231,7 @@ impl Downstairs {
             // reconciliation completed
             assert!(self.reconcile.is_some());
 
-            #[cfg(feature = "omicron-build")]
+            #[cfg(feature = "notify-nexus")]
             {
                 // If building for production, then notify Nexus when any
                 // reconciliation finishes.
@@ -3842,7 +3842,7 @@ impl Downstairs {
         }
     }
 
-    #[cfg(feature = "omicron-build")]
+    #[cfg(feature = "notify-nexus")]
     fn get_target_addrs(&self) -> Vec<SocketAddr> {
         self.clients
             .iter()
@@ -3850,7 +3850,7 @@ impl Downstairs {
             .collect()
     }
 
-    #[cfg(feature = "omicron-build")]
+    #[cfg(feature = "notify-nexus")]
     fn notify_nexus_of_live_repair_start(&self, repair: &LiveRepairData) {
         let log = self.log.new(o!("repair" => repair.id.to_string()));
 
@@ -3928,7 +3928,7 @@ impl Downstairs {
         });
     }
 
-    #[cfg(feature = "omicron-build")]
+    #[cfg(feature = "notify-nexus")]
     fn notify_nexus_of_live_repair_finish(&self, repair: &LiveRepairData) {
         let log = self.log.new(o!("repair" => repair.id.to_string()));
 
@@ -4009,7 +4009,7 @@ impl Downstairs {
         });
     }
 
-    #[cfg(feature = "omicron-build")]
+    #[cfg(feature = "notify-nexus")]
     fn notify_nexus_of_live_repair_progress(
         &self,
         repair_id: Uuid,
@@ -4071,7 +4071,7 @@ impl Downstairs {
         });
     }
 
-    #[cfg(feature = "omicron-build")]
+    #[cfg(feature = "notify-nexus")]
     fn notify_nexus_of_reconcile_start(&self, reconcile: &ReconcileData) {
         let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
 
@@ -4153,7 +4153,7 @@ impl Downstairs {
         });
     }
 
-    #[cfg(feature = "omicron-build")]
+    #[cfg(feature = "notify-nexus")]
     fn notify_nexus_of_reconcile_finished(
         &self,
         reconcile: &ReconcileData,
@@ -4240,7 +4240,7 @@ impl Downstairs {
         });
     }
 
-    #[cfg(feature = "omicron-build")]
+    #[cfg(feature = "notify-nexus")]
     fn notify_nexus_of_reconcile_progress(
         &self,
         reconcile_id: Uuid,
@@ -4302,7 +4302,7 @@ impl Downstairs {
         });
     }
 
-    #[cfg(feature = "omicron-build")]
+    #[cfg(feature = "notify-nexus")]
     pub(crate) fn notify_nexus_of_client_task_stopped(
         &self,
         client_id: ClientId,

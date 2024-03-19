@@ -11,7 +11,7 @@ path = "src/lib.rs"
 
 [features]
 asm = ["usdt/asm"]
-omicron-build = ["nexus-client", "internal-dns", "progenitor-client", "http", "omicron-uuid-kinds"]
+notify-nexus = ["nexus-client", "internal-dns", "progenitor-client", "http", "omicron-uuid-kinds"]
 
 [dependencies]
 anyhow.workspace = true

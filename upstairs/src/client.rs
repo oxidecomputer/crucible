@@ -2237,7 +2237,7 @@ impl DownstairsClient {
         self.client_delay_us.load(Ordering::Relaxed)
     }
 
-    #[cfg(feature = "omicron-build")]
+    #[cfg(feature = "notify-nexus")]
     pub(crate) fn id(&self) -> Option<Uuid> {
         self.region_uuid
     }
