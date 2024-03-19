@@ -2041,7 +2041,7 @@ impl Downstairs {
     pub(crate) async fn send_next_reconciliation_req(&mut self) -> bool {
         assert!(self.reconcile_current_work.is_none());
 
-        let Some(ref mut reconcile) = self.reconcile else {
+        let Some(reconcile) = &mut self.reconcile else {
             panic!("`self.reconcile` must be Some during reconciliation");
         };
 
