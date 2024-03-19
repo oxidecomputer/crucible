@@ -802,6 +802,7 @@ dependencies = [
  "base64 0.21.7",
  "bincode",
  "bytes",
+ "cfg-if",
  "chrono",
  "crucible-client-types",
  "crucible-common",

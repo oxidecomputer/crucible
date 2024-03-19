@@ -30,6 +30,28 @@ use ringbuffer::RingBuffer;
 use slog::{debug, error, info, o, warn, Logger};
 use uuid::Uuid;
 
+cfg_if::cfg_if! {
+    if #[cfg(feature = "omicron-build")] {
+        use chrono::Utc;
+        use crate::get_nexus_client;
+
+        use nexus_client::types::DownstairsClientStopped;
+        use nexus_client::types::DownstairsClientStoppedReason;
+        use nexus_client::types::DownstairsUnderRepair;
+        use nexus_client::types::RepairFinishInfo;
+        use nexus_client::types::RepairProgress;
+        use nexus_client::types::RepairStartInfo;
+        use nexus_client::types::UpstairsRepairType;
+
+        use omicron_uuid_kinds::DownstairsKind;
+        use omicron_uuid_kinds::GenericUuid;
+        use omicron_uuid_kinds::TypedUuid;
+        use omicron_uuid_kinds::UpstairsKind;
+        use omicron_uuid_kinds::UpstairsRepairKind;
+        use omicron_uuid_kinds::UpstairsSessionKind;
+    }
+}
+
 /// Downstairs data
 ///
 /// This data structure is responsible for tracking outstanding jobs from the
@@ -3831,17 +3853,6 @@ impl Downstairs {
 
     #[cfg(feature = "omicron-build")]
     fn notify_nexus_of_live_repair_start(&self, repair: &LiveRepairData) {
-        use crate::get_nexus_client;
-        use chrono::Utc;
-        use nexus_client::types::DownstairsUnderRepair;
-        use nexus_client::types::RepairStartInfo;
-        use nexus_client::types::UpstairsRepairType;
-        use omicron_uuid_kinds::GenericUuid;
-        use omicron_uuid_kinds::TypedUuid;
-        use omicron_uuid_kinds::UpstairsKind;
-        use omicron_uuid_kinds::UpstairsRepairKind;
-        use omicron_uuid_kinds::UpstairsSessionKind;
-
         let log = self.log.new(o!("repair" => repair.id.to_string()));
 
         let mut repairs = Vec::with_capacity(repair.repair_downstairs.len());
@@ -3920,17 +3931,6 @@ impl Downstairs {
 
     #[cfg(feature = "omicron-build")]
     fn notify_nexus_of_live_repair_finish(&self, repair: &LiveRepairData) {
-        use crate::get_nexus_client;
-        use chrono::Utc;
-        use nexus_client::types::DownstairsUnderRepair;
-        use nexus_client::types::RepairFinishInfo;
-        use nexus_client::types::UpstairsRepairType;
-        use omicron_uuid_kinds::GenericUuid;
-        use omicron_uuid_kinds::TypedUuid;
-        use omicron_uuid_kinds::UpstairsKind;
-        use omicron_uuid_kinds::UpstairsRepairKind;
-        use omicron_uuid_kinds::UpstairsSessionKind;
-
         let log = self.log.new(o!("repair" => repair.id.to_string()));
 
         let aborted = repair.aborting_repair;
@@ -4017,14 +4017,6 @@ impl Downstairs {
         current_extent: u64,
         extent_count: u64,
     ) {
-        use crate::get_nexus_client;
-        use chrono::Utc;
-        use nexus_client::types::RepairProgress;
-        use omicron_uuid_kinds::GenericUuid;
-        use omicron_uuid_kinds::TypedUuid;
-        use omicron_uuid_kinds::UpstairsKind;
-        use omicron_uuid_kinds::UpstairsRepairKind;
-
         let upstairs_id: TypedUuid<UpstairsKind> =
             TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
         let repair_id: TypedUuid<UpstairsRepairKind> =
@@ -4082,17 +4074,6 @@ impl Downstairs {
 
     #[cfg(feature = "omicron-build")]
     fn notify_nexus_of_reconcile_start(&self, reconcile: &ReconcileData) {
-        use crate::get_nexus_client;
-        use chrono::Utc;
-        use nexus_client::types::DownstairsUnderRepair;
-        use nexus_client::types::RepairStartInfo;
-        use nexus_client::types::UpstairsRepairType;
-        use omicron_uuid_kinds::GenericUuid;
-        use omicron_uuid_kinds::TypedUuid;
-        use omicron_uuid_kinds::UpstairsKind;
-        use omicron_uuid_kinds::UpstairsRepairKind;
-        use omicron_uuid_kinds::UpstairsSessionKind;
-
         let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
 
         // Reconcilation involves everyone
@@ -4179,17 +4160,6 @@ impl Downstairs {
         reconcile: &ReconcileData,
         aborted: bool,
     ) {
-        use crate::get_nexus_client;
-        use chrono::Utc;
-        use nexus_client::types::DownstairsUnderRepair;
-        use nexus_client::types::RepairFinishInfo;
-        use nexus_client::types::UpstairsRepairType;
-        use omicron_uuid_kinds::GenericUuid;
-        use omicron_uuid_kinds::TypedUuid;
-        use omicron_uuid_kinds::UpstairsKind;
-        use omicron_uuid_kinds::UpstairsRepairKind;
-        use omicron_uuid_kinds::UpstairsSessionKind;
-
         let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
 
         // Reconcilation involves everyone
@@ -4278,14 +4248,6 @@ impl Downstairs {
         current_task: usize,
         task_count: usize,
     ) {
-        use crate::get_nexus_client;
-        use chrono::Utc;
-        use nexus_client::types::RepairProgress;
-        use omicron_uuid_kinds::GenericUuid;
-        use omicron_uuid_kinds::TypedUuid;
-        use omicron_uuid_kinds::UpstairsKind;
-        use omicron_uuid_kinds::UpstairsRepairKind;
-
         let upstairs_id: TypedUuid<UpstairsKind> =
             TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
         let repair_id: TypedUuid<UpstairsRepairKind> =
@@ -4347,15 +4309,6 @@ impl Downstairs {
         client_id: ClientId,
         reason: ClientRunResult,
     ) {
-        use crate::get_nexus_client;
-        use chrono::Utc;
-        use nexus_client::types::DownstairsClientStopped;
-        use nexus_client::types::DownstairsClientStoppedReason;
-        use omicron_uuid_kinds::DownstairsKind;
-        use omicron_uuid_kinds::GenericUuid;
-        use omicron_uuid_kinds::TypedUuid;
-        use omicron_uuid_kinds::UpstairsKind;
-
         let upstairs_id: TypedUuid<UpstairsKind> =
             TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
 
