@@ -160,7 +160,7 @@ impl LiveRepairState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct LiveRepairData {
     /// An ID uniquely identifying this repair
     id: Uuid,
@@ -204,7 +204,7 @@ pub(crate) struct LiveRepairData {
     state: LiveRepairState,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct ReconcileData {
     /// An ID uniquely identifying this reconciliation
     id: Uuid,
@@ -991,8 +991,8 @@ impl Downstairs {
             {
                 // If building for production, then notify Nexus when any
                 // reconciliation starts.
-                let cloned_reconcile = self.reconcile.as_ref().unwrap().clone();
-                self.notify_nexus_of_reconcile_start(cloned_reconcile);
+                let reconcile = self.reconcile.as_ref().unwrap();
+                self.notify_nexus_of_reconcile_start(reconcile);
             }
 
             for c in self.clients.iter_mut() {
@@ -1125,8 +1125,8 @@ impl Downstairs {
         {
             // If building for production, then notify Nexus when any
             // live repair starts.
-            let cloned_repair = self.repair.as_ref().unwrap().clone();
-            self.notify_nexus_of_live_repair_start(cloned_repair);
+            let repair = self.repair.as_ref().unwrap();
+            self.notify_nexus_of_live_repair_start(repair);
         }
 
         // We'll be back in on_live_repair once the initial job finishes
@@ -1400,8 +1400,8 @@ impl Downstairs {
                 {
                     // If building for production, then notify Nexus when any
                     // live repair completes.
-                    let cloned_repair = repair.clone();
-                    self.notify_nexus_of_live_repair_finish(cloned_repair);
+                    let repair = self.repair.as_ref().unwrap();
+                    self.notify_nexus_of_live_repair_finish(repair);
                 }
 
                 // Set `self.repair` to `None` on our way out the door (because
@@ -2183,10 +2183,9 @@ impl Downstairs {
         {
             // If building for production, then notify Nexus when any
             // reconciliation finishes.
-            let cloned_reconcile = self.reconcile.as_ref().unwrap().clone();
+            let reconcile = self.reconcile.as_ref().unwrap();
             self.notify_nexus_of_reconcile_finished(
-                cloned_reconcile,
-                true, /* aborted */
+                reconcile, true, /* aborted */
             );
         }
 
@@ -2214,10 +2213,9 @@ impl Downstairs {
             {
                 // If building for production, then notify Nexus when any
                 // reconciliation finishes.
-                let cloned_reconcile = self.reconcile.as_ref().unwrap().clone();
+                let reconcile = self.reconcile.as_ref().unwrap();
                 self.notify_nexus_of_reconcile_finished(
-                    cloned_reconcile,
-                    false, /* aborted */
+                    reconcile, false, /* aborted */
                 );
             }
 
@@ -3823,7 +3821,7 @@ impl Downstairs {
     }
 
     #[cfg(feature = "omicron-build")]
-    fn get_target_addrs(&mut self) -> Vec<SocketAddr> {
+    fn get_target_addrs(&self) -> Vec<SocketAddr> {
         self.clients
             .iter()
             .map(|client| client.target_addr.clone())
@@ -3832,7 +3830,7 @@ impl Downstairs {
     }
 
     #[cfg(feature = "omicron-build")]
-    fn notify_nexus_of_live_repair_start(&mut self, repair: LiveRepairData) {
+    fn notify_nexus_of_live_repair_start(&self, repair: &LiveRepairData) {
         use crate::get_nexus_client;
         use chrono::Utc;
         use nexus_client::types::DownstairsUnderRepair;
@@ -3915,7 +3913,7 @@ impl Downstairs {
     }
 
     #[cfg(feature = "omicron-build")]
-    fn notify_nexus_of_live_repair_finish(&mut self, repair: LiveRepairData) {
+    fn notify_nexus_of_live_repair_finish(&self, repair: &LiveRepairData) {
         use crate::get_nexus_client;
         use chrono::Utc;
         use nexus_client::types::DownstairsUnderRepair;
@@ -4002,7 +4000,7 @@ impl Downstairs {
 
     #[cfg(feature = "omicron-build")]
     fn notify_nexus_of_live_repair_progress(
-        &mut self,
+        &self,
         repair_id: Uuid,
         current_extent: u64,
         extent_count: u64,
@@ -4067,7 +4065,7 @@ impl Downstairs {
     }
 
     #[cfg(feature = "omicron-build")]
-    fn notify_nexus_of_reconcile_start(&mut self, reconcile: ReconcileData) {
+    fn notify_nexus_of_reconcile_start(&self, reconcile: &ReconcileData) {
         use crate::get_nexus_client;
         use chrono::Utc;
         use nexus_client::types::DownstairsUnderRepair;
@@ -4155,8 +4153,8 @@ impl Downstairs {
 
     #[cfg(feature = "omicron-build")]
     fn notify_nexus_of_reconcile_finished(
-        &mut self,
-        reconcile: ReconcileData,
+        &self,
+        reconcile: &ReconcileData,
         aborted: bool,
     ) {
         use crate::get_nexus_client;
@@ -4247,7 +4245,7 @@ impl Downstairs {
 
     #[cfg(feature = "omicron-build")]
     fn notify_nexus_of_reconcile_progress(
-        &mut self,
+        &self,
         reconcile_id: Uuid,
         current_task: usize,
         task_count: usize,
@@ -4313,7 +4311,7 @@ impl Downstairs {
 
     #[cfg(feature = "omicron-build")]
     pub(crate) fn notify_nexus_of_client_task_stopped(
-        &mut self,
+        &self,
         client_id: ClientId,
         reason: ClientRunResult,
     ) {
