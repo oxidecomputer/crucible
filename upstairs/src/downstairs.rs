@@ -3842,8 +3842,7 @@ impl Downstairs {
         use omicron_uuid_kinds::UpstairsRepairKind;
         use omicron_uuid_kinds::UpstairsSessionKind;
 
-        let mut repairs: Vec<DownstairsUnderRepair> =
-            Vec::with_capacity(repair.repair_downstairs.len());
+        let mut repairs = Vec::with_capacity(repair.repair_downstairs.len());
 
         for cid in &repair.repair_downstairs {
             let Some(region_uuid) = self.clients[*cid].id() else {
@@ -3927,8 +3926,7 @@ impl Downstairs {
 
         let aborted = repair.aborting_repair;
 
-        let mut repairs: Vec<DownstairsUnderRepair> =
-            Vec::with_capacity(repair.repair_downstairs.len());
+        let mut repairs = Vec::with_capacity(repair.repair_downstairs.len());
 
         for cid in &repair.repair_downstairs {
             let Some(region_uuid) = self.clients[*cid].id() else {
@@ -4078,8 +4076,7 @@ impl Downstairs {
         use omicron_uuid_kinds::UpstairsSessionKind;
 
         // Reconcilation involves everyone
-        let mut repairs: Vec<DownstairsUnderRepair> =
-            Vec::with_capacity(self.clients.len());
+        let mut repairs = Vec::with_capacity(self.clients.len());
 
         for client in self.clients.iter() {
             let Some(region_uuid) = client.id() else {
@@ -4169,8 +4166,7 @@ impl Downstairs {
         use omicron_uuid_kinds::UpstairsSessionKind;
 
         // Reconcilation involves everyone
-        let mut repairs: Vec<DownstairsUnderRepair> =
-            Vec::with_capacity(self.clients.len());
+        let mut repairs = Vec::with_capacity(self.clients.len());
 
         for client in self.clients.iter() {
             let Some(region_uuid) = client.id() else {
