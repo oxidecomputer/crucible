@@ -3842,7 +3842,7 @@ impl Downstairs {
         use omicron_uuid_kinds::UpstairsRepairKind;
         use omicron_uuid_kinds::UpstairsSessionKind;
 
-        let log = self.log.new(o!("repair" => repair_id.to_string()));
+        let log = self.log.new(o!("repair" => repair.id.to_string()));
 
         let mut repairs = Vec::with_capacity(repair.repair_downstairs.len());
 
@@ -3931,7 +3931,7 @@ impl Downstairs {
         use omicron_uuid_kinds::UpstairsRepairKind;
         use omicron_uuid_kinds::UpstairsSessionKind;
 
-        let log = self.log.new(o!("repair" => repair_id.to_string()));
+        let log = self.log.new(o!("repair" => repair.id.to_string()));
 
         let aborted = repair.aborting_repair;
 
@@ -4093,12 +4093,12 @@ impl Downstairs {
         use omicron_uuid_kinds::UpstairsRepairKind;
         use omicron_uuid_kinds::UpstairsSessionKind;
 
-        let log = self.log.new(o!("reconcile" => repair_id.to_string()));
+        let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
 
         // Reconcilation involves everyone
         let mut repairs = Vec::with_capacity(self.clients.len());
 
-        for client in self.clients.iter() {
+        for (cid, client) in self.clients.iter().enumerate() {
             let Some(region_uuid) = client.id() else {
                 // A downstairs doesn't have an id but is being reconciled...?
                 warn!(log, "downstairs {cid} has a None id?");
@@ -4190,12 +4190,12 @@ impl Downstairs {
         use omicron_uuid_kinds::UpstairsRepairKind;
         use omicron_uuid_kinds::UpstairsSessionKind;
 
-        let log = self.log.new(o!("reconcile" => repair_id.to_string()));
+        let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
 
         // Reconcilation involves everyone
         let mut repairs = Vec::with_capacity(self.clients.len());
 
-        for client in self.clients.iter() {
+        for (cid, client) in self.clients.iter().enumerate() {
             let Some(region_uuid) = client.id() else {
                 // A downstairs doesn't have an id but is being reconciled...?
                 warn!(log, "downstairs {cid} has a None id?");
