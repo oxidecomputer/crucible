@@ -2012,10 +2012,8 @@ impl Upstairs {
         );
 
         #[cfg(feature = "omicron-build")]
-        {
-            self.downstairs
-                .notify_nexus_of_client_task_stopped(client_id, reason);
-        }
+        self.downstairs
+            .notify_nexus_of_client_task_stopped(client_id, reason);
 
         // If the upstairs is already active (or trying to go active), then the
         // downstairs should automatically call PromoteToActive when it reaches
