@@ -3842,17 +3842,21 @@ impl Downstairs {
         use omicron_uuid_kinds::UpstairsRepairKind;
         use omicron_uuid_kinds::UpstairsSessionKind;
 
+        let log = self.log.new(o!("repair" => repair_id.to_string()));
+
         let mut repairs = Vec::with_capacity(repair.repair_downstairs.len());
 
         for cid in &repair.repair_downstairs {
             let Some(region_uuid) = self.clients[*cid].id() else {
                 // A downstairs doesn't have an id but is being repaired...?
+                warn!(log, "downstairs {cid} has a None id?");
                 continue;
             };
 
             let Some(target_addr) = self.clients[*cid].target_addr else {
                 // A downstairs doesn't have a target_addr but is being
                 // repaired...?
+                warn!(log, "downstairs {cid} has a None target_addr?");
                 continue;
             };
 
@@ -3870,7 +3874,6 @@ impl Downstairs {
             TypedUuid::from_untyped_uuid(repair.id);
 
         let now = Utc::now();
-        let log = self.log.new(o!("repair" => repair_id.to_string()));
 
         // Spawn a task so we don't block the main loop talking to
         // Nexus.
@@ -3881,6 +3884,10 @@ impl Downstairs {
             else {
                 // Exit if no Nexus client returned from DNS - our notification
                 // is best effort.
+                error!(
+                    log,
+                    "no Nexus client from DNS, aborting start notification"
+                );
                 return;
             };
 
@@ -3924,6 +3931,8 @@ impl Downstairs {
         use omicron_uuid_kinds::UpstairsRepairKind;
         use omicron_uuid_kinds::UpstairsSessionKind;
 
+        let log = self.log.new(o!("repair" => repair_id.to_string()));
+
         let aborted = repair.aborting_repair;
 
         let mut repairs = Vec::with_capacity(repair.repair_downstairs.len());
@@ -3931,12 +3940,14 @@ impl Downstairs {
         for cid in &repair.repair_downstairs {
             let Some(region_uuid) = self.clients[*cid].id() else {
                 // A downstairs doesn't have an id but is being repaired...?
+                warn!(log, "downstairs {cid} has a None id?");
                 continue;
             };
 
             let Some(target_addr) = self.clients[*cid].target_addr else {
                 // A downstairs doesn't have a target_addr but is being
                 // repaired...?
+                warn!(log, "downstairs {cid} has a None target_addr?");
                 continue;
             };
 
@@ -3954,7 +3965,6 @@ impl Downstairs {
             TypedUuid::from_untyped_uuid(repair.id);
 
         let now = Utc::now();
-        let log = self.log.new(o!("repair" => repair_id.to_string()));
 
         // Spawn a task so we don't block the main loop talking to
         // Nexus.
@@ -3965,6 +3975,10 @@ impl Downstairs {
             else {
                 // Exit if no Nexus client returned from DNS - our notification
                 // is best effort.
+                error!(
+                    log,
+                    "no Nexus client from DNS, aborting finish notification"
+                );
                 return;
             };
 
@@ -4026,8 +4040,12 @@ impl Downstairs {
             let Some(nexus_client) =
                 get_nexus_client(&log, &target_addrs).await
             else {
-                // If no Nexus client from DNS, spin until one arrives - our
-                // notification is best effort.
+                // Exit if no Nexus client returned from DNS - our notification
+                // is best effort.
+                error!(
+                    log,
+                    "no Nexus client from DNS, aborting progress notification"
+                );
                 return;
             };
 
@@ -4075,18 +4093,22 @@ impl Downstairs {
         use omicron_uuid_kinds::UpstairsRepairKind;
         use omicron_uuid_kinds::UpstairsSessionKind;
 
+        let log = self.log.new(o!("reconcile" => repair_id.to_string()));
+
         // Reconcilation involves everyone
         let mut repairs = Vec::with_capacity(self.clients.len());
 
         for client in self.clients.iter() {
             let Some(region_uuid) = client.id() else {
                 // A downstairs doesn't have an id but is being reconciled...?
+                warn!(log, "downstairs {cid} has a None id?");
                 continue;
             };
 
             let Some(target_addr) = client.target_addr else {
                 // A downstairs doesn't have a target_addr but is being
                 // reconciled...?
+                warn!(log, "downstairs {cid} has a None target_addr?");
                 continue;
             };
 
@@ -4104,7 +4126,6 @@ impl Downstairs {
             TypedUuid::from_untyped_uuid(reconcile.id);
 
         let now = Utc::now();
-        let log = self.log.new(o!("reconcile" => repair_id.to_string()));
 
         // Spawn a task so we don't block the main loop talking to
         // Nexus.
@@ -4115,6 +4136,10 @@ impl Downstairs {
             else {
                 // Exit if no Nexus client returned from DNS - our notification
                 // is best effort.
+                error!(
+                    log,
+                    "no Nexus client from DNS, aborting start notification"
+                );
                 return;
             };
 
@@ -4165,18 +4190,22 @@ impl Downstairs {
         use omicron_uuid_kinds::UpstairsRepairKind;
         use omicron_uuid_kinds::UpstairsSessionKind;
 
+        let log = self.log.new(o!("reconcile" => repair_id.to_string()));
+
         // Reconcilation involves everyone
         let mut repairs = Vec::with_capacity(self.clients.len());
 
         for client in self.clients.iter() {
             let Some(region_uuid) = client.id() else {
                 // A downstairs doesn't have an id but is being reconciled...?
+                warn!(log, "downstairs {cid} has a None id?");
                 continue;
             };
 
             let Some(target_addr) = client.target_addr else {
                 // A downstairs doesn't have a target_addr but is being
                 // reconciled...?
+                warn!(log, "downstairs {cid} has a None target_addr?");
                 continue;
             };
 
@@ -4194,7 +4223,6 @@ impl Downstairs {
             TypedUuid::from_untyped_uuid(reconcile.id);
 
         let now = Utc::now();
-        let log = self.log.new(o!("reconcile" => repair_id.to_string()));
 
         // Spawn a task so we don't block the main loop talking to
         // Nexus.
@@ -4205,6 +4233,10 @@ impl Downstairs {
             else {
                 // Exit if no Nexus client returned from DNS - our notification
                 // is best effort.
+                error!(
+                    log,
+                    "no Nexus client from DNS, aborting finish notification"
+                );
                 return;
             };
 
@@ -4271,6 +4303,10 @@ impl Downstairs {
             else {
                 // Exit if no Nexus client returned from DNS - our notification
                 // is best effort.
+                error!(
+                    log,
+                    "no Nexus client from DNS, aborting progress notification"
+                );
                 return;
             };
 
