@@ -49,7 +49,7 @@ impl<T, E> Drop for BlockRes<T, E> {
  * When BlockOps are sent to a guest, the calling function receives a waiter
  * that it can block on. This uses a single-use channel to receive the
  * result of a particular operation, and is meant to be paired with a
- * BlockReq.
+ * sender stored in the `BlockOp`.
  */
 #[must_use]
 pub(crate) struct BlockReqWaiter<T, E = CrucibleError> {
