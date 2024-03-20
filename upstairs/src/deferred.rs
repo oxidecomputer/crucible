@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::{
-    client::ConnectionId, upstairs::UpstairsConfig, BlockContext, BlockOp,
+    client::ConnectionId, upstairs::UpstairsConfig, BlockContext, BlockReq,
     BlockRes, ClientId, ImpactedBlocks, Message,
 };
 use bytes::BytesMut;
@@ -110,16 +110,16 @@ pub(crate) struct DeferredWrite {
     pub cfg: Arc<UpstairsConfig>,
 }
 
-/// Result of a deferred `BlockOp`
+/// Result of a deferred `BlockReq`
 ///
-/// In most cases, this is simply the original `BlockOp` (stored in
-/// `DeferredBlockOp::Other`).  The exception is `BlockOp::Write` and
-/// `BlockOp::WriteUnwritten`, which require encryption; in these cases,
-/// encryption is done off-thread and the result is a `DeferredBlockOp::Write`.
+/// In most cases, this is simply the original `BlockReq` (stored in
+/// `DeferredBlockReq::Other`).  The exception is `BlockReq::Write` and
+/// `BlockReq::WriteUnwritten`, which require encryption; in these cases,
+/// encryption is done off-thread and the result is a `DeferredBlockReq::Write`.
 #[derive(Debug)]
-pub(crate) enum DeferredBlockOp {
+pub(crate) enum DeferredBlockReq {
     Write(EncryptedWrite),
-    Other(BlockOp),
+    Other(BlockReq),
 }
 
 #[derive(Debug)]

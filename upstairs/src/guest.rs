@@ -10,8 +10,8 @@ use std::{
 };
 
 use crate::{
-    BlockIO, BlockOp, BlockReqWaiter, BlockRes, Buffer, JobId, ReplaceResult,
-    UpstairsAction,
+    BlockIO, BlockOp, BlockReq, BlockReqWaiter, BlockRes, Buffer, JobId,
+    ReplaceResult, UpstairsAction,
 };
 use crucible_common::{
     build_logger, crucible_bail, Block, CrucibleError, IO_OUTSTANDING_MAX_JOBS,
@@ -285,7 +285,7 @@ impl Default for GuestWork {
 #[derive(Debug)]
 pub struct Guest {
     /// New requests from outside go into this queue
-    req_tx: mpsc::Sender<BlockOp>,
+    req_tx: mpsc::Sender<BlockReq>,
 
     /// Local cache for block size
     ///
@@ -407,7 +407,7 @@ impl Guest {
      * It's public for testing, but shouldn't be called
      */
     async fn send(&self, op: BlockOp) {
-        if let Err(e) = self.req_tx.send(op).await {
+        if let Err(e) = self.req_tx.send(BlockReq { op }).await {
             // This could happen during shutdown, if the up_main task is
             // destroyed while the Guest is still trying to do work.
             //
@@ -745,7 +745,7 @@ pub struct GuestLimits {
 /// * Wait for them to complete, then notify the guest through oneshot channels
 pub struct GuestIoHandle {
     /// Queue to receive new blockreqs
-    req_rx: mpsc::Receiver<BlockOp>,
+    req_rx: mpsc::Receiver<BlockReq>,
 
     /// Guest IO and bandwidth limits
     limits: GuestLimits,
@@ -755,7 +755,7 @@ pub struct GuestIoHandle {
     /// If a `BlockOp` was pulled from the queue but couldn't be used due to
     /// IOP or bandwidth limiting, it's stored here instead (and we check this
     /// before awaiting the queue).
-    req_head: Option<BlockOp>,
+    req_head: Option<BlockReq>,
 
     /// Are we currently IOP or bandwidth limited?
     ///
@@ -848,9 +848,9 @@ impl GuestIoHandle {
 
         // Check if we can consume right away
         let iop_limit_applies =
-            self.limits.iop_limit.is_some() && req.consumes_iops();
+            self.limits.iop_limit.is_some() && req.op.consumes_iops();
         let bw_limit_applies =
-            self.limits.bw_limit.is_some() && req.sz().is_some();
+            self.limits.bw_limit.is_some() && req.op.sz().is_some();
 
         if !iop_limit_applies && !bw_limit_applies {
             return UpstairsAction::Guest(req);
@@ -869,14 +869,14 @@ impl GuestIoHandle {
         // reached.
 
         if let Some(bw_limit) = self.limits.bw_limit {
-            if req.sz().is_some() && self.bw_tokens >= bw_limit {
+            if req.op.sz().is_some() && self.bw_tokens >= bw_limit {
                 bw_check_ok = false;
             }
         }
 
         if let Some(iop_limit_cfg) = &self.limits.iop_limit {
             let bytes_per_iops = iop_limit_cfg.bytes_per_iop;
-            if req.iops(bytes_per_iops).is_some()
+            if req.op.iops(bytes_per_iops).is_some()
                 && self.iop_tokens >= iop_limit_cfg.iop_limit
             {
                 iop_check_ok = false;
@@ -887,13 +887,13 @@ impl GuestIoHandle {
         // block req
         if bw_check_ok && iop_check_ok {
             if self.limits.bw_limit.is_some() {
-                if let Some(sz) = req.sz() {
+                if let Some(sz) = req.op.sz() {
                     self.bw_tokens += sz;
                 }
             }
 
             if let Some(cfg) = &self.limits.iop_limit {
-                if let Some(req_iops) = req.iops(cfg.bytes_per_iop) {
+                if let Some(req_iops) = req.op.iops(cfg.bytes_per_iop) {
                     self.iop_tokens += req_iops;
                 }
             }

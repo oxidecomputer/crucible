@@ -46,7 +46,7 @@ pub mod block_io;
 pub use block_io::{FileBlockIO, ReqwestBlockIO};
 
 pub mod block_req;
-pub(crate) use block_req::{BlockReqWaiter, BlockRes};
+pub(crate) use block_req::{BlockReq, BlockReqWaiter, BlockRes};
 
 mod buffer;
 pub use buffer::Buffer; // used in BlockIO::Read, so it must be public

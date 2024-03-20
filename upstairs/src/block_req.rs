@@ -2,6 +2,11 @@
 use super::*;
 use tokio::sync::oneshot;
 
+#[derive(Debug)]
+pub(crate) struct BlockReq {
+    pub op: BlockOp,
+}
+
 #[must_use]
 #[derive(Debug)]
 pub(crate) struct BlockRes<T, E = CrucibleError>(
