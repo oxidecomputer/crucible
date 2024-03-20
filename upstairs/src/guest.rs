@@ -10,8 +10,8 @@ use std::{
 };
 
 use crate::{
-    BlockIO, BlockOp, BlockReq, BlockReqReply, BlockReqWaiter, BlockRes,
-    Buffer, JobId, ReplaceResult, UpstairsAction,
+    BlockIO, BlockOp, BlockReqWaiter, BlockRes, Buffer, JobId, ReplaceResult,
+    UpstairsAction,
 };
 use crucible_common::{
     build_logger, crucible_bail, Block, CrucibleError, IO_OUTSTANDING_MAX_JOBS,
@@ -42,13 +42,8 @@ struct GtoS {
     ds_id: JobId,
 
     /*
-     * Buffer provided by the guest request. If this is a read,
-     * data will be written here.
-     */
-    guest_buffer: Option<Buffer>,
-
-    /*
-     * Notify the caller waiting on the job to finish.
+     * Handle to notify the guest when we're done
+     *
      * This is an Option for the case where we want to send an IO on behalf
      * of the Upstairs (not guest driven). Right now the only case where we
      * need that is to flush data to downstairs when the guest has not sent
@@ -56,22 +51,29 @@ struct GtoS {
      * If the sender is None, we know it's a request from the Upstairs and
      * we don't have to ACK it to anyone.
      */
-    res: Option<BlockRes>,
+    res: Option<GuestBlockRes>,
+}
+
+#[derive(Debug)]
+pub(crate) enum GuestBlockRes {
+    /// Reads must go into a buffer, and will return that buffer
+    Read(Buffer, BlockRes<Buffer, (Buffer, CrucibleError)>),
+
+    /// Other operations send an empty tuple to indicate completion
+    Other(BlockRes<()>),
+}
+
+impl From<BlockRes<()>> for GuestBlockRes {
+    fn from(b: BlockRes<()>) -> Self {
+        GuestBlockRes::Other(b)
+    }
 }
 
 impl GtoS {
     /// Create a new GtoS object where one Guest IO request maps to one
     /// downstairs operation.
-    pub fn new(
-        ds_id: JobId,
-        guest_buffer: Option<Buffer>,
-        res: Option<BlockRes>,
-    ) -> GtoS {
-        GtoS {
-            ds_id,
-            guest_buffer,
-            res,
-        }
+    pub fn new(ds_id: JobId, res: Option<GuestBlockRes>) -> GtoS {
+        GtoS { ds_id, res }
     }
 
     /*
@@ -86,39 +88,6 @@ impl GtoS {
         downstairs_responses: Option<Vec<ReadResponse>>,
         result: Result<(), CrucibleError>,
     ) {
-        let guest_buffer = if let Some(mut guest_buffer) = self.guest_buffer {
-            if let Some(downstairs_responses) = downstairs_responses {
-                let mut offset = 0;
-
-                // XXX don't do if result.is_err()?
-                for response in &downstairs_responses {
-                    // Copy over into guest memory.
-                    {
-                        let _ignored =
-                            span!(Level::TRACE, "copy to guest buffer")
-                                .entered();
-
-                        guest_buffer.write_read_response(offset, response);
-                        offset += response.data.len();
-                    }
-                }
-            } else {
-                /*
-                 * Should this panic?  If the caller is requesting a transfer,
-                 * the guest_buffer should exist. If it does not exist, then
-                 * either there is a real problem, or the operation was a write
-                 * or flush and why are we requesting a transfer for those.
-                 *
-                 * However, dropping a Guest before receiving a downstairs
-                 * response will trigger this, so eat it for now.
-                 */
-            }
-
-            Some(guest_buffer)
-        } else {
-            None
-        };
-
         /*
          * If present, send the result to the guest. If this is a flush
          * issued on behalf of crucible, then there is no place to send
@@ -129,20 +98,42 @@ impl GtoS {
          * given up because an IO took too long, or other possible
          * guest side reasons.
          */
-        if let Some(res) = self.res {
-            match result {
-                Ok(_) => match guest_buffer {
-                    Some(guest_buffer) => res.send_ok_with_buffer(guest_buffer),
-                    None => res.send_ok(),
-                },
+        match self.res {
+            Some(GuestBlockRes::Read(mut buffer, res)) => {
+                if let Some(downstairs_responses) = downstairs_responses {
+                    let mut offset = 0;
 
-                Err(e) => match guest_buffer {
-                    Some(guest_buffer) => {
-                        res.send_err_with_buffer(guest_buffer, e)
+                    // XXX don't do if result.is_err()?
+                    for response in &downstairs_responses {
+                        // Copy over into guest memory.
+                        {
+                            let _ignored =
+                                span!(Level::TRACE, "copy to guest buffer")
+                                    .entered();
+
+                            buffer.write_read_response(offset, response);
+                            offset += response.data.len();
+                        }
                     }
-                    None => res.send_err(e),
-                },
+                } else {
+                    /*
+                     * Should this panic?  If the caller is requesting a
+                     * transfer, the guest_buffer should exist. If it does not
+                     * exist, then either there is a real problem, or the
+                     * operation was a write or flush and why are we requesting
+                     * a transfer for those.
+                     *
+                     * However, dropping a Guest before receiving a downstairs
+                     * response will trigger this, so eat it for now.
+                     */
+                }
+                match result {
+                    Ok(()) => res.send_ok(buffer),
+                    Err(e) => res.send_err((buffer, e)),
+                }
             }
+            Some(GuestBlockRes::Other(res)) => res.send_result(result),
+            None => (),
         }
     }
 }
@@ -194,13 +185,12 @@ impl GuestWork {
     pub(crate) fn submit_job<F: FnOnce(GuestWorkId) -> JobId>(
         &mut self,
         f: F,
-        guest_buffer: Option<Buffer>,
-        res: Option<BlockRes>,
+        res: Option<GuestBlockRes>,
     ) -> (GuestWorkId, JobId) {
         let gw_id = self.next_gw_id();
         let ds_id = f(gw_id);
 
-        self.insert(gw_id, ds_id, guest_buffer, res);
+        self.active.insert(gw_id, GtoS::new(ds_id, res));
         (gw_id, ds_id)
     }
 
@@ -220,14 +210,8 @@ impl GuestWork {
     /// Normally, `submit_job` should be called instead; this function should
     /// only be used if we have reserved the `GuestWorkId` and `JobId` in
     /// advance.
-    pub(crate) fn insert(
-        &mut self,
-        gw_id: GuestWorkId,
-        ds_id: JobId,
-        guest_buffer: Option<Buffer>,
-        res: Option<BlockRes>,
-    ) {
-        let new_gtos = GtoS::new(ds_id, guest_buffer, res);
+    pub(crate) fn insert(&mut self, gw_id: GuestWorkId, ds_id: JobId) {
+        let new_gtos = GtoS::new(ds_id, None);
         self.active.insert(gw_id, new_gtos);
     }
 
@@ -301,7 +285,7 @@ impl Default for GuestWork {
 #[derive(Debug)]
 pub struct Guest {
     /// New requests from outside go into this queue
-    req_tx: mpsc::Sender<BlockReq>,
+    req_tx: mpsc::Sender<BlockOp>,
 
     /// Local cache for block size
     ///
@@ -422,9 +406,8 @@ impl Guest {
      *
      * It's public for testing, but shouldn't be called
      */
-    async fn send(&self, op: BlockOp) -> BlockReqWaiter {
-        let (brw, res) = BlockReqWaiter::pair();
-        if let Err(e) = self.req_tx.send(BlockReq { op, res }).await {
+    async fn send(&self, op: BlockOp) {
+        if let Err(e) = self.req_tx.send(op).await {
             // This could happen during shutdown, if the up_main task is
             // destroyed while the Guest is still trying to do work.
             //
@@ -433,42 +416,29 @@ impl Guest {
             // will have been dropped into the void).
             warn!(self.log, "failed to send op to guest: {e}");
         }
-        brw
     }
 
-    async fn send_and_wait(&self, op: BlockOp) -> BlockReqReply {
-        let brw = self.send(op).await;
-        brw.wait(&self.log).await
+    async fn send_and_wait<T>(
+        &self,
+        op: BlockOp,
+        rx: BlockReqWaiter<T, CrucibleError>,
+    ) -> Result<T, CrucibleError> {
+        self.send(op).await;
+        rx.wait(&self.log).await
     }
 
     pub async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
-        let data = Arc::new(Mutex::new(Block::new(0, 9)));
-        let extent_query = BlockOp::QueryExtentSize { data: data.clone() };
+        let (rx, done) = BlockReqWaiter::pair();
+        let extent_query = BlockOp::QueryExtentSize { done };
 
-        let reply = self.send_and_wait(extent_query).await;
-        assert!(reply.buffer.is_none());
-        reply.result?;
-
-        let es = *data.lock().await;
-        Ok(es)
+        self.send_and_wait(extent_query, rx).await
     }
 
     pub async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
-        let wc = WQCounts {
-            up_count: 0,
-            ds_count: 0,
-            active_count: 0,
-        };
+        let (rx, done) = BlockReqWaiter::pair();
+        let qwq = BlockOp::QueryWorkQueue { done };
 
-        let data = Arc::new(Mutex::new(wc));
-        let qwq = BlockOp::QueryWorkQueue { data: data.clone() };
-
-        let reply = self.send_and_wait(qwq).await;
-        assert!(reply.buffer.is_none());
-        reply.result?;
-
-        let wc = data.lock().await;
-        Ok(*wc)
+        self.send_and_wait(qwq, rx).await
     }
 
     // Maybe this can just be a guest specific thing, not a BlockIO
@@ -476,15 +446,14 @@ impl Guest {
         &self,
         gen: u64,
     ) -> Result<(), CrucibleError> {
-        let waiter = self.send(BlockOp::GoActiveWithGen { gen }).await;
+        let (rx, done) = BlockReqWaiter::pair();
+        self.send(BlockOp::GoActiveWithGen { gen, done }).await;
         info!(
             self.log,
             "The guest has requested activation with gen:{}", gen
         );
 
-        let reply = waiter.wait(&self.log).await;
-        assert!(reply.buffer.is_none());
-        reply.result?;
+        rx.wait(&self.log).await?;
 
         info!(
             self.log,
@@ -508,12 +477,11 @@ impl Guest {
 #[async_trait]
 impl BlockIO for Guest {
     async fn activate(&self) -> Result<(), CrucibleError> {
-        let waiter = self.send(BlockOp::GoActive).await;
+        let (rx, done) = BlockReqWaiter::pair();
+        self.send(BlockOp::GoActive { done }).await;
         info!(self.log, "The guest has requested activation");
 
-        let reply = waiter.wait(&self.log).await;
-        assert!(reply.buffer.is_none());
-        reply.result?;
+        rx.wait(&self.log).await?;
 
         info!(self.log, "The guest has finished waiting for activation");
         Ok(())
@@ -521,46 +489,32 @@ impl BlockIO for Guest {
 
     /// Disable any more IO from this guest and deactivate the downstairs.
     async fn deactivate(&self) -> Result<(), CrucibleError> {
-        let reply = self.send_and_wait(BlockOp::Deactivate).await;
-        assert!(reply.buffer.is_none());
-        reply.result
+        let (rx, done) = BlockReqWaiter::pair();
+        self.send_and_wait(BlockOp::Deactivate { done }, rx).await
     }
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
-        let data = Arc::new(Mutex::new(false));
-        let active_query = BlockOp::QueryGuestIOReady { data: data.clone() };
+        let (rx, done) = BlockReqWaiter::pair();
+        let active_query = BlockOp::QueryGuestIOReady { done };
 
-        let reply = self.send_and_wait(active_query).await;
-        assert!(reply.buffer.is_none());
-        reply.result?;
-
-        let is_active = *data.lock().await;
-        Ok(is_active)
+        self.send_and_wait(active_query, rx).await
     }
 
     async fn total_size(&self) -> Result<u64, CrucibleError> {
-        let data = Arc::new(Mutex::new(0));
-        let size_query = BlockOp::QueryTotalSize { data: data.clone() };
+        let (rx, done) = BlockReqWaiter::pair();
+        let size_query = BlockOp::QueryTotalSize { done };
 
-        let reply = self.send_and_wait(size_query).await;
-        assert!(reply.buffer.is_none());
-        reply.result?;
-
-        let total_size = *data.lock().await;
-        Ok(total_size)
+        self.send_and_wait(size_query, rx).await
     }
 
     async fn get_block_size(&self) -> Result<u64, CrucibleError> {
         let bs = self.block_size.load(Ordering::Relaxed);
         if bs == 0 {
-            let data = Arc::new(Mutex::new(0));
-            let size_query = BlockOp::QueryBlockSize { data: data.clone() };
+            let (rx, done) = BlockReqWaiter::pair();
+            let size_query = BlockOp::QueryBlockSize { done };
 
-            let reply = self.send_and_wait(size_query).await;
-            assert!(reply.buffer.is_none());
-            reply.result?;
+            let bs = self.send_and_wait(size_query, rx).await?;
 
-            let bs = *data.lock().await;
             self.block_size.store(bs, Ordering::Relaxed);
             Ok(bs)
         } else {
@@ -569,15 +523,10 @@ impl BlockIO for Guest {
     }
 
     async fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
-        let data = Arc::new(Mutex::new(Uuid::default()));
-        let uuid_query = BlockOp::QueryUpstairsUuid { data: data.clone() };
+        let (rx, done) = BlockReqWaiter::pair();
+        let uuid_query = BlockOp::QueryUpstairsUuid { done };
 
-        let reply = self.send_and_wait(uuid_query).await;
-        assert!(reply.buffer.is_none());
-        reply.result?;
-
-        let uuid = *data.lock().await;
-        Ok(uuid)
+        self.send_and_wait(uuid_query, rx).await
     }
 
     async fn read(
@@ -617,22 +566,36 @@ impl BlockIO for Guest {
             assert_eq!(chunk.len() as u64 % bs, 0);
 
             let offset_change = chunk.len() as u64 / bs;
+            let (rx, done) = BlockReqWaiter::pair();
             let rio = BlockOp::Read {
                 offset,
                 data: chunk,
+                done,
             };
 
-            let reply = self.send_and_wait(rio).await;
-
-            // Reattach the chunk to `data`
-            //
-            // [---data---][--------buffer-------]
-            data.unsplit(reply.buffer.unwrap());
+            // Our return value always includes the buffer, so we can splice it
+            // back onto our existing chunk of data using `unsplit`
+            self.send(rio).await;
+            let reply = rx.wait_raw(&self.log).await;
+            let err = match reply {
+                Some(Ok(buffer)) => {
+                    // Reattach the chunk to `data`
+                    //
+                    // [---data---][--------buffer-------]
+                    data.unsplit(buffer);
+                    None
+                }
+                Some(Err((buffer, err))) => {
+                    data.unsplit(buffer);
+                    Some(err)
+                }
+                None => Some(CrucibleError::RecvDisconnected),
+            };
 
             // If this is an error, then reattach the rest of the buffer so that
             // the caller doesn't have to reallocate anything.  Otherwise, the
             // buffer will be reattached piece by piece as we loop here.
-            if let Err(e) = reply.result {
+            if let Some(e) = err {
                 data.unsplit(buffer);
                 return Err(e);
             }
@@ -668,13 +631,17 @@ impl BlockIO for Guest {
             let buf = data.split_to(MDTS.min(data.len()));
             assert_eq!(buf.len() as u64 % bs, 0);
             let offset_change = buf.len() as u64 / bs;
-            let wio = BlockOp::Write { offset, data: buf };
+            let (rx, done) = BlockReqWaiter::pair();
+            let wio = BlockOp::Write {
+                offset,
+                data: buf,
+                done,
+            };
 
             self.backpressure_sleep().await;
 
-            let reply = self.send_and_wait(wio).await;
-            assert!(reply.buffer.is_none());
-            reply.result?;
+            let reply = self.send_and_wait(wio, rx).await;
+            reply?;
             offset.value += offset_change;
         }
 
@@ -695,43 +662,32 @@ impl BlockIO for Guest {
         if data.is_empty() {
             return Ok(());
         }
-        let wio = BlockOp::WriteUnwritten { offset, data };
+        let (rx, done) = BlockReqWaiter::pair();
+        let wio = BlockOp::WriteUnwritten { offset, data, done };
 
         self.backpressure_sleep().await;
-        let reply = self.send_and_wait(wio).await;
-        assert!(reply.buffer.is_none());
-        reply.result
+        self.send_and_wait(wio, rx).await
     }
 
     async fn flush(
         &self,
         snapshot_details: Option<SnapshotDetails>,
     ) -> Result<(), CrucibleError> {
-        let reply = self
-            .send_and_wait(BlockOp::Flush { snapshot_details })
-            .await;
-        assert!(reply.buffer.is_none());
-        reply.result
+        let (rx, done) = BlockReqWaiter::pair();
+        let flush = BlockOp::Flush {
+            snapshot_details,
+            done,
+        };
+        self.send_and_wait(flush, rx).await
     }
 
     async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
         // Note: for this implementation, BlockOp::ShowWork will be sent and
         // processed by the Upstairs even if it isn't active.
-        let wc = WQCounts {
-            up_count: 0,
-            ds_count: 0,
-            active_count: 0,
-        };
+        let (rx, done) = BlockReqWaiter::pair();
+        let sw = BlockOp::ShowWork { done };
 
-        let data = Arc::new(Mutex::new(wc));
-        let sw = BlockOp::ShowWork { data: data.clone() };
-
-        let reply = self.send_and_wait(sw).await;
-        assert!(reply.buffer.is_none());
-        reply.result?;
-
-        let wc = data.lock().await;
-        Ok(*wc)
+        self.send_and_wait(sw, rx).await
     }
 
     async fn replace_downstairs(
@@ -740,20 +696,10 @@ impl BlockIO for Guest {
         old: SocketAddr,
         new: SocketAddr,
     ) -> Result<ReplaceResult, CrucibleError> {
-        let data = Arc::new(Mutex::new(ReplaceResult::Missing));
-        let sw = BlockOp::ReplaceDownstairs {
-            id,
-            old,
-            new,
-            result: data.clone(),
-        };
+        let (rx, done) = BlockReqWaiter::pair();
+        let sw = BlockOp::ReplaceDownstairs { id, old, new, done };
 
-        let reply = self.send_and_wait(sw).await;
-        assert!(reply.buffer.is_none());
-        reply.result?;
-
-        let result = data.lock().await;
-        Ok(*result)
+        self.send_and_wait(sw, rx).await
     }
 }
 
@@ -799,17 +745,17 @@ pub struct GuestLimits {
 /// * Wait for them to complete, then notify the guest through oneshot channels
 pub struct GuestIoHandle {
     /// Queue to receive new blockreqs
-    req_rx: mpsc::Receiver<BlockReq>,
+    req_rx: mpsc::Receiver<BlockOp>,
 
     /// Guest IO and bandwidth limits
     limits: GuestLimits,
 
-    /// `BlockReq` that is at the head of the queue
+    /// `BlockOp` that is at the head of the queue
     ///
-    /// If a `BlockReq` was pulled from the queue but couldn't be used due to
+    /// If a `BlockOp` was pulled from the queue but couldn't be used due to
     /// IOP or bandwidth limiting, it's stored here instead (and we check this
     /// before awaiting the queue).
-    req_head: Option<BlockReq>,
+    req_head: Option<BlockOp>,
 
     /// Are we currently IOP or bandwidth limited?
     ///
@@ -879,7 +825,7 @@ impl GuestIoHandle {
     /// Listen for new work
     ///
     /// This will wait forever if we are currently IOP / BW limited; otherwise,
-    /// it will return the next value from the `BlockReq` queue.
+    /// it will return the next value from the `BlockOp` queue.
     ///
     /// To avoid being stuck forever, this function should be called as **a
     /// branch** of a `select!` statement that _also_ includes at least one
@@ -902,9 +848,9 @@ impl GuestIoHandle {
 
         // Check if we can consume right away
         let iop_limit_applies =
-            self.limits.iop_limit.is_some() && req.op.consumes_iops();
+            self.limits.iop_limit.is_some() && req.consumes_iops();
         let bw_limit_applies =
-            self.limits.bw_limit.is_some() && req.op.sz().is_some();
+            self.limits.bw_limit.is_some() && req.sz().is_some();
 
         if !iop_limit_applies && !bw_limit_applies {
             return UpstairsAction::Guest(req);
@@ -923,14 +869,14 @@ impl GuestIoHandle {
         // reached.
 
         if let Some(bw_limit) = self.limits.bw_limit {
-            if req.op.sz().is_some() && self.bw_tokens >= bw_limit {
+            if req.sz().is_some() && self.bw_tokens >= bw_limit {
                 bw_check_ok = false;
             }
         }
 
         if let Some(iop_limit_cfg) = &self.limits.iop_limit {
             let bytes_per_iops = iop_limit_cfg.bytes_per_iop;
-            if req.op.iops(bytes_per_iops).is_some()
+            if req.iops(bytes_per_iops).is_some()
                 && self.iop_tokens >= iop_limit_cfg.iop_limit
             {
                 iop_check_ok = false;
@@ -941,13 +887,13 @@ impl GuestIoHandle {
         // block req
         if bw_check_ok && iop_check_ok {
             if self.limits.bw_limit.is_some() {
-                if let Some(sz) = req.op.sz() {
+                if let Some(sz) = req.sz() {
                     self.bw_tokens += sz;
                 }
             }
 
             if let Some(cfg) = &self.limits.iop_limit {
-                if let Some(req_iops) = req.op.iops(cfg.bytes_per_iop) {
+                if let Some(req_iops) = req.iops(cfg.bytes_per_iop) {
                     self.iop_tokens += req_iops;
                 }
             }
@@ -1097,18 +1043,21 @@ mod test {
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(1, 512),
+                done: BlockReqWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(8, 512),
+                done: BlockReqWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(32, 512),
+                done: BlockReqWaiter::pair().1,
             })
             .await;
 
@@ -1138,18 +1087,21 @@ mod test {
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(1, 512),
+                done: BlockReqWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(8, 512),
+                done: BlockReqWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(31, 512),
+                done: BlockReqWaiter::pair().1,
             })
             .await;
 
@@ -1194,16 +1146,19 @@ mod test {
         let _ = guest
             .send(BlockOp::Flush {
                 snapshot_details: None,
+                done: BlockReqWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Flush {
                 snapshot_details: None,
+                done: BlockReqWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Flush {
                 snapshot_details: None,
+                done: BlockReqWaiter::pair().1,
             })
             .await;
 
@@ -1229,18 +1184,21 @@ mod test {
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(1024, 512), // 512 KiB
+                done: BlockReqWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(1024, 512),
+                done: BlockReqWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(1024, 512),
+                done: BlockReqWaiter::pair().1,
             })
             .await;
 
@@ -1284,16 +1242,19 @@ mod test {
         let _ = guest
             .send(BlockOp::Flush {
                 snapshot_details: None,
+                done: BlockReqWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Flush {
                 snapshot_details: None,
+                done: BlockReqWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Flush {
                 snapshot_details: None,
+                done: BlockReqWaiter::pair().1,
             })
             .await;
 
@@ -1324,12 +1285,14 @@ mod test {
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(14000, 512), // 7000 KiB
+                done: BlockReqWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(14000, 512), // 7000 KiB
+                done: BlockReqWaiter::pair().1,
             })
             .await;
 
@@ -1362,6 +1325,7 @@ mod test {
                 .send(BlockOp::Read {
                     offset: Block::new_512(0),
                     data: Buffer::new(2, 512),
+                    done: BlockReqWaiter::pair().1,
                 })
                 .await;
             assert_consumed(&mut io).await;
@@ -1371,6 +1335,7 @@ mod test {
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(2, 512),
+                done: BlockReqWaiter::pair().1,
             })
             .await;
         assert_none_consumed(&mut io).await;
@@ -1414,6 +1379,7 @@ mod test {
                 .send(BlockOp::Read {
                     offset: Block::new_512(0),
                     data: Buffer::new(optimal_io_size / 512, 512),
+                    done: BlockReqWaiter::pair().1,
                 })
                 .await;
 
@@ -1441,12 +1407,14 @@ mod test {
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(20480, 512), // 10 MiB
+                done: BlockReqWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(0, 512),
+                done: BlockReqWaiter::pair().1,
             })
             .await;
 

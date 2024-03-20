@@ -46,7 +46,7 @@ pub mod block_io;
 pub use block_io::{FileBlockIO, ReqwestBlockIO};
 
 pub mod block_req;
-pub(crate) use block_req::{BlockReq, BlockReqReply, BlockReqWaiter, BlockRes};
+pub(crate) use block_req::{BlockReqWaiter, BlockRes};
 
 mod buffer;
 pub use buffer::Buffer; // used in BlockIO::Read, so it must be public
@@ -1454,57 +1454,66 @@ impl fmt::Display for AckStatus {
  * tell the upstairs to behave in specific ways.
  */
 #[derive(Debug)]
-pub enum BlockOp {
+pub(crate) enum BlockOp {
     Read {
         offset: Block,
         data: Buffer,
+        done: BlockRes<Buffer, (Buffer, CrucibleError)>,
     },
     Write {
         offset: Block,
         data: BytesMut,
+        done: BlockRes<()>,
     },
     WriteUnwritten {
         offset: Block,
         data: BytesMut,
+        done: BlockRes<()>,
     },
     Flush {
         snapshot_details: Option<SnapshotDetails>,
+        done: BlockRes<()>,
     },
-    GoActive,
+    GoActive {
+        done: BlockRes<()>,
+    },
     GoActiveWithGen {
         gen: u64,
+        done: BlockRes<()>,
     },
-    Deactivate,
+    Deactivate {
+        done: BlockRes<()>,
+    },
     // Management commands
     ReplaceDownstairs {
         id: Uuid,
         old: SocketAddr,
         new: SocketAddr,
-        result: Arc<Mutex<ReplaceResult>>,
+        done: BlockRes<ReplaceResult>,
     },
     // Query ops
     QueryBlockSize {
-        data: Arc<Mutex<u64>>,
+        done: BlockRes<u64>,
     },
     QueryTotalSize {
-        data: Arc<Mutex<u64>>,
+        done: BlockRes<u64>,
     },
     QueryGuestIOReady {
-        data: Arc<Mutex<bool>>,
+        done: BlockRes<bool>,
     },
     QueryUpstairsUuid {
-        data: Arc<Mutex<Uuid>>,
+        done: BlockRes<Uuid>,
     },
     // Begin testing options.
     QueryExtentSize {
-        data: Arc<Mutex<Block>>,
+        done: BlockRes<Block>,
     },
     QueryWorkQueue {
-        data: Arc<Mutex<WQCounts>>,
+        done: BlockRes<WQCounts>,
     },
     // Show internal work queue, return outstanding IO requests.
     ShowWork {
-        data: Arc<Mutex<WQCounts>>,
+        done: BlockRes<WQCounts>,
     },
 }
 
@@ -1530,10 +1539,10 @@ impl BlockOp {
      */
     pub fn iops(&self, iop_sz: usize) -> Option<usize> {
         match self {
-            BlockOp::Read { offset: _, data } => {
+            BlockOp::Read { data, .. } => {
                 Some(ceiling_div!(data.len(), iop_sz))
             }
-            BlockOp::Write { offset: _, data } => {
+            BlockOp::Write { data, .. } => {
                 Some(ceiling_div!(data.len(), iop_sz))
             }
             _ => None,
@@ -1541,18 +1550,14 @@ impl BlockOp {
     }
 
     pub fn consumes_iops(&self) -> bool {
-        matches!(
-            self,
-            BlockOp::Read { offset: _, data: _ }
-                | BlockOp::Write { offset: _, data: _ }
-        )
+        matches!(self, BlockOp::Read { .. } | BlockOp::Write { .. })
     }
 
     // Return the total size of this BlockOp
     pub fn sz(&self) -> Option<usize> {
         match self {
-            BlockOp::Read { offset: _, data } => Some(data.len()),
-            BlockOp::Write { offset: _, data } => Some(data.len()),
+            BlockOp::Read { data, .. } => Some(data.len()),
+            BlockOp::Write { data, .. } => Some(data.len()),
             _ => None,
         }
     }
@@ -1565,24 +1570,28 @@ async fn test_return_iops() {
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(1, 512),
+        done: BlockReqWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(8, 512), // 4096 bytes
+        done: BlockReqWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(31, 512), // 15872 bytes < 16000
+        done: BlockReqWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(32, 512), // 16384 bytes > 16000
+        done: BlockReqWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 2);
 }

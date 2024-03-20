@@ -1284,7 +1284,6 @@ impl Downstairs {
                             self.submit_flush(gw_id, None)
                         },
                         None,
-                        None,
                     );
                     info!(self.log, "LiveRepair final flush submitted");
                     cdt::up__to__ds__flush__start!(|| (gw_id.0));
@@ -1338,7 +1337,7 @@ impl Downstairs {
         let nio = Self::create_noop_io(noop_id, deps, gw_noop_id);
 
         cdt::gw__noop__start!(|| (gw_noop_id.0));
-        gw.insert(gw_noop_id, noop_id, None, None);
+        gw.insert(gw_noop_id, noop_id);
         self.enqueue_repair(nio);
     }
 
@@ -1383,7 +1382,7 @@ impl Downstairs {
 
         cdt::gw__repair__start!(|| (gw_repair_id.0, eid));
 
-        gw.insert(gw_repair_id, repair_id, None, None);
+        gw.insert(gw_repair_id, repair_id);
         self.enqueue_repair(repair_io);
     }
 
@@ -1639,7 +1638,7 @@ impl Downstairs {
 
         cdt::gw__reopen__start!(|| (gw_reopen_id.0, eid));
 
-        gw.insert(gw_reopen_id, reopen_id, None, None);
+        gw.insert(gw_reopen_id, reopen_id);
         self.enqueue_repair(reopen_io);
     }
 
@@ -1825,7 +1824,7 @@ impl Downstairs {
         );
 
         cdt::gw__close__start!(|| (gw_close_id.0, eid));
-        gw.insert(gw_close_id, close_id, None, None);
+        gw.insert(gw_close_id, close_id);
         self.enqueue_repair(close_io);
     }
 
@@ -3162,6 +3161,9 @@ impl Downstairs {
         // TODO should this also ack the job, to mimick our event loop?
     }
 
+    /// Processes the given IO completion
+    ///
+    /// Returns `true` if the job is ready to be acked to the guest
     fn process_io_completion_inner(
         &mut self,
         ds_id: JobId,
