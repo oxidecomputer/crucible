@@ -76,12 +76,6 @@ mod downstairs;
 mod upstairs;
 use upstairs::{UpCounters, UpstairsAction};
 
-/// Max number of outstanding IOs between the upstairs and the downstairs
-///
-/// If we exceed this value, the upstairs will give up and mark that downstairs
-/// as faulted.
-const IO_OUTSTANDING_MAX_JOBS: usize = 57000;
-
 /// Max number of write bytes between the upstairs and the downstairs
 ///
 /// If we exceed this value, the upstairs will give up and mark that downstairs
@@ -2016,8 +2010,6 @@ pub struct Arg {
     pub ds_connected: [usize; 3],
     /// Times this downstairs has been replaced.
     pub ds_replaced: [usize; 3],
-    /// Times flow control has been enabled on this downstairs.
-    pub ds_flow_control: [usize; 3],
     /// Times we have live repaired an extent on this downstairs.
     pub ds_extents_repaired: [usize; 3],
     /// Times we have live confirmed  an extent on this downstairs.
