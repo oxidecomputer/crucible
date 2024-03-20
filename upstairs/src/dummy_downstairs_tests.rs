@@ -751,11 +751,31 @@ pub(crate) mod protocol_test {
                 });
             }
 
-            // Assert we're seeing the read requests
-            bail_assert!(matches!(
-                ds1_messages.recv().await.unwrap(),
-                Message::ReadRequest { .. },
-            ));
+            if i < IO_OUTSTANDING_MAX_JOBS {
+                // Before we're kicked out, assert we're seeing the read
+                // requests
+                bail_assert!(matches!(
+                    ds1_messages.recv().await.unwrap(),
+                    Message::ReadRequest { .. },
+                ));
+            } else {
+                // After ds1 is kicked out, we shouldn't see any more messages
+                match ds1_messages.try_recv() {
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {}
+                    x => {
+                        info!(
+                            harness.log,
+                            "Read {i} should return EMPTY, but we got:{:?}", x
+                        );
+
+                        bail!(
+                            "Read {i} should return EMPTY, but we got:{:?}",
+                            x
+                        );
+                    }
+                }
+            }
 
             match ds2_messages.recv().await.unwrap() {
                 Message::ReadRequest { job_id, .. } => {
@@ -1783,7 +1803,8 @@ pub(crate) mod protocol_test {
 
         // Send enough bytes to hit the IO_OUTSTANDING_MAX_BYTES condition on
         // downstairs 1, which should mark it as faulted and kick it out.
-        let write_buf = BytesMut::from(vec![1; 50 * 1024].as_slice()); // 50 KiB
+        const WRITE_SIZE: usize = 50 * 1024; // 50 KiB
+        let write_buf = BytesMut::from(vec![1; WRITE_SIZE].as_slice()); // 50 KiB
         let num_jobs = IO_OUTSTANDING_MAX_BYTES as usize / write_buf.len() + 10;
         let mut job_ids = Vec::with_capacity(num_jobs);
         assert!(num_jobs < IO_OUTSTANDING_MAX_JOBS);
@@ -1804,11 +1825,31 @@ pub(crate) mod protocol_test {
                 });
             }
 
-            // Assert we're seeing the write requests
-            bail_assert!(matches!(
-                ds1_messages.recv().await.unwrap(),
-                Message::Write { .. },
-            ));
+            if (i + 1) * WRITE_SIZE < IO_OUTSTANDING_MAX_BYTES as usize {
+                // Before we're kicked out, assert we're seeing the read
+                // requests
+                bail_assert!(matches!(
+                    ds1_messages.recv().await.unwrap(),
+                    Message::Write { .. },
+                ));
+            } else {
+                // After ds1 is kicked out, we shouldn't see any more messages
+                match ds1_messages.try_recv() {
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {}
+                    x => {
+                        info!(
+                            harness.log,
+                            "Read {i} should return EMPTY, but we got:{:?}", x
+                        );
+
+                        bail!(
+                            "Read {i} should return EMPTY, but we got:{:?}",
+                            x
+                        );
+                    }
+                }
+            }
 
             match ds2_messages.recv().await.unwrap() {
                 Message::Write {
@@ -1923,11 +1964,31 @@ pub(crate) mod protocol_test {
                 });
             }
 
-            // Assert we're seeing the read requests
-            bail_assert!(matches!(
-                ds1_messages.recv().await.unwrap(),
-                Message::ReadRequest { .. },
-            ));
+            if i < IO_OUTSTANDING_MAX_JOBS {
+                // Before we're kicked out, assert we're seeing the read
+                // requests
+                bail_assert!(matches!(
+                    ds1_messages.recv().await.unwrap(),
+                    Message::ReadRequest { .. },
+                ));
+            } else {
+                // After ds1 is kicked out, we shouldn't see any more messages
+                match ds1_messages.try_recv() {
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {}
+                    x => {
+                        info!(
+                            harness.log,
+                            "Read {i} should return EMPTY, but we got:{:?}", x
+                        );
+
+                        bail!(
+                            "Read {i} should return EMPTY, but we got:{:?}",
+                            x
+                        );
+                    }
+                }
+            }
 
             match ds2_messages.recv().await.unwrap() {
                 Message::ReadRequest { job_id, .. } => {
@@ -2617,11 +2678,31 @@ pub(crate) mod protocol_test {
                 });
             }
 
-            // Assert we're seeing the read requests
-            bail_assert!(matches!(
-                ds1_messages.recv().await.unwrap(),
-                Message::ReadRequest { .. },
-            ));
+            if i < IO_OUTSTANDING_MAX_JOBS {
+                // Before we're kicked out, assert we're seeing the read
+                // requests
+                bail_assert!(matches!(
+                    ds1_messages.recv().await.unwrap(),
+                    Message::ReadRequest { .. },
+                ));
+            } else {
+                // After ds1 is kicked out, we shouldn't see any more messages
+                match ds1_messages.try_recv() {
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {}
+                    x => {
+                        info!(
+                            harness.log,
+                            "Read {i} should return EMPTY, but we got:{:?}", x
+                        );
+
+                        bail!(
+                            "Read {i} should return EMPTY, but we got:{:?}",
+                            x
+                        );
+                    }
+                }
+            }
 
             match ds2_messages.recv().await.unwrap() {
                 Message::ReadRequest { job_id, .. } => {
