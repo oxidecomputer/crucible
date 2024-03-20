@@ -2,6 +2,10 @@
 use super::*;
 use tokio::sync::oneshot;
 
+/// Wrapper to contain a `BlockOp`
+///
+/// The `BlockReq` used to have more fields, but now it's down to just this one;
+/// we can remove it at a later point.
 #[derive(Debug)]
 pub(crate) struct BlockReq {
     pub op: BlockOp,
