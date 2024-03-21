@@ -650,7 +650,7 @@ impl BlockIO for Volume {
 
         // TODO parallel dispatch!
         let mut data_index = 0;
-        let mut read_buffer = Buffer::default();
+        let mut read_buffer = UninitializedBuffer::default();
         let single_volume = affected_sub_volumes.len() == 1;
 
         for (coverage, sub_volume) in affected_sub_volumes {
@@ -666,17 +666,17 @@ impl BlockIO for Volume {
 
             if let Some(parent_coverage) = parent_coverage {
                 let parent_offset = Block::new(coverage.start, offset.shift);
-                read_buffer.reset_owned(
+                let mut buf = read_buffer.reset_owned(
                     (parent_coverage.end - parent_coverage.start) as usize,
                     bs,
                 );
                 self.read_only_parent
                     .as_ref()
                     .unwrap()
-                    .read(parent_offset, &mut read_buffer)
+                    .read(parent_offset, &mut buf)
                     .await?;
 
-                data.eat(data_index, &mut read_buffer);
+                read_buffer = data.eat(data_index, buf);
             }
 
             let sub_offset = Block::new(
@@ -689,10 +689,10 @@ impl BlockIO for Volume {
             if single_volume {
                 sub_volume.read(sub_offset, data).await?;
             } else {
-                read_buffer
+                let mut buf = read_buffer
                     .reset_owned((coverage.end - coverage.start) as usize, bs);
-                sub_volume.read(sub_offset, &mut read_buffer).await?;
-                data.eat(data_index, &mut read_buffer);
+                sub_volume.read(sub_offset, &mut buf).await?;
+                read_buffer = data.eat(data_index, buf);
             }
 
             data_index += (coverage.end - coverage.start) as usize

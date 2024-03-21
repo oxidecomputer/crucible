@@ -832,14 +832,14 @@ pub(crate) mod up_test {
         let prev_ptr = upper.as_ptr();
 
         // Eating a partially owned buffer requires a memcpy
-        upper.eat(0, &mut lower);
+        let _ = upper.eat(0, lower);
         assert_eq!(prev_ptr, upper.as_ptr());
 
         // Eating the entire owned buffer just swaps pointers
-        lower.reset(10, 512);
+        let mut lower = Buffer::new(10, 512);
         lower.write(0, &[0xFE; 512 * 10]);
         let prev_ptr = lower.as_ptr();
-        upper.eat(0, &mut lower);
+        let _ = upper.eat(0, lower);
         assert_eq!(prev_ptr, upper.as_ptr());
     }
 }

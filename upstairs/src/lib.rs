@@ -1639,15 +1639,19 @@ impl Buffer {
 
     /// Consume and layer buffer contents on top of this one
     ///
-    /// The `buffer` argument will be left in an unknown state, and should be
-    /// reset before reuse.
+    /// Returns an uninitialized buffer, for ease of memory reuse.
     ///
     /// # Panics
     /// - The offset must be block-aligned
     /// - Both buffers must have the same block size
     ///
     /// If either of these conditions is not met, the function will panic
-    pub(crate) fn eat(&mut self, offset: usize, buffer: &mut Buffer) {
+    #[must_use]
+    pub(crate) fn eat(
+        &mut self,
+        offset: usize,
+        mut buffer: Buffer,
+    ) -> UninitializedBuffer {
         assert_eq!(offset % self.block_size, 0);
         assert_eq!(self.block_size, buffer.block_size);
 
@@ -1659,7 +1663,7 @@ impl Buffer {
             && self.len() == buffer.len()
             && buffer.owned.iter().all(|o| *o != 0)
         {
-            std::mem::swap(self, buffer);
+            std::mem::swap(self, &mut buffer);
         } else {
             for (b, (owned, chunk)) in buffer.blocks().enumerate() {
                 if owned {
@@ -1669,6 +1673,7 @@ impl Buffer {
                 }
             }
         }
+        UninitializedBuffer(buffer)
     }
 
     pub fn owned_ref(&self) -> &[u8] {
@@ -1687,23 +1692,6 @@ impl Buffer {
 
     pub fn reset(&mut self, block_count: usize, block_size: usize) {
         self.reset_with(0, block_count, block_size);
-    }
-
-    /// Resets to the given size, clearing the `owned` array
-    ///
-    /// The data array is resized (padding with 0s) but is not cleared; it is
-    /// expected that this function will be called right before reading into it,
-    /// so clearing it is unnecessary.
-    pub(crate) fn reset_owned(
-        &mut self,
-        block_count: usize,
-        block_size: usize,
-    ) {
-        let len = block_count * block_size;
-        self.data.resize(len, 0u8);
-        self.owned.fill(0u8);
-        self.owned.resize(block_count, 0u8);
-        self.block_size = block_size;
     }
 
     /// Returns a reference to a particular block
@@ -1784,6 +1772,31 @@ impl std::ops::Deref for Buffer {
     }
 }
 
+/// Buffer with unknown contents, which must be reset before it can be used
+#[derive(Debug, Default)]
+pub(crate) struct UninitializedBuffer(Buffer);
+
+impl UninitializedBuffer {
+    /// Resets to the given size, clearing the `owned` array
+    ///
+    /// The data array is resized (padding with 0s) but is not cleared; it is
+    /// expected that this function will be called right before reading into it,
+    /// so clearing it is unnecessary.
+    pub(crate) fn reset_owned(
+        self,
+        block_count: usize,
+        block_size: usize,
+    ) -> Buffer {
+        let mut out = self.0;
+        let len = block_count * block_size;
+        out.data.resize(len, 0u8);
+        out.owned.fill(0u8);
+        out.owned.resize(block_count, 0u8);
+        out.block_size = block_size;
+        out
+    }
+}
+
 #[test]
 fn test_buffer_sane() {
     const BLOCK_SIZE: usize = 512;
@@ -1839,18 +1852,18 @@ fn test_buffer_eats() {
     // We use an artificially low BLOCK_SIZE here for ease of alignment
     const BLOCK_COUNT: usize = 8;
     const BLOCK_SIZE: usize = 64;
-    let mut data = Buffer::new(BLOCK_COUNT, BLOCK_SIZE); // 512 bytes
+    let data = Buffer::new(BLOCK_COUNT, BLOCK_SIZE); // 512 bytes
 
     assert_eq!(&data[..], &vec![0u8; 512]);
 
     let mut buffer = Buffer::new(BLOCK_COUNT, BLOCK_SIZE);
-    buffer.eat(0, &mut data);
+    let _ = buffer.eat(0, data);
 
     assert_eq!(&buffer[..], &vec![0u8; 512]);
 
     let mut data = Buffer::new(BLOCK_COUNT, BLOCK_SIZE);
     data.write(64, &[1u8; 64]);
-    buffer.eat(0, &mut data);
+    let _ = buffer.eat(0, data);
 
     assert_eq!(&buffer[0..64], &vec![0u8; 64]);
     assert_eq!(&buffer[64..128], &vec![1u8; 64]);
@@ -1858,7 +1871,7 @@ fn test_buffer_eats() {
 
     let mut data = Buffer::new(BLOCK_COUNT, BLOCK_SIZE);
     data.write(128, &[7u8; 128]);
-    buffer.eat(0, &mut data);
+    let _ = buffer.eat(0, data);
 
     assert_eq!(&buffer[0..64], &vec![0u8; 64]);
     assert_eq!(&buffer[64..128], &vec![1u8; 64]);
