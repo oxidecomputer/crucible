@@ -3161,9 +3161,6 @@ impl Downstairs {
         // TODO should this also ack the job, to mimick our event loop?
     }
 
-    /// Processes the given IO completion
-    ///
-    /// Returns `true` if the job is ready to be acked to the guest
     fn process_io_completion_inner(
         &mut self,
         ds_id: JobId,
