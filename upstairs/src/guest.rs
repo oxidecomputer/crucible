@@ -110,16 +110,14 @@ impl GtoS {
                         }
                     }
                 } else {
-                    /*
-                     * Should this panic?  If the caller is requesting a
-                     * transfer, the guest_buffer should exist. If it does not
-                     * exist, then either there is a real problem, or the
-                     * operation was a write or flush and why are we requesting
-                     * a transfer for those.
-                     *
-                     * However, dropping a Guest before receiving a downstairs
-                     * response will trigger this, so eat it for now.
-                     */
+                    // Should this panic?  If the caller is requesting a
+                    // transfer, the guest_buffer should exist. If it does not
+                    // exist, then either there is a real problem, or the
+                    // operation was a write or flush and why are we requesting
+                    // a transfer for those.
+                    //
+                    // However, dropping a Guest before receiving a downstairs
+                    // response will trigger this, so eat it for now.
                 }
                 match result {
                     Ok(()) => res.send_ok(buffer),
