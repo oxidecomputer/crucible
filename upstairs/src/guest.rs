@@ -126,7 +126,10 @@ impl GtoS {
                     Err(e) => res.send_err((buffer, e)),
                 }
             }
-            Some(GuestBlockRes::Other(res)) => res.send_result(result),
+            Some(GuestBlockRes::Other(res)) => {
+                // Should we panic if someone provided downstairs_responses?
+                res.send_result(result)
+            }
             None => (),
         }
     }
