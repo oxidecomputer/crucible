@@ -13,7 +13,7 @@ pub(crate) struct BlockReq {
 
 #[must_use]
 #[derive(Debug)]
-pub(crate) struct BlockRes<T, E = CrucibleError>(
+pub(crate) struct BlockRes<T = (), E = CrucibleError>(
     Option<oneshot::Sender<Result<T, E>>>,
 );
 

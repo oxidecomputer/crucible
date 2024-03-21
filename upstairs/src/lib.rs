@@ -1463,26 +1463,26 @@ pub(crate) enum BlockOp {
     Write {
         offset: Block,
         data: BytesMut,
-        done: BlockRes<()>,
+        done: BlockRes,
     },
     WriteUnwritten {
         offset: Block,
         data: BytesMut,
-        done: BlockRes<()>,
+        done: BlockRes,
     },
     Flush {
         snapshot_details: Option<SnapshotDetails>,
-        done: BlockRes<()>,
+        done: BlockRes,
     },
     GoActive {
-        done: BlockRes<()>,
+        done: BlockRes,
     },
     GoActiveWithGen {
         gen: u64,
-        done: BlockRes<()>,
+        done: BlockRes,
     },
     Deactivate {
-        done: BlockRes<()>,
+        done: BlockRes,
     },
     // Management commands
     ReplaceDownstairs {

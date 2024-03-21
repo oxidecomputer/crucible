@@ -60,7 +60,7 @@ pub(crate) enum GuestBlockRes {
     Read(Buffer, BlockRes<Buffer, (Buffer, CrucibleError)>),
 
     /// Other operations send an empty tuple to indicate completion
-    Other(BlockRes<()>),
+    Other(BlockRes),
 }
 
 impl GtoS {

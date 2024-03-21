@@ -49,7 +49,7 @@ pub(crate) enum UpstairsState {
     /// The guest has requested that the upstairs go active
     ///
     /// We should reply on the provided channel
-    GoActive(BlockRes<()>),
+    GoActive(BlockRes),
 
     /// The upstairs is fully online and accepting guest IO
     Active,
@@ -60,7 +60,7 @@ pub(crate) enum UpstairsState {
     /// completed (including the final flush), the downstairs task should stop;
     /// when all three Downstairs have stopped, the upstairs should enter
     /// `UpstairsState::Initializing` and reply on this channel.
-    Deactivating(BlockRes<()>),
+    Deactivating(BlockRes),
 }
 
 /// Crucible upstairs counters
@@ -1151,7 +1151,7 @@ impl Upstairs {
     }
 
     /// Request that the Upstairs go active
-    async fn set_active_request(&mut self, res: BlockRes<()>) {
+    async fn set_active_request(&mut self, res: BlockRes) {
         match &self.state {
             UpstairsState::Initializing => {
                 self.state = UpstairsState::GoActive(res);
@@ -1198,7 +1198,7 @@ impl Upstairs {
     /// when complete.
     ///
     /// In either case, `self.state` is set to `UpstairsState::Deactivating`
-    fn set_deactivate(&mut self, res: BlockRes<()>) {
+    fn set_deactivate(&mut self, res: BlockRes) {
         info!(self.log, "Request to deactivate this guest");
         match &self.state {
             UpstairsState::Initializing | UpstairsState::GoActive(..) => {
@@ -1225,7 +1225,7 @@ impl Upstairs {
 
     pub(crate) fn submit_flush(
         &mut self,
-        res: Option<BlockRes<()>>,
+        res: Option<BlockRes>,
         snapshot_details: Option<SnapshotDetails>,
     ) {
         // Notice that unlike submit_read and submit_write, we do not check for
@@ -1344,7 +1344,7 @@ impl Upstairs {
         &mut self,
         offset: Block,
         data: BytesMut,
-        res: BlockRes<()>,
+        res: BlockRes,
         is_write_unwritten: bool,
     ) {
         self.submit_deferred_write_inner(
@@ -1381,7 +1381,7 @@ impl Upstairs {
         &mut self,
         offset: Block,
         data: BytesMut,
-        res: Option<BlockRes<()>>,
+        res: Option<BlockRes>,
         is_write_unwritten: bool,
     ) {
         // It's possible for the write to be invalid out of the gate, in which
@@ -1403,7 +1403,7 @@ impl Upstairs {
         &mut self,
         offset: Block,
         data: BytesMut,
-        res: Option<BlockRes<()>>,
+        res: Option<BlockRes>,
         is_write_unwritten: bool,
     ) -> Option<DeferredWrite> {
         #[cfg(not(test))]

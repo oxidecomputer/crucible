@@ -105,7 +105,7 @@ pub(crate) struct DeferredWrite {
     pub ddef: RegionDefinition,
     pub impacted_blocks: ImpactedBlocks,
     pub data: BytesMut,
-    pub res: Option<BlockRes<()>>,
+    pub res: Option<BlockRes>,
     pub is_write_unwritten: bool,
     pub cfg: Arc<UpstairsConfig>,
 }
@@ -127,7 +127,7 @@ pub(crate) struct EncryptedWrite {
     /// An `RawWrite` containing our encrypted data
     pub data: RawWrite,
     pub impacted_blocks: ImpactedBlocks,
-    pub res: Option<BlockRes<()>>,
+    pub res: Option<BlockRes>,
     pub is_write_unwritten: bool,
 }
 
