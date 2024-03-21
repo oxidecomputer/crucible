@@ -63,12 +63,6 @@ pub(crate) enum GuestBlockRes {
     Other(BlockRes<()>),
 }
 
-impl From<BlockRes<()>> for GuestBlockRes {
-    fn from(b: BlockRes<()>) -> Self {
-        GuestBlockRes::Other(b)
-    }
-}
-
 impl GtoS {
     /// Create a new GtoS object where one Guest IO request maps to one
     /// downstairs operation.
