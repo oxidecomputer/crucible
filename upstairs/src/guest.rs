@@ -415,27 +415,25 @@ impl Guest {
         }
     }
 
-    async fn send_and_wait<T>(
-        &self,
-        op: BlockOp,
-        rx: BlockReqWaiter<T, CrucibleError>,
-    ) -> Result<T, CrucibleError> {
+    /// Helper function to build a `BlockOp`, send it, and await the result
+    async fn send_and_wait<T, F>(&self, f: F) -> Result<T, CrucibleError>
+    where
+        F: FnOnce(BlockRes<T>) -> BlockOp,
+    {
+        let (rx, done) = BlockReqWaiter::pair();
+        let op = f(done);
         self.send(op).await;
         rx.wait(&self.log).await
     }
 
     pub async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
-        let (rx, done) = BlockReqWaiter::pair();
-        let extent_query = BlockOp::QueryExtentSize { done };
-
-        self.send_and_wait(extent_query, rx).await
+        self.send_and_wait(|done| BlockOp::QueryExtentSize { done })
+            .await
     }
 
     pub async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
-        let (rx, done) = BlockReqWaiter::pair();
-        let qwq = BlockOp::QueryWorkQueue { done };
-
-        self.send_and_wait(qwq, rx).await
+        self.send_and_wait(|done| BlockOp::QueryWorkQueue { done })
+            .await
     }
 
     // Maybe this can just be a guest specific thing, not a BlockIO
@@ -486,31 +484,26 @@ impl BlockIO for Guest {
 
     /// Disable any more IO from this guest and deactivate the downstairs.
     async fn deactivate(&self) -> Result<(), CrucibleError> {
-        let (rx, done) = BlockReqWaiter::pair();
-        self.send_and_wait(BlockOp::Deactivate { done }, rx).await
+        self.send_and_wait(|done| BlockOp::Deactivate { done })
+            .await
     }
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
-        let (rx, done) = BlockReqWaiter::pair();
-        let active_query = BlockOp::QueryGuestIOReady { done };
-
-        self.send_and_wait(active_query, rx).await
+        self.send_and_wait(|done| BlockOp::QueryGuestIOReady { done })
+            .await
     }
 
     async fn total_size(&self) -> Result<u64, CrucibleError> {
-        let (rx, done) = BlockReqWaiter::pair();
-        let size_query = BlockOp::QueryTotalSize { done };
-
-        self.send_and_wait(size_query, rx).await
+        self.send_and_wait(|done| BlockOp::QueryTotalSize { done })
+            .await
     }
 
     async fn get_block_size(&self) -> Result<u64, CrucibleError> {
         let bs = self.block_size.load(Ordering::Relaxed);
         if bs == 0 {
-            let (rx, done) = BlockReqWaiter::pair();
-            let size_query = BlockOp::QueryBlockSize { done };
-
-            let bs = self.send_and_wait(size_query, rx).await?;
+            let bs = self
+                .send_and_wait(|done| BlockOp::QueryBlockSize { done })
+                .await?;
 
             self.block_size.store(bs, Ordering::Relaxed);
             Ok(bs)
@@ -520,10 +513,8 @@ impl BlockIO for Guest {
     }
 
     async fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
-        let (rx, done) = BlockReqWaiter::pair();
-        let uuid_query = BlockOp::QueryUpstairsUuid { done };
-
-        self.send_and_wait(uuid_query, rx).await
+        self.send_and_wait(|done| BlockOp::QueryUpstairsUuid { done })
+            .await
     }
 
     async fn read(
@@ -628,16 +619,16 @@ impl BlockIO for Guest {
             let buf = data.split_to(MDTS.min(data.len()));
             assert_eq!(buf.len() as u64 % bs, 0);
             let offset_change = buf.len() as u64 / bs;
-            let (rx, done) = BlockReqWaiter::pair();
-            let wio = BlockOp::Write {
-                offset,
-                data: buf,
-                done,
-            };
 
             self.backpressure_sleep().await;
 
-            let reply = self.send_and_wait(wio, rx).await;
+            let reply = self
+                .send_and_wait(|done| BlockOp::Write {
+                    offset,
+                    data: buf,
+                    done,
+                })
+                .await;
             reply?;
             offset.value += offset_change;
         }
@@ -659,32 +650,31 @@ impl BlockIO for Guest {
         if data.is_empty() {
             return Ok(());
         }
-        let (rx, done) = BlockReqWaiter::pair();
-        let wio = BlockOp::WriteUnwritten { offset, data, done };
 
         self.backpressure_sleep().await;
-        self.send_and_wait(wio, rx).await
+        self.send_and_wait(|done| BlockOp::WriteUnwritten {
+            offset,
+            data,
+            done,
+        })
+        .await
     }
 
     async fn flush(
         &self,
         snapshot_details: Option<SnapshotDetails>,
     ) -> Result<(), CrucibleError> {
-        let (rx, done) = BlockReqWaiter::pair();
-        let flush = BlockOp::Flush {
+        self.send_and_wait(|done| BlockOp::Flush {
             snapshot_details,
             done,
-        };
-        self.send_and_wait(flush, rx).await
+        })
+        .await
     }
 
     async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
         // Note: for this implementation, BlockOp::ShowWork will be sent and
         // processed by the Upstairs even if it isn't active.
-        let (rx, done) = BlockReqWaiter::pair();
-        let sw = BlockOp::ShowWork { done };
-
-        self.send_and_wait(sw, rx).await
+        self.send_and_wait(|done| BlockOp::ShowWork { done }).await
     }
 
     async fn replace_downstairs(
@@ -693,10 +683,13 @@ impl BlockIO for Guest {
         old: SocketAddr,
         new: SocketAddr,
     ) -> Result<ReplaceResult, CrucibleError> {
-        let (rx, done) = BlockReqWaiter::pair();
-        let sw = BlockOp::ReplaceDownstairs { id, old, new, done };
-
-        self.send_and_wait(sw, rx).await
+        self.send_and_wait(|done| BlockOp::ReplaceDownstairs {
+            id,
+            old,
+            new,
+            done,
+        })
+        .await
     }
 }
 
