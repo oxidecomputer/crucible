@@ -227,13 +227,12 @@ impl GuestWork {
      * This may include moving data buffers from completed reads.
      */
     #[instrument]
-    pub(crate) async fn gw_ds_complete(
+    pub(crate) fn gw_ds_complete(
         &mut self,
         gw_id: GuestWorkId,
         ds_id: JobId,
         data: Option<Vec<ReadResponse>>,
         result: Result<(), CrucibleError>,
-        log: &Logger,
     ) {
         if let Some(gtos_job) = self.active.remove(&gw_id) {
             assert_eq!(gtos_job.ds_id, ds_id);

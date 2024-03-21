@@ -623,7 +623,6 @@ impl Upstairs {
         if self.downstairs.has_ackable_jobs() {
             self.downstairs
                 .ack_jobs(&mut self.guest.guest_work, &self.stats)
-                .await;
         }
 
         // Check for client-side deactivation
