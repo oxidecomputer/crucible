@@ -51,7 +51,7 @@ futures-core = "0.3"
 hex = "0.4"
 http = "0.2.11"
 httptest = "0.15.5"
-hyper = { version = "0.14", features = [ "full" ] }
+hyper = { version = "1.2", features = [ "full" ] }
 hyper-staticfile = "0.9"
 indicatif = { version = "0.17.8", features = ["rayon"] }
 itertools = "0.12.1"
