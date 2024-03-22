@@ -4327,7 +4327,10 @@ impl Downstairs {
                 DownstairsClientStoppedReason::ConnectionTimeout
             }
             ClientRunResult::ConnectionFailed(_) => {
-                DownstairsClientStoppedReason::ConnectionFailed
+                // skip this notification, it's too noisy during connection
+                // retries
+                //DownstairsClientStoppedReason::ConnectionFailed
+                return;
             }
             ClientRunResult::Timeout => DownstairsClientStoppedReason::Timeout,
             ClientRunResult::WriteFailed(_) => {
@@ -4337,7 +4340,10 @@ impl Downstairs {
                 DownstairsClientStoppedReason::ReadFailed
             }
             ClientRunResult::RequestedStop(_) => {
-                DownstairsClientStoppedReason::RequestedStop
+                // skip this notification, it fires for *every* Upstairs
+                // deactivation
+                //DownstairsClientStoppedReason::RequestedStop
+                return;
             }
             ClientRunResult::Finished => {
                 DownstairsClientStoppedReason::Finished
