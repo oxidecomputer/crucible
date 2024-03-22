@@ -90,7 +90,7 @@ slog-term = { version = "2.9" }
 static_assertions = "1.1.0"
 statistical = "1.0.0"
 subprocess = "0.2.9"
-strum_macros = "0.25.3"
+strum_macros = "0.26.2"
 tempfile = "3"
 test-strategy = "0.3.1"
 thiserror = "1"
