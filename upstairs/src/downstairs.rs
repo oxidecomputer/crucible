@@ -2074,7 +2074,7 @@ impl Downstairs {
 
         reconcile.reconcile_task_list_index += 1;
 
-        info!(
+        debug!(
             self.log,
             "reconciliation {}: on task {} of {}",
             reconcile.id,
