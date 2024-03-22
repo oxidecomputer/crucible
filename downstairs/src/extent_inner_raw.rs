@@ -23,9 +23,9 @@ use std::path::Path;
 
 /// Equivalent to `DownstairsBlockContext`, but without one's own block number
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct OnDiskDownstairsBlockContext {
-    pub block_context: BlockContext,
-    pub on_disk_hash: u64,
+struct OnDiskDownstairsBlockContext {
+    block_context: BlockContext,
+    on_disk_hash: u64,
 }
 
 /// Equivalent to `ExtentMeta`, but ordered for efficient on-disk serialization
@@ -33,24 +33,24 @@ pub struct OnDiskDownstairsBlockContext {
 /// In particular, the `dirty` byte is first, so it's easy to read at a known
 /// offset within the file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OnDiskMeta {
-    pub dirty: bool,
-    pub gen_number: u64,
-    pub flush_number: u64,
-    pub ext_version: u32,
+struct OnDiskMeta {
+    dirty: bool,
+    gen_number: u64,
+    flush_number: u64,
+    ext_version: u32,
 }
 
 /// Size of backup data
 ///
 /// This must be large enough to fit an `Option<OnDiskDownstairsBlockContext>`
 /// serialized using `bincode`.
-pub const BLOCK_CONTEXT_SLOT_SIZE_BYTES: u64 = 48;
+const BLOCK_CONTEXT_SLOT_SIZE_BYTES: u64 = 48;
 
 /// Size of metadata region
 ///
 /// This must be large enough to contain an `OnDiskMeta` serialized using
 /// `bincode`.
-pub const BLOCK_META_SIZE_BYTES: u64 = 32;
+const BLOCK_META_SIZE_BYTES: u64 = 32;
 
 /// Number of extra syscalls per read / write that triggers defragmentation
 const DEFRAGMENT_THRESHOLD: u64 = 3;
@@ -1483,8 +1483,8 @@ mod test {
         RegionDefinition::from_options(&opt).unwrap()
     }
 
-    #[tokio::test]
-    async fn encryption_context() -> Result<()> {
+    #[test]
+    fn encryption_context() -> Result<()> {
         let dir = tempdir()?;
         let mut inner =
             RawInner::create(dir.as_ref(), &new_region_definition(), 0)
@@ -1554,8 +1554,8 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn multiple_context() -> Result<()> {
+    #[test]
+    fn multiple_context() -> Result<()> {
         let dir = tempdir()?;
         let mut inner =
             RawInner::create(dir.as_ref(), &new_region_definition(), 0)
