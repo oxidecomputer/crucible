@@ -855,7 +855,7 @@ dependencies = [
  "atty",
  "crucible-workspace-hack",
  "dropshot",
- "nix 0.27.1",
+ "nix 0.28.0",
  "proptest",
  "rusqlite",
  "rustls-pemfile 1.0.4",
@@ -915,7 +915,7 @@ dependencies = [
  "itertools",
  "libc",
  "mime_guess",
- "nix 0.27.1",
+ "nix 0.28.0",
  "omicron-common",
  "openapi-lint",
  "openapiv3",
@@ -2297,9 +2297,9 @@ checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 
 [[package]]
 name = "libc"
-version = "0.2.151"
+version = "0.2.153"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "302d7ab3130588088d277783b1e2d2e10c9e9e4a16dd9050e6ec93fb3e7048f4"
+checksum = "9c198f91728a82281a64e1f4f9eeb25d82cb32a5de251c6bd1b5154d63a8e7bd"
 
 [[package]]
 name = "libgit2-sys"
@@ -2608,12 +2608,13 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.27.1"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
+checksum = "ab2156c4fce2f8df6c499cc1c763e4394b7482525bf2a9701c9d79d215f519e4"
 dependencies = [
  "bitflags 2.4.1",
  "cfg-if",
+ "cfg_aliases",
  "libc",
 ]
 
