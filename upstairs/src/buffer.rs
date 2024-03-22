@@ -374,6 +374,8 @@ impl UninitializedBuffer {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::{Block, BlockContext, ReadResponseBlockMetadata};
+    use rand::RngCore;
 
     #[test]
     fn test_buffer_sane() {
@@ -476,5 +478,111 @@ mod test {
         let prev_ptr = lower.as_ptr();
         let _ = upper.eat(0, lower);
         assert_eq!(prev_ptr, upper.as_ptr());
+    }
+
+    /// Test `Buffer::write_read_response` with a mix of owned / unowned blocks
+    ///
+    /// `f` determines which blocks are owned and is specified in various unit
+    /// tests calling this function.
+    fn write_read_response_partial_generic<F: Fn(u64) -> bool>(f: F) -> Buffer {
+        let mut buf = Buffer::new(10, 512);
+
+        // Build a write which only writes the first 4 blocks
+        let mut data = BytesMut::new();
+        data.resize(10 * 512, 0u8);
+        let mut rng = rand::thread_rng();
+        rng.fill_bytes(&mut data);
+
+        let blocks = (0..10)
+            .map(|i| ReadResponseBlockMetadata {
+                eid: 0,
+                offset: Block::new_512(i),
+                block_contexts: if f(i) {
+                    vec![BlockContext {
+                        hash: 123,
+                        encryption_context: None,
+                    }]
+                } else {
+                    vec![]
+                },
+            })
+            .collect();
+
+        buf.write_read_response(RawReadResponse {
+            blocks,
+            data: data.clone(),
+        });
+
+        for i in 0..10 {
+            let buf_chunk = &buf[i * 512..][..512];
+            let data_chunk = &data[i * 512..][..512];
+            if f(i as u64) {
+                assert_eq!(buf.owned[i], 1);
+                assert_eq!(buf_chunk, data_chunk);
+            } else {
+                assert_eq!(buf.owned[i], 0);
+                assert_eq!(buf_chunk, [0; 512]);
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn write_read_response_partial_all() {
+        let buf = write_read_response_partial_generic(|_i| true);
+        assert_eq!(&buf.owned[..], [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn write_read_response_partial_none() {
+        let buf = write_read_response_partial_generic(|_i| true);
+        assert_eq!(&buf.owned[..], [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn write_read_response_partial_mixed() {
+        let buf = write_read_response_partial_generic(|i| i % 4 < 2);
+        assert_eq!(&buf.owned[..], [1, 1, 0, 0, 1, 1, 0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn write_read_response_partial_low() {
+        let buf = write_read_response_partial_generic(|i| i < 4);
+        assert_eq!(&buf.owned[..], [1, 1, 1, 1, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn write_read_response_partial_high() {
+        let buf = write_read_response_partial_generic(|i| i > 4);
+        assert_eq!(&buf.owned[..], [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]);
+    }
+
+    /// Test that `Buffer::write_read_response` becomes a pointer swap if the
+    /// incoming data is fully owned.
+    #[test]
+    fn write_read_response_full_swap() {
+        let mut buf = Buffer::new(10, 512);
+
+        // Build a write which only writes the first 4 blocks
+        let mut data = BytesMut::new();
+        data.resize(10 * 512, 0u8);
+        let mut rng = rand::thread_rng();
+        rng.fill_bytes(&mut data);
+
+        let blocks = (0..10)
+            .map(|i| ReadResponseBlockMetadata {
+                eid: 0,
+                offset: Block::new_512(i),
+                block_contexts: vec![BlockContext {
+                    hash: 123,
+                    encryption_context: None,
+                }],
+            })
+            .collect();
+
+        let prev_data_ptr = data.as_ptr();
+        buf.write_read_response(RawReadResponse { blocks, data });
+
+        assert_eq!(buf.data.as_ptr(), prev_data_ptr);
     }
 }
