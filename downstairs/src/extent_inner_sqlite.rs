@@ -1237,8 +1237,8 @@ mod test {
         RegionDefinition::from_options(&opt).unwrap()
     }
 
-    #[tokio::test]
-    async fn encryption_context() -> Result<()> {
+    #[test]
+    fn encryption_context() -> Result<()> {
         let dir = tempdir()?;
         let mut inner =
             SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
@@ -1391,8 +1391,8 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn duplicate_context_insert() -> Result<()> {
+    #[test]
+    fn duplicate_context_insert() -> Result<()> {
         let dir = tempdir()?;
         let mut inner =
             SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
@@ -1428,8 +1428,8 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn multiple_context() -> Result<()> {
+    #[test]
+    fn multiple_context() -> Result<()> {
         let dir = tempdir()?;
         let mut inner =
             SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
