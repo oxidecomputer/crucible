@@ -210,9 +210,9 @@ checksum = "96d30a06541fbafbc7f82ed10c06164cfbd2c401138f6addd8404629c4b16711"
 
 [[package]]
 name = "async-recursion"
-version = "1.0.5"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fd55a5ba1179988837d24ab4c7cc8ed6efdeff578ede0416b4225a5fca35bd0"
+checksum = "30c5ef0ede93efbf733c1a727f3b6b5a1060bbedd5600183e66f6e4be4af0ec5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -243,9 +243,9 @@ dependencies = [
 
 [[package]]
 name = "async-trait"
-version = "0.1.77"
+version = "0.1.78"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c980ee35e870bd1a4d2c8294d4c04d0499e67bca1e4b5cefcc693c2fa00caea9"
+checksum = "461abc97219de0eaaf81fe3ef974a540158f3d079c2ab200f891f1a2ef201e85"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -804,7 +804,7 @@ dependencies = [
  "dropshot",
  "expectorate",
  "futures",
- "http 0.2.11",
+ "http 0.2.12",
  "hyper",
  "omicron-common",
  "openapi-lint",
@@ -855,7 +855,7 @@ dependencies = [
  "atty",
  "crucible-workspace-hack",
  "dropshot",
- "nix 0.27.1",
+ "nix 0.28.0",
  "proptest",
  "rusqlite",
  "rustls-pemfile 1.0.4",
@@ -909,13 +909,13 @@ dependencies = [
  "futures",
  "futures-core",
  "hex",
- "http 0.2.11",
+ "http 0.2.12",
  "hyper",
  "hyper-staticfile",
  "itertools",
  "libc",
  "mime_guess",
- "nix 0.27.1",
+ "nix 0.28.0",
  "omicron-common",
  "openapi-lint",
  "openapiv3",
@@ -1053,7 +1053,7 @@ dependencies = [
  "expectorate",
  "futures",
  "hex",
- "http 0.2.11",
+ "http 0.2.12",
  "hyper",
  "omicron-common",
  "openapi-lint",
@@ -1387,7 +1387,7 @@ version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/omicron?branch=main#eda05500978621d28df6e15cb50549abed9a60ca"
 dependencies = [
  "chrono",
- "http 0.2.11",
+ "http 0.2.12",
  "omicron-workspace-hack",
  "progenitor",
  "reqwest",
@@ -1426,7 +1426,7 @@ dependencies = [
  "form_urlencoded",
  "futures",
  "hostname",
- "http 0.2.11",
+ "http 0.2.12",
  "hyper",
  "indexmap 2.2.3",
  "multer",
@@ -1882,7 +1882,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "futures-util",
- "http 0.2.11",
+ "http 0.2.12",
  "indexmap 2.2.3",
  "slab",
  "tokio",
@@ -1979,9 +1979,9 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "0.2.11"
+version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8947b1a6fad4393052c7ba1f4cd97bed3e953a95c79c92ad9b051a04611d9fbb"
+checksum = "601cbb57e577e2f5ef5be8e7b83f0f63994f25aa94d673e54a92d5c516d101f1"
 dependencies = [
  "bytes",
  "fnv",
@@ -2006,7 +2006,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5f38f16d184e36f2408a55281cd658ecbd3ca05cce6d6510a176eca393e26d1"
 dependencies = [
  "bytes",
- "http 0.2.11",
+ "http 0.2.12",
  "pin-project-lite",
 ]
 
@@ -2039,7 +2039,7 @@ dependencies = [
  "crossbeam-channel",
  "form_urlencoded",
  "futures",
- "http 0.2.11",
+ "http 0.2.12",
  "hyper",
  "log",
  "once_cell",
@@ -2082,7 +2082,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "h2",
- "http 0.2.11",
+ "http 0.2.12",
  "http-body",
  "httparse",
  "httpdate",
@@ -2102,7 +2102,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec3efd23720e2049821a693cbc7e65ea87c72f1c58ff2f9522ff332b1491e590"
 dependencies = [
  "futures-util",
- "http 0.2.11",
+ "http 0.2.12",
  "hyper",
  "rustls 0.21.9",
  "tokio",
@@ -2116,7 +2116,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "318ca89e4827e7fe4ddd2824f52337239796ae8ecc761a663324407dc3d8d7e7"
 dependencies = [
  "futures-util",
- "http 0.2.11",
+ "http 0.2.12",
  "http-range",
  "httpdate",
  "hyper",
@@ -2297,9 +2297,9 @@ checksum = "e2abad23fbc42b3700f2f279844dc832adb2b2eb069b2df918f455c4e18cc646"
 
 [[package]]
 name = "libc"
-version = "0.2.151"
+version = "0.2.153"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "302d7ab3130588088d277783b1e2d2e10c9e9e4a16dd9050e6ec93fb3e7048f4"
+checksum = "9c198f91728a82281a64e1f4f9eeb25d82cb32a5de251c6bd1b5154d63a8e7bd"
 
 [[package]]
 name = "libgit2-sys"
@@ -2608,12 +2608,13 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.27.1"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
+checksum = "ab2156c4fce2f8df6c499cc1c763e4394b7482525bf2a9701c9d79d215f519e4"
 dependencies = [
  "bitflags 2.4.1",
  "cfg-if",
+ "cfg_aliases",
  "libc",
 ]
 
@@ -2837,7 +2838,7 @@ dependencies = [
  "dropshot",
  "futures",
  "hex",
- "http 0.2.11",
+ "http 0.2.12",
  "ipnetwork",
  "macaddr",
  "omicron-workspace-hack",
@@ -3453,7 +3454,7 @@ source = "git+https://github.com/oxidecomputer/progenitor?branch=main#bc0bb4b0fb
 dependencies = [
  "getopts",
  "heck",
- "http 0.2.11",
+ "http 0.2.12",
  "indexmap 2.2.3",
  "openapiv3",
  "proc-macro2",
@@ -3693,9 +3694,9 @@ dependencies = [
 
 [[package]]
 name = "rayon"
-version = "1.8.1"
+version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa7237101a77a10773db45d62004a272517633fbcc3df19d96455ede1122e051"
+checksum = "e4963ed1bc86e4f3ee217022bd855b297cef07fb9eac5dfa1f788b220b49b3bd"
 dependencies = [
  "either",
  "rayon-core",
@@ -3751,9 +3752,9 @@ dependencies = [
 
 [[package]]
 name = "reedline"
-version = "0.29.0"
+version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e01ebfbdb1a88963121d3c928c97be7f10fec7795bec8b918c8cda1db7c29e6"
+checksum = "413a9fa6a5d8c937d3ae1e975bfb6a918bb0b6cdfae6a10416218c837a31b8fc"
 dependencies = [
  "chrono",
  "crossterm",
@@ -3852,7 +3853,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "h2",
- "http 0.2.11",
+ "http 0.2.12",
  "http-body",
  "hyper",
  "hyper-rustls",
