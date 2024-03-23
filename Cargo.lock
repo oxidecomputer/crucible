@@ -805,7 +805,7 @@ dependencies = [
  "expectorate",
  "futures",
  "http 0.2.12",
- "hyper",
+ "hyper 0.14.27",
  "omicron-common",
  "openapi-lint",
  "openapiv3",
@@ -910,7 +910,7 @@ dependencies = [
  "futures-core",
  "hex",
  "http 0.2.12",
- "hyper",
+ "hyper 0.14.27",
  "hyper-staticfile",
  "itertools",
  "libc",
@@ -1054,7 +1054,7 @@ dependencies = [
  "futures",
  "hex",
  "http 0.2.12",
- "hyper",
+ "hyper 0.14.27",
  "omicron-common",
  "openapi-lint",
  "openapiv3",
@@ -1137,7 +1137,7 @@ dependencies = [
  "getrandom",
  "hashbrown 0.14.3",
  "hex",
- "hyper",
+ "hyper 0.14.27",
  "indexmap 2.2.3",
  "libc",
  "log",
@@ -1427,7 +1427,7 @@ dependencies = [
  "futures",
  "hostname",
  "http 0.2.12",
- "hyper",
+ "hyper 0.14.27",
  "indexmap 2.2.3",
  "multer",
  "openapiv3",
@@ -2011,6 +2011,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-body"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1cac85db508abc24a2e48553ba12a996e87244a0395ce011e62b37158745d643"
+dependencies = [
+ "bytes",
+ "http 1.0.0",
+]
+
+[[package]]
 name = "http-range"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2040,7 +2050,7 @@ dependencies = [
  "form_urlencoded",
  "futures",
  "http 0.2.12",
- "hyper",
+ "hyper 0.14.27",
  "log",
  "once_cell",
  "regex",
@@ -2083,7 +2093,7 @@ dependencies = [
  "futures-util",
  "h2",
  "http 0.2.12",
- "http-body",
+ "http-body 0.4.5",
  "httparse",
  "httpdate",
  "itoa",
@@ -2096,6 +2106,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyper"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "186548d73ac615b32a73aafe38fb4f56c0d340e110e5a200bcadbaf2e199263a"
+dependencies = [
+ "bytes",
+ "http 1.0.0",
+ "http-body 1.0.0",
+ "tokio",
+]
+
+[[package]]
 name = "hyper-rustls"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2103,7 +2125,7 @@ checksum = "ec3efd23720e2049821a693cbc7e65ea87c72f1c58ff2f9522ff332b1491e590"
 dependencies = [
  "futures-util",
  "http 0.2.12",
- "hyper",
+ "hyper 0.14.27",
  "rustls 0.21.9",
  "tokio",
  "tokio-rustls 0.24.1",
@@ -2111,15 +2133,15 @@ dependencies = [
 
 [[package]]
 name = "hyper-staticfile"
-version = "0.9.5"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "318ca89e4827e7fe4ddd2824f52337239796ae8ecc761a663324407dc3d8d7e7"
+checksum = "847250e0ccf0c0537daf49fc5c5ff69d43a752edbabc5274bc8322e8b092c55e"
 dependencies = [
  "futures-util",
- "http 0.2.12",
+ "http 1.0.0",
  "http-range",
  "httpdate",
- "hyper",
+ "hyper 1.2.0",
  "mime_guess",
  "percent-encoding",
  "rand 0.8.5",
@@ -2135,7 +2157,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6183ddfa99b85da61a140bea0efc93fdf56ceaa041b37d553518030827f9905"
 dependencies = [
  "bytes",
- "hyper",
+ "hyper 0.14.27",
  "native-tls",
  "tokio",
  "tokio-native-tls",
@@ -3854,8 +3876,8 @@ dependencies = [
  "futures-util",
  "h2",
  "http 0.2.12",
- "http-body",
- "hyper",
+ "http-body 0.4.5",
+ "hyper 0.14.27",
  "hyper-rustls",
  "hyper-tls",
  "ipnet",
