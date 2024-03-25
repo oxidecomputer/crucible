@@ -1011,8 +1011,6 @@ impl Downstairs {
 
             #[cfg(feature = "notify-nexus")]
             {
-                // If building for production, then notify Nexus when any
-                // reconciliation starts.
                 let reconcile = self.reconcile.as_ref().unwrap();
                 self.notify_nexus_of_reconcile_start(reconcile);
             }
@@ -1145,8 +1143,6 @@ impl Downstairs {
 
         #[cfg(feature = "notify-nexus")]
         {
-            // If building for production, then notify Nexus when any
-            // live repair starts.
             let repair = self.repair.as_ref().unwrap();
             self.notify_nexus_of_live_repair_start(repair);
         }
@@ -1384,8 +1380,6 @@ impl Downstairs {
                         let repair_id = repair.id;
                         let extent_count = repair.extent_count;
 
-                        // If building for production, then notify Nexus of live
-                        // repair progress.
                         self.notify_nexus_of_live_repair_progress(
                             repair_id,
                             active_extent,
@@ -1420,8 +1414,6 @@ impl Downstairs {
 
                 #[cfg(feature = "notify-nexus")]
                 {
-                    // If building for production, then notify Nexus when any
-                    // live repair completes.
                     let repair = self.repair.as_ref().unwrap();
                     self.notify_nexus_of_live_repair_finish(repair);
                 }
@@ -2084,8 +2076,6 @@ impl Downstairs {
 
         #[cfg(feature = "notify-nexus")]
         {
-            // If building for production, then notify Nexus of reconciliation
-            // progress.
             let reconcile_id = reconcile.id;
             let current_task = reconcile.reconcile_task_list_index;
             let task_count = self.reconcile_repair_needed;
@@ -2203,8 +2193,6 @@ impl Downstairs {
 
         #[cfg(feature = "notify-nexus")]
         {
-            // If building for production, then notify Nexus when any
-            // reconciliation finishes.
             let reconcile = self.reconcile.as_ref().unwrap();
             self.notify_nexus_of_reconcile_finished(
                 reconcile, true, /* aborted */
@@ -2233,8 +2221,6 @@ impl Downstairs {
 
             #[cfg(feature = "notify-nexus")]
             {
-                // If building for production, then notify Nexus when any
-                // reconciliation finishes.
                 let reconcile = self.reconcile.as_ref().unwrap();
                 self.notify_nexus_of_reconcile_finished(
                     reconcile, false, /* aborted */
