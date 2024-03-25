@@ -39,7 +39,6 @@ enum DtraceDisplay {
     LiveRepair,
     Connected,
     Replaced,
-    FlowControl,
     ExtentLiveRepair,
     ExtentLimit,
     Backpressure,
@@ -60,7 +59,6 @@ impl fmt::Display for DtraceDisplay {
             DtraceDisplay::LiveRepair => write!(f, "live_repair"),
             DtraceDisplay::Connected => write!(f, "connected"),
             DtraceDisplay::Replaced => write!(f, "replaced"),
-            DtraceDisplay::FlowControl => write!(f, "flow_control"),
             DtraceDisplay::ExtentLiveRepair => write!(f, "extent_live_repair"),
             DtraceDisplay::ExtentLimit => write!(f, "extent_under_repair"),
             DtraceDisplay::Backpressure => write!(f, "backpressure"),
@@ -231,9 +229,6 @@ fn print_dtrace_header(dd: &[DtraceDisplay]) {
             DtraceDisplay::Replaced => {
                 print!(" {:>4} {:>4} {:>4}", "RPL0", "RPL1", "RPL2");
             }
-            DtraceDisplay::FlowControl => {
-                print!(" {:>4} {:>4} {:>4}", "FC0", "FC1", "FC2");
-            }
             DtraceDisplay::ExtentLiveRepair => {
                 print!(" {:>4} {:>4} {:>4}", "EXR0", "EXR1", "EXR2");
                 print!(" {:>4} {:>4} {:>4}", "EXC0", "EXC1", "EXC2");
@@ -347,14 +342,6 @@ fn print_dtrace_row(d_out: Arg, dd: &[DtraceDisplay], last_job_id: &mut u64) {
                     d_out.ds_replaced[0],
                     d_out.ds_replaced[1],
                     d_out.ds_replaced[2],
-                );
-            }
-            DtraceDisplay::FlowControl => {
-                print!(
-                    " {:4} {:4} {:4}",
-                    d_out.ds_flow_control[0],
-                    d_out.ds_flow_control[1],
-                    d_out.ds_flow_control[2],
                 );
             }
             DtraceDisplay::ExtentLiveRepair => {

@@ -34,9 +34,6 @@ cleanup
 # show results
 set -x
 
-# was job based flow control triggered?
-grep "flow control" results.txt || true
-
 # show IOPS measurements
 grep "IOPS mean " results.txt || true
 

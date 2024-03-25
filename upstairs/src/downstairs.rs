@@ -20,7 +20,6 @@ use crate::{
     ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
     WorkSummary,
 };
-use crucible_common::MAX_ACTIVE_COUNT;
 use crucible_protocol::{RawWrite, WriteHeader};
 
 use rand::prelude::*;
@@ -413,28 +412,10 @@ impl Downstairs {
         }
     }
 
-    pub(crate) async fn io_send(&mut self, client_id: ClientId) -> bool {
-        // Send as many jobs as possible to the downstairs, limited by
-        // `MAX_ACTIVE_COUNT`.
-        //
-        // This XXX is for coming back here and making a better job of
-        // flow control; see RFD 445 for details.
+    pub(crate) async fn io_send(&mut self, client_id: ClientId) {
+        // Send all jobs to the downstairs
         let client = &mut self.clients[client_id];
-        let (new_work, flow_control) = {
-            let active_count = client.io_state_count.in_progress as usize;
-            if active_count > MAX_ACTIVE_COUNT {
-                // Can't do any work
-                client.stats.flow_control += 1;
-                return true;
-            } else {
-                let n = MAX_ACTIVE_COUNT - active_count;
-                let (new_work, flow_control) = client.new_work(n);
-                if flow_control {
-                    client.stats.flow_control += 1;
-                }
-                (new_work, flow_control)
-            }
-        };
+        let new_work = client.new_work();
 
         /*
          * Now we have a list of all the job IDs that are new for our client id.
@@ -628,7 +609,6 @@ impl Downstairs {
             };
             self.clients[client_id].send(message).await
         }
-        flow_control
     }
 
     /// Mark this request as in progress for this client, and return the

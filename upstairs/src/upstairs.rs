@@ -153,7 +153,7 @@ impl UpCounters {
 /// `Upstairs` into a known state afterwards.
 ///
 /// For example, we _always_ do things like
-/// - Send all pending IO (limited by the downstairs' `MAX_ACTIVE_COUNT`)
+/// - Send all pending IO to the client work tasks
 /// - Ack all ackable jobs to the guest
 /// - Step through the live-repair state machine (if it's running)
 /// - Check for client-side deactivation (if it's pending)
@@ -739,8 +739,6 @@ impl Upstairs {
             .collect_stats(|c| c.stats.live_repair_aborted);
         let ds_connected = self.downstairs.collect_stats(|c| c.stats.connected);
         let ds_replaced = self.downstairs.collect_stats(|c| c.stats.replaced);
-        let ds_flow_control =
-            self.downstairs.collect_stats(|c| c.stats.flow_control);
         let ds_extents_repaired =
             self.downstairs.collect_stats(|c| c.stats.extents_repaired);
         let ds_extents_confirmed =
@@ -775,7 +773,6 @@ impl Upstairs {
                 ds_live_repair_aborted,
                 ds_connected,
                 ds_replaced,
-                ds_flow_control,
                 ds_extents_repaired,
                 ds_extents_confirmed,
                 ds_extent_limit,

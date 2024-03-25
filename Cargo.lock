@@ -320,6 +320,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
 
 [[package]]
+name = "base64"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9475866fec1451be56a3c2400fd081ff546538961565ccb5b7142cbd22bc7a51"
+
+[[package]]
 name = "base64ct"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -748,7 +754,7 @@ dependencies = [
  "anyhow",
  "async-recursion",
  "async-trait",
- "base64",
+ "base64 0.22.0",
  "bincode",
  "bytes",
  "chrono",
@@ -841,7 +847,7 @@ dependencies = [
 name = "crucible-client-types"
 version = "0.1.0"
 dependencies = [
- "base64",
+ "base64 0.22.0",
  "crucible-workspace-hack",
  "schemars",
  "serde",
@@ -921,7 +927,7 @@ dependencies = [
  "omicron-common",
  "openapi-lint",
  "openapiv3",
- "opentelemetry",
+ "opentelemetry 0.22.0",
  "opentelemetry-jaeger",
  "oximeter",
  "oximeter-producer",
@@ -964,7 +970,7 @@ dependencies = [
  "crucible",
  "crucible-common",
  "crucible-workspace-hack",
- "opentelemetry",
+ "opentelemetry 0.22.0",
  "opentelemetry-jaeger",
  "rand 0.8.5",
  "tokio",
@@ -978,7 +984,7 @@ name = "crucible-integration-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.22.0",
  "bytes",
  "crucible",
  "crucible-client-types",
@@ -1043,7 +1049,7 @@ name = "crucible-pantry"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "base64",
+ "base64 0.22.0",
  "bytes",
  "chrono",
  "clap",
@@ -1419,7 +1425,7 @@ source = "git+https://github.com/oxidecomputer/dropshot?branch=main#59f102ee0d44
 dependencies = [
  "async-stream",
  "async-trait",
- "base64",
+ "base64 0.21.7",
  "bytes",
  "camino",
  "chrono",
@@ -1778,7 +1784,7 @@ name = "gateway-client"
 version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/omicron?branch=main#eda05500978621d28df6e15cb50549abed9a60ca"
 dependencies = [
- "base64",
+ "base64 0.21.7",
  "chrono",
  "gateway-messages",
  "omicron-workspace-hack",
@@ -2577,7 +2583,7 @@ source = "git+https://github.com/oxidecomputer/omicron?branch=main#eda0550097862
 dependencies = [
  "anyhow",
  "api_identity",
- "base64",
+ "base64 0.21.7",
  "chrono",
  "dns-service-client",
  "futures",
@@ -3008,6 +3014,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "opentelemetry"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "900d57987be3f2aeb70d385fff9b27fb74c5723cc9a52d904d4f9c807a0667bf"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "js-sys",
+ "once_cell",
+ "pin-project-lite",
+ "thiserror",
+ "urlencoding",
+]
+
+[[package]]
 name = "opentelemetry-jaeger"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3016,7 +3037,7 @@ dependencies = [
  "async-trait",
  "futures-core",
  "futures-util",
- "opentelemetry",
+ "opentelemetry 0.21.0",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk",
  "thrift",
@@ -3028,7 +3049,7 @@ version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f5774f1ef1f982ef2a447f6ee04ec383981a3ab99c8e77a1a7b30182e65bbc84"
 dependencies = [
- "opentelemetry",
+ "opentelemetry 0.21.0",
 ]
 
 [[package]]
@@ -3044,7 +3065,7 @@ dependencies = [
  "futures-util",
  "glob",
  "once_cell",
- "opentelemetry",
+ "opentelemetry 0.21.0",
  "ordered-float 4.2.0",
  "percent-encoding",
  "rand 0.8.5",
@@ -3340,7 +3361,7 @@ version = "0.6.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49b6c5ef183cd3ab4ba005f1ca64c21e8bd97ce4699cfea9e8d9a2c4958ca520"
 dependencies = [
- "base64",
+ "base64 0.21.7",
  "byteorder",
  "bytes",
  "fallible-iterator 0.2.0",
@@ -3849,7 +3870,7 @@ version = "0.11.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "046cd98826c46c2ac8ddecae268eb5c2e58628688a5fc7a2643704a73faba95b"
 dependencies = [
- "base64",
+ "base64 0.21.7",
  "bytes",
  "encoding_rs",
  "futures-core",
@@ -4051,7 +4072,7 @@ version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c74cae0a4cf6ccbbf5f359f08efdf8ee7e1dc532573bf0db71968cb56b1448c"
 dependencies = [
- "base64",
+ "base64 0.21.7",
 ]
 
 [[package]]
@@ -4060,7 +4081,7 @@ version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "35e4980fa29e4c4b212ffb3db068a564cbf560e51d3944b7c88bd8bf5bec64f4"
 dependencies = [
- "base64",
+ "base64 0.21.7",
  "rustls-pki-types",
 ]
 
@@ -4351,7 +4372,7 @@ version = "3.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "15d167997bd841ec232f5b2b8e0e26606df2e7caa4c31b95ea9ca52b200bd270"
 dependencies = [
- "base64",
+ "base64 0.21.7",
  "chrono",
  "hex",
  "indexmap 1.9.3",
@@ -5291,7 +5312,7 @@ checksum = "c67ac25c5407e7b961fafc6f7e9aa5958fd297aada2d20fa2ae1737357e55596"
 dependencies = [
  "js-sys",
  "once_cell",
- "opentelemetry",
+ "opentelemetry 0.21.0",
  "opentelemetry_sdk",
  "smallvec",
  "tracing",
