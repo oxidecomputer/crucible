@@ -8,6 +8,7 @@ use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 use clap::Parser;
 use csv::WriterBuilder;
+use futures::stream::FuturesOrdered;
 use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::prelude::*;
@@ -53,7 +54,7 @@ enum Workload {
         #[clap(long, short, default_value = "0.0.0.0", action)]
         listen: IpAddr,
         /// Port for the cliserver to listen on
-        #[clap(long, short, default_value = "5050", action)]
+        #[clap(long, short, default_value_t = 5050, action)]
         port: u16,
     },
     Deactivate,
@@ -71,19 +72,19 @@ enum Workload {
     /// Run the perf test, random writes, then random reads
     Perf {
         /// Size in blocks of each IO
-        #[clap(long, default_value = "1", action)]
+        #[clap(long, default_value_t = 1, action)]
         io_size: usize,
         /// Number of outstanding IOs at the same time.
-        #[clap(long, default_value = "1", action)]
+        #[clap(long, default_value_t = 1, action)]
         io_depth: usize,
         /// Output file for IO times
         #[clap(long, global = true, name = "PERF", action)]
         perf_out: Option<PathBuf>,
         /// Number of read test loops to do.
-        #[clap(long, default_value = "2", action)]
+        #[clap(long, default_value_t = 2, action)]
         read_loops: usize,
         /// Number of write test loops to do.
-        #[clap(long, default_value = "2", action)]
+        #[clap(long, default_value_t = 2, action)]
         write_loops: usize,
     },
     Repair,
@@ -109,7 +110,7 @@ enum Workload {
         replacement: SocketAddr,
 
         /// Number of IOs to do after replacement has started.
-        #[clap(long, default_value = "1800", action)]
+        #[clap(long, default_value_t = 1800, action)]
         work: usize,
     },
     Span,
@@ -145,7 +146,7 @@ pub struct Opt {
     #[clap(long, global = true, action)]
     flush_timeout: Option<f32>,
 
-    #[clap(short, global = true, long, default_value = "0", action)]
+    #[clap(short, global = true, long, default_value_t = 0, action)]
     gen: u64,
 
     /// The key for an encrypted downstairs.
@@ -281,9 +282,7 @@ pub struct RegionInfo {
 /*
  * All the tests need this basic set of information about the region.
  */
-async fn get_region_info(
-    guest: &Arc<Guest>,
-) -> Result<RegionInfo, CrucibleError> {
+async fn get_region_info(guest: &Guest) -> Result<RegionInfo, CrucibleError> {
     /*
      * These query requests have the side effect of preventing the test from
      * starting before the upstairs is ready.
@@ -368,11 +367,11 @@ impl WriteLog {
         }
     }
 
-    pub fn is_empty(&mut self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.count_cur.is_empty()
     }
 
-    pub fn len(&mut self) -> usize {
+    pub fn len(&self) -> usize {
         self.count_cur.len()
     }
 
@@ -507,19 +506,14 @@ impl WriteLog {
 
     // Set the current write count to a specific value.
     // You should only be using this if you know what you are doing.
-    pub fn set_wc(&mut self, index: usize, value: u32) {
+    #[cfg(test)]
+    fn set_wc(&mut self, index: usize, value: u32) {
         self.count_cur[index] = value;
-    }
-
-    // Set the write count value for the minimum.
-    // You should only be using this if you know what you are doing.
-    pub fn set_wc_min(&mut self, index: usize, value: u32) {
-        self.count_min[index] = value;
     }
 }
 
 async fn load_write_log(
-    guest: &Arc<Guest>,
+    guest: &Guest,
     ri: &mut RegionInfo,
     vi: PathBuf,
     verify: bool,
@@ -895,15 +889,15 @@ async fn main() -> Result<()> {
                     "ec",
                     "times",
                 ))?;
-                opt_wtr = Some(&mut wtr);
+                opt_wtr = Some(wtr);
             }
 
             // The header for all perf tests
             perf_header();
             perf_workload(
                 &guest,
-                &mut region_info,
-                &mut opt_wtr,
+                &region_info,
+                opt_wtr,
                 count,
                 io_depth,
                 io_size,
@@ -976,7 +970,7 @@ async fn main() -> Result<()> {
                 &guest,
                 &mut wtq,
                 &mut region_info,
-                full_target,
+                &full_target,
                 work,
                 fast_fill,
             )
@@ -1075,7 +1069,7 @@ async fn main() -> Result<()> {
  * value for a block since the last commit was called.
  */
 async fn verify_volume(
-    guest: &Arc<Guest>,
+    guest: &Guest,
     ri: &mut RegionInfo,
     range: bool,
 ) -> Result<()> {
@@ -1320,10 +1314,7 @@ fn validate_vec<V: AsRef<[u8]>>(
  * I named it balloon because each loop on a block "balloons" from the
  * minimum IO size to the largest possible IO size.
  */
-async fn balloon_workload(
-    guest: &Arc<Guest>,
-    ri: &mut RegionInfo,
-) -> Result<()> {
+async fn balloon_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
     for block_index in 0..ri.total_blocks {
         /*
          * Loop over all the IO sizes (in blocks) that an IO can
@@ -1377,7 +1368,7 @@ async fn balloon_workload(
  * Write then read (and verify) to every possible block.
  */
 async fn fill_workload(
-    guest: &Arc<Guest>,
+    guest: &Guest,
     ri: &mut RegionInfo,
     skip_verify: bool,
 ) -> Result<()> {
@@ -1429,7 +1420,7 @@ async fn fill_workload(
  * touched without having to write to every block.
  */
 async fn fill_sparse_workload(
-    guest: &Arc<Guest>,
+    guest: &Guest,
     ri: &mut RegionInfo,
 ) -> Result<()> {
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
@@ -1465,7 +1456,7 @@ async fn fill_sparse_workload(
  * Read data is verified.
  */
 async fn generic_workload(
-    guest: &Arc<Guest>,
+    guest: &Guest,
     wtq: &mut WhenToQuit,
     ri: &mut RegionInfo,
     quiet: bool,
@@ -1639,7 +1630,7 @@ async fn generic_workload(
 // be below the threshold of gone_too_long() so we don't end up faulting the
 // downstairs and doing a live repair
 async fn replay_workload(
-    guest: &Arc<Guest>,
+    guest: &Guest,
     wtq: &mut WhenToQuit,
     ri: &mut RegionInfo,
     dsc_client: Client,
@@ -1714,10 +1705,10 @@ async fn replay_workload(
 // bunch more IO.  Wait for all IO to finish (on all three downstairs) before
 // we continue.
 async fn replace_workload(
-    guest: &Arc<Guest>,
+    guest: &Guest,
     wtq: &mut WhenToQuit,
     ri: &mut RegionInfo,
-    full_targets: Vec<SocketAddr>,
+    full_targets: &[SocketAddr],
     work: usize,
     fill: bool,
 ) -> Result<()> {
@@ -1807,7 +1798,7 @@ async fn replace_workload(
  * automatic flush can come through and sync our data.
  */
 async fn dirty_workload(
-    guest: &Arc<Guest>,
+    guest: &Guest,
     ri: &mut RegionInfo,
     count: usize,
 ) -> Result<()> {
@@ -1819,7 +1810,7 @@ async fn dirty_workload(
     /*
      * To store our write requests
      */
-    let mut futureslist = Vec::new();
+    let mut futureslist = FuturesOrdered::new();
 
     let size = 1;
     /*
@@ -1854,10 +1845,12 @@ async fn dirty_workload(
         );
 
         let future = guest.write(offset, data);
-        futureslist.push(future);
+        futureslist.push_back(future);
     }
     println!("loop over {} futures", futureslist.len());
-    crucible::join_all(futureslist).await?;
+    while let Some(r) = futureslist.next().await {
+        r?;
+    }
     Ok(())
 }
 
@@ -1893,7 +1886,7 @@ pub fn perf_csv(
     io_depth: usize,
     io_size: usize,
     duration: Duration,
-    iotimes: Vec<Duration>,
+    iotimes: &[Duration],
     es: u64,
     ec: u64,
 ) {
@@ -1964,7 +1957,7 @@ fn perf_summary(
     msg: &str,
     count: usize,
     io_depth: usize,
-    times: Vec<Duration>,
+    times: &[Duration],
     total_time: Duration,
     es: u64,
     ec: u64,
@@ -2023,8 +2016,8 @@ struct Record {
 #[allow(clippy::too_many_arguments)]
 async fn perf_workload(
     guest: &Arc<Guest>,
-    ri: &mut RegionInfo,
-    wtr: &mut Option<&mut csv::Writer<File>>,
+    ri: &RegionInfo,
+    mut wtr: Option<csv::Writer<File>>,
     count: usize,
     io_depth: usize,
     blocks_per_io: usize,
@@ -2069,7 +2062,7 @@ async fn perf_workload(
         let big_start = Instant::now();
         for _ in 0..count {
             let burst_start = Instant::now();
-            let mut write_futures = Vec::with_capacity(io_depth);
+            let mut write_futures = FuturesOrdered::new();
 
             for write_buffer in write_buffers.iter().take(io_depth) {
                 let offset: u64 = rng.gen::<u64>() % offset_mod;
@@ -2077,25 +2070,19 @@ async fn perf_workload(
                     offset * ri.block_size,
                     write_buffer.clone(),
                 );
-                write_futures.push(future);
+                write_futures.push_back(future);
             }
 
-            crucible::join_all(write_futures).await?;
+            while let Some(result) = write_futures.next().await {
+                result?;
+            }
             wtime.push(burst_start.elapsed());
         }
         let big_end = big_start.elapsed();
 
         guest.flush(None).await?;
-        perf_summary(
-            "rwrites",
-            count,
-            io_depth,
-            wtime.clone(),
-            big_end,
-            es,
-            ec,
-        );
-        if let Some(wtr) = wtr {
+        perf_summary("rwrites", count, io_depth, &wtime, big_end, es, ec);
+        if let Some(wtr) = wtr.as_mut() {
             perf_csv(
                 wtr,
                 "rwrite",
@@ -2103,7 +2090,7 @@ async fn perf_workload(
                 io_depth,
                 blocks_per_io,
                 big_end,
-                wtime.clone(),
+                &wtime,
                 es,
                 ec,
             );
@@ -2124,7 +2111,7 @@ async fn perf_workload(
         let big_start = Instant::now();
         for _ in 0..count {
             let burst_start = Instant::now();
-            let mut read_futures = Vec::with_capacity(io_depth);
+            let mut read_futures = FuturesOrdered::new();
 
             for mut read_buffer in read_buffers.drain(0..io_depth) {
                 let offset: u64 = rng.gen::<u64>() % offset_mod;
@@ -2141,11 +2128,11 @@ async fn perf_workload(
                         Ok(read_buffer)
                     })
                 };
-                read_futures.push(future);
+                read_futures.push_back(future);
             }
 
-            for future in read_futures {
-                let result: Result<Buffer, CrucibleError> = future.await?;
+            while let Some(result) = read_futures.next().await {
+                let result: Result<Buffer, CrucibleError> = result?;
                 let read_buffer = result?;
                 read_buffers.push(read_buffer);
             }
@@ -2154,9 +2141,9 @@ async fn perf_workload(
         }
         let big_end = big_start.elapsed();
 
-        perf_summary("rreads", count, io_depth, rtime.clone(), big_end, es, ec);
+        perf_summary("rreads", count, io_depth, &rtime, big_end, es, ec);
 
-        if let Some(wtr) = wtr {
+        if let Some(wtr) = wtr.as_mut() {
             perf_csv(
                 wtr,
                 "rread",
@@ -2164,7 +2151,7 @@ async fn perf_workload(
                 io_depth,
                 blocks_per_io,
                 big_end,
-                rtime.clone(),
+                &rtime,
                 es,
                 ec,
             );
@@ -2187,7 +2174,7 @@ async fn perf_workload(
  * Generate a random offset and length, and write to then read from
  * that offset/length.  Verify the data is what we expect.
  */
-async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+async fn one_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
     /*
      * TODO: Allow the user to specify a seed here.
      */
@@ -2245,7 +2232,7 @@ async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
  * for the IO parts of this.
  */
 async fn deactivate_workload(
-    guest: &Arc<Guest>,
+    guest: &Guest,
     count: usize,
     ri: &mut RegionInfo,
     mut gen: u64,
@@ -2318,7 +2305,7 @@ async fn deactivate_workload(
  * that offset/length.  Verify the data is what we expect.
  */
 async fn write_flush_read_workload(
-    guest: &Arc<Guest>,
+    guest: &Guest,
     count: usize,
     ri: &mut RegionInfo,
 ) -> Result<()> {
@@ -2447,7 +2434,7 @@ async fn burst_workload(
  * We try to exit this test and leave jobs outstanding.
  */
 async fn repair_workload(
-    guest: &Arc<Guest>,
+    guest: &Guest,
     count: usize,
     ri: &mut RegionInfo,
 ) -> Result<()> {
@@ -2571,8 +2558,8 @@ async fn demo_workload(
     // what it is now and what it is at the end of test.
     ri.write_log.commit();
 
-    let mut read_futures = Vec::with_capacity(count);
-    let mut futures = Vec::with_capacity(count);
+    let mut read_futures = FuturesOrdered::new();
+    let mut write_futures = FuturesOrdered::new();
 
     // TODO: Let the user select the number of loops
     // TODO: Allow user to request r/w/f percentage (how???)
@@ -2581,7 +2568,7 @@ async fn demo_workload(
         if op == 0 {
             // flush
             let future = guest.flush(None);
-            futures.push(future);
+            write_futures.push_back(future);
         } else {
             // Read or Write both need this
             // Pick a random size (in blocks) for the IO, up to 10
@@ -2608,7 +2595,7 @@ async fn demo_workload(
                     fill_vec(block_index, size, &ri.write_log, ri.block_size);
 
                 let future = guest.write(offset, data);
-                futures.push(future);
+                write_futures.push_back(future);
             } else {
                 // Read
                 let block_size = ri.block_size as usize;
@@ -2621,7 +2608,7 @@ async fn demo_workload(
                         Ok(data)
                     })
                 };
-                read_futures.push(future);
+                read_futures.push_back(future);
             }
         }
     }
@@ -2632,12 +2619,14 @@ async fn demo_workload(
     };
     println!(
         "Submit work and wait for {} jobs to finish",
-        futures.len() + read_futures.len()
+        write_futures.len() + read_futures.len()
     );
-    crucible::join_all(futures).await?;
+    while let Some(result) = write_futures.next().await {
+        result?;
+    }
 
-    for future in read_futures {
-        let result: Result<Buffer, CrucibleError> = future.await?;
+    while let Some(result) = read_futures.next().await {
+        let result: Result<Buffer, CrucibleError> = result?;
         let _buf = result?;
     }
 
@@ -2661,7 +2650,7 @@ async fn demo_workload(
  * This is a test workload that generates a single write spanning an extent
  * then will try to read the same.
  */
-async fn span_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+async fn span_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
     /*
      * Pick the last block in the first extent
      */
@@ -2702,7 +2691,7 @@ async fn span_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
  * Write, flush, then read every block in the volume.
  * We wait for each op to finish, so this is all sequential.
  */
-async fn big_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+async fn big_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
     for block_index in 0..ri.total_blocks {
         /*
          * Update the write count for all blocks we plan to write to.
@@ -2744,10 +2733,7 @@ async fn big_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     Ok(())
 }
 
-async fn biggest_io_workload(
-    guest: &Arc<Guest>,
-    ri: &mut RegionInfo,
-) -> Result<()> {
+async fn biggest_io_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
     /*
      * Based on our protocol, send the biggest IO we can.
      */
@@ -2819,8 +2805,8 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
 
     let mut my_offset: u64 = 0;
     for my_count in 1..150 {
-        let mut futures = Vec::new();
-        let mut read_futures = Vec::new();
+        let mut write_futures = FuturesOrdered::new();
+        let mut read_futures = FuturesOrdered::new();
 
         /*
          * Generate some number of operations
@@ -2845,7 +2831,7 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
                     data.len()
                 );
                 let future = guest.write_to_byte_offset(my_offset, data);
-                futures.push(future);
+                write_futures.push_back(future);
             } else {
                 let mut data =
                     crucible::Buffer::repeat(0, 1, ri.block_size as usize);
@@ -2867,7 +2853,7 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
                         Ok(data)
                     })
                 };
-                read_futures.push(future);
+                read_futures.push_back(future);
             }
         }
 
@@ -2878,17 +2864,19 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         // flush check to trigger.
         println!("Loop:{} send a final flush and wait", my_count);
         let flush_future = guest.flush(None);
-        futures.push(flush_future);
+        write_futures.push_back(flush_future);
 
         println!(
             "Loop:{} loop over {} futures",
             my_count,
-            futures.len() + read_futures.len()
+            write_futures.len() + read_futures.len()
         );
 
-        crucible::join_all(futures).await?;
-        for future in read_futures {
-            let result: Result<Buffer, CrucibleError> = future.await?;
+        while let Some(result) = write_futures.next().await {
+            result?;
+        }
+        while let Some(result) = read_futures.next().await {
+            let result: Result<_, CrucibleError> = result?;
             let _buffer = result?;
         }
 
@@ -2945,7 +2933,7 @@ mod test {
     #[test]
     fn test_wl_empty() {
         // No size is empty
-        let mut write_log = WriteLog::new(0);
+        let write_log = WriteLog::new(0);
         assert!(write_log.is_empty());
     }
 
