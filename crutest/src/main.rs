@@ -3,7 +3,10 @@ use std::fs::File;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc,
+};
 
 use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
@@ -99,7 +102,21 @@ enum Workload {
         /// Number of seconds to run
         #[clap(long, default_value_t = 60, action)]
         time: u64,
-        /// Fill the region with random data first
+        /// Completely fill the region with random data first
+        #[clap(long)]
+        fill: bool,
+    },
+    RandWrite {
+        /// Size in blocks of each IO
+        #[clap(long, default_value_t = 1, action)]
+        io_size: usize,
+        /// Number of outstanding IOs at the same time.
+        #[clap(long, default_value_t = 1, action)]
+        io_depth: usize,
+        /// Number of seconds to run
+        #[clap(long, default_value_t = 60, action)]
+        time: u64,
+        /// Completely fill the region with random data first
         #[clap(long)]
         fill: bool,
     },
@@ -933,6 +950,26 @@ async fn main() -> Result<()> {
             fill,
         } => {
             rand_read_workload(
+                &guest,
+                &mut region_info,
+                is_encrypted,
+                io_depth,
+                io_size,
+                time,
+                fill,
+            )
+            .await?;
+            if opt.quit {
+                return Ok(());
+            }
+        }
+        Workload::RandWrite {
+            io_size,
+            io_depth,
+            time,
+            fill,
+        } => {
+            rand_write_workload(
                 &guest,
                 &mut region_info,
                 is_encrypted,
@@ -2238,8 +2275,6 @@ async fn rand_read_workload(
     time_secs: u64,
     fill: bool,
 ) -> Result<()> {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
     // Before we start, make sure the work queues are empty.
     loop {
         let wc = guest.query_work_queue().await?;
@@ -2268,12 +2303,12 @@ async fn rand_read_workload(
 
     let stop = Arc::new(AtomicBool::new(false));
     let bytes_read = Arc::new(AtomicUsize::new(0));
+    let block_size = ri.block_size as usize;
+    let total_blocks = ri.total_blocks;
     for _ in 0..io_depth {
         let stop = stop.clone();
         let guest = guest.clone();
         let bytes_read = bytes_read.clone();
-        let block_size = ri.block_size as usize;
-        let total_blocks = ri.total_blocks;
         tokio::spawn(async move {
             let mut buf = Buffer::new(blocks_per_io, block_size);
             let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
@@ -2297,9 +2332,10 @@ async fn rand_read_workload(
         let delta = bytes - prev;
         prev = bytes;
         print!(
-            "{} {}/sec ({} secs remaining)    ",
+            "{} {}/sec ({} IOPS)  [{} secs remaining]    ",
             if i == 0 { '\n' } else { '\r' },
             human_bytes(delta as f64),
+            delta / (blocks_per_io * block_size),
             time_secs - i,
         );
         std::io::stdout().lock().flush().unwrap();
@@ -2308,8 +2344,98 @@ async fn rand_read_workload(
 
     let bytes = bytes_read.load(Ordering::Acquire);
     println!(
-        "\naverage read performance: {}/sec",
-        human_bytes(bytes as f64 / time_secs as f64)
+        "\naverage read performance: {}/sec ({} IOPS)",
+        human_bytes(bytes as f64 / time_secs as f64),
+        bytes / (blocks_per_io * block_size) / time_secs as usize,
+    );
+
+    Ok(())
+}
+
+async fn rand_write_workload(
+    guest: &Arc<Guest>,
+    ri: &mut RegionInfo,
+    encrypted: bool,
+    io_depth: usize,
+    blocks_per_io: usize,
+    time_secs: u64,
+    fill: bool,
+) -> Result<()> {
+    // Before we start, make sure the work queues are empty.
+    loop {
+        let wc = guest.query_work_queue().await?;
+        if wc.up_count + wc.ds_count == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    if fill {
+        println!("filling region before reading");
+        fill_workload(guest, ri, true).await?;
+    }
+
+    if blocks_per_io > ri.total_blocks {
+        bail!("too many blocks per IO; can't exceed {}", ri.total_blocks);
+    }
+
+    println!(
+        "\n-----------------------------------\
+        \nrandom read with {} chunks ({blocks_per_io} block{})",
+        human_bytes((blocks_per_io as u64 * ri.block_size) as f64),
+        if blocks_per_io > 1 { "s" } else { "" },
+    );
+    print_region_description(ri, encrypted);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let bytes_read = Arc::new(AtomicUsize::new(0));
+
+    let block_size = ri.block_size as usize;
+    let total_blocks = ri.total_blocks;
+    for _ in 0..io_depth {
+        let stop = stop.clone();
+        let guest = guest.clone();
+        let bytes_read = bytes_read.clone();
+        tokio::spawn(async move {
+            let mut buf = BytesMut::new();
+            buf.resize(blocks_per_io * block_size, 0u8);
+            let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+            rng.fill_bytes(&mut buf);
+            let block_shift = block_size.trailing_zeros();
+            while !stop.load(Ordering::Acquire) {
+                let offset = rng.gen_range(0..=total_blocks - blocks_per_io);
+                guest
+                    .write(Block::new(offset as u64, block_shift), buf.clone())
+                    .await
+                    .unwrap();
+                bytes_read.fetch_add(buf.len(), Ordering::Relaxed);
+            }
+            Ok::<(), CrucibleError>(())
+        });
+    }
+
+    let mut prev = 0;
+    for i in 0..time_secs {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let bytes = bytes_read.load(Ordering::Acquire);
+        let delta = bytes - prev;
+        prev = bytes;
+        print!(
+            "{} {}/sec ({} IOPS)  [{} secs remaining]    ",
+            if i == 0 { '\n' } else { '\r' },
+            human_bytes(delta as f64),
+            delta / (blocks_per_io * block_size),
+            time_secs - i,
+        );
+        std::io::stdout().lock().flush().unwrap();
+    }
+    stop.store(true, Ordering::Release);
+
+    let bytes = bytes_read.load(Ordering::Acquire);
+    println!(
+        "\naverage write performance: {}/sec ({} IOPS)",
+        human_bytes(bytes as f64 / time_secs as f64),
+        bytes / (blocks_per_io * block_size) / time_secs as usize,
     );
 
     Ok(())
