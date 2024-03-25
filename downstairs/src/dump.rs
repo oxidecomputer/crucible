@@ -1,6 +1,7 @@
 // Copyright 2021 Oxide Computer Company
 use super::*;
 use crate::extent::ExtentMeta;
+use crucible_protocol::ReadResponseBlockMetadata;
 use std::convert::TryInto;
 
 use sha2::{Digest, Sha256};
@@ -392,9 +393,9 @@ fn color_vec(compare: &[u64]) -> Vec<u8> {
     colors
 }
 
-fn return_status_letters<'a, T, U: std::cmp::PartialEq>(
-    items: &'a [T],
-    accessor: fn(&'a T) -> U,
+fn return_status_letters<'a, U: std::cmp::PartialEq>(
+    items: &'a [(ReadResponseBlockMetadata, BytesMut)],
+    accessor: fn(&'a (ReadResponseBlockMetadata, BytesMut)) -> U,
     nc: bool,
 ) -> ([String; 3], bool) {
     let mut status_letters = vec![String::new(); 3];
@@ -525,7 +526,7 @@ async fn show_extent(
          * Build a Vector to hold our responses, one for each
          * region we are comparing.
          */
-        let mut dvec: Vec<ReadResponse> = Vec::with_capacity(dir_count);
+        let mut dvec = Vec::with_capacity(dir_count);
 
         /*
          * Read the requested block in from the extent.  Store it
@@ -547,14 +548,8 @@ async fn show_extent(
                 )
                 .await?;
             let b = response.blocks.pop().unwrap();
-            let response = ReadResponse {
-                eid: b.eid,
-                offset: b.offset,
-                data: response.data,
-                block_contexts: b.block_contexts,
-            };
-
-            dvec.insert(index, response);
+            assert!(response.blocks.is_empty());
+            dvec.insert(index, (b, response.data));
         }
 
         /*
@@ -569,7 +564,7 @@ async fn show_extent(
 
         // first compare data
         let (status_letters, data_different) =
-            return_status_letters(&dvec, |x| &x.data, nc);
+            return_status_letters(&dvec, |(_block, data)| data, nc);
 
         // Print the data status letters
         for dir_index in 0..dir_count {
@@ -577,8 +572,11 @@ async fn show_extent(
         }
 
         // then, compare block_context_columns
-        let (status_letters, bc_different) =
-            return_status_letters(&dvec, |x| &x.block_contexts, nc);
+        let (status_letters, bc_different) = return_status_letters(
+            &dvec,
+            |(block, _data)| &block.block_contexts,
+            nc,
+        );
 
         // Print block context status letters
         for dir_index in 0..dir_count {
@@ -647,7 +645,7 @@ async fn show_extent_block(
      * Build a Vector to hold our responses, one for each
      * region we are comparing.
      */
-    let mut dvec: Vec<ReadResponse> = Vec::with_capacity(dir_count);
+    let mut dvec = Vec::with_capacity(dir_count);
 
     /*
      * Read the requested block in from the extent.  Store it
@@ -671,21 +669,15 @@ async fn show_extent_block(
             )
             .await?;
         let b = response.blocks.pop().unwrap();
-        let response = ReadResponse {
-            eid: b.eid,
-            offset: b.offset,
-            data: response.data,
-            block_contexts: b.block_contexts,
-        };
-
-        dvec.insert(index, response);
+        assert!(response.blocks.is_empty());
+        dvec.insert(index, (b, response.data));
     }
 
     /*
      * Compare data
      */
     let (status_letters, different) =
-        return_status_letters(&dvec, |x| &x.data, nc);
+        return_status_letters(&dvec, |(_block, data)| data, nc);
 
     if !only_show_differences || different {
         println!("{:>6}  {:<64}  {:3}", "DATA", "SHA256", "VER");
@@ -697,7 +689,7 @@ async fn show_extent_block(
         );
         for dir_index in 0..dir_count {
             let mut hasher = Sha256::new();
-            hasher.update(&dvec[dir_index].data[..]);
+            hasher.update(&dvec[dir_index].1[..]);
             println!(
                 "{:>6}  {:64}  {:^3}",
                 dir_index,
@@ -711,8 +703,11 @@ async fn show_extent_block(
     /*
      * Compare block contexts
      */
-    let (_, different) =
-        return_status_letters(&dvec, |x| &x.block_contexts, nc);
+    let (_, different) = return_status_letters(
+        &dvec,
+        |(block, _data)| &block.block_contexts,
+        nc,
+    );
 
     if !only_show_differences || different {
         /*
@@ -722,12 +717,12 @@ async fn show_extent_block(
 
         let mut max_nonce_depth = 0;
 
-        for (dir_index, response) in dvec.iter().enumerate() {
+        for (dir_index, (block, _data)) in dvec.iter().enumerate() {
             print!("{:^24} ", dir_index);
 
             max_nonce_depth = std::cmp::max(
                 max_nonce_depth,
-                response.encryption_contexts().len(),
+                block.encryption_contexts().len(),
             );
         }
         if !only_show_differences {
@@ -749,8 +744,8 @@ async fn show_extent_block(
 
             let mut all_same_len = true;
             let mut nonces = Vec::with_capacity(dir_count);
-            for response in dvec.iter() {
-                let ctxs = response.encryption_contexts();
+            for (block, _data) in dvec.iter() {
+                let ctxs = block.encryption_contexts();
                 print!(
                     "{:^24} ",
                     if depth < ctxs.len() {
@@ -781,13 +776,11 @@ async fn show_extent_block(
 
         let mut max_tag_depth = 0;
 
-        for (dir_index, response) in dvec.iter().enumerate() {
+        for (dir_index, (block, _data)) in dvec.iter().enumerate() {
             print!("{:^32} ", dir_index);
 
-            max_tag_depth = std::cmp::max(
-                max_tag_depth,
-                response.encryption_contexts().len(),
-            );
+            max_tag_depth =
+                std::cmp::max(max_tag_depth, block.encryption_contexts().len());
         }
         if !only_show_differences {
             print!(" {:<5}", "DIFF");
@@ -808,8 +801,8 @@ async fn show_extent_block(
 
             let mut all_same_len = true;
             let mut tags = Vec::with_capacity(dir_count);
-            for response in dvec.iter() {
-                let ctxs = response.encryption_contexts();
+            for (block, _data) in dvec.iter() {
+                let ctxs = block.encryption_contexts();
                 print!(
                     "{:^32} ",
                     if depth < ctxs.len() {
@@ -837,7 +830,8 @@ async fn show_extent_block(
     /*
      * Compare integrity hashes
      */
-    let (_, different) = return_status_letters(&dvec, |x| x.hashes(), nc);
+    let (_, different) =
+        return_status_letters(&dvec, |(block, _data)| block.hashes(), nc);
 
     if !only_show_differences || different {
         /*
@@ -847,11 +841,11 @@ async fn show_extent_block(
 
         let mut max_hash_depth = 0;
 
-        for (dir_index, response) in dvec.iter().enumerate() {
+        for (dir_index, (block, _data)) in dvec.iter().enumerate() {
             print!("{:^16} ", dir_index);
 
             max_hash_depth =
-                std::cmp::max(max_hash_depth, response.hashes().len());
+                std::cmp::max(max_hash_depth, block.hashes().len());
         }
         if !only_show_differences {
             print!(" {:<5}", "DIFF");
@@ -872,12 +866,12 @@ async fn show_extent_block(
 
             let mut all_same_len = true;
             let mut hashes = Vec::with_capacity(dir_count);
-            for response in dvec.iter() {
+            for (block, _data) in dvec.iter() {
                 print!(
                     "{:^16} ",
-                    if depth < response.hashes().len() {
-                        hashes.push(response.hashes()[depth]);
-                        hex::encode(response.hashes()[depth].to_le_bytes())
+                    if depth < block.hashes().len() {
+                        hashes.push(block.hashes()[depth]);
+                        hex::encode(block.hashes()[depth].to_le_bytes())
                     } else {
                         all_same_len = false;
                         "".to_string()
