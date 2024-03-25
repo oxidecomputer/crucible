@@ -443,6 +443,9 @@ impl DownstairsClient {
         out
     }
 
+    /// Ensures that the given job is in the job queue and in `IOState::New`
+    ///
+    /// Returns `true` if the job was requeued, or `false` if it was already `New`
     pub(crate) fn replay_job(&mut self, job: &mut DownstairsIO) -> bool {
         /*
          * If the job is InProgress or New, then we can just go back
@@ -458,10 +461,10 @@ impl DownstairsClient {
         job.replay = true;
         if old_state != IOState::New {
             self.requeue_one(job.ds_id);
-            return true;
+            true
+        } else {
+            false
         }
-
-        false
     }
 
     /// Sets this job as skipped and moves it to `skipped_jobs`

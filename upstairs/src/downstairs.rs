@@ -5859,7 +5859,6 @@ pub(crate) mod test {
     async fn reconcile_repair_workflow_1() {
         let mut ds = Downstairs::test_default();
         set_all_reconcile(&mut ds);
-        ds.reconcile_repair_needed = 2;
 
         let up_state = UpstairsState::Active;
         let close_id = ReconciliationId(0);
@@ -5878,6 +5877,7 @@ pub(crate) mod test {
                 extent_id: 1,
             },
         ));
+        ds.reconcile_repair_needed = ds.reconcile_task_list.len();
 
         // Send the close job.  Reconciliation isn't done at this point!
         assert!(!ds.send_next_reconciliation_req().await);
@@ -5918,7 +5918,6 @@ pub(crate) mod test {
         // Verify Done or Skipped works when checking for a complete repair
         let mut ds = Downstairs::test_default();
         set_all_reconcile(&mut ds);
-        ds.reconcile_repair_needed = 1;
 
         let up_state = UpstairsState::Active;
         let rep_id = ReconciliationId(1);
@@ -5937,6 +5936,7 @@ pub(crate) mod test {
                 dest_clients: vec![ClientId::new(1), ClientId::new(2)],
             },
         ));
+        ds.reconcile_repair_needed = ds.reconcile_task_list.len();
 
         // Send the job.  Reconciliation isn't done at this point!
         assert!(!ds.send_next_reconciliation_req().await);
