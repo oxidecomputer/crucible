@@ -808,9 +808,7 @@ async fn main() -> Result<()> {
             println!("Run Demo test");
             let count = opt.count.unwrap_or(300);
             /*
-             * The count provided here should be greater than the flow
-             * control limit if we wish to test flow control.  Also, set
-             * lossy on a downstairs otherwise it will probably keep up.
+             * Set lossy on a downstairs otherwise it will probably keep up.
              */
             demo_workload(&guest, count, &mut region_info).await?;
         }

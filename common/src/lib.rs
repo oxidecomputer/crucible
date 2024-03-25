@@ -26,9 +26,14 @@ pub mod x509;
 
 pub const REPAIR_PORT_OFFSET: u16 = 4000;
 
-// Max number of submitted IOs between the upstairs and the downstairs, above
-// which flow control kicks in.
-pub const MAX_ACTIVE_COUNT: usize = 2600;
+/// Max number of outstanding IOs between the upstairs and the downstairs
+///
+/// If we exceed this value, the upstairs will give up and mark that downstairs
+/// as faulted.
+///
+/// This is exposed in `crucible-common` so that both sides can pick appropriate
+/// lengths for their `mpsc` queues.
+pub const IO_OUTSTANDING_MAX_JOBS: usize = 57000;
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(
