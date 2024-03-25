@@ -500,7 +500,23 @@ impl Pantry {
             Some(entry) => {
                 let entry = entry.clone();
                 drop(entries);
-                Ok(entry)
+
+                // If it's not active, then return "410 Gone". If this volume is
+                // no longer active then it's likely a Propolis has activated
+                // and taken over from the Pantry. Do not return 503 in this
+                // case, no operation will be retryable if inactive.
+                if !entry.volume.query_is_active().await? {
+                    Err(HttpError::for_client_error(
+                        Some(format!(
+                            "volume {} is no longer active!",
+                            volume_id
+                        )),
+                        http::StatusCode::GONE,
+                        format!("volume {} is no longer active!", volume_id),
+                    ))
+                } else {
+                    Ok(entry)
+                }
             }
 
             None => {
