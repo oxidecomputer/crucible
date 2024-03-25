@@ -11,6 +11,7 @@ path = "src/lib.rs"
 
 [features]
 asm = ["usdt/asm"]
+notify-nexus = ["nexus-client", "internal-dns", "progenitor-client", "http", "omicron-uuid-kinds"]
 
 [dependencies]
 anyhow.workspace = true
@@ -19,6 +20,7 @@ async-recursion.workspace = true
 base64.workspace = true
 bincode.workspace = true
 bytes.workspace = true
+cfg-if.workspace = true
 chrono.workspace = true
 crucible-common.workspace = true
 crucible-client-types.workspace = true
@@ -52,6 +54,11 @@ aes-gcm-siv.workspace = true
 rand_chacha.workspace = true
 reqwest.workspace = true
 crucible-workspace-hack.workspace = true
+nexus-client = { workspace = true, optional = true }
+internal-dns = { workspace = true, optional = true }
+omicron-uuid-kinds = { workspace = true, optional = true }
+progenitor-client = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
 
 [dev-dependencies]
 expectorate.workspace = true

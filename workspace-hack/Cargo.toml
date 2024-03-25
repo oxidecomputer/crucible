@@ -17,6 +17,8 @@ publish = false
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env", "unstable-styles", "wrap_help"] }
+clap_builder = { version = "4", default-features = false, features = ["env", "std", "suggestions", "unstable-styles", "usage", "wrap_help"] }
 console = { version = "0.15" }
 crossbeam-utils = { version = "0.8" }
 crypto-common = { version = "0.1", default-features = false, features = ["getrandom", "std"] }
@@ -43,7 +45,7 @@ rand = { version = "0.8", features = ["min_const_gen", "small_rng"] }
 rand_chacha = { version = "0.3" }
 rand_core = { version = "0.6", default-features = false, features = ["std"] }
 reqwest = { version = "0.11", features = ["blocking", "json", "rustls-tls", "stream"] }
-schemars = { version = "0.8", features = ["bytes", "chrono", "uuid1"] }
+schemars = { version = "0.8", features = ["bytes", "chrono", "uuid", "uuid1"] }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
 slog = { version = "2", features = ["dynamic-keys", "max_level_trace", "release_max_level_debug"] }
@@ -77,7 +79,7 @@ phf_shared = { version = "0.11" }
 rand = { version = "0.8", features = ["min_const_gen", "small_rng"] }
 rand_chacha = { version = "0.3" }
 rand_core = { version = "0.6", default-features = false, features = ["std"] }
-schemars = { version = "0.8", features = ["bytes", "chrono", "uuid1"] }
+schemars = { version = "0.8", features = ["bytes", "chrono", "uuid", "uuid1"] }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["alloc", "derive", "rc"] }
 syn = { version = "2", features = ["extra-traits", "full", "visit", "visit-mut"] }
