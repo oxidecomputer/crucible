@@ -226,22 +226,6 @@ pub type CrucibleBlockIOFuture<'a> = Pin<
     >,
 >;
 
-/// Await on the results of multiple BlockIO operations
-///
-/// Using [async_trait] with the BlockIO trait will perform Box::pin on the
-/// result of the async operation functions. `join_all` is provided here to
-/// consume a list of multiple BlockIO operations' futures and await them all.
-#[inline]
-pub async fn join_all<'a>(
-    iter: impl IntoIterator<Item = CrucibleBlockIOFuture<'a>>,
-) -> Result<(), CrucibleError> {
-    futures::future::join_all(iter)
-        .await
-        .into_iter()
-        .collect::<Result<Vec<()>, CrucibleError>>()
-        .map(|_| ())
-}
-
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum ReplaceResult {
     Started,
