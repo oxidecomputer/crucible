@@ -1869,7 +1869,7 @@ name = "gateway-client"
 version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/omicron?branch=main#a3fa5404eeb6fa223f8925dbe4a1d0fb468d9484"
 dependencies = [
- "base64 0.21.7",
+ "base64 0.22.0",
  "chrono",
  "gateway-messages",
  "omicron-workspace-hack",
@@ -2781,7 +2781,7 @@ source = "git+https://github.com/oxidecomputer/omicron?branch=main#a3fa5404eeb6f
 dependencies = [
  "anyhow",
  "api_identity",
- "base64 0.21.7",
+ "base64 0.22.0",
  "chrono",
  "dns-service-client",
  "futures",
@@ -3591,37 +3591,6 @@ name = "portable-atomic"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3bccab0e7fd7cc19f820a1c8c91720af652d0c88dc9664dd72aef2614f04af3b"
-
-[[package]]
-name = "postgres-protocol"
-version = "0.6.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49b6c5ef183cd3ab4ba005f1ca64c21e8bd97ce4699cfea9e8d9a2c4958ca520"
-dependencies = [
- "base64 0.21.7",
- "byteorder",
- "bytes",
- "fallible-iterator 0.2.0",
- "hmac",
- "md-5",
- "memchr",
- "rand 0.8.5",
- "sha2",
- "stringprep",
-]
-
-[[package]]
-name = "postgres-types"
-version = "0.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d2234cdee9408b523530a9b6d2d6b373d1db34f6a8e51dc03ded1828d7fb67c"
-dependencies = [
- "bytes",
- "chrono",
- "fallible-iterator 0.2.0",
- "postgres-protocol",
- "uuid",
-]
 
 [[package]]
 name = "powerfmt"
