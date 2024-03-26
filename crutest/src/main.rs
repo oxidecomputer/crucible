@@ -71,6 +71,11 @@ enum Workload {
         #[clap(long, action)]
         skip_verify: bool,
     },
+    FastFill {
+        /// Don't do the verify step after filling the region.
+        #[clap(long, action)]
+        skip_verify: bool,
+    },
     Generic,
     Nothing,
     One,
@@ -870,6 +875,11 @@ async fn main() -> Result<()> {
             fill_workload(&guest, &mut region_info, skip_verify).await?;
         }
 
+        Workload::FastFill { skip_verify } => {
+            println!("Fast fill test");
+            fast_fill_workload(&guest, &mut region_info, skip_verify).await?;
+        }
+
         Workload::Generic => {
             // Either we have a count, or we run until we get a signal.
             let mut wtq = {
@@ -1482,6 +1492,90 @@ async fn fill_workload(
 
     guest.flush(None).await?;
     pb.finish();
+
+    if !skip_verify {
+        verify_volume(guest, ri, false).await?;
+    }
+    Ok(())
+}
+
+async fn fast_fill_workload(
+    guest: &Arc<Guest>,
+    ri: &mut RegionInfo,
+    skip_verify: bool,
+) -> Result<()> {
+    let pb = ProgressBar::new(ri.total_blocks as u64);
+    pb.set_style(ProgressStyle::default_bar()
+        .template(
+            "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})"
+        )
+        .unwrap()
+        .progress_chars("#>-"));
+
+    const IO_SIZE: usize = 256;
+    const NUM_WORKERS: usize = 8;
+
+    // Steal the write log, so we can share it between threads
+    let write_log = std::mem::replace(&mut ri.write_log, WriteLog::new(0));
+    let write_log = Arc::new(std::sync::Mutex::new(write_log));
+
+    let tasks = futures::stream::FuturesUnordered::new();
+    for i in 0..NUM_WORKERS {
+        let mut block_index = i * IO_SIZE * NUM_WORKERS;
+        let guest = guest.clone();
+        let write_log = write_log.clone();
+        let total_blocks = ri.total_blocks;
+        let block_size = ri.block_size;
+        let pb = pb.clone();
+        tasks.push(tokio::task::spawn(async move {
+            while block_index < total_blocks {
+                let offset =
+                    Block::new(block_index as u64, block_size.trailing_zeros());
+
+                let next_io_blocks = if block_index + IO_SIZE > total_blocks {
+                    total_blocks - block_index
+                } else {
+                    IO_SIZE
+                };
+
+                let data = {
+                    let mut write_log = write_log.lock().unwrap();
+                    for i in 0..next_io_blocks {
+                        write_log.update_wc(block_index + i);
+                    }
+
+                    fill_vec(
+                        block_index,
+                        next_io_blocks,
+                        &write_log,
+                        block_size,
+                    )
+                };
+
+                guest.write(offset, data).await?;
+
+                block_index += next_io_blocks;
+                pb.set_position(block_index as u64);
+            }
+            Result::<(), CrucibleError>::Ok(())
+        }));
+    }
+
+    for t in tasks {
+        t.await??;
+    }
+
+    guest.flush(None).await?;
+    pb.finish();
+
+    // Now that all the workers are done, put the write log back into place
+    ri.write_log = std::mem::replace(
+        &mut Arc::try_unwrap(write_log)
+            .expect("could not unwrap write log")
+            .lock()
+            .unwrap(),
+        WriteLog::new(0),
+    );
 
     if !skip_verify {
         verify_volume(guest, ri, false).await?;
@@ -2286,7 +2380,7 @@ async fn rand_read_workload(
 
     if fill {
         println!("filling region before reading");
-        fill_workload(guest, ri, true).await?;
+        fast_fill_workload(guest, ri, true).await?;
     }
 
     if blocks_per_io > ri.total_blocks {
@@ -2371,8 +2465,8 @@ async fn rand_write_workload(
     }
 
     if fill {
-        println!("filling region before reading");
-        fill_workload(guest, ri, true).await?;
+        println!("filling region before writing");
+        fast_fill_workload(guest, ri, true).await?;
     }
 
     if blocks_per_io > ri.total_blocks {
@@ -2381,21 +2475,21 @@ async fn rand_write_workload(
 
     println!(
         "\n-----------------------------------\
-        \nrandom read with {} chunks ({blocks_per_io} block{})",
+        \nrandom write with {} chunks ({blocks_per_io} block{})",
         human_bytes((blocks_per_io as u64 * ri.block_size) as f64),
         if blocks_per_io > 1 { "s" } else { "" },
     );
     print_region_description(ri, encrypted);
 
     let stop = Arc::new(AtomicBool::new(false));
-    let bytes_read = Arc::new(AtomicUsize::new(0));
+    let bytes_written = Arc::new(AtomicUsize::new(0));
 
     let block_size = ri.block_size as usize;
     let total_blocks = ri.total_blocks;
     for _ in 0..io_depth {
         let stop = stop.clone();
         let guest = guest.clone();
-        let bytes_read = bytes_read.clone();
+        let bytes_written = bytes_written.clone();
         tokio::spawn(async move {
             let mut buf = BytesMut::new();
             buf.resize(blocks_per_io * block_size, 0u8);
@@ -2408,7 +2502,7 @@ async fn rand_write_workload(
                     .write(Block::new(offset as u64, block_shift), buf.clone())
                     .await
                     .unwrap();
-                bytes_read.fetch_add(buf.len(), Ordering::Relaxed);
+                bytes_written.fetch_add(buf.len(), Ordering::Relaxed);
             }
             Ok::<(), CrucibleError>(())
         });
@@ -2417,7 +2511,7 @@ async fn rand_write_workload(
     let mut prev = 0;
     for i in 0..time_secs {
         std::thread::sleep(std::time::Duration::from_secs(1));
-        let bytes = bytes_read.load(Ordering::Acquire);
+        let bytes = bytes_written.load(Ordering::Acquire);
         let delta = bytes - prev;
         prev = bytes;
         print!(
@@ -2431,7 +2525,7 @@ async fn rand_write_workload(
     }
     stop.store(true, Ordering::Release);
 
-    let bytes = bytes_read.load(Ordering::Acquire);
+    let bytes = bytes_written.load(Ordering::Acquire);
     println!(
         "\naverage write performance: {}/sec ({} IOPS)",
         human_bytes(bytes as f64 / time_secs as f64),
