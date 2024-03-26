@@ -297,6 +297,24 @@ fn history_file<P: AsRef<Path>>(file: P) -> PathBuf {
     out
 }
 
+/// Mode flags for `rand_write_read_workload`
+#[derive(Copy, Clone, Debug)]
+enum RandReadWriteMode {
+    Read,
+    Write,
+}
+
+/// Configuration for `rand_read_write_workload`
+#[derive(Copy, Clone, Debug)]
+struct RandReadWriteConfig {
+    mode: RandReadWriteMode,
+    encrypted: bool,
+    io_depth: usize,
+    blocks_per_io: usize,
+    time_secs: u64,
+    fill: bool,
+}
+
 /*
  * All the tests need this basic info about the region.
  * Not all tests make use of the write_log yet, but perhaps someday..
@@ -949,14 +967,17 @@ async fn main() -> Result<()> {
             time,
             fill,
         } => {
-            rand_read_workload(
+            rand_read_write_workload(
                 &guest,
                 &mut region_info,
-                is_encrypted,
-                io_depth,
-                io_size,
-                time,
-                fill,
+                RandReadWriteConfig {
+                    encrypted: is_encrypted,
+                    io_depth,
+                    blocks_per_io: io_size,
+                    time_secs: time,
+                    fill,
+                    mode: RandReadWriteMode::Read,
+                },
             )
             .await?;
             if opt.quit {
@@ -969,14 +990,17 @@ async fn main() -> Result<()> {
             time,
             fill,
         } => {
-            rand_write_workload(
+            rand_read_write_workload(
                 &guest,
                 &mut region_info,
-                is_encrypted,
-                io_depth,
-                io_size,
-                time,
-                fill,
+                RandReadWriteConfig {
+                    encrypted: is_encrypted,
+                    io_depth,
+                    blocks_per_io: io_size,
+                    time_secs: time,
+                    fill,
+                    mode: RandReadWriteMode::Write,
+                },
             )
             .await?;
             if opt.quit {
@@ -2347,14 +2371,10 @@ fn print_region_description(ri: &RegionInfo, encrypted: bool) {
     );
 }
 
-async fn rand_read_workload(
+async fn rand_read_write_workload(
     guest: &Arc<Guest>,
     ri: &mut RegionInfo,
-    encrypted: bool,
-    io_depth: usize,
-    blocks_per_io: usize,
-    time_secs: u64,
-    fill: bool,
+    cfg: RandReadWriteConfig,
 ) -> Result<()> {
     // Before we start, make sure the work queues are empty.
     loop {
@@ -2365,158 +2385,103 @@ async fn rand_read_workload(
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
-    if fill {
-        println!("filling region before reading");
+    let desc = match cfg.mode {
+        RandReadWriteMode::Read => "read",
+        RandReadWriteMode::Write => "write",
+    };
+
+    if cfg.fill {
+        println!("filling region before {desc}");
         fill_workload(guest, ri, true).await?;
     }
 
-    if blocks_per_io > ri.total_blocks {
+    if cfg.blocks_per_io > ri.total_blocks {
         bail!("too many blocks per IO; can't exceed {}", ri.total_blocks);
     }
 
     println!(
         "\n-----------------------------------\
-        \nrandom read with {} chunks ({blocks_per_io} block{})",
-        human_bytes((blocks_per_io as u64 * ri.block_size) as f64),
-        if blocks_per_io > 1 { "s" } else { "" },
+        \nrandom {desc} with {} chunks ({} block{})",
+        human_bytes((cfg.blocks_per_io as u64 * ri.block_size) as f64),
+        cfg.blocks_per_io,
+        if cfg.blocks_per_io > 1 { "s" } else { "" },
     );
-    print_region_description(ri, encrypted);
+    print_region_description(ri, cfg.encrypted);
 
     let stop = Arc::new(AtomicBool::new(false));
-    let bytes_read = Arc::new(AtomicUsize::new(0));
+    let byte_count = Arc::new(AtomicUsize::new(0));
+
     let block_size = ri.block_size as usize;
     let total_blocks = ri.total_blocks;
-    for _ in 0..io_depth {
+    for _ in 0..cfg.io_depth {
         let stop = stop.clone();
         let guest = guest.clone();
-        let bytes_read = bytes_read.clone();
+        let byte_count = byte_count.clone();
         tokio::spawn(async move {
-            let mut buf = Buffer::new(blocks_per_io, block_size);
-            let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
-            let block_shift = block_size.trailing_zeros();
-            while !stop.load(Ordering::Acquire) {
-                let offset = rng.gen_range(0..=total_blocks - blocks_per_io);
-                guest
-                    .read(Block::new(offset as u64, block_shift), &mut buf)
-                    .await
-                    .unwrap();
-                bytes_read.fetch_add(buf.len(), Ordering::Relaxed);
+            match cfg.mode {
+                RandReadWriteMode::Write => {
+                    let mut buf = BytesMut::new();
+                    buf.resize(cfg.blocks_per_io * block_size, 0u8);
+                    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+                    rng.fill_bytes(&mut buf);
+                    let block_shift = block_size.trailing_zeros();
+                    while !stop.load(Ordering::Acquire) {
+                        let offset =
+                            rng.gen_range(0..=total_blocks - cfg.blocks_per_io);
+                        guest
+                            .write(
+                                Block::new(offset as u64, block_shift),
+                                buf.clone(),
+                            )
+                            .await
+                            .unwrap();
+                        byte_count.fetch_add(buf.len(), Ordering::Relaxed);
+                    }
+                }
+                RandReadWriteMode::Read => {
+                    let mut buf = Buffer::new(cfg.blocks_per_io, block_size);
+                    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+                    let block_shift = block_size.trailing_zeros();
+                    while !stop.load(Ordering::Acquire) {
+                        let offset =
+                            rng.gen_range(0..=total_blocks - cfg.blocks_per_io);
+                        guest
+                            .read(
+                                Block::new(offset as u64, block_shift),
+                                &mut buf,
+                            )
+                            .await
+                            .unwrap();
+                        byte_count.fetch_add(buf.len(), Ordering::Relaxed);
+                    }
+                }
             }
             Ok::<(), CrucibleError>(())
         });
     }
 
     let mut prev = 0;
-    for i in 0..time_secs {
+    for i in 0..cfg.time_secs {
         std::thread::sleep(std::time::Duration::from_secs(1));
-        let bytes = bytes_read.load(Ordering::Acquire);
+        let bytes = byte_count.load(Ordering::Acquire);
         let delta = bytes - prev;
         prev = bytes;
         print!(
             "{} {}/sec ({} IOPS)  [{} secs remaining]    ",
             if i == 0 { '\n' } else { '\r' },
             human_bytes(delta as f64),
-            delta / (blocks_per_io * block_size),
-            time_secs - i,
+            delta / (cfg.blocks_per_io * block_size),
+            cfg.time_secs - i,
         );
         std::io::stdout().lock().flush().unwrap();
     }
     stop.store(true, Ordering::Release);
 
-    let bytes = bytes_read.load(Ordering::Acquire);
+    let bytes = byte_count.load(Ordering::Acquire);
     println!(
-        "\naverage read performance: {}/sec ({} IOPS)",
-        human_bytes(bytes as f64 / time_secs as f64),
-        bytes / (blocks_per_io * block_size) / time_secs as usize,
-    );
-
-    Ok(())
-}
-
-async fn rand_write_workload(
-    guest: &Arc<Guest>,
-    ri: &mut RegionInfo,
-    encrypted: bool,
-    io_depth: usize,
-    blocks_per_io: usize,
-    time_secs: u64,
-    fill: bool,
-) -> Result<()> {
-    // Before we start, make sure the work queues are empty.
-    loop {
-        let wc = guest.query_work_queue().await?;
-        if wc.up_count + wc.ds_count == 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-
-    if fill {
-        println!("filling region before writing");
-        fill_workload(guest, ri, true).await?;
-    }
-
-    if blocks_per_io > ri.total_blocks {
-        bail!("too many blocks per IO; can't exceed {}", ri.total_blocks);
-    }
-
-    println!(
-        "\n-----------------------------------\
-        \nrandom write with {} chunks ({blocks_per_io} block{})",
-        human_bytes((blocks_per_io as u64 * ri.block_size) as f64),
-        if blocks_per_io > 1 { "s" } else { "" },
-    );
-    print_region_description(ri, encrypted);
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let bytes_written = Arc::new(AtomicUsize::new(0));
-
-    let block_size = ri.block_size as usize;
-    let total_blocks = ri.total_blocks;
-    for _ in 0..io_depth {
-        let stop = stop.clone();
-        let guest = guest.clone();
-        let bytes_written = bytes_written.clone();
-        tokio::spawn(async move {
-            let mut buf = BytesMut::new();
-            buf.resize(blocks_per_io * block_size, 0u8);
-            let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
-            rng.fill_bytes(&mut buf);
-            let block_shift = block_size.trailing_zeros();
-            while !stop.load(Ordering::Acquire) {
-                let offset = rng.gen_range(0..=total_blocks - blocks_per_io);
-                guest
-                    .write(Block::new(offset as u64, block_shift), buf.clone())
-                    .await
-                    .unwrap();
-                bytes_written.fetch_add(buf.len(), Ordering::Relaxed);
-            }
-            Ok::<(), CrucibleError>(())
-        });
-    }
-
-    let mut prev = 0;
-    for i in 0..time_secs {
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        let bytes = bytes_written.load(Ordering::Acquire);
-        let delta = bytes - prev;
-        prev = bytes;
-        print!(
-            "{} {}/sec ({} IOPS)  [{} secs remaining]    ",
-            if i == 0 { '\n' } else { '\r' },
-            human_bytes(delta as f64),
-            delta / (blocks_per_io * block_size),
-            time_secs - i,
-        );
-        std::io::stdout().lock().flush().unwrap();
-    }
-    stop.store(true, Ordering::Release);
-
-    let bytes = bytes_written.load(Ordering::Acquire);
-    println!(
-        "\naverage write performance: {}/sec ({} IOPS)",
-        human_bytes(bytes as f64 / time_secs as f64),
-        bytes / (blocks_per_io * block_size) / time_secs as usize,
+        "\naverage {desc} performance: {}/sec ({} IOPS)",
+        human_bytes(bytes as f64 / cfg.time_secs as f64),
+        bytes / (cfg.blocks_per_io * block_size) / cfg.time_secs as usize,
     );
 
     Ok(())
