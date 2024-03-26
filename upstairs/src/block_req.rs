@@ -29,7 +29,7 @@ impl<T, E> BlockRes<T, E> {
     }
 
     /// Consume this BlockRes and send a Result to the receiver
-    pub(crate) fn send_result(mut self, result: Result<T, E>) {
+    pub fn send_result(mut self, result: Result<T, E>) {
         // XXX this eats the result!
         let _ = self.0.take().expect("sender was populated").send(result);
     }
