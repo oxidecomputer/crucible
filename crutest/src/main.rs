@@ -1522,7 +1522,7 @@ async fn fast_fill_workload(
 
     let tasks = futures::stream::FuturesUnordered::new();
     for i in 0..NUM_WORKERS {
-        let mut block_index = i * IO_SIZE * NUM_WORKERS;
+        let mut block_index = i * IO_SIZE;
         let guest = guest.clone();
         let write_log = write_log.clone();
         let bytes_done = bytes_done.clone();
