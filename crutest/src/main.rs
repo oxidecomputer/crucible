@@ -71,11 +71,6 @@ enum Workload {
         #[clap(long, action)]
         skip_verify: bool,
     },
-    FastFill {
-        /// Don't do the verify step after filling the region.
-        #[clap(long, action)]
-        skip_verify: bool,
-    },
     Generic,
     Nothing,
     One,
@@ -875,11 +870,6 @@ async fn main() -> Result<()> {
             fill_workload(&guest, &mut region_info, skip_verify).await?;
         }
 
-        Workload::FastFill { skip_verify } => {
-            println!("Fast fill test");
-            fast_fill_workload(&guest, &mut region_info, skip_verify).await?;
-        }
-
         Workload::Generic => {
             // Either we have a count, or we run until we get a signal.
             let mut wtq = {
@@ -1452,54 +1442,6 @@ async fn balloon_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
  * Write then read (and verify) to every possible block.
  */
 async fn fill_workload(
-    guest: &Guest,
-    ri: &mut RegionInfo,
-    skip_verify: bool,
-) -> Result<()> {
-    let pb = ProgressBar::new(ri.total_blocks as u64);
-    pb.set_style(ProgressStyle::default_bar()
-        .template(
-            "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})"
-        )
-        .unwrap()
-        .progress_chars("#>-"));
-
-    let io_sz = 100;
-
-    let mut block_index = 0;
-    while block_index < ri.total_blocks {
-        let offset =
-            Block::new(block_index as u64, ri.block_size.trailing_zeros());
-
-        let next_io_blocks = if block_index + io_sz > ri.total_blocks {
-            ri.total_blocks - block_index
-        } else {
-            io_sz
-        };
-
-        for i in 0..next_io_blocks {
-            ri.write_log.update_wc(block_index + i);
-        }
-
-        let data =
-            fill_vec(block_index, next_io_blocks, &ri.write_log, ri.block_size);
-
-        guest.write(offset, data).await?;
-
-        block_index += next_io_blocks;
-        pb.set_position(block_index as u64);
-    }
-
-    guest.flush(None).await?;
-    pb.finish();
-
-    if !skip_verify {
-        verify_volume(guest, ri, false).await?;
-    }
-    Ok(())
-}
-
-async fn fast_fill_workload(
     guest: &Arc<Guest>,
     ri: &mut RegionInfo,
     skip_verify: bool,
@@ -2386,7 +2328,7 @@ async fn rand_read_workload(
 
     if fill {
         println!("filling region before reading");
-        fast_fill_workload(guest, ri, true).await?;
+        fill_workload(guest, ri, true).await?;
     }
 
     if blocks_per_io > ri.total_blocks {
@@ -2472,7 +2414,7 @@ async fn rand_write_workload(
 
     if fill {
         println!("filling region before writing");
-        fast_fill_workload(guest, ri, true).await?;
+        fill_workload(guest, ri, true).await?;
     }
 
     if blocks_per_io > ri.total_blocks {
