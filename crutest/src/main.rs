@@ -546,7 +546,7 @@ impl WriteLog {
 }
 
 async fn load_write_log(
-    guest: &Guest,
+    guest: &Arc<Guest>,
     ri: &mut RegionInfo,
     vi: PathBuf,
     verify: bool,
@@ -1143,7 +1143,7 @@ async fn main() -> Result<()> {
  * value for a block since the last commit was called.
  */
 async fn verify_volume(
-    guest: &Guest,
+    guest: &Arc<Guest>,
     ri: &mut RegionInfo,
     range: bool,
 ) -> Result<()> {
@@ -1154,8 +1154,6 @@ async fn verify_volume(
         ri.total_blocks, range
     );
 
-    let mut result = Ok(());
-
     let pb = ProgressBar::new(ri.total_blocks as u64);
     pb.set_style(ProgressStyle::default_bar()
         .template(
@@ -1164,60 +1162,101 @@ async fn verify_volume(
         .unwrap()
         .progress_chars("#>-"));
 
-    let io_sz = 100;
-    let mut block_index = 0;
-    while block_index < ri.total_blocks {
-        let offset =
-            Block::new(block_index as u64, ri.block_size.trailing_zeros());
+    const IO_SIZE: usize = 256;
+    const NUM_WORKERS: usize = 8;
 
-        let next_io_blocks = if block_index + io_sz > ri.total_blocks {
-            ri.total_blocks - block_index
-        } else {
-            io_sz
-        };
+    // Steal the write log, so we can share it between threads
+    let write_log = std::mem::replace(&mut ri.write_log, WriteLog::new(0));
+    let write_log = Arc::new(std::sync::RwLock::new(write_log));
+    let bytes_done = Arc::new(AtomicUsize::new(0));
 
-        let mut data = crucible::Buffer::repeat(
-            255,
-            next_io_blocks,
-            ri.block_size as usize,
-        );
-        guest.read(offset, &mut data).await?;
+    let tasks = futures::stream::FuturesUnordered::new();
+    for i in 0..NUM_WORKERS {
+        let mut block_index = i * IO_SIZE;
+        let guest = guest.clone();
+        let write_log = write_log.clone();
+        let bytes_done = bytes_done.clone();
+        let total_blocks = ri.total_blocks;
+        let block_size = ri.block_size;
+        let pb = pb.clone();
+        tasks.push(tokio::task::spawn(async move {
+            let mut result = Ok(());
+            while block_index < total_blocks {
+                let offset =
+                    Block::new(block_index as u64, block_size.trailing_zeros());
 
-        let dl = data.into_bytes();
-        match validate_vec(
-            dl,
-            block_index,
-            &mut ri.write_log,
-            ri.block_size,
-            range,
-        ) {
-            ValidateStatus::Bad => {
-                println!(
-                    "Error in block range {} -> {}",
-                    block_index,
-                    block_index + next_io_blocks
-                );
-                result = Err(anyhow!("Validation error".to_string()));
-            }
-            ValidateStatus::InRange => {
-                if range {
-                    {}
+                let next_io_blocks = if block_index + IO_SIZE > total_blocks {
+                    total_blocks - block_index
                 } else {
-                    println!(
-                        "Error in block range {} -> {}",
-                        block_index,
-                        block_index + next_io_blocks
-                    );
-                    result = Err(anyhow!("Validation error".to_string()));
-                }
-            }
-            ValidateStatus::Good => {}
-        }
+                    IO_SIZE
+                };
 
-        block_index += next_io_blocks;
-        pb.set_position(block_index as u64);
+                let mut data = crucible::Buffer::repeat(
+                    255,
+                    next_io_blocks,
+                    block_size as usize,
+                );
+                guest.read(offset, &mut data).await?;
+
+                let dl = data.into_bytes();
+                let mut write_log = write_log.write().unwrap();
+                match validate_vec(
+                    dl,
+                    block_index,
+                    &mut write_log,
+                    block_size,
+                    range,
+                ) {
+                    ValidateStatus::Bad => {
+                        println!(
+                            "Error in block range {} -> {}",
+                            block_index,
+                            block_index + next_io_blocks
+                        );
+                        result = Err(anyhow!("Validation error".to_string()));
+                    }
+                    ValidateStatus::InRange => {
+                        if range {
+                            {}
+                        } else {
+                            println!(
+                                "Error in block range {} -> {}",
+                                block_index,
+                                block_index + next_io_blocks
+                            );
+                            result =
+                                Err(anyhow!("Validation error".to_string()));
+                        }
+                    }
+                    ValidateStatus::Good => {}
+                }
+
+                block_index += next_io_blocks + NUM_WORKERS * IO_SIZE;
+                let b = bytes_done.fetch_add(next_io_blocks, Ordering::Relaxed);
+                pb.set_position(b as u64);
+            }
+            result
+        }));
+    }
+
+    // Wait for the tasks to finish
+    let mut result = Ok(());
+    for t in tasks {
+        let r = t.await?;
+        if r.is_err() {
+            result = r;
+        }
     }
     pb.finish();
+
+    // Now that all the workers are done, put the write log back into place
+    ri.write_log = std::mem::replace(
+        &mut Arc::try_unwrap(write_log)
+            .expect("could not unwrap write log")
+            .write()
+            .unwrap(),
+        WriteLog::new(0),
+    );
     result
 }
 
@@ -1572,7 +1611,7 @@ async fn fill_sparse_workload(
  * Read data is verified.
  */
 async fn generic_workload(
-    guest: &Guest,
+    guest: &Arc<Guest>,
     wtq: &mut WhenToQuit,
     ri: &mut RegionInfo,
     quiet: bool,
@@ -1746,7 +1785,7 @@ async fn generic_workload(
 // be below the threshold of gone_too_long() so we don't end up faulting the
 // downstairs and doing a live repair
 async fn replay_workload(
-    guest: &Guest,
+    guest: &Arc<Guest>,
     wtq: &mut WhenToQuit,
     ri: &mut RegionInfo,
     dsc_client: Client,
@@ -1821,7 +1860,7 @@ async fn replay_workload(
 // bunch more IO.  Wait for all IO to finish (on all three downstairs) before
 // we continue.
 async fn replace_workload(
-    guest: &Guest,
+    guest: &Arc<Guest>,
     wtq: &mut WhenToQuit,
     ri: &mut RegionInfo,
     full_targets: &[SocketAddr],
@@ -2545,7 +2584,7 @@ async fn one_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
  * for the IO parts of this.
  */
 async fn deactivate_workload(
-    guest: &Guest,
+    guest: &Arc<Guest>,
     count: usize,
     ri: &mut RegionInfo,
     mut gen: u64,
