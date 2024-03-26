@@ -1192,40 +1192,31 @@ async fn verify_volume(
     // Steal the write log, so we can share it between threads
     let write_log = std::mem::replace(&mut ri.write_log, WriteLog::new(0));
     let write_log = Arc::new(std::sync::RwLock::new(write_log));
-    let bytes_done = Arc::new(AtomicUsize::new(0));
+    let blocks_done = Arc::new(AtomicUsize::new(0));
 
     let tasks = futures::stream::FuturesUnordered::new();
     for i in 0..NUM_WORKERS {
         let mut block_index = i * IO_SIZE;
         let guest = guest.clone();
         let write_log = write_log.clone();
-        let bytes_done = bytes_done.clone();
+        let blocks_done = blocks_done.clone();
         let total_blocks = ri.total_blocks;
         let block_size = ri.block_size;
         let pb = pb.clone();
         tasks.push(tokio::task::spawn(async move {
             let mut result = Ok(());
+            let mut data = crucible::Buffer::new(0, block_size as usize);
             while block_index < total_blocks {
                 let offset =
                     Block::new(block_index as u64, block_size.trailing_zeros());
 
-                let next_io_blocks = if block_index + IO_SIZE > total_blocks {
-                    total_blocks - block_index
-                } else {
-                    IO_SIZE
-                };
-
-                let mut data = crucible::Buffer::repeat(
-                    255,
-                    next_io_blocks,
-                    block_size as usize,
-                );
+                let next_io_blocks = (total_blocks - block_index).min(IO_SIZE);
+                data.reset(next_io_blocks, block_size as usize);
                 guest.read(offset, &mut data).await?;
 
-                let dl = data.into_bytes();
                 let mut write_log = write_log.write().unwrap();
                 match validate_vec(
-                    dl,
+                    &*data,
                     block_index,
                     &mut write_log,
                     block_size,
@@ -1255,9 +1246,10 @@ async fn verify_volume(
                     ValidateStatus::Good => {}
                 }
 
-                block_index += next_io_blocks + NUM_WORKERS * IO_SIZE;
-                let b = bytes_done.fetch_add(next_io_blocks, Ordering::Relaxed);
-                pb.set_position(b as u64);
+                block_index += NUM_WORKERS * IO_SIZE;
+                let progress =
+                    blocks_done.fetch_add(next_io_blocks, Ordering::Relaxed);
+                pb.set_position(progress as u64);
             }
             result
         }));
@@ -1523,14 +1515,14 @@ async fn fill_workload(
     // Steal the write log, so we can share it between threads
     let write_log = std::mem::replace(&mut ri.write_log, WriteLog::new(0));
     let write_log = Arc::new(std::sync::RwLock::new(write_log));
-    let bytes_done = Arc::new(AtomicUsize::new(0));
+    let blocks_done = Arc::new(AtomicUsize::new(0));
 
     let tasks = futures::stream::FuturesUnordered::new();
     for i in 0..NUM_WORKERS {
         let mut block_index = i * IO_SIZE;
         let guest = guest.clone();
         let write_log = write_log.clone();
-        let bytes_done = bytes_done.clone();
+        let blocks_done = blocks_done.clone();
         let total_blocks = ri.total_blocks;
         let block_size = ri.block_size;
         let pb = pb.clone();
@@ -1539,13 +1531,10 @@ async fn fill_workload(
                 let offset =
                     Block::new(block_index as u64, block_size.trailing_zeros());
 
-                let next_io_blocks = if block_index + IO_SIZE > total_blocks {
-                    total_blocks - block_index
-                } else {
-                    IO_SIZE
-                };
+                let next_io_blocks = (total_blocks - block_index).min(IO_SIZE);
 
                 {
+                    // Lock and update the write log
                     let mut write_log = write_log.write().unwrap();
                     for i in 0..next_io_blocks {
                         write_log.update_wc(block_index + i);
@@ -1564,9 +1553,10 @@ async fn fill_workload(
 
                 guest.write(offset, data).await?;
 
-                block_index += next_io_blocks + NUM_WORKERS * IO_SIZE;
-                let b = bytes_done.fetch_add(next_io_blocks, Ordering::Relaxed);
-                pb.set_position(b as u64);
+                block_index += NUM_WORKERS * IO_SIZE;
+                let progress =
+                    blocks_done.fetch_add(next_io_blocks, Ordering::Relaxed);
+                pb.set_position(progress as u64);
             }
             Result::<(), CrucibleError>::Ok(())
         }));
