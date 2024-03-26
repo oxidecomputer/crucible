@@ -1518,12 +1518,14 @@ async fn fast_fill_workload(
     // Steal the write log, so we can share it between threads
     let write_log = std::mem::replace(&mut ri.write_log, WriteLog::new(0));
     let write_log = Arc::new(std::sync::Mutex::new(write_log));
+    let bytes_done = Arc::new(AtomicUsize::new(0));
 
     let tasks = futures::stream::FuturesUnordered::new();
     for i in 0..NUM_WORKERS {
         let mut block_index = i * IO_SIZE * NUM_WORKERS;
         let guest = guest.clone();
         let write_log = write_log.clone();
+        let bytes_done = bytes_done.clone();
         let total_blocks = ri.total_blocks;
         let block_size = ri.block_size;
         let pb = pb.clone();
@@ -1555,7 +1557,8 @@ async fn fast_fill_workload(
                 guest.write(offset, data).await?;
 
                 block_index += next_io_blocks;
-                pb.set_position(block_index as u64);
+                let b = bytes_done.fetch_add(next_io_blocks, Ordering::Relaxed);
+                pb.set_position(b as u64);
             }
             Result::<(), CrucibleError>::Ok(())
         }));
