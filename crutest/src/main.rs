@@ -1559,7 +1559,7 @@ async fn fast_fill_workload(
 
                 guest.write(offset, data).await?;
 
-                block_index += next_io_blocks;
+                block_index += next_io_blocks + NUM_WORKERS * IO_SIZE;
                 let b = bytes_done.fetch_add(next_io_blocks, Ordering::Relaxed);
                 pb.set_position(b as u64);
             }
