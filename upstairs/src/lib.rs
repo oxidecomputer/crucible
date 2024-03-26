@@ -1445,14 +1445,12 @@ impl fmt::Display for AckStatus {
     }
 }
 
-/*
- * Inspired from Propolis block.rs
- *
- * The following are the operations that Crucible supports from outside
- * callers. We have extended this to cover a bunch of test operations as
- * well. The first three are the supported operations, the other operations
- * tell the upstairs to behave in specific ways.
- */
+/// Operations supported by Crucible
+///
+/// This is inspired by Propolis's `block.rs`, but is internal to the Crucible
+/// upstairs crate (i.e. what you're reading right now).  The outside world
+/// uses the [`Guest`] API, which translates into these types internally when
+/// passing messages to the [`Upstairs`](crate::upstairs::Upstairs).
 #[derive(Debug)]
 pub(crate) enum BlockOp {
     Read {
