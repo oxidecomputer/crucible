@@ -67,25 +67,18 @@ impl<T, E> BlockReqWaiter<T, E> {
     ///
     /// If the other side of the oneshot drops without a reply, log an error
     /// and return `None`.
-    pub async fn wait_raw(self, log: &Logger) -> Option<Result<T, E>> {
+    pub async fn wait_raw(self) -> Option<Result<T, E>> {
         match self.recv.await {
             Ok(reply) => Some(reply),
-            Err(_) => {
-                warn!(
-                    log,
-                    "BlockReqWaiter disconnected; \
-                     this should only happen at exit"
-                );
-                None
-            }
+            Err(_) => None,
         }
     }
 }
 
 impl<T> BlockReqWaiter<T, CrucibleError> {
     /// Wait, translating disconnection into `RecvDisconnected`
-    pub async fn wait(self, log: &Logger) -> Result<T, CrucibleError> {
-        self.wait_raw(log)
+    pub async fn wait(self) -> Result<T, CrucibleError> {
+        self.wait_raw()
             .await
             .unwrap_or(Err(CrucibleError::RecvDisconnected))
     }
@@ -116,7 +109,7 @@ mod test {
 
         res.send_ok(());
 
-        let reply = brw.wait(&crucible_common::build_logger()).await;
+        let reply = brw.wait().await;
         assert!(reply.is_ok());
     }
 
@@ -126,7 +119,7 @@ mod test {
 
         res.send_err(CrucibleError::UpstairsInactive);
 
-        let reply = brw.wait(&crucible_common::build_logger()).await;
+        let reply = brw.wait().await;
         assert!(reply.is_err());
     }
 }

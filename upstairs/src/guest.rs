@@ -420,7 +420,7 @@ impl Guest {
         let (rx, done) = BlockReqWaiter::pair();
         let op = f(done);
         self.send(op).await;
-        rx.wait(&self.log).await
+        rx.wait().await
     }
 
     pub async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
@@ -445,7 +445,7 @@ impl Guest {
             "The guest has requested activation with gen:{}", gen
         );
 
-        rx.wait(&self.log).await?;
+        rx.wait().await?;
 
         info!(
             self.log,
@@ -473,7 +473,7 @@ impl BlockIO for Guest {
         self.send(BlockOp::GoActive { done }).await;
         info!(self.log, "The guest has requested activation");
 
-        rx.wait(&self.log).await?;
+        rx.wait().await?;
 
         info!(self.log, "The guest has finished waiting for activation");
         Ok(())
@@ -561,7 +561,7 @@ impl BlockIO for Guest {
             // Our return value always includes the buffer, so we can splice it
             // back onto our existing chunk of data using `unsplit`
             self.send(rio).await;
-            let reply = rx.wait_raw(&self.log).await;
+            let reply = rx.wait_raw().await;
             let err = match reply {
                 Some(Ok(buffer)) => {
                     // Reattach the chunk to `data`
