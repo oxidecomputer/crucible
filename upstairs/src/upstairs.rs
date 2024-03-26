@@ -2156,7 +2156,7 @@ pub(crate) mod test {
         }))
         .await;
 
-        let reply = ds_done_brw.wait(&up.log).await;
+        let reply = ds_done_brw.wait().await;
         assert!(reply.is_err());
 
         up.force_active().unwrap();
@@ -2167,7 +2167,7 @@ pub(crate) mod test {
         }))
         .await;
 
-        let reply = ds_done_brw.wait(&up.log).await;
+        let reply = ds_done_brw.wait().await;
         assert!(reply.is_ok());
 
         let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
@@ -2176,7 +2176,7 @@ pub(crate) mod test {
         }))
         .await;
 
-        let reply = ds_done_brw.wait(&up.log).await;
+        let reply = ds_done_brw.wait().await;
         assert!(reply.is_err());
     }
 
@@ -2226,7 +2226,7 @@ pub(crate) mod test {
             }
         }
 
-        let reply = ds_done_brw.wait(&up.log).await;
+        let reply = ds_done_brw.wait().await;
         assert!(reply.is_ok());
     }
 
