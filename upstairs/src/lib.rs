@@ -1612,6 +1612,8 @@ pub struct Arg {
     pub ds_reconciled: usize,
     /// Extents still needing repair during initial reconciliation.
     pub ds_reconcile_needed: usize,
+    /// Times we failed the initial reconcile.
+    pub ds_reconcile_aborted: usize,
     /// Times we have completed a LiveRepair on a downstairs.
     pub ds_live_repair_completed: [usize; 3],
     /// Times we aborted a LiveRepair on a downstairs.
@@ -1624,6 +1626,8 @@ pub struct Arg {
     pub ds_extents_repaired: [usize; 3],
     /// Times we have live confirmed  an extent on this downstairs.
     pub ds_extents_confirmed: [usize; 3],
+    /// If in Live Repair, the current extent we are repairing.
+    pub ds_extent_limit: usize,
     /// Per-client delay to keep them roughly in sync
     pub ds_delay_us: [usize; 3],
     /// Times we skipped repairing a downstairs because we are read_only.

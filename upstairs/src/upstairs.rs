@@ -730,6 +730,7 @@ impl Upstairs {
         let ds_io_count = self.downstairs.io_state_count();
         let ds_reconciled = self.downstairs.reconcile_repaired();
         let ds_reconcile_needed = self.downstairs.reconcile_repair_needed();
+        let ds_reconcile_aborted = self.downstairs.reconcile_repair_aborted();
         let ds_live_repair_completed = self
             .downstairs
             .collect_stats(|c| c.stats.live_repair_completed);
@@ -742,6 +743,11 @@ impl Upstairs {
             self.downstairs.collect_stats(|c| c.stats.extents_repaired);
         let ds_extents_confirmed =
             self.downstairs.collect_stats(|c| c.stats.extents_confirmed);
+        let ds_extent_limit = self
+            .downstairs
+            .active_repair_extent()
+            .map(|v| v as usize)
+            .unwrap_or(0);
         let ds_delay_us =
             self.downstairs.collect_stats(|c| c.get_delay_us() as usize);
         let ds_ro_lr_skipped =
@@ -762,12 +768,14 @@ impl Upstairs {
                 ds_io_count,
                 ds_reconciled,
                 ds_reconcile_needed,
+                ds_reconcile_aborted,
                 ds_live_repair_completed,
                 ds_live_repair_aborted,
                 ds_connected,
                 ds_replaced,
                 ds_extents_repaired,
                 ds_extents_confirmed,
+                ds_extent_limit,
                 ds_delay_us,
                 ds_ro_lr_skipped,
             };

@@ -619,6 +619,8 @@ dependencies = [
  "crucible-protocol",
  "crucible-workspace-hack",
  "serde_json",
+ "strum 0.26.1",
+ "strum_macros 0.26.1",
  "tokio",
 ]
 
@@ -1104,7 +1106,7 @@ dependencies = [
  "num_enum",
  "schemars",
  "serde",
- "strum_macros 0.25.3",
+ "strum_macros 0.26.1",
  "tokio",
  "tokio-util",
  "uuid",

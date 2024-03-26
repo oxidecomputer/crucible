@@ -426,20 +426,27 @@ impl DownstairsClient {
         out
     }
 
-    pub(crate) fn replay_job(&mut self, job: &mut DownstairsIO) {
+    /// Ensures that the given job is in the job queue and in `IOState::New`
+    ///
+    /// Returns `true` if the job was requeued, or `false` if it was already `New`
+    pub(crate) fn replay_job(&mut self, job: &mut DownstairsIO) -> bool {
         /*
          * If the job is InProgress or New, then we can just go back
          * to New and no extra work is required.
-         * If it's Done, then by definition it has been acked; assert that here
+         * If it's Done, then by definition it has been acked; test that here
          * to double-check.
          */
-        if IOState::Done == job.state[self.client_id] {
-            assert!(job.acked);
+        if IOState::Done == job.state[self.client_id] && !job.acked {
+            panic!("[{}] This job was not acked: {:?}", self.client_id, job);
         }
+
         let old_state = self.set_job_state(job, IOState::New);
         job.replay = true;
         if old_state != IOState::New {
             self.requeue_one(job.ds_id);
+            true
+        } else {
+            false
         }
     }
 
@@ -542,8 +549,6 @@ impl DownstairsClient {
                 self.log,
                 "Gone missing, transition from {current:?} to {new_state:?}"
             );
-        } else {
-            info!(self.log, "Still missing, state is {current:?}");
         }
 
         // Jobs are skipped and replayed in `Downstairs::reinitialize`, which is
@@ -2123,7 +2128,7 @@ impl DownstairsClient {
     ) {
         // If someone has moved us out of reconcile, this is a logic error
         if self.state != DsState::Reconcile {
-            panic!("should still be in reconcile");
+            panic!("[{}] should still be in reconcile", self.client_id);
         }
         let prev_state = job.state.insert(self.client_id, IOState::InProgress);
         assert_eq!(prev_state, IOState::New);
@@ -2147,7 +2152,7 @@ impl DownstairsClient {
                     let prev_state =
                         job.state.insert(self.client_id, IOState::Skipped);
                     assert_eq!(prev_state, IOState::InProgress);
-                    info!(self.log, "no action needed request {repair_id:?}");
+                    debug!(self.log, "no action needed request {repair_id:?}");
                 }
             }
             Message::ExtentFlush {
@@ -2156,10 +2161,10 @@ impl DownstairsClient {
                 ..
             } => {
                 if *client_id == self.client_id {
-                    info!(self.log, "sending flush request {repair_id:?}");
+                    debug!(self.log, "sending flush request {repair_id:?}");
                     self.send(job.op.clone()).await;
                 } else {
-                    info!(self.log, "skipping flush request {repair_id:?}");
+                    debug!(self.log, "skipping flush request {repair_id:?}");
                     // Skip this job for this Downstairs, since it's narrowly
                     // aimed at a different client.
                     let prev_state =
@@ -2500,7 +2505,7 @@ impl ClientIoTask {
         // spinning (e.g. if something is fundamentally wrong with the
         // Downstairs)
         if self.delay {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         }
 
         // Wait for the start oneshot to fire.  This may happen immediately, but

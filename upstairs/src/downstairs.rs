@@ -90,6 +90,9 @@ pub(crate) struct Downstairs {
     /// Number of extents needing repair during initial activation
     reconcile_repair_needed: usize,
 
+    /// Number of failing attempts to reconcile the downstairs
+    reconcile_repair_aborted: usize,
+
     /// The logger for messages sent from downstairs methods.
     log: Logger,
 
@@ -252,6 +255,7 @@ impl Downstairs {
             reconcile_task_list: VecDeque::new(),
             reconcile_repaired: 0,
             reconcile_repair_needed: 0,
+            reconcile_repair_aborted: 0,
             log: log.new(o!("" => "downstairs".to_string())),
             ackable_work: BTreeSet::new(),
             repair: None,
@@ -812,6 +816,7 @@ impl Downstairs {
             self.ds_active.len(),
         );
 
+        let mut count = 0;
         self.ds_active.for_each(|ds_id, job| {
             // We don't need to send anything before our last good flush
             if *ds_id <= lf {
@@ -819,8 +824,14 @@ impl Downstairs {
                 return;
             }
 
-            self.clients[client_id].replay_job(job);
+            if self.clients[client_id].replay_job(job) {
+                count += 1;
+            }
         });
+        info!(
+            self.log,
+            "[{client_id}] Marked {count} jobs for replay since flush: {lf}"
+        );
     }
 
     /// Compare downstairs region metadata and based on the results:
@@ -959,6 +970,7 @@ impl Downstairs {
                 max_gen,
             );
             self.reconcile_repair_needed = self.reconcile_task_list.len();
+            self.reconcile_repaired = 0;
             Ok(true)
         } else {
             info!(self.log, "All extents match");
@@ -1999,6 +2011,8 @@ impl Downstairs {
 
         if self.clients[client_id].on_reconciliation_job_done(repair_id, next) {
             self.reconcile_current_work = None;
+            self.reconcile_repair_needed -= 1;
+            self.reconcile_repaired += 1;
             self.send_next_reconciliation_req().await
         } else {
             false
@@ -2046,6 +2060,9 @@ impl Downstairs {
         info!(self.log, "Clear out existing repair work queue");
         self.reconcile_task_list = VecDeque::new();
         self.reconcile_current_work = None;
+        self.reconcile_repair_needed = 0;
+        self.reconcile_repaired = 0;
+        self.reconcile_repair_aborted += 1;
     }
 
     /// Asserts that initial reconciliation is done, and sets clients as Active
@@ -3306,6 +3323,11 @@ impl Downstairs {
     /// Accessor for [`Downstairs::reconcile_repair_needed`]
     pub(crate) fn reconcile_repair_needed(&self) -> usize {
         self.reconcile_repair_needed
+    }
+
+    /// Accessor for [`Downstairs::reconcile_repair_aborted`]
+    pub(crate) fn reconcile_repair_aborted(&self) -> usize {
+        self.reconcile_repair_aborted
     }
 
     pub(crate) fn get_work_summary(&self) -> crate::control::DownstairsWork {
@@ -5835,6 +5857,7 @@ pub(crate) mod test {
                 extent_id: 1,
             },
         ));
+        ds.reconcile_repair_needed = ds.reconcile_task_list.len();
 
         // Send the close job.  Reconciliation isn't done at this point!
         assert!(!ds.send_next_reconciliation_req().await);
@@ -5866,6 +5889,8 @@ pub(crate) mod test {
             ds.on_reconciliation_ack(ClientId::new(2), msg.clone(), &up_state)
                 .await
         );
+        assert_eq!(ds.reconcile_repair_needed, 0);
+        assert_eq!(ds.reconcile_repaired, 2);
     }
 
     #[tokio::test]
@@ -5891,6 +5916,7 @@ pub(crate) mod test {
                 dest_clients: vec![ClientId::new(1), ClientId::new(2)],
             },
         ));
+        ds.reconcile_repair_needed = ds.reconcile_task_list.len();
 
         // Send the job.  Reconciliation isn't done at this point!
         assert!(!ds.send_next_reconciliation_req().await);
@@ -5914,6 +5940,8 @@ pub(crate) mod test {
             ds.on_reconciliation_ack(ClientId::new(2), msg.clone(), &up_state)
                 .await
         );
+        assert_eq!(ds.reconcile_repair_needed, 0);
+        assert_eq!(ds.reconcile_repaired, 1);
     }
 
     #[tokio::test]
