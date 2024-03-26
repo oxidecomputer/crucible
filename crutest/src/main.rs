@@ -1517,7 +1517,7 @@ async fn fast_fill_workload(
 
     // Steal the write log, so we can share it between threads
     let write_log = std::mem::replace(&mut ri.write_log, WriteLog::new(0));
-    let write_log = Arc::new(std::sync::Mutex::new(write_log));
+    let write_log = Arc::new(std::sync::RwLock::new(write_log));
     let bytes_done = Arc::new(AtomicUsize::new(0));
 
     let tasks = futures::stream::FuturesUnordered::new();
@@ -1540,12 +1540,15 @@ async fn fast_fill_workload(
                     IO_SIZE
                 };
 
-                let data = {
-                    let mut write_log = write_log.lock().unwrap();
+                {
+                    let mut write_log = write_log.write().unwrap();
                     for i in 0..next_io_blocks {
                         write_log.update_wc(block_index + i);
                     }
+                };
 
+                let data = {
+                    let write_log = write_log.read().unwrap();
                     fill_vec(
                         block_index,
                         next_io_blocks,
@@ -1575,7 +1578,7 @@ async fn fast_fill_workload(
     ri.write_log = std::mem::replace(
         &mut Arc::try_unwrap(write_log)
             .expect("could not unwrap write log")
-            .lock()
+            .write()
             .unwrap(),
         WriteLog::new(0),
     );
