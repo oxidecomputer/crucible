@@ -92,6 +92,7 @@ enum Workload {
         #[clap(long, default_value_t = 2, action)]
         write_loops: usize,
     },
+    /// Measure performance with a random read workload
     RandRead {
         /// Size in blocks of each IO
         #[clap(long, default_value_t = 1, action)]
@@ -106,6 +107,7 @@ enum Workload {
         #[clap(long)]
         fill: bool,
     },
+    /// Measure performance with a random write workload
     RandWrite {
         /// Size in blocks of each IO
         #[clap(long, default_value_t = 1, action)]
