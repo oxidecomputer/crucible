@@ -296,6 +296,15 @@ struct RandReadWriteWorkload {
     /// Print the guest log to `stderr`
     #[clap(short, long)]
     verbose: bool,
+    /// Print values in bytes, without human-readable units
+    #[clap(short, long)]
+    raw: bool,
+    /// Time per sample printed to the output
+    #[clap(long, default_value_t = 1)]
+    sample_time: u64,
+    /// Number of subsamples per sample
+    #[clap(long, default_value_t = 10)]
+    subsample_count: u64,
 }
 
 /// Mode flags for `rand_write_read_workload`
@@ -312,7 +321,15 @@ struct RandReadWriteConfig {
     encrypted: bool,
     io_depth: usize,
     blocks_per_io: usize,
+
+    /// Print raw bytes, without human-friendly formatting
+    raw: bool,
+    /// Total amount of time to run
     time_secs: u64,
+    /// Rate at which we should print samples
+    sample_time_secs: u64,
+    /// Number of subsamples for each `sample_time_secs`, for standard deviation
+    subsample_count: u64,
     fill: bool,
 }
 
@@ -984,6 +1001,9 @@ async fn main() -> Result<()> {
                     io_depth: cfg.io_depth,
                     blocks_per_io: cfg.io_size,
                     time_secs: cfg.time,
+                    raw: cfg.raw,
+                    sample_time_secs: cfg.sample_time,
+                    subsample_count: cfg.subsample_count,
                     fill: cfg.fill,
                     mode: RandReadWriteMode::Read,
                 },
@@ -1002,6 +1022,9 @@ async fn main() -> Result<()> {
                     io_depth: cfg.io_depth,
                     blocks_per_io: cfg.io_size,
                     time_secs: cfg.time,
+                    raw: cfg.raw,
+                    sample_time_secs: cfg.sample_time,
+                    subsample_count: cfg.subsample_count,
                     fill: cfg.fill,
                     mode: RandReadWriteMode::Write,
                 },
@@ -2394,14 +2417,14 @@ async fn rand_read_write_workload(
     }
 
     println!(
-        "\n-----------------------------------\
+        "\n----------------------------------------------\
         \nrandom {desc} with {} chunks ({} block{})",
         human_bytes((cfg.blocks_per_io as u64 * ri.block_size) as f64),
         cfg.blocks_per_io,
         if cfg.blocks_per_io > 1 { "s" } else { "" },
     );
     print_region_description(ri, cfg.encrypted);
-    println!("-----------------------------------");
+    println!("----------------------------------------------");
 
     let stop = Arc::new(AtomicBool::new(false));
     let byte_count = Arc::new(AtomicUsize::new(0));
@@ -2457,29 +2480,60 @@ async fn rand_read_write_workload(
         workers.push(handle);
     }
 
+    // Spawn a task which stops us after the given time
+    {
+        let stop = stop.clone();
+        let time_secs = cfg.time_secs;
+        tokio::task::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(time_secs)).await;
+            stop.store(true, Ordering::Release);
+        });
+    }
+
+    // Initial sleep
     let mut prev = 0;
-    for i in 0..cfg.time_secs {
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        let bytes = byte_count.load(Ordering::Acquire);
-        let delta = bytes - prev;
-        prev = bytes;
-        print!(
-            "\r {}/sec ({} IOPS)  [{} secs remaining]    ",
-            human_bytes(delta as f64),
-            delta / (cfg.blocks_per_io * block_size),
-            cfg.time_secs - i,
-        );
+
+    let subsample_delay = Duration::from_secs_f64(
+        cfg.sample_time_secs as f64 / cfg.subsample_count as f64,
+    );
+    let mut samples = vec![];
+    while !stop.load(Ordering::Relaxed) {
+        // Store speeds in bytes/sec, correcting for our sub-second sample time
+        let start = samples.len();
+        for _ in 0..cfg.subsample_count {
+            tokio::time::sleep(subsample_delay).await;
+            let bytes = byte_count.load(Ordering::Acquire);
+            samples.push((bytes - prev) as f64 / subsample_delay.as_secs_f64());
+            prev = bytes;
+        }
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let slice = &samples[start..];
+        let mean = slice.iter().sum::<f64>() / slice.len() as f64;
+        let stdev = (slice.iter().map(|&d| (d - mean).powi(2)).sum::<f64>()
+            / slice.len() as f64)
+            .sqrt();
+        if cfg.raw {
+            println!("{mean:>14} {}", stdev as usize);
+        } else {
+            println!(
+                "{:>14} ± {:<16}  ({} IOPS)",
+                format!("{}/sec", human_bytes(mean)),
+                format!("{}/sec", human_bytes(stdev)),
+                mean as usize / (cfg.blocks_per_io * block_size),
+            );
+        }
         std::io::stdout().lock().flush().unwrap();
     }
     stop.store(true, Ordering::Release);
-    let bytes = byte_count.load(Ordering::Acquire);
-    println!();
 
     // Join all workers
     for h in workers {
         h.await??;
     }
 
+    // Spawn a secondary worker to wait and log during guest deactivation
     let stop = Arc::new(AtomicBool::new(false));
     {
         let guest = guest.clone();
@@ -2501,11 +2555,16 @@ async fn rand_read_write_workload(
     guest.deactivate().await?;
     stop.store(true, Ordering::Relaxed);
 
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    let stdev = (samples.iter().map(|&d| (d - mean).powi(2)).sum::<f64>()
+        / samples.len() as f64)
+        .sqrt();
     println!(
-        "\n-----------------------------------\
-        \naverage {desc} performance: {}/sec ({} IOPS)",
-        human_bytes(bytes as f64 / cfg.time_secs as f64),
-        bytes / (cfg.blocks_per_io * block_size) / cfg.time_secs as usize,
+        "\r----------------------------------------------\
+        \naverage {desc} performance: {}/sec ± {}/sec ({} IOPS)",
+        human_bytes(mean),
+        human_bytes(stdev),
+        mean as usize / (cfg.blocks_per_io * block_size),
     );
 
     Ok(())
