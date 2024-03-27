@@ -2511,12 +2511,14 @@ async fn rand_read_write_workload(
     );
     let mut samples = vec![];
     let mut first = true;
+    let mut next_time = std::time::Instant::now() + subsample_delay;
     while !stop.load(Ordering::Relaxed) {
         // Store speeds in bytes/sec, correcting for our sub-second sample time
         let start = samples.len();
         for _ in 0..cfg.subsample_count {
-            tokio::time::sleep(subsample_delay).await;
+            tokio::time::sleep_until(next_time.into()).await;
             let bytes = byte_count.load(Ordering::Acquire);
+            next_time += subsample_delay;
             samples.push((bytes - prev) as f64 / subsample_delay.as_secs_f64());
             prev = bytes;
         }
