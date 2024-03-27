@@ -65,8 +65,7 @@ impl<T, E> BlockReqWaiter<T, E> {
 
     /// Consume this BlockReqWaiter and wait on the message
     ///
-    /// If the other side of the oneshot drops without a reply, log an error
-    /// and return `None`.
+    /// Returns `None` if the other side drops without a reply
     pub async fn wait_raw(self) -> Option<Result<T, E>> {
         match self.recv.await {
             Ok(reply) => Some(reply),
