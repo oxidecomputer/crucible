@@ -293,7 +293,12 @@ struct RandReadWriteWorkload {
     /// Completely fill the region with random data first
     #[clap(long)]
     fill: bool,
-    /// Print the guest log to `stderr`
+    /// Print the guest log (at `INFO` level) to `stderr`
+    ///
+    /// If this is not set, then only `ERROR` messages are logged
+    ///
+    /// By default, this is not set, because the guest log is noisy and
+    /// interrupts our intentional logging.
     #[clap(short, long)]
     verbose: bool,
     /// Print values in bytes, without human-readable units
@@ -2505,6 +2510,7 @@ async fn rand_read_write_workload(
         cfg.sample_time_secs as f64 / cfg.subsample_count as f64,
     );
     let mut samples = vec![];
+    let mut first = true;
     while !stop.load(Ordering::Relaxed) {
         // Store speeds in bytes/sec, correcting for our sub-second sample time
         let start = samples.len();
@@ -2513,6 +2519,11 @@ async fn rand_read_write_workload(
             let bytes = byte_count.load(Ordering::Acquire);
             samples.push((bytes - prev) as f64 / subsample_delay.as_secs_f64());
             prev = bytes;
+        }
+        // Ignore the first round of samples, to reduce startup effects
+        if std::mem::take(&mut first) {
+            samples.clear();
+            continue;
         }
         if stop.load(Ordering::Relaxed) {
             break;
