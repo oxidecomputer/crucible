@@ -11,6 +11,7 @@ use crate::{
     },
     downstairs::{Downstairs, DownstairsAction},
     extent_from_offset,
+    guest::GuestBlockRes,
     stats::UpStatOuter,
     Block, BlockOp, BlockReq, BlockRes, Buffer, ClientId, ClientMap,
     CrucibleOpts, DsState, EncryptionContext, GuestIoHandle, Message,
@@ -116,7 +117,7 @@ impl UpCounters {
 /// Under the hood, [`Upstairs::select`] selects from **many** possible async
 /// events:
 /// - Messages from downstairs clients
-/// - [`BlockReq`] from the guest
+/// - [`BlockOp`] from the guest
 /// - Various timeouts
 ///   - Client timeout
 ///   - Client ping intervals
@@ -236,7 +237,7 @@ pub(crate) struct Upstairs {
     /// This is public so that others can clone it to get a controller handle
     pub(crate) control_tx: mpsc::Sender<ControlRequest>,
 
-    /// Stream of post-processed `BlockOp` futures
+    /// Stream of post-processed `BlockReq` futures
     deferred_reqs: DeferredQueue<Option<DeferredBlockReq>>,
 
     /// Stream of decrypted `Message` futures
@@ -622,7 +623,6 @@ impl Upstairs {
         if self.downstairs.has_ackable_jobs() {
             self.downstairs
                 .ack_jobs(&mut self.guest.guest_work, &self.stats)
-                .await;
         }
 
         // Check for client-side deactivation
@@ -657,7 +657,7 @@ impl Upstairs {
                 let UpstairsState::Deactivating(res) = prev else {
                     panic!("invalid upstairs state {prev:?}"); // checked above
                 };
-                res.send_ok();
+                res.send_ok(());
             }
         }
 
@@ -931,11 +931,11 @@ impl Upstairs {
         match req.op {
             // All Write operations are deferred, because they will offload
             // encryption to a separate thread pool.
-            BlockOp::Write { offset, data } => {
-                self.submit_deferred_write(offset, data, req.res, false);
+            BlockOp::Write { offset, data, done } => {
+                self.submit_deferred_write(offset, data, done, false);
             }
-            BlockOp::WriteUnwritten { offset, data } => {
-                self.submit_deferred_write(offset, data, req.res, true);
+            BlockOp::WriteUnwritten { offset, data, done } => {
+                self.submit_deferred_write(offset, data, done, true);
             }
             // If we have any deferred requests in the FuturesOrdered, then we
             // have to keep using it for subsequent requests (even ones that are
@@ -980,35 +980,31 @@ impl Upstairs {
     async fn apply_guest_request_inner(&mut self, req: BlockReq) {
         // If any of the submit_* functions fail to send to the downstairs, they
         // return an error.  These are reported to the Guest.
-        let BlockReq { op, res } = req;
-        match op {
+        match req.op {
             // These three options can be handled by this task directly,
             // and don't require the upstairs to be fully online.
-            BlockOp::GoActive => {
-                self.set_active_request(res).await;
+            BlockOp::GoActive { done } => {
+                self.set_active_request(done).await;
             }
-            BlockOp::GoActiveWithGen { gen } => {
+            BlockOp::GoActiveWithGen { gen, done } => {
                 self.cfg.generation.store(gen, Ordering::Release);
-                self.set_active_request(res).await;
+                self.set_active_request(done).await;
             }
-            BlockOp::QueryGuestIOReady { data } => {
-                *data.lock().await = self.guest_io_ready();
-                res.send_ok();
+            BlockOp::QueryGuestIOReady { done } => {
+                done.send_ok(self.guest_io_ready());
             }
-            BlockOp::QueryUpstairsUuid { data } => {
-                *data.lock().await = self.cfg.upstairs_id;
-                res.send_ok();
+            BlockOp::QueryUpstairsUuid { done } => {
+                done.send_ok(self.cfg.upstairs_id);
             }
-            BlockOp::Deactivate => {
-                self.set_deactivate(res);
+            BlockOp::Deactivate { done } => {
+                self.set_deactivate(done);
             }
 
             // Query ops
-            BlockOp::QueryBlockSize { data } => {
+            BlockOp::QueryBlockSize { done } => {
                 match self.ddef.get_def() {
                     Some(rd) => {
-                        *data.lock().await = rd.block_size();
-                        res.send_ok();
+                        done.send_ok(rd.block_size());
                     }
                     None => {
                         warn!(
@@ -1016,17 +1012,16 @@ impl Upstairs {
                             "Block size not available (active: {})",
                             self.guest_io_ready()
                         );
-                        res.send_err(CrucibleError::PropertyNotAvailable(
+                        done.send_err(CrucibleError::PropertyNotAvailable(
                             "block size".to_string(),
                         ));
                     }
                 };
             }
-            BlockOp::QueryTotalSize { data } => {
+            BlockOp::QueryTotalSize { done } => {
                 match self.ddef.get_def() {
                     Some(rd) => {
-                        *data.lock().await = rd.total_size();
-                        res.send_ok();
+                        done.send_ok(rd.total_size());
                     }
                     None => {
                         warn!(
@@ -1034,19 +1029,18 @@ impl Upstairs {
                             "Total size not available (active: {})",
                             self.guest_io_ready()
                         );
-                        res.send_err(CrucibleError::PropertyNotAvailable(
+                        done.send_err(CrucibleError::PropertyNotAvailable(
                             "total size".to_string(),
                         ));
                     }
                 };
             }
             // Testing options
-            BlockOp::QueryExtentSize { data } => {
+            BlockOp::QueryExtentSize { done } => {
                 // Yes, test only
                 match self.ddef.get_def() {
                     Some(rd) => {
-                        *data.lock().await = rd.extent_size();
-                        res.send_ok();
+                        done.send_ok(rd.extent_size());
                     }
                     None => {
                         warn!(
@@ -1054,13 +1048,13 @@ impl Upstairs {
                             "Extent size not available (active: {})",
                             self.guest_io_ready()
                         );
-                        res.send_err(CrucibleError::PropertyNotAvailable(
+                        done.send_err(CrucibleError::PropertyNotAvailable(
                             "extent size".to_string(),
                         ));
                     }
                 };
             }
-            BlockOp::QueryWorkQueue { data } => {
+            BlockOp::QueryWorkQueue { done } => {
                 // TODO should this first check if the Upstairs is active?
                 let active_count = self
                     .downstairs
@@ -1068,27 +1062,28 @@ impl Upstairs {
                     .iter()
                     .filter(|c| c.state() == DsState::Active)
                     .count();
-                *data.lock().await = WQCounts {
+                done.send_ok(WQCounts {
                     up_count: self.guest.guest_work.len(),
                     ds_count: self.downstairs.active_count(),
                     active_count,
-                };
-                res.send_ok();
+                });
             }
 
-            BlockOp::ShowWork { data } => {
+            BlockOp::ShowWork { done } => {
                 // TODO should this first check if the Upstairs is active?
-                *data.lock().await = self.show_all_work();
-                res.send_ok();
+                done.send_ok(self.show_all_work());
             }
 
-            BlockOp::Read { offset, data } => {
-                self.submit_read(offset, data, res)
+            BlockOp::Read { offset, data, done } => {
+                self.submit_read(offset, data, done)
             }
             BlockOp::Write { .. } | BlockOp::WriteUnwritten { .. } => {
                 panic!("writes must always be deferred")
             }
-            BlockOp::Flush { snapshot_details } => {
+            BlockOp::Flush {
+                snapshot_details,
+                done,
+            } => {
                 /*
                  * Submit for read and write both check if the upstairs is
                  * ready for guest IO or not.  Because the Upstairs itself can
@@ -1097,23 +1092,15 @@ impl Upstairs {
                  * flush command.
                  */
                 if !self.guest_io_ready() {
-                    res.send_err(CrucibleError::UpstairsInactive);
+                    done.send_err(CrucibleError::UpstairsInactive);
                     return;
                 }
-                self.submit_flush(Some(res), snapshot_details);
+                self.submit_flush(Some(done), snapshot_details);
             }
-            BlockOp::ReplaceDownstairs {
-                id,
-                old,
-                new,
-                result,
-            } => match self.downstairs.replace(id, old, new, &self.state) {
-                Ok(v) => {
-                    *result.lock().await = v;
-                    res.send_ok();
-                }
-                Err(e) => res.send_err(e),
-            },
+            BlockOp::ReplaceDownstairs { id, old, new, done } => {
+                let r = self.downstairs.replace(id, old, new, &self.state);
+                done.send_result(r);
+            }
         }
     }
 
@@ -1260,25 +1247,29 @@ impl Upstairs {
                 }
                 self.downstairs.submit_flush(gw_id, snapshot_details)
             },
-            None,
-            res,
+            res.map(GuestBlockRes::Other),
         );
 
         cdt::up__to__ds__flush__start!(|| (gw_id.0));
     }
 
     /// Submits a read job to the downstairs
-    fn submit_read(&mut self, offset: Block, data: Buffer, res: BlockRes) {
+    fn submit_read(
+        &mut self,
+        offset: Block,
+        data: Buffer,
+        res: BlockRes<Buffer, (Buffer, CrucibleError)>,
+    ) {
         self.submit_read_inner(offset, data, Some(res))
     }
 
-    /// Submits a dummy read (without associated `BlockReq`)
+    /// Submits a dummy read (without associated `BlockOp`)
     #[cfg(test)]
     pub(crate) fn submit_dummy_read(&mut self, offset: Block, data: Buffer) {
         self.submit_read_inner(offset, data, None)
     }
 
-    /// Submit a read job to the downstairs, optionally without a `BlockReq`
+    /// Submit a read job to the downstairs, optionally without a `BlockOp`
     ///
     /// # Panics
     /// If `res` is `None` and this isn't the test suite
@@ -1286,14 +1277,14 @@ impl Upstairs {
         &mut self,
         offset: Block,
         data: Buffer,
-        res: Option<BlockRes>,
+        res: Option<BlockRes<Buffer, (Buffer, CrucibleError)>>,
     ) {
         #[cfg(not(test))]
         assert!(res.is_some());
 
         if !self.guest_io_ready() {
             if let Some(res) = res {
-                res.send_err_with_buffer(data, CrucibleError::UpstairsInactive);
+                res.send_err((data, CrucibleError::UpstairsInactive));
             }
             return;
         }
@@ -1310,7 +1301,7 @@ impl Upstairs {
          */
         if let Err(e) = ddef.validate_io(offset, data.len()) {
             if let Some(res) = res {
-                res.send_err_with_buffer(data, e);
+                res.send_err((data, e));
             }
             return;
         }
@@ -1337,8 +1328,7 @@ impl Upstairs {
                 cdt::gw__read__start!(|| (gw_id.0));
                 self.downstairs.submit_read(gw_id, impacted_blocks, ddef)
             },
-            Some(data),
-            res,
+            res.map(|res| GuestBlockRes::Read(data, res)),
         );
 
         cdt::up__to__ds__read__start!(|| (gw_id.0));
@@ -1364,7 +1354,7 @@ impl Upstairs {
         )
     }
 
-    /// Submits a dummy write (without an associated `BlockReq`)
+    /// Submits a dummy write (without an associated `BlockOp`)
     ///
     /// This **does not** go through the deferred-write pipeline
     #[cfg(test)]
@@ -1489,8 +1479,7 @@ impl Upstairs {
                     write.is_write_unwritten,
                 )
             },
-            None,
-            write.res,
+            write.res.map(GuestBlockRes::Other),
         );
 
         if write.is_write_unwritten {
@@ -1893,7 +1882,7 @@ impl Upstairs {
         else {
             unreachable!(); // checked above
         };
-        res.send_ok();
+        res.send_ok(());
         info!(
             self.log,
             "{} is now active with session: {}",
@@ -2080,7 +2069,7 @@ pub(crate) mod test {
         client::ClientStopReason,
         downstairs::test::set_all_active,
         test::{make_encrypted_upstairs, make_upstairs},
-        BlockContext, BlockReq, BlockReqWaiter, DsState, JobId,
+        BlockContext, BlockOp, BlockReqWaiter, DsState, JobId,
     };
     use bytes::BytesMut;
     use crucible_common::integrity_hash;
@@ -2163,38 +2152,32 @@ pub(crate) mod test {
 
         let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Deactivate,
-            res: ds_done_res,
+            op: BlockOp::Deactivate { done: ds_done_res },
         }))
         .await;
 
-        let reply = ds_done_brw.wait(&up.log).await;
-        assert!(reply.buffer.is_none());
-        assert!(reply.result.is_err());
+        let reply = ds_done_brw.wait().await;
+        assert!(reply.is_err());
 
         up.force_active().unwrap();
 
         let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Deactivate,
-            res: ds_done_res,
+            op: BlockOp::Deactivate { done: ds_done_res },
         }))
         .await;
 
-        let reply = ds_done_brw.wait(&up.log).await;
-        assert!(reply.buffer.is_none());
-        assert!(reply.result.is_ok());
+        let reply = ds_done_brw.wait().await;
+        assert!(reply.is_ok());
 
         let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Deactivate,
-            res: ds_done_res,
+            op: BlockOp::Deactivate { done: ds_done_res },
         }))
         .await;
 
-        let reply = ds_done_brw.wait(&up.log).await;
-        assert!(reply.buffer.is_none());
-        assert!(reply.result.is_err());
+        let reply = ds_done_brw.wait().await;
+        assert!(reply.is_err());
     }
 
     #[tokio::test]
@@ -2211,8 +2194,7 @@ pub(crate) mod test {
         // The deactivate message should happen immediately
         let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Deactivate,
-            res: ds_done_res,
+            op: BlockOp::Deactivate { done: ds_done_res },
         }))
         .await;
 
@@ -2244,9 +2226,8 @@ pub(crate) mod test {
             }
         }
 
-        let reply = ds_done_brw.wait(&up.log).await;
-        assert!(reply.buffer.is_none());
-        assert!(reply.result.is_ok());
+        let reply = ds_done_brw.wait().await;
+        assert!(reply.is_ok());
     }
 
     // Job dependency tests
@@ -3526,14 +3507,13 @@ pub(crate) mod test {
         // Build a write, put it on the work queue.
         let offset = Block::new_512(7);
         let data = BytesMut::from([1; 512].as_slice());
+        let (_write_res, done) = BlockReqWaiter::pair();
         let op = if is_write_unwritten {
-            BlockOp::WriteUnwritten { offset, data }
+            BlockOp::WriteUnwritten { offset, data, done }
         } else {
-            BlockOp::Write { offset, data }
+            BlockOp::Write { offset, data, done }
         };
-        let (_write_brw, write_res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq { op, res: write_res }))
-            .await;
+        up.apply(UpstairsAction::Guest(BlockReq { op })).await;
         up.await_deferred_reqs().await;
         let id1 = JobId(1000); // We know that job IDs start at 1000
 
@@ -3541,8 +3521,9 @@ pub(crate) mod test {
         let (mut deactivate_done_brw, deactivate_done_res) =
             BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Deactivate,
-            res: deactivate_done_res,
+            op: BlockOp::Deactivate {
+                done: deactivate_done_res,
+            },
         }))
         .await;
 
@@ -3631,8 +3612,7 @@ pub(crate) mod test {
         }
 
         let reply = deactivate_done_brw.try_wait().unwrap();
-        assert!(reply.buffer.is_none());
-        reply.result.unwrap();
+        assert!(reply.is_ok());
 
         // Verify we have disconnected and can go back to init.
         assert!(matches!(up.state, UpstairsState::Initializing));
@@ -3651,10 +3631,9 @@ pub(crate) mod test {
 
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
-        let (_tx, res) = BlockReqWaiter::pair();
+        let (_res, done) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
-            res,
+            op: BlockOp::Read { offset, data, done },
         }))
         .await;
 
@@ -3713,10 +3692,9 @@ pub(crate) mod test {
         let blocks = 16384 / 512;
         let data = Buffer::new(blocks, 512);
         let offset = Block::new_512(7);
-        let (_tx, res) = BlockReqWaiter::pair();
+        let (_res, done) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
-            res,
+            op: BlockOp::Read { offset, data, done },
         }))
         .await;
 
@@ -3785,10 +3763,9 @@ pub(crate) mod test {
         let blocks = 16384 / 512;
         let data = Buffer::new(blocks, 512);
         let offset = Block::new_512(7);
-        let (_tx, res) = BlockReqWaiter::pair();
+        let (_res, done) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
-            res,
+            op: BlockOp::Read { offset, data, done },
         }))
         .await;
 
@@ -3879,10 +3856,9 @@ pub(crate) mod test {
 
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
-        let (_tx, res) = BlockReqWaiter::pair();
+        let (_res, done) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
-            res,
+            op: BlockOp::Read { offset, data, done },
         }))
         .await;
 
@@ -3959,10 +3935,9 @@ pub(crate) mod test {
 
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
-        let (_tx, res) = BlockReqWaiter::pair();
+        let (_res, done) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
-            res,
+            op: BlockOp::Read { offset, data, done },
         }))
         .await;
 
@@ -4028,10 +4003,9 @@ pub(crate) mod test {
 
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
-        let (_tx, res) = BlockReqWaiter::pair();
+        let (_res, done) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
-            res,
+            op: BlockOp::Read { offset, data, done },
         }))
         .await;
 
@@ -4082,10 +4056,9 @@ pub(crate) mod test {
 
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
-        let (_tx, res) = BlockReqWaiter::pair();
+        let (_res, done) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
-            res,
+            op: BlockOp::Read { offset, data, done },
         }))
         .await;
 
@@ -4162,10 +4135,9 @@ pub(crate) mod test {
 
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
-        let (_tx, res) = BlockReqWaiter::pair();
+        let (_res, done) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
-            res,
+            op: BlockOp::Read { offset, data, done },
         }))
         .await;
 
@@ -4244,10 +4216,9 @@ pub(crate) mod test {
 
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
-        let (_tx, res) = BlockReqWaiter::pair();
+        let (_res, done) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
-            res,
+            op: BlockOp::Read { offset, data, done },
         }))
         .await;
 
@@ -4323,10 +4294,9 @@ pub(crate) mod test {
 
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
-        let (_tx, res) = BlockReqWaiter::pair();
+        let (_res, done) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
-            res,
+            op: BlockOp::Read { offset, data, done },
         }))
         .await;
 
@@ -4395,10 +4365,9 @@ pub(crate) mod test {
 
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
-        let (_tx, res) = BlockReqWaiter::pair();
+        let (_res, done) = BlockReqWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data },
-            res,
+            op: BlockOp::Read { offset, data, done },
         }))
         .await;
 

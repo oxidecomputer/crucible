@@ -324,7 +324,7 @@ impl Downstairs {
     }
 
     /// Send back acks for all jobs that are `AckReady`
-    pub(crate) async fn ack_jobs(
+    pub(crate) fn ack_jobs(
         &mut self,
         gw: &mut GuestWork,
         up_stats: &UpStatOuter,
@@ -334,7 +334,7 @@ impl Downstairs {
         let ack_list = std::mem::take(&mut self.ackable_work);
         let jobs_checked = ack_list.len();
         for ds_id_done in ack_list.iter() {
-            self.ack_job(*ds_id_done, gw, up_stats).await;
+            self.ack_job(*ds_id_done, gw, up_stats);
         }
         debug!(self.log, "ack_ready handled {jobs_checked} jobs");
     }
@@ -345,7 +345,7 @@ impl Downstairs {
     ///
     /// This is public for the sake of unit testing, but shouldn't be called
     /// outside of this module normally.
-    async fn ack_job(
+    fn ack_job(
         &mut self,
         ds_id: JobId,
         gw: &mut GuestWork,
@@ -366,7 +366,7 @@ impl Downstairs {
         Self::cdt_gw_work_done(done, up_stats);
         debug!(self.log, "[A] ack job {}:{}", ds_id, gw_id);
 
-        gw.gw_ds_complete(gw_id, ds_id, data, r, &self.log).await;
+        gw.gw_ds_complete(gw_id, ds_id, data, r);
 
         self.retire_check(ds_id);
     }
@@ -1284,7 +1284,6 @@ impl Downstairs {
                             self.submit_flush(gw_id, None)
                         },
                         None,
-                        None,
                     );
                     info!(self.log, "LiveRepair final flush submitted");
                     cdt::up__to__ds__flush__start!(|| (gw_id.0));
@@ -1338,7 +1337,7 @@ impl Downstairs {
         let nio = Self::create_noop_io(noop_id, deps, gw_noop_id);
 
         cdt::gw__noop__start!(|| (gw_noop_id.0));
-        gw.insert(gw_noop_id, noop_id, None, None);
+        gw.insert(gw_noop_id, noop_id);
         self.enqueue_repair(nio);
     }
 
@@ -1383,7 +1382,7 @@ impl Downstairs {
 
         cdt::gw__repair__start!(|| (gw_repair_id.0, eid));
 
-        gw.insert(gw_repair_id, repair_id, None, None);
+        gw.insert(gw_repair_id, repair_id);
         self.enqueue_repair(repair_io);
     }
 
@@ -1639,7 +1638,7 @@ impl Downstairs {
 
         cdt::gw__reopen__start!(|| (gw_reopen_id.0, eid));
 
-        gw.insert(gw_reopen_id, reopen_id, None, None);
+        gw.insert(gw_reopen_id, reopen_id);
         self.enqueue_repair(reopen_io);
     }
 
@@ -1825,7 +1824,7 @@ impl Downstairs {
         );
 
         cdt::gw__close__start!(|| (gw_close_id.0, eid));
-        gw.insert(gw_close_id, close_id, None, None);
+        gw.insert(gw_close_id, close_id);
         self.enqueue_repair(close_io);
     }
 
