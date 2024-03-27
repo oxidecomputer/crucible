@@ -94,33 +94,13 @@ enum Workload {
     },
     /// Measure performance with a random read workload
     RandRead {
-        /// Size in blocks of each IO
-        #[clap(long, default_value_t = 1, action)]
-        io_size: usize,
-        /// Number of outstanding IOs at the same time.
-        #[clap(long, default_value_t = 1, action)]
-        io_depth: usize,
-        /// Number of seconds to run
-        #[clap(long, default_value_t = 60, action)]
-        time: u64,
-        /// Completely fill the region with random data first
-        #[clap(long)]
-        fill: bool,
+        #[clap(flatten)]
+        cfg: RandReadWriteWorkload,
     },
     /// Measure performance with a random write workload
     RandWrite {
-        /// Size in blocks of each IO
-        #[clap(long, default_value_t = 1, action)]
-        io_size: usize,
-        /// Number of outstanding IOs at the same time.
-        #[clap(long, default_value_t = 1, action)]
-        io_depth: usize,
-        /// Number of seconds to run
-        #[clap(long, default_value_t = 60, action)]
-        time: u64,
-        /// Completely fill the region with random data first
-        #[clap(long)]
-        fill: bool,
+        #[clap(flatten)]
+        cfg: RandReadWriteWorkload,
     },
     Repair,
     /// Test the downstairs replay path.
@@ -297,6 +277,25 @@ pub fn opts() -> Result<Opt> {
 fn history_file<P: AsRef<Path>>(file: P) -> PathBuf {
     let out = file.as_ref().to_path_buf();
     out
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::Args)]
+struct RandReadWriteWorkload {
+    /// Size in blocks of each IO
+    #[clap(long, default_value_t = 1, action)]
+    io_size: usize,
+    /// Number of outstanding IOs at the same time.
+    #[clap(long, default_value_t = 1, action)]
+    io_depth: usize,
+    /// Number of seconds to run
+    #[clap(long, default_value_t = 60, action)]
+    time: u64,
+    /// Completely fill the region with random data first
+    #[clap(long)]
+    fill: bool,
+    /// Print the guest log to `stderr`
+    #[clap(short, long)]
+    verbose: bool,
 }
 
 /// Mode flags for `rand_write_read_workload`
@@ -700,13 +699,26 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Opt out of verbose logs for certain tests
+    let log_level = match opt.workload {
+        Workload::RandRead { cfg } | Workload::RandWrite { cfg } => {
+            if cfg.verbose {
+                slog::Level::Info
+            } else {
+                slog::Level::Error
+            }
+        }
+        _ => slog::Level::Info,
+    };
+    let guest_logger = crucible_common::build_logger_with_level(log_level);
+
     /*
      * The structure we use to send work from outside crucible into the
      * Upstairs main task.
      * We create this here instead of inside up_main() so we can use
      * the methods provided by guest to interact with Crucible.
      */
-    let (guest, io) = Guest::new(None);
+    let (guest, io) = Guest::new(Some(guest_logger));
     let guest = Arc::new(guest);
 
     let pr;
@@ -963,21 +975,16 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
         }
-        Workload::RandRead {
-            io_size,
-            io_depth,
-            time,
-            fill,
-        } => {
+        Workload::RandRead { cfg } => {
             rand_read_write_workload(
                 &guest,
                 &mut region_info,
                 RandReadWriteConfig {
                     encrypted: is_encrypted,
-                    io_depth,
-                    blocks_per_io: io_size,
-                    time_secs: time,
-                    fill,
+                    io_depth: cfg.io_depth,
+                    blocks_per_io: cfg.io_size,
+                    time_secs: cfg.time,
+                    fill: cfg.fill,
                     mode: RandReadWriteMode::Read,
                 },
             )
@@ -986,21 +993,16 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
         }
-        Workload::RandWrite {
-            io_size,
-            io_depth,
-            time,
-            fill,
-        } => {
+        Workload::RandWrite { cfg } => {
             rand_read_write_workload(
                 &guest,
                 &mut region_info,
                 RandReadWriteConfig {
                     encrypted: is_encrypted,
-                    io_depth,
-                    blocks_per_io: io_size,
-                    time_secs: time,
-                    fill,
+                    io_depth: cfg.io_depth,
+                    blocks_per_io: cfg.io_size,
+                    time_secs: cfg.time,
+                    fill: cfg.fill,
                     mode: RandReadWriteMode::Write,
                 },
             )
