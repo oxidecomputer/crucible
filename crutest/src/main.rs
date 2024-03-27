@@ -2401,17 +2401,19 @@ async fn rand_read_write_workload(
         if cfg.blocks_per_io > 1 { "s" } else { "" },
     );
     print_region_description(ri, cfg.encrypted);
+    println!("-----------------------------------");
 
     let stop = Arc::new(AtomicBool::new(false));
     let byte_count = Arc::new(AtomicUsize::new(0));
 
     let block_size = ri.block_size as usize;
     let total_blocks = ri.total_blocks;
+    let mut workers = vec![];
     for _ in 0..cfg.io_depth {
         let stop = stop.clone();
         let guest = guest.clone();
         let byte_count = byte_count.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             match cfg.mode {
                 RandReadWriteMode::Write => {
                     let mut buf = BytesMut::new();
@@ -2452,6 +2454,7 @@ async fn rand_read_write_workload(
             }
             Ok::<(), CrucibleError>(())
         });
+        workers.push(handle);
     }
 
     let mut prev = 0;
@@ -2461,8 +2464,7 @@ async fn rand_read_write_workload(
         let delta = bytes - prev;
         prev = bytes;
         print!(
-            "{} {}/sec ({} IOPS)  [{} secs remaining]    ",
-            if i == 0 { '\n' } else { '\r' },
+            "\r {}/sec ({} IOPS)  [{} secs remaining]    ",
             human_bytes(delta as f64),
             delta / (cfg.blocks_per_io * block_size),
             cfg.time_secs - i,
@@ -2470,10 +2472,38 @@ async fn rand_read_write_workload(
         std::io::stdout().lock().flush().unwrap();
     }
     stop.store(true, Ordering::Release);
-
     let bytes = byte_count.load(Ordering::Acquire);
+    println!();
+
+    // Join all workers
+    for h in workers {
+        h.await??;
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let guest = guest.clone();
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                let Ok(wq) = guest.query_work_queue().await else {
+                    break;
+                };
+                print!(
+                    "\r stopping guest [{} jobs remaining]    ",
+                    wq.ds_count + wq.up_count
+                );
+                std::io::stdout().lock().flush().unwrap();
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
+    }
+    guest.deactivate().await?;
+    stop.store(true, Ordering::Relaxed);
+
     println!(
-        "\naverage {desc} performance: {}/sec ({} IOPS)",
+        "\n-----------------------------------\
+        \naverage {desc} performance: {}/sec ({} IOPS)",
         human_bytes(bytes as f64 / cfg.time_secs as f64),
         bytes / (cfg.blocks_per_io * block_size) / cfg.time_secs as usize,
     );
