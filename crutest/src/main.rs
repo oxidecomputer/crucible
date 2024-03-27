@@ -39,7 +39,7 @@ use dsc_client::{types::DownstairsState, Client};
  */
 /// Client: A Crucible Upstairs test program
 #[allow(clippy::derive_partial_eq_without_eq, clippy::upper_case_acronyms)]
-#[derive(Debug, Parser, PartialEq)]
+#[derive(Debug, Parser)]
 #[clap(name = "workload", term_width = 80)]
 #[clap(about = "Workload the program will execute.", long_about = None)]
 enum Workload {
@@ -279,7 +279,7 @@ fn history_file<P: AsRef<Path>>(file: P) -> PathBuf {
     out
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::Args)]
+#[derive(Copy, Clone, Debug, clap::Args)]
 struct RandReadWriteWorkload {
     /// Size in blocks of each IO
     #[clap(long, default_value_t = 1, action)]
@@ -305,8 +305,8 @@ struct RandReadWriteWorkload {
     #[clap(short, long)]
     raw: bool,
     /// Time per sample printed to the output
-    #[clap(long, default_value_t = 1)]
-    sample_time: u64,
+    #[clap(long, default_value_t = 1.0)]
+    sample_time: f64,
     /// Number of subsamples per sample
     #[clap(long, default_value_t = 10)]
     subsample_count: u64,
@@ -332,7 +332,7 @@ struct RandReadWriteConfig {
     /// Total amount of time to run
     time_secs: u64,
     /// Rate at which we should print samples
-    sample_time_secs: u64,
+    sample_time_secs: f64,
     /// Number of subsamples for each `sample_time_secs`, for standard deviation
     subsample_count: u64,
     fill: bool,
@@ -697,7 +697,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    if opt.workload == Workload::Verify && opt.verify_in.is_none() {
+    if matches!(opt.workload, Workload::Verify) && opt.verify_in.is_none() {
         bail!("Verify requires verify_in file");
     }
 
@@ -852,7 +852,7 @@ async fn main() -> Result<()> {
          * option has in it.
          */
         let verify = {
-            if opt.workload == Workload::Verify {
+            if matches!(opt.workload, Workload::Verify) {
                 false
             } else {
                 opt.verify_at_start
@@ -2507,7 +2507,7 @@ async fn rand_read_write_workload(
     let mut prev = 0;
 
     let subsample_delay = Duration::from_secs_f64(
-        cfg.sample_time_secs as f64 / cfg.subsample_count as f64,
+        cfg.sample_time_secs / cfg.subsample_count as f64,
     );
     let mut samples = vec![];
     let mut first = true;
