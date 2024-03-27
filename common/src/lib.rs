@@ -64,7 +64,7 @@ pub enum CrucibleError {
     #[error("Error grabbing reader-writer {0} lock")]
     RwLockError(String),
 
-    #[error("BlockReqWaiter recv channel disconnected")]
+    #[error("BlockOpWaiter recv channel disconnected")]
     RecvDisconnected,
 
     #[error("SendError: {0}")]

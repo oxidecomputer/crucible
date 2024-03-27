@@ -110,10 +110,10 @@ pub(crate) struct Downstairs {
 /// We pass through all states (except `FinalFlush`) in order for each extent,
 /// then pass through the `FinalFlush` state before completion.  In each state,
 /// we're waiting for a particular job to finish, which is indicated by a
-/// `BlockReqWaiter`.
+/// `BlockOpWaiter`.
 ///
 /// Early states carry around reserved IDs (both `JobId` and guest work IDs), as
-/// well as a reserved `BlockReqWaiter` for the final flush.
+/// well as a reserved `BlockOpWaiter` for the final flush.
 #[derive(Copy, Clone, Debug)]
 pub(crate) enum LiveRepairState {
     Closing {
