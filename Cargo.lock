@@ -1239,6 +1239,7 @@ dependencies = [
  "serde_json",
  "signal-hook",
  "signal-hook-tokio",
+ "slog",
  "statistical",
  "tokio",
  "tokio-util",
