@@ -333,6 +333,26 @@ struct RandReadWriteConfig {
     fill: bool,
 }
 
+impl RandReadWriteConfig {
+    fn new(
+        cfg: RandReadWriteWorkload,
+        encrypted: bool,
+        mode: RandReadWriteMode,
+    ) -> Self {
+        RandReadWriteConfig {
+            encrypted,
+            io_depth: cfg.io_depth,
+            blocks_per_io: cfg.io_size,
+            time_secs: cfg.time,
+            raw: cfg.raw,
+            sample_time_secs: cfg.sample_time,
+            subsample_count: cfg.subsample_count,
+            fill: cfg.fill,
+            mode,
+        }
+    }
+}
+
 /*
  * All the tests need this basic info about the region.
  * Not all tests make use of the write_log yet, but perhaps someday..
@@ -996,17 +1016,11 @@ async fn main() -> Result<()> {
             rand_read_write_workload(
                 &guest,
                 &mut region_info,
-                RandReadWriteConfig {
-                    encrypted: is_encrypted,
-                    io_depth: cfg.io_depth,
-                    blocks_per_io: cfg.io_size,
-                    time_secs: cfg.time,
-                    raw: cfg.raw,
-                    sample_time_secs: cfg.sample_time,
-                    subsample_count: cfg.subsample_count,
-                    fill: cfg.fill,
-                    mode: RandReadWriteMode::Read,
-                },
+                RandReadWriteConfig::new(
+                    cfg,
+                    is_encrypted,
+                    RandReadWriteMode::Read,
+                ),
             )
             .await?;
             if opt.quit {
@@ -1017,17 +1031,11 @@ async fn main() -> Result<()> {
             rand_read_write_workload(
                 &guest,
                 &mut region_info,
-                RandReadWriteConfig {
-                    encrypted: is_encrypted,
-                    io_depth: cfg.io_depth,
-                    blocks_per_io: cfg.io_size,
-                    time_secs: cfg.time,
-                    raw: cfg.raw,
-                    sample_time_secs: cfg.sample_time,
-                    subsample_count: cfg.subsample_count,
-                    fill: cfg.fill,
-                    mode: RandReadWriteMode::Write,
-                },
+                RandReadWriteConfig::new(
+                    cfg,
+                    is_encrypted,
+                    RandReadWriteMode::Write,
+                ),
             )
             .await?;
             if opt.quit {
