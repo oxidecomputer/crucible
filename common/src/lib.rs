@@ -333,6 +333,11 @@ impl std::fmt::Display for BuildInfo {
  * A common logger setup for all to use.
  */
 pub fn build_logger() -> slog::Logger {
+    build_logger_with_level(slog::Level::Info)
+}
+
+/// Build a logger with the specific log level
+pub fn build_logger_with_level(level: slog::Level) -> slog::Logger {
     let main_drain = if atty::is(atty::Stream::Stdout) {
         let decorator = slog_term::TermDecorator::new().build();
         let drain = slog_term::FullFormat::new(decorator).build().fuse();
@@ -350,7 +355,7 @@ pub fn build_logger() -> slog::Logger {
 
     let (dtrace_drain, probe_reg) = slog_dtrace::Dtrace::new();
 
-    let filtered_main = slog::LevelFilter::new(main_drain, slog::Level::Info);
+    let filtered_main = slog::LevelFilter::new(main_drain, level);
 
     let log = slog::Logger::root(
         slog::Duplicate::new(filtered_main.fuse(), dtrace_drain.fuse()).fuse(),
