@@ -46,7 +46,7 @@ pub mod block_io;
 pub use block_io::{FileBlockIO, ReqwestBlockIO};
 
 pub mod block_req;
-pub(crate) use block_req::{BlockReq, BlockReqWaiter, BlockRes};
+pub(crate) use block_req::{BlockOpWaiter, BlockRes};
 
 mod buffer;
 pub use buffer::Buffer; // used in BlockIO::Read, so it must be public
@@ -1568,28 +1568,28 @@ async fn test_return_iops() {
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(1, 512),
-        done: BlockReqWaiter::pair().1,
+        done: BlockOpWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(8, 512), // 4096 bytes
-        done: BlockReqWaiter::pair().1,
+        done: BlockOpWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(31, 512), // 15872 bytes < 16000
-        done: BlockReqWaiter::pair().1,
+        done: BlockOpWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(32, 512), // 16384 bytes > 16000
-        done: BlockReqWaiter::pair().1,
+        done: BlockOpWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 2);
 }

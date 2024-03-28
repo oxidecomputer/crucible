@@ -2,15 +2,6 @@
 use super::*;
 use tokio::sync::oneshot;
 
-/// Wrapper to contain a `BlockOp`
-///
-/// The `BlockReq` used to have more fields, but now it's down to just this one;
-/// we can remove it at a later point.
-#[derive(Debug)]
-pub(crate) struct BlockReq {
-    pub op: BlockOp,
-}
-
 #[must_use]
 #[derive(Debug)]
 pub(crate) struct BlockRes<T = (), E = CrucibleError>(
@@ -38,7 +29,7 @@ impl<T, E> BlockRes<T, E> {
 impl<T, E> Drop for BlockRes<T, E> {
     fn drop(&mut self) {
         if self.0.is_some() {
-            // During normal operation, we expect to reply to every BlockReq, so
+            // During normal operation, we expect to reply to every BlockOp, so
             // we'll fire a DTrace probe here.
             cdt::up__block__req__dropped!();
         }
@@ -52,18 +43,18 @@ impl<T, E> Drop for BlockRes<T, E> {
  * sender stored in the `BlockOp`.
  */
 #[must_use]
-pub(crate) struct BlockReqWaiter<T, E = CrucibleError> {
+pub(crate) struct BlockOpWaiter<T, E = CrucibleError> {
     recv: oneshot::Receiver<Result<T, E>>,
 }
 
-impl<T, E> BlockReqWaiter<T, E> {
-    /// Create associated `BlockReqWaiter`/`BlockRes` pair
+impl<T, E> BlockOpWaiter<T, E> {
+    /// Create associated `BlockOpWaiter`/`BlockRes` pair
     pub fn pair() -> (Self, BlockRes<T, E>) {
         let (send, recv) = oneshot::channel();
         (Self { recv }, BlockRes(Some(send)))
     }
 
-    /// Consume this BlockReqWaiter and wait on the message
+    /// Consume this BlockOpWaiter and wait on the message
     ///
     /// Returns `None` if the other side drops without a reply
     pub async fn wait_raw(self) -> Option<Result<T, E>> {
@@ -74,7 +65,7 @@ impl<T, E> BlockReqWaiter<T, E> {
     }
 }
 
-impl<T> BlockReqWaiter<T, CrucibleError> {
+impl<T> BlockOpWaiter<T, CrucibleError> {
     /// Wait, translating disconnection into `RecvDisconnected`
     pub async fn wait(self) -> Result<T, CrucibleError> {
         self.wait_raw()
@@ -84,7 +75,7 @@ impl<T> BlockReqWaiter<T, CrucibleError> {
 }
 
 #[cfg(test)]
-impl<T> BlockReqWaiter<T, CrucibleError> {
+impl<T> BlockOpWaiter<T, CrucibleError> {
     pub fn try_wait(&mut self) -> Option<Result<T, CrucibleError>> {
         match self.recv.try_recv() {
             Ok(reply) => Some(reply),
@@ -104,7 +95,7 @@ mod test {
 
     #[tokio::test]
     async fn test_blockreq_and_blockreqwaiter() {
-        let (brw, res) = BlockReqWaiter::pair();
+        let (brw, res) = BlockOpWaiter::pair();
 
         res.send_ok(());
 
@@ -114,7 +105,7 @@ mod test {
 
     #[tokio::test]
     async fn test_blockreq_and_blockreqwaiter_err() {
-        let (brw, res) = BlockReqWaiter::<()>::pair();
+        let (brw, res) = BlockOpWaiter::<()>::pair();
 
         res.send_err(CrucibleError::UpstairsInactive);
 

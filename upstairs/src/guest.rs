@@ -10,8 +10,8 @@ use std::{
 };
 
 use crate::{
-    BlockIO, BlockOp, BlockReq, BlockReqWaiter, BlockRes, Buffer, JobId,
-    ReplaceResult, UpstairsAction,
+    BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, JobId, ReplaceResult,
+    UpstairsAction,
 };
 use crucible_common::{
     build_logger, crucible_bail, Block, CrucibleError, IO_OUTSTANDING_MAX_JOBS,
@@ -74,7 +74,7 @@ impl GtoS {
      * When all downstairs jobs have completed, and all buffers have been
      * attached to the GtoS struct, we can do the final copy of the data
      * from upstairs memory back to the guest's memory. Notify corresponding
-     * BlockReqWaiter if required
+     * BlockOpWaiter if required
      */
     #[instrument]
     fn transfer_and_notify(
@@ -279,7 +279,7 @@ impl Default for GuestWork {
 #[derive(Debug)]
 pub struct Guest {
     /// New requests from outside go into this queue
-    req_tx: mpsc::Sender<BlockReq>,
+    req_tx: mpsc::Sender<BlockOp>,
 
     /// Local cache for block size
     ///
@@ -401,11 +401,11 @@ impl Guest {
      * It's public for testing, but shouldn't be called
      */
     async fn send(&self, op: BlockOp) {
-        if let Err(e) = self.req_tx.send(BlockReq { op }).await {
+        if let Err(e) = self.req_tx.send(op).await {
             // This could happen during shutdown, if the up_main task is
             // destroyed while the Guest is still trying to do work.
             //
-            // If this happens, then the BlockReqWaiter will immediately return
+            // If this happens, then the BlockOpWaiter will immediately return
             // with CrucibleError::RecvDisconnected (since the oneshot::Sender
             // will have been dropped into the void).
             warn!(self.log, "failed to send op to guest: {e}");
@@ -417,7 +417,7 @@ impl Guest {
     where
         F: FnOnce(BlockRes<T>) -> BlockOp,
     {
-        let (rx, done) = BlockReqWaiter::pair();
+        let (rx, done) = BlockOpWaiter::pair();
         let op = f(done);
         self.send(op).await;
         rx.wait().await
@@ -438,7 +438,7 @@ impl Guest {
         &self,
         gen: u64,
     ) -> Result<(), CrucibleError> {
-        let (rx, done) = BlockReqWaiter::pair();
+        let (rx, done) = BlockOpWaiter::pair();
         self.send(BlockOp::GoActiveWithGen { gen, done }).await;
         info!(
             self.log,
@@ -469,7 +469,7 @@ impl Guest {
 #[async_trait]
 impl BlockIO for Guest {
     async fn activate(&self) -> Result<(), CrucibleError> {
-        let (rx, done) = BlockReqWaiter::pair();
+        let (rx, done) = BlockOpWaiter::pair();
         self.send(BlockOp::GoActive { done }).await;
         info!(self.log, "The guest has requested activation");
 
@@ -551,7 +551,7 @@ impl BlockIO for Guest {
             assert_eq!(chunk.len() as u64 % bs, 0);
 
             let offset_change = chunk.len() as u64 / bs;
-            let (rx, done) = BlockReqWaiter::pair();
+            let (rx, done) = BlockOpWaiter::pair();
             let rio = BlockOp::Read {
                 offset,
                 data: chunk,
@@ -732,7 +732,7 @@ pub struct GuestLimits {
 /// * Wait for them to complete, then notify the guest through oneshot channels
 pub struct GuestIoHandle {
     /// Queue to receive new blockreqs
-    req_rx: mpsc::Receiver<BlockReq>,
+    req_rx: mpsc::Receiver<BlockOp>,
 
     /// Guest IO and bandwidth limits
     limits: GuestLimits,
@@ -742,7 +742,7 @@ pub struct GuestIoHandle {
     /// If a `BlockOp` was pulled from the queue but couldn't be used due to
     /// IOP or bandwidth limiting, it's stored here instead (and we check this
     /// before awaiting the queue).
-    req_head: Option<BlockReq>,
+    req_head: Option<BlockOp>,
 
     /// Are we currently IOP or bandwidth limited?
     ///
@@ -835,9 +835,9 @@ impl GuestIoHandle {
 
         // Check if we can consume right away
         let iop_limit_applies =
-            self.limits.iop_limit.is_some() && req.op.consumes_iops();
+            self.limits.iop_limit.is_some() && req.consumes_iops();
         let bw_limit_applies =
-            self.limits.bw_limit.is_some() && req.op.sz().is_some();
+            self.limits.bw_limit.is_some() && req.sz().is_some();
 
         if !iop_limit_applies && !bw_limit_applies {
             return UpstairsAction::Guest(req);
@@ -856,14 +856,14 @@ impl GuestIoHandle {
         // reached.
 
         if let Some(bw_limit) = self.limits.bw_limit {
-            if req.op.sz().is_some() && self.bw_tokens >= bw_limit {
+            if req.sz().is_some() && self.bw_tokens >= bw_limit {
                 bw_check_ok = false;
             }
         }
 
         if let Some(iop_limit_cfg) = &self.limits.iop_limit {
             let bytes_per_iops = iop_limit_cfg.bytes_per_iop;
-            if req.op.iops(bytes_per_iops).is_some()
+            if req.iops(bytes_per_iops).is_some()
                 && self.iop_tokens >= iop_limit_cfg.iop_limit
             {
                 iop_check_ok = false;
@@ -874,13 +874,13 @@ impl GuestIoHandle {
         // block req
         if bw_check_ok && iop_check_ok {
             if self.limits.bw_limit.is_some() {
-                if let Some(sz) = req.op.sz() {
+                if let Some(sz) = req.sz() {
                     self.bw_tokens += sz;
                 }
             }
 
             if let Some(cfg) = &self.limits.iop_limit {
-                if let Some(req_iops) = req.op.iops(cfg.bytes_per_iop) {
+                if let Some(req_iops) = req.iops(cfg.bytes_per_iop) {
                     self.iop_tokens += req_iops;
                 }
             }
@@ -1030,21 +1030,21 @@ mod test {
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(1, 512),
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(8, 512),
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(32, 512),
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
 
@@ -1074,21 +1074,21 @@ mod test {
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(1, 512),
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(8, 512),
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(31, 512),
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
 
@@ -1133,19 +1133,19 @@ mod test {
         let _ = guest
             .send(BlockOp::Flush {
                 snapshot_details: None,
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Flush {
                 snapshot_details: None,
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Flush {
                 snapshot_details: None,
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
 
@@ -1171,21 +1171,21 @@ mod test {
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(1024, 512), // 512 KiB
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(1024, 512),
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(1024, 512),
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
 
@@ -1229,19 +1229,19 @@ mod test {
         let _ = guest
             .send(BlockOp::Flush {
                 snapshot_details: None,
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Flush {
                 snapshot_details: None,
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Flush {
                 snapshot_details: None,
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
 
@@ -1272,14 +1272,14 @@ mod test {
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(14000, 512), // 7000 KiB
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(14000, 512), // 7000 KiB
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
 
@@ -1312,7 +1312,7 @@ mod test {
                 .send(BlockOp::Read {
                     offset: Block::new_512(0),
                     data: Buffer::new(2, 512),
-                    done: BlockReqWaiter::pair().1,
+                    done: BlockOpWaiter::pair().1,
                 })
                 .await;
             assert_consumed(&mut io).await;
@@ -1322,7 +1322,7 @@ mod test {
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(2, 512),
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
         assert_none_consumed(&mut io).await;
@@ -1366,7 +1366,7 @@ mod test {
                 .send(BlockOp::Read {
                     offset: Block::new_512(0),
                     data: Buffer::new(optimal_io_size / 512, 512),
-                    done: BlockReqWaiter::pair().1,
+                    done: BlockOpWaiter::pair().1,
                 })
                 .await;
 
@@ -1394,14 +1394,14 @@ mod test {
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(20480, 512), // 10 MiB
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
                 offset: Block::new_512(0),
                 data: Buffer::new(0, 512),
-                done: BlockReqWaiter::pair().1,
+                done: BlockOpWaiter::pair().1,
             })
             .await;
 

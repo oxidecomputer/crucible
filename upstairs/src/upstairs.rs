@@ -6,16 +6,16 @@ use crate::{
     control::ControlRequest,
     deadline_secs,
     deferred::{
-        DeferredBlockReq, DeferredMessage, DeferredQueue, DeferredRead,
+        DeferredBlockOp, DeferredMessage, DeferredQueue, DeferredRead,
         DeferredWrite, EncryptedWrite,
     },
     downstairs::{Downstairs, DownstairsAction},
     extent_from_offset,
     guest::GuestBlockRes,
     stats::UpStatOuter,
-    Block, BlockOp, BlockReq, BlockRes, Buffer, ClientId, ClientMap,
-    CrucibleOpts, DsState, EncryptionContext, GuestIoHandle, Message,
-    RegionDefinition, RegionDefinitionStatus, SnapshotDetails, WQCounts,
+    Block, BlockOp, BlockRes, Buffer, ClientId, ClientMap, CrucibleOpts,
+    DsState, EncryptionContext, GuestIoHandle, Message, RegionDefinition,
+    RegionDefinitionStatus, SnapshotDetails, WQCounts,
 };
 use crucible_common::CrucibleError;
 use serde::{Deserialize, Serialize};
@@ -237,8 +237,8 @@ pub(crate) struct Upstairs {
     /// This is public so that others can clone it to get a controller handle
     pub(crate) control_tx: mpsc::Sender<ControlRequest>,
 
-    /// Stream of post-processed `BlockReq` futures
-    deferred_reqs: DeferredQueue<Option<DeferredBlockReq>>,
+    /// Stream of post-processed `BlockOp` futures
+    deferred_ops: DeferredQueue<Option<DeferredBlockOp>>,
 
     /// Stream of decrypted `Message` futures
     deferred_msgs: DeferredQueue<DeferredMessage>,
@@ -248,10 +248,10 @@ pub(crate) struct Upstairs {
 #[derive(Debug)]
 pub(crate) enum UpstairsAction {
     Downstairs(DownstairsAction),
-    Guest(BlockReq),
+    Guest(BlockOp),
 
     /// A deferred block request has completed
-    DeferredBlockReq(DeferredBlockReq),
+    DeferredBlockOp(DeferredBlockOp),
 
     /// A deferred message has arrived
     DeferredMessage(DeferredMessage),
@@ -394,7 +394,7 @@ impl Upstairs {
             downstairs,
             control_rx,
             control_tx,
-            deferred_reqs: DeferredQueue::new(),
+            deferred_ops: DeferredQueue::new(),
             deferred_msgs: DeferredQueue::new(),
         }
     }
@@ -444,7 +444,7 @@ impl Upstairs {
         self.guest_dropped
             && self.guest.guest_work.is_empty()
             && self.downstairs.ds_active.is_empty()
-            && self.deferred_reqs.is_empty()
+            && self.deferred_ops.is_empty()
             && self.deferred_msgs.is_empty()
     }
 
@@ -463,25 +463,25 @@ impl Upstairs {
             => {
                 UpstairsAction::RepairCheck
             }
-            d = self.deferred_reqs.next(), if !self.deferred_reqs.is_empty()
+            d = self.deferred_ops.next(), if !self.deferred_ops.is_empty()
             => {
                 match d {
                     // Normal operation: the deferred task gave us back a
-                    // DeferredBlockReq, which we need to handle.
-                    Some(Some(d)) => UpstairsAction::DeferredBlockReq(d),
+                    // DeferredBlockOp, which we need to handle.
+                    Some(Some(d)) => UpstairsAction::DeferredBlockOp(d),
 
                     // The innermost Option is None if the deferred task handled
-                    // the request on its own (and replied to the `BlockReq`
+                    // the request on its own (and replied to the `BlockOp`
                     // already). This happens if encryption fails, which would
                     // be odd, but possible?
                     Some(None) => UpstairsAction::NoOp,
 
                     // The outer Option is None if the FuturesOrdered is empty
                     None => {
-                        // Calling `deferred_reqs.next()` on an empty queue must
+                        // Calling `deferred_ops.next()` on an empty queue must
                         // set the flag marking the deferred futures list as
                         // empty; assert that here as a sanity check.
-                        assert!(self.deferred_reqs.is_empty());
+                        assert!(self.deferred_ops.is_empty());
                         UpstairsAction::NoOp
                     }
                 }
@@ -531,7 +531,7 @@ impl Upstairs {
             UpstairsAction::GuestDropped => {
                 self.guest_dropped = true;
             }
-            UpstairsAction::DeferredBlockReq(req) => {
+            UpstairsAction::DeferredBlockOp(req) => {
                 self.counters.action_deferred_block += 1;
                 cdt::up__action_deferred_block!(|| (self
                     .counters
@@ -673,12 +673,12 @@ impl Upstairs {
     /// could be other events that need handling simultaneously, so we do not
     /// want to stall the Upstairs.
     #[cfg(test)]
-    async fn await_deferred_reqs(&mut self) {
-        while let Some(req) = self.deferred_reqs.next().await {
+    async fn await_deferred_ops(&mut self) {
+        while let Some(req) = self.deferred_ops.next().await {
             let req = req.unwrap(); // the deferred request should not fail
-            self.apply(UpstairsAction::DeferredBlockReq(req)).await;
+            self.apply(UpstairsAction::DeferredBlockOp(req)).await;
         }
-        assert!(self.deferred_reqs.is_empty());
+        assert!(self.deferred_ops.is_empty());
     }
 
     /// Helper function to await all deferred messages
@@ -926,9 +926,9 @@ impl Upstairs {
         matches!(self.state, UpstairsState::Active)
     }
 
-    /// When a `BlockReq` arrives, defer it as a future
-    async fn defer_guest_request(&mut self, req: BlockReq) {
-        match req.op {
+    /// When a `BlockOp` arrives, defer it as a future
+    async fn defer_guest_request(&mut self, op: BlockOp) {
+        match op {
             // All Write operations are deferred, because they will offload
             // encryption to a separate thread pool.
             BlockOp::Write { offset, data, done } => {
@@ -940,14 +940,14 @@ impl Upstairs {
             // If we have any deferred requests in the FuturesOrdered, then we
             // have to keep using it for subsequent requests (even ones that are
             // not writes) to preserve FIFO ordering
-            _ if !self.deferred_reqs.is_empty() => {
-                self.deferred_reqs
-                    .push_immediate(Some(DeferredBlockReq::Other(req)));
+            _ if !self.deferred_ops.is_empty() => {
+                self.deferred_ops
+                    .push_immediate(Some(DeferredBlockOp::Other(op)));
             }
             // Otherwise, we can apply a non-write operation immediately, saving
             // a trip through the FuturesUnordered
             _ => {
-                self.apply_guest_request_inner(req).await;
+                self.apply_guest_request_inner(op).await;
             }
         }
     }
@@ -962,11 +962,11 @@ impl Upstairs {
     /// This function can be called before the upstairs is active, so any
     /// operation that requires the upstairs to be active should check that
     /// and report an error.
-    async fn apply_guest_request(&mut self, req: DeferredBlockReq) {
-        match req {
-            DeferredBlockReq::Write(req) => self.submit_write(req),
-            DeferredBlockReq::Other(req) => {
-                self.apply_guest_request_inner(req).await
+    async fn apply_guest_request(&mut self, op: DeferredBlockOp) {
+        match op {
+            DeferredBlockOp::Write(op) => self.submit_write(op),
+            DeferredBlockOp::Other(op) => {
+                self.apply_guest_request_inner(op).await
             }
         }
     }
@@ -974,13 +974,13 @@ impl Upstairs {
     /// Does the actual work for a (non-write) guest request
     ///
     /// # Panics
-    /// This function assumes that `BlockReq::Write` and
-    /// `BlockReq::WriteUnwritten` are always deferred and handled separately;
+    /// This function assumes that `BlockOp::Write` and
+    /// `BlockOp::WriteUnwritten` are always deferred and handled separately;
     /// it will panic if `req` matches either of them.
-    async fn apply_guest_request_inner(&mut self, req: BlockReq) {
+    async fn apply_guest_request_inner(&mut self, op: BlockOp) {
         // If any of the submit_* functions fail to send to the downstairs, they
         // return an error.  These are reported to the Guest.
-        match req.op {
+        match op {
             // These three options can be handled by this task directly,
             // and don't require the upstairs to be fully online.
             BlockOp::GoActive { done } => {
@@ -1390,9 +1390,9 @@ impl Upstairs {
         if let Some(w) =
             self.compute_deferred_write(offset, data, res, is_write_unwritten)
         {
-            let tx = self.deferred_reqs.push_oneshot();
+            let tx = self.deferred_ops.push_oneshot();
             rayon::spawn(move || {
-                let out = w.run().map(DeferredBlockReq::Write);
+                let out = w.run().map(DeferredBlockOp::Write);
                 let _ = tx.send(out);
             });
         }
@@ -2069,7 +2069,7 @@ pub(crate) mod test {
         client::ClientStopReason,
         downstairs::test::set_all_active,
         test::{make_encrypted_upstairs, make_upstairs},
-        BlockContext, BlockOp, BlockReqWaiter, DsState, JobId,
+        BlockContext, BlockOp, BlockOpWaiter, DsState, JobId,
     };
     use bytes::BytesMut;
     use crucible_common::integrity_hash;
@@ -2150,9 +2150,9 @@ pub(crate) mod test {
 
         let mut up = Upstairs::test_default(None);
 
-        let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Deactivate { done: ds_done_res },
+        let (ds_done_brw, ds_done_res) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Deactivate {
+            done: ds_done_res,
         }))
         .await;
 
@@ -2161,18 +2161,18 @@ pub(crate) mod test {
 
         up.force_active().unwrap();
 
-        let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Deactivate { done: ds_done_res },
+        let (ds_done_brw, ds_done_res) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Deactivate {
+            done: ds_done_res,
         }))
         .await;
 
         let reply = ds_done_brw.wait().await;
         assert!(reply.is_ok());
 
-        let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Deactivate { done: ds_done_res },
+        let (ds_done_brw, ds_done_res) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Deactivate {
+            done: ds_done_res,
         }))
         .await;
 
@@ -2192,9 +2192,9 @@ pub(crate) mod test {
         set_all_active(&mut up.downstairs);
 
         // The deactivate message should happen immediately
-        let (ds_done_brw, ds_done_res) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Deactivate { done: ds_done_res },
+        let (ds_done_brw, ds_done_res) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Deactivate {
+            done: ds_done_res,
         }))
         .await;
 
@@ -3507,23 +3507,21 @@ pub(crate) mod test {
         // Build a write, put it on the work queue.
         let offset = Block::new_512(7);
         let data = BytesMut::from([1; 512].as_slice());
-        let (_write_res, done) = BlockReqWaiter::pair();
+        let (_write_res, done) = BlockOpWaiter::pair();
         let op = if is_write_unwritten {
             BlockOp::WriteUnwritten { offset, data, done }
         } else {
             BlockOp::Write { offset, data, done }
         };
-        up.apply(UpstairsAction::Guest(BlockReq { op })).await;
-        up.await_deferred_reqs().await;
+        up.apply(UpstairsAction::Guest(op)).await;
+        up.await_deferred_ops().await;
         let id1 = JobId(1000); // We know that job IDs start at 1000
 
         // Create and enqueue the flush by setting deactivate
         let (mut deactivate_done_brw, deactivate_done_res) =
-            BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Deactivate {
-                done: deactivate_done_res,
-            },
+            BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Deactivate {
+            done: deactivate_done_res,
         }))
         .await;
 
@@ -3631,11 +3629,9 @@ pub(crate) mod test {
 
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
-        let (_res, done) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data, done },
-        }))
-        .await;
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
+            .await;
 
         // fake read response from downstairs that will successfully decrypt
         let mut data = Vec::from([1u8; 512]);
@@ -3692,11 +3688,9 @@ pub(crate) mod test {
         let blocks = 16384 / 512;
         let data = Buffer::new(blocks, 512);
         let offset = Block::new_512(7);
-        let (_res, done) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data, done },
-        }))
-        .await;
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
+            .await;
 
         let mut data = Vec::from([1u8; 512]);
 
@@ -3763,11 +3757,9 @@ pub(crate) mod test {
         let blocks = 16384 / 512;
         let data = Buffer::new(blocks, 512);
         let offset = Block::new_512(7);
-        let (_res, done) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data, done },
-        }))
-        .await;
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
+            .await;
 
         // fake read response from downstairs that will fail decryption
         let mut data = Vec::from([1u8; 512]);
@@ -3856,11 +3848,9 @@ pub(crate) mod test {
 
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
-        let (_res, done) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data, done },
-        }))
-        .await;
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
+            .await;
 
         // fake read response from downstairs that will fail decryption
         let mut data = Vec::from([1u8; 512]);
@@ -3935,11 +3925,9 @@ pub(crate) mod test {
 
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
-        let (_res, done) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data, done },
-        }))
-        .await;
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
+            .await;
 
         // fake read response from downstairs that will fail integrity hash
         // check
@@ -4003,11 +3991,9 @@ pub(crate) mod test {
 
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
-        let (_res, done) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data, done },
-        }))
-        .await;
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
+            .await;
 
         // fake read response from downstairs that will fail integrity hash
         // check
@@ -4056,11 +4042,9 @@ pub(crate) mod test {
 
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
-        let (_res, done) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data, done },
-        }))
-        .await;
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
+            .await;
 
         let data = BytesMut::from([1u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
@@ -4135,11 +4119,9 @@ pub(crate) mod test {
 
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
-        let (_res, done) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data, done },
-        }))
-        .await;
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
+            .await;
 
         for client_id in [ClientId::new(0), ClientId::new(1)] {
             let data = BytesMut::from([1u8; 512].as_slice());
@@ -4216,11 +4198,9 @@ pub(crate) mod test {
 
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
-        let (_res, done) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data, done },
-        }))
-        .await;
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
+            .await;
 
         let data = BytesMut::from([1u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
@@ -4294,11 +4274,9 @@ pub(crate) mod test {
 
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
-        let (_res, done) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data, done },
-        }))
-        .await;
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
+            .await;
 
         // The first read has no block contexts, because it was unwritten
         let data = BytesMut::from([0u8; 512].as_slice());
@@ -4365,11 +4343,9 @@ pub(crate) mod test {
 
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
-        let (_res, done) = BlockReqWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockReq {
-            op: BlockOp::Read { offset, data, done },
-        }))
-        .await;
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
+            .await;
 
         // The first read has no block contexts, because it was unwritten
         let data = BytesMut::from([0u8; 512].as_slice());
