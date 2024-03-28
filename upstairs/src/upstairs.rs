@@ -238,7 +238,7 @@ pub(crate) struct Upstairs {
     pub(crate) control_tx: mpsc::Sender<ControlRequest>,
 
     /// Stream of post-processed `BlockOp` futures
-    deferred_reqs: DeferredQueue<Option<DeferredBlockOp>>,
+    deferred_ops: DeferredQueue<Option<DeferredBlockOp>>,
 
     /// Stream of decrypted `Message` futures
     deferred_msgs: DeferredQueue<DeferredMessage>,
@@ -394,7 +394,7 @@ impl Upstairs {
             downstairs,
             control_rx,
             control_tx,
-            deferred_reqs: DeferredQueue::new(),
+            deferred_ops: DeferredQueue::new(),
             deferred_msgs: DeferredQueue::new(),
         }
     }
@@ -444,7 +444,7 @@ impl Upstairs {
         self.guest_dropped
             && self.guest.guest_work.is_empty()
             && self.downstairs.ds_active.is_empty()
-            && self.deferred_reqs.is_empty()
+            && self.deferred_ops.is_empty()
             && self.deferred_msgs.is_empty()
     }
 
@@ -463,7 +463,7 @@ impl Upstairs {
             => {
                 UpstairsAction::RepairCheck
             }
-            d = self.deferred_reqs.next(), if !self.deferred_reqs.is_empty()
+            d = self.deferred_ops.next(), if !self.deferred_ops.is_empty()
             => {
                 match d {
                     // Normal operation: the deferred task gave us back a
@@ -478,10 +478,10 @@ impl Upstairs {
 
                     // The outer Option is None if the FuturesOrdered is empty
                     None => {
-                        // Calling `deferred_reqs.next()` on an empty queue must
+                        // Calling `deferred_ops.next()` on an empty queue must
                         // set the flag marking the deferred futures list as
                         // empty; assert that here as a sanity check.
-                        assert!(self.deferred_reqs.is_empty());
+                        assert!(self.deferred_ops.is_empty());
                         UpstairsAction::NoOp
                     }
                 }
@@ -673,12 +673,12 @@ impl Upstairs {
     /// could be other events that need handling simultaneously, so we do not
     /// want to stall the Upstairs.
     #[cfg(test)]
-    async fn await_deferred_reqs(&mut self) {
-        while let Some(req) = self.deferred_reqs.next().await {
+    async fn await_deferred_ops(&mut self) {
+        while let Some(req) = self.deferred_ops.next().await {
             let req = req.unwrap(); // the deferred request should not fail
             self.apply(UpstairsAction::DeferredBlockOp(req)).await;
         }
-        assert!(self.deferred_reqs.is_empty());
+        assert!(self.deferred_ops.is_empty());
     }
 
     /// Helper function to await all deferred messages
@@ -927,8 +927,8 @@ impl Upstairs {
     }
 
     /// When a `BlockOp` arrives, defer it as a future
-    async fn defer_guest_request(&mut self, req: BlockOp) {
-        match req {
+    async fn defer_guest_request(&mut self, op: BlockOp) {
+        match op {
             // All Write operations are deferred, because they will offload
             // encryption to a separate thread pool.
             BlockOp::Write { offset, data, done } => {
@@ -940,14 +940,14 @@ impl Upstairs {
             // If we have any deferred requests in the FuturesOrdered, then we
             // have to keep using it for subsequent requests (even ones that are
             // not writes) to preserve FIFO ordering
-            _ if !self.deferred_reqs.is_empty() => {
-                self.deferred_reqs
-                    .push_immediate(Some(DeferredBlockOp::Other(req)));
+            _ if !self.deferred_ops.is_empty() => {
+                self.deferred_ops
+                    .push_immediate(Some(DeferredBlockOp::Other(op)));
             }
             // Otherwise, we can apply a non-write operation immediately, saving
             // a trip through the FuturesUnordered
             _ => {
-                self.apply_guest_request_inner(req).await;
+                self.apply_guest_request_inner(op).await;
             }
         }
     }
@@ -962,11 +962,11 @@ impl Upstairs {
     /// This function can be called before the upstairs is active, so any
     /// operation that requires the upstairs to be active should check that
     /// and report an error.
-    async fn apply_guest_request(&mut self, req: DeferredBlockOp) {
-        match req {
-            DeferredBlockOp::Write(req) => self.submit_write(req),
-            DeferredBlockOp::Other(req) => {
-                self.apply_guest_request_inner(req).await
+    async fn apply_guest_request(&mut self, op: DeferredBlockOp) {
+        match op {
+            DeferredBlockOp::Write(op) => self.submit_write(op),
+            DeferredBlockOp::Other(op) => {
+                self.apply_guest_request_inner(op).await
             }
         }
     }
@@ -977,10 +977,10 @@ impl Upstairs {
     /// This function assumes that `BlockOp::Write` and
     /// `BlockOp::WriteUnwritten` are always deferred and handled separately;
     /// it will panic if `req` matches either of them.
-    async fn apply_guest_request_inner(&mut self, req: BlockOp) {
+    async fn apply_guest_request_inner(&mut self, op: BlockOp) {
         // If any of the submit_* functions fail to send to the downstairs, they
         // return an error.  These are reported to the Guest.
-        match req {
+        match op {
             // These three options can be handled by this task directly,
             // and don't require the upstairs to be fully online.
             BlockOp::GoActive { done } => {
@@ -1390,7 +1390,7 @@ impl Upstairs {
         if let Some(w) =
             self.compute_deferred_write(offset, data, res, is_write_unwritten)
         {
-            let tx = self.deferred_reqs.push_oneshot();
+            let tx = self.deferred_ops.push_oneshot();
             rayon::spawn(move || {
                 let out = w.run().map(DeferredBlockOp::Write);
                 let _ = tx.send(out);
@@ -3514,7 +3514,7 @@ pub(crate) mod test {
             BlockOp::Write { offset, data, done }
         };
         up.apply(UpstairsAction::Guest(op)).await;
-        up.await_deferred_reqs().await;
+        up.await_deferred_ops().await;
         let id1 = JobId(1000); // We know that job IDs start at 1000
 
         // Create and enqueue the flush by setting deactivate
