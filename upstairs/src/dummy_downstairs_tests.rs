@@ -3161,4 +3161,112 @@ pub(crate) mod protocol_test {
 
         Ok(())
     }
+
+    /// Test that replaying writes works
+    #[tokio::test]
+    async fn test_write_replay() -> Result<()> {
+        let harness = Arc::new(TestHarness::new().await?);
+
+        let (jh1, mut ds1_messages) =
+            harness.ds1().await.spawn_message_receiver();
+        let (_jh2, mut ds2_messages) = harness.ds2.spawn_message_receiver();
+        let (_jh3, mut ds3_messages) = harness.ds3.spawn_message_receiver();
+
+        // Send a write, which will succeed
+        let write_handle = {
+            let harness = harness.clone();
+            tokio::spawn(async move {
+                let mut data = BytesMut::new();
+                data.resize(512, 1u8);
+                harness.guest.write(Block::new_512(0), data).await.unwrap();
+            })
+        };
+
+        // Ensure that all three clients got the read request
+        let job_id = match ds1_messages.recv().await.unwrap() {
+            Message::Write { header, .. } => header.job_id,
+            _ => panic!("invalid request"),
+        };
+        bail_assert!(matches!(
+            ds2_messages.recv().await.unwrap(),
+            Message::Write { .. },
+        ));
+        bail_assert!(matches!(
+            ds3_messages.recv().await.unwrap(),
+            Message::Write { .. },
+        ));
+
+        let response = Message::WriteAck {
+            upstairs_id: harness.guest.get_uuid().await.unwrap(),
+            session_id: harness
+                .ds1()
+                .await
+                .upstairs_session_id
+                .lock()
+                .await
+                .unwrap(),
+            job_id,
+            result: Ok(()),
+        };
+        harness
+            .ds1()
+            .await
+            .fw
+            .lock()
+            .await
+            .send(response.clone())
+            .await
+            .unwrap();
+        harness
+            .ds2
+            .fw
+            .lock()
+            .await
+            .send(response.clone())
+            .await
+            .unwrap();
+        harness
+            .ds3
+            .fw
+            .lock()
+            .await
+            .send(response.clone())
+            .await
+            .unwrap();
+
+        // Check that the write worked
+        write_handle.await.unwrap();
+
+        // If downstairs 1 disconnects and reconnects, it should get the exact
+        // same message replayed to it.
+        drop(ds1_messages);
+        jh1.abort();
+
+        let ds1 = harness.take_ds1().await;
+        let ds1 = ds1.close();
+        let ds1 = ds1.into_connected_downstairs().await;
+
+        ds1.negotiate_start().await?;
+        ds1.negotiate_step_last_flush(JobId(0)).await?;
+
+        let (_jh1, mut ds1_messages) = ds1.spawn_message_receiver();
+
+        // Ensure that we get the same Write
+        match ds1_messages.recv().await.unwrap() {
+            Message::Write { header, .. } => assert_eq!(header.job_id, job_id),
+            _ => panic!("invalid request"),
+        };
+
+        // Send a reply, which is the second time this Write operation completes
+        ds1.fw.lock().await.send(response.clone()).await.unwrap();
+
+        // Give it a second to think about it
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Check that the guest hasn't panicked by sending it a message that
+        // requires going to the worker thread.
+        harness.guest.get_uuid().await.unwrap();
+
+        Ok(())
+    }
 }
