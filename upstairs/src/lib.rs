@@ -906,6 +906,9 @@ struct DownstairsIO {
      */
     data: Option<Vec<ReadResponse>>,
     read_response_hashes: Vec<Option<u64>>,
+
+    /// Number of bytes that this job has contributed to guest backpressure
+    backpressure_bytes: Option<u64>,
 }
 
 impl DownstairsIO {
