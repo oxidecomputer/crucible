@@ -55,7 +55,7 @@ pub(crate) struct Downstairs {
     /// It is stored in the Downstairs because from the perspective of the
     /// Upstairs, writes complete immediately; only the Downstairs is actually
     /// tracking the pending jobs.
-    write_bytes_outstanding: u64,
+    write_bytes_outstanding: BackpressureBytes,
 
     /// The next Job ID this Upstairs should use for downstairs work.
     next_id: JobId,
@@ -103,6 +103,44 @@ pub(crate) struct Downstairs {
     ///
     /// This must be handled after every event
     ackable_work: BTreeSet<JobId>,
+}
+
+/// Helper struct to contain a count of backpressure bytes
+#[derive(Debug)]
+struct BackpressureBytes(u64);
+
+impl BackpressureBytes {
+    fn new() -> Self {
+        BackpressureBytes(0)
+    }
+
+    /// Ensures that the given `DownstairsIO` is counted for backpressure
+    ///
+    /// This is idempotent: if the job has already been counted, indicated by
+    /// the `DownstairsIO::backpressure_bytes` member being `Some(..)`, it will
+    /// not be counted again.
+    fn increment(&mut self, io: &mut DownstairsIO) {
+        match &io.work {
+            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
+                if io.backpressure_bytes.is_none() {
+                    let n = data.len() as u64;
+                    io.backpressure_bytes = Some(n);
+                    self.0 += n;
+                }
+            }
+            _ => (),
+        };
+    }
+
+    /// Remove the given job's contribution to backpressure
+    ///
+    /// This is idempotent: `DownstairsIO::backpressure_bytes` is set to `None`
+    /// by this function call, so it's harmless to call repeatedly.
+    fn decrement(&mut self, io: &mut DownstairsIO) {
+        if let Some(n) = io.backpressure_bytes.take() {
+            self.0 = self.0.checked_sub(n).unwrap();
+        }
+    }
 }
 
 /// State machine for a live-repair operation
@@ -247,7 +285,7 @@ impl Downstairs {
             cfg,
             next_flush: 0,
             ds_active: ActiveJobs::new(),
-            write_bytes_outstanding: 0,
+            write_bytes_outstanding: BackpressureBytes::new(),
             completed: AllocRingBuffer::new(2048),
             completed_jobs: AllocRingBuffer::new(8),
             next_id: JobId(1000),
@@ -827,6 +865,10 @@ impl Downstairs {
             if self.clients[client_id].replay_job(job) {
                 count += 1;
             }
+
+            // Make sure this job counts for backpressure (this is a no-op if
+            // the job is already counted).
+            self.write_bytes_outstanding.increment(job);
         });
         info!(
             self.log,
@@ -1357,6 +1399,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
+            backpressure_bytes: None,
         }
     }
 
@@ -1480,6 +1523,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
+            backpressure_bytes: None,
         }
     }
 
@@ -1620,6 +1664,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
+            backpressure_bytes: None,
         }
     }
 
@@ -1693,6 +1738,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
+            backpressure_bytes: None,
         };
         self.enqueue(io);
         ds_id
@@ -1773,6 +1819,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
+            backpressure_bytes: None,
         };
         self.enqueue(io);
         ds_id
@@ -1803,6 +1850,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
+            backpressure_bytes: None,
         }
     }
 
@@ -2133,6 +2181,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
+            backpressure_bytes: None,
         };
 
         self.enqueue(fl);
@@ -2257,6 +2306,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
+            backpressure_bytes: None,
         };
 
         self.enqueue(io);
@@ -2340,14 +2390,8 @@ impl Downstairs {
             }
         }
 
-        // If this is a write (which will be fast-acked), increment our byte
-        // counter for backpressure calculations.
-        match &io.work {
-            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
-                self.write_bytes_outstanding += data.len() as u64;
-            }
-            _ => (),
-        };
+        // Make sure this job is counted for backpressure
+        self.write_bytes_outstanding.increment(&mut io);
         let is_write = matches!(io.work, IOop::Write { .. });
 
         // Puts the IO onto the downstairs work queue.
@@ -2724,7 +2768,19 @@ impl Downstairs {
             }
             // Now that we've collected jobs to retire, remove them from the map
             for &id in &retired {
-                let _ = self.ds_active.remove(&id);
+                let mut job = self.ds_active.remove(&id);
+
+                // Jobs should have their backpressure contribution removed when
+                // they are completed (in `process_io_completion_inner`),
+                // **not** when they are retired.  We'll do a sanity check here
+                // and print a warning if that's not the case.
+                if job.backpressure_bytes.is_some() {
+                    warn!(
+                        self.log,
+                        "job {ds_id} had pending backpressure bytes"
+                    );
+                    self.write_bytes_outstanding.decrement(&mut job);
+                }
             }
 
             debug!(self.log, "[rc] retire {} clears {:?}", ds_id, retired);
@@ -3217,17 +3273,7 @@ impl Downstairs {
         // retired by the next flush).
         let wc = job.state_count();
         if (wc.error + wc.skipped + wc.done) == 3 {
-            match &job.work {
-                IOop::Write { data, .. }
-                | IOop::WriteUnwritten { data, .. } => {
-                    let change = data.len() as u64;
-                    self.write_bytes_outstanding = self
-                        .write_bytes_outstanding
-                        .checked_sub(change)
-                        .unwrap();
-                }
-                _ => (),
-            };
+            self.write_bytes_outstanding.decrement(job);
         }
 
         /*
@@ -3344,7 +3390,7 @@ impl Downstairs {
     }
 
     pub(crate) fn write_bytes_outstanding(&self) -> u64 {
-        self.write_bytes_outstanding
+        self.write_bytes_outstanding.0
     }
 
     /// Marks a single job as acked
