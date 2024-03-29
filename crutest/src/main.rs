@@ -1,14 +1,20 @@
 // Copyright 2023 Oxide Computer Company
 use std::fs::File;
+use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc,
+};
 
 use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 use clap::Parser;
 use csv::WriterBuilder;
+use futures::stream::FuturesOrdered;
 use futures::StreamExt;
+use human_bytes::human_bytes;
 use indicatif::{ProgressBar, ProgressStyle};
 use rand::prelude::*;
 use rand_chacha::rand_core::SeedableRng;
@@ -33,7 +39,7 @@ use dsc_client::{types::DownstairsState, Client};
  */
 /// Client: A Crucible Upstairs test program
 #[allow(clippy::derive_partial_eq_without_eq, clippy::upper_case_acronyms)]
-#[derive(Debug, Parser, PartialEq)]
+#[derive(Debug, Parser)]
 #[clap(name = "workload", term_width = 80)]
 #[clap(about = "Workload the program will execute.", long_about = None)]
 enum Workload {
@@ -53,7 +59,7 @@ enum Workload {
         #[clap(long, short, default_value = "0.0.0.0", action)]
         listen: IpAddr,
         /// Port for the cliserver to listen on
-        #[clap(long, short, default_value = "5050", action)]
+        #[clap(long, short, default_value_t = 5050, action)]
         port: u16,
     },
     Deactivate,
@@ -71,20 +77,30 @@ enum Workload {
     /// Run the perf test, random writes, then random reads
     Perf {
         /// Size in blocks of each IO
-        #[clap(long, default_value = "1", action)]
+        #[clap(long, default_value_t = 1, action)]
         io_size: usize,
         /// Number of outstanding IOs at the same time.
-        #[clap(long, default_value = "1", action)]
+        #[clap(long, default_value_t = 1, action)]
         io_depth: usize,
         /// Output file for IO times
         #[clap(long, global = true, name = "PERF", action)]
         perf_out: Option<PathBuf>,
         /// Number of read test loops to do.
-        #[clap(long, default_value = "2", action)]
+        #[clap(long, default_value_t = 2, action)]
         read_loops: usize,
         /// Number of write test loops to do.
-        #[clap(long, default_value = "2", action)]
+        #[clap(long, default_value_t = 2, action)]
         write_loops: usize,
+    },
+    /// Measure performance with a random read workload
+    RandRead {
+        #[clap(flatten)]
+        cfg: RandReadWriteWorkload,
+    },
+    /// Measure performance with a random write workload
+    RandWrite {
+        #[clap(flatten)]
+        cfg: RandReadWriteWorkload,
     },
     Repair,
     /// Test the downstairs replay path.
@@ -109,7 +125,7 @@ enum Workload {
         replacement: SocketAddr,
 
         /// Number of IOs to do after replacement has started.
-        #[clap(long, default_value = "1800", action)]
+        #[clap(long, default_value_t = 1800, action)]
         work: usize,
     },
     Span,
@@ -145,7 +161,7 @@ pub struct Opt {
     #[clap(long, global = true, action)]
     flush_timeout: Option<f32>,
 
-    #[clap(short, global = true, long, default_value = "0", action)]
+    #[clap(short, global = true, long, default_value_t = 0, action)]
     gen: u64,
 
     /// The key for an encrypted downstairs.
@@ -263,6 +279,85 @@ fn history_file<P: AsRef<Path>>(file: P) -> PathBuf {
     out
 }
 
+#[derive(Copy, Clone, Debug, clap::Args)]
+struct RandReadWriteWorkload {
+    /// Size in blocks of each IO
+    #[clap(long, default_value_t = 1, action)]
+    io_size: usize,
+    /// Number of outstanding IOs at the same time.
+    #[clap(long, default_value_t = 1, action)]
+    io_depth: usize,
+    /// Number of seconds to run
+    #[clap(long, default_value_t = 60, action)]
+    time: u64,
+    /// Completely fill the region with random data first
+    #[clap(long)]
+    fill: bool,
+    /// Print the guest log (at `INFO` level) to `stderr`
+    ///
+    /// If this is not set, then only `ERROR` messages are logged
+    ///
+    /// By default, this is not set, because the guest log is noisy and
+    /// interrupts our intentional logging.
+    #[clap(short, long)]
+    verbose: bool,
+    /// Print values in bytes, without human-readable units
+    #[clap(short, long)]
+    raw: bool,
+    /// Time per sample printed to the output
+    #[clap(long, default_value_t = 1.0)]
+    sample_time: f64,
+    /// Number of subsamples per sample
+    #[clap(long, default_value_t = 10)]
+    subsample_count: u64,
+}
+
+/// Mode flags for `rand_write_read_workload`
+#[derive(Copy, Clone, Debug)]
+enum RandReadWriteMode {
+    Read,
+    Write,
+}
+
+/// Configuration for `rand_read_write_workload`
+#[derive(Copy, Clone, Debug)]
+struct RandReadWriteConfig {
+    mode: RandReadWriteMode,
+    encrypted: bool,
+    io_depth: usize,
+    blocks_per_io: usize,
+
+    /// Print raw bytes, without human-friendly formatting
+    raw: bool,
+    /// Total amount of time to run
+    time_secs: u64,
+    /// Rate at which we should print samples
+    sample_time_secs: f64,
+    /// Number of subsamples for each `sample_time_secs`, for standard deviation
+    subsample_count: u64,
+    fill: bool,
+}
+
+impl RandReadWriteConfig {
+    fn new(
+        cfg: RandReadWriteWorkload,
+        encrypted: bool,
+        mode: RandReadWriteMode,
+    ) -> Self {
+        RandReadWriteConfig {
+            encrypted,
+            io_depth: cfg.io_depth,
+            blocks_per_io: cfg.io_size,
+            time_secs: cfg.time,
+            raw: cfg.raw,
+            sample_time_secs: cfg.sample_time,
+            subsample_count: cfg.subsample_count,
+            fill: cfg.fill,
+            mode,
+        }
+    }
+}
+
 /*
  * All the tests need this basic info about the region.
  * Not all tests make use of the write_log yet, but perhaps someday..
@@ -281,9 +376,7 @@ pub struct RegionInfo {
 /*
  * All the tests need this basic set of information about the region.
  */
-async fn get_region_info(
-    guest: &Arc<Guest>,
-) -> Result<RegionInfo, CrucibleError> {
+async fn get_region_info(guest: &Guest) -> Result<RegionInfo, CrucibleError> {
     /*
      * These query requests have the side effect of preventing the test from
      * starting before the upstairs is ready.
@@ -368,11 +461,11 @@ impl WriteLog {
         }
     }
 
-    pub fn is_empty(&mut self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.count_cur.is_empty()
     }
 
-    pub fn len(&mut self) -> usize {
+    pub fn len(&self) -> usize {
         self.count_cur.len()
     }
 
@@ -507,14 +600,9 @@ impl WriteLog {
 
     // Set the current write count to a specific value.
     // You should only be using this if you know what you are doing.
-    pub fn set_wc(&mut self, index: usize, value: u32) {
+    #[cfg(test)]
+    fn set_wc(&mut self, index: usize, value: u32) {
         self.count_cur[index] = value;
-    }
-
-    // Set the write count value for the minimum.
-    // You should only be using this if you know what you are doing.
-    pub fn set_wc_min(&mut self, index: usize, value: u32) {
-        self.count_min[index] = value;
     }
 }
 
@@ -596,6 +684,7 @@ async fn handle_signals(
 #[tokio::main]
 async fn main() -> Result<()> {
     let opt = opts()?;
+    let is_encrypted = opt.key.is_some();
 
     // If we just want the version, print that and exit.
     if let Workload::Version = opt.workload {
@@ -608,7 +697,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    if opt.workload == Workload::Verify && opt.verify_in.is_none() {
+    if matches!(opt.workload, Workload::Verify) && opt.verify_in.is_none() {
         bail!("Verify requires verify_in file");
     }
 
@@ -652,13 +741,26 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Opt out of verbose logs for certain tests
+    let log_level = match opt.workload {
+        Workload::RandRead { cfg } | Workload::RandWrite { cfg } => {
+            if cfg.verbose {
+                slog::Level::Info
+            } else {
+                slog::Level::Error
+            }
+        }
+        _ => slog::Level::Info,
+    };
+    let guest_logger = crucible_common::build_logger_with_level(log_level);
+
     /*
      * The structure we use to send work from outside crucible into the
      * Upstairs main task.
      * We create this here instead of inside up_main() so we can use
      * the methods provided by guest to interact with Crucible.
      */
-    let (guest, io) = Guest::new(None);
+    let (guest, io) = Guest::new(Some(guest_logger));
     let guest = Arc::new(guest);
 
     let pr;
@@ -750,7 +852,7 @@ async fn main() -> Result<()> {
          * option has in it.
          */
         let verify = {
-            if opt.workload == Workload::Verify {
+            if matches!(opt.workload, Workload::Verify) {
                 false
             } else {
                 opt.verify_at_start
@@ -895,20 +997,50 @@ async fn main() -> Result<()> {
                     "ec",
                     "times",
                 ))?;
-                opt_wtr = Some(&mut wtr);
+                opt_wtr = Some(wtr);
             }
 
             // The header for all perf tests
             perf_header();
             perf_workload(
                 &guest,
-                &mut region_info,
-                &mut opt_wtr,
+                &region_info,
+                opt_wtr,
                 count,
                 io_depth,
                 io_size,
                 write_loops,
                 read_loops,
+            )
+            .await?;
+            if opt.quit {
+                return Ok(());
+            }
+        }
+        Workload::RandRead { cfg } => {
+            rand_read_write_workload(
+                &guest,
+                &mut region_info,
+                RandReadWriteConfig::new(
+                    cfg,
+                    is_encrypted,
+                    RandReadWriteMode::Read,
+                ),
+            )
+            .await?;
+            if opt.quit {
+                return Ok(());
+            }
+        }
+        Workload::RandWrite { cfg } => {
+            rand_read_write_workload(
+                &guest,
+                &mut region_info,
+                RandReadWriteConfig::new(
+                    cfg,
+                    is_encrypted,
+                    RandReadWriteMode::Write,
+                ),
             )
             .await?;
             if opt.quit {
@@ -976,7 +1108,7 @@ async fn main() -> Result<()> {
                 &guest,
                 &mut wtq,
                 &mut region_info,
-                full_target,
+                &full_target,
                 work,
                 fast_fill,
             )
@@ -1086,8 +1218,6 @@ async fn verify_volume(
         ri.total_blocks, range
     );
 
-    let mut result = Ok(());
-
     let pb = ProgressBar::new(ri.total_blocks as u64);
     pb.set_style(ProgressStyle::default_bar()
         .template(
@@ -1096,60 +1226,93 @@ async fn verify_volume(
         .unwrap()
         .progress_chars("#>-"));
 
-    let io_sz = 100;
-    let mut block_index = 0;
-    while block_index < ri.total_blocks {
-        let offset =
-            Block::new(block_index as u64, ri.block_size.trailing_zeros());
+    const IO_SIZE: usize = 256;
+    const NUM_WORKERS: usize = 8;
 
-        let next_io_blocks = if block_index + io_sz > ri.total_blocks {
-            ri.total_blocks - block_index
-        } else {
-            io_sz
-        };
+    // Steal the write log, so we can share it between threads
+    let write_log = std::mem::replace(&mut ri.write_log, WriteLog::new(0));
+    let write_log = Arc::new(std::sync::RwLock::new(write_log));
+    let blocks_done = Arc::new(AtomicUsize::new(0));
 
-        let mut data = crucible::Buffer::repeat(
-            255,
-            next_io_blocks,
-            ri.block_size as usize,
-        );
-        guest.read(offset, &mut data).await?;
+    let tasks = futures::stream::FuturesUnordered::new();
+    for i in 0..NUM_WORKERS {
+        let mut block_index = i * IO_SIZE;
+        let guest = guest.clone();
+        let write_log = write_log.clone();
+        let blocks_done = blocks_done.clone();
+        let total_blocks = ri.total_blocks;
+        let block_size = ri.block_size;
+        let pb = pb.clone();
+        tasks.push(tokio::task::spawn(async move {
+            let mut result = Ok(());
+            let mut data = crucible::Buffer::new(0, block_size as usize);
+            while block_index < total_blocks {
+                let offset =
+                    Block::new(block_index as u64, block_size.trailing_zeros());
 
-        let dl = data.into_bytes();
-        match validate_vec(
-            dl,
-            block_index,
-            &mut ri.write_log,
-            ri.block_size,
-            range,
-        ) {
-            ValidateStatus::Bad => {
-                println!(
-                    "Error in block range {} -> {}",
+                let next_io_blocks = (total_blocks - block_index).min(IO_SIZE);
+                data.reset(next_io_blocks, block_size as usize);
+                guest.read(offset, &mut data).await?;
+
+                let mut write_log = write_log.write().unwrap();
+                match validate_vec(
+                    &*data,
                     block_index,
-                    block_index + next_io_blocks
-                );
-                result = Err(anyhow!("Validation error".to_string()));
-            }
-            ValidateStatus::InRange => {
-                if range {
-                    {}
-                } else {
-                    println!(
-                        "Error in block range {} -> {}",
-                        block_index,
-                        block_index + next_io_blocks
-                    );
-                    result = Err(anyhow!("Validation error".to_string()));
+                    &mut write_log,
+                    block_size,
+                    range,
+                ) {
+                    ValidateStatus::Bad => {
+                        println!(
+                            "Error in block range {} -> {}",
+                            block_index,
+                            block_index + next_io_blocks
+                        );
+                        result = Err(anyhow!("Validation error".to_string()));
+                    }
+                    ValidateStatus::InRange => {
+                        if range {
+                            {}
+                        } else {
+                            println!(
+                                "Error in block range {} -> {}",
+                                block_index,
+                                block_index + next_io_blocks
+                            );
+                            result =
+                                Err(anyhow!("Validation error".to_string()));
+                        }
+                    }
+                    ValidateStatus::Good => {}
                 }
-            }
-            ValidateStatus::Good => {}
-        }
 
-        block_index += next_io_blocks;
-        pb.set_position(block_index as u64);
+                block_index += NUM_WORKERS * IO_SIZE;
+                let progress =
+                    blocks_done.fetch_add(next_io_blocks, Ordering::Relaxed);
+                pb.set_position(progress as u64);
+            }
+            result
+        }));
+    }
+
+    // Wait for the tasks to finish
+    let mut result = Ok(());
+    for t in tasks {
+        let r = t.await?;
+        if r.is_err() {
+            result = r;
+        }
     }
     pb.finish();
+
+    // Now that all the workers are done, put the write log back into place
+    ri.write_log = std::mem::replace(
+        &mut Arc::try_unwrap(write_log)
+            .expect("could not unwrap write log")
+            .write()
+            .unwrap(),
+        WriteLog::new(0),
+    );
     result
 }
 
@@ -1320,10 +1483,7 @@ fn validate_vec<V: AsRef<[u8]>>(
  * I named it balloon because each loop on a block "balloons" from the
  * minimum IO size to the largest possible IO size.
  */
-async fn balloon_workload(
-    guest: &Arc<Guest>,
-    ri: &mut RegionInfo,
-) -> Result<()> {
+async fn balloon_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
     for block_index in 0..ri.total_blocks {
         /*
          * Loop over all the IO sizes (in blocks) that an IO can
@@ -1389,34 +1549,74 @@ async fn fill_workload(
         .unwrap()
         .progress_chars("#>-"));
 
-    let io_sz = 100;
+    const IO_SIZE: usize = 256;
+    const NUM_WORKERS: usize = 8;
 
-    let mut block_index = 0;
-    while block_index < ri.total_blocks {
-        let offset =
-            Block::new(block_index as u64, ri.block_size.trailing_zeros());
+    // Steal the write log, so we can share it between threads
+    let write_log = std::mem::replace(&mut ri.write_log, WriteLog::new(0));
+    let write_log = Arc::new(std::sync::RwLock::new(write_log));
+    let blocks_done = Arc::new(AtomicUsize::new(0));
 
-        let next_io_blocks = if block_index + io_sz > ri.total_blocks {
-            ri.total_blocks - block_index
-        } else {
-            io_sz
-        };
+    let tasks = futures::stream::FuturesUnordered::new();
+    for i in 0..NUM_WORKERS {
+        let mut block_index = i * IO_SIZE;
+        let guest = guest.clone();
+        let write_log = write_log.clone();
+        let blocks_done = blocks_done.clone();
+        let total_blocks = ri.total_blocks;
+        let block_size = ri.block_size;
+        let pb = pb.clone();
+        tasks.push(tokio::task::spawn(async move {
+            while block_index < total_blocks {
+                let offset =
+                    Block::new(block_index as u64, block_size.trailing_zeros());
 
-        for i in 0..next_io_blocks {
-            ri.write_log.update_wc(block_index + i);
-        }
+                let next_io_blocks = (total_blocks - block_index).min(IO_SIZE);
 
-        let data =
-            fill_vec(block_index, next_io_blocks, &ri.write_log, ri.block_size);
+                {
+                    // Lock and update the write log
+                    let mut write_log = write_log.write().unwrap();
+                    for i in 0..next_io_blocks {
+                        write_log.update_wc(block_index + i);
+                    }
+                };
 
-        guest.write(offset, data).await?;
+                let data = {
+                    let write_log = write_log.read().unwrap();
+                    fill_vec(
+                        block_index,
+                        next_io_blocks,
+                        &write_log,
+                        block_size,
+                    )
+                };
 
-        block_index += next_io_blocks;
-        pb.set_position(block_index as u64);
+                guest.write(offset, data).await?;
+
+                block_index += NUM_WORKERS * IO_SIZE;
+                let progress =
+                    blocks_done.fetch_add(next_io_blocks, Ordering::Relaxed);
+                pb.set_position(progress as u64);
+            }
+            Result::<(), CrucibleError>::Ok(())
+        }));
+    }
+
+    for t in tasks {
+        t.await??;
     }
 
     guest.flush(None).await?;
     pb.finish();
+
+    // Now that all the workers are done, put the write log back into place
+    ri.write_log = std::mem::replace(
+        &mut Arc::try_unwrap(write_log)
+            .expect("could not unwrap write log")
+            .write()
+            .unwrap(),
+        WriteLog::new(0),
+    );
 
     if !skip_verify {
         verify_volume(guest, ri, false).await?;
@@ -1429,7 +1629,7 @@ async fn fill_workload(
  * touched without having to write to every block.
  */
 async fn fill_sparse_workload(
-    guest: &Arc<Guest>,
+    guest: &Guest,
     ri: &mut RegionInfo,
 ) -> Result<()> {
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
@@ -1717,7 +1917,7 @@ async fn replace_workload(
     guest: &Arc<Guest>,
     wtq: &mut WhenToQuit,
     ri: &mut RegionInfo,
-    full_targets: Vec<SocketAddr>,
+    full_targets: &[SocketAddr],
     work: usize,
     fill: bool,
 ) -> Result<()> {
@@ -1807,7 +2007,7 @@ async fn replace_workload(
  * automatic flush can come through and sync our data.
  */
 async fn dirty_workload(
-    guest: &Arc<Guest>,
+    guest: &Guest,
     ri: &mut RegionInfo,
     count: usize,
 ) -> Result<()> {
@@ -1819,7 +2019,7 @@ async fn dirty_workload(
     /*
      * To store our write requests
      */
-    let mut futureslist = Vec::new();
+    let mut futureslist = FuturesOrdered::new();
 
     let size = 1;
     /*
@@ -1854,10 +2054,12 @@ async fn dirty_workload(
         );
 
         let future = guest.write(offset, data);
-        futureslist.push(future);
+        futureslist.push_back(future);
     }
     println!("loop over {} futures", futureslist.len());
-    crucible::join_all(futureslist).await?;
+    while let Some(r) = futureslist.next().await {
+        r?;
+    }
     Ok(())
 }
 
@@ -1893,7 +2095,7 @@ pub fn perf_csv(
     io_depth: usize,
     io_size: usize,
     duration: Duration,
-    iotimes: Vec<Duration>,
+    iotimes: &[Duration],
     es: u64,
     ec: u64,
 ) {
@@ -1964,7 +2166,7 @@ fn perf_summary(
     msg: &str,
     count: usize,
     io_depth: usize,
-    times: Vec<Duration>,
+    times: &[Duration],
     total_time: Duration,
     es: u64,
     ec: u64,
@@ -2023,8 +2225,8 @@ struct Record {
 #[allow(clippy::too_many_arguments)]
 async fn perf_workload(
     guest: &Arc<Guest>,
-    ri: &mut RegionInfo,
-    wtr: &mut Option<&mut csv::Writer<File>>,
+    ri: &RegionInfo,
+    mut wtr: Option<csv::Writer<File>>,
     count: usize,
     io_depth: usize,
     blocks_per_io: usize,
@@ -2069,7 +2271,7 @@ async fn perf_workload(
         let big_start = Instant::now();
         for _ in 0..count {
             let burst_start = Instant::now();
-            let mut write_futures = Vec::with_capacity(io_depth);
+            let mut write_futures = FuturesOrdered::new();
 
             for write_buffer in write_buffers.iter().take(io_depth) {
                 let offset: u64 = rng.gen::<u64>() % offset_mod;
@@ -2077,25 +2279,19 @@ async fn perf_workload(
                     offset * ri.block_size,
                     write_buffer.clone(),
                 );
-                write_futures.push(future);
+                write_futures.push_back(future);
             }
 
-            crucible::join_all(write_futures).await?;
+            while let Some(result) = write_futures.next().await {
+                result?;
+            }
             wtime.push(burst_start.elapsed());
         }
         let big_end = big_start.elapsed();
 
         guest.flush(None).await?;
-        perf_summary(
-            "rwrites",
-            count,
-            io_depth,
-            wtime.clone(),
-            big_end,
-            es,
-            ec,
-        );
-        if let Some(wtr) = wtr {
+        perf_summary("rwrites", count, io_depth, &wtime, big_end, es, ec);
+        if let Some(wtr) = wtr.as_mut() {
             perf_csv(
                 wtr,
                 "rwrite",
@@ -2103,7 +2299,7 @@ async fn perf_workload(
                 io_depth,
                 blocks_per_io,
                 big_end,
-                wtime.clone(),
+                &wtime,
                 es,
                 ec,
             );
@@ -2124,7 +2320,7 @@ async fn perf_workload(
         let big_start = Instant::now();
         for _ in 0..count {
             let burst_start = Instant::now();
-            let mut read_futures = Vec::with_capacity(io_depth);
+            let mut read_futures = FuturesOrdered::new();
 
             for mut read_buffer in read_buffers.drain(0..io_depth) {
                 let offset: u64 = rng.gen::<u64>() % offset_mod;
@@ -2141,11 +2337,11 @@ async fn perf_workload(
                         Ok(read_buffer)
                     })
                 };
-                read_futures.push(future);
+                read_futures.push_back(future);
             }
 
-            for future in read_futures {
-                let result: Result<Buffer, CrucibleError> = future.await?;
+            while let Some(result) = read_futures.next().await {
+                let result: Result<Buffer, CrucibleError> = result?;
                 let read_buffer = result?;
                 read_buffers.push(read_buffer);
             }
@@ -2154,9 +2350,9 @@ async fn perf_workload(
         }
         let big_end = big_start.elapsed();
 
-        perf_summary("rreads", count, io_depth, rtime.clone(), big_end, es, ec);
+        perf_summary("rreads", count, io_depth, &rtime, big_end, es, ec);
 
-        if let Some(wtr) = wtr {
+        if let Some(wtr) = wtr.as_mut() {
             perf_csv(
                 wtr,
                 "rread",
@@ -2164,7 +2360,7 @@ async fn perf_workload(
                 io_depth,
                 blocks_per_io,
                 big_end,
-                rtime.clone(),
+                &rtime,
                 es,
                 ec,
             );
@@ -2183,11 +2379,223 @@ async fn perf_workload(
     }
     Ok(())
 }
+
+/// Prints a pleasant summary of the given region
+fn print_region_description(ri: &RegionInfo, encrypted: bool) {
+    println!("region info:");
+    println!("  block size:      {} bytes", ri.block_size);
+    println!("  blocks / extent: {}", ri.extent_size.value);
+    println!(
+        "  extent size:     {}",
+        human_bytes((ri.block_size * ri.extent_size.value) as f64)
+    );
+    println!(
+        "  extent count:    {}",
+        ri.total_blocks as u64 / ri.extent_size.value
+    );
+    println!("  total blocks:    {}", ri.total_blocks);
+    println!("  total size:      {}", human_bytes(ri.total_size as f64));
+    println!(
+        "  encryption:      {}",
+        if encrypted { "yes" } else { "no" }
+    );
+}
+
+async fn rand_read_write_workload(
+    guest: &Arc<Guest>,
+    ri: &mut RegionInfo,
+    cfg: RandReadWriteConfig,
+) -> Result<()> {
+    // Before we start, make sure the work queues are empty.
+    loop {
+        let wc = guest.query_work_queue().await?;
+        if wc.up_count + wc.ds_count == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    let desc = match cfg.mode {
+        RandReadWriteMode::Read => "read",
+        RandReadWriteMode::Write => "write",
+    };
+
+    if cfg.fill {
+        println!("filling region before {desc}");
+        fill_workload(guest, ri, true).await?;
+    }
+
+    if cfg.blocks_per_io > ri.total_blocks {
+        bail!("too many blocks per IO; can't exceed {}", ri.total_blocks);
+    }
+
+    println!(
+        "\n----------------------------------------------\
+        \nrandom {desc} with {} chunks ({} block{})",
+        human_bytes((cfg.blocks_per_io as u64 * ri.block_size) as f64),
+        cfg.blocks_per_io,
+        if cfg.blocks_per_io > 1 { "s" } else { "" },
+    );
+    print_region_description(ri, cfg.encrypted);
+    println!("----------------------------------------------");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let byte_count = Arc::new(AtomicUsize::new(0));
+
+    let block_size = ri.block_size as usize;
+    let total_blocks = ri.total_blocks;
+    let mut workers = vec![];
+    for _ in 0..cfg.io_depth {
+        let stop = stop.clone();
+        let guest = guest.clone();
+        let byte_count = byte_count.clone();
+        let handle = tokio::spawn(async move {
+            match cfg.mode {
+                RandReadWriteMode::Write => {
+                    let mut buf = BytesMut::new();
+                    buf.resize(cfg.blocks_per_io * block_size, 0u8);
+                    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+                    rng.fill_bytes(&mut buf);
+                    let block_shift = block_size.trailing_zeros();
+                    while !stop.load(Ordering::Acquire) {
+                        let offset =
+                            rng.gen_range(0..=total_blocks - cfg.blocks_per_io);
+                        guest
+                            .write(
+                                Block::new(offset as u64, block_shift),
+                                buf.clone(),
+                            )
+                            .await
+                            .unwrap();
+                        byte_count.fetch_add(buf.len(), Ordering::Relaxed);
+                    }
+                }
+                RandReadWriteMode::Read => {
+                    let mut buf = Buffer::new(cfg.blocks_per_io, block_size);
+                    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+                    let block_shift = block_size.trailing_zeros();
+                    while !stop.load(Ordering::Acquire) {
+                        let offset =
+                            rng.gen_range(0..=total_blocks - cfg.blocks_per_io);
+                        guest
+                            .read(
+                                Block::new(offset as u64, block_shift),
+                                &mut buf,
+                            )
+                            .await
+                            .unwrap();
+                        byte_count.fetch_add(buf.len(), Ordering::Relaxed);
+                    }
+                }
+            }
+            Ok::<(), CrucibleError>(())
+        });
+        workers.push(handle);
+    }
+
+    // Spawn a task which stops us after the given time
+    {
+        let stop = stop.clone();
+        let time_secs = cfg.time_secs;
+        tokio::task::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(time_secs)).await;
+            stop.store(true, Ordering::Release);
+        });
+    }
+
+    // Initial sleep
+    let mut prev = 0;
+
+    let subsample_delay = Duration::from_secs_f64(
+        cfg.sample_time_secs / cfg.subsample_count as f64,
+    );
+    let mut samples = vec![];
+    let mut first = true;
+    let mut next_time = std::time::Instant::now() + subsample_delay;
+    while !stop.load(Ordering::Relaxed) {
+        // Store speeds in bytes/sec, correcting for our sub-second sample time
+        let start = samples.len();
+        for _ in 0..cfg.subsample_count {
+            tokio::time::sleep_until(next_time.into()).await;
+            let bytes = byte_count.load(Ordering::Acquire);
+            next_time += subsample_delay;
+            samples.push((bytes - prev) as f64 / subsample_delay.as_secs_f64());
+            prev = bytes;
+        }
+        // Ignore the first round of samples, to reduce startup effects
+        if std::mem::take(&mut first) {
+            samples.clear();
+            continue;
+        }
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let slice = &samples[start..];
+        let mean = slice.iter().sum::<f64>() / slice.len() as f64;
+        let stdev = (slice.iter().map(|&d| (d - mean).powi(2)).sum::<f64>()
+            / slice.len() as f64)
+            .sqrt();
+        if cfg.raw {
+            println!("{mean:>14} {}", stdev as usize);
+        } else {
+            println!(
+                "{:>14} ± {:<16}  ({} IOPS)",
+                format!("{}/sec", human_bytes(mean)),
+                format!("{}/sec", human_bytes(stdev)),
+                mean as usize / (cfg.blocks_per_io * block_size),
+            );
+        }
+        std::io::stdout().lock().flush().unwrap();
+    }
+    stop.store(true, Ordering::Release);
+
+    // Join all workers
+    for h in workers {
+        h.await??;
+    }
+
+    // Spawn a secondary worker to wait and log during guest deactivation
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let guest = guest.clone();
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                let Ok(wq) = guest.query_work_queue().await else {
+                    break;
+                };
+                print!(
+                    "\r stopping guest [{} jobs remaining]    ",
+                    wq.ds_count + wq.up_count
+                );
+                std::io::stdout().lock().flush().unwrap();
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
+    }
+    guest.deactivate().await?;
+    stop.store(true, Ordering::Relaxed);
+
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    let stdev = (samples.iter().map(|&d| (d - mean).powi(2)).sum::<f64>()
+        / samples.len() as f64)
+        .sqrt();
+    println!(
+        "\r----------------------------------------------\
+        \naverage {desc} performance: {}/sec ± {}/sec ({} IOPS)",
+        human_bytes(mean),
+        human_bytes(stdev),
+        mean as usize / (cfg.blocks_per_io * block_size),
+    );
+
+    Ok(())
+}
+
 /*
  * Generate a random offset and length, and write to then read from
  * that offset/length.  Verify the data is what we expect.
  */
-async fn one_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+async fn one_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
     /*
      * TODO: Allow the user to specify a seed here.
      */
@@ -2318,7 +2726,7 @@ async fn deactivate_workload(
  * that offset/length.  Verify the data is what we expect.
  */
 async fn write_flush_read_workload(
-    guest: &Arc<Guest>,
+    guest: &Guest,
     count: usize,
     ri: &mut RegionInfo,
 ) -> Result<()> {
@@ -2447,7 +2855,7 @@ async fn burst_workload(
  * We try to exit this test and leave jobs outstanding.
  */
 async fn repair_workload(
-    guest: &Arc<Guest>,
+    guest: &Guest,
     count: usize,
     ri: &mut RegionInfo,
 ) -> Result<()> {
@@ -2571,8 +2979,8 @@ async fn demo_workload(
     // what it is now and what it is at the end of test.
     ri.write_log.commit();
 
-    let mut read_futures = Vec::with_capacity(count);
-    let mut futures = Vec::with_capacity(count);
+    let mut read_futures = FuturesOrdered::new();
+    let mut write_futures = FuturesOrdered::new();
 
     // TODO: Let the user select the number of loops
     // TODO: Allow user to request r/w/f percentage (how???)
@@ -2581,7 +2989,7 @@ async fn demo_workload(
         if op == 0 {
             // flush
             let future = guest.flush(None);
-            futures.push(future);
+            write_futures.push_back(future);
         } else {
             // Read or Write both need this
             // Pick a random size (in blocks) for the IO, up to 10
@@ -2608,7 +3016,7 @@ async fn demo_workload(
                     fill_vec(block_index, size, &ri.write_log, ri.block_size);
 
                 let future = guest.write(offset, data);
-                futures.push(future);
+                write_futures.push_back(future);
             } else {
                 // Read
                 let block_size = ri.block_size as usize;
@@ -2621,7 +3029,7 @@ async fn demo_workload(
                         Ok(data)
                     })
                 };
-                read_futures.push(future);
+                read_futures.push_back(future);
             }
         }
     }
@@ -2632,12 +3040,14 @@ async fn demo_workload(
     };
     println!(
         "Submit work and wait for {} jobs to finish",
-        futures.len() + read_futures.len()
+        write_futures.len() + read_futures.len()
     );
-    crucible::join_all(futures).await?;
+    while let Some(result) = write_futures.next().await {
+        result?;
+    }
 
-    for future in read_futures {
-        let result: Result<Buffer, CrucibleError> = future.await?;
+    while let Some(result) = read_futures.next().await {
+        let result: Result<Buffer, CrucibleError> = result?;
         let _buf = result?;
     }
 
@@ -2661,7 +3071,7 @@ async fn demo_workload(
  * This is a test workload that generates a single write spanning an extent
  * then will try to read the same.
  */
-async fn span_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+async fn span_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
     /*
      * Pick the last block in the first extent
      */
@@ -2702,7 +3112,7 @@ async fn span_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
  * Write, flush, then read every block in the volume.
  * We wait for each op to finish, so this is all sequential.
  */
-async fn big_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+async fn big_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
     for block_index in 0..ri.total_blocks {
         /*
          * Update the write count for all blocks we plan to write to.
@@ -2744,10 +3154,7 @@ async fn big_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
     Ok(())
 }
 
-async fn biggest_io_workload(
-    guest: &Arc<Guest>,
-    ri: &mut RegionInfo,
-) -> Result<()> {
+async fn biggest_io_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
     /*
      * Based on our protocol, send the biggest IO we can.
      */
@@ -2819,8 +3226,8 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
 
     let mut my_offset: u64 = 0;
     for my_count in 1..150 {
-        let mut futures = Vec::new();
-        let mut read_futures = Vec::new();
+        let mut write_futures = FuturesOrdered::new();
+        let mut read_futures = FuturesOrdered::new();
 
         /*
          * Generate some number of operations
@@ -2845,7 +3252,7 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
                     data.len()
                 );
                 let future = guest.write_to_byte_offset(my_offset, data);
-                futures.push(future);
+                write_futures.push_back(future);
             } else {
                 let mut data =
                     crucible::Buffer::repeat(0, 1, ri.block_size as usize);
@@ -2867,7 +3274,7 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
                         Ok(data)
                     })
                 };
-                read_futures.push(future);
+                read_futures.push_back(future);
             }
         }
 
@@ -2878,17 +3285,19 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         // flush check to trigger.
         println!("Loop:{} send a final flush and wait", my_count);
         let flush_future = guest.flush(None);
-        futures.push(flush_future);
+        write_futures.push_back(flush_future);
 
         println!(
             "Loop:{} loop over {} futures",
             my_count,
-            futures.len() + read_futures.len()
+            write_futures.len() + read_futures.len()
         );
 
-        crucible::join_all(futures).await?;
-        for future in read_futures {
-            let result: Result<Buffer, CrucibleError> = future.await?;
+        while let Some(result) = write_futures.next().await {
+            result?;
+        }
+        while let Some(result) = read_futures.next().await {
+            let result: Result<_, CrucibleError> = result?;
             let _buffer = result?;
         }
 
@@ -2945,7 +3354,7 @@ mod test {
     #[test]
     fn test_wl_empty() {
         // No size is empty
-        let mut write_log = WriteLog::new(0);
+        let write_log = WriteLog::new(0);
         assert!(write_log.is_empty());
     }
 
