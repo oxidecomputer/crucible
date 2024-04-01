@@ -375,7 +375,7 @@ impl Guest {
             backpressure_config: BackpressureConfig {
                 // Byte-based backpressure
                 bytes_start: 0.05,
-                bytes_max_delay: Duration::from_millis(50),
+                bytes_max_delay: Duration::from_millis(100),
 
                 // Queue-based backpressure
                 queue_start: 0.05,
