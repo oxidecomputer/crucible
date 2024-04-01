@@ -278,9 +278,9 @@ impl Downstairs {
                 // jobs of discrepancy
                 jobs_scale: 0.04,
 
-                // max delay is 10 ms.  This is meant to be a gentle nudge, not
-                // a giant shove, and even 10 ms may be too high.
-                max_delay: Duration::from_millis(10),
+                // max delay is 100 ms, chosen experimentally to keep downstairs
+                // in sync even in heavily loaded systems
+                max_delay: Duration::from_millis(100),
             },
             cfg,
             next_flush: 0,
