@@ -595,8 +595,8 @@ impl Upstairs {
             }
         }
 
-        // Check whether we need to mark a Downstairs as faulted because too
-        // many jobs have piled up.
+        // Check whether we need to mark an offline Downstairs as faulted
+        // because too many jobs have piled up.
         self.gone_too_long();
 
         // Check to see whether live-repair can continue
@@ -697,8 +697,10 @@ impl Upstairs {
 
     /// Check outstanding IOops for each downstairs.
     ///
-    /// If the number is too high, then mark that downstairs as failed, scrub
-    /// any outstanding jobs, and restart the client IO task.
+    /// We never kick out a Downstairs that is replying to us, but will
+    /// eventually transition a Downstairs from Offline to Faulted (which then
+    /// leads to scrubbing any outstanding jobs, and restarting the client IO
+    /// task).
     fn gone_too_long(&mut self) {
         // If we are not active, then just exit.
         if !matches!(self.state, UpstairsState::Active) {
@@ -706,15 +708,8 @@ impl Upstairs {
         }
 
         for cid in ClientId::iter() {
-            // Only downstairs in these states are checked.
-            match self.downstairs.clients[cid].state() {
-                DsState::Active
-                | DsState::LiveRepair
-                | DsState::Offline
-                | DsState::Replay => {
-                    self.downstairs.check_gone_too_long(cid, &self.state);
-                }
-                _ => {}
+            if self.downstairs.clients[cid].state() == DsState::Offline {
+                self.downstairs.check_gone_too_long(cid, &self.state);
             }
         }
     }

@@ -1836,9 +1836,7 @@ async fn generic_workload(
 }
 
 // Make use of dsc to stop and start a downstairs while sending IO.  This
-// should trigger the replay code path.  The IO sent to the downstairs should
-// be below the threshold of gone_too_long() so we don't end up faulting the
-// downstairs and doing a live repair
+// should trigger the replay code path.
 async fn replay_workload(
     guest: &Arc<Guest>,
     wtq: &mut WhenToQuit,

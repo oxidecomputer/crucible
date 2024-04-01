@@ -774,6 +774,7 @@ dependencies = [
  "futures",
  "futures-core",
  "http 0.2.12",
+ "humantime",
  "internal-dns",
  "itertools",
  "libc",

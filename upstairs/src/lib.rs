@@ -83,17 +83,17 @@ mod downstairs;
 mod upstairs;
 use upstairs::{UpCounters, UpstairsAction};
 
-/// Max number of write bytes between the upstairs and the downstairs
+/// Max number of write bytes between the upstairs and an offline downstairs
 ///
-/// If we exceed this value, the upstairs will give up and mark that downstairs
-/// as faulted.
+/// If we exceed this value, the upstairs will give
+/// up and mark the offline downstairs as faulted.
 const IO_OUTSTANDING_MAX_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
 
-/// Max number of outstanding IOs between the upstairs and a downstairs
+/// Max number of outstanding IOs between the upstairs and an offline downstairs
 ///
-/// If we exceed this value, the upstairs will give up and mark that downstairs
-/// as faulted.
-pub const IO_OUTSTANDING_MAX_JOBS: usize = 57000;
+/// If we exceed this value, the upstairs will give up and mark that offline
+/// downstairs as faulted.
+pub const IO_OUTSTANDING_MAX_JOBS: usize = 10000;
 
 /// The BlockIO trait behaves like a physical NVMe disk (or a virtio virtual
 /// disk): there is no contract about what order operations that are submitted
