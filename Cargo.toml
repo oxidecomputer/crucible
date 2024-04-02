@@ -114,7 +114,7 @@ omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "m
 openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
 oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
-progenitor = { git = "https://github.com/oxidecomputer/progenitor", branch = "main" }
+progenitor = { git = "https://github.com/oxidecomputer/progenitor", branch = "revert-reqwest-update" }
 
 # local path
 crucible = { path = "./upstairs" }
