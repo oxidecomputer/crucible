@@ -2977,8 +2977,8 @@ pub(crate) fn validate_unencrypted_read_response(
                 error!(log, "No match          hash:0x{:x}", context.hash);
             }
             error!(log, "Data from hash:");
-            for (i, item) in data.iter().enumerate().take(6) {
-                error!(log, "[{}]:{}", i, item);
+            for (i, d) in data.iter().enumerate().take(6) {
+                error!(log, "[{i}]:{d}");
             }
 
             Err(CrucibleError::HashMismatch)
