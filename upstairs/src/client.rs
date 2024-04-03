@@ -347,8 +347,7 @@ impl DownstairsClient {
         //
         // However, during Tokio shutdown, tasks may stop in arbitrary order.
         // We log an error but don't panic, because panicking is uncouth.
-        if let Err(e) = self.client_task.client_request_tx.send(m.into()).await
-        {
+        if let Err(e) = self.client_task.client_request_tx.send(m).await {
             error!(
                 self.log,
                 "failed to send message: {e};
@@ -2950,7 +2949,7 @@ pub(crate) fn validate_unencrypted_read_response(
     if !block_contexts.is_empty() {
         // check integrity hashes - make sure at least one is correct.
         let mut successful_hash = false;
-        let computed_hash = integrity_hash(&[&data[..]]);
+        let computed_hash = integrity_hash(&[data]);
 
         // The most recent hash is probably going to be the right one.
         for context in block_contexts.iter().rev() {
@@ -2973,8 +2972,8 @@ pub(crate) fn validate_unencrypted_read_response(
                 error!(log, "No match          hash:0x{:x}", context.hash);
             }
             error!(log, "Data from hash:");
-            for i in 0..6 {
-                error!(log, "[{}]:{}", i, data[i]);
+            for (i, d) in data.iter().enumerate().take(6) {
+                error!(log, "[{i}]:{d}");
             }
 
             Err(CrucibleError::HashMismatch)
