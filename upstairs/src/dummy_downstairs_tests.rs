@@ -106,6 +106,8 @@ pub(crate) mod protocol_test {
         }
 
         /// Tries to return the next non-ping packet
+        ///
+        /// (pings are answered automatically)
         fn try_recv(&mut self) -> Result<Message, mpsc::error::TryRecvError> {
             loop {
                 let packet = self.rx.try_recv();
