@@ -2004,6 +2004,11 @@ impl Upstairs {
             self.log,
             "downstairs task for {client_id} stopped due to {reason:?}"
         );
+
+        #[cfg(feature = "notify-nexus")]
+        self.downstairs
+            .notify_nexus_of_client_task_stopped(client_id, reason);
+
         // If the upstairs is already active (or trying to go active), then the
         // downstairs should automatically call PromoteToActive when it reaches
         // the relevant state.

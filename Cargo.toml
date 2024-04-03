@@ -39,6 +39,7 @@ base64 = "0.22.0"
 bincode = "1.3"
 byte-unit = "5.1.4"
 bytes = { version = "1", features = ["serde"] }
+cfg-if = { version = "1" }
 chrono = { version = "0.4", features = [ "serde" ] }
 clap = { version = "4.5", features = ["derive", "env", "wrap_help"] }
 clearscreen = "2.0.1"
@@ -111,10 +112,14 @@ uuid = { version = "1", features = [ "serde", "v4" ] }
 # git
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main", features = [ "usdt-probes" ] }
 omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
+nexus-client = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
+internal-dns = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
+omicron-uuid-kinds = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
 oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 progenitor = { git = "https://github.com/oxidecomputer/progenitor", branch = "main" }
+progenitor-client = { git = "https://github.com/oxidecomputer/progenitor", branch = "main" }
 
 # local path
 crucible = { path = "./upstairs" }
