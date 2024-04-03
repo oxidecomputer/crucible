@@ -13,7 +13,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use crucible_client_types::{CrucibleOpts, VolumeConstructionRequest};
+pub use crucible_client_types::{
+    CrucibleOpts, ReplaceResult, VolumeConstructionRequest,
+};
 pub use crucible_common::*;
 pub use crucible_protocol::*;
 
@@ -234,32 +236,6 @@ pub type CrucibleBlockIOFuture<'a> = Pin<
             + 'a,
     >,
 >;
-
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum ReplaceResult {
-    Started,
-    StartedAlready,
-    CompletedAlready,
-    Missing,
-}
-impl Debug for ReplaceResult {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ReplaceResult::Started => {
-                write!(f, "Started")
-            }
-            ReplaceResult::StartedAlready => {
-                write!(f, "StartedAlready")
-            }
-            ReplaceResult::CompletedAlready => {
-                write!(f, "CompletedAlready")
-            }
-            ReplaceResult::Missing => {
-                write!(f, "Missing")
-            }
-        }
-    }
-}
 
 /// DTrace probes in the upstairs
 ///

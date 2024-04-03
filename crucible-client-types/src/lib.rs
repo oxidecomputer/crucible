@@ -4,6 +4,7 @@ use base64::{engine, Engine};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::fmt::Debug;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
@@ -92,5 +93,32 @@ impl std::fmt::Display for CrucibleOpts {
         write!(f, " Control: {:?}, ", self.control)?;
         write!(f, " read_only: {:?}", self.read_only)?;
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub enum ReplaceResult {
+    Started,
+    StartedAlready,
+    CompletedAlready,
+    Missing,
+}
+
+impl Debug for ReplaceResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReplaceResult::Started => {
+                write!(f, "Started")
+            }
+            ReplaceResult::StartedAlready => {
+                write!(f, "StartedAlready")
+            }
+            ReplaceResult::CompletedAlready => {
+                write!(f, "CompletedAlready")
+            }
+            ReplaceResult::Missing => {
+                write!(f, "Missing")
+            }
+        }
     }
 }

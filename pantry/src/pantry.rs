@@ -1,6 +1,7 @@
 // Copyright 2022 Oxide Computer Company
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -20,6 +21,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crucible::BlockIO;
+use crucible::ReplaceResult;
 use crucible::SnapshotDetails;
 use crucible::Volume;
 use crucible::VolumeConstructionRequest;
@@ -27,11 +29,13 @@ use crucible_common::crucible_bail;
 use crucible_common::CrucibleError;
 
 use crate::server::ExpectedDigest;
+use crate::server::PantryStatus;
+use crate::server::VolumeStatus;
 
 pub struct PantryEntry {
     log: Logger,
     volume: Volume,
-    volume_construction_request: VolumeConstructionRequest,
+    volume_construction_request: Mutex<VolumeConstructionRequest>,
 }
 
 /// Retry a request in the face of network weather
@@ -396,6 +400,116 @@ impl PantryEntry {
         self.volume.deactivate().await?;
         Ok(())
     }
+
+    pub async fn volume_is_active(&self) -> Result<bool, CrucibleError> {
+        self.volume.query_is_active().await
+    }
+
+    pub async fn activate(&self) -> Result<(), CrucibleError> {
+        self.volume.activate().await
+    }
+
+    pub async fn replace(
+        &self,
+        new_vcr: VolumeConstructionRequest,
+    ) -> Result<ReplaceResult, CrucibleError> {
+        let mut mg = self.volume_construction_request.lock().await;
+        let current_vcr = mg.clone();
+
+        let result = self
+            .volume
+            .target_replace(current_vcr, new_vcr.clone())
+            .await?;
+
+        // If target_replace returned Ok, then replace this entry's vcr with the
+        // new one.
+        *mg = new_vcr;
+
+        Ok(result)
+    }
+}
+
+#[derive(Default)]
+pub struct PantryJobs {
+    job_handles: BTreeMap<String, JoinHandle<Result<(), CrucibleError>>>,
+    volume_id_to_job_ids: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl PantryJobs {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn total_job_handles(&self) -> usize {
+        self.job_handles.len()
+    }
+
+    pub fn num_job_handles_for_volume(&self, volume_id: &str) -> usize {
+        match self.volume_id_to_job_ids.get(volume_id) {
+            Some(job_ids) => job_ids.len(),
+            None => 0,
+        }
+    }
+
+    pub fn get(
+        &self,
+        job_id: &str,
+    ) -> Option<&JoinHandle<Result<(), CrucibleError>>> {
+        self.job_handles.get(job_id)
+    }
+
+    pub fn contains_job(&self, job_id: &str) -> bool {
+        self.job_handles.contains_key(job_id)
+    }
+
+    pub fn insert(
+        &mut self,
+        volume_id: String,
+        job_id: String,
+        handle: JoinHandle<Result<(), CrucibleError>>,
+    ) -> Option<JoinHandle<Result<(), CrucibleError>>> {
+        let inserted = self
+            .volume_id_to_job_ids
+            .entry(volume_id)
+            .or_default()
+            .insert(job_id.clone());
+
+        assert!(inserted);
+
+        self.job_handles.insert(job_id, handle)
+    }
+
+    pub fn remove(
+        &mut self,
+        job_id: &str,
+    ) -> Option<JoinHandle<Result<(), CrucibleError>>> {
+        // Does this job exist?
+        let job = self.job_handles.remove(job_id);
+
+        if job.is_some() {
+            // Each job id should map to one volume id
+            let mut job_volume_id: Vec<String> = self
+                .volume_id_to_job_ids
+                .iter()
+                .filter(|(_, job_ids)| job_ids.contains(job_id))
+                .map(|(volume_id, _)| volume_id.clone())
+                .collect();
+
+            assert_eq!(job_volume_id.len(), 1);
+
+            let volume_id = job_volume_id.pop().unwrap();
+
+            let existing = self
+                .volume_id_to_job_ids
+                .entry(volume_id)
+                .or_default()
+                .remove(job_id);
+
+            assert!(existing);
+        }
+
+        job
+    }
 }
 
 /// Pantry stores opened Volumes in-memory
@@ -409,7 +523,7 @@ pub struct Pantry {
 
     /// Pantry can run background jobs on Volumes, and currently running jobs
     /// are stored here.
-    jobs: Mutex<BTreeMap<String, JoinHandle<Result<(), CrucibleError>>>>,
+    jobs: Mutex<PantryJobs>,
 }
 
 impl Pantry {
@@ -417,7 +531,24 @@ impl Pantry {
         Ok(Pantry {
             log,
             entries: Mutex::new(BTreeMap::default()),
-            jobs: Mutex::new(BTreeMap::default()),
+            jobs: Mutex::new(PantryJobs::new()),
+        })
+    }
+
+    pub async fn status(&self) -> Result<PantryStatus, HttpError> {
+        let volumes = self
+            .entries
+            .lock()
+            .await
+            .iter()
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        let num_job_handles = self.jobs.lock().await.total_job_handles();
+
+        Ok(PantryStatus {
+            volumes,
+            num_job_handles,
         })
     }
 
@@ -431,7 +562,8 @@ impl Pantry {
             // This function must be idempotent for the same inputs. If an entry
             // at this ID exists already, compare the existing volume
             // construction request, and return either Ok or conflict
-            if entry.volume_construction_request == volume_construction_request
+            if *entry.volume_construction_request.lock().await
+                == volume_construction_request
             {
                 info!(
                     self.log,
@@ -482,11 +614,98 @@ impl Pantry {
             Arc::new(PantryEntry {
                 log: self.log.new(o!("volume" => volume_id.clone())),
                 volume,
-                volume_construction_request,
+                volume_construction_request: Mutex::new(
+                    volume_construction_request,
+                ),
             }),
         );
 
         info!(self.log, "volume {} constructed and inserted ok", volume_id);
+
+        Ok(())
+    }
+
+    /// Perform attach, with activation done in a job.
+    pub async fn attach_activate_background(
+        &self,
+        volume_id: String,
+        job_id: String,
+        volume_construction_request: VolumeConstructionRequest,
+    ) -> Result<(), CrucibleError> {
+        let mut entries = self.entries.lock().await;
+        if let Some(entry) = entries.get(&volume_id) {
+            // This function must be idempotent for the same inputs. If an entry
+            // at this ID exists already, compare the existing volume
+            // construction request, and return either Ok or conflict
+            if *entry.volume_construction_request.lock().await
+                == volume_construction_request
+            {
+                error!(
+                    self.log,
+                    "volume {} already an entry, and has same volume \
+                    construction request, returning OK",
+                    volume_id,
+                );
+
+                return Ok(());
+            } else {
+                error!(
+                    self.log,
+                    "volume {} already an entry, but has different volume \
+                    construction request, bailing!",
+                    volume_id,
+                );
+
+                crucible_bail!(
+                    Unsupported,
+                    "Existing entry for {} with different volume construction \
+                    request!",
+                    volume_id,
+                );
+            }
+        }
+
+        // To make this function idempotent, the user must supply the job id. If
+        // that job id already exists, then bail out.
+        let mut jobs = self.jobs.lock().await;
+
+        if jobs.contains_job(&job_id) {
+            crucible_bail!(Unsupported, "Existing job id {}", job_id,);
+        }
+
+        // If no entry exists, then add one
+        info!(
+            self.log,
+            "no entry exists for volume {}, constructing...", volume_id
+        );
+
+        let volume = Volume::construct(
+            volume_construction_request.clone(),
+            None,
+            self.log.clone(),
+        )
+        .await?;
+
+        info!(self.log, "volume {} constructed ok", volume_id);
+
+        let entry = Arc::new(PantryEntry {
+            log: self.log.new(o!("volume" => volume_id.clone())),
+            volume,
+            volume_construction_request: Mutex::new(
+                volume_construction_request,
+            ),
+        });
+
+        entries.insert(volume_id.clone(), entry.clone());
+
+        info!(self.log, "volume {} constructed and inserted ok", volume_id);
+
+        let join_handle = tokio::spawn(async move { entry.activate().await });
+
+        info!(self.log, "volume {} activating in background", volume_id);
+
+        jobs.insert(volume_id, job_id.clone(), join_handle);
+        drop(jobs);
 
         Ok(())
     }
@@ -525,6 +744,30 @@ impl Pantry {
                 Err(HttpError::for_not_found(None, volume_id))
             }
         }
+    }
+
+    pub async fn volume_status(
+        &self,
+        volume_id: String,
+    ) -> Result<VolumeStatus, HttpError> {
+        let entry = self.entry(volume_id.clone()).await?;
+
+        let jobs = self.jobs.lock().await;
+
+        Ok(VolumeStatus {
+            active: entry.volume_is_active().await?,
+            num_job_handles: jobs.num_job_handles_for_volume(&volume_id),
+        })
+    }
+
+    pub async fn replace(
+        &self,
+        volume_id: String,
+        new_vcr: VolumeConstructionRequest,
+    ) -> Result<ReplaceResult, HttpError> {
+        let entry = self.entry(volume_id.clone()).await?;
+        let result = entry.replace(new_vcr).await?;
+        Ok(result)
     }
 
     pub async fn is_job_finished(
@@ -582,7 +825,7 @@ impl Pantry {
         url: String,
         expected_digest: Option<ExpectedDigest>,
     ) -> Result<String, HttpError> {
-        let entry = self.entry(volume_id).await?;
+        let entry = self.entry(volume_id.clone()).await?;
         let entry = entry.clone();
 
         let join_handle = tokio::spawn(async move {
@@ -591,7 +834,7 @@ impl Pantry {
 
         let mut jobs = self.jobs.lock().await;
         let job_id = Uuid::new_v4().to_string();
-        jobs.insert(job_id.clone(), join_handle);
+        jobs.insert(volume_id, job_id.clone(), join_handle);
 
         Ok(job_id)
     }
@@ -626,14 +869,14 @@ impl Pantry {
     }
 
     pub async fn scrub(&self, volume_id: String) -> Result<String, HttpError> {
-        let entry = self.entry(volume_id).await?;
+        let entry = self.entry(volume_id.clone()).await?;
         let entry = entry.clone();
 
         let join_handle = tokio::spawn(async move { entry.scrub().await });
 
         let mut jobs = self.jobs.lock().await;
         let job_id = Uuid::new_v4().to_string();
-        jobs.insert(job_id.clone(), join_handle);
+        jobs.insert(volume_id, job_id.clone(), join_handle);
 
         Ok(job_id)
     }
@@ -644,7 +887,7 @@ impl Pantry {
         expected_digest: ExpectedDigest,
         size_to_verify: Option<u64>,
     ) -> Result<String, HttpError> {
-        let entry = self.entry(volume_id).await?;
+        let entry = self.entry(volume_id.clone()).await?;
         let entry = entry.clone();
 
         let join_handle = tokio::spawn(async move {
@@ -653,7 +896,7 @@ impl Pantry {
 
         let mut jobs = self.jobs.lock().await;
         let job_id = Uuid::new_v4().to_string();
-        jobs.insert(job_id.clone(), join_handle);
+        jobs.insert(volume_id, job_id.clone(), join_handle);
 
         Ok(job_id)
     }

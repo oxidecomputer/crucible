@@ -5,6 +5,30 @@
     "version": "0.0.0"
   },
   "paths": {
+    "/crucible/pantry/0": {
+      "get": {
+        "summary": "Get the Pantry's status",
+        "operationId": "pantry_status",
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PantryStatus"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/crucible/pantry/0/job/{id}/is-finished": {
       "get": {
         "summary": "Poll to see if a Pantry background job is done",
@@ -75,6 +99,38 @@
       }
     },
     "/crucible/pantry/0/volume/{id}": {
+      "get": {
+        "summary": "Get a current Volume's status",
+        "operationId": "volume_status",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VolumeStatus"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
       "post": {
         "summary": "Construct a volume from a VolumeConstructionRequest, storing the result in",
         "description": "the Pantry.",
@@ -134,6 +190,44 @@
         "responses": {
           "204": {
             "description": "successful deletion"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/crucible/pantry/0/volume/{id}/background": {
+      "post": {
+        "summary": "Construct a volume from a VolumeConstructionRequest, storing the result in",
+        "description": "the Pantry. Activate in a separate job so as not to block the request.",
+        "operationId": "attach_activate_background",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AttachBackgroundRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "resource updated"
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -387,6 +481,21 @@
   },
   "components": {
     "schemas": {
+      "AttachBackgroundRequest": {
+        "type": "object",
+        "properties": {
+          "job_id": {
+            "type": "string"
+          },
+          "volume_construction_request": {
+            "$ref": "#/components/schemas/VolumeConstructionRequest"
+          }
+        },
+        "required": [
+          "job_id",
+          "volume_construction_request"
+        ]
+      },
       "AttachRequest": {
         "type": "object",
         "properties": {
@@ -595,6 +704,27 @@
           "job_result_ok"
         ]
       },
+      "PantryStatus": {
+        "type": "object",
+        "properties": {
+          "num_job_handles": {
+            "description": "How many job handles?",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "volumes": {
+            "description": "How many Volumes?",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "num_job_handles",
+          "volumes"
+        ]
+      },
       "ScrubResponse": {
         "type": "object",
         "properties": {
@@ -787,6 +917,25 @@
               "type"
             ]
           }
+        ]
+      },
+      "VolumeStatus": {
+        "type": "object",
+        "properties": {
+          "active": {
+            "description": "Is the Volume active?",
+            "type": "boolean"
+          },
+          "num_job_handles": {
+            "description": "How many job handles are there for this Volume?",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "active",
+          "num_job_handles"
         ]
       }
     },
