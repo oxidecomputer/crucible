@@ -9,7 +9,7 @@
 dtrace:::BEGIN
 {
     show = 21;
-    last = 0;
+    last[pid] = 0;
 }
 
 /*
@@ -19,8 +19,10 @@ dtrace:::BEGIN
 tick-1s
 /show > 20/
 {
+    printf("%6s ", "PID");
     printf("%17s %17s %17s", "DS STATE 0", "DS STATE 1", "DS STATE 2");
     printf("  %5s %5s %5s %5s", "UPW", "DSW", "DELTA", "BAKPR");
+    printf(" %10s", "WRITE_BO");
     printf("  %5s %5s %5s", "NEW0", "NEW1", "NEW2");
     printf("  %5s %5s %5s", "IP0", "IP1", "IP2");
     printf("  %5s %5s %5s", "D0", "D1", "D2");
@@ -32,6 +34,7 @@ tick-1s
 crucible_upstairs*:::up-status
 {
     show = show + 1;
+    printf("%6d ", pid);
     /*
      * State for the three downstairs
      */
@@ -51,14 +54,15 @@ crucible_upstairs*:::up-status
      */
     current_str = json(copyinstr(arg1), "ok.next_job_id");
     current = strtoll(current_str, 10);
-    if (last == 0)
+    if (last[pid] == 0)
         delta = current;
     else
-        delta = current - last;
+        delta = current - last[pid];
 
-    last = current;
+    last[pid] = current;
     printf(" %5d", delta);
     printf(" %5s", json(copyinstr(arg1), "ok.up_backpressure"));
+    printf(" %10s", json(copyinstr(arg1), "ok.write_bytes_out"));
 
     /*
      * New jobs on the work list for each downstairs
