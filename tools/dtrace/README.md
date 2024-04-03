@@ -38,6 +38,41 @@ alan@atrium:dsdrop$ pfexec dtrace -Z -s ./tools/dtrace/downstairs_count.d 56784
   34   34  156  156   172   172   362   362   362
 ```
 
+## get-ds-state.sh
+This script is typically run on a sled where there are Propolis zones.
+It will print the zone, the PID, and the state of each downstairs for
+the propolis-server process.
+
+Example output would look like this:
+```
+root@BRM42220014:~# /tmp/get-ds-state.sh
+oxz_propolis-server_34aa5f9c-d933-49fa-b38e-fc4607933d50  28022            active            active            active
+oxz_propolis-server_3cef2a36-c2c3-49a6-bf38-f3d340264b1c   7737            active            active            active
+oxz_propolis-server_3a1b039a-e41f-4968-a672-0d6900830219   8766            active            active            active
+oxz_propolis-server_373e09ac-abcc-418d-a989-5184429042da   9984            active            active            active
+oxz_propolis-server_491d90a6-813e-4b83-b158-7bf708dd91f5  10335            active            active            active
+oxz_propolis-server_4d78774c-6818-4a2f-bceb-35ca5d9affa4  11016            active            active            active
+oxz_propolis-server_f14ba802-0d1a-4320-b4a2-192f7a6d0c5e  11817            active            active            active
+```
+
+## get-lr-state.sh
+This script is typically run on a sled where there are Propolis zones.
+It will print the zone, the PID, and counters for live repair completed on
+each of the three downstairs, then counters for live repair aborted on each
+of the three downstairs.
+
+Example output would look like this:
+```
+root@BRM42220014:~# /tmp/get-lr-state.sh
+oxz_propolis-server_34aa5f9c-d933-49fa-b38e-fc4607933d50  28022 0 0 0 0 0 0
+oxz_propolis-server_3cef2a36-c2c3-49a6-bf38-f3d340264b1c   7737 0 0 0 0 0 0
+oxz_propolis-server_3a1b039a-e41f-4968-a672-0d6900830219   8766 0 0 0 0 0 0
+oxz_propolis-server_373e09ac-abcc-418d-a989-5184429042da   9984 0 0 0 0 0 0
+oxz_propolis-server_491d90a6-813e-4b83-b158-7bf708dd91f5  10335 0 0 0 0 0 0
+oxz_propolis-server_4d78774c-6818-4a2f-bceb-35ca5d9affa4  11016 0 0 0 0 0 0
+oxz_propolis-server_f14ba802-0d1a-4320-b4a2-192f7a6d0c5e  11817 0 0 0 0 0 0
+```
+
 ## perf-upstairs-rw.d
 A DTrace script to track writes and flushes through the upstairs.
 The shows the time in three parts:
@@ -343,8 +378,11 @@ pfexec dtrace -s upstairs_info.d
 You start crucible, then run the above script.  Output should start appearing
 within a few seconds.
 
-The output has several columns.  The first three will list the state of each
-of the three downstairs.  Following that the remaining columns all indicate
+The output has several columns.  The first is the PID of the process where
+we collected the DTrace states.  The next three will list the state of each
+of the three downstairs. 
+
+Following that the remaining columns all indicate
 various work queues and job state for work internal to the Upstairs.  Before we
 describe the columns, a bit of detail about the internal structure of Crucible
 upstairs is needed.
@@ -360,26 +398,30 @@ to complete this job.  For each downstairs job, there is a state for that job
 on each of the three downstairs.
 
 Now, back to the columns.
-Columns four and five show the count of active jobs for the guest side (UPW)
+Columns five and six show the count of active jobs for the guest side (UPW)
 and for the downstairs side (DSW).
 
+DELTA column is the difference in JobID since the last stat was gathered.
+This is roughly the number of new jobs that have been sent to the downstairs.
+BAKPR column shows the delay applied to guest write operations.
+WRITE_BO column is the number of write bytes that haven't finished.
 
-The remaining columns 6-20 show the count of job states on each downstairs.
+The remaining columns show the count of job states on each downstairs.
 Jobs for the downstairs can be in one of five possible states:
  `New`, `In Progress`, `Done`, `Skipped`, `Error`.
-For each state/downstairs, we print a count of jobs in that state.
+For each state/downstairs, we print a count of jobs in that state, except
+for the `Error` state which we don't print.
 
 Here is an example of how it might look:
 ```
 alan@cat:crucible$ pfexec dtrace -s upstairs_info.d
-DS 0 STATE   DS 1 STATE   DS 2 STATE   UPW  DSW  NEW0 NEW1 NEW2   IP0  IP1  IP2    D0   D1   D2    S0   S1   S2  E0 E1 E2
-    active       active       active     1    2     1    1    1     0    0    0     1    1    1     0    0    0   0  0  0
-    active       active       active     4 1259     1    1    1     2    2    2  1256 1256 1256     0    0    0   0  0  0
-    active       active       active     3  557     1    1   77     2    2   99   554  554  381     0    0    0   0  0  0
-    active       active       active     2 1364     0    0  446     1    1  100  1363 1363  818     0    0    0   0  0  0
-    active       active       active     9 1510     1    1   47     8    8  100  1501 1501 1363     0    0    0   0  0  0
-    active       active       active     9 1508     1    1 1317     8    8    0  1499 1499  191     0    0    0   0  0  0
-    active       active       active     9 2175     1    1  576     8    8  100  2166 2166 1499     0    0    0   0  0  0
+   PID  DS STATE 0  DS STATE 1  DS STATE 2  UPW   DSW DELTA BAKPR  WRITE_BO  NEW0 NEW1 NEW2  IP0 IP1 IP2   D0  D1  D2  S0 S1 S2
+  1546      active      active      active    9   165   303    81  82837504     0    0    0   26  17 152  139 148  13   0  0  0
+  1546      active      active      active    7   158   314    33  72351744     0    0    0   32  15 137  126 143  21   0  0  0
+  1546      active      active      active    7   177   327     3  59768832     0    0    0   28  12 113  149 165  64   0  0  0
+  1546      active      active      active    5   154   315    20  68157440     0    0    0   21  11 121  133 143  33   0  0  0
+  1546      active      active      active    7   184   364     0  55574528     0    0    0   15  12 101  169 172  83   0  0  0
+  1546      active      active      active    7   192   362     0  46155264     0    0    0   26  10  95  166 182  97   0  0  0
 ```
 
 ## upstairs_count.d
