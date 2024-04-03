@@ -137,79 +137,71 @@ pub(crate) mod protocol_test {
 
         pub async fn negotiate_start(&mut self) -> Result<()> {
             let packet = self.recv().await.unwrap();
-            match &packet {
-                Message::HereIAm {
-                    version,
-                    upstairs_id: _,
-                    session_id: _,
-                    gen: _,
-                    read_only,
-                    encrypted: _,
-                    alternate_versions: _,
-                } => {
-                    info!(
-                        self.log,
-                        "negotiate packet {:?} (upstairs read-only {})",
-                        packet,
-                        read_only
-                    );
+            if let Message::HereIAm {
+                version,
+                upstairs_id: _,
+                session_id: _,
+                gen: _,
+                read_only,
+                encrypted: _,
+                alternate_versions: _,
+            } = &packet
+            {
+                info!(
+                    self.log,
+                    "negotiate packet {:?} (upstairs read-only {})",
+                    packet,
+                    read_only
+                );
 
-                    if *read_only != self.cfg.read_only {
-                        bail!("read only mismatch!");
-                    }
-
-                    self.send(Message::YesItsMe {
-                        version: *version,
-                        repair_addr: self.repair_addr,
-                    })
-                    .unwrap();
+                if *read_only != self.cfg.read_only {
+                    bail!("read only mismatch!");
                 }
 
-                x => {
-                    bail!("wrong packet {:?}, expected HereIAm", x)
-                }
+                self.send(Message::YesItsMe {
+                    version: *version,
+                    repair_addr: self.repair_addr,
+                })
+                .unwrap();
+            } else {
+                bail!("wrong packet {packet:?}, expected HereIAm")
             }
 
             let packet = self.recv().await.unwrap();
-            match &packet {
-                Message::PromoteToActive {
-                    upstairs_id,
-                    session_id,
-                    gen,
-                } => {
-                    assert!(*gen == 1);
+            if let Message::PromoteToActive {
+                upstairs_id,
+                session_id,
+                gen,
+            } = &packet
+            {
+                assert!(*gen == 1);
 
-                    info!(self.log, "negotiate packet {:?}", packet);
+                info!(self.log, "negotiate packet {:?}", packet);
 
-                    // Record the session id the upstairs sent us
-                    self.upstairs_session_id = Some(*session_id);
+                // Record the session id the upstairs sent us
+                self.upstairs_session_id = Some(*session_id);
 
-                    self.send(Message::YouAreNowActive {
-                        upstairs_id: *upstairs_id,
-                        session_id: *session_id,
-                        gen: *gen,
-                    })
-                    .unwrap();
-                }
-
-                x => {
-                    bail!("wrong packet {:?}, expected PromoteToActive", x)
-                }
+                self.send(Message::YouAreNowActive {
+                    upstairs_id: *upstairs_id,
+                    session_id: *session_id,
+                    gen: *gen,
+                })
+                .unwrap();
+            } else {
+                bail!("wrong packet {packet:?}, expected PromoteToActive")
             }
 
             let packet = self.recv().await.unwrap();
-            match &packet {
-                Message::RegionInfoPlease => {
-                    info!(self.log, "negotiate packet {:?}", packet);
+            if let Message::RegionInfoPlease = &packet {
+                info!(self.log, "negotiate packet {:?}", packet);
 
-                    self.send(Message::RegionInfo {
-                        region_def: self.get_region_definition(),
-                    })
-                    .unwrap();
-                    Ok(())
-                }
-
-                x => bail!("wrong packet: {:?}, expected RegionInfoPlease", x),
+                self.send(Message::RegionInfo {
+                    region_def: self.get_region_definition(),
+                })
+                .unwrap();
+                Ok(())
+            } else {
+                bail!("wrong packet: {packet:?}, expected RegionInfoPlease");
             }
         }
 
@@ -217,22 +209,17 @@ pub(crate) mod protocol_test {
             &mut self,
         ) -> Result<()> {
             let packet = self.recv().await.unwrap();
-            match &packet {
-                Message::ExtentVersionsPlease => {
-                    info!(self.log, "negotiate packet {:?}", packet);
+            if let Message::ExtentVersionsPlease = &packet {
+                info!(self.log, "negotiate packet {:?}", packet);
 
-                    self.send(Message::ExtentVersions {
-                        gen_numbers: self.cfg.gen_numbers.clone(),
-                        flush_numbers: self.cfg.flush_numbers.clone(),
-                        dirty_bits: self.cfg.dirty_bits.clone(),
-                    })
-                    .unwrap();
-                }
-
-                x => bail!(
-                    "wrong packet: {:?}, expected ExtentVersionsPlease",
-                    x
-                ),
+                self.send(Message::ExtentVersions {
+                    gen_numbers: self.cfg.gen_numbers.clone(),
+                    flush_numbers: self.cfg.flush_numbers.clone(),
+                    dirty_bits: self.cfg.dirty_bits.clone(),
+                })
+                .unwrap();
+            } else {
+                bail!("wrong packet: {packet:?}, expected ExtentVersionsPlease")
             }
 
             Ok(())
@@ -243,15 +230,13 @@ pub(crate) mod protocol_test {
             last_flush_number: JobId,
         ) -> Result<()> {
             let packet = self.recv().await.unwrap();
-            match &packet {
-                Message::LastFlush { .. } => {
-                    info!(self.log, "negotiate packet {:?}", packet);
+            if let Message::LastFlush { .. } = &packet {
+                info!(self.log, "negotiate packet {:?}", packet);
 
-                    self.send(Message::LastFlushAck { last_flush_number })
-                        .unwrap();
-                }
-
-                x => bail!("wrong packet: {:?}, expected LastFlush", x),
+                self.send(Message::LastFlushAck { last_flush_number })
+                    .unwrap();
+            } else {
+                bail!("wrong packet: {packet:?}, expected LastFlush");
             }
 
             Ok(())
