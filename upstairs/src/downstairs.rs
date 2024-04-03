@@ -20,7 +20,6 @@ use crate::{
     ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
     WorkSummary,
 };
-use crucible_common::MAX_ACTIVE_COUNT;
 use crucible_protocol::{RawWrite, WriteHeader};
 
 use rand::prelude::*;
@@ -80,7 +79,7 @@ pub(crate) struct Downstairs {
     /// It is stored in the Downstairs because from the perspective of the
     /// Upstairs, writes complete immediately; only the Downstairs is actually
     /// tracking the pending jobs.
-    write_bytes_outstanding: u64,
+    write_bytes_outstanding: BackpressureBytes,
 
     /// The next Job ID this Upstairs should use for downstairs work.
     next_id: JobId,
@@ -118,6 +117,9 @@ pub(crate) struct Downstairs {
     /// Number of extents needing repair during initial activation
     reconcile_repair_needed: usize,
 
+    /// Number of failing attempts to reconcile the downstairs
+    reconcile_repair_aborted: usize,
+
     /// The logger for messages sent from downstairs methods.
     log: Logger,
 
@@ -130,15 +132,53 @@ pub(crate) struct Downstairs {
     ackable_work: BTreeSet<JobId>,
 }
 
+/// Helper struct to contain a count of backpressure bytes
+#[derive(Debug)]
+struct BackpressureBytes(u64);
+
+impl BackpressureBytes {
+    fn new() -> Self {
+        BackpressureBytes(0)
+    }
+
+    /// Ensures that the given `DownstairsIO` is counted for backpressure
+    ///
+    /// This is idempotent: if the job has already been counted, indicated by
+    /// the `DownstairsIO::backpressure_bytes` member being `Some(..)`, it will
+    /// not be counted again.
+    fn increment(&mut self, io: &mut DownstairsIO) {
+        match &io.work {
+            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
+                if io.backpressure_bytes.is_none() {
+                    let n = data.len() as u64;
+                    io.backpressure_bytes = Some(n);
+                    self.0 += n;
+                }
+            }
+            _ => (),
+        };
+    }
+
+    /// Remove the given job's contribution to backpressure
+    ///
+    /// This is idempotent: `DownstairsIO::backpressure_bytes` is set to `None`
+    /// by this function call, so it's harmless to call repeatedly.
+    fn decrement(&mut self, io: &mut DownstairsIO) {
+        if let Some(n) = io.backpressure_bytes.take() {
+            self.0 = self.0.checked_sub(n).unwrap();
+        }
+    }
+}
+
 /// State machine for a live-repair operation
 ///
 /// We pass through all states (except `FinalFlush`) in order for each extent,
 /// then pass through the `FinalFlush` state before completion.  In each state,
 /// we're waiting for a particular job to finish, which is indicated by a
-/// `BlockReqWaiter`.
+/// `BlockOpWaiter`.
 ///
 /// Early states carry around reserved IDs (both `JobId` and guest work IDs), as
-/// well as a reserved `BlockReqWaiter` for the final flush.
+/// well as a reserved `BlockOpWaiter` for the final flush.
 #[derive(Copy, Clone, Debug)]
 pub(crate) enum LiveRepairState {
     Closing {
@@ -277,14 +317,14 @@ impl Downstairs {
                 // jobs of discrepancy
                 jobs_scale: 0.04,
 
-                // max delay is 10 ms.  This is meant to be a gentle nudge, not
-                // a giant shove, and even 10 ms may be too high.
-                max_delay: Duration::from_millis(10),
+                // max delay is 100 ms, chosen experimentally to keep downstairs
+                // in sync even in heavily loaded systems
+                max_delay: Duration::from_millis(100),
             },
             cfg,
             next_flush: 0,
             ds_active: ActiveJobs::new(),
-            write_bytes_outstanding: 0,
+            write_bytes_outstanding: BackpressureBytes::new(),
             completed: AllocRingBuffer::new(2048),
             completed_jobs: AllocRingBuffer::new(8),
             next_id: JobId(1000),
@@ -293,6 +333,7 @@ impl Downstairs {
             reconcile_task_list: VecDeque::new(),
             reconcile_repaired: 0,
             reconcile_repair_needed: 0,
+            reconcile_repair_aborted: 0,
             log: log.new(o!("" => "downstairs".to_string())),
             ackable_work: BTreeSet::new(),
             repair: None,
@@ -361,7 +402,7 @@ impl Downstairs {
     }
 
     /// Send back acks for all jobs that are `AckReady`
-    pub(crate) async fn ack_jobs(
+    pub(crate) fn ack_jobs(
         &mut self,
         gw: &mut GuestWork,
         up_stats: &UpStatOuter,
@@ -371,7 +412,7 @@ impl Downstairs {
         let ack_list = std::mem::take(&mut self.ackable_work);
         let jobs_checked = ack_list.len();
         for ds_id_done in ack_list.iter() {
-            self.ack_job(*ds_id_done, gw, up_stats).await;
+            self.ack_job(*ds_id_done, gw, up_stats);
         }
         debug!(self.log, "ack_ready handled {jobs_checked} jobs");
     }
@@ -382,7 +423,7 @@ impl Downstairs {
     ///
     /// This is public for the sake of unit testing, but shouldn't be called
     /// outside of this module normally.
-    async fn ack_job(
+    fn ack_job(
         &mut self,
         ds_id: JobId,
         gw: &mut GuestWork,
@@ -403,7 +444,7 @@ impl Downstairs {
         Self::cdt_gw_work_done(done, up_stats);
         debug!(self.log, "[A] ack job {}:{}", ds_id, gw_id);
 
-        gw.gw_ds_complete(gw_id, ds_id, data, r, &self.log).await;
+        gw.gw_ds_complete(gw_id, ds_id, data, r);
 
         self.retire_check(ds_id);
     }
@@ -449,28 +490,10 @@ impl Downstairs {
         }
     }
 
-    pub(crate) async fn io_send(&mut self, client_id: ClientId) -> bool {
-        // Send as many jobs as possible to the downstairs, limited by
-        // `MAX_ACTIVE_COUNT`.
-        //
-        // This XXX is for coming back here and making a better job of
-        // flow control; see RFD 445 for details.
+    pub(crate) async fn io_send(&mut self, client_id: ClientId) {
+        // Send all jobs to the downstairs
         let client = &mut self.clients[client_id];
-        let (new_work, flow_control) = {
-            let active_count = client.io_state_count.in_progress as usize;
-            if active_count > MAX_ACTIVE_COUNT {
-                // Can't do any work
-                client.stats.flow_control += 1;
-                return true;
-            } else {
-                let n = MAX_ACTIVE_COUNT - active_count;
-                let (new_work, flow_control) = client.new_work(n);
-                if flow_control {
-                    client.stats.flow_control += 1;
-                }
-                (new_work, flow_control)
-            }
-        };
+        let new_work = client.new_work();
 
         /*
          * Now we have a list of all the job IDs that are new for our client id.
@@ -664,7 +687,6 @@ impl Downstairs {
             };
             self.clients[client_id].send(message).await
         }
-        flow_control
     }
 
     /// Mark this request as in progress for this client, and return the
@@ -872,6 +894,7 @@ impl Downstairs {
             self.ds_active.len(),
         );
 
+        let mut count = 0;
         self.ds_active.for_each(|ds_id, job| {
             // We don't need to send anything before our last good flush
             if *ds_id <= lf {
@@ -879,8 +902,18 @@ impl Downstairs {
                 return;
             }
 
-            self.clients[client_id].replay_job(job);
+            if self.clients[client_id].replay_job(job) {
+                count += 1;
+            }
+
+            // Make sure this job counts for backpressure (this is a no-op if
+            // the job is already counted).
+            self.write_bytes_outstanding.increment(job);
         });
+        info!(
+            self.log,
+            "[{client_id}] Marked {count} jobs for replay since flush: {lf}"
+        );
     }
 
     /// Compare downstairs region metadata and based on the results:
@@ -1033,6 +1066,7 @@ impl Downstairs {
             );
 
             self.reconcile_repair_needed = self.reconcile_task_list.len();
+            self.reconcile_repaired = 0;
 
             Ok(true)
         } else {
@@ -1360,7 +1394,6 @@ impl Downstairs {
                             self.submit_flush(gw_id, None)
                         },
                         None,
-                        None,
                     );
                     info!(self.log, "LiveRepair final flush submitted");
                     cdt::up__to__ds__flush__start!(|| (gw_id.0));
@@ -1435,7 +1468,7 @@ impl Downstairs {
         let nio = Self::create_noop_io(noop_id, deps, gw_noop_id);
 
         cdt::gw__noop__start!(|| (gw_noop_id.0));
-        gw.insert(gw_noop_id, noop_id, None, None);
+        gw.insert(gw_noop_id, noop_id);
         self.enqueue_repair(nio);
     }
 
@@ -1455,6 +1488,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
+            backpressure_bytes: None,
         }
     }
 
@@ -1480,7 +1514,7 @@ impl Downstairs {
 
         cdt::gw__repair__start!(|| (gw_repair_id.0, eid));
 
-        gw.insert(gw_repair_id, repair_id, None, None);
+        gw.insert(gw_repair_id, repair_id);
         self.enqueue_repair(repair_io);
     }
 
@@ -1578,6 +1612,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
+            backpressure_bytes: None,
         }
     }
 
@@ -1718,6 +1753,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
+            backpressure_bytes: None,
         }
     }
 
@@ -1736,7 +1772,7 @@ impl Downstairs {
 
         cdt::gw__reopen__start!(|| (gw_reopen_id.0, eid));
 
-        gw.insert(gw_reopen_id, reopen_id, None, None);
+        gw.insert(gw_reopen_id, reopen_id);
         self.enqueue_repair(reopen_io);
     }
 
@@ -1791,6 +1827,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
+            backpressure_bytes: None,
         };
         self.enqueue(io);
         ds_id
@@ -1871,6 +1908,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
+            backpressure_bytes: None,
         };
         self.enqueue(io);
         ds_id
@@ -1901,6 +1939,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
+            backpressure_bytes: None,
         }
     }
 
@@ -1922,7 +1961,7 @@ impl Downstairs {
         );
 
         cdt::gw__close__start!(|| (gw_close_id.0, eid));
-        gw.insert(gw_close_id, close_id, None, None);
+        gw.insert(gw_close_id, close_id);
         self.enqueue_repair(close_io);
     }
 
@@ -2140,6 +2179,8 @@ impl Downstairs {
 
         if self.clients[client_id].on_reconciliation_job_done(repair_id, next) {
             self.reconcile_current_work = None;
+            self.reconcile_repair_needed -= 1;
+            self.reconcile_repaired += 1;
             self.send_next_reconciliation_req().await
         } else {
             false
@@ -2200,6 +2241,9 @@ impl Downstairs {
         }
 
         self.reconcile = None;
+        self.reconcile_repair_needed = 0;
+        self.reconcile_repaired = 0;
+        self.reconcile_repair_aborted += 1;
     }
 
     /// Asserts that initial reconciliation is done, and sets clients as Active
@@ -2291,6 +2335,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
+            backpressure_bytes: None,
         };
 
         self.enqueue(fl);
@@ -2415,6 +2460,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_response_hashes: Vec::new(),
+            backpressure_bytes: None,
         };
 
         self.enqueue(io);
@@ -2498,14 +2544,8 @@ impl Downstairs {
             }
         }
 
-        // If this is a write (which will be fast-acked), increment our byte
-        // counter for backpressure calculations.
-        match &io.work {
-            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
-                self.write_bytes_outstanding += data.len() as u64;
-            }
-            _ => (),
-        };
+        // Make sure this job is counted for backpressure
+        self.write_bytes_outstanding.increment(&mut io);
         let is_write = matches!(io.work, IOop::Write { .. });
 
         // Puts the IO onto the downstairs work queue.
@@ -2882,7 +2922,19 @@ impl Downstairs {
             }
             // Now that we've collected jobs to retire, remove them from the map
             for &id in &retired {
-                let _ = self.ds_active.remove(&id);
+                let mut job = self.ds_active.remove(&id);
+
+                // Jobs should have their backpressure contribution removed when
+                // they are completed (in `process_io_completion_inner`),
+                // **not** when they are retired.  We'll do a sanity check here
+                // and print a warning if that's not the case.
+                if job.backpressure_bytes.is_some() {
+                    warn!(
+                        self.log,
+                        "job {ds_id} had pending backpressure bytes"
+                    );
+                    self.write_bytes_outstanding.decrement(&mut job);
+                }
             }
 
             debug!(self.log, "[rc] retire {} clears {:?}", ds_id, retired);
@@ -3375,17 +3427,7 @@ impl Downstairs {
         // retired by the next flush).
         let wc = job.state_count();
         if (wc.error + wc.skipped + wc.done) == 3 {
-            match &job.work {
-                IOop::Write { data, .. }
-                | IOop::WriteUnwritten { data, .. } => {
-                    let change = data.len() as u64;
-                    self.write_bytes_outstanding = self
-                        .write_bytes_outstanding
-                        .checked_sub(change)
-                        .unwrap();
-                }
-                _ => (),
-            };
+            self.write_bytes_outstanding.decrement(job);
         }
 
         /*
@@ -3482,6 +3524,11 @@ impl Downstairs {
         self.reconcile_repair_needed
     }
 
+    /// Accessor for [`Downstairs::reconcile_repair_aborted`]
+    pub(crate) fn reconcile_repair_aborted(&self) -> usize {
+        self.reconcile_repair_aborted
+    }
+
     pub(crate) fn get_work_summary(&self) -> crate::control::DownstairsWork {
         let mut kvec: Vec<_> = self.ds_active.keys().cloned().collect();
         kvec.sort_unstable();
@@ -3497,7 +3544,7 @@ impl Downstairs {
     }
 
     pub(crate) fn write_bytes_outstanding(&self) -> u64 {
-        self.write_bytes_outstanding
+        self.write_bytes_outstanding.0
     }
 
     /// Marks a single job as acked
@@ -6585,6 +6632,7 @@ pub(crate) mod test {
                 extent_id: 1,
             },
         ));
+        ds.reconcile_repair_needed = ds.reconcile_task_list.len();
 
         // Send the close job.  Reconciliation isn't done at this point!
         assert!(!ds.send_next_reconciliation_req().await);
@@ -6616,6 +6664,8 @@ pub(crate) mod test {
             ds.on_reconciliation_ack(ClientId::new(2), msg.clone(), &up_state)
                 .await
         );
+        assert_eq!(ds.reconcile_repair_needed, 0);
+        assert_eq!(ds.reconcile_repaired, 2);
     }
 
     #[tokio::test]
@@ -6646,6 +6696,7 @@ pub(crate) mod test {
                 dest_clients: vec![ClientId::new(1), ClientId::new(2)],
             },
         ));
+        ds.reconcile_repair_needed = ds.reconcile_task_list.len();
 
         // Send the job.  Reconciliation isn't done at this point!
         assert!(!ds.send_next_reconciliation_req().await);
@@ -6669,6 +6720,8 @@ pub(crate) mod test {
             ds.on_reconciliation_ack(ClientId::new(2), msg.clone(), &up_state)
                 .await
         );
+        assert_eq!(ds.reconcile_repair_needed, 0);
+        assert_eq!(ds.reconcile_repaired, 1);
     }
 
     #[tokio::test]

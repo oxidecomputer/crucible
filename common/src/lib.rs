@@ -26,9 +26,14 @@ pub mod x509;
 
 pub const REPAIR_PORT_OFFSET: u16 = 4000;
 
-// Max number of submitted IOs between the upstairs and the downstairs, above
-// which flow control kicks in.
-pub const MAX_ACTIVE_COUNT: usize = 2600;
+/// Max number of outstanding IOs between the upstairs and the downstairs
+///
+/// If we exceed this value, the upstairs will give up and mark that downstairs
+/// as faulted.
+///
+/// This is exposed in `crucible-common` so that both sides can pick appropriate
+/// lengths for their `mpsc` queues.
+pub const IO_OUTSTANDING_MAX_JOBS: usize = 57000;
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(
@@ -59,7 +64,7 @@ pub enum CrucibleError {
     #[error("Error grabbing reader-writer {0} lock")]
     RwLockError(String),
 
-    #[error("BlockReqWaiter recv channel disconnected")]
+    #[error("BlockOpWaiter recv channel disconnected")]
     RecvDisconnected,
 
     #[error("SendError: {0}")]
@@ -328,6 +333,11 @@ impl std::fmt::Display for BuildInfo {
  * A common logger setup for all to use.
  */
 pub fn build_logger() -> slog::Logger {
+    build_logger_with_level(slog::Level::Info)
+}
+
+/// Build a logger with the specific log level
+pub fn build_logger_with_level(level: slog::Level) -> slog::Logger {
     let main_drain = if atty::is(atty::Stream::Stdout) {
         let decorator = slog_term::TermDecorator::new().build();
         let drain = slog_term::FullFormat::new(decorator).build().fuse();
@@ -345,7 +355,7 @@ pub fn build_logger() -> slog::Logger {
 
     let (dtrace_drain, probe_reg) = slog_dtrace::Dtrace::new();
 
-    let filtered_main = slog::LevelFilter::new(main_drain, slog::Level::Info);
+    let filtered_main = slog::LevelFilter::new(main_drain, level);
 
     let log = slog::Logger::root(
         slog::Duplicate::new(filtered_main.fuse(), dtrace_drain.fuse()).fuse(),

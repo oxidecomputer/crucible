@@ -16,8 +16,8 @@ use std::time::Duration;
 use crucible_common::{
     build_logger, crucible_bail, deadline_secs,
     impacted_blocks::extent_from_offset, integrity_hash, mkdir_for_file,
-    verbose_timeout, Block, CrucibleError, RegionDefinition, MAX_ACTIVE_COUNT,
-    MAX_BLOCK_SIZE,
+    verbose_timeout, Block, CrucibleError, RegionDefinition,
+    IO_OUTSTANDING_MAX_JOBS, MAX_BLOCK_SIZE,
 };
 use crucible_protocol::{
     BlockContext, CrucibleDecoder, CrucibleEncoder, JobId, Message,
@@ -1117,10 +1117,11 @@ where
 
     // Give our work queue a little more space than we expect the upstairs
     // to ever send us.
-    let (job_channel_tx, job_channel_rx) = mpsc::channel(MAX_ACTIVE_COUNT + 50);
+    let (job_channel_tx, job_channel_rx) =
+        mpsc::channel(IO_OUTSTANDING_MAX_JOBS + 50);
 
     let (resp_channel_tx, resp_channel_rx) =
-        mpsc::channel(MAX_ACTIVE_COUNT + 50);
+        mpsc::channel(IO_OUTSTANDING_MAX_JOBS + 50);
     let mut framed_write_task = tokio::spawn(reply_task(resp_channel_rx, fw));
 
     /*
@@ -1179,7 +1180,7 @@ where
     };
 
     let (message_channel_tx, mut message_channel_rx) =
-        mpsc::channel(MAX_ACTIVE_COUNT + 50);
+        mpsc::channel(IO_OUTSTANDING_MAX_JOBS + 50);
     let mut pf_task = {
         let adc = ads.clone();
         let tx = job_channel_tx.clone();

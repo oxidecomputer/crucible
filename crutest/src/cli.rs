@@ -887,7 +887,7 @@ async fn process_cli_command(
                 match perf_workload(
                     guest,
                     ri,
-                    &mut None,
+                    None,
                     count,
                     io_size,
                     io_depth,

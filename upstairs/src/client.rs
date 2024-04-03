@@ -4,9 +4,11 @@ use crate::{
     upstairs::UpstairsState, ClientIOStateCount, ClientId, CrucibleDecoder,
     CrucibleError, DownstairsIO, DsState, EncryptionContext, IOState, IOop,
     JobId, Message, ReadResponse, ReconcileIO, RegionDefinitionStatus,
-    RegionMetadata, MAX_ACTIVE_COUNT,
+    RegionMetadata,
 };
-use crucible_common::{deadline_secs, verbose_timeout, x509::TLSContext};
+use crucible_common::{
+    deadline_secs, verbose_timeout, x509::TLSContext, IO_OUTSTANDING_MAX_JOBS,
+};
 use crucible_protocol::{
     BlockContext, MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
 };
@@ -273,9 +275,6 @@ impl DownstairsClient {
     pub(crate) fn should_do_more_work(&self) -> bool {
         !self.new_jobs.is_empty()
             && matches!(self.state, DsState::Active | DsState::LiveRepair)
-            && (crate::MAX_ACTIVE_COUNT
-                - self.io_state_count.in_progress as usize)
-                > 0
     }
 
     /// Choose which `ClientAction` to apply
@@ -329,24 +328,8 @@ impl DownstairsClient {
 
     /// Return a list of downstairs request IDs that represent unissued
     /// requests for this client.
-    ///
-    /// Returns a tuple of `(jobs, flow control)` where flow control is true if
-    /// the jobs list has been clamped to `max_count`.
-    pub(crate) fn new_work(
-        &mut self,
-        max_count: usize,
-    ) -> (BTreeSet<JobId>, bool) {
-        if max_count >= self.new_jobs.len() {
-            // Happy path: we can grab everything
-            (std::mem::take(&mut self.new_jobs), false)
-        } else {
-            // Otherwise, pop elements from the queue
-            let mut out = BTreeSet::new();
-            for _ in 0..max_count {
-                out.insert(self.new_jobs.pop_first().unwrap());
-            }
-            (out, true)
-        }
+    pub(crate) fn new_work(&mut self) -> BTreeSet<JobId> {
+        std::mem::take(&mut self.new_jobs)
     }
 
     /// Requeues a single job
@@ -442,20 +425,27 @@ impl DownstairsClient {
         out
     }
 
-    pub(crate) fn replay_job(&mut self, job: &mut DownstairsIO) {
+    /// Ensures that the given job is in the job queue and in `IOState::New`
+    ///
+    /// Returns `true` if the job was requeued, or `false` if it was already `New`
+    pub(crate) fn replay_job(&mut self, job: &mut DownstairsIO) -> bool {
         /*
          * If the job is InProgress or New, then we can just go back
          * to New and no extra work is required.
-         * If it's Done, then by definition it has been acked; assert that here
+         * If it's Done, then by definition it has been acked; test that here
          * to double-check.
          */
-        if IOState::Done == job.state[self.client_id] {
-            assert!(job.acked);
+        if IOState::Done == job.state[self.client_id] && !job.acked {
+            panic!("[{}] This job was not acked: {:?}", self.client_id, job);
         }
+
         let old_state = self.set_job_state(job, IOState::New);
         job.replay = true;
         if old_state != IOState::New {
             self.requeue_one(job.ds_id);
+            true
+        } else {
+            false
         }
     }
 
@@ -558,8 +548,6 @@ impl DownstairsClient {
                 self.log,
                 "Gone missing, transition from {current:?} to {new_state:?}"
             );
-        } else {
-            info!(self.log, "Still missing, state is {current:?}");
         }
 
         // Jobs are skipped and replayed in `Downstairs::reinitialize`, which is
@@ -696,14 +684,14 @@ impl DownstairsClient {
         client_delay_us: Arc<AtomicU64>,
         log: &Logger,
     ) -> ClientTaskHandle {
-        // These channels must support at least MAX_ACTIVE_COUNT messages;
-        // otherwise, we risk a deadlock if the IO task and main task
+        // These channels must support at least IO_OUTSTANDING_MAX_JOBS
+        // messages; otherwise, we risk a deadlock if the IO task and main task
         // simultaneously try sending each other data when the channels are
         // full.
         let (client_request_tx, client_request_rx) =
-            mpsc::channel(MAX_ACTIVE_COUNT * 2);
+            mpsc::channel(IO_OUTSTANDING_MAX_JOBS + 200);
         let (client_response_tx, client_response_rx) =
-            mpsc::channel(MAX_ACTIVE_COUNT * 2);
+            mpsc::channel(IO_OUTSTANDING_MAX_JOBS + 200);
         let (client_stop_tx, client_stop_rx) = oneshot::channel();
         let (client_connect_tx, client_connect_rx) = oneshot::channel();
 
@@ -746,9 +734,9 @@ impl DownstairsClient {
     #[cfg(test)]
     fn new_dummy_task(connect: bool) -> ClientTaskHandle {
         let (client_request_tx, client_request_rx) =
-            mpsc::channel(MAX_ACTIVE_COUNT * 2);
+            mpsc::channel(IO_OUTSTANDING_MAX_JOBS + 200);
         let (_client_response_tx, client_response_rx) =
-            mpsc::channel(MAX_ACTIVE_COUNT * 2);
+            mpsc::channel(IO_OUTSTANDING_MAX_JOBS + 200);
         let (client_stop_tx, client_stop_rx) = oneshot::channel();
         let (client_connect_tx, client_connect_rx) = oneshot::channel();
 
@@ -2139,7 +2127,7 @@ impl DownstairsClient {
     ) {
         // If someone has moved us out of reconcile, this is a logic error
         if self.state != DsState::Reconcile {
-            panic!("should still be in reconcile");
+            panic!("[{}] should still be in reconcile", self.client_id);
         }
         let prev_state = job.state.insert(self.client_id, IOState::InProgress);
         assert_eq!(prev_state, IOState::New);
@@ -2163,7 +2151,7 @@ impl DownstairsClient {
                     let prev_state =
                         job.state.insert(self.client_id, IOState::Skipped);
                     assert_eq!(prev_state, IOState::InProgress);
-                    info!(self.log, "no action needed request {repair_id:?}");
+                    debug!(self.log, "no action needed request {repair_id:?}");
                 }
             }
             Message::ExtentFlush {
@@ -2172,10 +2160,10 @@ impl DownstairsClient {
                 ..
             } => {
                 if *client_id == self.client_id {
-                    info!(self.log, "sending flush request {repair_id:?}");
+                    debug!(self.log, "sending flush request {repair_id:?}");
                     self.send(job.op.clone()).await;
                 } else {
-                    info!(self.log, "skipping flush request {repair_id:?}");
+                    debug!(self.log, "skipping flush request {repair_id:?}");
                     // Skip this job for this Downstairs, since it's narrowly
                     // aimed at a different client.
                     let prev_state =
@@ -2318,9 +2306,6 @@ pub(crate) struct DownstairsStats {
 
     /// Count of downstairs replacements
     pub replaced: usize,
-
-    /// Count of times a downstairs has had flow control turned on
-    pub flow_control: usize,
 }
 
 /// When the upstairs halts the IO client task, it must provide a reason
@@ -2524,7 +2509,7 @@ impl ClientIoTask {
         // spinning (e.g. if something is fundamentally wrong with the
         // Downstairs)
         if self.delay {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         }
 
         // Wait for the start oneshot to fire.  This may happen immediately, but

@@ -46,7 +46,7 @@ pub mod block_io;
 pub use block_io::{FileBlockIO, ReqwestBlockIO};
 
 pub mod block_req;
-pub(crate) use block_req::{BlockReq, BlockReqReply, BlockReqWaiter, BlockRes};
+pub(crate) use block_req::{BlockOpWaiter, BlockRes};
 
 mod buffer;
 pub use buffer::Buffer; // used in BlockIO::Read, so it must be public
@@ -79,12 +79,6 @@ mod client;
 mod downstairs;
 mod upstairs;
 use upstairs::{UpCounters, UpstairsAction};
-
-/// Max number of outstanding IOs between the upstairs and the downstairs
-///
-/// If we exceed this value, the upstairs will give up and mark that downstairs
-/// as faulted.
-const IO_OUTSTANDING_MAX_JOBS: usize = 57000;
 
 /// Max number of write bytes between the upstairs and the downstairs
 ///
@@ -231,22 +225,6 @@ pub type CrucibleBlockIOFuture<'a> = Pin<
             + 'a,
     >,
 >;
-
-/// Await on the results of multiple BlockIO operations
-///
-/// Using [async_trait] with the BlockIO trait will perform Box::pin on the
-/// result of the async operation functions. `join_all` is provided here to
-/// consume a list of multiple BlockIO operations' futures and await them all.
-#[inline]
-pub async fn join_all<'a>(
-    iter: impl IntoIterator<Item = CrucibleBlockIOFuture<'a>>,
-) -> Result<(), CrucibleError> {
-    futures::future::join_all(iter)
-        .await
-        .into_iter()
-        .collect::<Result<Vec<()>, CrucibleError>>()
-        .map(|_| ())
-}
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum ReplaceResult {
@@ -918,6 +896,9 @@ struct DownstairsIO {
      */
     data: Option<Vec<ReadResponse>>,
     read_response_hashes: Vec<Option<u64>>,
+
+    /// Number of bytes that this job has contributed to guest backpressure
+    backpressure_bytes: Option<u64>,
 }
 
 impl DownstairsIO {
@@ -1457,66 +1438,73 @@ impl fmt::Display for AckStatus {
     }
 }
 
-/*
- * Inspired from Propolis block.rs
- *
- * The following are the operations that Crucible supports from outside
- * callers. We have extended this to cover a bunch of test operations as
- * well. The first three are the supported operations, the other operations
- * tell the upstairs to behave in specific ways.
- */
+/// Operations supported by Crucible
+///
+/// This is inspired by Propolis's `block.rs`, but is internal to the Crucible
+/// upstairs crate (i.e. what you're reading right now).  The outside world
+/// uses the [`Guest`] API, which translates into these types internally when
+/// passing messages to the [`Upstairs`](crate::upstairs::Upstairs).
 #[derive(Debug)]
-pub enum BlockOp {
+pub(crate) enum BlockOp {
     Read {
         offset: Block,
         data: Buffer,
+        done: BlockRes<Buffer, (Buffer, CrucibleError)>,
     },
     Write {
         offset: Block,
         data: BytesMut,
+        done: BlockRes,
     },
     WriteUnwritten {
         offset: Block,
         data: BytesMut,
+        done: BlockRes,
     },
     Flush {
         snapshot_details: Option<SnapshotDetails>,
+        done: BlockRes,
     },
-    GoActive,
+    GoActive {
+        done: BlockRes,
+    },
     GoActiveWithGen {
         gen: u64,
+        done: BlockRes,
     },
-    Deactivate,
+    Deactivate {
+        done: BlockRes,
+    },
     // Management commands
     ReplaceDownstairs {
         id: Uuid,
         old: SocketAddr,
         new: SocketAddr,
-        result: Arc<Mutex<ReplaceResult>>,
+        done: BlockRes<ReplaceResult>,
     },
     // Query ops
     QueryBlockSize {
-        data: Arc<Mutex<u64>>,
+        done: BlockRes<u64>,
     },
     QueryTotalSize {
-        data: Arc<Mutex<u64>>,
+        done: BlockRes<u64>,
     },
     QueryGuestIOReady {
-        data: Arc<Mutex<bool>>,
+        done: BlockRes<bool>,
     },
     QueryUpstairsUuid {
-        data: Arc<Mutex<Uuid>>,
+        done: BlockRes<Uuid>,
     },
     // Begin testing options.
     QueryExtentSize {
-        data: Arc<Mutex<Block>>,
+        done: BlockRes<Block>,
     },
     QueryWorkQueue {
-        data: Arc<Mutex<WQCounts>>,
+        done: BlockRes<WQCounts>,
     },
     // Show internal work queue, return outstanding IO requests.
     ShowWork {
-        data: Arc<Mutex<WQCounts>>,
+        done: BlockRes<WQCounts>,
     },
 }
 
@@ -1542,10 +1530,10 @@ impl BlockOp {
      */
     pub fn iops(&self, iop_sz: usize) -> Option<usize> {
         match self {
-            BlockOp::Read { offset: _, data } => {
+            BlockOp::Read { data, .. } => {
                 Some(ceiling_div!(data.len(), iop_sz))
             }
-            BlockOp::Write { offset: _, data } => {
+            BlockOp::Write { data, .. } => {
                 Some(ceiling_div!(data.len(), iop_sz))
             }
             _ => None,
@@ -1553,18 +1541,14 @@ impl BlockOp {
     }
 
     pub fn consumes_iops(&self) -> bool {
-        matches!(
-            self,
-            BlockOp::Read { offset: _, data: _ }
-                | BlockOp::Write { offset: _, data: _ }
-        )
+        matches!(self, BlockOp::Read { .. } | BlockOp::Write { .. })
     }
 
     // Return the total size of this BlockOp
     pub fn sz(&self) -> Option<usize> {
         match self {
-            BlockOp::Read { offset: _, data } => Some(data.len()),
-            BlockOp::Write { offset: _, data } => Some(data.len()),
+            BlockOp::Read { data, .. } => Some(data.len()),
+            BlockOp::Write { data, .. } => Some(data.len()),
             _ => None,
         }
     }
@@ -1577,24 +1561,28 @@ async fn test_return_iops() {
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(1, 512),
+        done: BlockOpWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(8, 512), // 4096 bytes
+        done: BlockOpWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(31, 512), // 15872 bytes < 16000
+        done: BlockOpWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(32, 512), // 16384 bytes > 16000
+        done: BlockOpWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 2);
 }
@@ -1624,6 +1612,8 @@ pub struct Arg {
     pub ds_reconciled: usize,
     /// Extents still needing repair during initial reconciliation.
     pub ds_reconcile_needed: usize,
+    /// Times we failed the initial reconcile.
+    pub ds_reconcile_aborted: usize,
     /// Times we have completed a LiveRepair on a downstairs.
     pub ds_live_repair_completed: [usize; 3],
     /// Times we aborted a LiveRepair on a downstairs.
@@ -1632,12 +1622,12 @@ pub struct Arg {
     pub ds_connected: [usize; 3],
     /// Times this downstairs has been replaced.
     pub ds_replaced: [usize; 3],
-    /// Times flow control has been enabled on this downstairs.
-    pub ds_flow_control: [usize; 3],
     /// Times we have live repaired an extent on this downstairs.
     pub ds_extents_repaired: [usize; 3],
     /// Times we have live confirmed  an extent on this downstairs.
     pub ds_extents_confirmed: [usize; 3],
+    /// If in Live Repair, the current extent we are repairing.
+    pub ds_extent_limit: usize,
     /// Per-client delay to keep them roughly in sync
     pub ds_delay_us: [usize; 3],
     /// Times we skipped repairing a downstairs because we are read_only.
