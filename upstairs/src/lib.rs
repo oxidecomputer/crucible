@@ -33,7 +33,10 @@ use aes_gcm_siv::aead::AeadInPlace;
 use aes_gcm_siv::{Aes256GcmSiv, Key, KeyInit, Nonce, Tag};
 
 pub mod control;
+
+#[cfg(test)]
 mod dummy_downstairs_tests;
+
 mod pseudo_file;
 
 pub mod volume;

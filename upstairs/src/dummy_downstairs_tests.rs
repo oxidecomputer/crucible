@@ -1,6 +1,8 @@
 // Copyright 2023 Oxide Computer Company
 
-#[cfg(test)]
+#[cfg(not(test))]
+compile_error!("dummy_downstairs should only be used in unit tests");
+
 pub(crate) mod protocol_test {
     use std::sync::Arc;
     use std::time::Duration;
@@ -34,6 +36,7 @@ pub(crate) mod protocol_test {
     use slog::error;
     use slog::info;
     use slog::o;
+    use slog::warn;
     use slog::Drain;
     use slog::Logger;
     use std::net::SocketAddr;
@@ -276,7 +279,11 @@ pub(crate) mod protocol_test {
 
         /// Stops the loopback worker, returning the `TcpListener` for reuse
         pub async fn halt(self) -> TcpListener {
-            self.stop.send(()).expect("could not stop worker");
+            if let Err(()) = self.stop.send(()) {
+                // This may be fine, if the worker was kicked out and stopped on
+                // its own (e.g. because one of its queues was closed)
+                warn!(self.log, "could not stop loopback worker");
+            }
             let r = self.loopback_worker.await;
             r.expect("failed to join loopback worker")
                 .expect("loopback worker returned an error")
@@ -299,16 +306,17 @@ pub(crate) mod protocol_test {
         async fn start(self, log: Logger) -> DownstairsHandle {
             let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
             let listener = TcpListener::bind(&bind_addr).await.unwrap();
+            let uuid = Uuid::new_v4();
 
-            self.start_with_listener(log, listener).await
+            self.restart(uuid, listener, log).await
         }
 
-        async fn start_with_listener(
+        async fn restart(
             self,
-            log: Logger,
+            uuid: Uuid,
             listener: TcpListener,
+            log: Logger,
         ) -> DownstairsHandle {
-            let uuid = Uuid::new_v4();
             let local_addr = listener.local_addr().unwrap();
 
             // Dummy repair task, to get a SocketAddr for the `YesItsMe` reply
@@ -524,8 +532,9 @@ pub(crate) mod protocol_test {
             let ds1 = self.take_ds1();
             let cfg = ds1.cfg.clone();
             let log = ds1.log.clone();
+            let uuid = ds1.uuid;
             let listener = ds1.halt().await;
-            self.ds1 = Some(cfg.start_with_listener(log, listener).await);
+            self.ds1 = Some(cfg.restart(uuid, listener, log).await);
         }
     }
 
@@ -2577,9 +2586,10 @@ pub(crate) mod protocol_test {
             tokio::spawn(async move {
                 let cfg = ds1.cfg.clone();
                 let log = ds1.log.clone();
+                let uuid = ds1.uuid;
                 let listener = ds1.halt().await;
                 reconnected.store(RECONNECT_TRYING, Ordering::Release);
-                let mut ds1 = cfg.start_with_listener(log, listener).await;
+                let mut ds1 = cfg.restart(uuid, listener, log).await;
 
                 ds1.negotiate_start().await.unwrap();
                 reconnected.store(RECONNECT_DONE, Ordering::Release);
