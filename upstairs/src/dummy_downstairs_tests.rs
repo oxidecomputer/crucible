@@ -89,18 +89,14 @@ pub(crate) mod protocol_test {
         async fn recv(&mut self) -> Option<Message> {
             loop {
                 let packet = self.rx.recv().await?;
-                match packet {
-                    Message::Ruok => {
-                        // Respond to pings right away
-                        if let Err(e) = self.send(Message::Imok) {
-                            error!(self.log, "could not send ping: {e:?}");
-                        }
-                        info!(self.log, "responded to ping");
-
-                        continue;
+                if packet == Message::Ruok {
+                    // Respond to pings right away
+                    if let Err(e) = self.send(Message::Imok) {
+                        error!(self.log, "could not send ping: {e:?}");
                     }
-
-                    x => break Some(x),
+                    info!(self.log, "responded to ping");
+                } else {
+                    break Some(packet);
                 }
             }
         }
@@ -111,18 +107,16 @@ pub(crate) mod protocol_test {
         fn try_recv(&mut self) -> Result<Message, mpsc::error::TryRecvError> {
             loop {
                 let packet = self.rx.try_recv();
-                match packet {
-                    Ok(Message::Ruok) => {
-                        // Respond to pings right away
-                        if let Err(e) = self.send(Message::Imok) {
-                            error!(self.log, "could not send ping: {e:?}");
-                        }
-                        info!(self.log, "responded to ping");
-
-                        continue;
+                if packet == Ok(Message::Ruok) {
+                    // Respond to pings right away
+                    if let Err(e) = self.send(Message::Imok) {
+                        error!(self.log, "could not send ping: {e:?}");
                     }
+                    info!(self.log, "responded to ping");
 
-                    m => break m,
+                    continue;
+                } else {
+                    break packet;
                 }
             }
         }
