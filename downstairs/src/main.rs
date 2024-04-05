@@ -47,7 +47,7 @@ enum Args {
     /// the region here will be replaced.
     Clone {
         /// Directory where the region is located.
-        #[clap(short, long, name = "DIRECTORY", action)]
+        #[clap(short, long, value_name = "DIRECTORY", action)]
         data: PathBuf,
 
         /// Source IP:Port where the extent files will come from.
@@ -58,26 +58,50 @@ enum Args {
         trace_endpoint: Option<String>,
     },
     Create {
+        /// Block size.
         #[clap(long, default_value = "512", action)]
         block_size: u64,
 
-        #[clap(short, long, name = "DIRECTORY", action)]
+        /// Directory where the region files we be located.
+        #[clap(short, long, value_name = "DIRECTORY", action)]
         data: PathBuf,
 
+        /// Number of blocks per extent file.
         #[clap(long, default_value = "100", action)]
         extent_size: u64,
 
+        /// Number of extent files.
         #[clap(long, default_value = "15", action)]
         extent_count: u64,
 
-        #[clap(short, long, name = "FILE", action)]
+        /// Import data for the extent from this file.
+        #[clap(
+            short,
+            long,
+            value_name = "FILE",
+            action,
+            conflicts_with = "clone_source"
+        )]
         import_path: Option<PathBuf>,
 
-        #[clap(short, long, name = "UUID", action)]
+        /// UUID for the region.
+        #[clap(short, long, value_name = "UUID", action)]
         uuid: Uuid,
 
+        /// Will the region be encrypted.
         #[clap(long, action)]
         encrypted: bool,
+
+        /// Clone another downstairs after creating.
+        ///
+        /// IP:Port where the extent files will come from.
+        #[clap(
+            long,
+            value_name = "SOURCE",
+            action,
+            conflicts_with = "import_path"
+        )]
+        clone_source: Option<SocketAddr>,
     },
     /*
      * Dump region information.
@@ -90,7 +114,7 @@ enum Args {
         /*
          * Directories containing a region.
          */
-        #[clap(short, long, name = "DIRECTORY", action)]
+        #[clap(short, long, value_name = "DIRECTORY", action)]
         data: Vec<PathBuf>,
 
         /*
@@ -119,16 +143,16 @@ enum Args {
         /*
          * Number of blocks to export.
          */
-        #[clap(long, default_value = "0", name = "COUNT", action)]
+        #[clap(long, default_value = "0", value_name = "COUNT", action)]
         count: u64,
 
-        #[clap(short, long, name = "DIRECTORY", action)]
+        #[clap(short, long, value_name = "DIRECTORY", action)]
         data: PathBuf,
 
-        #[clap(short, long, name = "OUT_FILE", action)]
+        #[clap(short, long, value_name = "OUT_FILE", action)]
         export_path: PathBuf,
 
-        #[clap(short, long, default_value = "0", name = "SKIP", action)]
+        #[clap(short, long, default_value = "0", value_name = "SKIP", action)]
         skip: u64,
     },
     Run {
@@ -137,13 +161,13 @@ enum Args {
             short,
             long,
             default_value = "0.0.0.0",
-            name = "ADDRESS",
+            value_name = "ADDRESS",
             action
         )]
         address: IpAddr,
 
         /// Directory where the region is located.
-        #[clap(short, long, name = "DIRECTORY", action)]
+        #[clap(short, long, value_name = "DIRECTORY", action)]
         data: PathBuf,
 
         /// Test option, makes the search for new work sleep and sometimes
@@ -156,7 +180,7 @@ enum Args {
          * oximeter server, the downstairs will publish stats.
          */
         /// Use this address:port to send stats to an Oximeter server.
-        #[clap(long, name = "OXIMETER_ADDRESS:PORT", action)]
+        #[clap(long, value_name = "OXIMETER_ADDRESS:PORT", action)]
         oximeter: Option<SocketAddr>,
 
         /// Listen on this port for the upstairs to connect to us.
@@ -204,7 +228,7 @@ enum Args {
         #[clap(long, default_value_t = 512)]
         block_size: u64,
 
-        #[clap(short, long, name = "DIRECTORY")]
+        #[clap(short, long, value_name = "DIRECTORY")]
         data: PathBuf,
 
         #[clap(long, default_value_t = 100)]
@@ -287,10 +311,11 @@ async fn main() -> Result<()> {
             import_path,
             uuid,
             encrypted,
+            clone_source,
         } => {
             let mut region = create_region(
                 block_size,
-                data,
+                data.clone(),
                 extent_size,
                 extent_count,
                 uuid,
@@ -306,6 +331,13 @@ async fn main() -> Result<()> {
                  * new data and inital flush number is written to disk.
                  */
                 region.region_flush(1, 0, &None, JobId(0), None).await?;
+            } else if let Some(ref clone_source) = clone_source {
+                info!(log, "Cloning from: {:?}", clone_source);
+                let d = Downstairs::new_builder(&data, false)
+                    .set_logger(log.clone())
+                    .build()
+                    .await?;
+                clone_region(d, *clone_source).await?
             }
 
             info!(log, "UUID: {:?}", region.def().uuid());
@@ -315,6 +347,7 @@ async fn main() -> Result<()> {
                 region.def().extent_size().value,
                 region.def().extent_count(),
             );
+            // Now, clone it!
             Ok(())
         }
         Args::Dump {

@@ -38,6 +38,7 @@ mod test {
     }
 
     impl TestDownstairs {
+        #[allow(clippy::too_many_arguments)]
         pub async fn new(
             address: IpAddr,
             encrypted: bool,
@@ -46,6 +47,7 @@ mod test {
             extent_count: u32,
             problematic: bool,
             backend: Backend,
+            clone_source: Option<SocketAddr>,
         ) -> Result<Self> {
             let tempdir = tempfile::Builder::new()
                 .prefix(&"downstairs-")
@@ -73,6 +75,10 @@ mod test {
                 .set_backend(backend)
                 .build()
                 .await?;
+
+            if let Some(ref clone_source) = clone_source {
+                clone_region(downstairs.clone(), *clone_source).await?
+            }
 
             let _join_handle = start_downstairs(
                 downstairs.clone(),
@@ -252,6 +258,7 @@ mod test {
                 extent_count,
                 problematic,
                 backend,
+                None,
             )
             .await?;
             let downstairs2 = TestDownstairs::new(
@@ -262,6 +269,7 @@ mod test {
                 extent_count,
                 problematic,
                 backend,
+                None,
             )
             .await?;
             let downstairs3 = TestDownstairs::new(
@@ -272,6 +280,7 @@ mod test {
                 extent_count,
                 problematic,
                 backend,
+                None,
             )
             .await?;
 
@@ -360,6 +369,7 @@ mod test {
                 self.extent_count,
                 false,
                 Backend::RawFile,
+                None,
             )
             .await
         }
@@ -2657,6 +2667,9 @@ mod test {
         // Clone a read only downstairs to the new downstairs
         // Make a new volume with two old and the one new downstairs and verify
         // the original data we wrote.
+        // Create a new downstairs directly from the clone.
+        // Make a new volume with two old and the one new downstairs and verify
+        // the original data we wrote.
         const BLOCK_SIZE: usize = 512;
 
         // boot three downstairs, write some data to them, then change to
@@ -2708,6 +2721,7 @@ mod test {
             2,
             false,
             Backend::RawFile,
+            None,
         )
         .await
         .unwrap();
@@ -2716,6 +2730,56 @@ mod test {
         let clone_source =
             test_downstairs_set.downstairs1.repair_address().await;
         new_ds.reboot_clone(clone_source).await.unwrap();
+
+        // Restart the new downstairs read only.
+        new_ds.reboot_read_only().await.unwrap();
+        let new_target = new_ds.address().await;
+
+        // Take our original opts, and replace a target with the downstairs
+        // we just cloned.
+        let mut new_opts = test_downstairs_set.opts();
+        new_opts.target[0] = new_target;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                new_opts,
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                3,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        // Verify our volume still has the random data we wrote.
+        let volume_size = volume.total_size().await? as usize;
+        let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+            .await?;
+
+        assert_eq!(&buffer[BLOCK_SIZE..], &random_buffer[BLOCK_SIZE..]);
+
+        // Clone an original downstairs directly to our new downstairs
+        let clone_source =
+            test_downstairs_set.downstairs1.repair_address().await;
+        let mut new_ds = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            5,
+            2,
+            false,
+            Backend::RawFile,
+            Some(clone_source),
+        )
+        .await
+        .unwrap();
 
         // Restart the new downstairs read only.
         new_ds.reboot_read_only().await.unwrap();
@@ -2823,6 +2887,7 @@ mod test {
             2,
             false,
             Backend::RawFile,
+            None,
         )
         .await
         .unwrap();
@@ -2884,6 +2949,7 @@ mod test {
             2,
             false,
             Backend::RawFile,
+            None,
         )
         .await
         .unwrap();
@@ -2918,6 +2984,7 @@ mod test {
             2,
             false,
             Backend::RawFile,
+            None,
         )
         .await
         .unwrap();
@@ -2951,6 +3018,7 @@ mod test {
             3,
             false,
             Backend::RawFile,
+            None,
         )
         .await
         .unwrap();
@@ -2966,6 +3034,7 @@ mod test {
             2, // <- Different than above
             false,
             Backend::RawFile,
+            None,
         )
         .await
         .unwrap();
@@ -2987,6 +3056,7 @@ mod test {
             2,
             false,
             Backend::RawFile,
+            None,
         )
         .await
         .unwrap();
@@ -3002,6 +3072,7 @@ mod test {
             2,
             false,
             Backend::RawFile,
+            None,
         )
         .await
         .unwrap();
@@ -3023,6 +3094,7 @@ mod test {
             2,
             false,
             Backend::RawFile,
+            None,
         )
         .await
         .unwrap();
@@ -3037,6 +3109,7 @@ mod test {
             2,
             false,
             Backend::RawFile,
+            None,
         )
         .await
         .unwrap();
@@ -3058,6 +3131,7 @@ mod test {
             2,
             false,
             Backend::RawFile,
+            None,
         )
         .await
         .unwrap();
@@ -3072,6 +3146,7 @@ mod test {
             2,
             false,
             Backend::RawFile,
+            None,
         )
         .await
         .unwrap();
@@ -3244,6 +3319,7 @@ mod test {
             2,
             false,
             Backend::RawFile,
+            None,
         )
         .await
         .unwrap();
