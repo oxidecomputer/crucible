@@ -36,6 +36,7 @@ exp="${testdir}/exported_file"
 imp="${testdir}/import"
 clone_dir="${testdir}/clone"
 clone_exp="${testdir}/clone_export_file"
+create_clone_dir="${testdir}/create_clone"
 echo "Create file for import"
 dd if=/dev/urandom of="$imp" bs=512 count=300
 
@@ -49,7 +50,7 @@ echo "Import Export test passed"
 
 # We can make use of the export function to test downstairs clone
 echo "Test clone"
-echo "Starting downstairs"
+echo "Starting source downstairs"
 ${cds} run -d "$region_dir" -p 8810 --mode ro > ${testdir}/ds_out.txt &
 ds_pid=$!
 
@@ -69,6 +70,13 @@ ${cds} clone -d "$clone_dir" -s 127.0.0.1:12810
 echo "Verify clone using export"
 ${cds} export -d "$clone_dir" -e "$clone_exp" --count 300
 
+diff $imp $clone_exp
+
+echo "Creating new downstairs from clone directly"
+${cds} create -u $(uuidgen) -d "$create_clone_dir" --extent-size 100 --extent-count 15 --block-size 512 --clone-source 127.0.0.1:12810
+
+echo "Verify second clone using export"
+${cds} export -d "$create_clone_dir" -e "$clone_exp" --count 300
 diff $imp $clone_exp
 
 echo "Stopping downstairs"

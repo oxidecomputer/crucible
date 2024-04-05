@@ -58,26 +58,45 @@ enum Args {
         trace_endpoint: Option<String>,
     },
     Create {
+        /// Block size.
         #[clap(long, default_value = "512", action)]
         block_size: u64,
 
+        /// Directory where the region files we be located.
         #[clap(short, long, name = "DIRECTORY", action)]
         data: PathBuf,
 
+        /// Number of blocks per extent file.
         #[clap(long, default_value = "100", action)]
         extent_size: u64,
 
+        /// Number of extent files.
         #[clap(long, default_value = "15", action)]
         extent_count: u64,
 
-        #[clap(short, long, name = "FILE", action)]
+        /// Import data for the extent from this file.
+        #[clap(
+            short,
+            long,
+            name = "FILE",
+            action,
+            conflicts_with = "clone_source"
+        )]
         import_path: Option<PathBuf>,
 
+        /// UUID for the region.
         #[clap(short, long, name = "UUID", action)]
         uuid: Uuid,
 
+        /// Will the region be encrypted.
         #[clap(long, action)]
         encrypted: bool,
+
+        /// Clone another downstairs after creating.
+        ///
+        /// IP:Port where the extent files will come from.
+        #[clap(long, action, conflicts_with = "import-path")]
+        clone_source: Option<SocketAddr>,
     },
     /*
      * Dump region information.
@@ -287,10 +306,11 @@ async fn main() -> Result<()> {
             import_path,
             uuid,
             encrypted,
+            clone_source,
         } => {
             let mut region = create_region(
                 block_size,
-                data,
+                data.clone(),
                 extent_size,
                 extent_count,
                 uuid,
@@ -306,6 +326,13 @@ async fn main() -> Result<()> {
                  * new data and inital flush number is written to disk.
                  */
                 region.region_flush(1, 0, &None, JobId(0), None).await?;
+            } else if let Some(ref clone_source) = clone_source {
+                info!(log, "Cloning from: {:?}", clone_source);
+                let d = Downstairs::new_builder(&data, false)
+                    .set_logger(log.clone())
+                    .build()
+                    .await?;
+                clone_region(d, *clone_source).await?
             }
 
             info!(log, "UUID: {:?}", region.def().uuid());
@@ -315,6 +342,7 @@ async fn main() -> Result<()> {
                 region.def().extent_size().value,
                 region.def().extent_count(),
             );
+            // Now, clone it!
             Ok(())
         }
         Args::Dump {
