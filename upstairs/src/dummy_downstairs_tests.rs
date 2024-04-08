@@ -3,6 +3,7 @@
 #[cfg(not(test))]
 compile_error!("dummy_downstairs should only be used in unit tests");
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -458,18 +459,21 @@ impl TestHarness {
         }
 
         // Connect all 3x Downstairs
-        let mut fut = futures::stream::FuturesOrdered::new();
+        //
+        // We're using a VecDeque instead of FuturesOrdered so that if a future
+        // panics, we get a meaningful backtrace with a correct line number.
+        let mut fut = VecDeque::new();
         for mut ds in [ds1, ds2, ds3] {
-            fut.push_back(async move {
+            fut.push_back(tokio::spawn(async move {
                 ds.negotiate_start().await;
                 ds.negotiate_step_extent_versions_please().await;
                 ds
-            });
+            }));
         }
 
-        let ds1 = fut.next().await.unwrap();
-        let ds2 = fut.next().await.unwrap();
-        let ds3 = fut.next().await.unwrap();
+        let ds1 = fut.pop_front().unwrap().await.unwrap();
+        let ds2 = fut.pop_front().unwrap().await.unwrap();
+        let ds3 = fut.pop_front().unwrap().await.unwrap();
 
         for _ in 0..10 {
             if guest.query_is_active().await.unwrap() {
