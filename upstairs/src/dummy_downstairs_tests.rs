@@ -27,8 +27,6 @@ use crucible_protocol::ReadResponseBlockMetadata;
 use crucible_protocol::ReadResponseHeader;
 use crucible_protocol::WriteHeader;
 
-use anyhow::bail;
-use anyhow::Result;
 use bytes::BytesMut;
 use futures::SinkExt;
 use futures::StreamExt;
@@ -128,7 +126,7 @@ impl DownstairsHandle {
         self.tx.send(m)
     }
 
-    pub async fn negotiate_start(&mut self) -> Result<()> {
+    pub async fn negotiate_start(&mut self) {
         let packet = self.recv().await.unwrap();
         if let Message::HereIAm {
             version,
@@ -148,7 +146,7 @@ impl DownstairsHandle {
             );
 
             if *read_only != self.cfg.read_only {
-                bail!("read only mismatch!");
+                panic!("read only mismatch!");
             }
 
             self.send(Message::YesItsMe {
@@ -157,7 +155,7 @@ impl DownstairsHandle {
             })
             .unwrap();
         } else {
-            bail!("wrong packet {packet:?}, expected HereIAm")
+            panic!("wrong packet {packet:?}, expected HereIAm")
         }
 
         let packet = self.recv().await.unwrap();
@@ -181,7 +179,7 @@ impl DownstairsHandle {
             })
             .unwrap();
         } else {
-            bail!("wrong packet {packet:?}, expected PromoteToActive")
+            panic!("wrong packet {packet:?}, expected PromoteToActive")
         }
 
         let packet = self.recv().await.unwrap();
@@ -192,15 +190,12 @@ impl DownstairsHandle {
                 region_def: self.get_region_definition(),
             })
             .unwrap();
-            Ok(())
         } else {
-            bail!("wrong packet: {packet:?}, expected RegionInfoPlease");
+            panic!("wrong packet: {packet:?}, expected RegionInfoPlease");
         }
     }
 
-    pub async fn negotiate_step_extent_versions_please(
-        &mut self,
-    ) -> Result<()> {
+    pub async fn negotiate_step_extent_versions_please(&mut self) {
         let packet = self.recv().await.unwrap();
         if let Message::ExtentVersionsPlease = &packet {
             info!(self.log, "negotiate packet {:?}", packet);
@@ -212,16 +207,14 @@ impl DownstairsHandle {
             })
             .unwrap();
         } else {
-            bail!("wrong packet: {packet:?}, expected ExtentVersionsPlease")
+            panic!("wrong packet: {packet:?}, expected ExtentVersionsPlease")
         }
-
-        Ok(())
     }
 
     pub async fn negotiate_step_last_flush(
         &mut self,
         last_flush_number: JobId,
-    ) -> Result<()> {
+    ) {
         let packet = self.recv().await.unwrap();
         if let Message::LastFlush { .. } = &packet {
             info!(self.log, "negotiate packet {:?}", packet);
@@ -229,10 +222,8 @@ impl DownstairsHandle {
             self.send(Message::LastFlushAck { last_flush_number })
                 .unwrap();
         } else {
-            bail!("wrong packet: {packet:?}, expected LastFlush");
+            panic!("wrong packet: {packet:?}, expected LastFlush");
         }
-
-        Ok(())
     }
 
     pub fn get_region_options(&self) -> RegionOptions {
@@ -405,11 +396,11 @@ pub struct TestHarness {
 }
 
 impl TestHarness {
-    pub async fn new() -> Result<TestHarness> {
+    pub async fn new() -> TestHarness {
         Self::new_(false).await
     }
 
-    pub async fn new_ro() -> Result<TestHarness> {
+    pub async fn new_ro() -> TestHarness {
         Self::new_(true).await
     }
 
@@ -430,7 +421,7 @@ impl TestHarness {
         }
     }
 
-    async fn new_(read_only: bool) -> Result<TestHarness> {
+    async fn new_(read_only: bool) -> TestHarness {
         let log = csl();
 
         let cfg = Self::default_config(read_only);
@@ -457,13 +448,12 @@ impl TestHarness {
 
         let join_handle = up_main(crucible_opts, 1, None, io, None).unwrap();
 
-        let mut handles: Vec<JoinHandle<Result<()>>> = vec![];
+        let mut handles: Vec<JoinHandle<()>> = vec![];
 
         {
             let guest = guest.clone();
             handles.push(tokio::spawn(async move {
-                guest.activate().await?;
-                Ok(())
+                guest.activate().await.unwrap();
             }));
         }
 
@@ -471,15 +461,15 @@ impl TestHarness {
         let mut fut = futures::stream::FuturesOrdered::new();
         for mut ds in [ds1, ds2, ds3] {
             fut.push_back(async move {
-                ds.negotiate_start().await?;
-                ds.negotiate_step_extent_versions_please().await?;
-                Result::<_>::Ok(ds)
+                ds.negotiate_start().await;
+                ds.negotiate_step_extent_versions_please().await;
+                ds
             });
         }
 
-        let ds1 = fut.next().await.unwrap().unwrap();
-        let ds2 = fut.next().await.unwrap().unwrap();
-        let ds3 = fut.next().await.unwrap().unwrap();
+        let ds1 = fut.next().await.unwrap();
+        let ds2 = fut.next().await.unwrap();
+        let ds3 = fut.next().await.unwrap();
 
         for _ in 0..10 {
             if guest.query_is_active().await.unwrap() {
@@ -491,14 +481,14 @@ impl TestHarness {
 
         assert!(guest.query_is_active().await.unwrap());
 
-        Ok(TestHarness {
+        TestHarness {
             log,
             ds1: Some(ds1),
             ds2,
             ds3,
             _join_handle: join_handle,
             guest,
-        })
+        }
     }
 
     fn take_ds1(&mut self) -> DownstairsHandle {
@@ -544,8 +534,8 @@ where
 
 /// Test that replay occurs after a downstairs disconnects and reconnects
 #[tokio::test]
-async fn test_replay_occurs() -> Result<()> {
-    let mut harness = TestHarness::new().await?;
+async fn test_replay_occurs() {
+    let mut harness = TestHarness::new().await;
 
     // Send a read
     {
@@ -579,8 +569,8 @@ async fn test_replay_occurs() -> Result<()> {
 
     harness.restart_ds1().await;
 
-    harness.ds1().negotiate_start().await?;
-    harness.ds1().negotiate_step_last_flush(JobId(0)).await?;
+    harness.ds1().negotiate_start().await;
+    harness.ds1().negotiate_step_last_flush(JobId(0)).await;
 
     let mut ds1_message_second_time = None;
 
@@ -596,8 +586,6 @@ async fn test_replay_occurs() -> Result<()> {
     }
 
     assert_eq!(ds1_message, ds1_message_second_time.unwrap());
-
-    Ok(())
 }
 
 /// Test that after giving up on a downstairs, setting it to faulted, and
@@ -605,8 +593,8 @@ async fn test_replay_occurs() -> Result<()> {
 /// repaired with the correct source, and that extent limits are honoured if
 /// additional IO comes through.
 #[tokio::test]
-async fn test_successful_live_repair() -> Result<()> {
-    let mut harness = TestHarness::new().await?;
+async fn test_successful_live_repair() {
+    let mut harness = TestHarness::new().await;
 
     // Send 200 more than IO_OUTSTANDING_MAX_JOBS jobs, sending read
     // responses from two of the three downstairs. After we have sent
@@ -640,12 +628,7 @@ async fn test_successful_live_repair() -> Result<()> {
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {}
                 x => {
-                    info!(
-                        harness.log,
-                        "Read {i} should return EMPTY, but we got:{:?}", x
-                    );
-
-                    bail!("Read {i} should return EMPTY, but we got:{:?}", x);
+                    panic!("Read {i} should return EMPTY, but we got:{x:?}");
                 }
             }
         }
@@ -655,8 +638,7 @@ async fn test_successful_live_repair() -> Result<()> {
                 // Record the job ids of the read requests
                 job_ids.push(job_id);
             }
-
-            _ => bail!("saw non read request!"),
+            _ => panic!("saw non read request!"),
         }
 
         assert!(matches!(
@@ -712,8 +694,7 @@ async fn test_successful_live_repair() -> Result<()> {
 
         let flush_job_id = match harness.ds2.recv().await.unwrap() {
             Message::Flush { job_id, .. } => job_id,
-
-            _ => bail!("saw non flush ack!"),
+            _ => panic!("saw non flush ack!"),
         };
 
         assert!(matches!(
@@ -786,18 +767,15 @@ async fn test_successful_live_repair() -> Result<()> {
 
         _ => {
             // Any other error (or success!) is unexpected
-            bail!("try_recv returned {:?}", v);
+            panic!("try_recv returned {v:?}");
         }
     }
 
     // Reconnect ds1
     harness.restart_ds1().await;
 
-    harness.ds1().negotiate_start().await?;
-    harness
-        .ds1()
-        .negotiate_step_extent_versions_please()
-        .await?;
+    harness.ds1().negotiate_start().await;
+    harness.ds1().negotiate_step_extent_versions_please().await;
 
     // The Upstairs will start sending LiveRepair related work, which may be
     // out of order. Buffer some here.
@@ -844,7 +822,7 @@ async fn test_successful_live_repair() -> Result<()> {
             match ds1_buffered_messages[m] {
                 Message::ExtentLiveReopen { job_id, .. } => job_id,
 
-                _ => bail!(
+                _ => panic!(
                     "ds1_buffered_messages[m] not Message::ExtentLiveReopen"
                 ),
             }
@@ -915,8 +893,7 @@ async fn test_successful_live_repair() -> Result<()> {
                         // update our target dep_job_id to match this read.
                         dep_job_id[0] = *job_id;
                     }
-
-                    _ => bail!("saw {:?}", m1),
+                    _ => panic!("saw {m1:?}"),
                 }
             } else {
                 // All IO above this is skipped for the downstairs under
@@ -954,8 +931,7 @@ async fn test_successful_live_repair() -> Result<()> {
                     });
                     dep_job_id[1] = *job_id;
                 }
-
-                _ => bail!("saw {:?}", m2),
+                _ => panic!("saw {m2:?}"),
             }
 
             match &m3 {
@@ -982,8 +958,7 @@ async fn test_successful_live_repair() -> Result<()> {
                     });
                     dep_job_id[2] = *job_id;
                 }
-
-                _ => bail!("saw {:?}", m3),
+                _ => panic!("saw {m3:?}"),
             }
 
             // write
@@ -1030,8 +1005,7 @@ async fn test_successful_live_repair() -> Result<()> {
                         // dep_job_id right away:
                         dep_job_id[0] = *job_id;
                     }
-
-                    _ => bail!("saw {:?}", m1),
+                    _ => panic!("saw {m1:?}"),
                 }
             } else {
                 // All IO above this is skipped for the downstairs under
@@ -1069,8 +1043,7 @@ async fn test_successful_live_repair() -> Result<()> {
                     });
                     dep_job_id[1] = *job_id;
                 }
-
-                _ => bail!("saw {:?}", m2),
+                _ => panic!("saw {m2:?}"),
             }
 
             match &m3 {
@@ -1097,8 +1070,7 @@ async fn test_successful_live_repair() -> Result<()> {
                     });
                     dep_job_id[2] = *job_id;
                 }
-
-                _ => bail!("saw {:?}", m3),
+                _ => panic!("saw {m3:?}"),
             }
         }
 
@@ -1142,8 +1114,7 @@ async fn test_successful_live_repair() -> Result<()> {
                     })
                     .unwrap();
             }
-
-            _ => bail!("saw {:?}", m1),
+            _ => panic!("saw {m1:?}"),
         }
 
         match &m2 {
@@ -1171,8 +1142,7 @@ async fn test_successful_live_repair() -> Result<()> {
                     })
                     .unwrap()
             }
-
-            _ => bail!("saw {:?}", m2),
+            _ => panic!("saw {m2:?}"),
         }
 
         match &m3 {
@@ -1200,8 +1170,7 @@ async fn test_successful_live_repair() -> Result<()> {
                     })
                     .unwrap()
             }
-
-            _ => bail!("saw {:?}", m3),
+            _ => panic!("saw {m3:?}"),
         }
 
         // Based on those gen, flush, and dirty values, ds1 should get the
@@ -1234,8 +1203,7 @@ async fn test_successful_live_repair() -> Result<()> {
                     })
                     .unwrap();
             }
-
-            _ => bail!("saw {:?}", m3),
+            _ => panic!("saw {m3:?}"),
         }
 
         match &m2 {
@@ -1253,8 +1221,7 @@ async fn test_successful_live_repair() -> Result<()> {
                     result: Ok(()),
                 })
                 .unwrap(),
-
-            _ => bail!("saw {:?}", m2),
+            _ => panic!("saw {m2:?}"),
         }
 
         match &m3 {
@@ -1272,8 +1239,7 @@ async fn test_successful_live_repair() -> Result<()> {
                     result: Ok(()),
                 })
                 .unwrap(),
-
-            _ => bail!("saw {:?}", m2),
+            _ => panic!("saw {m2:?}"),
         }
 
         // Now, all downstairs will see ExtentLiveNoop
@@ -1297,8 +1263,7 @@ async fn test_successful_live_repair() -> Result<()> {
                     result: Ok(()),
                 })
                 .unwrap(),
-
-            _ => bail!("saw {:?}", m2),
+            _ => panic!("saw {m2:?}"),
         }
 
         match &m2 {
@@ -1316,8 +1281,7 @@ async fn test_successful_live_repair() -> Result<()> {
                     result: Ok(()),
                 })
                 .unwrap(),
-
-            _ => bail!("saw {:?}", m2),
+            _ => panic!("saw {m2:?}"),
         }
 
         match &m3 {
@@ -1335,8 +1299,7 @@ async fn test_successful_live_repair() -> Result<()> {
                     result: Ok(()),
                 })
                 .unwrap(),
-
-            _ => bail!("saw {:?}", m2),
+            _ => panic!("saw {m2:?}"),
         }
 
         // Finally, processing the ExtentLiveNoOp above means that the
@@ -1375,8 +1338,7 @@ async fn test_successful_live_repair() -> Result<()> {
                     })
                     .unwrap()
             }
-
-            _ => bail!("saw {:?}", m2),
+            _ => panic!("saw {m2:?}"),
         }
 
         match &m2 {
@@ -1399,8 +1361,7 @@ async fn test_successful_live_repair() -> Result<()> {
                     })
                     .unwrap()
             }
-
-            _ => bail!("saw {:?}", m2),
+            _ => panic!("saw {m2:?}"),
         }
 
         match &m3 {
@@ -1423,8 +1384,7 @@ async fn test_successful_live_repair() -> Result<()> {
                     })
                     .unwrap()
             }
-
-            _ => bail!("saw {:?}", m2),
+            _ => panic!("saw {m2:?}"),
         }
 
         // After those are done, send out the read and write job responses
@@ -1447,8 +1407,7 @@ async fn test_successful_live_repair() -> Result<()> {
                 flush_number: 12,
                 ..
             } => job_id,
-
-            _ => bail!("saw non flush!"),
+            _ => panic!("saw non flush!"),
         };
 
         assert!(matches!(
@@ -1530,14 +1489,12 @@ async fn test_successful_live_repair() -> Result<()> {
             Message::ReadRequest { .. },
         ));
     }
-
-    Ok(())
 }
 
 /// Test that we will mark a Downstairs as failed if we hit the byte limit
 #[tokio::test]
-async fn test_byte_fault_condition() -> Result<()> {
-    let mut harness = TestHarness::new().await?;
+async fn test_byte_fault_condition() {
+    let mut harness = TestHarness::new().await;
 
     // Send enough bytes to hit the IO_OUTSTANDING_MAX_BYTES condition on
     // downstairs 1, which should mark it as faulted and kick it out.
@@ -1572,12 +1529,7 @@ async fn test_byte_fault_condition() -> Result<()> {
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {}
                 x => {
-                    info!(
-                        harness.log,
-                        "Read {i} should return EMPTY, but we got:{:?}", x
-                    );
-
-                    bail!("Read {i} should return EMPTY, but we got:{:?}", x);
+                    panic!("Read {i} should return EMPTY, but we got:{x:?}");
                 }
             }
         }
@@ -1590,8 +1542,7 @@ async fn test_byte_fault_condition() -> Result<()> {
                 // Record the job ids of the write requests
                 job_ids.push(job_id);
             }
-
-            _ => bail!("saw non write request!"),
+            _ => panic!("saw non write request!"),
         }
 
         assert!(matches!(
@@ -1635,13 +1586,12 @@ async fn test_byte_fault_condition() -> Result<()> {
         Err(TryRecvError::Disconnected),
         "ds1 message queue must be disconnected"
     );
-    Ok(())
 }
 
 /// Test that an error during the live repair doesn't halt indefinitely
 #[tokio::test]
-async fn test_error_during_live_repair_no_halt() -> Result<()> {
-    let mut harness = TestHarness::new().await?;
+async fn test_error_during_live_repair_no_halt() {
+    let mut harness = TestHarness::new().await;
 
     // Send 200 more than IO_OUTSTANDING_MAX_JOBS jobs, sending read
     // responses from two of the three downstairs. After we have sent
@@ -1675,12 +1625,7 @@ async fn test_error_during_live_repair_no_halt() -> Result<()> {
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {}
                 x => {
-                    info!(
-                        harness.log,
-                        "Read {i} should return EMPTY, but we got:{:?}", x
-                    );
-
-                    bail!("Read {i} should return EMPTY, but we got:{:?}", x);
+                    panic!("Read {i} should return EMPTY, but we got:{x:?}");
                 }
             }
         }
@@ -1690,8 +1635,7 @@ async fn test_error_during_live_repair_no_halt() -> Result<()> {
                 // Record the job ids of the read requests
                 job_ids.push(job_id);
             }
-
-            _ => bail!("saw non read request!"),
+            _ => panic!("saw non read request!"),
         }
 
         assert!(matches!(
@@ -1747,8 +1691,7 @@ async fn test_error_during_live_repair_no_halt() -> Result<()> {
 
         let flush_job_id = match harness.ds2.recv().await.unwrap() {
             Message::Flush { job_id, .. } => job_id,
-
-            _ => bail!("saw non flush ack!"),
+            _ => panic!("saw non flush ack!"),
         };
 
         assert!(matches!(
@@ -1824,21 +1767,17 @@ async fn test_error_during_live_repair_no_halt() -> Result<()> {
         Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => {
             // This is expected, continue on
         }
-
         _ => {
             // Any other error (or success!) is unexpected
-            bail!("try_recv returned {:?}", v);
+            panic!("try_recv returned {v:?}");
         }
     }
 
     // Reconnect ds1
     harness.restart_ds1().await;
 
-    harness.ds1().negotiate_start().await?;
-    harness
-        .ds1()
-        .negotiate_step_extent_versions_please()
-        .await?;
+    harness.ds1().negotiate_start().await;
+    harness.ds1().negotiate_step_extent_versions_please().await;
 
     // The Upstairs will start sending LiveRepair related work, which may be
     // out of order. Buffer some here.
@@ -1916,8 +1855,7 @@ async fn test_error_during_live_repair_no_halt() -> Result<()> {
                 })
                 .unwrap();
         }
-
-        _ => bail!("saw {:?}", m1),
+        _ => panic!("saw {m1:?}"),
     }
 
     match &m2 {
@@ -1945,8 +1883,7 @@ async fn test_error_during_live_repair_no_halt() -> Result<()> {
                 })
                 .unwrap()
         }
-
-        _ => bail!("saw {:?}", m2),
+        _ => panic!("saw {m2:?}"),
     }
 
     match &m3 {
@@ -1974,8 +1911,7 @@ async fn test_error_during_live_repair_no_halt() -> Result<()> {
                 })
                 .unwrap()
         }
-
-        _ => bail!("saw {:?}", m3),
+        _ => panic!("saw {m3:?}"),
     }
 
     // Based on those gen, flush, and dirty values, ds1 should get the
@@ -2011,8 +1947,7 @@ async fn test_error_during_live_repair_no_halt() -> Result<()> {
                 })
                 .unwrap();
         }
-
-        _ => bail!("saw {:?}", m3),
+        _ => panic!("saw {m3:?}"),
     }
 
     match &m2 {
@@ -2030,8 +1965,7 @@ async fn test_error_during_live_repair_no_halt() -> Result<()> {
                 result: Ok(()),
             })
             .unwrap(),
-
-        _ => bail!("saw {:?}", m2),
+        _ => panic!("saw {m2:?}"),
     }
 
     match &m3 {
@@ -2049,8 +1983,7 @@ async fn test_error_during_live_repair_no_halt() -> Result<()> {
                 result: Ok(()),
             })
             .unwrap(),
-
-        _ => bail!("saw {:?}", m2),
+        _ => panic!("saw {m2:?}"),
     }
 
     error!(harness.log, "dropping ds1 now!");
@@ -2065,12 +1998,9 @@ async fn test_error_during_live_repair_no_halt() -> Result<()> {
     harness.restart_ds1().await;
 
     error!(harness.log, "ds1 negotiate start now!");
-    harness.ds1().negotiate_start().await?;
+    harness.ds1().negotiate_start().await;
     error!(harness.log, "ds1 negotiate extent versions please now!");
-    harness
-        .ds1()
-        .negotiate_step_extent_versions_please()
-        .await?;
+    harness.ds1().negotiate_step_extent_versions_please().await;
 
     // Continue faking for downstairs 2 and 3 - the work that was occuring
     // for extent 0 should finish before the Upstairs aborts the repair
@@ -2094,8 +2024,7 @@ async fn test_error_during_live_repair_no_halt() -> Result<()> {
                 result: Ok(()),
             })
             .unwrap(),
-
-        _ => bail!("saw {:?}", m2),
+        _ => panic!("saw {m2:?}"),
     }
 
     match &m3 {
@@ -2113,8 +2042,7 @@ async fn test_error_during_live_repair_no_halt() -> Result<()> {
                 result: Ok(()),
             })
             .unwrap(),
-
-        _ => bail!("saw {:?}", m2),
+        _ => panic!("saw {m2:?}"),
     }
 
     let m2 = filter_out(&mut ds2_buffered_messages, |x| {
@@ -2141,8 +2069,7 @@ async fn test_error_during_live_repair_no_halt() -> Result<()> {
                 result: Ok(()),
             })
             .unwrap(),
-
-        _ => bail!("saw {:?}", m2),
+        _ => panic!("saw {m2:?}"),
     }
 
     match &m3 {
@@ -2160,8 +2087,7 @@ async fn test_error_during_live_repair_no_halt() -> Result<()> {
                 result: Ok(()),
             })
             .unwrap(),
-
-        _ => bail!("saw {:?}", m2),
+        _ => panic!("saw {m2:?}"),
     }
 
     // The Upstairs will abort the live repair task, and will send a final
@@ -2174,8 +2100,7 @@ async fn test_error_during_live_repair_no_halt() -> Result<()> {
             flush_number: 3,
             ..
         } => job_id,
-
-        _ => bail!("saw non flush!"),
+        _ => panic!("saw non flush!"),
     };
 
     assert!(matches!(
@@ -2218,16 +2143,14 @@ async fn test_error_during_live_repair_no_halt() -> Result<()> {
         harness.ds1().recv().await.unwrap(),
         Message::ExtentLiveReopen { extent_id: 0, .. },
     ));
-
-    Ok(())
 }
 
 /// Test that after giving up on a downstairs, setting it to faulted, and
 /// letting it reconnect, live repair does *not* occur if the upstairs is
 /// configured read-only.
 #[tokio::test]
-async fn test_no_read_only_live_repair() -> Result<()> {
-    let mut harness = TestHarness::new_ro().await?;
+async fn test_no_read_only_live_repair() {
+    let mut harness = TestHarness::new_ro().await;
 
     // Send 200 more than IO_OUTSTANDING_MAX_JOBS jobs, sending read
     // responses from two of the three downstairs. After we have sent
@@ -2261,12 +2184,7 @@ async fn test_no_read_only_live_repair() -> Result<()> {
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {}
                 x => {
-                    info!(
-                        harness.log,
-                        "Read {i} should return EMPTY, but we got:{:?}", x
-                    );
-
-                    bail!("Read {i} should return EMPTY, but we got:{:?}", x);
+                    panic!("Read {i} should return EMPTY, but we got:{x:?}");
                 }
             }
         }
@@ -2276,8 +2194,7 @@ async fn test_no_read_only_live_repair() -> Result<()> {
                 // Record the job ids of the read requests
                 job_ids.push(job_id);
             }
-
-            _ => bail!("saw non read request!"),
+            _ => panic!("saw non read request!"),
         }
 
         assert!(matches!(
@@ -2333,8 +2250,7 @@ async fn test_no_read_only_live_repair() -> Result<()> {
 
         let flush_job_id = match harness.ds2.recv().await.unwrap() {
             Message::Flush { job_id, .. } => job_id,
-
-            _ => bail!("saw non flush ack!"),
+            _ => panic!("saw non flush ack!"),
         };
 
         assert!(matches!(
@@ -2407,18 +2323,15 @@ async fn test_no_read_only_live_repair() -> Result<()> {
 
         _ => {
             // Any other error (or success!) is unexpected
-            bail!("try_recv returned {:?}", v);
+            panic!("try_recv returned {v:?}");
         }
     }
 
     // Reconnect ds1
     harness.restart_ds1().await;
 
-    harness.ds1().negotiate_start().await?;
-    harness
-        .ds1()
-        .negotiate_step_extent_versions_please()
-        .await?;
+    harness.ds1().negotiate_start().await;
+    harness.ds1().negotiate_step_extent_versions_please().await;
 
     // Wait for all three downstairs to be online before we send
     // our final read.
@@ -2455,14 +2368,12 @@ async fn test_no_read_only_live_repair() -> Result<()> {
         harness.ds3.recv().await.unwrap(),
         Message::ReadRequest { .. },
     ));
-
-    Ok(())
 }
 
 /// Test that deactivation doesn't fail if one client is slower than others
 #[tokio::test]
-async fn test_deactivate_slow() -> Result<()> {
-    let mut harness = TestHarness::new().await?;
+async fn test_deactivate_slow() {
+    let mut harness = TestHarness::new().await;
 
     // Queue up a read, so that the deactivate requires a flush
     {
@@ -2554,9 +2465,9 @@ async fn test_deactivate_slow() -> Result<()> {
             reconnected.store(RECONNECT_TRYING, Ordering::Release);
             let mut ds1 = cfg.restart(uuid, listener, log).await;
 
-            ds1.negotiate_start().await.unwrap();
+            ds1.negotiate_start().await;
             reconnected.store(RECONNECT_DONE, Ordering::Release);
-            ds1.negotiate_step_extent_versions_please().await.unwrap();
+            ds1.negotiate_step_extent_versions_please().await;
         })
     };
 
@@ -2595,14 +2506,12 @@ async fn test_deactivate_slow() -> Result<()> {
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     ds1_restart_handle.await.unwrap();
     assert_eq!(reconnected.load(Ordering::Acquire), RECONNECT_DONE);
-
-    Ok(())
 }
 
 /// Test that replaying writes works
 #[tokio::test]
-async fn test_write_replay() -> Result<()> {
-    let mut harness = TestHarness::new().await?;
+async fn test_write_replay() {
+    let mut harness = TestHarness::new().await;
 
     // Send a write, which will succeed
     let write_handle = {
@@ -2645,8 +2554,8 @@ async fn test_write_replay() -> Result<()> {
     // same message replayed to it.
     harness.restart_ds1().await;
 
-    harness.ds1().negotiate_start().await?;
-    harness.ds1().negotiate_step_last_flush(JobId(0)).await?;
+    harness.ds1().negotiate_start().await;
+    harness.ds1().negotiate_step_last_flush(JobId(0)).await;
 
     // Ensure that we get the same Write
     match harness.ds1().recv().await.unwrap() {
@@ -2663,6 +2572,4 @@ async fn test_write_replay() -> Result<()> {
     // Check that the guest hasn't panicked by sending it a message that
     // requires going to the worker thread.
     harness.guest.get_uuid().await.unwrap();
-
-    Ok(())
 }
