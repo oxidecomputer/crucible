@@ -1425,7 +1425,6 @@ async fn test_byte_fault_condition() {
     const WRITE_SIZE: usize = 50 * 1024; // 50 KiB
     let write_buf = BytesMut::from(vec![1; WRITE_SIZE].as_slice()); // 50 KiB
     let num_jobs = IO_OUTSTANDING_MAX_BYTES as usize / write_buf.len() + 10;
-    let mut job_ids = Vec::with_capacity(num_jobs);
     assert!(num_jobs < IO_OUTSTANDING_MAX_JOBS);
 
     for i in 0..num_jobs {
@@ -1437,7 +1436,6 @@ async fn test_byte_fault_condition() {
         });
 
         let job_id = harness.ds2.ack_write().await;
-        job_ids.push(job_id);
         harness.ds3.ack_write().await;
 
         // With 2x responses, we can now await the write job (which ensures that
@@ -1495,7 +1493,6 @@ async fn test_job_fault_condition() {
     // IO_OUTSTANDING_MAX_JOBS jobs, the Upstairs will set ds1 to faulted,
     // and send it no more work.
     const NUM_JOBS: usize = IO_OUTSTANDING_MAX_JOBS + 200;
-    let mut job_ids = Vec::with_capacity(NUM_JOBS);
 
     for i in 0..NUM_JOBS {
         // We must `spawn` here because `write` will wait for the response to
@@ -1507,7 +1504,6 @@ async fn test_job_fault_condition() {
 
         // Respond with read responses for downstairs 2 and 3
         let job_id = harness.ds2.ack_read().await;
-        job_ids.push(job_id);
         harness.ds3.ack_read().await;
 
         // With 1x responses, we can now await the read job (which ensures that
