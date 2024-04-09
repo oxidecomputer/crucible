@@ -721,63 +721,51 @@ impl Upstairs {
 
     /// Fires the `up-status` DTrace probe
     fn on_stat_update(&self) {
-        let up_count = self.guest.guest_work.len() as u32;
-        let up_counters = self.counters;
-        let next_job_id = self.downstairs.peek_next_id();
-        let ds_count = self.downstairs.active_count() as u32;
-        let ds_state = self.downstairs.collect_stats(|c| c.state());
-
-        let ds_io_count = self.downstairs.io_state_count();
-        let ds_reconciled = self.downstairs.reconcile_repaired();
-        let ds_reconcile_needed = self.downstairs.reconcile_repair_needed();
-        let ds_reconcile_aborted = self.downstairs.reconcile_repair_aborted();
-        let ds_live_repair_completed = self
-            .downstairs
-            .collect_stats(|c| c.stats.live_repair_completed);
-        let ds_live_repair_aborted = self
-            .downstairs
-            .collect_stats(|c| c.stats.live_repair_aborted);
-        let ds_connected = self.downstairs.collect_stats(|c| c.stats.connected);
-        let ds_replaced = self.downstairs.collect_stats(|c| c.stats.replaced);
-        let ds_extents_repaired =
-            self.downstairs.collect_stats(|c| c.stats.extents_repaired);
-        let ds_extents_confirmed =
-            self.downstairs.collect_stats(|c| c.stats.extents_confirmed);
-        let ds_extent_limit = self
-            .downstairs
-            .active_repair_extent()
-            .map(|v| v as usize)
-            .unwrap_or(0);
-        let ds_delay_us =
-            self.downstairs.collect_stats(|c| c.get_delay_us() as usize);
-        let ds_ro_lr_skipped =
-            self.downstairs.collect_stats(|c| c.stats.ro_lr_skipped);
-
-        let up_backpressure = self.guest.backpressure_us();
-        let write_bytes_out = self.downstairs.write_bytes_outstanding();
-
         cdt::up__status!(|| {
             let arg = Arg {
-                up_count,
-                up_counters,
-                next_job_id,
-                up_backpressure,
-                write_bytes_out,
-                ds_count,
-                ds_state,
-                ds_io_count,
-                ds_reconciled,
-                ds_reconcile_needed,
-                ds_reconcile_aborted,
-                ds_live_repair_completed,
-                ds_live_repair_aborted,
-                ds_connected,
-                ds_replaced,
-                ds_extents_repaired,
-                ds_extents_confirmed,
-                ds_extent_limit,
-                ds_delay_us,
-                ds_ro_lr_skipped,
+                session_id: self.cfg.session_id.to_string(),
+                up_count: self.guest.guest_work.len() as u32,
+                up_counters: self.counters,
+                next_job_id: self.downstairs.peek_next_id(),
+                up_backpressure: self.guest.backpressure_us(),
+                write_bytes_out: self.downstairs.write_bytes_outstanding(),
+                ds_count: self.downstairs.active_count() as u32,
+                ds_state: self.downstairs.collect_stats(|c| c.state()),
+                ds_io_count: self.downstairs.io_state_count(),
+                ds_reconciled: self.downstairs.reconcile_repaired(),
+                ds_reconcile_needed: self.downstairs.reconcile_repair_needed(),
+                ds_reconcile_aborted: self
+                    .downstairs
+                    .reconcile_repair_aborted(),
+                ds_live_repair_completed: self
+                    .downstairs
+                    .collect_stats(|c| c.stats.live_repair_completed),
+                ds_live_repair_aborted: self
+                    .downstairs
+                    .collect_stats(|c| c.stats.live_repair_aborted),
+                ds_connected: self
+                    .downstairs
+                    .collect_stats(|c| c.stats.connected),
+                ds_replaced: self
+                    .downstairs
+                    .collect_stats(|c| c.stats.replaced),
+                ds_extents_repaired: self
+                    .downstairs
+                    .collect_stats(|c| c.stats.extents_repaired),
+                ds_extents_confirmed: self
+                    .downstairs
+                    .collect_stats(|c| c.stats.extents_confirmed),
+                ds_extent_limit: self
+                    .downstairs
+                    .active_repair_extent()
+                    .map(|v| v as usize)
+                    .unwrap_or(0),
+                ds_delay_us: self
+                    .downstairs
+                    .collect_stats(|c| c.get_delay_us() as usize),
+                ds_ro_lr_skipped: self
+                    .downstairs
+                    .collect_stats(|c| c.stats.ro_lr_skipped),
             };
             ("stats", arg)
         });
