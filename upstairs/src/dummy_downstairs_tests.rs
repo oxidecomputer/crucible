@@ -1404,31 +1404,15 @@ async fn test_successful_live_repair() {
     }
 
     // Try another read
-    {
-        // We must `spawn` here because `read` will wait for the
-        // response to come back before returning
-        harness.spawn(|guest| async move {
-            let mut buffer = Buffer::new(1, 512);
-            guest.read(Block::new_512(0), &mut buffer).await.unwrap();
-        });
+    harness.spawn(|guest| async move {
+        let mut buffer = Buffer::new(1, 512);
+        guest.read(Block::new_512(0), &mut buffer).await.unwrap();
+    });
 
-        // All downstairs should see it
-
-        assert!(matches!(
-            harness.ds1().recv().await.unwrap(),
-            Message::ReadRequest { .. },
-        ));
-
-        assert!(matches!(
-            harness.ds2.recv().await.unwrap(),
-            Message::ReadRequest { .. },
-        ));
-
-        assert!(matches!(
-            harness.ds3.recv().await.unwrap(),
-            Message::ReadRequest { .. },
-        ));
-    }
+    // All downstairs should see it
+    harness.ds1().ack_read().await;
+    harness.ds2.ack_read().await;
+    harness.ds3.ack_read().await;
 }
 
 /// Test that we will mark a Downstairs as failed if we hit the byte limit
@@ -2124,27 +2108,15 @@ async fn test_no_read_only_live_repair() {
     info!(harness.log, "submitting final read!");
 
     // The read should be served as normal
-    // We must `spawn` here because `read` will wait for the
-    // response to come back before returning
     harness.spawn(|guest| async move {
         let mut buffer = Buffer::new(1, 512);
         guest.read(Block::new_512(0), &mut buffer).await.unwrap();
     });
 
     // All downstairs should see it
-    assert!(matches!(
-        harness.ds1().recv().await.unwrap(),
-        Message::ReadRequest { .. },
-    ));
-    assert!(matches!(
-        harness.ds2.recv().await.unwrap(),
-        Message::ReadRequest { .. },
-    ));
-
-    assert!(matches!(
-        harness.ds3.recv().await.unwrap(),
-        Message::ReadRequest { .. },
-    ));
+    harness.ds1().ack_read().await;
+    harness.ds2.ack_read().await;
+    harness.ds3.ack_read().await;
 }
 
 /// Test that deactivation doesn't fail if one client is slower than others
