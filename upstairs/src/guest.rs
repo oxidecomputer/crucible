@@ -470,6 +470,18 @@ impl Guest {
         self.send_and_wait(|done| BlockOp::GetDownstairsState { done })
             .await
     }
+
+    /// Mark a particular downstairs as faulted
+    ///
+    /// This is used in tests to trigger live-repair
+    #[cfg(test)]
+    pub async fn fault_downstairs(
+        &self,
+        client_id: crate::ClientId,
+    ) -> Result<(), CrucibleError> {
+        self.send_and_wait(|done| BlockOp::FaultDownstairs { client_id, done })
+            .await
+    }
 }
 
 #[async_trait]

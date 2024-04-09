@@ -1098,6 +1098,16 @@ impl Upstairs {
                 }
                 done.send_ok(out);
             }
+
+            #[cfg(test)]
+            BlockOp::FaultDownstairs { client_id, done } => {
+                self.downstairs.skip_all_jobs(client_id);
+                self.downstairs.clients[client_id].fault(
+                    &self.state,
+                    crate::client::ClientStopReason::RequestedFault,
+                );
+                done.send_ok(());
+            }
         }
     }
 

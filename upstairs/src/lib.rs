@@ -1520,6 +1520,12 @@ pub(crate) enum BlockOp {
     GetDownstairsState {
         done: BlockRes<ClientData<DsState>>,
     },
+
+    #[cfg(test)]
+    FaultDownstairs {
+        client_id: ClientId,
+        done: BlockRes<()>,
+    },
 }
 
 macro_rules! ceiling_div {

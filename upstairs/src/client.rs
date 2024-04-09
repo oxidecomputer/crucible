@@ -2337,6 +2337,10 @@ pub(crate) enum ClientStopReason {
 
     /// The upstairs has requested that we deactivate
     Deactivated,
+
+    /// The test suite has requested a fault
+    #[cfg(test)]
+    RequestedFault,
 }
 
 /// Response received from the I/O task
