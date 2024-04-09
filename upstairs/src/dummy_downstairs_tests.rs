@@ -311,7 +311,7 @@ impl DownstairsHandle {
     /// Returns the job ID for further checks
     ///
     /// # Panics
-    /// If a non-write message arrives
+    /// If a non-read message arrives
     pub async fn ack_read(&mut self) -> JobId {
         let Message::ReadRequest {
             job_id,
@@ -734,26 +734,28 @@ async fn test_successful_live_repair() {
     }
 
     // Confirm that DS1 has been disconnected (and cannot reply to jobs)
-    let (block, data) = make_blank_read_response();
-    let session_id = harness.ds1().upstairs_session_id.unwrap();
-    let upstairs_id = harness.guest.get_uuid().await.unwrap();
-    match harness.ds1().send(Message::ReadResponse {
-        header: ReadResponseHeader {
-            upstairs_id,
-            session_id,
-            job_id: job_ids[0],
-            blocks: Ok(vec![block.clone()]),
-        },
-        data: data.clone(),
-    }) {
-        Ok(()) => panic!("DS1 should be disconnected"),
-        Err(e) => {
-            // We should be able to send a few, but at some point
-            // the Upstairs will disconnect us.
-            info!(
-                harness.log,
-                "could not send read response for job {}: {}", job_ids[0], e
-            );
+    {
+        let (block, data) = make_blank_read_response();
+        let session_id = harness.ds1().upstairs_session_id.unwrap();
+        let upstairs_id = harness.guest.get_uuid().await.unwrap();
+        match harness.ds1().send(Message::ReadResponse {
+            header: ReadResponseHeader {
+                upstairs_id,
+                session_id,
+                job_id: job_ids[0],
+                blocks: Ok(vec![block.clone()]),
+            },
+            data: data.clone(),
+        }) {
+            Ok(()) => panic!("DS1 should be disconnected"),
+            Err(e) => {
+                info!(
+                    harness.log,
+                    "could not send read response for job {}: {}",
+                    job_ids[0],
+                    e
+                );
+            }
         }
     }
 
@@ -1626,38 +1628,28 @@ async fn test_error_during_live_repair_no_halt() {
         jh.await.unwrap();
     }
 
-    // Send ds1 responses for the jobs it saw
-    for (i, job_id) in job_ids.iter().enumerate() {
+    // Try to reply from DS1, to confirm that we've been kicked out
+    {
         let (block, data) = make_blank_read_response();
-        let upstairs_id = harness.guest.get_uuid().await.unwrap();
         let session_id = harness.ds1().upstairs_session_id.unwrap();
+        let upstairs_id = harness.guest.get_uuid().await.unwrap();
         match harness.ds1().send(Message::ReadResponse {
             header: ReadResponseHeader {
                 upstairs_id,
                 session_id,
-                job_id: *job_id,
+                job_id: job_ids[0],
                 blocks: Ok(vec![block.clone()]),
             },
             data: data.clone(),
         }) {
-            Ok(()) => {
+            Ok(()) => panic!("DS1 should be disconnected"),
+            Err(e) => {
                 info!(
                     harness.log,
-                    "sent read response for job {} = {}", i, job_id,
-                );
-            }
-
-            Err(e) => {
-                // We should be able to send a few, but at some point
-                // the Upstairs will disconnect us.
-                error!(
-                    harness.log,
-                    "could not send read response for job {} = {}: {}",
-                    i,
-                    job_id,
+                    "could not send read response for job {}: {}",
+                    job_ids[0],
                     e
                 );
-                break;
             }
         }
     }
@@ -2074,31 +2066,27 @@ async fn test_no_read_only_live_repair() {
     }
 
     // Send ds1 responses for the jobs it saw
-    for (i, job_id) in job_ids.iter().enumerate() {
+    {
         let (block, data) = make_blank_read_response();
-        let upstairs_id = harness.guest.get_uuid().await.unwrap();
         let session_id = harness.ds1().upstairs_session_id.unwrap();
+        let upstairs_id = harness.guest.get_uuid().await.unwrap();
         match harness.ds1().send(Message::ReadResponse {
             header: ReadResponseHeader {
                 upstairs_id,
                 session_id,
-                job_id: *job_id,
+                job_id: job_ids[0],
                 blocks: Ok(vec![block.clone()]),
             },
             data: data.clone(),
         }) {
-            Ok(()) => {}
+            Ok(()) => panic!("DS1 should be disconnected"),
             Err(e) => {
-                // We should be able to send a few, but at some point
-                // the Upstairs will disconnect us.
-                error!(
+                info!(
                     harness.log,
-                    "could not send read response for job {} = {}: {}",
-                    i,
-                    job_id,
+                    "could not send read response for job {}: {}",
+                    job_ids[0],
                     e
                 );
-                break;
             }
         }
     }
