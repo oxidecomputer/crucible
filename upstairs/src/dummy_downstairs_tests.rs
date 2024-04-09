@@ -1524,7 +1524,7 @@ async fn test_job_fault_condition() {
         job_ids.push(job_id);
         harness.ds3.ack_read().await;
 
-        // With 1x responses, we can now await the write job (which ensures that
+        // With 1x responses, we can now await the read job (which ensures that
         // the Upstairs has finished updating its state).
         h.await.unwrap();
 
