@@ -1515,6 +1515,11 @@ pub(crate) enum BlockOp {
     ShowWork {
         done: BlockRes<WQCounts>,
     },
+
+    #[cfg(test)]
+    GetDownstairsState {
+        done: BlockRes<ClientData<DsState>>,
+    },
 }
 
 macro_rules! ceiling_div {

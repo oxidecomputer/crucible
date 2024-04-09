@@ -13,6 +13,7 @@ use crate::BlockContext;
 use crate::BlockIO;
 use crate::Buffer;
 use crate::CrucibleError;
+use crate::DsState;
 use crate::{IO_OUTSTANDING_MAX_BYTES, IO_OUTSTANDING_MAX_JOBS};
 use crucible_client_types::CrucibleOpts;
 use crucible_common::Block;
@@ -1508,34 +1509,16 @@ async fn test_byte_fault_condition() {
     assert!(num_jobs < IO_OUTSTANDING_MAX_JOBS);
 
     for i in 0..num_jobs {
-        {
+        // We must tokio::spawn here because `write` will wait for the response
+        // to come back before returning
+        let h = tokio::spawn({
             let guest = harness.guest.clone();
 
-            // We must tokio::spawn here because `write` will wait for the
-            // response to come back before returning
             let write_buf = write_buf.clone();
-            tokio::spawn(async move {
+            async move {
                 guest.write(Block::new_512(0), write_buf).await.unwrap();
-            });
-        }
-
-        if (i + 1) * WRITE_SIZE < IO_OUTSTANDING_MAX_BYTES as usize {
-            // Before we're kicked out, assert we're seeing the read
-            // requests
-            assert!(matches!(
-                harness.ds1().recv().await.unwrap(),
-                Message::Write { .. },
-            ));
-        } else {
-            // After ds1 is kicked out, we shouldn't see any more messages
-            match harness.ds1().try_recv() {
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => {}
-                x => {
-                    panic!("Read {i} should return EMPTY, but we got:{x:?}");
-                }
             }
-        }
+        });
 
         match harness.ds2.recv().await.unwrap() {
             Message::Write {
@@ -1574,6 +1557,144 @@ async fn test_byte_fault_condition() {
                 result: Ok(()),
             })
             .unwrap();
+
+        // With 2x responses, we can now await the write job (which ensures that
+        // the Upstairs has finished updating its state).
+        h.await.unwrap();
+
+        let ds = harness.guest.downstairs_state().await.unwrap();
+        if (i + 1) * WRITE_SIZE < IO_OUTSTANDING_MAX_BYTES as usize {
+            // Before we're kicked out, assert we're seeing the read
+            // requests
+            assert!(matches!(
+                harness.ds1().recv().await.unwrap(),
+                Message::Write { .. },
+            ));
+            assert_eq!(ds[ClientId::new(0)], DsState::Active);
+            assert_eq!(ds[ClientId::new(1)], DsState::Active);
+            assert_eq!(ds[ClientId::new(2)], DsState::Active);
+        } else {
+            // After ds1 is kicked out, we shouldn't see any more messages
+            match harness.ds1().try_recv() {
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {}
+                x => {
+                    panic!("Read {i} should return EMPTY, but we got:{x:?}");
+                }
+            }
+            assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
+            assert_eq!(ds[ClientId::new(1)], DsState::Active);
+            assert_eq!(ds[ClientId::new(2)], DsState::Active);
+        }
+    }
+
+    // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
+    // flush_timeout set to 24 hours, we shouldn't see anything else
+    assert!(matches!(harness.ds2.try_recv(), Err(TryRecvError::Empty)));
+    assert!(matches!(harness.ds3.try_recv(), Err(TryRecvError::Empty)));
+
+    // Assert the Upstairs isn't sending ds1 more work, because it is
+    // Faulted
+    let v = harness.ds1().try_recv();
+    assert_eq!(
+        v,
+        Err(TryRecvError::Disconnected),
+        "ds1 message queue must be disconnected"
+    );
+}
+
+/// Test that we will mark a Downstairs as failed if we hit the byte limit
+#[tokio::test]
+async fn test_job_fault_condition() {
+    let mut harness = TestHarness::new().await;
+
+    // Send 200 more than IO_OUTSTANDING_MAX_JOBS jobs, sending read
+    // responses from two of the three downstairs. After we have sent
+    // IO_OUTSTANDING_MAX_JOBS jobs, the Upstairs will set ds1 to faulted,
+    // and send it no more work.
+    const NUM_JOBS: usize = IO_OUTSTANDING_MAX_JOBS + 200;
+    let mut job_ids = Vec::with_capacity(NUM_JOBS);
+
+    for i in 0..NUM_JOBS {
+        // We must tokio::spawn here because `write` will wait for the response
+        // to come back before returning
+        let h = tokio::spawn({
+            let guest = harness.guest.clone();
+            async move {
+                let mut buffer = Buffer::new(1, 512);
+                guest.read(Block::new_512(0), &mut buffer).await.unwrap();
+            }
+        });
+
+        match harness.ds2.recv().await.unwrap() {
+            Message::ReadRequest { job_id, .. } => {
+                // Record the job ids of the write requests
+                job_ids.push(job_id);
+            }
+            _ => panic!("saw non write request!"),
+        }
+
+        assert!(matches!(
+            harness.ds3.recv().await.unwrap(),
+            Message::ReadRequest { .. },
+        ));
+
+        // Respond with read responses for downstairs 2 and 3
+        let (block, data) = make_blank_read_response();
+        harness
+            .ds2
+            .send(Message::ReadResponse {
+                header: ReadResponseHeader {
+                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                    session_id: harness.ds2.upstairs_session_id.unwrap(),
+                    job_id: job_ids[i],
+                    blocks: Ok(vec![block.clone()]),
+                },
+                data: data.clone(),
+            })
+            .unwrap();
+
+        harness
+            .ds3
+            .send(Message::ReadResponse {
+                header: ReadResponseHeader {
+                    upstairs_id: harness.guest.get_uuid().await.unwrap(),
+                    session_id: harness.ds3.upstairs_session_id.unwrap(),
+                    job_id: job_ids[i],
+                    blocks: Ok(vec![block.clone()]),
+                },
+                data: data.clone(),
+            })
+            .unwrap();
+
+        // With 1x responses, we can now await the write job (which ensures that
+        // the Upstairs has finished updating its state).
+        h.await.unwrap();
+
+        let ds = harness.guest.downstairs_state().await.unwrap();
+        if i < IO_OUTSTANDING_MAX_JOBS {
+            // Before we're kicked out, assert we're seeing the read
+            // requests
+            assert!(matches!(
+                harness.ds1().recv().await.unwrap(),
+                Message::ReadRequest { .. },
+            ));
+            assert_eq!(ds[ClientId::new(0)], DsState::Active);
+            assert_eq!(ds[ClientId::new(1)], DsState::Active);
+            assert_eq!(ds[ClientId::new(2)], DsState::Active);
+        } else {
+            // After ds1 is kicked out, we shouldn't see any more messages
+            match harness.ds1().try_recv() {
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {}
+                x => {
+                    panic!("Read {i} should return EMPTY, but we got:{x:?}");
+                }
+            }
+            assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
+            assert_eq!(ds[ClientId::new(1)], DsState::Active);
+            assert_eq!(ds[ClientId::new(2)], DsState::Active);
+        }
     }
 
     // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the

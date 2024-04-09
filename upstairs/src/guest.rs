@@ -462,6 +462,14 @@ impl Guest {
             drop(_guard);
         }
     }
+
+    #[cfg(test)]
+    pub async fn downstairs_state(
+        &self,
+    ) -> Result<crate::ClientData<crate::DsState>, CrucibleError> {
+        self.send_and_wait(|done| BlockOp::GetDownstairsState { done })
+            .await
+    }
 }
 
 #[async_trait]
