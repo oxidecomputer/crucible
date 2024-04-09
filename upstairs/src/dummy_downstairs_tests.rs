@@ -1499,7 +1499,7 @@ async fn test_byte_fault_condition() {
     );
 }
 
-/// Test that we will mark a Downstairs as failed if we hit the byte limit
+/// Test that we will mark a Downstairs as failed if we hit the job limit
 #[tokio::test]
 async fn test_job_fault_condition() {
     let mut harness = TestHarness::new().await;
