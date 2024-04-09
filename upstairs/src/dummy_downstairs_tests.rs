@@ -1435,7 +1435,7 @@ async fn test_byte_fault_condition() {
             guest.write(Block::new_512(0), write_buf).await.unwrap();
         });
 
-        let job_id = harness.ds2.ack_write().await;
+        harness.ds2.ack_write().await;
         harness.ds3.ack_write().await;
 
         // With 2x responses, we can now await the write job (which ensures that
@@ -1503,7 +1503,7 @@ async fn test_job_fault_condition() {
         });
 
         // Respond with read responses for downstairs 2 and 3
-        let job_id = harness.ds2.ack_read().await;
+        harness.ds2.ack_read().await;
         harness.ds3.ack_read().await;
 
         // With 1x responses, we can now await the read job (which ensures that
