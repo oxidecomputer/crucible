@@ -2142,9 +2142,6 @@ async fn test_deactivate_slow() {
 
     // At this point, the upstairs sends YouAreNoLongerActive, but then
     // drops the sender end, so we can't actually see it.
-    //
-    // TODO is this correct?  Shouldn't values in the mpsc queue be read out,
-    // even if the sender has been dropped?
     assert!(harness.ds1().recv().await.is_none());
 
     // Reconnect ds1, since the Downstairs always tries to reconnect
