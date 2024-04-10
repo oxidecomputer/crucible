@@ -1595,6 +1595,8 @@ async fn test_return_iops() {
  */
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Arg {
+    /// Upstairs session UUID
+    pub session_id: String,
     /// Jobs on the upstairs guest work queue.
     pub up_count: u32,
     /// Apply loop counter
