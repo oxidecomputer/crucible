@@ -751,7 +751,7 @@ async fn test_successful_live_repair() {
             Err(e) => {
                 info!(
                     harness.log,
-                    "could not send read response for job {}: {}",
+                    "ds1 can't reply to job {}, because it's disconnected: {}",
                     job_ids[0],
                     e
                 );
@@ -1608,7 +1608,7 @@ async fn test_error_during_live_repair_no_halt() {
         jh.await.unwrap();
     }
 
-    // Try to reply from DS1, to confirm that we've been kicked out
+    // Confirm that DS1 has been disconnected (and cannot reply to jobs)
     {
         let (block, data) = make_blank_read_response();
         let session_id = harness.ds1().upstairs_session_id.unwrap();
@@ -1626,7 +1626,7 @@ async fn test_error_during_live_repair_no_halt() {
             Err(e) => {
                 info!(
                     harness.log,
-                    "could not send read response for job {}: {}",
+                    "ds1 can't reply to job {}, because it's disconnected: {}",
                     job_ids[0],
                     e
                 );
@@ -2045,7 +2045,7 @@ async fn test_no_read_only_live_repair() {
         jh.await.unwrap();
     }
 
-    // Send ds1 responses for the jobs it saw
+    // Confirm that DS1 has been disconnected (and cannot reply to jobs)
     {
         let (block, data) = make_blank_read_response();
         let session_id = harness.ds1().upstairs_session_id.unwrap();
@@ -2063,7 +2063,7 @@ async fn test_no_read_only_live_repair() {
             Err(e) => {
                 info!(
                     harness.log,
-                    "could not send read response for job {}: {}",
+                    "ds1 can't reply to job {}, because it's disconnected: {}",
                     job_ids[0],
                     e
                 );
