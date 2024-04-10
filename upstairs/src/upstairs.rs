@@ -1089,6 +1089,25 @@ impl Upstairs {
                 let r = self.downstairs.replace(id, old, new, &self.state);
                 done.send_result(r);
             }
+
+            #[cfg(test)]
+            BlockOp::GetDownstairsState { done } => {
+                let mut out = crate::ClientData::new(DsState::New);
+                for i in ClientId::iter() {
+                    out[i] = self.downstairs.clients[i].state();
+                }
+                done.send_ok(out);
+            }
+
+            #[cfg(test)]
+            BlockOp::FaultDownstairs { client_id, done } => {
+                self.downstairs.skip_all_jobs(client_id);
+                self.downstairs.clients[client_id].fault(
+                    &self.state,
+                    crate::client::ClientStopReason::RequestedFault,
+                );
+                done.send_ok(());
+            }
         }
     }
 
