@@ -6,9 +6,7 @@ use crate::{
     JobId, Message, ReadResponse, ReconcileIO, RegionDefinitionStatus,
     RegionMetadata,
 };
-use crucible_common::{
-    deadline_secs, verbose_timeout, x509::TLSContext, IO_OUTSTANDING_MAX_JOBS,
-};
+use crucible_common::{deadline_secs, verbose_timeout, x509::TLSContext};
 use crucible_protocol::{
     BlockContext, MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
 };
@@ -50,13 +48,13 @@ struct ClientTaskHandle {
     ///
     /// The only thing that we send to the client is [`Message`], which is then
     /// sent out over the network.
-    client_request_tx: mpsc::Sender<Message>,
+    client_request_tx: mpsc::UnboundedSender<Message>,
 
     /// Handle to receive data from the I/O task
     ///
     /// The client has a variety of responses, which include [`Message`]
     /// replies, but also things like "the I/O task has stopped"
-    client_response_rx: mpsc::Receiver<ClientResponse>,
+    client_response_rx: mpsc::UnboundedReceiver<ClientResponse>,
 
     /// One-shot sender to ask the client to open its connection
     ///
@@ -340,6 +338,7 @@ impl DownstairsClient {
         self.new_jobs.insert(work);
     }
 
+    #[allow(clippy::unused_async)]
     pub(crate) async fn send(&mut self, m: Message) {
         // Normally, the client task continues running until
         // `self.client_task.client_request_tx` is dropped; as such, we should
@@ -347,7 +346,7 @@ impl DownstairsClient {
         //
         // However, during Tokio shutdown, tasks may stop in arbitrary order.
         // We log an error but don't panic, because panicking is uncouth.
-        if let Err(e) = self.client_task.client_request_tx.send(m).await {
+        if let Err(e) = self.client_task.client_request_tx.send(m) {
             error!(
                 self.log,
                 "failed to send message: {e};
@@ -684,14 +683,11 @@ impl DownstairsClient {
         client_delay_us: Arc<AtomicU64>,
         log: &Logger,
     ) -> ClientTaskHandle {
-        // These channels must support at least IO_OUTSTANDING_MAX_JOBS
-        // messages; otherwise, we risk a deadlock if the IO task and main task
-        // simultaneously try sending each other data when the channels are
-        // full.
-        let (client_request_tx, client_request_rx) =
-            mpsc::channel(IO_OUTSTANDING_MAX_JOBS + 200);
+        // Messages in flight are limited by backpressure, so we can use
+        // unbounded channels here without fear of runaway.
+        let (client_request_tx, client_request_rx) = mpsc::unbounded_channel();
         let (client_response_tx, client_response_rx) =
-            mpsc::channel(IO_OUTSTANDING_MAX_JOBS + 200);
+            mpsc::unbounded_channel();
         let (client_stop_tx, client_stop_rx) = oneshot::channel();
         let (client_connect_tx, client_connect_rx) = oneshot::channel();
 
@@ -733,10 +729,9 @@ impl DownstairsClient {
     /// Starts a dummy IO task, returning its IO handle
     #[cfg(test)]
     fn new_dummy_task(connect: bool) -> ClientTaskHandle {
-        let (client_request_tx, client_request_rx) =
-            mpsc::channel(IO_OUTSTANDING_MAX_JOBS + 200);
+        let (client_request_tx, client_request_rx) = mpsc::unbounded_channel();
         let (_client_response_tx, client_response_rx) =
-            mpsc::channel(IO_OUTSTANDING_MAX_JOBS + 200);
+            mpsc::unbounded_channel();
         let (client_stop_tx, client_stop_rx) = oneshot::channel();
         let (client_connect_tx, client_connect_rx) = oneshot::channel();
 
@@ -2412,10 +2407,10 @@ struct ClientIoTask {
     target: SocketAddr,
 
     /// Request channel from the main task
-    request_rx: mpsc::Receiver<Message>,
+    request_rx: mpsc::UnboundedReceiver<Message>,
 
     /// Reply channel to the main task
-    response_tx: mpsc::Sender<ClientResponse>,
+    response_tx: mpsc::UnboundedSender<ClientResponse>,
 
     /// Oneshot used to start the task
     start: oneshot::Receiver<()>,
@@ -2487,12 +2482,7 @@ impl ClientIoTask {
         let r = self.run_inner().await;
 
         warn!(self.log, "client task is sending Done({r:?})");
-        if self
-            .response_tx
-            .send(ClientResponse::Done(r))
-            .await
-            .is_err()
-        {
+        if self.response_tx.send(ClientResponse::Done(r)).is_err() {
             warn!(
                 self.log,
                 "client task could not reply to main task; shutting down?"
@@ -2617,7 +2607,6 @@ impl ClientIoTask {
     {
         self.response_tx
             .send(ClientResponse::Connected)
-            .await
             .expect("client_response_tx closed unexpectedly");
 
         // Spawn a separate task to receive data over the network, so that we
@@ -2753,7 +2742,7 @@ impl ClientIoTask {
 }
 
 async fn rx_loop<R>(
-    response_tx: mpsc::Sender<ClientResponse>,
+    response_tx: mpsc::UnboundedSender<ClientResponse>,
     mut fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
     log: Logger,
 ) -> ClientRunResult
@@ -2766,7 +2755,7 @@ where
                 match f {
                     Some(Ok(m)) => {
                         if let Err(e) =
-                            response_tx.send(ClientResponse::Message(m)).await
+                            response_tx.send(ClientResponse::Message(m))
                         {
                             warn!(
                                 log,

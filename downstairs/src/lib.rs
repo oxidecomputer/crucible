@@ -16,8 +16,7 @@ use std::time::Duration;
 use crucible_common::{
     build_logger, crucible_bail, deadline_secs,
     impacted_blocks::extent_from_offset, integrity_hash, mkdir_for_file,
-    verbose_timeout, Block, CrucibleError, RegionDefinition,
-    IO_OUTSTANDING_MAX_JOBS, MAX_BLOCK_SIZE,
+    verbose_timeout, Block, CrucibleError, RegionDefinition, MAX_BLOCK_SIZE,
 };
 use crucible_protocol::{
     BlockContext, CrucibleDecoder, CrucibleEncoder, JobId, Message,
@@ -538,25 +537,21 @@ pub mod cdt {
 // Check if a Message is valid on this downstairs or not.
 // If not, then send the correct error on the provided channel, return false.
 // If correct, then return true.
-async fn is_message_valid(
+fn is_message_valid(
     upstairs_connection: UpstairsConnection,
     upstairs_id: Uuid,
     session_id: Uuid,
-    resp_tx: &mpsc::Sender<Message>,
+    resp_tx: &mpsc::UnboundedSender<Message>,
 ) -> Result<bool> {
     if upstairs_connection.upstairs_id != upstairs_id {
-        resp_tx
-            .send(Message::UuidMismatch {
-                expected_id: upstairs_connection.upstairs_id,
-            })
-            .await?;
+        resp_tx.send(Message::UuidMismatch {
+            expected_id: upstairs_connection.upstairs_id,
+        })?;
         Ok(false)
     } else if upstairs_connection.session_id != session_id {
-        resp_tx
-            .send(Message::UuidMismatch {
-                expected_id: upstairs_connection.session_id,
-            })
-            .await?;
+        resp_tx.send(Message::UuidMismatch {
+            expected_id: upstairs_connection.session_id,
+        })?;
         Ok(false)
     } else {
         Ok(true)
@@ -566,8 +561,8 @@ async fn is_message_valid(
 async fn do_work_task(
     ads: &Mutex<Downstairs>,
     upstairs_connection: UpstairsConnection,
-    mut job_channel_rx: mpsc::Receiver<()>,
-    resp_tx: mpsc::Sender<Message>,
+    mut job_channel_rx: mpsc::UnboundedReceiver<()>,
+    resp_tx: mpsc::UnboundedSender<Message>,
 ) -> Result<()> {
     // The lossy attribute currently does not change at runtime. To avoid
     // continually locking the downstairs, cache the result here.
@@ -1078,7 +1073,7 @@ where
 }
 
 async fn reply_task<WT>(
-    mut resp_channel_rx: mpsc::Receiver<Message>,
+    mut resp_channel_rx: mpsc::UnboundedReceiver<Message>,
     mut fw: FramedWrite<WT, CrucibleEncoder>,
 ) -> Result<()>
 where
@@ -1115,13 +1110,10 @@ where
     // Create the log for this task to use.
     let log = ads.lock().await.log.new(o!("task" => "main".to_string()));
 
-    // Give our work queue a little more space than we expect the upstairs
-    // to ever send us.
-    let (job_channel_tx, job_channel_rx) =
-        mpsc::channel(IO_OUTSTANDING_MAX_JOBS + 50);
-
-    let (resp_channel_tx, resp_channel_rx) =
-        mpsc::channel(IO_OUTSTANDING_MAX_JOBS + 50);
+    // We rely on backpressure to limit total jobs in flight, so these channels
+    // can be unbounded.
+    let (job_channel_tx, job_channel_rx) = mpsc::unbounded_channel();
+    let (resp_channel_tx, resp_channel_rx) = mpsc::unbounded_channel();
     let mut framed_write_task = tokio::spawn(reply_task(resp_channel_rx, fw));
 
     /*
@@ -1179,8 +1171,10 @@ where
         })
     };
 
+    // The Upstairs uses backpressure to limit total outstanding jobs, so these
+    // channels can be unbounded.
     let (message_channel_tx, mut message_channel_rx) =
-        mpsc::channel(IO_OUTSTANDING_MAX_JOBS + 50);
+        mpsc::unbounded_channel();
     let mut pf_task = {
         let adc = ads.clone();
         let tx = job_channel_tx.clone();
@@ -1198,7 +1192,7 @@ where
                     // If we added work, tell the work task to get busy.
                     Ok(Some(new_ds_id)) => {
                         cdt::work__start!(|| new_ds_id.0);
-                        tx.send(()).await?;
+                        tx.send(())?;
                     }
                     // If we handled the job locally, nothing to do here
                     Ok(None) => (),
@@ -1283,7 +1277,7 @@ where
                                 new_session_id:
                                     new_upstairs_connection.session_id,
                                 new_gen: new_upstairs_connection.gen,
-                            }).await
+                            })
                         {
                             warn!(log, "Failed sending YouAreNoLongerActive: {}", e);
                         }
@@ -1316,10 +1310,10 @@ where
                     Some(Ok(msg)) => {
                         if matches!(msg, Message::Ruok) {
                             // Respond instantly to pings, don't wait.
-                            if let Err(e) = resp_channel_tx.send(Message::Imok).await {
+                            if let Err(e) = resp_channel_tx.send(Message::Imok) {
                                 bail!("Failed sending Imok: {}", e);
                             }
-                        } else if let Err(e) = message_channel_tx.send(msg).await {
+                        } else if let Err(e) = message_channel_tx.send(msg) {
                             bail!("Failed sending message to proc_frame: {}", e);
                         }
                     }
@@ -2328,7 +2322,7 @@ impl Downstairs {
         ad: &Mutex<Downstairs>,
         upstairs_connection: UpstairsConnection,
         m: Message,
-        resp_tx: &mpsc::Sender<Message>,
+        resp_tx: &mpsc::UnboundedSender<Message>,
     ) -> Result<Option<JobId>> {
         // Initial check against upstairs and session ID
         match m {
@@ -2390,9 +2384,7 @@ impl Downstairs {
                     upstairs_id,
                     session_id,
                     resp_tx,
-                )
-                .await?
-                {
+                )? {
                     return Ok(None);
                 }
             }
@@ -2593,7 +2585,7 @@ impl Downstairs {
                         },
                     }
                 };
-                resp_tx.send(msg).await?;
+                resp_tx.send(msg)?;
                 None
             }
             Message::ExtentClose {
@@ -2612,7 +2604,7 @@ impl Downstairs {
                         },
                     }
                 };
-                resp_tx.send(msg).await?;
+                resp_tx.send(msg)?;
                 None
             }
             Message::ExtentRepair {
@@ -2646,7 +2638,7 @@ impl Downstairs {
                         },
                     }
                 };
-                resp_tx.send(msg).await?;
+                resp_tx.send(msg)?;
                 None
             }
             Message::ExtentReopen {
@@ -2665,7 +2657,7 @@ impl Downstairs {
                         },
                     }
                 };
-                resp_tx.send(msg).await?;
+                resp_tx.send(msg)?;
                 None
             }
             x => bail!("unexpected frame {:?}", x),
@@ -2676,7 +2668,7 @@ impl Downstairs {
     async fn do_work_for(
         ads: &Mutex<Downstairs>,
         upstairs_connection: UpstairsConnection,
-        resp_tx: &mpsc::Sender<Message>,
+        resp_tx: &mpsc::UnboundedSender<Message>,
     ) -> Result<()> {
         let ds = ads.lock().await;
         if !ds.is_active(upstairs_connection) {
@@ -2742,14 +2734,12 @@ impl Downstairs {
             };
 
             if let Some(error) = m.err() {
-                resp_tx
-                    .send(Message::ErrorReport {
-                        upstairs_id: upstairs_connection.upstairs_id,
-                        session_id: upstairs_connection.session_id,
-                        job_id: new_id,
-                        error: error.clone(),
-                    })
-                    .await?;
+                resp_tx.send(Message::ErrorReport {
+                    upstairs_id: upstairs_connection.upstairs_id,
+                    session_id: upstairs_connection.session_id,
+                    job_id: new_id,
+                    error: error.clone(),
+                })?;
 
                 // If the job errored, do not consider it completed.
                 // Retry it.
@@ -2782,7 +2772,7 @@ impl Downstairs {
                 // consumes the message (so we'll check whether it's
                 // a FlushAck beforehand)
                 let is_flush = matches!(m, Message::FlushAck { .. });
-                resp_tx.send(m).await?;
+                resp_tx.send(m)?;
 
                 ads.lock().await.complete_work_inner(
                     upstairs_connection,

@@ -89,6 +89,12 @@ use upstairs::{UpCounters, UpstairsAction};
 /// as faulted.
 const IO_OUTSTANDING_MAX_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
 
+/// Max number of outstanding IOs between the upstairs and a downstairs
+///
+/// If we exceed this value, the upstairs will give up and mark that downstairs
+/// as faulted.
+pub const IO_OUTSTANDING_MAX_JOBS: usize = 57000;
+
 /// The BlockIO trait behaves like a physical NVMe disk (or a virtio virtual
 /// disk): there is no contract about what order operations that are submitted
 /// between flushes are performed in.
