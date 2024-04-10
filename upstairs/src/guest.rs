@@ -13,9 +13,7 @@ use crate::{
     BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, JobId, ReplaceResult,
     UpstairsAction,
 };
-use crucible_common::{
-    build_logger, crucible_bail, Block, CrucibleError, IO_OUTSTANDING_MAX_JOBS,
-};
+use crucible_common::{build_logger, crucible_bail, Block, CrucibleError};
 use crucible_protocol::{ReadResponse, SnapshotDetails};
 
 use async_trait::async_trait;
@@ -910,7 +908,7 @@ impl GuestIoHandle {
 
     /// Set `self.backpressure_us` based on outstanding IO ratio
     pub fn set_backpressure(&self, bytes: u64, jobs: u64) {
-        let jobs_frac = jobs as f64 / IO_OUTSTANDING_MAX_JOBS as f64;
+        let jobs_frac = jobs as f64 / crate::IO_OUTSTANDING_MAX_JOBS as f64;
         let bytes_frac = bytes as f64 / crate::IO_OUTSTANDING_MAX_BYTES as f64;
 
         // Check to see if the number of outstanding write bytes (between
