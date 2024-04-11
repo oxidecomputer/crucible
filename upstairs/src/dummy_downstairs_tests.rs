@@ -381,8 +381,9 @@ impl DownstairsConfig {
 
         let log_ = log.clone();
         let loopback_worker = tokio::task::spawn(async move {
-            let (sock, _raddr) = listener.accept().await.unwrap();
-            info!(log, "loopback worker connected");
+            info!(log, "loopback worker is listening on {local_addr:?}");
+            let (sock, raddr) = listener.accept().await.unwrap();
+            info!(log, "loopback worker connected to {raddr:?}");
 
             let (read, write) = sock.into_split();
 
