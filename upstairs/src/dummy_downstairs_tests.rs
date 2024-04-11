@@ -88,11 +88,7 @@ impl DownstairsHandle {
         loop {
             let packet = self.rx.recv().await?;
             if packet == Message::Ruok {
-                // Respond to pings right away
-                if let Err(e) = self.send(Message::Imok) {
-                    error!(self.log, "could not send ping: {e:?}");
-                }
-                info!(self.log, "responded to ping");
+                self.handle_ping()
             } else {
                 break Some(packet);
             }
@@ -106,16 +102,22 @@ impl DownstairsHandle {
         loop {
             let packet = self.rx.try_recv();
             if packet == Ok(Message::Ruok) {
-                // Respond to pings right away
-                if let Err(e) = self.send(Message::Imok) {
-                    error!(self.log, "could not send ping: {e:?}");
-                }
-                info!(self.log, "responded to ping");
-
-                continue;
+                self.handle_ping();
             } else {
                 break packet;
             }
+        }
+    }
+
+    fn handle_ping(&mut self) {
+        if self.cfg.reply_to_ping {
+            // Respond to pings right away
+            if let Err(e) = self.send(Message::Imok) {
+                error!(self.log, "could not send ping: {e:?}");
+            }
+            info!(self.log, "responded to ping");
+        } else {
+            info!(self.log, "ignored ping");
         }
     }
 
@@ -339,6 +341,7 @@ impl DownstairsHandle {
 #[derive(Clone)]
 pub struct DownstairsConfig {
     read_only: bool,
+    reply_to_ping: bool,
 
     extent_count: u32,
     extent_size: Block,
@@ -473,20 +476,29 @@ pub struct TestHarness {
 
 impl TestHarness {
     pub async fn new() -> TestHarness {
-        Self::new_(false).await
+        Self::new_(false, true).await
     }
 
     pub async fn new_ro() -> TestHarness {
-        Self::new_(true).await
+        Self::new_(true, true).await
+    }
+
+    /// Build a new TestHarness where DS1 doesn't reply to pings
+    pub async fn new_no_ping() -> TestHarness {
+        Self::new_(false, false).await
     }
 
     pub fn ds1(&mut self) -> &mut DownstairsHandle {
         self.ds1.as_mut().unwrap()
     }
 
-    fn default_config(read_only: bool) -> DownstairsConfig {
+    fn default_config(
+        read_only: bool,
+        reply_to_ping: bool,
+    ) -> DownstairsConfig {
         DownstairsConfig {
             read_only,
+            reply_to_ping,
 
             extent_count: 10,
             extent_size: Block::new_512(10),
@@ -497,10 +509,10 @@ impl TestHarness {
         }
     }
 
-    async fn new_(read_only: bool) -> TestHarness {
+    async fn new_(read_only: bool, reply_to_ping: bool) -> TestHarness {
         let log = csl();
 
-        let cfg = Self::default_config(read_only);
+        let cfg = Self::default_config(read_only, reply_to_ping);
 
         let ds1 = cfg.clone().start(log.new(o!("downstairs" => 1))).await;
         let ds2 = cfg.clone().start(log.new(o!("downstairs" => 2))).await;
@@ -685,7 +697,6 @@ async fn test_successful_live_repair() {
 
     // Send some jobs, so that we test job skipping when DS1 is faulted.
     const NUM_JOBS: usize = 200;
-    let mut job_ids = Vec::with_capacity(NUM_JOBS);
 
     for _ in 0..NUM_JOBS {
         // We must use `spawn` here because `read` will wait for the
@@ -701,8 +712,7 @@ async fn test_successful_live_repair() {
             Message::ReadRequest { .. },
         ));
 
-        let job_id = harness.ds2.ack_read().await;
-        job_ids.push(job_id);
+        harness.ds2.ack_read().await;
         harness.ds3.ack_read().await;
 
         h.await.unwrap(); // we have > 1x reply, so the read will return
@@ -714,6 +724,22 @@ async fn test_successful_live_repair() {
         .fault_downstairs(ClientId::new(0))
         .await
         .unwrap();
+
+    // Give the IO worker time to notice that the pipe is broken
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    run_live_repair(harness).await;
+}
+
+/// Runs live repair on a harness with DS1 marked as faulted
+async fn run_live_repair(mut harness: TestHarness) {
+    // Assert the Upstairs isn't sending ds1 more work, because it is Faulted
+    let v = harness.ds1().try_recv();
+    assert_eq!(
+        v,
+        Err(TryRecvError::Disconnected),
+        "ds1 message queue must be disconnected"
+    );
 
     // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
     // flush_timeout set to 24 hours, we shouldn't see anything else
@@ -735,6 +761,7 @@ async fn test_successful_live_repair() {
 
     // Confirm that DS1 has been disconnected (and cannot reply to jobs)
     {
+        let job_id = JobId(1000);
         let (block, data) = make_blank_read_response();
         let session_id = harness.ds1().upstairs_session_id.unwrap();
         let upstairs_id = harness.guest.get_uuid().await.unwrap();
@@ -742,7 +769,7 @@ async fn test_successful_live_repair() {
             header: ReadResponseHeader {
                 upstairs_id,
                 session_id,
-                job_id: job_ids[0],
+                job_id,
                 blocks: Ok(vec![block.clone()]),
             },
             data: data.clone(),
@@ -752,7 +779,7 @@ async fn test_successful_live_repair() {
                 info!(
                     harness.log,
                     "ds1 can't reply to job {}, because it's disconnected: {}",
-                    job_ids[0],
+                    job_id,
                     e
                 );
             }
@@ -1468,19 +1495,8 @@ async fn test_byte_fault_condition() {
         }
     }
 
-    // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
-    // flush_timeout set to 24 hours, we shouldn't see anything else
-    assert!(matches!(harness.ds2.try_recv(), Err(TryRecvError::Empty)));
-    assert!(matches!(harness.ds3.try_recv(), Err(TryRecvError::Empty)));
-
-    // Assert the Upstairs isn't sending ds1 more work, because it is
-    // Faulted
-    let v = harness.ds1().try_recv();
-    assert_eq!(
-        v,
-        Err(TryRecvError::Disconnected),
-        "ds1 message queue must be disconnected"
-    );
+    // Confirm that live repair still works
+    run_live_repair(harness).await
 }
 
 /// Test that we will mark a Downstairs as failed if we hit the job limit
@@ -1536,19 +1552,8 @@ async fn test_job_fault_condition() {
         }
     }
 
-    // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
-    // flush_timeout set to 24 hours, we shouldn't see anything else
-    assert!(matches!(harness.ds2.try_recv(), Err(TryRecvError::Empty)));
-    assert!(matches!(harness.ds3.try_recv(), Err(TryRecvError::Empty)));
-
-    // Assert the Upstairs isn't sending ds1 more work, because it is
-    // Faulted
-    let v = harness.ds1().try_recv();
-    assert_eq!(
-        v,
-        Err(TryRecvError::Disconnected),
-        "ds1 message queue must be disconnected"
-    );
+    // Confirm that live repair still works
+    run_live_repair(harness).await
 }
 
 /// Test that an error during the live repair doesn't halt indefinitely
