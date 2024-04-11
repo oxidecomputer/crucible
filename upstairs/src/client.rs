@@ -2573,7 +2573,11 @@ impl ClientIoTask {
             tcp = sock.connect(self.target) => {
                 match tcp {
                     Ok(tcp) => {
-                        info!(self.log, "ds_connection connected");
+                        info!(
+                            self.log,
+                            "ds_connection connected from {:?}",
+                            tcp.local_addr()
+                        );
                         tcp
                     }
                     Err(e) => {
