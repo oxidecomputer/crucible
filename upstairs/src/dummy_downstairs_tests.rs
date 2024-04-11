@@ -66,10 +66,7 @@ fn csl() -> Logger {
 pub struct DownstairsHandle {
     log: Logger,
 
-    /// When the loopback worker finishes, we return the original listener
-    /// so that we can reconnect later on.
-    loopback_worker:
-        tokio::task::JoinHandle<Result<TcpListener, CrucibleError>>,
+    loopback_worker: tokio::task::JoinHandle<Result<(), CrucibleError>>,
     rx: mpsc::UnboundedReceiver<Message>,
     tx: mpsc::UnboundedSender<Message>,
     stop: oneshot::Sender<()>,
@@ -251,8 +248,8 @@ impl DownstairsHandle {
         def
     }
 
-    /// Stops the loopback worker, returning the `TcpListener` for reuse
-    pub async fn halt(self) -> TcpListener {
+    /// Stops the loopback worker, returning the `SocketAddr` for reuse
+    pub async fn halt(self) -> SocketAddr {
         if let Err(()) = self.stop.send(()) {
             // This may be fine, if the worker was kicked out and stopped on
             // its own (e.g. because one of its queues was closed)
@@ -260,7 +257,8 @@ impl DownstairsHandle {
         }
         let r = self.loopback_worker.await;
         r.expect("failed to join loopback worker")
-            .expect("loopback worker returned an error")
+            .expect("loopback worker returned an error");
+        self.local_addr
     }
 
     /// Awaits a `Message::Flush { .. }` and sends a `FlushAck`
@@ -355,18 +353,17 @@ pub struct DownstairsConfig {
 impl DownstairsConfig {
     async fn start(self, log: Logger) -> DownstairsHandle {
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let listener = TcpListener::bind(&bind_addr).await.unwrap();
         let uuid = Uuid::new_v4();
-
-        self.restart(uuid, listener, log).await
+        self.restart(uuid, bind_addr, log).await
     }
 
     async fn restart(
         self,
         uuid: Uuid,
-        listener: TcpListener,
+        bind_addr: SocketAddr,
         log: Logger,
     ) -> DownstairsHandle {
+        let listener = TcpListener::bind(&bind_addr).await.unwrap();
         let local_addr = listener.local_addr().unwrap();
 
         // Dummy repair task, to get a SocketAddr for the `YesItsMe` reply
@@ -443,7 +440,7 @@ impl DownstairsConfig {
                     }
                 }
             }
-            Ok(listener)
+            Ok(())
         });
 
         DownstairsHandle {
@@ -594,8 +591,8 @@ impl TestHarness {
         let cfg = ds1.cfg.clone();
         let log = ds1.log.clone();
         let uuid = ds1.uuid;
-        let listener = ds1.halt().await;
-        self.ds1 = Some(cfg.restart(uuid, listener, log).await);
+        let addr = ds1.halt().await;
+        self.ds1 = Some(cfg.restart(uuid, addr, log).await);
     }
 
     /// Spawns a function on the `Guest`
@@ -2381,9 +2378,9 @@ async fn test_deactivate_slow() {
             let cfg = ds1.cfg.clone();
             let log = ds1.log.clone();
             let uuid = ds1.uuid;
-            let listener = ds1.halt().await;
+            let addr = ds1.halt().await;
             reconnected.store(RECONNECT_TRYING, Ordering::Release);
-            let mut ds1 = cfg.restart(uuid, listener, log).await;
+            let mut ds1 = cfg.restart(uuid, addr, log).await;
 
             ds1.negotiate_start().await;
             reconnected.store(RECONNECT_DONE, Ordering::Release);
