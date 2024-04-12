@@ -499,8 +499,9 @@ impl TestHarness {
             read_only,
             reply_to_ping,
 
-            extent_count: 10,
-            extent_size: Block::new_512(10),
+            // Slightly over 1 MiB, so we can do max-size writes
+            extent_count: 25,
+            extent_size: Block::new_512(100),
 
             gen_numbers: vec![0u64; 10],
             flush_numbers: vec![0u64; 10],
@@ -1448,7 +1449,7 @@ async fn test_byte_fault_condition() {
 
     // Send enough bytes to hit the IO_OUTSTANDING_MAX_BYTES condition on
     // downstairs 1, which should mark it as faulted and kick it out.
-    const WRITE_SIZE: usize = 50 * 1024; // 50 KiB
+    const WRITE_SIZE: usize = 1024usize.pow(2); // 1 MiB
     let write_buf = BytesMut::from(vec![1; WRITE_SIZE].as_slice()); // 50 KiB
     let num_jobs = IO_OUTSTANDING_MAX_BYTES as usize / write_buf.len() + 10;
     assert!(num_jobs < IO_OUTSTANDING_MAX_JOBS);
@@ -1516,7 +1517,7 @@ async fn test_byte_fault_condition_offline() {
     // `num_jobs` sends enough bytes to hit the IO_OUTSTANDING_MAX_BYTES
     // condition on downstairs 1, which should mark it as faulted and kick it
     // out.
-    const WRITE_SIZE: usize = 50 * 1024; // 50 KiB
+    const WRITE_SIZE: usize = 1024usize.pow(2); // 1 MiB
     let write_buf = BytesMut::from(vec![1; WRITE_SIZE].as_slice()); // 50 KiB
     let num_jobs = IO_OUTSTANDING_MAX_BYTES as usize / write_buf.len() + 10;
     assert!(num_jobs < IO_OUTSTANDING_MAX_JOBS);
