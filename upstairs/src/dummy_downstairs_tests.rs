@@ -475,44 +475,38 @@ pub struct TestHarness {
 
 impl TestHarness {
     pub async fn new() -> TestHarness {
-        Self::new_(false, true).await
+        Self::new_(false).await
     }
 
     pub async fn new_ro() -> TestHarness {
-        Self::new_(true, true).await
-    }
-
-    /// Build a new TestHarness where DS1 doesn't reply to pings
-    pub async fn new_no_ping() -> TestHarness {
-        Self::new_(false, false).await
+        Self::new_(true).await
     }
 
     pub fn ds1(&mut self) -> &mut DownstairsHandle {
         self.ds1.as_mut().unwrap()
     }
 
-    fn default_config(
-        read_only: bool,
-        reply_to_ping: bool,
-    ) -> DownstairsConfig {
+    fn default_config(read_only: bool) -> DownstairsConfig {
         DownstairsConfig {
             read_only,
-            reply_to_ping,
+            reply_to_ping: true,
 
-            // Slightly over 1 MiB, so we can do max-size writes
+            // Extent count is picked so that we can hit
+            // IO_OUTSTANDING_MAX_BYTES in less than IO_OUTSTANDING_MAX_JOBS,
+            // i.e. letting us test both byte and job fault conditions.
             extent_count: 25,
-            extent_size: Block::new_512(100),
+            extent_size: Block::new_512(10),
 
-            gen_numbers: vec![0u64; 10],
-            flush_numbers: vec![0u64; 10],
-            dirty_bits: vec![false; 10],
+            gen_numbers: vec![0u64; 25],
+            flush_numbers: vec![0u64; 25],
+            dirty_bits: vec![false; 25],
         }
     }
 
-    async fn new_(read_only: bool, reply_to_ping: bool) -> TestHarness {
+    async fn new_(read_only: bool) -> TestHarness {
         let log = csl();
 
-        let cfg = Self::default_config(read_only, reply_to_ping);
+        let cfg = Self::default_config(read_only);
 
         let ds1 = cfg.clone().start(log.new(o!("downstairs" => 1))).await;
         let ds2 = cfg.clone().start(log.new(o!("downstairs" => 2))).await;
@@ -813,7 +807,7 @@ async fn run_live_repair(mut harness: TestHarness) {
     let mut ds2_buffered_messages = vec![];
     let mut ds3_buffered_messages = vec![];
 
-    for eid in 0..10 {
+    for eid in 0..25 {
         // The Upstairs first sends the close and reopen jobs
         for _ in 0..2 {
             ds1_buffered_messages.push(harness.ds1().recv().await.unwrap());
@@ -871,7 +865,7 @@ async fn run_live_repair(mut harness: TestHarness) {
 
         let mut responses = vec![Vec::new(); 3];
 
-        for io_eid in 0usize..10 {
+        for io_eid in 0usize..25 {
             let mut dep_job_id = [reopen_job_id; 3];
             // read
             harness.spawn(move |guest| async move {
@@ -1425,11 +1419,11 @@ async fn run_live_repair(mut harness: TestHarness) {
     // Expect the live repair to send a final flush
     {
         let flush_number = harness.ds1().ack_flush().await;
-        assert_eq!(flush_number, 12);
+        assert_eq!(flush_number, 27);
         let flush_number = harness.ds2.ack_flush().await;
-        assert_eq!(flush_number, 12);
+        assert_eq!(flush_number, 27);
         let flush_number = harness.ds3.ack_flush().await;
-        assert_eq!(flush_number, 12);
+        assert_eq!(flush_number, 27);
     }
 
     // Try another read
@@ -1447,34 +1441,24 @@ async fn run_live_repair(mut harness: TestHarness) {
 /// Test that we will mark a Downstairs as failed if we hit the byte limit
 #[tokio::test]
 async fn test_byte_fault_condition() {
-    let mut harness = TestHarness::new_no_ping().await;
-
     // Send enough bytes such that when we hit the client timeout, we are above
     // our bytes-in-flight limit (so the downstairs gets marked as faulted
     // instead of offline).
-    const MARGIN_SECS: f32 = 4.0;
-    const SEND_JOBS_TIME: f32 = CLIENT_TIMEOUT_SECS - MARGIN_SECS;
-    let start_time = tokio::time::Instant::now();
+    //
+    // Notice that we keep DS1 replying to pings through this process, so it
+    // doesn't get set to offline early.
+    let mut harness = TestHarness::new().await;
 
     // `num_jobs` sends enough bytes to hit the IO_OUTSTANDING_MAX_BYTES
     // condition on downstairs 1, which should mark it as faulted and kick it
     // out.
-    const WRITE_SIZE: usize = 1024usize.pow(2); // 1 MiB
+    const WRITE_SIZE: usize = 105 * 1024; // 105 KiB
     let write_buf = BytesMut::from(vec![1; WRITE_SIZE].as_slice()); // 50 KiB
     let num_jobs = IO_OUTSTANDING_MAX_BYTES as usize / write_buf.len() + 10;
     assert!(num_jobs < IO_OUTSTANDING_MAX_JOBS);
 
     // First, we'll send jobs until the timeout
-    for i in 0..num_jobs {
-        // Delay so that we hit SEND_JOBS_TIME at the end of this loop
-        tokio::time::sleep_until(
-            start_time
-                + Duration::from_secs_f32(
-                    SEND_JOBS_TIME * i as f32 / (num_jobs / 2) as f32,
-                ),
-        )
-        .await;
-
+    for _ in 0..num_jobs {
         // We must `spawn` here because `write` will wait for the response
         // to come back before returning
         let write_buf = write_buf.clone();
@@ -1490,7 +1474,7 @@ async fn test_byte_fault_condition() {
         harness.ds2.ack_write().await;
         harness.ds3.ack_write().await;
 
-        // With 2x responses, we can now await the read job (which ensures that
+        // With 2x responses, we can now await the write job (which ensures that
         // the Upstairs has finished updating its state).
         h.await.unwrap();
 
@@ -1501,8 +1485,23 @@ async fn test_byte_fault_condition() {
     }
 
     // Sleep until we're confident that the Downstairs is kicked out
-    info!(harness.log, "waiting for Upstairs to kick out DS1");
-    tokio::time::sleep(Duration::from_secs_f32(2.0 * MARGIN_SECS)).await;
+    let sleep_time = CLIENT_TIMEOUT_SECS + 5.0;
+    info!(
+        harness.log,
+        "waiting {sleep_time} secs for Upstairs to kick out DS1"
+    );
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs_f32(sleep_time)) => {
+            // we're done!
+        }
+        // we don't listen to ds1 here, so we won't acknowledge any pings!
+        v = harness.ds2.recv() => {
+            panic!("received unexpected message on ds2: {v:?}")
+        }
+        v = harness.ds3.recv() => {
+            panic!("received unexpected message on ds3: {v:?}")
+        }
+    }
 
     // Check to make sure that happened
     let ds = harness.guest.downstairs_state().await.unwrap();
@@ -1517,8 +1516,9 @@ async fn test_byte_fault_condition() {
 /// Test that we will transition a downstairs from offline -> faulted if we hit
 /// the byte limit after it's already offline
 #[tokio::test]
-async fn test_bbyte_fault_condition_offline() {
-    let mut harness = TestHarness::new_no_ping().await;
+async fn test_byte_fault_condition_offline() {
+    let mut harness = TestHarness::new().await;
+    harness.ds1().cfg.reply_to_ping = false;
 
     // Two different transitions occur during this test:
     // - We're not replying to pings, so DS1 will eventually transition from
@@ -1532,7 +1532,7 @@ async fn test_bbyte_fault_condition_offline() {
     // `num_jobs` sends enough bytes to hit the IO_OUTSTANDING_MAX_BYTES
     // condition on downstairs 1, which should mark it as faulted and kick it
     // out.
-    const WRITE_SIZE: usize = 1024usize.pow(2); // 1 MiB
+    const WRITE_SIZE: usize = 105 * 1024; // 105 KiB
     let write_buf = BytesMut::from(vec![1; WRITE_SIZE].as_slice()); // 50 KiB
     let num_jobs = IO_OUTSTANDING_MAX_BYTES as usize / write_buf.len() + 10;
     assert!(num_jobs < IO_OUTSTANDING_MAX_JOBS);
@@ -1625,26 +1625,13 @@ async fn test_bbyte_fault_condition_offline() {
 /// Test that we will mark a Downstairs as failed if we hit the job limit
 #[tokio::test]
 async fn test_job_fault_condition() {
-    let mut harness = TestHarness::new_no_ping().await;
+    let mut harness = TestHarness::new().await;
 
-    // We're going to queue up > IO_OUTSTANDING_MAX_JOBS in less than our
-    // timeout time, so that when timeout hits, the downstairs will become
-    // Faulted instead of Offline.
-    const MARGIN_SECS: f32 = 4.0;
-    const SEND_JOBS_TIME: f32 = CLIENT_TIMEOUT_SECS - MARGIN_SECS;
+    // We're going to queue up > IO_OUTSTANDING_MAX_JOBS, then wait for a
+    // timeout, so that when timeout hits, the downstairs will become Faulted
+    // instead of Offline.
     let num_jobs = IO_OUTSTANDING_MAX_JOBS + 200;
-    let start_time = tokio::time::Instant::now();
-
-    for i in 0..num_jobs {
-        // Delay so that we hit SEND_JOBS_TIME at the end of this loop
-        tokio::time::sleep_until(
-            start_time
-                + Duration::from_secs_f32(
-                    SEND_JOBS_TIME * i as f32 / num_jobs as f32,
-                ),
-        )
-        .await;
-
+    for _ in 0..num_jobs {
         // We must `spawn` here because `write` will wait for the response to
         // come back before returning
         let h = harness.spawn(|guest| async move {
@@ -1677,8 +1664,24 @@ async fn test_job_fault_condition() {
     // Because it has so many pending jobs, it will become Faulted instead of
     // Offline (or rather, will transition Active -> Offline -> Faulted
     // immediately).
+    let sleep_time = CLIENT_TIMEOUT_SECS + 5.0;
     info!(harness.log, "waiting for Upstairs to kick out DS1");
-    tokio::time::sleep(Duration::from_secs_f32(2.0 * MARGIN_SECS)).await;
+    info!(
+        harness.log,
+        "waiting {sleep_time} secs for Upstairs to kick out DS1"
+    );
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs_f32(sleep_time)) => {
+            // we're done!
+        }
+        // we don't listen to ds1 here, so we won't acknowledge any pings!
+        v = harness.ds2.recv() => {
+            panic!("received unexpected message on ds2: {v:?}")
+        }
+        v = harness.ds3.recv() => {
+            panic!("received unexpected message on ds3: {v:?}")
+        }
+    }
 
     // Check to make sure that happened
     let ds = harness.guest.downstairs_state().await.unwrap();
@@ -1693,8 +1696,9 @@ async fn test_job_fault_condition() {
 /// Test that we will transition a downstairs from offline -> faulted if we hit
 /// the job limit after it's already offline
 #[tokio::test]
-async fn test_jjob_fault_condition_offline() {
-    let mut harness = TestHarness::new_no_ping().await;
+async fn test_job_fault_condition_offline() {
+    let mut harness = TestHarness::new().await;
+    harness.ds1().cfg.reply_to_ping = false;
 
     // Two different transitions occur during this test:
     // - We're not replying to pings, so DS1 will eventually transition from
