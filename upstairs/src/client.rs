@@ -37,6 +37,10 @@ const TIMEOUT_SECS: f32 = 15.0;
 const TIMEOUT_LIMIT: usize = 3;
 const PING_INTERVAL_SECS: f32 = 5.0;
 
+/// Total time before a client is timed out
+#[cfg(test)]
+pub const CLIENT_TIMEOUT_SECS: f32 = TIMEOUT_SECS * TIMEOUT_LIMIT as f32;
+
 /// Handle to a running I/O task
 ///
 /// The I/O task is "thin"; it simply forwards messages around.  The task
@@ -2503,7 +2507,25 @@ impl ClientIoTask {
         // spinning (e.g. if something is fundamentally wrong with the
         // Downstairs)
         if self.delay {
-            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            tokio::select! {
+                s = &mut self.stop => {
+                    warn!(self.log, "client IO task stopped during sleep");
+                    return match s {
+                        Ok(s) =>
+                            ClientRunResult::RequestedStop(s),
+                        Err(e) => {
+                            warn!(
+                                self.log,
+                               "client_stop_rx closed unexpectedly: {e:?}"
+                            );
+                            ClientRunResult::QueueClosed
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                    // this is fine
+                },
+            }
         }
 
         // Wait for the start oneshot to fire.  This may happen immediately, but
@@ -2551,7 +2573,11 @@ impl ClientIoTask {
             tcp = sock.connect(self.target) => {
                 match tcp {
                     Ok(tcp) => {
-                        info!(self.log, "ds_connection connected");
+                        info!(
+                            self.log,
+                            "ds_connection connected from {:?}",
+                            tcp.local_addr()
+                        );
                         tcp
                     }
                     Err(e) => {
@@ -2561,6 +2587,20 @@ impl ClientIoTask {
                             self.target,
                         );
                         return ClientRunResult::ConnectionFailed(e);
+                    }
+                }
+            }
+            s = &mut self.stop => {
+                warn!(self.log, "client IO task stopped during connection");
+                return match s {
+                    Ok(s) =>
+                        ClientRunResult::RequestedStop(s),
+                    Err(e) => {
+                        warn!(
+                            self.log,
+                           "client_stop_rx closed unexpectedly: {e:?}"
+                        );
+                        ClientRunResult::QueueClosed
                     }
                 }
             }

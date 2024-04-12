@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::client::CLIENT_TIMEOUT_SECS;
 use crate::guest::Guest;
 use crate::up_main;
 use crate::BlockContext;
@@ -65,10 +66,7 @@ fn csl() -> Logger {
 pub struct DownstairsHandle {
     log: Logger,
 
-    /// When the loopback worker finishes, we return the original listener
-    /// so that we can reconnect later on.
-    loopback_worker:
-        tokio::task::JoinHandle<Result<TcpListener, CrucibleError>>,
+    loopback_worker: tokio::task::JoinHandle<Result<(), CrucibleError>>,
     rx: mpsc::UnboundedReceiver<Message>,
     tx: mpsc::UnboundedSender<Message>,
     stop: oneshot::Sender<()>,
@@ -88,11 +86,7 @@ impl DownstairsHandle {
         loop {
             let packet = self.rx.recv().await?;
             if packet == Message::Ruok {
-                // Respond to pings right away
-                if let Err(e) = self.send(Message::Imok) {
-                    error!(self.log, "could not send ping: {e:?}");
-                }
-                info!(self.log, "responded to ping");
+                self.handle_ping()
             } else {
                 break Some(packet);
             }
@@ -106,16 +100,22 @@ impl DownstairsHandle {
         loop {
             let packet = self.rx.try_recv();
             if packet == Ok(Message::Ruok) {
-                // Respond to pings right away
-                if let Err(e) = self.send(Message::Imok) {
-                    error!(self.log, "could not send ping: {e:?}");
-                }
-                info!(self.log, "responded to ping");
-
-                continue;
+                self.handle_ping();
             } else {
                 break packet;
             }
+        }
+    }
+
+    fn handle_ping(&mut self) {
+        if self.cfg.reply_to_ping {
+            // Respond to pings right away
+            if let Err(e) = self.send(Message::Imok) {
+                error!(self.log, "could not send ping: {e:?}");
+            }
+            info!(self.log, "responded to ping");
+        } else {
+            info!(self.log, "ignored ping");
         }
     }
 
@@ -248,8 +248,8 @@ impl DownstairsHandle {
         def
     }
 
-    /// Stops the loopback worker, returning the `TcpListener` for reuse
-    pub async fn halt(self) -> TcpListener {
+    /// Stops the loopback worker, returning the `SocketAddr` for reuse
+    pub async fn halt(self) -> SocketAddr {
         if let Err(()) = self.stop.send(()) {
             // This may be fine, if the worker was kicked out and stopped on
             // its own (e.g. because one of its queues was closed)
@@ -257,7 +257,8 @@ impl DownstairsHandle {
         }
         let r = self.loopback_worker.await;
         r.expect("failed to join loopback worker")
-            .expect("loopback worker returned an error")
+            .expect("loopback worker returned an error");
+        self.local_addr
     }
 
     /// Awaits a `Message::Flush { .. }` and sends a `FlushAck`
@@ -339,6 +340,7 @@ impl DownstairsHandle {
 #[derive(Clone)]
 pub struct DownstairsConfig {
     read_only: bool,
+    reply_to_ping: bool,
 
     extent_count: u32,
     extent_size: Block,
@@ -351,18 +353,17 @@ pub struct DownstairsConfig {
 impl DownstairsConfig {
     async fn start(self, log: Logger) -> DownstairsHandle {
         let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let listener = TcpListener::bind(&bind_addr).await.unwrap();
         let uuid = Uuid::new_v4();
-
-        self.restart(uuid, listener, log).await
+        self.restart(uuid, bind_addr, log).await
     }
 
     async fn restart(
         self,
         uuid: Uuid,
-        listener: TcpListener,
+        bind_addr: SocketAddr,
         log: Logger,
     ) -> DownstairsHandle {
+        let listener = TcpListener::bind(&bind_addr).await.unwrap();
         let local_addr = listener.local_addr().unwrap();
 
         // Dummy repair task, to get a SocketAddr for the `YesItsMe` reply
@@ -377,8 +378,9 @@ impl DownstairsConfig {
 
         let log_ = log.clone();
         let loopback_worker = tokio::task::spawn(async move {
-            let (sock, _raddr) = listener.accept().await.unwrap();
-            info!(log, "loopback worker connected");
+            info!(log, "loopback worker is listening on {local_addr:?}");
+            let (sock, raddr) = listener.accept().await.unwrap();
+            info!(log, "loopback worker connected to {raddr:?}");
 
             let (read, write) = sock.into_split();
 
@@ -438,7 +440,7 @@ impl DownstairsConfig {
                     }
                 }
             }
-            Ok(listener)
+            Ok(())
         });
 
         DownstairsHandle {
@@ -473,20 +475,29 @@ pub struct TestHarness {
 
 impl TestHarness {
     pub async fn new() -> TestHarness {
-        Self::new_(false).await
+        Self::new_(false, true).await
     }
 
     pub async fn new_ro() -> TestHarness {
-        Self::new_(true).await
+        Self::new_(true, true).await
+    }
+
+    /// Build a new TestHarness where DS1 doesn't reply to pings
+    pub async fn new_no_ping() -> TestHarness {
+        Self::new_(false, false).await
     }
 
     pub fn ds1(&mut self) -> &mut DownstairsHandle {
         self.ds1.as_mut().unwrap()
     }
 
-    fn default_config(read_only: bool) -> DownstairsConfig {
+    fn default_config(
+        read_only: bool,
+        reply_to_ping: bool,
+    ) -> DownstairsConfig {
         DownstairsConfig {
             read_only,
+            reply_to_ping,
 
             extent_count: 10,
             extent_size: Block::new_512(10),
@@ -497,10 +508,10 @@ impl TestHarness {
         }
     }
 
-    async fn new_(read_only: bool) -> TestHarness {
+    async fn new_(read_only: bool, reply_to_ping: bool) -> TestHarness {
         let log = csl();
 
-        let cfg = Self::default_config(read_only);
+        let cfg = Self::default_config(read_only, reply_to_ping);
 
         let ds1 = cfg.clone().start(log.new(o!("downstairs" => 1))).await;
         let ds2 = cfg.clone().start(log.new(o!("downstairs" => 2))).await;
@@ -580,8 +591,8 @@ impl TestHarness {
         let cfg = ds1.cfg.clone();
         let log = ds1.log.clone();
         let uuid = ds1.uuid;
-        let listener = ds1.halt().await;
-        self.ds1 = Some(cfg.restart(uuid, listener, log).await);
+        let addr = ds1.halt().await;
+        self.ds1 = Some(cfg.restart(uuid, addr, log).await);
     }
 
     /// Spawns a function on the `Guest`
@@ -685,7 +696,6 @@ async fn test_successful_live_repair() {
 
     // Send some jobs, so that we test job skipping when DS1 is faulted.
     const NUM_JOBS: usize = 200;
-    let mut job_ids = Vec::with_capacity(NUM_JOBS);
 
     for _ in 0..NUM_JOBS {
         // We must use `spawn` here because `read` will wait for the
@@ -701,8 +711,7 @@ async fn test_successful_live_repair() {
             Message::ReadRequest { .. },
         ));
 
-        let job_id = harness.ds2.ack_read().await;
-        job_ids.push(job_id);
+        harness.ds2.ack_read().await;
         harness.ds3.ack_read().await;
 
         h.await.unwrap(); // we have > 1x reply, so the read will return
@@ -714,6 +723,22 @@ async fn test_successful_live_repair() {
         .fault_downstairs(ClientId::new(0))
         .await
         .unwrap();
+
+    // Give the IO worker time to notice that the pipe is broken
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    run_live_repair(harness).await;
+}
+
+/// Runs live repair on a harness with DS1 marked as faulted
+async fn run_live_repair(mut harness: TestHarness) {
+    // Assert the Upstairs isn't sending ds1 more work, because it is Faulted
+    let v = harness.ds1().try_recv();
+    assert_eq!(
+        v,
+        Err(TryRecvError::Disconnected),
+        "ds1 message queue must be disconnected"
+    );
 
     // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
     // flush_timeout set to 24 hours, we shouldn't see anything else
@@ -735,6 +760,7 @@ async fn test_successful_live_repair() {
 
     // Confirm that DS1 has been disconnected (and cannot reply to jobs)
     {
+        let job_id = JobId(1000);
         let (block, data) = make_blank_read_response();
         let session_id = harness.ds1().upstairs_session_id.unwrap();
         let upstairs_id = harness.guest.get_uuid().await.unwrap();
@@ -742,7 +768,7 @@ async fn test_successful_live_repair() {
             header: ReadResponseHeader {
                 upstairs_id,
                 session_id,
-                job_id: job_ids[0],
+                job_id,
                 blocks: Ok(vec![block.clone()]),
             },
             data: data.clone(),
@@ -752,7 +778,7 @@ async fn test_successful_live_repair() {
                 info!(
                     harness.log,
                     "ds1 can't reply to job {}, because it's disconnected: {}",
-                    job_ids[0],
+                    job_id,
                     e
                 );
             }
@@ -1468,19 +1494,116 @@ async fn test_byte_fault_condition() {
         }
     }
 
-    // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
-    // flush_timeout set to 24 hours, we shouldn't see anything else
-    assert!(matches!(harness.ds2.try_recv(), Err(TryRecvError::Empty)));
-    assert!(matches!(harness.ds3.try_recv(), Err(TryRecvError::Empty)));
+    // Confirm that live repair still works
+    run_live_repair(harness).await
+}
 
-    // Assert the Upstairs isn't sending ds1 more work, because it is
-    // Faulted
-    let v = harness.ds1().try_recv();
-    assert_eq!(
-        v,
-        Err(TryRecvError::Disconnected),
-        "ds1 message queue must be disconnected"
-    );
+/// Test that we will transition a downstairs from offline -> faulted if we hit
+/// the byte limit after it's already offline
+#[tokio::test]
+async fn test_byte_fault_condition_offline() {
+    let mut harness = TestHarness::new_no_ping().await;
+
+    // Two different transitions occur during this test:
+    // - We're not replying to pings, so DS1 will eventually transition from
+    //   Active -> Offline (after 45 seconds).
+    // - Then, after its job count hits IO_OUTSTANDING_MAX_BYTES, it will
+    //   transition from Offline -> Faulted
+    const MARGIN_SECS: f32 = 2.0;
+    const SEND_JOBS_TIME: f32 = CLIENT_TIMEOUT_SECS - MARGIN_SECS;
+    let start_time = tokio::time::Instant::now();
+
+    // `num_jobs` sends enough bytes to hit the IO_OUTSTANDING_MAX_BYTES
+    // condition on downstairs 1, which should mark it as faulted and kick it
+    // out.
+    const WRITE_SIZE: usize = 50 * 1024; // 50 KiB
+    let write_buf = BytesMut::from(vec![1; WRITE_SIZE].as_slice()); // 50 KiB
+    let num_jobs = IO_OUTSTANDING_MAX_BYTES as usize / write_buf.len() + 10;
+    assert!(num_jobs < IO_OUTSTANDING_MAX_JOBS);
+
+    // First, we'll send jobs until the timeout
+    for i in 0..num_jobs / 2 {
+        // Delay so that we hit SEND_JOBS_TIME at the end of this loop
+        tokio::time::sleep_until(
+            start_time
+                + Duration::from_secs_f32(
+                    SEND_JOBS_TIME * i as f32 / (num_jobs / 2) as f32,
+                ),
+        )
+        .await;
+
+        // We must `spawn` here because `write` will wait for the response
+        // to come back before returning
+        let write_buf = write_buf.clone();
+        let h = harness.spawn(move |guest| async move {
+            guest.write(Block::new_512(0), write_buf).await.unwrap();
+        });
+
+        // Before we're kicked out, assert we're seeing the read requests
+        assert!(matches!(
+            harness.ds1().recv().await.unwrap(),
+            Message::Write { .. },
+        ));
+        harness.ds2.ack_write().await;
+        harness.ds3.ack_write().await;
+
+        // With 2x responses, we can now await the read job (which ensures that
+        // the Upstairs has finished updating its state).
+        h.await.unwrap();
+
+        let ds = harness.guest.downstairs_state().await.unwrap();
+        assert_eq!(ds[ClientId::new(0)], DsState::Active);
+        assert_eq!(ds[ClientId::new(1)], DsState::Active);
+        assert_eq!(ds[ClientId::new(2)], DsState::Active);
+    }
+
+    // Sleep until we're confident that the Downstairs is kicked out
+    info!(harness.log, "waiting for Upstairs to kick out DS1");
+    tokio::time::sleep(Duration::from_secs_f32(2.0 * MARGIN_SECS)).await;
+
+    // Check to make sure that happened
+    let ds = harness.guest.downstairs_state().await.unwrap();
+    assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+    assert_eq!(ds[ClientId::new(1)], DsState::Active);
+    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+
+    // At this point, DS1 has `num_jobs` pending and is offline.  We can
+    // transition it to `Faulted` by sending it enough to hit
+    // `IO_OUTSTANDING_MAX_BYTES`
+    for i in (num_jobs / 2)..num_jobs {
+        let write_buf = write_buf.clone();
+        let h = harness.spawn(move |guest| async move {
+            guest.write(Block::new_512(0), write_buf).await.unwrap();
+        });
+
+        // After ds1 is kicked out, we shouldn't see any more messages
+        match harness.ds1().try_recv() {
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
+            x => {
+                panic!("Write {i} should return EMPTY, but we got:{x:?}");
+            }
+        }
+        harness.ds2.ack_write().await;
+        harness.ds3.ack_write().await;
+
+        // With 2x responses, we can now await the write job (which ensures that
+        // the Upstairs has finished updating its state).
+        h.await.unwrap();
+
+        let ds = harness.guest.downstairs_state().await.unwrap();
+        if (i + 1) * WRITE_SIZE < IO_OUTSTANDING_MAX_BYTES as usize {
+            assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+            assert_eq!(ds[ClientId::new(1)], DsState::Active);
+            assert_eq!(ds[ClientId::new(2)], DsState::Active);
+        } else {
+            assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
+            assert_eq!(ds[ClientId::new(1)], DsState::Active);
+            assert_eq!(ds[ClientId::new(2)], DsState::Active);
+        }
+    }
+
+    // Confirm that the system comes up after live-repair
+    run_live_repair(harness).await;
 }
 
 /// Test that we will mark a Downstairs as failed if we hit the job limit
@@ -1536,19 +1659,116 @@ async fn test_job_fault_condition() {
         }
     }
 
-    // Confirm that's all the Upstairs sent us (only ds2 and ds3) - with the
-    // flush_timeout set to 24 hours, we shouldn't see anything else
-    assert!(matches!(harness.ds2.try_recv(), Err(TryRecvError::Empty)));
-    assert!(matches!(harness.ds3.try_recv(), Err(TryRecvError::Empty)));
+    // Confirm that live repair still works
+    run_live_repair(harness).await
+}
 
-    // Assert the Upstairs isn't sending ds1 more work, because it is
-    // Faulted
-    let v = harness.ds1().try_recv();
-    assert_eq!(
-        v,
-        Err(TryRecvError::Disconnected),
-        "ds1 message queue must be disconnected"
-    );
+/// Test that we will transition a downstairs from offline -> faulted if we hit
+/// the job limit after it's already offline
+#[tokio::test]
+async fn test_job_fault_condition_offline() {
+    let mut harness = TestHarness::new_no_ping().await;
+
+    // Two different transitions occur during this test:
+    // - We're not replying to pings, so DS1 will eventually transition from
+    //   Active -> Offline (after 45 seconds).
+    // - Then, after its job count hits IO_OUTSTANDING_MAX_JOBS, it will
+    //   transition from Offline -> Faulted
+
+    const MARGIN_SECS: f32 = 2.0;
+    const SEND_JOBS_TIME: f32 = CLIENT_TIMEOUT_SECS - MARGIN_SECS;
+    let num_jobs = IO_OUTSTANDING_MAX_JOBS / 2;
+    let start_time = tokio::time::Instant::now();
+
+    for i in 0..num_jobs {
+        // Delay so that we hit SEND_JOBS_TIME at the end of this loop
+        tokio::time::sleep_until(
+            start_time
+                + Duration::from_secs_f32(
+                    SEND_JOBS_TIME * i as f32 / num_jobs as f32,
+                ),
+        )
+        .await;
+
+        // We must `spawn` here because `write` will wait for the response to
+        // come back before returning
+        let h = harness.spawn(|guest| async move {
+            let mut buffer = Buffer::new(1, 512);
+            guest.read(Block::new_512(0), &mut buffer).await.unwrap();
+        });
+
+        // DS1 should be receiving messages
+        assert!(matches!(
+            harness.ds1().recv().await.unwrap(),
+            Message::ReadRequest { .. },
+        ));
+
+        // Respond with read responses for downstairs 2 and 3
+        harness.ds2.ack_read().await;
+        harness.ds3.ack_read().await;
+
+        // With 1x responses, we can now await the read job (which ensures that
+        // the Upstairs has finished updating its state).
+        h.await.unwrap();
+
+        let ds = harness.guest.downstairs_state().await.unwrap();
+        assert_eq!(ds[ClientId::new(0)], DsState::Active);
+        assert_eq!(ds[ClientId::new(1)], DsState::Active);
+        assert_eq!(ds[ClientId::new(2)], DsState::Active);
+    }
+
+    // Sleep until we're confident that the Downstairs is kicked out
+    info!(harness.log, "waiting for Upstairs to kick out DS1");
+    tokio::time::sleep(Duration::from_secs_f32(2.0 * MARGIN_SECS)).await;
+
+    // Check to make sure that happened
+    let ds = harness.guest.downstairs_state().await.unwrap();
+    assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+    assert_eq!(ds[ClientId::new(1)], DsState::Active);
+    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+
+    // At this point, DS1 has `num_jobs` pending and is offline.  We can
+    // transition it to `Faulted` by sending it enough to hit
+    // `IO_OUTSTANDING_MAX_JOBS`
+    info!(harness.log, "sending more jobs to fault DS1");
+    for i in num_jobs..IO_OUTSTANDING_MAX_JOBS + 200 {
+        let h = harness.spawn(|guest| async move {
+            let mut buffer = Buffer::new(1, 512);
+            guest.read(Block::new_512(0), &mut buffer).await.unwrap();
+        });
+
+        // DS1 should never receive messages, because it's offline
+        match harness.ds1().try_recv() {
+            Err(TryRecvError::Empty | TryRecvError::Disconnected) => {}
+            x => {
+                panic!("Read {i} should return EMPTY, but we got:{x:?}");
+            }
+        }
+
+        // Respond with read responses for downstairs 2 and 3
+        harness.ds2.ack_read().await;
+        harness.ds3.ack_read().await;
+
+        // With 1x responses, we can now await the read job (which ensures that
+        // the Upstairs has finished updating its state).
+        h.await.unwrap();
+
+        let ds = harness.guest.downstairs_state().await.unwrap();
+        if i < IO_OUTSTANDING_MAX_JOBS {
+            // At this point, we should still be offline
+            assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+            assert_eq!(ds[ClientId::new(1)], DsState::Active);
+            assert_eq!(ds[ClientId::new(2)], DsState::Active);
+        } else {
+            // After ds1 is kicked out, we shouldn't see any more messages
+            assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
+            assert_eq!(ds[ClientId::new(1)], DsState::Active);
+            assert_eq!(ds[ClientId::new(2)], DsState::Active);
+        }
+    }
+
+    // Confirm that the system comes up after live-repair
+    run_live_repair(harness).await;
 }
 
 /// Test that an error during the live repair doesn't halt indefinitely
@@ -2158,9 +2378,9 @@ async fn test_deactivate_slow() {
             let cfg = ds1.cfg.clone();
             let log = ds1.log.clone();
             let uuid = ds1.uuid;
-            let listener = ds1.halt().await;
+            let addr = ds1.halt().await;
             reconnected.store(RECONNECT_TRYING, Ordering::Release);
-            let mut ds1 = cfg.restart(uuid, listener, log).await;
+            let mut ds1 = cfg.restart(uuid, addr, log).await;
 
             ds1.negotiate_start().await;
             reconnected.store(RECONNECT_DONE, Ordering::Release);
