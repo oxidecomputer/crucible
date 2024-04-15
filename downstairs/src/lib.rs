@@ -1308,12 +1308,7 @@ where
                         return Ok(());
                     }
                     Some(Ok(msg)) => {
-                        if matches!(msg, Message::Ruok) {
-                            // Respond instantly to pings, don't wait.
-                            if let Err(e) = resp_channel_tx.send(Message::Imok) {
-                                bail!("Failed sending Imok: {}", e);
-                            }
-                        } else if let Err(e) = message_channel_tx.send(msg) {
+                        if let Err(e) = message_channel_tx.send(msg) {
                             bail!("Failed sending message to proc_frame: {}", e);
                         }
                     }
@@ -2658,6 +2653,10 @@ impl Downstairs {
                     }
                 };
                 resp_tx.send(msg)?;
+                None
+            }
+            Message::Ruok => {
+                resp_tx.send(Message::Imok)?;
                 None
             }
             x => bail!("unexpected frame {:?}", x),
