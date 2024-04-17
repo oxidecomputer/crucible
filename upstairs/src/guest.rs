@@ -333,6 +333,19 @@ struct BackpressureConfig {
 }
 
 impl BackpressureConfig {
+    // Our chosen backpressure curve is quadratic for 1/2 of its range, then
+    // goes to infinity in the second half.  This gives C0 + C1 continuity.
+    fn curve(frac: f64, scale: Duration) -> Duration {
+        // Remap from 0-1 to 0-1.5 for ease of calculation
+        let frac = frac * 2.0;
+        let v = if frac < 1.0 {
+            frac
+        } else {
+            1.0 / (1.0 - (frac - 1.0))
+        };
+        scale.mul_f64(v.powi(2))
+    }
+
     fn get_backpressure_us(&self, bytes: u64, jobs: u64) -> u64 {
         // Saturate at 1 hour per job, which is basically infinite
         if bytes >= self.bytes_max || jobs >= self.queue_max {
@@ -347,16 +360,10 @@ impl BackpressureConfig {
             / (self.bytes_max - self.bytes_start) as f64;
 
         // Delay should be 0 at frac = 0, and infinite at frac = 1
-        let delay_bytes = self
-            .bytes_scale
-            .mul_f64(1.0 / (1.0 - bytes_frac).powi(2) - 1.0)
-            .as_micros() as u64;
-
-        // Compute an alternate delay based on queue length
-        let delay_jobs = self
-            .queue_scale
-            .mul_f64(1.0 / (1.0 - jobs_frac).powi(2) - 1.0)
-            .as_micros() as u64;
+        let delay_bytes =
+            Self::curve(bytes_frac, self.bytes_scale).as_micros() as u64;
+        let delay_jobs =
+            Self::curve(jobs_frac, self.queue_scale).as_micros() as u64;
 
         delay_bytes.max(delay_jobs)
     }
@@ -424,7 +431,7 @@ impl Guest {
             // Byte-based backpressure
             bytes_start: 50 * 1024u64.pow(2), // 50 MiB
             bytes_max: IO_OUTSTANDING_MAX_BYTES * 2,
-            bytes_scale: Duration::from_millis(25),
+            bytes_scale: Duration::from_millis(100),
 
             // Queue-based backpressure
             queue_start: 500,
@@ -1509,9 +1516,9 @@ mod test {
                 humantime::format_duration(timeout)
             );
             assert!(
-                timeout < Duration::from_secs(120),
+                timeout < Duration::from_secs(180),
                 "offline -> faulted transition happens too slowly \
-                 with job size {job_size};  expected < 2 mins, got {}",
+                 with job size {job_size};  expected < 3 mins, got {}",
                 humantime::format_duration(timeout)
             );
 
