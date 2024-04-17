@@ -2,6 +2,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -308,8 +309,8 @@ struct RandReadWriteWorkload {
     #[clap(long, default_value_t = 1.0)]
     sample_time: f64,
     /// Number of subsamples per sample
-    #[clap(long, default_value_t = 10)]
-    subsample_count: u64,
+    #[clap(long, default_value_t = NonZeroU64::new(10).unwrap())]
+    subsample_count: NonZeroU64,
 }
 
 /// Mode flags for `rand_write_read_workload`
@@ -334,7 +335,7 @@ struct RandReadWriteConfig {
     /// Rate at which we should print samples
     sample_time_secs: f64,
     /// Number of subsamples for each `sample_time_secs`, for standard deviation
-    subsample_count: u64,
+    subsample_count: NonZeroU64,
     fill: bool,
 }
 
@@ -2493,42 +2494,33 @@ async fn rand_read_write_workload(
         workers.push(handle);
     }
 
-    // Spawn a task which stops us after the given time
-    {
-        let stop = stop.clone();
-        let time_secs = cfg.time_secs;
-        tokio::task::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(time_secs)).await;
-            stop.store(true, Ordering::Release);
-        });
-    }
-
     // Initial sleep
     let mut prev = 0;
 
     let subsample_delay = Duration::from_secs_f64(
-        cfg.sample_time_secs / cfg.subsample_count as f64,
+        cfg.sample_time_secs / cfg.subsample_count.get() as f64,
     );
     let mut samples = vec![];
     let mut first = true;
-    let mut next_time = std::time::Instant::now() + subsample_delay;
-    while !stop.load(Ordering::Relaxed) {
+    let mut next_time = Instant::now() + subsample_delay;
+    let stop_time = Instant::now() + Duration::from_secs(cfg.time_secs);
+    'outer: loop {
         // Store speeds in bytes/sec, correcting for our sub-second sample time
         let start = samples.len();
-        for _ in 0..cfg.subsample_count {
-            tokio::time::sleep_until(next_time.into()).await;
+        for _ in 0..cfg.subsample_count.get() {
+            tokio::time::sleep_until(next_time).await;
             let bytes = byte_count.load(Ordering::Acquire);
             next_time += subsample_delay;
             samples.push((bytes - prev) as f64 / subsample_delay.as_secs_f64());
             prev = bytes;
+            if Instant::now() >= stop_time {
+                break 'outer;
+            }
         }
         // Ignore the first round of samples, to reduce startup effects
         if std::mem::take(&mut first) {
             samples.clear();
             continue;
-        }
-        if stop.load(Ordering::Relaxed) {
-            break;
         }
         let slice = &samples[start..];
         let mean = slice.iter().sum::<f64>() / slice.len() as f64;
