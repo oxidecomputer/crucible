@@ -473,6 +473,9 @@ pub struct TestHarness {
     guest: Arc<Guest>,
 }
 
+/// Number of extents in `TestHarness::default_config`
+const DEFAULT_EXTENT_COUNT: usize = 25;
+
 impl TestHarness {
     pub async fn new() -> TestHarness {
         Self::new_(false).await
@@ -494,12 +497,12 @@ impl TestHarness {
             // Extent count is picked so that we can hit
             // IO_OUTSTANDING_MAX_BYTES in less than IO_OUTSTANDING_MAX_JOBS,
             // i.e. letting us test both byte and job fault conditions.
-            extent_count: 25,
+            extent_count: DEFAULT_EXTENT_COUNT as u32,
             extent_size: Block::new_512(10),
 
-            gen_numbers: vec![0u64; 25],
-            flush_numbers: vec![0u64; 25],
-            dirty_bits: vec![false; 25],
+            gen_numbers: vec![0u64; DEFAULT_EXTENT_COUNT],
+            flush_numbers: vec![0u64; DEFAULT_EXTENT_COUNT],
+            dirty_bits: vec![false; DEFAULT_EXTENT_COUNT],
         }
     }
 
@@ -807,7 +810,7 @@ async fn run_live_repair(mut harness: TestHarness) {
     let mut ds2_buffered_messages = vec![];
     let mut ds3_buffered_messages = vec![];
 
-    for eid in 0..25 {
+    for eid in 0..DEFAULT_EXTENT_COUNT {
         // The Upstairs first sends the close and reopen jobs
         for _ in 0..2 {
             ds1_buffered_messages.push(harness.ds1().recv().await.unwrap());
@@ -865,7 +868,7 @@ async fn run_live_repair(mut harness: TestHarness) {
 
         let mut responses = vec![Vec::new(); 3];
 
-        for io_eid in 0usize..25 {
+        for io_eid in 0usize..DEFAULT_EXTENT_COUNT {
             let mut dep_job_id = [reopen_job_id; 3];
             // read
             harness.spawn(move |guest| async move {
