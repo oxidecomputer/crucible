@@ -169,10 +169,7 @@ async fn main_thread(
         if let Err(e) = delete_a_region(agent, &log, region_id).await {
             bail!("Region delete {region_id} failed: {e}");
         }
-        info!(
-            log,
-            "--- Completed loop with {region_id} at count: {count}---"
-        );
+        info!(log, "--- Completed {:5} loops with {region_id} ---", count);
     }
     Ok(())
 }
@@ -564,7 +561,7 @@ async fn clone_a_snapshot(
 
     info!(
         log,
-        "Ucreatedse {:?} for source clone {:?}", source_addr, region_request
+        "Use {:?} for source clone {:?}", source_addr, region_request
     );
 
     if let Err(e) = create_a_region(agent, log, region_request.clone()).await {
@@ -695,7 +692,7 @@ async fn query_thread(
                 }
             }
         }
-        info!(log, "--- Completed query loop at count: {count}---");
+        info!(log, "--- Completed {:5} query loops ---", count);
     }
     Ok(())
 }

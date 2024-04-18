@@ -3327,12 +3327,32 @@ pub async fn clone_region(
 
     let url = format!("http://{:?}", source);
     let repair_server = Client::new(&url);
+
     let source_def = match repair_server.get_region_info().await {
         Ok(def) => def.into_inner(),
         Err(e) => {
             bail!("Failed to get source region definition: {e}");
         }
     };
+
+    // For the first contact with the remote side, we will retry forever.
+    // We do this in case the source for our snapshot is not ready yet.
+    /*
+    let source_def;
+    loop {
+        match repair_server.get_region_info().await {
+            Ok(def) => {
+                source_def = def.into_inner();
+                break;
+            }
+            Err(e) => {
+                info!(log, "Failed to get source region definition: {e}");
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        }
+    }
+    */
+
     info!(log, "The source RegionDefinition is: {:?}", source_def);
 
     let source_ro_mode = match repair_server.get_region_mode().await {
