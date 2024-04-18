@@ -432,7 +432,7 @@ impl Upstairs {
             let action = self.select().await;
             self.counters.apply += 1;
             cdt::up__apply!(|| (self.counters.apply));
-            self.apply(action).await
+            self.apply(action)
         }
     }
 
@@ -514,19 +514,19 @@ impl Upstairs {
     }
 
     /// Apply an action returned from [`Upstairs::select`]
-    pub(crate) async fn apply(&mut self, action: UpstairsAction) {
+    pub(crate) fn apply(&mut self, action: UpstairsAction) {
         match action {
             UpstairsAction::Downstairs(d) => {
                 self.counters.action_downstairs += 1;
                 cdt::up__action_downstairs!(|| (self
                     .counters
                     .action_downstairs));
-                self.apply_downstairs_action(d).await
+                self.apply_downstairs_action(d)
             }
             UpstairsAction::Guest(b) => {
                 self.counters.action_guest += 1;
                 cdt::up__action_guest!(|| (self.counters.action_guest));
-                self.defer_guest_request(b).await;
+                self.defer_guest_request(b);
             }
             UpstairsAction::GuestDropped => {
                 self.guest_dropped = true;
@@ -536,14 +536,14 @@ impl Upstairs {
                 cdt::up__action_deferred_block!(|| (self
                     .counters
                     .action_deferred_block));
-                self.apply_guest_request(req).await;
+                self.apply_guest_request(req);
             }
             UpstairsAction::DeferredMessage(m) => {
                 self.counters.action_deferred_message += 1;
                 cdt::up__action_deferred_message!(|| (self
                     .counters
                     .action_deferred_message));
-                self.on_client_message(m).await;
+                self.on_client_message(m);
             }
             UpstairsAction::LeakCheck => {
                 self.counters.action_leak_check += 1;
@@ -615,7 +615,7 @@ impl Upstairs {
         // after `continue_live_repair`, which may enqueue jobs.
         for i in ClientId::iter() {
             if self.downstairs.clients[i].should_do_more_work() {
-                self.downstairs.io_send(i).await;
+                self.downstairs.io_send(i);
             }
         }
 
@@ -676,7 +676,7 @@ impl Upstairs {
     async fn await_deferred_ops(&mut self) {
         while let Some(req) = self.deferred_ops.next().await {
             let req = req.unwrap(); // the deferred request should not fail
-            self.apply(UpstairsAction::DeferredBlockOp(req)).await;
+            self.apply(UpstairsAction::DeferredBlockOp(req));
         }
         assert!(self.deferred_ops.is_empty());
     }
@@ -690,7 +690,7 @@ impl Upstairs {
     #[cfg(test)]
     async fn await_deferred_msgs(&mut self) {
         while let Some(msg) = self.deferred_msgs.next().await {
-            self.apply(UpstairsAction::DeferredMessage(msg)).await;
+            self.apply(UpstairsAction::DeferredMessage(msg));
         }
         assert!(self.deferred_msgs.is_empty());
     }
@@ -910,7 +910,7 @@ impl Upstairs {
     }
 
     /// When a `BlockOp` arrives, defer it as a future
-    async fn defer_guest_request(&mut self, op: BlockOp) {
+    fn defer_guest_request(&mut self, op: BlockOp) {
         match op {
             // All Write operations are deferred, because they will offload
             // encryption to a separate thread pool.
@@ -930,7 +930,7 @@ impl Upstairs {
             // Otherwise, we can apply a non-write operation immediately, saving
             // a trip through the FuturesUnordered
             _ => {
-                self.apply_guest_request_inner(op).await;
+                self.apply_guest_request_inner(op);
             }
         }
     }
@@ -945,12 +945,10 @@ impl Upstairs {
     /// This function can be called before the upstairs is active, so any
     /// operation that requires the upstairs to be active should check that
     /// and report an error.
-    async fn apply_guest_request(&mut self, op: DeferredBlockOp) {
+    fn apply_guest_request(&mut self, op: DeferredBlockOp) {
         match op {
             DeferredBlockOp::Write(op) => self.submit_write(op),
-            DeferredBlockOp::Other(op) => {
-                self.apply_guest_request_inner(op).await
-            }
+            DeferredBlockOp::Other(op) => self.apply_guest_request_inner(op),
         }
     }
 
@@ -960,18 +958,18 @@ impl Upstairs {
     /// This function assumes that `BlockOp::Write` and
     /// `BlockOp::WriteUnwritten` are always deferred and handled separately;
     /// it will panic if `req` matches either of them.
-    async fn apply_guest_request_inner(&mut self, op: BlockOp) {
+    fn apply_guest_request_inner(&mut self, op: BlockOp) {
         // If any of the submit_* functions fail to send to the downstairs, they
         // return an error.  These are reported to the Guest.
         match op {
             // These three options can be handled by this task directly,
             // and don't require the upstairs to be fully online.
             BlockOp::GoActive { done } => {
-                self.set_active_request(done).await;
+                self.set_active_request(done);
             }
             BlockOp::GoActiveWithGen { gen, done } => {
                 self.cfg.generation.store(gen, Ordering::Release);
-                self.set_active_request(done).await;
+                self.set_active_request(done);
             }
             BlockOp::QueryGuestIOReady { done } => {
                 done.send_ok(self.guest_io_ready());
@@ -1152,7 +1150,7 @@ impl Upstairs {
     }
 
     /// Request that the Upstairs go active
-    async fn set_active_request(&mut self, res: BlockRes) {
+    fn set_active_request(&mut self, res: BlockRes) {
         match &self.state {
             UpstairsState::Initializing => {
                 self.state = UpstairsState::GoActive(res);
@@ -1188,7 +1186,7 @@ impl Upstairs {
         // Notify all clients that they should go active when they hit an
         // appropriate state in their negotiation.
         for c in self.downstairs.clients.iter_mut() {
-            c.set_active_request().await;
+            c.set_active_request();
         }
     }
 
@@ -1492,16 +1490,16 @@ impl Upstairs {
     }
 
     /// React to an event sent by one of the downstairs clients
-    async fn apply_downstairs_action(&mut self, d: DownstairsAction) {
+    fn apply_downstairs_action(&mut self, d: DownstairsAction) {
         match d {
             DownstairsAction::Client { client_id, action } => {
-                self.apply_client_action(client_id, action).await;
+                self.apply_client_action(client_id, action);
             }
         }
     }
 
     /// React to an event sent by one of the downstairs clients
-    async fn apply_client_action(
+    fn apply_client_action(
         &mut self,
         client_id: ClientId,
         action: ClientAction,
@@ -1509,7 +1507,7 @@ impl Upstairs {
         match action {
             ClientAction::Connected => {
                 self.downstairs.clients[client_id].stats.connected += 1;
-                self.downstairs.clients[client_id].send_here_i_am().await;
+                self.downstairs.clients[client_id].send_here_i_am();
             }
             ClientAction::Response(m) => {
                 // We would not have received ClientAction::Response if the IO
@@ -1557,7 +1555,7 @@ impl Upstairs {
                         });
                     } else {
                         // Do decryption right here!
-                        self.on_client_message(dr.run()).await;
+                        self.on_client_message(dr.run());
                     }
                 } else {
                     let dm = DeferredMessage {
@@ -1567,7 +1565,7 @@ impl Upstairs {
                         connection_id: id,
                     };
                     if self.deferred_msgs.is_empty() {
-                        self.on_client_message(dm).await;
+                        self.on_client_message(dm);
                     } else {
                         self.deferred_msgs.push_immediate(dm);
                     }
@@ -1587,7 +1585,7 @@ impl Upstairs {
         }
     }
 
-    async fn on_client_message(&mut self, dm: DeferredMessage) {
+    fn on_client_message(&mut self, dm: DeferredMessage) {
         let (client_id, m, hashes) = (dm.client_id, dm.message, dm.hashes);
 
         // It's possible for a deferred message to arrive **after** we have
@@ -1644,8 +1642,7 @@ impl Upstairs {
             | Message::ExtentVersions { .. } => {
                 // negotiation and initial reconciliation
                 let r = self.downstairs.clients[client_id]
-                    .continue_negotiation(m, &self.state, &mut self.ddef)
-                    .await;
+                    .continue_negotiation(m, &self.state, &mut self.ddef);
 
                 match r {
                     // continue_negotiation returns an error if the upstairs
@@ -1660,7 +1657,7 @@ impl Upstairs {
 
                             DsState::WaitQuorum => {
                                 // See if we have a quorum
-                                if self.connect_region_set().await {
+                                if self.connect_region_set() {
                                     // We connected normally, so there's no need
                                     // to check for live-repair.
                                     self.repair_check_interval = None;
@@ -1687,11 +1684,11 @@ impl Upstairs {
                 );
             }
             Message::RepairAckId { .. } => {
-                if self
-                    .downstairs
-                    .on_reconciliation_ack(client_id, m, &self.state)
-                    .await
-                {
+                if self.downstairs.on_reconciliation_ack(
+                    client_id,
+                    m,
+                    &self.state,
+                ) {
                     // reconciliation is done, great work everyone
                     self.on_reconciliation_done(DsState::Reconcile);
                 }
@@ -1741,7 +1738,7 @@ impl Upstairs {
     /// **can't** activate, then we should notify the requestor of failure.
     ///
     /// If we have a problem here, we can't activate the upstairs.
-    async fn connect_region_set(&mut self) -> bool {
+    fn connect_region_set(&mut self) -> bool {
         /*
          * If reconciliation is required, it happens in three phases.
          * Typically an interruption of reconciliation will result in things
@@ -1845,7 +1842,7 @@ impl Upstairs {
                 // We have populated all of the reconciliation requests in
                 // `Downstairs::reconcile_task_list`.  Start reconciliation by
                 // sending the first request.
-                self.downstairs.send_next_reconciliation_req().await;
+                self.downstairs.send_next_reconciliation_req();
                 true
             }
             Ok(false) => {
@@ -2107,7 +2104,7 @@ pub(crate) mod test {
     //
     // The caller will indicate which downstairs client it wished to be
     // moved to LiveRepair.
-    pub(crate) async fn start_up_and_repair(or_ds: ClientId) -> Upstairs {
+    pub(crate) fn start_up_and_repair(or_ds: ClientId) -> Upstairs {
         let mut up = create_test_upstairs();
 
         // Move our downstairs client fail_id to LiveRepair.
@@ -2116,7 +2113,7 @@ pub(crate) mod test {
         client.checked_state_transition(&up.state, DsState::LiveRepairReady);
 
         // Start repairing the downstairs; this also enqueues the jobs
-        up.apply(UpstairsAction::RepairCheck).await;
+        up.apply(UpstairsAction::RepairCheck);
 
         // Assert that the repair started
         up.on_repair_check();
@@ -2132,8 +2129,8 @@ pub(crate) mod test {
         up
     }
 
-    #[tokio::test]
-    async fn reconcile_not_ready() {
+    #[test]
+    fn reconcile_not_ready() {
         // Verify reconcile returns false when a downstairs is not ready
         let mut up = Upstairs::test_default(None);
         up.ds_transition(ClientId::new(0), DsState::WaitActive);
@@ -2142,7 +2139,7 @@ pub(crate) mod test {
         up.ds_transition(ClientId::new(1), DsState::WaitActive);
         up.ds_transition(ClientId::new(1), DsState::WaitQuorum);
 
-        let res = up.connect_region_set().await;
+        let res = up.connect_region_set();
         assert!(!res);
         assert!(!matches!(&up.state, &UpstairsState::Active))
     }
@@ -2160,8 +2157,7 @@ pub(crate) mod test {
         let (ds_done_brw, ds_done_res) = BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Deactivate {
             done: ds_done_res,
-        }))
-        .await;
+        }));
 
         let reply = ds_done_brw.wait().await;
         assert!(reply.is_err());
@@ -2171,8 +2167,7 @@ pub(crate) mod test {
         let (ds_done_brw, ds_done_res) = BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Deactivate {
             done: ds_done_res,
-        }))
-        .await;
+        }));
 
         let reply = ds_done_brw.wait().await;
         assert!(reply.is_ok());
@@ -2180,8 +2175,7 @@ pub(crate) mod test {
         let (ds_done_brw, ds_done_res) = BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Deactivate {
             done: ds_done_res,
-        }))
-        .await;
+        }));
 
         let reply = ds_done_brw.wait().await;
         assert!(reply.is_err());
@@ -2202,8 +2196,7 @@ pub(crate) mod test {
         let (ds_done_brw, ds_done_res) = BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Deactivate {
             done: ds_done_res,
-        }))
-        .await;
+        }));
 
         // Make sure the correct DS have changed state.
         for client_id in ClientId::iter() {
@@ -2219,8 +2212,7 @@ pub(crate) mod test {
                         ClientStopReason::Deactivated,
                     ),
                 ),
-            }))
-            .await;
+            }));
 
             // This causes the downstairs state to be reinitialized
             assert_eq!(up.ds_state(client_id), DsState::New);
@@ -3520,7 +3512,7 @@ pub(crate) mod test {
         } else {
             BlockOp::Write { offset, data, done }
         };
-        up.apply(UpstairsAction::Guest(op)).await;
+        up.apply(UpstairsAction::Guest(op));
         up.await_deferred_ops().await;
         let id1 = JobId(1000); // We know that job IDs start at 1000
 
@@ -3529,8 +3521,7 @@ pub(crate) mod test {
             BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Deactivate {
             done: deactivate_done_res,
-        }))
-        .await;
+        }));
 
         // The deactivate didn't return right away
         assert_eq!(deactivate_done_brw.try_wait(), None);
@@ -3549,8 +3540,7 @@ pub(crate) mod test {
                     job_id: id1,
                     result: Ok(()),
                 }),
-            }))
-            .await;
+            }));
         }
 
         // Verify the deactivate is not done yet.
@@ -3572,8 +3562,7 @@ pub(crate) mod test {
                     job_id: flush_id,
                     result: Ok(()),
                 }),
-            }))
-            .await;
+            }));
             assert_eq!(deactivate_done_brw.try_wait(), None);
         }
 
@@ -3597,8 +3586,7 @@ pub(crate) mod test {
                 job_id: flush_id,
                 result: Ok(()),
             }),
-        }))
-        .await;
+        }));
 
         assert_eq!(up.ds_state(ClientId::new(1)), DsState::Deactivated);
 
@@ -3612,8 +3600,7 @@ pub(crate) mod test {
                         ClientStopReason::Deactivated,
                     ),
                 ),
-            }))
-            .await;
+            }));
         }
 
         let reply = deactivate_done_brw.try_wait().unwrap();
@@ -3628,8 +3615,8 @@ pub(crate) mod test {
         }
     }
 
-    #[tokio::test]
-    async fn good_decryption() {
+    #[test]
+    fn good_decryption() {
         let mut up = make_encrypted_upstairs();
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
@@ -3637,8 +3624,7 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
-            .await;
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
         // fake read response from downstairs that will successfully decrypt
         let mut data = Vec::from([1u8; 512]);
@@ -3678,8 +3664,7 @@ pub(crate) mod test {
                 },
                 data,
             }),
-        }))
-        .await;
+        }));
 
         // This was a small read and handled in-line
         assert!(up.deferred_msgs.is_empty());
@@ -3696,8 +3681,7 @@ pub(crate) mod test {
         let data = Buffer::new(blocks, 512);
         let offset = Block::new_512(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
-            .await;
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
         let mut data = Vec::from([1u8; 512]);
 
@@ -3745,8 +3729,7 @@ pub(crate) mod test {
                 },
                 data: buf,
             }),
-        }))
-        .await;
+        }));
 
         // This was a large read and was deferred
         assert!(!up.deferred_msgs.is_empty());
@@ -3765,8 +3748,7 @@ pub(crate) mod test {
         let data = Buffer::new(blocks, 512);
         let offset = Block::new_512(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
-            .await;
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
         // fake read response from downstairs that will fail decryption
         let mut data = Vec::from([1u8; 512]);
@@ -3827,8 +3809,7 @@ pub(crate) mod test {
                 },
                 data: buf,
             }),
-        }))
-        .await;
+        }));
 
         // Prepare to receive the message with an invalid tag
         let fut = up.await_deferred_msgs();
@@ -3847,8 +3828,8 @@ pub(crate) mod test {
     }
 
     /// Confirm that an offloaded decryption also panics (eventually)
-    #[tokio::test]
-    async fn bad_decryption_means_panic() {
+    #[test]
+    fn bad_decryption_means_panic() {
         let mut up = make_encrypted_upstairs();
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
@@ -3856,8 +3837,7 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
-            .await;
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
         // fake read response from downstairs that will fail decryption
         let mut data = Vec::from([1u8; 512]);
@@ -3896,7 +3876,7 @@ pub(crate) mod test {
         }]);
 
         // Prepare to receive the message with an invalid tag
-        let fut =
+        let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id: ClientId::new(0),
                 action: ClientAction::Response(Message::ReadResponse {
@@ -3908,9 +3888,10 @@ pub(crate) mod test {
                     },
                     data: data.as_slice().into(),
                 }),
-            }));
+            }))
+        });
 
-        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+        let result = thread.join();
         assert!(result.is_err());
         let r = result
             .as_ref()
@@ -3924,8 +3905,8 @@ pub(crate) mod test {
     }
 
     /// Confirms that the encrypted read hash checksum works
-    #[tokio::test]
-    async fn bad_hash_on_encrypted_read_panic() {
+    #[test]
+    fn bad_hash_on_encrypted_read_panic() {
         let mut up = make_encrypted_upstairs();
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
@@ -3933,8 +3914,7 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
-            .await;
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
         // fake read response from downstairs that will fail integrity hash
         // check
@@ -3963,7 +3943,7 @@ pub(crate) mod test {
         }]);
 
         // Prepare to receive the message with a junk hash
-        let fut =
+        let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id: ClientId::new(0),
                 action: ClientAction::Response(Message::ReadResponse {
@@ -3975,11 +3955,12 @@ pub(crate) mod test {
                     },
                     data: data.as_slice().into(),
                 }),
-            }));
+            }))
+        });
 
         // Don't use `should_panic`, as the `unwrap` above could cause this test
         // to pass for the wrong reason.
-        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+        let result = thread.join();
 
         assert!(result.is_err());
         let r = result
@@ -3990,8 +3971,8 @@ pub(crate) mod test {
         assert!(r.contains("HashMismatch"));
     }
 
-    #[tokio::test]
-    async fn bad_read_hash_makes_panic() {
+    #[test]
+    fn bad_read_hash_makes_panic() {
         let mut up = make_upstairs();
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
@@ -3999,8 +3980,7 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
-            .await;
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
         // fake read response from downstairs that will fail integrity hash
         // check
@@ -4014,7 +3994,7 @@ pub(crate) mod test {
         }]);
 
         // Prepare to handle the response with a junk hash
-        let fut =
+        let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id: ClientId::new(0),
                 action: ClientAction::Response(Message::ReadResponse {
@@ -4026,11 +4006,12 @@ pub(crate) mod test {
                     },
                     data: BytesMut::from([1u8; 512].as_slice()),
                 }),
-            }));
+            }))
+        });
 
         // Don't use `should_panic`, as the `unwrap` above could cause this test
         // to pass for the wrong reason.
-        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+        let result = thread.join();
 
         assert!(result.is_err());
         let r = result
@@ -4041,8 +4022,8 @@ pub(crate) mod test {
         assert!(r.contains("HashMismatch"));
     }
 
-    #[tokio::test]
-    async fn work_read_hash_mismatch() {
+    #[test]
+    fn work_read_hash_mismatch() {
         let mut up = make_upstairs();
         up.force_active().unwrap();
         set_all_active(&mut up.downstairs);
@@ -4050,8 +4031,7 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
-            .await;
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
         let data = BytesMut::from([1u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
@@ -4074,8 +4054,7 @@ pub(crate) mod test {
                 },
                 data,
             }),
-        }))
-        .await;
+        }));
 
         // Send back a second response with different data and a hash that (1)
         // is correct for that data, but (2) does not match the original hash.
@@ -4092,7 +4071,7 @@ pub(crate) mod test {
                 hash,
             }],
         }]);
-        let fut =
+        let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id: ClientId::new(2),
                 action: ClientAction::Response(Message::ReadResponse {
@@ -4104,8 +4083,9 @@ pub(crate) mod test {
                     },
                     data,
                 }),
-            }));
-        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+            }))
+        });
+        let result = thread.join();
 
         assert!(result.is_err());
         let r = result
@@ -4117,8 +4097,8 @@ pub(crate) mod test {
         assert!(r.contains("read hash mismatch"));
     }
 
-    #[tokio::test]
-    async fn work_read_hash_mismatch_third() {
+    #[test]
+    fn work_read_hash_mismatch_third() {
         // Test that a hash mismatch on the third response will trigger a panic.
         let mut up = make_upstairs();
         up.force_active().unwrap();
@@ -4127,8 +4107,7 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
-            .await;
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
         for client_id in [ClientId::new(0), ClientId::new(1)] {
             let data = BytesMut::from([1u8; 512].as_slice());
@@ -4152,8 +4131,7 @@ pub(crate) mod test {
                     },
                     data: data.clone(),
                 }),
-            }))
-            .await;
+            }));
         }
 
         // Send back a second response with different data and a hash that (1)
@@ -4171,7 +4149,7 @@ pub(crate) mod test {
                 hash,
             }],
         }]);
-        let fut =
+        let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id: ClientId::new(2),
                 action: ClientAction::Response(Message::ReadResponse {
@@ -4183,8 +4161,9 @@ pub(crate) mod test {
                     },
                     data,
                 }),
-            }));
-        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+            }))
+        });
+        let result = thread.join();
 
         assert!(result.is_err());
         let r = result
@@ -4196,8 +4175,8 @@ pub(crate) mod test {
         assert!(r.contains("read hash mismatch"));
     }
 
-    #[tokio::test]
-    async fn work_read_hash_inside() {
+    #[test]
+    fn work_read_hash_inside() {
         // Test that a hash length mismatch will panic
         let mut up = make_upstairs();
         up.force_active().unwrap();
@@ -4206,8 +4185,7 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
-            .await;
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
         let data = BytesMut::from([1u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
@@ -4230,8 +4208,7 @@ pub(crate) mod test {
                 },
                 data,
             }),
-        }))
-        .await;
+        }));
 
         // Send back a second response with more data (2 blocks instead of 1);
         // the first block matches.
@@ -4246,7 +4223,7 @@ pub(crate) mod test {
             }],
         };
         let r2 = Ok(vec![response.clone(), response.clone()]);
-        let fut =
+        let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id: ClientId::new(2),
                 action: ClientAction::Response(Message::ReadResponse {
@@ -4258,8 +4235,9 @@ pub(crate) mod test {
                     },
                     data,
                 }),
-            }));
-        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+            }))
+        });
+        let result = thread.join();
 
         assert!(result.is_err());
         let r = result
@@ -4271,8 +4249,8 @@ pub(crate) mod test {
         assert!(r.contains("read hash mismatch"));
     }
 
-    #[tokio::test]
-    async fn work_read_hash_mismatch_no_data() {
+    #[test]
+    fn work_read_hash_mismatch_no_data() {
         // Test that empty data first, then data later will trigger
         // hash mismatch panic.
         let mut up = make_upstairs();
@@ -4282,8 +4260,7 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
-            .await;
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
         // The first read has no block contexts, because it was unwritten
         let data = BytesMut::from([0u8; 512].as_slice());
@@ -4303,8 +4280,7 @@ pub(crate) mod test {
                 },
                 data: data.clone(),
             }),
-        }))
-        .await;
+        }));
 
         // Send back a second response with actual block contexts (oh no!)
         let hash = integrity_hash(&[&data]);
@@ -4316,7 +4292,7 @@ pub(crate) mod test {
                 hash,
             }],
         }]);
-        let fut =
+        let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id: ClientId::new(2),
                 action: ClientAction::Response(Message::ReadResponse {
@@ -4328,8 +4304,9 @@ pub(crate) mod test {
                     },
                     data,
                 }),
-            }));
-        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+            }))
+        });
+        let result = thread.join();
 
         assert!(result.is_err());
         let r = result
@@ -4341,8 +4318,8 @@ pub(crate) mod test {
         assert!(r.contains("read hash mismatch"));
     }
 
-    #[tokio::test]
-    async fn work_read_hash_mismatch_no_data_next() {
+    #[test]
+    fn work_read_hash_mismatch_no_data_next() {
         // Test that missing data on the 2nd read response will panic
         let mut up = make_upstairs();
         up.force_active().unwrap();
@@ -4351,8 +4328,7 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = Block::new_512(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }))
-            .await;
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
         // The first read has no block contexts, because it was unwritten
         let data = BytesMut::from([0u8; 512].as_slice());
@@ -4376,8 +4352,7 @@ pub(crate) mod test {
                 },
                 data: data.clone(),
             }),
-        }))
-        .await;
+        }));
 
         // Send back a second response with no actual data (oh no!)
         let r2 = Ok(vec![ReadResponseBlockMetadata {
@@ -4387,7 +4362,7 @@ pub(crate) mod test {
                 // No block contexts!
             ],
         }]);
-        let fut =
+        let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id: ClientId::new(2),
                 action: ClientAction::Response(Message::ReadResponse {
@@ -4399,8 +4374,9 @@ pub(crate) mod test {
                     },
                     data,
                 }),
-            }));
-        let result = std::panic::AssertUnwindSafe(fut).catch_unwind().await;
+            }))
+        });
+        let result = thread.join();
 
         assert!(result.is_err());
         let r = result
