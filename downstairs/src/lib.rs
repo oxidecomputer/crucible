@@ -3326,12 +3326,14 @@ pub async fn clone_region(
 
     let url = format!("http://{:?}", source);
     let repair_server = Client::new(&url);
+
     let source_def = match repair_server.get_region_info().await {
         Ok(def) => def.into_inner(),
         Err(e) => {
             bail!("Failed to get source region definition: {e}");
         }
     };
+
     info!(log, "The source RegionDefinition is: {:?}", source_def);
 
     let source_ro_mode = match repair_server.get_region_mode().await {

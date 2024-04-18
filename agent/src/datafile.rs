@@ -45,6 +45,7 @@ impl DataFile {
         let mut conf_path = base_path.to_path_buf();
         conf_path.push("crucible.json");
 
+        info!(log, "Using conf_path:{:?}", conf_path);
         /*
          * Open data file, load contents.
          */
@@ -52,7 +53,7 @@ impl DataFile {
             Ok(Some(inner)) => inner,
             Ok(None) => Inner::default(),
             Err(e) => {
-                bail!("failed to load data file {:?}: {:?}", conf_path, e)
+                bail!("failed to load data file {:?}: {:?}", conf_path, e);
             }
         };
 
@@ -205,6 +206,8 @@ impl DataFile {
          */
         let port_number = self.get_free_port(&inner)?;
 
+        let read_only = create.source.is_some();
+
         let r = Region {
             id: create.id.clone(),
             state: State::Requested,
@@ -218,6 +221,8 @@ impl DataFile {
             cert_pem: create.cert_pem,
             key_pem: create.key_pem,
             root_pem: create.root_pem,
+            source: create.source,
+            read_only,
         };
 
         info!(self.log, "region {} state: {:?}", r.id.0, r.state);
@@ -390,7 +395,8 @@ impl DataFile {
                         existing.state = State::Tombstoned;
 
                         /*
-                         * Wake the worker thread to remove the snapshot we've created.
+                         * Wake the worker thread to remove the snapshot we've
+                         *  created.
                          */
                         self.bell.notify_all();
 
@@ -399,8 +405,8 @@ impl DataFile {
 
                     State::Failed => {
                         /*
-                         * For now, this terminal state will preserve evidence for
-                         * investigation.
+                         * For now, this terminal state will preserve evidence
+                         *  for investigation.
                          */
                         bail!(
                             "region {} running snapshot {} failed to provision \

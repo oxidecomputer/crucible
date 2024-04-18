@@ -513,6 +513,17 @@ where
                 val: df.get_listen_addr().ip().to_string(),
             });
 
+            // If the region has a source, then it was created as a clone and
+            // must be started read only.
+            if r.source.is_some() {
+                properties.push(crate::model::SmfProperty {
+                    name: "mode",
+                    typ: crucible_smf::scf_type_t::SCF_TYPE_ASTRING,
+                    val: "ro".to_string(),
+                });
+                info!(log, "{:?} marking clone as read_only", name);
+            }
+
             properties
         };
 
@@ -1029,7 +1040,7 @@ mod test {
     }
 
     #[test]
-    fn test_smf_region() -> Result<()> {
+    fn test_smf_region_good() -> Result<()> {
         let harness = TestSmfHarness::new()?;
 
         let region_id = RegionId(Uuid::new_v4().to_string());
@@ -1046,6 +1057,7 @@ mod test {
             cert_pem: None,
             key_pem: None,
             root_pem: None,
+            source: None,
         })?;
 
         // Call apply_smf before `df.created`
@@ -1075,6 +1087,7 @@ mod test {
                 directory.value()?.unwrap().as_string()?,
                 harness.region_path_string(&region_id)
             );
+            assert!(pg.get_property("mode")?.is_none());
         }
 
         // Tombstone the region
@@ -1121,6 +1134,7 @@ mod test {
             cert_pem: None,
             key_pem: None,
             root_pem: None,
+            source: None,
         })?;
 
         // Pretend creating the region failed
@@ -1133,6 +1147,62 @@ mod test {
         assert!(harness.smf_is_empty());
 
         Ok(())
+    }
+
+    #[test]
+    fn test_smf_region_source_ro() {
+        // Verify that a region created with a source endpoint will result
+        // in an SMF service with the mode property set to 'ro'.
+        let harness = TestSmfHarness::new().unwrap();
+
+        let region_id = RegionId(Uuid::new_v4().to_string());
+
+        // Submit a create region request with a source
+        harness
+            .df
+            .create_region_request(CreateRegion {
+                id: region_id.clone(),
+
+                block_size: 512,
+                extent_size: 10,
+                extent_count: 20,
+                encrypted: true,
+
+                cert_pem: None,
+                key_pem: None,
+                root_pem: None,
+                source: Some("127.0.0.1:8899".parse().unwrap()),
+            })
+            .unwrap();
+
+        // Pretend to actually create the region
+        harness.df.created(&region_id).unwrap();
+
+        // Now call apply_smf
+        harness.apply_smf().unwrap();
+
+        // Verify The downstairs SMF instance was created with the expected mode
+        {
+            let instance = harness
+                .smf_interface
+                .get_instance(&format!("downstairs-{}", region_id.0))
+                .unwrap()
+                .unwrap();
+            assert!(instance.enabled());
+
+            let pg = instance.get_pg("config").unwrap().unwrap();
+
+            let directory = pg.get_property("directory").unwrap().unwrap();
+            assert_eq!(
+                directory.value().unwrap().unwrap().as_string().unwrap(),
+                harness.region_path_string(&region_id)
+            );
+            let mode = pg.get_property("mode").unwrap().unwrap();
+            assert_eq!(
+                mode.value().unwrap().unwrap().as_string().unwrap(),
+                "ro".to_string()
+            );
+        }
     }
 
     #[test]
@@ -1153,6 +1223,7 @@ mod test {
             cert_pem: None,
             key_pem: None,
             root_pem: None,
+            source: None,
         })?;
 
         // Pretend to actually create the region
@@ -1199,6 +1270,7 @@ mod test {
             cert_pem: None,
             key_pem: None,
             root_pem: None,
+            source: None,
         })?;
 
         // Call apply_smf before `df.created`
@@ -1241,6 +1313,7 @@ mod test {
             cert_pem: None,
             key_pem: None,
             root_pem: None,
+            source: None,
         })?;
 
         // Pretend to actually create the region
@@ -1336,6 +1409,7 @@ mod test {
             cert_pem: None,
             key_pem: None,
             root_pem: None,
+            source: None,
         })?;
 
         // Pretend to actually create the region (worker)
@@ -1475,6 +1549,7 @@ mod test {
             cert_pem: None,
             key_pem: None,
             root_pem: None,
+            source: None,
         })?;
 
         // The Region is Requested before `worker` ensures that the child
@@ -1835,6 +1910,11 @@ fn worker_region_create(
         cmd = cmd.arg("--encrypted");
     }
 
+    if let Some(source) = region.source {
+        cmd = cmd.arg("--clone-source").arg(source.to_string());
+    }
+
+    info!(log, "downstairs create with: {:?}", cmd);
     let cmd = cmd.output()?;
 
     if cmd.status.success() {
