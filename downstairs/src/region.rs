@@ -4578,80 +4578,68 @@ pub(crate) mod test {
         validate_whole_region(&mut region, &data).await;
     }
 
-    macro_rules! one_region_test {
-        ($b:ident, $f:ident) => {
-            #[tokio::test]
-            async fn $f() {
-                super::$f(Backend::$b).await
-            }
-        };
-    }
     macro_rules! region_test_suite {
         ($b:ident) => {
-            one_region_test!($b, region_create_drop_open);
-            one_region_test!($b, copy_extent_dir);
-            one_region_test!($b, copy_extent_dir_twice);
-            one_region_test!($b, close_extent);
-            one_region_test!($b, reopen_extent_cleanup_one);
-            one_region_test!($b, reopen_extent_cleanup_two);
-            one_region_test!($b, reopen_extent_cleanup_replay);
-            one_region_test!($b, reopen_extent_cleanup_replay_short);
-            one_region_test!($b, reopen_extent_no_replay_readonly);
-            one_region_test!($b, reopen_all_extents);
-            one_region_test!($b, new_region);
-            one_region_test!($b, new_existing_region);
-            one_region_test!($b, dump_a_region);
-            one_region_test!($b, dump_two_region);
-            one_region_test!($b, dump_extent);
-            one_region_test!($b, test_big_write);
-            one_region_test!($b, test_region_open_removes_partial_writes);
-            one_region_test!($b, test_ok_hash_ok);
-            one_region_test!($b, test_write_unwritten_when_empty);
-            one_region_test!($b, test_write_unwritten_when_written);
-            one_region_test!($b, test_write_unwritten_when_written_flush);
-            one_region_test!($b, test_write_unwritten_big_write);
-            one_region_test!($b, test_write_unwritten_big_write_partial_0);
-            one_region_test!($b, test_write_unwritten_big_write_partial_1);
-            one_region_test!($b, test_write_unwritten_big_write_partial_final);
-            one_region_test!($b, test_write_unwritten_big_write_partial_sparse);
-            one_region_test!($b, test_flush_extent_limit_base);
-            one_region_test!($b, test_flush_extent_limit_end);
-            one_region_test!($b, test_flush_extent_limit_walk_it_off);
-            one_region_test!($b, test_flush_extent_limit_too_large);
-            one_region_test!($b, test_extent_write_flush_close);
-            one_region_test!($b, test_extent_close_reopen_flush_close);
-            one_region_test!($b, test_flush_after_multiple_disjoint_writes);
-            one_region_test!($b, test_big_extent_full_write_and_flush);
-            one_region_test!($b, test_bad_hash_bad);
-            one_region_test!($b, test_blank_block_read_ok);
-            one_region_test!($b, test_read_single_large_contiguous);
-            one_region_test!($b, test_read_multiple_disjoint_large_contiguous);
-            one_region_test!($b, test_read_multiple_disjoint_none_contiguous);
-            one_region_test!($b, test_write_single_large_contiguous);
-            one_region_test!(
+            region_test_suite!(
                 $b,
-                test_write_single_large_contiguous_span_extents
-            );
-            one_region_test!($b, test_write_multiple_disjoint_large_contiguous);
-            one_region_test!($b, test_write_multiple_disjoint_none_contiguous);
-            one_region_test!($b, test_write_unwritten_single_large_contiguous);
-            one_region_test!(
-                $b,
-                test_write_unwritten_single_large_contiguous_span_extents
-            );
-            one_region_test!(
-                $b,
-                test_write_unwritten_multiple_disjoint_large_contiguous
-            );
-            one_region_test!(
-                $b,
-                test_read_single_large_contiguous_span_extents
-            );
-            one_region_test!(
-                $b,
+                region_create_drop_open,
+                copy_extent_dir,
+                copy_extent_dir_twice,
+                close_extent,
+                reopen_extent_cleanup_one,
+                reopen_extent_cleanup_two,
+                reopen_extent_cleanup_replay,
+                reopen_extent_cleanup_replay_short,
+                reopen_extent_no_replay_readonly,
+                reopen_all_extents,
+                new_region,
+                new_existing_region,
+                dump_a_region,
+                dump_two_region,
+                dump_extent,
+                test_big_write,
+                test_region_open_removes_partial_writes,
+                test_ok_hash_ok,
+                test_write_unwritten_when_empty,
+                test_write_unwritten_when_written,
+                test_write_unwritten_when_written_flush,
+                test_write_unwritten_big_write,
+                test_write_unwritten_big_write_partial_0,
+                test_write_unwritten_big_write_partial_1,
+                test_write_unwritten_big_write_partial_final,
+                test_write_unwritten_big_write_partial_sparse,
+                test_flush_extent_limit_base,
+                test_flush_extent_limit_end,
+                test_flush_extent_limit_walk_it_off,
+                test_flush_extent_limit_too_large,
+                test_extent_write_flush_close,
+                test_extent_close_reopen_flush_close,
+                test_flush_after_multiple_disjoint_writes,
+                test_big_extent_full_write_and_flush,
+                test_bad_hash_bad,
+                test_blank_block_read_ok,
+                test_read_single_large_contiguous,
+                test_read_multiple_disjoint_large_contiguous,
+                test_read_multiple_disjoint_none_contiguous,
+                test_write_single_large_contiguous,
+                test_write_single_large_contiguous_span_extents,
+                test_write_multiple_disjoint_large_contiguous,
+                test_write_multiple_disjoint_none_contiguous,
+                test_write_unwritten_single_large_contiguous,
+                test_write_unwritten_single_large_contiguous_span_extents,
+                test_write_unwritten_multiple_disjoint_large_contiguous,
+                test_read_single_large_contiguous_span_extents,
                 test_write_unwritten_multiple_disjoint_none_contiguous
             );
         };
+
+        ($b:ident, $($fs:ident),+) => {
+        $(
+            #[tokio::test]
+            async fn $fs() {
+                super::$fs(Backend::$b).await
+            }
+         )+};
     }
 
     mod raw_file {
