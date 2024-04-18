@@ -1235,8 +1235,8 @@ pub mod repair_test {
             assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
         }
     }
-    #[tokio::test]
-    async fn test_repair_io_span_el_sent() {
+    #[test]
+    fn test_repair_io_span_el_sent() {
         // Verify that IOs put on the queue when a downstairs is
         // in LiveRepair and the IO starts at an extent that is below
         // the extent_limit, but extends to beyond the extent limit,

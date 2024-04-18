@@ -96,8 +96,8 @@ pub(crate) mod up_test {
         assert_eq!(span.affected_block_numbers(), &vec![268, 269, 270, 271]);
     }
 
-    #[tokio::test]
-    async fn test_iospan_buffer_read_write() {
+    #[test]
+    fn test_iospan_buffer_read_write() {
         let mut span = IOSpan::new(500, 64, 512);
         assert_eq!(span.affected_block_count(), 2);
         assert_eq!(span.affected_block_numbers(), &vec![0, 1]);
@@ -139,8 +139,8 @@ pub(crate) mod up_test {
             .collect()
     }
 
-    #[tokio::test]
-    async fn off_to_extent_one_block() {
+    #[test]
+    fn off_to_extent_one_block() {
         let up = make_upstairs();
 
         for i in 0..100 {
@@ -160,8 +160,8 @@ pub(crate) mod up_test {
         assert_eq!(up_efo(&up, Block::new_512(999), 1), exv);
     }
 
-    #[tokio::test]
-    async fn off_to_extent_two_blocks() {
+    #[test]
+    fn off_to_extent_two_blocks() {
         let up = make_upstairs();
 
         for i in 0..99 {
@@ -187,8 +187,8 @@ pub(crate) mod up_test {
         assert_eq!(up_efo(&up, Block::new_512(998), 2), exv);
     }
 
-    #[tokio::test]
-    async fn off_to_extent_bridge() {
+    #[test]
+    fn off_to_extent_bridge() {
         /*
          * Testing when our buffer crosses extents.
          */
@@ -225,41 +225,41 @@ pub(crate) mod up_test {
     /*
      * Testing various invalid inputs
      */
-    #[tokio::test]
-    async fn off_to_extent_length_zero() {
+    #[test]
+    fn off_to_extent_length_zero() {
         let up = make_upstairs();
         assert_eq!(up_efo(&up, Block::new_512(0), 0), vec![]);
     }
 
-    #[tokio::test]
-    async fn off_to_extent_length_almost_too_big() {
+    #[test]
+    fn off_to_extent_length_almost_too_big() {
         let up = make_upstairs();
         up_efo(&up, Block::new_512(0), 1000);
     }
 
-    #[tokio::test]
+    #[test]
     #[should_panic]
-    async fn off_to_extent_length_too_big() {
+    fn off_to_extent_length_too_big() {
         let up = make_upstairs();
         up_efo(&up, Block::new_512(0), 1001);
     }
 
-    #[tokio::test]
-    async fn off_to_extent_length_and_offset_almost_too_big() {
+    #[test]
+    fn off_to_extent_length_and_offset_almost_too_big() {
         let up = make_upstairs();
         up_efo(&up, Block::new_512(900), 100);
     }
 
-    #[tokio::test]
+    #[test]
     #[should_panic]
-    async fn off_to_extent_length_and_offset_too_big() {
+    fn off_to_extent_length_and_offset_too_big() {
         let up = make_upstairs();
         up_efo(&up, Block::new_512(1000), 1);
     }
 
-    #[tokio::test]
+    #[test]
     #[should_panic]
-    async fn not_right_block_size() {
+    fn not_right_block_size() {
         let up = make_upstairs();
         up_efo(&up, Block::new_4096(900), 1);
     }
@@ -710,8 +710,8 @@ pub(crate) mod up_test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn send_io_live_repair_read() {
+    #[test]
+    fn send_io_live_repair_read() {
         // Check the send_io_live_repair for a read below extent limit,
         // at extent limit, and above extent limit.
 
@@ -780,8 +780,8 @@ pub(crate) mod up_test {
         }
     }
 
-    #[tokio::test]
-    async fn send_io_live_repair_write() {
+    #[test]
+    fn send_io_live_repair_write() {
         // Check the send_io_live_repair for a write below extent limit,
         // at extent limit, and above extent limit.
 
@@ -801,8 +801,8 @@ pub(crate) mod up_test {
         assert!(wr.send_io_live_repair(Some(3)));
     }
 
-    #[tokio::test]
-    async fn send_io_live_repair_unwritten_write() {
+    #[test]
+    fn send_io_live_repair_unwritten_write() {
         // Check the send_io_live_repair for a write unwritten below extent
         // at extent limit, and above extent limit.
 
