@@ -1630,10 +1630,24 @@ pub(crate) mod test {
         // extent by copying the files from extent zero into the copy
         // directory.
         let dest_name = extent_file_name(1, ExtentType::Data);
-        let source_path = extent_path(&dir, 0);
+        let mut source_path = extent_path(&dir, 0);
         let mut dest_path = cp.clone();
         dest_path.push(dest_name);
         std::fs::copy(source_path.clone(), dest_path.clone()).unwrap();
+
+        if backend == Backend::SQLite {
+            source_path.set_extension("db");
+            dest_path.set_extension("db");
+            std::fs::copy(source_path.clone(), dest_path.clone()).unwrap();
+
+            source_path.set_extension("db-shm");
+            dest_path.set_extension("db-shm");
+            std::fs::copy(source_path.clone(), dest_path.clone()).unwrap();
+
+            source_path.set_extension("db-wal");
+            dest_path.set_extension("db-wal");
+            std::fs::copy(source_path.clone(), dest_path.clone()).unwrap();
+        }
 
         let rd = replace_dir(&dir, 1);
         rename(cp.clone(), rd.clone()).unwrap();
@@ -1654,73 +1668,6 @@ pub(crate) mod test {
         // deleted this directory.
         let cd = completed_dir(&dir, 1);
         assert!(!Path::new(&cd).exists());
-    }
-
-    #[tokio::test]
-    async fn reopen_extent_cleanup_replay_sqlite() -> Result<()> {
-        // Verify on extent open that a replacement directory will
-        // have it's contents replace an extents existing data and
-        // metadata files.
-        // Create the region, make three extents
-        let dir = tempdir()?;
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            Backend::SQLite,
-            csl(),
-        )
-        .await?;
-        region.extend(3).await?;
-
-        // Close extent 1
-        region.close_extent(1).await.unwrap();
-        assert!(matches!(region.extents[1], ExtentState::Closed));
-
-        // Make copy directory for this extent
-        let cp = Region::create_copy_dir(&dir, 1)?;
-
-        // We are simulating the copy of files from the "source" repair
-        // extent by copying the files from extent zero into the copy
-        // directory.
-        let dest_name = extent_file_name(1, ExtentType::Data);
-        let mut source_path = extent_path(&dir, 0);
-        let mut dest_path = cp.clone();
-        dest_path.push(dest_name);
-        std::fs::copy(source_path.clone(), dest_path.clone())?;
-
-        source_path.set_extension("db");
-        dest_path.set_extension("db");
-        std::fs::copy(source_path.clone(), dest_path.clone())?;
-
-        source_path.set_extension("db-shm");
-        dest_path.set_extension("db-shm");
-        std::fs::copy(source_path.clone(), dest_path.clone())?;
-
-        source_path.set_extension("db-wal");
-        dest_path.set_extension("db-wal");
-        std::fs::copy(source_path.clone(), dest_path.clone())?;
-
-        let rd = replace_dir(&dir, 1);
-        rename(cp.clone(), rd.clone())?;
-
-        // Now we have a replace directory, we verify that special
-        // action is taken when we (re)open the extent.
-
-        // Reopen extent 1
-        region.reopen_extent(1).await?;
-
-        let _ext_one = region.get_opened_extent(1);
-
-        // Make sure all repair directories are gone
-        assert!(!Path::new(&cp).exists());
-        assert!(!Path::new(&rd).exists());
-
-        // The reopen should have replayed the repair, renamed, then
-        // deleted this directory.
-        let cd = completed_dir(&dir, 1);
-        assert!(!Path::new(&cd).exists());
-
-        Ok(())
     }
 
     async fn reopen_extent_cleanup_replay_short(backend: Backend) {
@@ -1751,14 +1698,37 @@ pub(crate) mod test {
         // extent by copying the files from extent zero into the copy
         // directory.
         let dest_name = extent_file_name(1, ExtentType::Data);
-        let source_path = extent_path(&dir, 0);
+        let mut source_path = extent_path(&dir, 0);
         let mut dest_path = cp.clone();
         dest_path.push(dest_name);
         println!("cp {:?} to {:?}", source_path, dest_path);
         std::fs::copy(source_path.clone(), dest_path.clone()).unwrap();
 
+        if backend == Backend::SQLite {
+            source_path.set_extension("db");
+            dest_path.set_extension("db");
+            std::fs::copy(source_path.clone(), dest_path.clone()).unwrap();
+        }
+
         let rd = replace_dir(&dir, 1);
         rename(cp.clone(), rd.clone()).unwrap();
+
+        if backend == Backend::SQLite {
+            // The close may remove the db-shm and db-wal files, manually
+            // create them here, just to verify they are removed after the
+            // reopen as they are not included in the files to be recovered
+            // and this test exists to verify they will be deleted.
+            let mut invalid_db = extent_path(&dir, 1);
+            invalid_db.set_extension("db-shm");
+            println!("Recreate {:?}", invalid_db);
+            std::fs::copy(source_path.clone(), invalid_db.clone()).unwrap();
+            assert!(Path::new(&invalid_db).exists());
+
+            invalid_db.set_extension("db-wal");
+            println!("Recreate {:?}", invalid_db);
+            std::fs::copy(source_path.clone(), invalid_db.clone()).unwrap();
+            assert!(Path::new(&invalid_db).exists());
+        }
 
         // Now we have a replace directory populated and our files to
         // delete are ready.  We verify that special action is taken
@@ -1777,90 +1747,6 @@ pub(crate) mod test {
         // deleted this directory.
         let cd = completed_dir(&dir, 1);
         assert!(!Path::new(&cd).exists());
-    }
-
-    #[tokio::test]
-    async fn reopen_extent_cleanup_replay_short_sqlite() -> Result<()> {
-        // test move_replacement_extent(), create a copy dir, populate it
-        // and let the reopen do the work.  This time we make sure our
-        // copy dir only has extent data and .db files, and not .db-shm
-        // nor .db-wal.  Verify these files are delete from the original
-        // extent after the reopen has cleaned them up.
-        // Create the region, make three extents
-        let dir = tempdir()?;
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            Backend::SQLite,
-            csl(),
-        )
-        .await?;
-        region.extend(3).await?;
-
-        // Close extent 1
-        region.close_extent(1).await.unwrap();
-        assert!(matches!(region.extents[1], ExtentState::Closed));
-
-        // Make copy directory for this extent
-        let cp = Region::create_copy_dir(&dir, 1)?;
-
-        // We are simulating the copy of files from the "source" repair
-        // extent by copying the files from extent zero into the copy
-        // directory.
-        let dest_name = extent_file_name(1, ExtentType::Data);
-        let mut source_path = extent_path(&dir, 0);
-        let mut dest_path = cp.clone();
-        dest_path.push(dest_name);
-        println!("cp {:?} to {:?}", source_path, dest_path);
-        std::fs::copy(source_path.clone(), dest_path.clone())?;
-
-        source_path.set_extension("db");
-        dest_path.set_extension("db");
-        std::fs::copy(source_path.clone(), dest_path.clone())?;
-
-        let rd = replace_dir(&dir, 1);
-        rename(cp.clone(), rd.clone())?;
-
-        // The close may remove the db-shm and db-wal files, manually
-        // create them here, just to verify they are removed after the
-        // reopen as they are not included in the files to be recovered
-        // and this test exists to verify they will be deleted.
-        let mut invalid_db = extent_path(&dir, 1);
-        invalid_db.set_extension("db-shm");
-        println!("Recreate {:?}", invalid_db);
-        std::fs::copy(source_path.clone(), invalid_db.clone())?;
-        assert!(Path::new(&invalid_db).exists());
-
-        invalid_db.set_extension("db-wal");
-        println!("Recreate {:?}", invalid_db);
-        std::fs::copy(source_path.clone(), invalid_db.clone())?;
-        assert!(Path::new(&invalid_db).exists());
-
-        // Now we have a replace directory populated and our files to
-        // delete are ready.  We verify that special action is taken
-        // when we (re)open the extent.
-
-        // Reopen extent 1
-        region.reopen_extent(1).await?;
-
-        // Make sure there is no longer a db-shm and db-wal
-        dest_path.set_extension("db-shm");
-        assert!(!Path::new(&dest_path).exists());
-        dest_path.set_extension("db-wal");
-        assert!(!Path::new(&dest_path).exists());
-
-        let _ext_one = region.get_opened_extent(1);
-
-        // Make sure all repair directories are gone
-        assert!(!Path::new(&cp).exists());
-        assert!(!Path::new(&rd).exists());
-
-        // The reopen should have replayed the repair, renamed, then
-        // deleted this directory.
-        let cd = completed_dir(&dir, 1);
-        assert!(!Path::new(&cd).exists());
-
-        Ok(())
     }
 
     #[tokio::test]
