@@ -203,7 +203,7 @@ impl Region {
         options: RegionOptions,
         log: Logger,
     ) -> Result<Region> {
-        Self::create_with_backend(dir, options, Backend::RawFile, log).await
+        Self::create_with_backend(dir, options, Backend::default(), log).await
     }
 
     pub async fn create_with_backend<P: AsRef<Path>>(
@@ -259,7 +259,7 @@ impl Region {
             options,
             verbose,
             read_only,
-            Backend::RawFile,
+            Backend::default(),
             log,
         )
         .await
@@ -467,7 +467,7 @@ impl Region {
             &self.def,
             eid as u32,
             self.read_only,
-            Backend::RawFile,
+            Backend::default(),
             &self.log,
         )?;
 
@@ -2331,6 +2331,29 @@ pub(crate) mod test {
             .unwrap();
     }
 
+    /// Read block data from raw files on disk
+    fn read_file_data(
+        ddef: RegionDefinition,
+        dir: &Path,
+        backend: Backend,
+    ) -> Vec<u8> {
+        let mut out = vec![];
+        let extent_data_size =
+            (ddef.extent_size().value * ddef.block_size()) as usize;
+        for i in 0..ddef.extent_count() {
+            match backend {
+                Backend::SQLite | Backend::RawFile => {
+                    let path = extent_path(dir, i);
+                    let data =
+                        std::fs::read(path).expect("Unable to read file");
+
+                    out.extend(&data[..extent_data_size]);
+                }
+            }
+        }
+        out
+    }
+
     async fn test_big_write(backend: Backend) {
         let dir = tempdir().unwrap();
         let mut region = Region::create_with_backend(
@@ -2380,17 +2403,7 @@ pub(crate) mod test {
         region.region_write(&writes, JobId(0), false).await.unwrap();
 
         // read data into File, compare what was written to buffer
-
-        let mut read_from_files: Vec<u8> = Vec::with_capacity(total_size);
-
-        let extent_data_size =
-            (ddef.extent_size().value * ddef.block_size()) as usize;
-        for i in 0..ddef.extent_count() {
-            let path = extent_path(&dir, i);
-            let data = std::fs::read(path).expect("Unable to read file");
-
-            read_from_files.extend(&data[..extent_data_size]);
-        }
+        let read_from_files = read_file_data(ddef, dir.path(), backend);
 
         assert_eq!(buffer.len(), read_from_files.len());
         assert_eq!(buffer, read_from_files);
@@ -2938,17 +2951,9 @@ pub(crate) mod test {
         region.region_write(&writes, JobId(0), true).await.unwrap();
 
         // read data into File, compare what was written to buffer
-        let mut read_from_files: Vec<u8> = Vec::with_capacity(total_size);
+        let read_from_files = read_file_data(ddef, dir.path(), backend);
 
-        let extent_data_size =
-            (ddef.extent_size().value * ddef.block_size()) as usize;
-        for i in 0..ddef.extent_count() {
-            let path = extent_path(&dir, i);
-            let data = std::fs::read(path).expect("Unable to read file");
-
-            read_from_files.extend(&data[..extent_data_size]);
-        }
-
+        assert_eq!(buffer.len(), read_from_files.len());
         assert_eq!(buffer, read_from_files);
 
         // read all using region_read
@@ -3055,17 +3060,9 @@ pub(crate) mod test {
         }
 
         // read data into File, compare what was written to buffer
-        let mut read_from_files: Vec<u8> = Vec::with_capacity(total_size);
+        let read_from_files = read_file_data(ddef, dir.path(), backend);
 
-        let extent_data_size =
-            (ddef.extent_size().value * ddef.block_size()) as usize;
-        for i in 0..ddef.extent_count() {
-            let path = extent_path(&dir, i);
-            let data = std::fs::read(path).expect("Unable to read file");
-
-            read_from_files.extend(&data[..extent_data_size]);
-        }
-
+        assert_eq!(buffer.len(), read_from_files.len());
         assert_eq!(buffer, read_from_files);
 
         // read all using region_read
@@ -3173,17 +3170,9 @@ pub(crate) mod test {
         }
 
         // read data into File, compare what was written to buffer
-        let mut read_from_files: Vec<u8> = Vec::with_capacity(total_size);
+        let read_from_files = read_file_data(ddef, dir.path(), backend);
 
-        let extent_data_size =
-            (ddef.extent_size().value * ddef.block_size()) as usize;
-        for i in 0..ddef.extent_count() {
-            let path = extent_path(&dir, i);
-            let data = std::fs::read(path).expect("Unable to read file");
-
-            read_from_files.extend(&data[..extent_data_size]);
-        }
-
+        assert_eq!(buffer.len(), read_from_files.len());
         assert_eq!(buffer, read_from_files);
 
         // read all using region_read
@@ -3814,22 +3803,32 @@ pub(crate) mod test {
 
         for (i, range) in ranges.iter().enumerate() {
             // Get the contexts for the range
-            let ctxts = ext
-                .get_block_contexts(range.start, range.end - range.start)
+            let mut resp = RawReadResponse::with_capacity(
+                (range.end - range.start) as usize,
+                512,
+            );
+            let reqs = range
+                .clone()
+                .map(|i| ReadRequest {
+                    eid: 0,
+                    offset: Block::new_512(i),
+                })
+                .collect::<Vec<_>>();
+            ext.read_into(JobId(i as u64), &reqs, &mut resp)
                 .await
                 .unwrap();
 
             // Every block should have at most 1 block
             assert_eq!(
-                ctxts.iter().map(|block_ctxts| block_ctxts.len()).max(),
+                resp.blocks.iter().map(|b| b.block_contexts.len()).max(),
                 Some(1)
             );
 
             // Now that we've checked that, flatten out for an easier eq
-            let actual_ctxts: Vec<_> = ctxts
+            let actual_ctxts: Vec<_> = resp
+                .blocks
                 .iter()
-                .flatten()
-                .map(|downstairs_context| &downstairs_context.block_context)
+                .flat_map(|b| b.block_contexts.iter())
                 .collect();
 
             // What we expect is the hashes for the last write we did
@@ -3899,19 +3898,26 @@ pub(crate) mod test {
         let ext = region.get_opened_extent_mut(0);
 
         // Get the contexts for the range
-        let ctxts = ext.get_block_contexts(0, EXTENT_SIZE).await.unwrap();
+        let reqs = (0..EXTENT_SIZE)
+            .map(|i| ReadRequest {
+                eid: 0,
+                offset: Block::new_512(i),
+            })
+            .collect::<Vec<_>>();
+        let mut out = RawReadResponse::with_capacity(EXTENT_SIZE as usize, 512);
+        ext.read_into(JobId(0), &reqs, &mut out).await.unwrap();
 
         // Every block should have at most 1 block
         assert_eq!(
-            ctxts.iter().map(|block_ctxts| block_ctxts.len()).max(),
+            out.blocks.iter().map(|b| b.block_contexts.len()).max(),
             Some(1)
         );
 
         // Now that we've checked that, flatten out for an easier eq
-        let actual_ctxts: Vec<_> = ctxts
+        let actual_ctxts: Vec<_> = out
+            .blocks
             .iter()
-            .flatten()
-            .map(|downstairs_context| &downstairs_context.block_context)
+            .flat_map(|b| b.block_contexts.iter())
             .collect();
 
         // What we expect is the hashes for the last write we did

@@ -5,6 +5,9 @@ use crate::{
         check_input, extent_path, DownstairsBlockContext, ExtentInner,
         EXTENT_META_RAW,
     },
+    extent_inner_raw_common::{
+        pread_all, pwrite_all, OnDiskMeta, BLOCK_META_SIZE_BYTES,
+    },
     integrity_hash, mkdir_for_file,
     region::{BatchedPwritev, JobOrReconciliationId},
     Block, BlockContext, CrucibleError, JobId, RegionDefinition,
@@ -28,29 +31,11 @@ struct OnDiskDownstairsBlockContext {
     on_disk_hash: u64,
 }
 
-/// Equivalent to `ExtentMeta`, but ordered for efficient on-disk serialization
-///
-/// In particular, the `dirty` byte is first, so it's easy to read at a known
-/// offset within the file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OnDiskMeta {
-    dirty: bool,
-    gen_number: u64,
-    flush_number: u64,
-    ext_version: u32,
-}
-
 /// Size of backup data
 ///
 /// This must be large enough to fit an `Option<OnDiskDownstairsBlockContext>`
 /// serialized using `bincode`.
 const BLOCK_CONTEXT_SLOT_SIZE_BYTES: u64 = 48;
-
-/// Size of metadata region
-///
-/// This must be large enough to contain an `OnDiskMeta` serialized using
-/// `bincode`.
-const BLOCK_META_SIZE_BYTES: u64 = 32;
 
 /// Number of extra syscalls per read / write that triggers defragmentation
 const DEFRAGMENT_THRESHOLD: u64 = 3;
@@ -189,6 +174,7 @@ impl ExtentInner for RawInner {
         job_id: JobId,
         requests: &[crucible_protocol::ReadRequest],
         out: &mut RawReadResponse,
+        _iov_max: usize, // unused by raw file backend
     ) -> Result<(), CrucibleError> {
         // This code batches up operations for contiguous regions of
         // ReadRequests, so we can perform larger read syscalls queries. This
@@ -1425,47 +1411,6 @@ impl RawLayout {
     }
 }
 
-/// Call `pread` repeatedly to read an entire buffer
-///
-/// Quoth the standard,
-///
-/// > The value returned may be less than nbyte if the number of bytes left in
-/// > the file is less than nbyte, if the read() request was interrupted by a
-/// > signal, or if the file is a pipe or FIFO or special file and has fewer
-/// > than nbyte bytes immediately available for reading. For example, a read()
-/// > from a file associated with a terminal may return one typed line of data.
-///
-/// We don't have to worry about most of these conditions, but it may be
-/// possible for Crucible to be interrupted by a signal, so let's play it safe.
-fn pread_all<F: AsFd + Copy>(
-    fd: F,
-    mut buf: &mut [u8],
-    mut offset: i64,
-) -> Result<(), nix::errno::Errno> {
-    while !buf.is_empty() {
-        let n = nix::sys::uio::pread(fd, buf, offset)?;
-        offset += n as i64;
-        buf = &mut buf[n..];
-    }
-    Ok(())
-}
-
-/// Call `pwrite` repeatedly to write an entire buffer
-///
-/// See details for why this is necessary in [`pread_all`]
-fn pwrite_all<F: AsFd + Copy>(
-    fd: F,
-    mut buf: &[u8],
-    mut offset: i64,
-) -> Result<(), nix::errno::Errno> {
-    while !buf.is_empty() {
-        let n = nix::sys::uio::pwrite(fd, buf, offset)?;
-        offset += n as i64;
-        buf = &buf[n..];
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -1728,7 +1673,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(0),
             };
-            let resp = inner.read(JobId(21), &[read])?;
+            let resp = inner.read(JobId(21), &[read], IOV_MAX_TEST)?;
 
             // We should not get back our data, because block 0 was written.
             assert_ne!(
@@ -1762,7 +1707,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(1),
             };
-            let resp = inner.read(JobId(31), &[read])?;
+            let resp = inner.read(JobId(31), &[read], IOV_MAX_TEST)?;
 
             // We should get back our data! Block 1 was never written.
             assert_eq!(
@@ -1985,7 +1930,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(0),
             };
-            let resp = inner.read(JobId(31), &[read])?;
+            let resp = inner.read(JobId(31), &[read], IOV_MAX_TEST)?;
 
             // We should get back our data! Block 1 was never written.
             assert_eq!(
@@ -2490,7 +2435,7 @@ mod test {
             eid: 0,
             offset: Block::new_512(0),
         };
-        let resp = inner.read(JobId(31), &[read])?;
+        let resp = inner.read(JobId(31), &[read], IOV_MAX_TEST)?;
 
         let data = Bytes::from(vec![0x03; 512]);
         let hash = integrity_hash(&[&data[..]]);

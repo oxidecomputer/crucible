@@ -47,6 +47,7 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
         job_id: JobId,
         requests: &[crucible_protocol::ReadRequest],
         out: &mut RawReadResponse,
+        iov_max: usize,
     ) -> Result<(), CrucibleError>;
 
     /// Performs a read then destructures into a `Vec<ReadResponse>`
@@ -55,12 +56,13 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
         &mut self,
         job_id: JobId,
         requests: &[crucible_protocol::ReadRequest],
+        iov_max: usize,
     ) -> Result<RawReadResponse, CrucibleError> {
         let block_size = requests[0].offset.block_size_in_bytes();
         let mut out =
             RawReadResponse::with_capacity(requests.len(), block_size as u64);
         if !requests.is_empty() {
-            self.read_into(job_id, requests, &mut out)?;
+            self.read_into(job_id, requests, &mut out, iov_max)?;
         }
         Ok(out)
     }
@@ -73,6 +75,11 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
         iov_max: usize,
     ) -> Result<(), CrucibleError>;
 
+    /// Reads zero or more context slots for each block in the given range
+    ///
+    /// # Panics
+    /// If an extent implementation cannot get block contexts separately from a
+    /// read, this is allowed to panic.
     #[cfg(test)]
     fn get_block_contexts(
         &mut self,
@@ -84,6 +91,10 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
     ///
     /// This should only be called from test functions, where we want to
     /// manually modify block contexts and test associated behavior
+    ///
+    /// # Panics
+    /// If an extent implementation cannot set block contexts separately from a
+    /// write, this is allowed to panic.
     #[cfg(test)]
     fn set_dirty_and_block_context(
         &mut self,
@@ -441,10 +452,21 @@ impl Extent {
                 )?;
                 Box::new(inner)
             } else {
-                let inner = extent_inner_raw::RawInner::open(
-                    dir, def, number, read_only, log,
-                )?;
-                Box::new(inner)
+                match extent_inner_raw_common::OnDiskMeta::get_version_tag(
+                    dir, number,
+                )? {
+                    EXTENT_META_RAW => {
+                        Box::new(extent_inner_raw::RawInner::open(
+                            dir, def, number, read_only, log,
+                        )?)
+                    }
+                    i => {
+                        return Err(CrucibleError::IoError(format!(
+                            "raw extent {number} has unknown tag {i}"
+                        ))
+                        .into())
+                    }
+                }
             }
         };
 
@@ -541,7 +563,7 @@ impl Extent {
             (job_id.0, self.number, requests.len() as u64)
         });
 
-        self.inner.read_into(job_id, requests, out)?;
+        self.inner.read_into(job_id, requests, out, self.iov_max)?;
         cdt::extent__read__done!(|| {
             (job_id.0, self.number, requests.len() as u64)
         });
@@ -613,6 +635,11 @@ impl Extent {
         }
     }
 
+    /// Sets the dirty flag and a single block context
+    ///
+    /// # Panics
+    /// If the inner extent implementation does not support setting block
+    /// contexts separately from a read operation
     #[cfg(test)]
     #[allow(clippy::unused_async)] // this will be async again in the future
     pub async fn set_dirty_and_block_context(
@@ -622,6 +649,11 @@ impl Extent {
         self.inner.set_dirty_and_block_context(block_context)
     }
 
+    /// Gets zero or more block contexts for each block in the given range
+    ///
+    /// # Panics
+    /// If the inner extent implementation does not support getting block
+    /// contexts separately from a read operation
     #[cfg(test)]
     #[allow(clippy::unused_async)] // this will be async again in the future
     pub async fn get_block_contexts(

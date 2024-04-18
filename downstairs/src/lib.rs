@@ -45,6 +45,7 @@ pub mod repair;
 mod stats;
 
 mod extent_inner_raw;
+pub(crate) mod extent_inner_raw_common;
 mod extent_inner_sqlite;
 
 use extent::ExtentState;
@@ -1454,7 +1455,7 @@ impl Downstairs {
             read_errors: Some(false),
             write_errors: Some(false),
             flush_errors: Some(false),
-            backend: Some(Backend::RawFile),
+            backend: Some(Backend::default()),
             log: None,
         }
     }
@@ -3073,8 +3074,9 @@ enum WrappedStream {
 ///
 /// Normally, we only allow the most recent backend.  However, for integration
 /// tests, it can be useful to create volumes using older backends.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Default, Debug, PartialEq)]
 pub enum Backend {
+    #[default]
     RawFile,
 
     #[cfg(any(test, feature = "integration-tests"))]
@@ -3099,7 +3101,7 @@ pub async fn create_region(
         extent_count,
         uuid,
         encrypted,
-        Backend::RawFile,
+        Backend::default(),
         log,
     )
     .await
