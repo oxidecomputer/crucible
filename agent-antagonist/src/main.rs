@@ -528,9 +528,12 @@ async fn clone_a_snapshot(
                             "Snapshot {snapshot_id} is ready, proceed with clone"
                         );
 
-                        // This +4000 is the repair port, which is determined
-                        // by the downstairs itself.
-                        source_addr.set_port(my_snap.port_number + 4000);
+                        // The repair port (determined by the downstairs) is
+                        // the base port plus this offset.
+                        source_addr.set_port(
+                            my_snap.port_number
+                                + crucible_common::REPAIR_PORT_OFFSET,
+                        );
                         break 'created;
                     }
                     x => {
