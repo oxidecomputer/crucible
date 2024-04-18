@@ -2506,6 +2506,10 @@ impl ClientIoTask {
         // If we're reconnecting, then add a short delay to avoid constantly
         // spinning (e.g. if something is fundamentally wrong with the
         // Downstairs)
+        //
+        // The upstairs can still stop us here, e.g. if we need to transition
+        // from Offline -> Faulted because we hit a job limit, that bounces the
+        // IO task (whether it *should* is debatable).
         if self.delay {
             tokio::select! {
                 s = &mut self.stop => {

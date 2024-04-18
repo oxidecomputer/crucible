@@ -62,12 +62,13 @@ http = { workspace = true, optional = true }
 
 [dev-dependencies]
 expectorate.workspace = true
-openapiv3.workspace = true
+humantime.workspace = true
 openapi-lint.workspace = true
-tokio-test.workspace = true
+openapiv3.workspace = true
+proptest.workspace = true
 tempfile.workspace = true
 test-strategy.workspace = true
-proptest.workspace = true
+tokio-test.workspace = true
 
 [build-dependencies]
 version_check = "0.9.4"
