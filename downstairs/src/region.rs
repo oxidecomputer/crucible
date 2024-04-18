@@ -1749,60 +1749,6 @@ pub(crate) mod test {
         assert!(!Path::new(&cd).exists());
     }
 
-    #[tokio::test]
-    async fn reopen_extent_no_replay_readonly_sqlite() -> Result<()> {
-        // Verify on a read-only region a replacement directory will
-        // be ignored.  This is required by the dump command, as it would
-        // be tragic if the command to inspect a region changed that
-        // region's contents in the act of inspecting.
-
-        // Create the region, make three extents
-        let dir = tempdir()?;
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            Backend::SQLite,
-            csl(),
-        )
-        .await?;
-        region.extend(3).await?;
-
-        // Make copy directory for this extent
-        let _ext_one = region.get_opened_extent(1);
-        let cp = Region::create_copy_dir(&dir, 1)?;
-
-        // We are simulating the copy of files from the "source" repair
-        // extent by copying the files from extent zero into the copy
-        // directory.
-        let dest_name = extent_file_name(1, ExtentType::Data);
-        let mut source_path = extent_path(&dir, 0);
-        let mut dest_path = cp.clone();
-        dest_path.push(dest_name);
-        std::fs::copy(source_path.clone(), dest_path.clone())?;
-
-        source_path.set_extension("db");
-        dest_path.set_extension("db");
-        std::fs::copy(source_path.clone(), dest_path.clone())?;
-
-        let rd = replace_dir(&dir, 1);
-        rename(cp, rd.clone())?;
-
-        drop(region);
-
-        // Open up the region read_only now.
-        let region =
-            Region::open(&dir, new_region_options(), false, true, &csl())
-                .await?;
-
-        // Verify extent 1 has opened again.
-        let _ext_one = region.get_opened_extent(1);
-
-        // Make sure repair directory is still present
-        assert!(Path::new(&rd).exists());
-
-        Ok(())
-    }
-
     async fn reopen_extent_no_replay_readonly(backend: Backend) {
         // Verify on a read-only region a replacement directory will
         // be ignored.  This is required by the dump command, as it would
@@ -1829,10 +1775,16 @@ pub(crate) mod test {
         // extent by copying the files from extent zero into the copy
         // directory.
         let dest_name = extent_file_name(1, ExtentType::Data);
-        let source_path = extent_path(&dir, 0);
+        let mut source_path = extent_path(&dir, 0);
         let mut dest_path = cp.clone();
         dest_path.push(dest_name);
         std::fs::copy(source_path.clone(), dest_path.clone()).unwrap();
+
+        if backend == Backend::SQLite {
+            source_path.set_extension("db");
+            dest_path.set_extension("db");
+            std::fs::copy(source_path.clone(), dest_path.clone()).unwrap();
+        }
 
         let rd = replace_dir(&dir, 1);
         rename(cp, rd.clone()).unwrap();
