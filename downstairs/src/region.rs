@@ -2349,6 +2349,24 @@ pub(crate) mod test {
 
                     out.extend(&data[..extent_data_size]);
                 }
+                Backend::RawFileV2 => {
+                    let path = extent_path(dir, i);
+                    let data =
+                        std::fs::read(path).expect("Unable to read file");
+
+                    let block_size = ddef.block_size() as usize;
+                    const CONTEXT_SIZE: usize = 40;
+                    let chunk_size = block_size + CONTEXT_SIZE; // context slot size
+                    for j in 0..ddef.extent_size().value as usize {
+                        out.extend(
+                            &match j % 2 {
+                                0 => &data[j * chunk_size..],
+                                1 => &data[j * chunk_size + CONTEXT_SIZE..],
+                                _ => unreachable!(),
+                            }[..block_size],
+                        );
+                    }
+                }
             }
         }
         out
@@ -2540,6 +2558,11 @@ pub(crate) mod test {
     }
 
     async fn test_region_open_removes_partial_writes(backend: Backend) {
+        // The RawFileV2 backend cannot write contexts separately from block
+        // data, so there's no such thing as a partial write.
+        if backend == Backend::RawFileV2 {
+            return;
+        }
         // Opening a dirty extent should fully rehash the extent to remove any
         // contexts that don't correlate with data on disk. This is necessary
         // for write_unwritten to work after a crash, and to move us into a
@@ -4495,6 +4518,10 @@ pub(crate) mod test {
     mod raw_file {
         use super::*;
         region_test_suite!(RawFile);
+    }
+    mod raw_file_v2 {
+        use super::*;
+        region_test_suite!(RawFileV2);
     }
     mod sqlite {
         use super::*;

@@ -45,6 +45,7 @@ mod stats;
 
 mod extent_inner_raw;
 pub(crate) mod extent_inner_raw_common;
+mod extent_inner_raw_v2;
 mod extent_inner_sqlite;
 
 use extent::ExtentState;
@@ -1372,7 +1373,7 @@ impl DownstairsBuilder<'_> {
         let read_errors = self.read_errors.unwrap_or(false);
         let write_errors = self.write_errors.unwrap_or(false);
         let flush_errors = self.flush_errors.unwrap_or(false);
-        let backend = self.backend.unwrap_or(Backend::RawFile);
+        let backend = self.backend.unwrap_or_default();
 
         let log = match &self.log {
             Some(log) => log.clone(),
@@ -3075,8 +3076,9 @@ enum WrappedStream {
 /// tests, it can be useful to create volumes using older backends.
 #[derive(Copy, Clone, Default, Debug, PartialEq)]
 pub enum Backend {
-    #[default]
     RawFile,
+    #[default]
+    RawFileV2,
 
     #[cfg(any(test, feature = "integration-tests"))]
     SQLite,
