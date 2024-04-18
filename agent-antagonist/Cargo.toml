@@ -6,16 +6,20 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-reqwest.workspace = true
-crucible-agent-client.workspace = true
-tokio.workspace = true
-serde.workspace = true
-rand.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+crucible-agent-client.workspace = true
+crucible-common.workspace = true
+crucible-workspace-hack.workspace = true
+futures-core.workspace = true
+futures.workspace = true
+rand.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+signal-hook-tokio.workspace = true
+signal-hook.workspace = true
 slog.workspace = true
 slog-term.workspace = true
 slog-bunyan.workspace = true
-crucible-common.workspace = true
+tokio.workspace = true
 uuid.workspace = true
-crucible-workspace-hack.workspace = true

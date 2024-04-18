@@ -4,7 +4,7 @@ use super::model::*;
 use anyhow::{anyhow, bail, Result};
 use crucible_common::write_json;
 use serde::{Deserialize, Serialize};
-use slog::{crit, error, info, Logger};
+use slog::{crit, error, info, warn, Logger};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -33,6 +33,13 @@ struct Inner {
     running_snapshots: BTreeMap<RegionId, BTreeMap<String, RunningSnapshot>>,
 }
 
+#[derive(Serialize, Deserialize, Default)]
+struct InnerV1 {
+    regions: BTreeMap<RegionId, RegionV1>,
+    // indexed by region id and snapshot name
+    running_snapshots: BTreeMap<RegionId, BTreeMap<String, RunningSnapshot>>,
+}
+
 impl DataFile {
     pub fn new(
         log: Logger,
@@ -45,6 +52,7 @@ impl DataFile {
         let mut conf_path = base_path.to_path_buf();
         conf_path.push("crucible.json");
 
+        info!(log, "Using conf_path:{:?}", conf_path);
         /*
          * Open data file, load contents.
          */
@@ -52,7 +60,66 @@ impl DataFile {
             Ok(Some(inner)) => inner,
             Ok(None) => Inner::default(),
             Err(e) => {
-                bail!("failed to load data file {:?}: {:?}", conf_path, e)
+                warn!(log, "failed to load data file {:?}: {:?}", conf_path, e);
+                warn!(log, "Attempting to fallback to V1");
+
+                // We may have an older version, try that.
+                // This conversion check only needs to happen once, and
+                // once all files have been updated, we can get rid of
+                // this code.
+                let iv1: InnerV1 = match crucible_common::read_json_maybe(
+                    &conf_path,
+                ) {
+                    Ok(Some(inner)) => inner,
+                    Ok(None) => {
+                        panic!("Failed fallback read for conf file")
+                    }
+                    Err(e) => {
+                        bail!(
+                            "fallback to v1 failed to load data file {:?}: {:?}",
+                            conf_path, e
+                        )
+                    }
+                };
+                info!(log, "Imported an older format file");
+
+                let mut inner = Inner::default();
+                for (rid, region_snapshots) in iv1.running_snapshots.iter() {
+                    info!(
+                        log,
+                        "Converting V1 snapshot: {:?}:{:?}",
+                        rid,
+                        region_snapshots
+                    );
+                    inner
+                        .running_snapshots
+                        .insert(rid.clone(), region_snapshots.clone());
+                }
+
+                // Any existing V1 region will not have a source field
+                // and will not be read only, so we know what values
+                // those fields will have.
+                for (rid, region) in iv1.regions {
+                    info!(log, "V1 rid:{:?} region: {:?}", rid, region);
+                    let updated_region = Region {
+                        id: region.id,
+                        state: region.state,
+                        block_size: region.block_size,
+                        extent_size: region.extent_size,
+                        extent_count: region.extent_count,
+                        encrypted: region.encrypted,
+                        port_number: region.port_number,
+                        cert_pem: region.cert_pem,
+                        key_pem: region.key_pem,
+                        root_pem: region.root_pem,
+                        source: None,
+                        read_only: false,
+                    };
+                    inner.regions.insert(rid.clone(), updated_region);
+                }
+                warn!(log, "Updated conf file from older version");
+                // We need to "flush" this update so the file has it.
+                inner
             }
         };
 
@@ -205,6 +272,8 @@ impl DataFile {
          */
         let port_number = self.get_free_port(&inner)?;
 
+        let read_only = create.source.is_some();
+
         let r = Region {
             id: create.id.clone(),
             state: State::Requested,
@@ -218,6 +287,8 @@ impl DataFile {
             cert_pem: create.cert_pem,
             key_pem: create.key_pem,
             root_pem: create.root_pem,
+            source: create.source,
+            read_only,
         };
 
         info!(self.log, "region {} state: {:?}", r.id.0, r.state);
@@ -390,7 +461,8 @@ impl DataFile {
                         existing.state = State::Tombstoned;
 
                         /*
-                         * Wake the worker thread to remove the snapshot we've created.
+                         * Wake the worker thread to remove the snapshot we've
+                         *  created.
                          */
                         self.bell.notify_all();
 
@@ -399,8 +471,8 @@ impl DataFile {
 
                     State::Failed => {
                         /*
-                         * For now, this terminal state will preserve evidence for
-                         * investigation.
+                         * For now, this terminal state will preserve evidence
+                         *  for investigation.
                          */
                         bail!(
                             "region {} running snapshot {} failed to provision \

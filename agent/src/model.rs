@@ -1,5 +1,6 @@
 // Copyright 2021 Oxide Computer Company
 
+use std::net::SocketAddr;
 use std::path::Path;
 
 use chrono::prelude::*;
@@ -16,6 +17,33 @@ pub enum State {
     Tombstoned,
     Destroyed,
     Failed,
+}
+
+// The original Region structure, no longer in use.
+// This only exists for us to update any agents using the
+// older format.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Serialize, Deserialize, JsonSchema, Debug, PartialEq, Clone)]
+pub struct RegionV1 {
+    pub id: RegionId,
+    pub state: State,
+
+    // Creation parameters
+    pub block_size: u64,
+    pub extent_size: u64,
+    pub extent_count: u64,
+    pub encrypted: bool,
+
+    // Run-time parameters
+    pub port_number: u16,
+    pub cert_pem: Option<String>,
+
+    // TODO should skip serializing this on list regions response, but this
+    // causes crucible.json to not have it
+    // #[serde(skip_serializing)]
+    pub key_pem: Option<String>,
+
+    pub root_pem: Option<String>,
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -40,6 +68,11 @@ pub struct Region {
     pub key_pem: Option<String>,
 
     pub root_pem: Option<String>,
+    // If this region was created as part of a clone.
+    pub source: Option<SocketAddr>,
+
+    // If this region is read only
+    pub read_only: bool,
 }
 
 pub struct SmfProperty<'a> {
@@ -121,6 +154,11 @@ pub struct CreateRegion {
     pub key_pem: Option<String>,
     pub root_pem: Option<String>,
     // TODO base64 encoded der too?
+
+    /// If requested, copy the extent contents from the provided IP:Port
+    ///
+    /// Regions created from a source will be started read_only
+    pub source: Option<SocketAddr>,
 }
 
 impl CreateRegion {
@@ -159,6 +197,11 @@ impl CreateRegion {
             Some(format!(
                 "root_pem {:?} instead of requested {:?}",
                 self.root_pem, r.root_pem
+            ))
+        } else if self.source != r.source {
+            Some(format!(
+                "source {:?} instead of requested {:?}",
+                self.source, r.source
             ))
         } else {
             None
@@ -315,6 +358,8 @@ mod test {
             cert_pem: None,
             key_pem: None,
             root_pem: None,
+            source: None,
+            read_only: false,
         };
 
         let s = serde_json::to_string(&r).expect("serialise");

@@ -337,6 +337,11 @@
           "root_pem": {
             "nullable": true,
             "type": "string"
+          },
+          "source": {
+            "nullable": true,
+            "description": "If requested, copy the extent contents from the provided IP:Port\n\nRegions created from a source will be started read_only",
+            "type": "string"
           }
         },
         "required": [
@@ -424,7 +429,14 @@
             "format": "uint16",
             "minimum": 0
           },
+          "read_only": {
+            "type": "boolean"
+          },
           "root_pem": {
+            "nullable": true,
+            "type": "string"
+          },
+          "source": {
             "nullable": true,
             "type": "string"
           },
@@ -439,6 +451,7 @@
           "extent_size",
           "id",
           "port_number",
+          "read_only",
           "state"
         ]
       },
