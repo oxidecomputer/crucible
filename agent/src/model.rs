@@ -154,7 +154,6 @@ pub struct CreateRegion {
     pub key_pem: Option<String>,
     pub root_pem: Option<String>,
     // TODO base64 encoded der too?
-
     /// If requested, copy the extent contents from the provided IP:Port
     ///
     /// Regions created from a source will be started read_only
