@@ -15,9 +15,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crucible_common::{
-    build_logger, crucible_bail, impacted_blocks::extent_from_offset,
-    integrity_hash, mkdir_for_file, verbose_timeout, Block, CrucibleError,
-    ExtentId, RegionDefinition, MAX_BLOCK_SIZE,
+    build_logger, crucible_bail, deadline_secs,
+    impacted_blocks::extent_from_offset, integrity_hash, mkdir_for_file,
+    verbose_timeout, Block, CrucibleError, ExtentId, RegionDefinition,
+    MAX_BLOCK_SIZE,
 };
 use crucible_protocol::{
     BlockContext, CrucibleDecoder, JobId, Message, MessageWriter,
@@ -46,7 +47,6 @@ mod stats;
 
 mod extent_inner_raw;
 pub(crate) mod extent_inner_raw_common;
-mod extent_inner_sqlite;
 
 use extent::ExtentState;
 use region::Region;
@@ -1322,7 +1322,6 @@ impl DownstairsBuilder<'_> {
         let read_errors = self.read_errors.unwrap_or(false);
         let write_errors = self.write_errors.unwrap_or(false);
         let flush_errors = self.flush_errors.unwrap_or(false);
-        let backend = self.backend.unwrap_or(Backend::RawFile);
 
         let log = match &self.log {
             Some(log) => log.clone(),
@@ -1330,12 +1329,11 @@ impl DownstairsBuilder<'_> {
         };
 
         // Open the region at the provided location.
-        let region = Region::open_with_backend(
+        let region = Region::open(
             self.data,
             Default::default(),
             true,
             self.read_only,
-            backend,
             &log,
         )
         .await?;
@@ -3456,9 +3454,6 @@ enum WrappedStream {
 pub enum Backend {
     #[default]
     RawFile,
-
-    #[cfg(any(test, feature = "integration-tests"))]
-    SQLite,
 }
 
 pub async fn create_region(

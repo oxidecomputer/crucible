@@ -467,48 +467,6 @@ impl ExtentInner for RawInner {
 }
 
 impl RawInner {
-    /// Imports context and metadata
-    ///
-    /// Returns a buffer that must be appended to raw block data to form the
-    /// full raw extent file.
-    pub fn import(
-        file: &mut File,
-        def: &RegionDefinition,
-        ctxs: Vec<Option<DownstairsBlockContext>>,
-        dirty: bool,
-        flush_number: u64,
-        gen_number: u64,
-    ) -> Result<(), CrucibleError> {
-        let layout = RawLayout::new(def.extent_size());
-        let block_count = layout.block_count() as usize;
-        assert_eq!(block_count, def.extent_size().value as usize);
-        assert_eq!(block_count, ctxs.len());
-
-        file.set_len(layout.file_size())?;
-        layout.write_context_slots_contiguous(
-            file,
-            0,
-            ctxs.iter().map(Option::as_ref),
-            ContextSlot::A,
-        )?;
-        layout.write_context_slots_contiguous(
-            file,
-            0,
-            std::iter::repeat(None).take(block_count),
-            ContextSlot::B,
-        )?;
-
-        layout.write_active_context_and_metadata(
-            file,
-            vec![ContextSlot::A; block_count].as_slice(),
-            dirty,
-            flush_number,
-            gen_number,
-        )?;
-
-        Ok(())
-    }
-
     pub fn create(
         dir: &Path,
         def: &RegionDefinition,
