@@ -108,12 +108,6 @@ pub struct Eid {
 pub enum FileType {
     #[serde(rename = "data")]
     Data,
-    #[serde(rename = "db")]
-    Database,
-    #[serde(rename = "db_shm")]
-    DatabaseSharedMemory,
-    #[serde(rename = "db_wal")]
-    DatabaseLog,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -133,17 +127,9 @@ async fn get_extent_file(
     let fs = path.into_inner();
     let eid = ExtentId(fs.eid);
 
-    let mut extent_path = extent_path(rqctx.context().region_dir.clone(), eid);
+    let extent_path = extent_path(rqctx.context().region_dir.clone(), eid);
     match fs.file_type {
-        FileType::Database => {
-            extent_path.set_extension("db");
-        }
-        FileType::DatabaseSharedMemory => {
-            extent_path.set_extension("db-shm");
-        }
-        FileType::DatabaseLog => {
-            extent_path.set_extension("db-wal");
-        }
+        // No file extension
         FileType::Data => (),
     };
 
@@ -263,12 +249,7 @@ fn extent_file_list(
     eid: ExtentId,
 ) -> Result<Vec<String>, HttpError> {
     let mut files = Vec::new();
-    let possible_files = [
-        (ExtentType::Data, true),
-        (ExtentType::Db, false),
-        (ExtentType::DbShm, false),
-        (ExtentType::DbWal, false),
-    ];
+    let possible_files = [(ExtentType::Data, true)];
 
     for (file, required) in possible_files.into_iter() {
         let mut fullname = extent_dir.clone();
