@@ -305,7 +305,7 @@ impl DownstairsClient {
     }
 
     /// Send a `Message::HereIAm` via the client IO task
-    pub(crate) async fn send_here_i_am(&mut self) {
+    pub(crate) fn send_here_i_am(&mut self) {
         self.send(Message::HereIAm {
             version: CRUCIBLE_MESSAGE_VERSION,
             upstairs_id: self.cfg.upstairs_id,
@@ -314,8 +314,7 @@ impl DownstairsClient {
             read_only: self.cfg.read_only,
             encrypted: self.cfg.encrypted(),
             alternate_versions: vec![],
-        })
-        .await;
+        });
     }
 
     fn halt_io_task(&mut self, r: ClientStopReason) {
@@ -342,8 +341,7 @@ impl DownstairsClient {
         self.new_jobs.insert(work);
     }
 
-    #[allow(clippy::unused_async)]
-    pub(crate) async fn send(&mut self, m: Message) {
+    pub(crate) fn send(&mut self, m: Message) {
         // Normally, the client task continues running until
         // `self.client_task.client_request_tx` is dropped; as such, we should
         // always be able to send it a message.
@@ -765,7 +763,7 @@ impl DownstairsClient {
     /// # Panics
     /// If we already called this function (without `reinitialize` in between),
     /// or `self.state` is invalid for promotion.
-    pub(crate) async fn set_active_request(&mut self) {
+    pub(crate) fn set_active_request(&mut self) {
         if let Some(t) = self.client_task.client_connect_tx.take() {
             info!(self.log, "sending connect oneshot to client");
             if let Err(e) = t.send(()) {
@@ -809,8 +807,7 @@ impl DownstairsClient {
                     upstairs_id: self.cfg.upstairs_id,
                     session_id: self.cfg.session_id,
                     gen: self.cfg.generation(),
-                })
-                .await;
+                });
 
                 self.promote_state = Some(PromoteState::Sent);
                 // TODO: negotiation / promotion state is spread across
@@ -1572,7 +1569,7 @@ impl DownstairsClient {
     /// error is at or after `Message::YouAreNowActive`.
     ///
     /// Returns `true` if negotiation for this downstairs is complete
-    pub(crate) async fn continue_negotiation(
+    pub(crate) fn continue_negotiation(
         &mut self,
         m: Message,
         up_state: &UpstairsState,
@@ -1707,8 +1704,7 @@ impl DownstairsClient {
                             upstairs_id: self.cfg.upstairs_id,
                             session_id: self.cfg.session_id,
                             gen: self.cfg.generation(),
-                        })
-                        .await;
+                        });
                         self.promote_state = Some(PromoteState::Sent);
                         self.negotiation_state =
                             NegotiationState::WaitForPromote;
@@ -1842,7 +1838,7 @@ impl DownstairsClient {
                 }
 
                 self.negotiation_state = NegotiationState::WaitForRegionInfo;
-                self.send(Message::RegionInfoPlease).await;
+                self.send(Message::RegionInfoPlease);
             }
             Message::RegionInfo { region_def } => {
                 if self.negotiation_state != NegotiationState::WaitForRegionInfo
@@ -1975,8 +1971,7 @@ impl DownstairsClient {
 
                         self.send(Message::LastFlush {
                             last_flush_number: lf,
-                        })
-                        .await;
+                        });
                     }
                     DsState::WaitActive
                     | DsState::Faulted
@@ -1986,7 +1981,7 @@ impl DownstairsClient {
                          */
                         self.negotiation_state =
                             NegotiationState::GetExtentVersions;
-                        self.send(Message::ExtentVersionsPlease).await;
+                        self.send(Message::ExtentVersionsPlease);
                     }
                     DsState::Replacing => {
                         warn!(
@@ -2120,7 +2115,7 @@ impl DownstairsClient {
     ///
     /// The `job` argument should be a reference to
     /// `Downstairs::reconcile_current_work`, and its state is updated.
-    pub(crate) async fn send_next_reconciliation_req(
+    pub(crate) fn send_next_reconciliation_req(
         &mut self,
         job: &mut ReconcileIO,
     ) {
@@ -2143,7 +2138,7 @@ impl DownstairsClient {
                 assert!(!dest_clients.is_empty());
                 if dest_clients.iter().any(|d| *d == self.client_id) {
                     info!(self.log, "sending reconcile request {repair_id:?}");
-                    self.send(job.op.clone()).await;
+                    self.send(job.op.clone());
                 } else {
                     // Skip this job for this Downstairs, since only the target
                     // clients need to do the reconcile.
@@ -2160,7 +2155,7 @@ impl DownstairsClient {
             } => {
                 if *client_id == self.client_id {
                     debug!(self.log, "sending flush request {repair_id:?}");
-                    self.send(job.op.clone()).await;
+                    self.send(job.op.clone());
                 } else {
                     debug!(self.log, "skipping flush request {repair_id:?}");
                     // Skip this job for this Downstairs, since it's narrowly
@@ -2172,7 +2167,7 @@ impl DownstairsClient {
             }
             Message::ExtentReopen { .. } | Message::ExtentClose { .. } => {
                 // All other reconcile ops are sent as-is
-                self.send(job.op.clone()).await;
+                self.send(job.op.clone());
             }
             m => panic!("invalid reconciliation request {m:?}"),
         }

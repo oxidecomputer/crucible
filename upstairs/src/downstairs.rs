@@ -490,7 +490,7 @@ impl Downstairs {
         }
     }
 
-    pub(crate) async fn io_send(&mut self, client_id: ClientId) {
+    pub(crate) fn io_send(&mut self, client_id: ClientId) {
         // Send all jobs to the downstairs
         let client = &mut self.clients[client_id];
         let new_work = client.new_work();
@@ -685,7 +685,7 @@ impl Downstairs {
                     }
                 }
             };
-            self.clients[client_id].send(message).await
+            self.clients[client_id].send(message)
         }
     }
 
@@ -2091,7 +2091,7 @@ impl Downstairs {
     /// # Panics
     /// If `self.reconcile_current_work` is not `None`, or if `self.reconcile`
     /// is `None`.
-    pub(crate) async fn send_next_reconciliation_req(&mut self) -> bool {
+    pub(crate) fn send_next_reconciliation_req(&mut self) -> bool {
         assert!(self.reconcile_current_work.is_none());
 
         let Some(reconcile) = &mut self.reconcile else {
@@ -2127,7 +2127,7 @@ impl Downstairs {
         }
 
         for c in self.clients.iter_mut() {
-            c.send_next_reconciliation_req(&mut next).await;
+            c.send_next_reconciliation_req(&mut next);
         }
 
         self.reconcile_current_work = Some(next);
@@ -2142,7 +2142,7 @@ impl Downstairs {
     /// If any of the downstairs clients are in an invalid state for
     /// reconciliation to continue, mark them as `FailedRepair` and restart
     /// them, clearing out the current reconciliation state.
-    pub(crate) async fn on_reconciliation_ack(
+    pub(crate) fn on_reconciliation_ack(
         &mut self,
         client_id: ClientId,
         m: Message,
@@ -2181,7 +2181,7 @@ impl Downstairs {
             self.reconcile_current_work = None;
             self.reconcile_repair_needed -= 1;
             self.reconcile_repaired += 1;
-            self.send_next_reconciliation_req().await
+            self.send_next_reconciliation_req()
         } else {
             false
         }
@@ -4533,8 +4533,8 @@ pub(crate) mod test {
         }
     }
 
-    #[tokio::test]
-    async fn work_flush_three_ok() {
+    #[test]
+    fn work_flush_three_ok() {
         let mut ds = Downstairs::test_default();
 
         let next_id = ds.create_and_enqueue_generic_flush(None);
@@ -4578,8 +4578,8 @@ pub(crate) mod test {
     }
 
     // Ensure that a snapshot requires all three downstairs to return Ok
-    #[tokio::test]
-    async fn work_flush_snapshot_needs_three() {
+    #[test]
+    fn work_flush_snapshot_needs_three() {
         let mut ds = Downstairs::test_default();
 
         let next_id =
@@ -4629,8 +4629,8 @@ pub(crate) mod test {
         assert_eq!(ds.completed.len(), 1);
     }
 
-    #[tokio::test]
-    async fn work_flush_one_error_then_ok() {
+    #[test]
+    fn work_flush_one_error_then_ok() {
         let mut ds = Downstairs::test_default();
         set_all_active(&mut ds);
 
@@ -4679,8 +4679,8 @@ pub(crate) mod test {
         assert!(ds.clients[ClientId::new(2)].skipped_jobs.is_empty());
     }
 
-    #[tokio::test]
-    async fn work_flush_two_errors_equals_fail() {
+    #[test]
+    fn work_flush_two_errors_equals_fail() {
         let mut ds = Downstairs::test_default();
         set_all_active(&mut ds);
 
@@ -4725,8 +4725,8 @@ pub(crate) mod test {
         assert_eq!(ds.completed.len(), 1);
     }
 
-    #[tokio::test]
-    async fn work_read_one_ok() {
+    #[test]
+    fn work_read_one_ok() {
         let mut ds = Downstairs::test_default();
 
         let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
@@ -4778,8 +4778,8 @@ pub(crate) mod test {
         assert!(ds.completed.is_empty());
     }
 
-    #[tokio::test]
-    async fn work_read_one_bad_two_ok() {
+    #[test]
+    fn work_read_one_bad_two_ok() {
         let mut ds = Downstairs::test_default();
 
         let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
@@ -4829,8 +4829,8 @@ pub(crate) mod test {
         assert!(ds.completed.is_empty());
     }
 
-    #[tokio::test]
-    async fn work_read_two_bad_one_ok() {
+    #[test]
+    fn work_read_two_bad_one_ok() {
         let mut ds = Downstairs::test_default();
 
         let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
@@ -4879,8 +4879,8 @@ pub(crate) mod test {
         assert!(ds.completed.is_empty());
     }
 
-    #[tokio::test]
-    async fn work_read_three_bad() {
+    #[test]
+    fn work_read_three_bad() {
         let mut ds = Downstairs::test_default();
 
         let (next_id, _request) = ds.create_and_enqueue_generic_read_eob();
@@ -4925,8 +4925,8 @@ pub(crate) mod test {
         assert!(ds.completed.is_empty());
     }
 
-    #[tokio::test]
-    async fn work_read_two_ok_one_bad() {
+    #[test]
+    fn work_read_two_ok_one_bad() {
         // Test that missing data on the 2nd read response will panic
         let mut ds = Downstairs::test_default();
 
@@ -5199,8 +5199,8 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(2)].last_flush, flush_id);
     }
 
-    #[tokio::test]
-    async fn work_assert_reads_do_not_cause_failure_state_transition() {
+    #[test]
+    fn work_assert_reads_do_not_cause_failure_state_transition() {
         let mut ds = Downstairs::test_default();
 
         // send a read, and clients 0 and 1 will return errors
@@ -5307,8 +5307,8 @@ pub(crate) mod test {
         );
     }
 
-    #[tokio::test]
-    async fn work_completed_read_flush() {
+    #[test]
+    fn work_completed_read_flush() {
         // Verify that a read remains on the active queue until a flush
         // comes through and clears it.
         let mut ds = Downstairs::test_default();
@@ -5408,8 +5408,8 @@ pub(crate) mod test {
         assert_eq!(ds.completed.len(), 2);
     }
 
-    #[tokio::test]
-    async fn retire_dont_retire_everything() {
+    #[test]
+    fn retire_dont_retire_everything() {
         // Verify that a read not ACKED remains on the active queue even
         // if a flush comes through after it.
         let mut ds = Downstairs::test_default();
@@ -5715,8 +5715,8 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(1)].last_flush, flush_id);
     }
 
-    #[tokio::test]
-    async fn work_completed_read_replay() {
+    #[test]
+    fn work_completed_read_replay() {
         // Verify that a single read will replay
         let mut ds = Downstairs::test_default();
 
@@ -5758,8 +5758,8 @@ pub(crate) mod test {
         assert!(ds.ds_active.get(&next_id).unwrap().acked);
     }
 
-    #[tokio::test]
-    async fn work_completed_two_read_replay() {
+    #[test]
+    fn work_completed_two_read_replay() {
         // Verify that a read will replay and acks are handled correctly if
         // there is more than one done read.
         let mut ds = Downstairs::test_default();
@@ -5826,8 +5826,8 @@ pub(crate) mod test {
         assert!(ds.ds_active.get(&next_id).unwrap().acked);
     }
 
-    #[tokio::test]
-    async fn work_completed_ack_read_replay() {
+    #[test]
+    fn work_completed_ack_read_replay() {
         // Verify that a read we Acked will still replay if that downstairs
         // goes away. Make sure everything still finishes ok.
         let mut ds = Downstairs::test_default();
@@ -5884,8 +5884,8 @@ pub(crate) mod test {
 
     // XXX another test that does read replay for the first IO
     // Also, the third IO?
-    #[tokio::test]
-    async fn work_completed_ack_read_replay_hash_mismatch() {
+    #[test]
+    fn work_completed_ack_read_replay_hash_mismatch() {
         // Verify that a read replay won't cause a panic on hash mismatch.
         // During a replay, the same block may have been written after a read,
         // so the actual contents of the block are now different.  We can't
@@ -5965,8 +5965,8 @@ pub(crate) mod test {
         assert!(ds.ds_active.get(&next_id).unwrap().acked);
     }
 
-    #[tokio::test]
-    async fn work_completed_ack_read_replay_two_hash_mismatch() {
+    #[test]
+    fn work_completed_ack_read_replay_two_hash_mismatch() {
         // Verify that a read replay won't cause a panic on hash mismatch.
         // During a replay, the same block may have been written after a read,
         // so the actual contents of the block are now different.  We can't
@@ -6443,8 +6443,8 @@ pub(crate) mod test {
     }
 
     // Tests for reconciliation
-    #[tokio::test]
-    async fn send_next_reconciliation_req_none() {
+    #[test]
+    fn send_next_reconciliation_req_none() {
         // No repairs on the queue, should return None
         let mut ds = Downstairs::test_default();
         set_all_reconcile(&mut ds);
@@ -6454,12 +6454,12 @@ pub(crate) mod test {
             reconcile_task_list_index: 0,
         });
 
-        let w = ds.send_next_reconciliation_req().await;
+        let w = ds.send_next_reconciliation_req();
         assert!(w); // reconciliation is "done", because there's nothing there
     }
 
-    #[tokio::test]
-    async fn reconcile_repair_workflow_not_repair() {
+    #[test]
+    fn reconcile_repair_workflow_not_repair() {
         // Verify that reconciliation will not give out work if a downstairs is
         // not in the correct state, and that it will clear the work queue and
         // mark other downstairs as failed.
@@ -6491,7 +6491,7 @@ pub(crate) mod test {
         set_all_reconcile(&mut ds);
 
         // Send the first reconciliation req
-        assert!(!ds.send_next_reconciliation_req().await);
+        assert!(!ds.send_next_reconciliation_req());
 
         // Fault client 1, so that later event handling will kick us out of
         // repair
@@ -6501,15 +6501,13 @@ pub(crate) mod test {
         );
 
         // Send an ack to trigger the reconciliation state check
-        let nw = ds
-            .on_reconciliation_ack(
-                ClientId::new(0),
-                Message::RepairAckId {
-                    repair_id: close_id,
-                },
-                &UpstairsState::Active,
-            )
-            .await;
+        let nw = ds.on_reconciliation_ack(
+            ClientId::new(0),
+            Message::RepairAckId {
+                repair_id: close_id,
+            },
+            &UpstairsState::Active,
+        );
         assert!(!nw);
 
         // The two troublesome tasks will pass through DsState::ReconcileFailed and
@@ -6524,8 +6522,8 @@ pub(crate) mod test {
         assert!(ds.reconcile.is_none());
     }
 
-    #[tokio::test]
-    async fn reconcile_repair_workflow_not_repair_later() {
+    #[test]
+    fn reconcile_repair_workflow_not_repair_later() {
         // Verify that rep_done still works even after we have a downstairs
         // in the FailedReconcile state. Verify that attempts to get new work
         // after a failed repair now return none.
@@ -6549,14 +6547,15 @@ pub(crate) mod test {
             },
         ));
         // Send that job
-        ds.send_next_reconciliation_req().await;
+        ds.send_next_reconciliation_req();
 
         // Downstairs 0 and 2 are okay, but 1 failed (for some reason!)
         let msg = Message::RepairAckId { repair_id: rep_id };
-        assert!(
-            !ds.on_reconciliation_ack(ClientId::new(0), msg.clone(), &up_state)
-                .await
-        );
+        assert!(!ds.on_reconciliation_ack(
+            ClientId::new(0),
+            msg.clone(),
+            &up_state
+        ));
         ds.on_reconciliation_failed(
             ClientId::new(1),
             Message::ExtentError {
@@ -6568,10 +6567,11 @@ pub(crate) mod test {
             },
             &up_state,
         );
-        assert!(
-            !ds.on_reconciliation_ack(ClientId::new(2), msg.clone(), &up_state)
-                .await
-        );
+        assert!(!ds.on_reconciliation_ack(
+            ClientId::new(2),
+            msg.clone(),
+            &up_state
+        ));
 
         // Getting the next work to do should verify the previous is done,
         // and handle a state change for a downstairs.
@@ -6583,9 +6583,9 @@ pub(crate) mod test {
         assert!(ds.reconcile_task_list.is_empty());
     }
 
-    #[tokio::test]
+    #[test]
     #[should_panic]
-    async fn reconcile_rep_in_progress_bad1() {
+    fn reconcile_rep_in_progress_bad1() {
         // Verify the same downstairs can't mark a job in progress twice
         let mut ds = Downstairs::test_default();
         set_all_reconcile(&mut ds);
@@ -6600,12 +6600,12 @@ pub(crate) mod test {
         ));
 
         // Send that req
-        assert!(!ds.send_next_reconciliation_req().await);
-        ds.send_next_reconciliation_req().await; // panics
+        assert!(!ds.send_next_reconciliation_req());
+        ds.send_next_reconciliation_req(); // panics
     }
 
-    #[tokio::test]
-    async fn reconcile_repair_workflow_1() {
+    #[test]
+    fn reconcile_repair_workflow_1() {
         let mut ds = Downstairs::test_default();
         set_all_reconcile(&mut ds);
 
@@ -6635,7 +6635,7 @@ pub(crate) mod test {
         ds.reconcile_repair_needed = ds.reconcile_task_list.len();
 
         // Send the close job.  Reconciliation isn't done at this point!
-        assert!(!ds.send_next_reconciliation_req().await);
+        assert!(!ds.send_next_reconciliation_req());
 
         // Ack the close job.  Reconciliation isn't done at this point, because
         // there's another job in the task list.
@@ -6643,7 +6643,7 @@ pub(crate) mod test {
             repair_id: close_id,
         };
         for i in ClientId::iter() {
-            assert!(!ds.on_reconciliation_ack(i, msg.clone(), &up_state).await);
+            assert!(!ds.on_reconciliation_ack(i, msg.clone(), &up_state));
         }
 
         // The third ack will have sent the next reconciliation job
@@ -6651,25 +6651,28 @@ pub(crate) mod test {
 
         // Now, make sure we consider this done only after all three are done
         let msg = Message::RepairAckId { repair_id: rep_id };
-        assert!(
-            !ds.on_reconciliation_ack(ClientId::new(0), msg.clone(), &up_state)
-                .await
-        );
-        assert!(
-            !ds.on_reconciliation_ack(ClientId::new(1), msg.clone(), &up_state)
-                .await
-        );
+        assert!(!ds.on_reconciliation_ack(
+            ClientId::new(0),
+            msg.clone(),
+            &up_state
+        ));
+        assert!(!ds.on_reconciliation_ack(
+            ClientId::new(1),
+            msg.clone(),
+            &up_state
+        ));
         // The third ack finishes reconciliation!
-        assert!(
-            ds.on_reconciliation_ack(ClientId::new(2), msg.clone(), &up_state)
-                .await
-        );
+        assert!(ds.on_reconciliation_ack(
+            ClientId::new(2),
+            msg.clone(),
+            &up_state
+        ));
         assert_eq!(ds.reconcile_repair_needed, 0);
         assert_eq!(ds.reconcile_repaired, 2);
     }
 
-    #[tokio::test]
-    async fn reconcile_repair_workflow_2() {
+    #[test]
+    fn reconcile_repair_workflow_2() {
         // Verify Done or Skipped works when checking for a complete repair
         let mut ds = Downstairs::test_default();
         set_all_reconcile(&mut ds);
@@ -6699,7 +6702,7 @@ pub(crate) mod test {
         ds.reconcile_repair_needed = ds.reconcile_task_list.len();
 
         // Send the job.  Reconciliation isn't done at this point!
-        assert!(!ds.send_next_reconciliation_req().await);
+        assert!(!ds.send_next_reconciliation_req());
 
         // Mark all three as in progress
         let Some(job) = &ds.reconcile_current_work else {
@@ -6710,23 +6713,25 @@ pub(crate) mod test {
         assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
 
         let msg = Message::RepairAckId { repair_id: rep_id };
-        assert!(
-            !ds.on_reconciliation_ack(ClientId::new(1), msg.clone(), &up_state)
-                .await
-        );
+        assert!(!ds.on_reconciliation_ack(
+            ClientId::new(1),
+            msg.clone(),
+            &up_state
+        ));
         // The second ack finishes reconciliation, because it was skipped for
         // client 0 (which was the source of repairs).
-        assert!(
-            ds.on_reconciliation_ack(ClientId::new(2), msg.clone(), &up_state)
-                .await
-        );
+        assert!(ds.on_reconciliation_ack(
+            ClientId::new(2),
+            msg.clone(),
+            &up_state
+        ));
         assert_eq!(ds.reconcile_repair_needed, 0);
         assert_eq!(ds.reconcile_repaired, 1);
     }
 
-    #[tokio::test]
+    #[test]
     #[should_panic]
-    async fn reconcile_repair_inprogress_not_done() {
+    fn reconcile_repair_inprogress_not_done() {
         // Verify Done or Skipped works when checking for a complete repair
         let mut ds = Downstairs::test_default();
         set_all_reconcile(&mut ds);
@@ -6750,7 +6755,7 @@ pub(crate) mod test {
         ));
 
         // Send the job.  Reconciliation isn't done at this point!
-        assert!(!ds.send_next_reconciliation_req().await);
+        assert!(!ds.send_next_reconciliation_req());
 
         // If we get back an ack from client 0, something has gone terribly
         // wrong (because the jobs should have been skipped for it)
@@ -6758,13 +6763,12 @@ pub(crate) mod test {
             ClientId::new(0),
             Message::RepairAckId { repair_id: rep_id },
             &up_state,
-        )
-        .await; // this should panic!
+        ); // this should panic!
     }
 
-    #[tokio::test]
+    #[test]
     #[should_panic]
-    async fn reconcile_leave_no_job_behind() {
+    fn reconcile_leave_no_job_behind() {
         // Verify we can't start a new job before the old is finished.
         // Verify Done or Skipped works when checking for a complete repair
         let mut ds = Downstairs::test_default();
@@ -6791,21 +6795,23 @@ pub(crate) mod test {
         ));
 
         // Send the first req; reconciliation is not yet done
-        assert!(!ds.send_next_reconciliation_req().await);
+        assert!(!ds.send_next_reconciliation_req());
 
         // Now, make sure we consider this done only after all three are done
         let msg = Message::RepairAckId { repair_id: rep_id };
-        assert!(
-            !ds.on_reconciliation_ack(ClientId::new(1), msg.clone(), &up_state)
-                .await
-        );
-        assert!(
-            !ds.on_reconciliation_ack(ClientId::new(2), msg.clone(), &up_state)
-                .await
-        );
+        assert!(!ds.on_reconciliation_ack(
+            ClientId::new(1),
+            msg.clone(),
+            &up_state
+        ));
+        assert!(!ds.on_reconciliation_ack(
+            ClientId::new(2),
+            msg.clone(),
+            &up_state
+        ));
         // don't finish
 
-        ds.send_next_reconciliation_req().await; // panics!
+        ds.send_next_reconciliation_req(); // panics!
     }
 
     #[test]
@@ -6992,8 +6998,8 @@ pub(crate) mod test {
         }
     }
 
-    #[tokio::test]
-    async fn flush_io_single_skip() {
+    #[test]
+    fn flush_io_single_skip() {
         // up_ds_listen test, a single downstairs skip won't prevent us
         // from acking back OK for a flush to the guest.
         let mut ds = Downstairs::test_default();
@@ -7039,8 +7045,8 @@ pub(crate) mod test {
         }
     }
 
-    #[tokio::test]
-    async fn flush_io_double_skip() {
+    #[test]
+    fn flush_io_double_skip() {
         // up_ds_listen test, a double skip on a flush will result in an error
         // back to the guest.
         let mut ds = Downstairs::test_default();
@@ -7077,8 +7083,8 @@ pub(crate) mod test {
         }
     }
 
-    #[tokio::test]
-    async fn flush_io_fail_and_skip() {
+    #[test]
+    fn flush_io_fail_and_skip() {
         // up_ds_listen test, a fail plus a skip on a flush will result in an
         // error back to the guest.
         let mut ds = Downstairs::test_default();
@@ -7342,8 +7348,8 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
     }
 
-    #[tokio::test]
-    async fn read_after_two_write_fail_is_alright() {
+    #[test]
+    fn read_after_two_write_fail_is_alright() {
         // Verify that if two writes fail, a read can still be acked.
         let mut ds = Downstairs::test_default();
         set_all_active(&mut ds);
@@ -7424,8 +7430,8 @@ pub(crate) mod test {
         ));
     }
 
-    #[tokio::test]
-    async fn write_after_write_fail_is_alright() {
+    #[test]
+    fn write_after_write_fail_is_alright() {
         // Verify that if a single write fails on a downstairs, a second
         // write can still be acked.
         // Then, send a flush and verify the work queue is cleared.
@@ -7569,8 +7575,8 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
     }
 
-    #[tokio::test]
-    async fn write_fail_skips_new_jobs() {
+    #[test]
+    fn write_fail_skips_new_jobs() {
         // Verify that if a single write fails on a downstairs, any
         // work that was IOState::New for that downstairs will change
         // to IOState::Skipped.  This also verifies that the list of
@@ -7646,8 +7652,8 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
     }
 
-    #[tokio::test]
-    async fn write_fail_skips_inprogress_jobs() {
+    #[test]
+    fn write_fail_skips_inprogress_jobs() {
         // Verify that if a single write fails on a downstairs, any
         // work that was IOState::InProgress for that downstairs will change
         // to IOState::Skipped.
@@ -7719,9 +7725,9 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
     }
 
-    #[tokio::test]
+    #[test]
     #[should_panic]
-    async fn deactivate_ds_not_when_initializing() {
+    fn deactivate_ds_not_when_initializing() {
         // No deactivate of downstairs when upstairs not active.
         let mut ds = Downstairs::test_default();
 
@@ -7729,8 +7735,8 @@ pub(crate) mod test {
         ds.try_deactivate(ClientId::new(0), &UpstairsState::Initializing);
     }
 
-    #[tokio::test]
-    async fn write_fail_skips_many_jobs() {
+    #[test]
+    fn write_fail_skips_many_jobs() {
         // Create a bunch of jobs, do some, then encounter a write error.
         // Make sure that older jobs are still okay, and failed job was
         // skipped.
@@ -7844,8 +7850,8 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
     }
 
-    #[tokio::test]
-    async fn write_fail_past_present_future() {
+    #[test]
+    fn write_fail_past_present_future() {
         // Create a bunch of jobs, finish some, then encounter a write error.
         // Make sure that older jobs are still okay, failed job was error,
         // and jobs not yet started on the faulted downstairs have
@@ -7975,8 +7981,8 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 1);
     }
 
-    #[tokio::test]
-    async fn faulted_downstairs_skips_work() {
+    #[test]
+    fn faulted_downstairs_skips_work() {
         // Verify that any job submitted with a faulted downstairs is
         // automatically moved to skipped.
         let mut ds = Downstairs::test_default();
@@ -8016,8 +8022,8 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
     }
 
-    #[tokio::test]
-    async fn faulted_downstairs_skips_but_still_does_work() {
+    #[test]
+    fn faulted_downstairs_skips_but_still_does_work() {
         // Verify work can progress through the work queue even when one
         // downstairs has failed. One write, one read, and one flush.
         let mut ds = Downstairs::test_default();
@@ -8148,8 +8154,8 @@ pub(crate) mod test {
         assert_eq!(ds.active_count(), 0);
     }
 
-    #[tokio::test]
-    async fn two_faulted_downstairs_can_still_read() {
+    #[test]
+    fn two_faulted_downstairs_can_still_read() {
         // Verify we can still read (and clear the work queue) with only
         // one downstairs.
         let mut ds = Downstairs::test_default();
@@ -8262,8 +8268,8 @@ pub(crate) mod test {
         assert_eq!(ds.active_count(), 0);
     }
 
-    #[tokio::test]
-    async fn three_faulted_enqueue_will_handle_read() {
+    #[test]
+    fn three_faulted_enqueue_will_handle_read() {
         // When three downstairs are faulted, verify that enqueue will move
         // work through the queue for us.
         let mut ds = Downstairs::test_default();
@@ -8305,8 +8311,8 @@ pub(crate) mod test {
         assert_eq!(ds.ackable_work().len(), 0);
     }
 
-    #[tokio::test]
-    async fn three_faulted_enqueue_will_handle_write() {
+    #[test]
+    fn three_faulted_enqueue_will_handle_write() {
         // When three downstairs are faulted, verify that enqueue will move
         // work through the queue for us.
         let mut ds = Downstairs::test_default();
@@ -8357,8 +8363,8 @@ pub(crate) mod test {
         assert_eq!(ds.ackable_work().len(), 0);
     }
 
-    #[tokio::test]
-    async fn three_faulted_enqueue_will_handle_flush() {
+    #[test]
+    fn three_faulted_enqueue_will_handle_flush() {
         // When three downstairs are faulted, verify that enqueue will move
         // work through the queue for us.
         let mut ds = Downstairs::test_default();
@@ -8404,8 +8410,8 @@ pub(crate) mod test {
         }
     }
 
-    #[tokio::test]
-    async fn three_faulted_enqueue_will_handle_many_ios() {
+    #[test]
+    fn three_faulted_enqueue_will_handle_many_ios() {
         // When three downstairs are faulted, verify that enqueue will move
         // work through the queue for us. Several jobs are submitted and
         // a final flush should clean them out.
@@ -8466,8 +8472,8 @@ pub(crate) mod test {
         }
     }
 
-    #[tokio::test]
-    async fn three_faulted_retire_skipped_some_leave_some() {
+    #[test]
+    fn three_faulted_retire_skipped_some_leave_some() {
         // When three downstairs are faulted, verify that enqueue will move
         // work through the queue for us. Several jobs are submitted and
         // a flush, then several more jobs. Verify the jobs after the flush
@@ -8551,8 +8557,8 @@ pub(crate) mod test {
     // and verify that the IOop::ExtentLiveRepair or IOop::ExtentNoOp is
     // generated (and populated) correctly.
     //
-    #[tokio::test]
-    async fn test_solver_no_work() {
+    #[test]
+    fn test_solver_no_work() {
         // Make sure that the repair solver will return NoOp when a repair
         // is not required.
         let mut ds = Downstairs::test_default();
@@ -8807,8 +8813,8 @@ pub(crate) mod test {
         }
     }
 
-    #[tokio::test]
-    async fn test_solver_dirty_needs_repair_two() {
+    #[test]
+    fn test_solver_dirty_needs_repair_two() {
         // Make sure that the repair solver will see a dirty extent_info
         // field is true and mark that downstairs for repair.
         // We test with two downstairs to repair here.
@@ -8827,8 +8833,8 @@ pub(crate) mod test {
         submit_one_source_two_repair(&mut ds, g_ei, b_ei);
     }
 
-    #[tokio::test]
-    async fn test_solver_dirty_needs_repair_one() {
+    #[test]
+    fn test_solver_dirty_needs_repair_one() {
         // Make sure that the repair solver will see a dirty extent_info
         // field is true and repair that downstairs.
         // We test with just one downstairs to repair here.
@@ -8848,8 +8854,8 @@ pub(crate) mod test {
         submit_one_source_one_repair(&mut ds, g_ei, b_ei);
     }
 
-    #[tokio::test]
-    async fn test_solver_gen_lower_needs_repair_one() {
+    #[test]
+    fn test_solver_gen_lower_needs_repair_one() {
         // Make sure that the repair solver will see a generation extent_info
         // field is lower on a downstairs client  and mark that downstairs
         // for repair.  We test with one downstairs to repair here.
@@ -8869,8 +8875,8 @@ pub(crate) mod test {
         submit_one_source_one_repair(&mut ds, g_ei, b_ei);
     }
 
-    #[tokio::test]
-    async fn test_solver_gen_lower_needs_repair_two() {
+    #[test]
+    fn test_solver_gen_lower_needs_repair_two() {
         // Make sure that the repair solver will see a generation extent_info
         // field is lower on a downstairs client  and mark that downstairs
         // for repair.  We test with two downstairs to repair here.
@@ -8890,8 +8896,8 @@ pub(crate) mod test {
         submit_one_source_two_repair(&mut ds, g_ei, b_ei);
     }
 
-    #[tokio::test]
-    async fn test_solver_gen_higher_needs_repair_one() {
+    #[test]
+    fn test_solver_gen_higher_needs_repair_one() {
         // Make sure that the repair solver will see a generation extent_info
         // field is higher on a downstairs client, and mark that downstairs
         // for repair.  We test with one downstairs to repair here.
@@ -8911,8 +8917,8 @@ pub(crate) mod test {
         submit_one_source_one_repair(&mut ds, g_ei, b_ei);
     }
 
-    #[tokio::test]
-    async fn test_solver_gen_higher_needs_repair_two() {
+    #[test]
+    fn test_solver_gen_higher_needs_repair_two() {
         // Make sure that the repair solver will see a generation extent_info
         // field is lower on a downstairs client  and mark that downstairs
         // for repair.  We test with two downstairs to repair here.
@@ -8932,8 +8938,8 @@ pub(crate) mod test {
         submit_one_source_two_repair(&mut ds, g_ei, b_ei);
     }
 
-    #[tokio::test]
-    async fn test_solver_flush_lower_needs_repair_one() {
+    #[test]
+    fn test_solver_flush_lower_needs_repair_one() {
         // Make sure that the repair solver will see a flush extent_info
         // field is lower on a downstairs client  and mark that downstairs
         // for repair.  We test with one downstairs to repair here.
@@ -8953,8 +8959,8 @@ pub(crate) mod test {
         submit_one_source_one_repair(&mut ds, g_ei, b_ei);
     }
 
-    #[tokio::test]
-    async fn test_solver_flush_lower_needs_repair_two() {
+    #[test]
+    fn test_solver_flush_lower_needs_repair_two() {
         // Make sure that the repair solver will see a flush extent_info
         // field is lower on a downstairs client  and mark that downstairs
         // for repair.  We test with two downstairs to repair here.
@@ -8974,8 +8980,8 @@ pub(crate) mod test {
         submit_one_source_two_repair(&mut ds, g_ei, b_ei);
     }
 
-    #[tokio::test]
-    async fn test_solver_flush_higher_needs_repair_one() {
+    #[test]
+    fn test_solver_flush_higher_needs_repair_one() {
         // Make sure that the repair solver will see a flush extent_info
         // field is higher on a downstairs client, and mark that downstairs
         // for repair.  We test with one downstairs to repair here.
@@ -8995,8 +9001,8 @@ pub(crate) mod test {
         submit_one_source_one_repair(&mut ds, g_ei, b_ei);
     }
 
-    #[tokio::test]
-    async fn test_solver_flush_higher_needs_repair_two() {
+    #[test]
+    fn test_solver_flush_higher_needs_repair_two() {
         // Make sure that the repair solver will see a generation extent_info
         // field is lower on a downstairs client  and mark that downstairs
         // for repair.  We test with two downstairs to repair here.
@@ -9016,8 +9022,8 @@ pub(crate) mod test {
         submit_one_source_two_repair(&mut ds, g_ei, b_ei);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_enqueue_reopen() {
+    #[test]
+    fn test_live_repair_enqueue_reopen() {
         // Make sure the create_and_enqueue_reopen_io() function does
         // what we expect it to do, which also tests create_reopen_io()
         // function as well.
@@ -9070,8 +9076,8 @@ pub(crate) mod test {
         assert!(job.data.is_none());
     }
 
-    #[tokio::test]
-    async fn test_live_repair_enqueue_close() {
+    #[test]
+    fn test_live_repair_enqueue_close() {
         // Make sure the create_and_enqueue_close_io() function does
         // what we expect it to do, which also tests create_close_io()
         // function as well.
@@ -9141,8 +9147,8 @@ pub(crate) mod test {
         assert!(job.data.is_none());
     }
 
-    #[tokio::test]
-    async fn test_live_repair_enqueue_repair_noop() {
+    #[test]
+    fn test_live_repair_enqueue_repair_noop() {
         // Make sure the create_and_enqueue_repair_io() function does
         // what we expect it to do, which also tests create_repair_io()
         // function as well.  In this case we expect the job created to
@@ -9209,8 +9215,8 @@ pub(crate) mod test {
         assert!(job.data.is_none());
     }
 
-    #[tokio::test]
-    async fn test_live_repair_enqueue_repair_repair() {
+    #[test]
+    fn test_live_repair_enqueue_repair_repair() {
         // Make sure the create_and_enqueue_repair_io() function does
         // what we expect it to do, which also tests create_repair_io()
         // function as well.
@@ -9362,8 +9368,8 @@ pub(crate) mod test {
     // F is flush
     // Rp is a Repair
 
-    #[tokio::test]
-    async fn test_live_repair_deps_writes() {
+    #[test]
+    fn test_live_repair_deps_writes() {
         // Test that writes on different blocks in the extent are all
         // captured by the repair at the end.
         //       block
@@ -9405,8 +9411,8 @@ pub(crate) mod test {
         );
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_reads() {
+    #[test]
+    fn test_live_repair_deps_reads() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -9447,8 +9453,8 @@ pub(crate) mod test {
         );
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_mix() {
+    #[test]
+    fn test_live_repair_deps_mix() {
         // Test that the following job dependency graph is made:
         //
         //       block
@@ -9484,8 +9490,8 @@ pub(crate) mod test {
         assert_eq!(jobs[3].work.deps(), &[jobs[2].ds_id]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_repair() {
+    #[test]
+    fn test_live_repair_deps_repair() {
         // Basic test for inter-repair dependencies
         //
         // This only actually tests our test function
@@ -9518,8 +9524,8 @@ pub(crate) mod test {
         assert_eq!(jobs[3].work.deps(), &[JobId(1002)]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_repair_write() {
+    #[test]
+    fn test_live_repair_deps_repair_write() {
         // Write after repair depends on the repair
         //       block
         // op# | 0 1 2 | deps
@@ -9548,8 +9554,8 @@ pub(crate) mod test {
         assert_eq!(jobs[4].work.deps(), &[JobId(1003)]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_repair_read() {
+    #[test]
+    fn test_live_repair_deps_repair_read() {
         // Read after repair requires the repair
         //       block
         // op# | 0 1 2 | deps
@@ -9577,8 +9583,8 @@ pub(crate) mod test {
         assert_eq!(jobs[4].work.deps(), &[JobId(1003)]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_repair_flush() {
+    #[test]
+    fn test_live_repair_deps_repair_flush() {
         // Flush after repair requires the flush
         //       block
         // op# | 0 1 2 | deps
@@ -9605,8 +9611,8 @@ pub(crate) mod test {
         assert_eq!(jobs[4].work.deps(), &[JobId(1003)]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_no_overlap() {
+    #[test]
+    fn test_live_repair_deps_no_overlap() {
         // No overlap, no deps, IO before repair
         //       block   block   block
         // op# | 0 1 2 | 3 4 5 | 6 7 8 | deps
@@ -9633,8 +9639,8 @@ pub(crate) mod test {
         assert!(jobs[2].work.deps().is_empty());
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_after_no_overlap() {
+    #[test]
+    fn test_live_repair_deps_after_no_overlap() {
         // No overlap no deps IO after repair.
         //       block   block   block
         // op# | 0 1 2 | 3 4 5 | 6 7 8 | deps
@@ -9661,8 +9667,8 @@ pub(crate) mod test {
         assert!(jobs[5].work.deps().is_empty());
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_flush_repair_flush() {
+    #[test]
+    fn test_live_repair_deps_flush_repair_flush() {
         // Flush Repair Flush
         //       block   block
         // op# | 0 1 2 | 3 4 5 | deps
@@ -9696,8 +9702,8 @@ pub(crate) mod test {
         assert_eq!(jobs[5].work.deps(), &[JobId(1000), JobId(1004)]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_repair_flush_repair() {
+    #[test]
+    fn test_live_repair_deps_repair_flush_repair() {
         // Repair Flush Repair
         //       block   block
         // op# | 0 1 2 | 3 4 5 | deps
@@ -9731,8 +9737,8 @@ pub(crate) mod test {
         assert_eq!(jobs[5].work.deps(), &[JobId(1004)]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_repair_wspan_left() {
+    #[test]
+    fn test_live_repair_deps_repair_wspan_left() {
         // A repair will depend on a write spanning the extent
         //       block   block
         // op# | 0 1 2 | 3 4 5 | deps
@@ -9770,8 +9776,8 @@ pub(crate) mod test {
         assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_repair_wspan_right() {
+    #[test]
+    fn test_live_repair_deps_repair_wspan_right() {
         // A repair will depend on a write spanning the extent
         //       block   block
         // op# | 0 1 2 | 3 4 5 | deps
@@ -9810,8 +9816,8 @@ pub(crate) mod test {
         assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_repair_rspan_left() {
+    #[test]
+    fn test_live_repair_deps_repair_rspan_left() {
         // A repair will depend on a read spanning the extent
 
         // Read spans extent
@@ -9850,8 +9856,8 @@ pub(crate) mod test {
         assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_repair_rspan_right() {
+    #[test]
+    fn test_live_repair_deps_repair_rspan_right() {
         // A repair will depend on a read spanning the extent
         // Read spans other extent
         //       block   block
@@ -9889,8 +9895,8 @@ pub(crate) mod test {
         assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_repair_other() {
+    #[test]
+    fn test_live_repair_deps_repair_other() {
         // A write can be depended on by two different repairs, who won't
         // depend on each other.
         // This situation does not really exist, as a repair won't start
@@ -9937,8 +9943,8 @@ pub(crate) mod test {
         assert_eq!(jobs[5].work.deps(), &[jobs[0].ds_id]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_super_spanner() {
+    #[test]
+    fn test_live_repair_deps_super_spanner() {
         // Super spanner
         //       block   block   block
         // op# | 0 1 2 | 3 4 5 | 6 7 8 | deps
@@ -9975,8 +9981,8 @@ pub(crate) mod test {
         assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_repair_wafter() {
+    #[test]
+    fn test_live_repair_deps_repair_wafter() {
         // Write after repair spans extent.
         // This write needs to include a future repair that
         // does not exist yet.
@@ -10076,8 +10082,8 @@ pub(crate) mod test {
         assert_eq!(jobs[4].work.deps(), &[JobId(1003), JobId(1007)]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_repair_rafter() {
+    #[test]
+    fn test_live_repair_deps_repair_rafter() {
         // Read after spans extent
         //       block   block
         // op# | 0 1 2 | 3 4 5 | deps
@@ -10116,8 +10122,8 @@ pub(crate) mod test {
         assert_eq!(jobs[4].work.deps(), &[JobId(1003)]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_repair_overlappers() {
+    #[test]
+    fn test_live_repair_deps_repair_overlappers() {
         // IOs that span both sides.
         //       block   block   block
         // op# | 0 1 2 | 3 4 5 | 6 7 8 | deps
@@ -10174,8 +10180,8 @@ pub(crate) mod test {
         assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id, jobs[1].ds_id]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_deps_repair_kitchen_sink() {
+    #[test]
+    fn test_live_repair_deps_repair_kitchen_sink() {
         // Repair simulator
         // In truth, you would never have more than one repair out at
         // the same time (the way it is now) but from a pure dependency point
@@ -10244,8 +10250,8 @@ pub(crate) mod test {
         assert_eq!(jobs[12].work.deps(), &[JobId(1000)]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_no_repair_yet() {
+    #[test]
+    fn test_live_repair_no_repair_yet() {
         // This is a special repair case.  We have a downstairs that is in
         // LiveRepair, but we have not yet started the actual repair
         // work. IOs that arrive at this point in time should go ahead
@@ -10294,8 +10300,8 @@ pub(crate) mod test {
         assert_eq!(jobs[2].state[ClientId::new(1)], IOState::Skipped);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_repair_write_push() {
+    #[test]
+    fn test_live_repair_repair_write_push() {
         // This is a special repair case.  We have a downstairs that is in
         // LiveRepair, and we have indicated that this extent is
         // under repair.  The write (that spans extents should have
@@ -10366,8 +10372,8 @@ pub(crate) mod test {
         assert_eq!(jobs[0].work.deps(), &[JobId(1003)]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_repair_read_push() {
+    #[test]
+    fn test_live_repair_repair_read_push() {
         // This is a special repair case.  We have a downstairs that is in
         // LiveRepair, and we have indicated that this extent is
         // under repair.  The read (that spans extents should have
@@ -10446,8 +10452,8 @@ pub(crate) mod test {
         assert_eq!(jobs[4].work.deps(), &[JobId(1003)]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_flush_is_flush() {
+    #[test]
+    fn test_live_repair_flush_is_flush() {
         // This is a special repair case.  We have a downstairs that is in
         // LiveRepair, and we have indicated that this extent is
         // under repair.  A flush should depend on any outstanding
@@ -10492,8 +10498,8 @@ pub(crate) mod test {
         assert!(jobs[0].work.deps().is_empty());
     }
 
-    #[tokio::test]
-    async fn test_live_repair_send_io_write_below() {
+    #[test]
+    fn test_live_repair_send_io_write_below() {
         // Verify that we will send a write during LiveRepair when
         // the IO is an extent that is already repaired.
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
@@ -10534,8 +10540,8 @@ pub(crate) mod test {
         ds.submit_test_write_block(gw.next_gw_id(), 0, 0, true);
     }
 
-    #[tokio::test]
-    async fn test_repair_dep_cleanup_some() {
+    #[test]
+    fn test_repair_dep_cleanup_some() {
         // Verify that a downstairs in LiveRepair state will have its
         // dependency list altered to reflect both the removal of skipped
         // jobs as well as removal of Done jobs that happened before the
@@ -10663,8 +10669,8 @@ pub(crate) mod test {
         );
     }
 
-    #[tokio::test]
-    async fn test_repair_dep_cleanup_repair() {
+    #[test]
+    fn test_repair_dep_cleanup_repair() {
         // Verify that a downstairs in LiveRepair state will have its
         // dependency list altered.
         // We want to be sure that a repair job that may have ended up
@@ -10874,8 +10880,8 @@ pub(crate) mod test {
         assert_eq!(current_deps, &[JobId(1006), JobId(1008), JobId(1012)]);
     }
 
-    #[tokio::test]
-    async fn test_repair_dep_cleanup_sk_repair() {
+    #[test]
+    fn test_repair_dep_cleanup_sk_repair() {
         // Verify that a downstairs in LiveRepair state will have its
         // dependency list altered.
         // Simulating what happens when we start repair with just the close
@@ -10976,8 +10982,8 @@ pub(crate) mod test {
         );
     }
 
-    #[tokio::test]
-    async fn test_live_repair_span_write_write() {
+    #[test]
+    fn test_live_repair_span_write_write() {
         // We have a downstairs that is in LiveRepair, and we have indicated
         // that this extent is under repair.  The write (that spans extents
         // should have created IDs for future repair work and then made itself
@@ -11083,8 +11089,8 @@ pub(crate) mod test {
         assert_eq!(jobs[1].state[ClientId::new(2)], IOState::New);
     }
 
-    #[tokio::test]
-    async fn test_spicy_live_repair() {
+    #[test]
+    fn test_spicy_live_repair() {
         // We have a downstairs that is in LiveRepair, and send a write which is
         // above the extent above repair.  This is fine; it's skipped on the
         // being-repaired downstairs.
