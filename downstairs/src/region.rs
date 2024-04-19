@@ -4416,6 +4416,12 @@ pub(crate) mod test {
         validate_whole_region(&mut region, &data).await;
     }
 
+    /// Macro defining the full region test suite
+    ///
+    /// Functions in the test suite should take a `b: Backend` parameter and
+    /// panic on an error (i.e. returning `()`).
+    ///
+    /// Add new functions here to ensure that they're tested for every backend!
     macro_rules! region_test_suite {
         ($b:ident) => {
             region_test_suite!(
