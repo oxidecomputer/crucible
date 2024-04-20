@@ -19,6 +19,7 @@ mod test {
     use repair_client::Client;
     use sha2::Digest;
     use slog::{info, o, warn, Drain, Logger};
+    use std::io::Write;
     use tempfile::*;
     use tokio::sync::mpsc;
     use uuid::*;
@@ -743,82 +744,6 @@ mod test {
 
         assert_eq!(vec![55; BLOCK_SIZE * 10], &buffer[..]);
 
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn integration_test_url() -> Result<()> {
-        const BLOCK_SIZE: usize = 512;
-
-        let tds = TestDownstairsSet::small(false).await?;
-        let opts = tds.opts();
-
-        let server = Server::run();
-        server.expect(
-            Expectation::matching(request::method_path("GET", "/ff.raw"))
-                .times(1..)
-                .respond_with(status_code(200).body(vec![0xff; BLOCK_SIZE])),
-        );
-        server.expect(
-            Expectation::matching(request::method_path("HEAD", "/ff.raw"))
-                .times(1..)
-                .respond_with(status_code(200).append_header(
-                    "Content-Length",
-                    format!("{}", BLOCK_SIZE),
-                )),
-        );
-
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 1,
-                }],
-                read_only_parent: Some(Box::new(
-                    VolumeConstructionRequest::Volume {
-                        id: Uuid::new_v4(),
-                        block_size: BLOCK_SIZE as u64,
-                        sub_volumes: vec![VolumeConstructionRequest::Url {
-                            id: Uuid::new_v4(),
-                            block_size: BLOCK_SIZE as u64,
-                            url: server.url("/ff.raw").to_string(),
-                        }],
-                        read_only_parent: None,
-                    },
-                )),
-            };
-
-        let volume = Volume::construct(vcr, None, csl()).await?;
-        volume.activate().await?;
-
-        // Read one block: should be all 0xff
-        let mut buffer = Buffer::new(1, BLOCK_SIZE);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
-            .await?;
-
-        assert_eq!(vec![0xff; BLOCK_SIZE], &buffer[..]);
-
-        // Write one block full of 0x01
-        volume
-            .write(
-                Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                BytesMut::from(vec![0x01; BLOCK_SIZE].as_slice()),
-            )
-            .await?;
-
-        // Read one block: should be all 0x01
-        let mut buffer = Buffer::new(1, BLOCK_SIZE);
-        volume
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
-            .await?;
-
-        assert_eq!(vec![0x01; BLOCK_SIZE], &buffer[..]);
         Ok(())
     }
 
@@ -4998,32 +4923,20 @@ mod test {
 
     #[tokio::test]
     async fn test_pantry_scrub() {
-        // Test scrubbing the OVMF image from a URL
-        // XXX httptest::Server does not support range requests, otherwise that
-        // should be used here instead.
-
-        let base_url = "https://oxide-omicron-build.s3.amazonaws.com";
-        let url = format!("{}/OVMF_CODE_20220922.fd", base_url);
-
-        let data = {
-            let dur = std::time::Duration::from_secs(25);
-            let client = reqwest::ClientBuilder::new()
-                .connect_timeout(dur)
-                .timeout(dur)
-                .build()
-                .unwrap();
-
-            client
-                .get(&url)
-                .send()
-                .await
-                .unwrap()
-                .bytes()
-                .await
-                .unwrap()
-        };
+        // Test scrubbing random data from a file on disk.
 
         const BLOCK_SIZE: usize = 512;
+
+        // There's no particular reason for this exact count other than, this
+        // test used to reference OVMF code over HTTP, and that OVMF code was
+        // this many 512-byte blocks in size.
+        const BLOCK_COUNT: usize = 3840;
+
+        let mut data = vec![0u8; BLOCK_SIZE * BLOCK_COUNT];
+        rand::thread_rng().fill(data.as_mut_slice());
+
+        let mut parent_file = NamedTempFile::new().unwrap();
+        parent_file.write_all(&data).unwrap();
 
         // Spin off three downstairs, build our Crucible struct (with a
         // read-only parent pointing to the random data above)
@@ -5033,11 +4946,12 @@ mod test {
 
         let volume_id = Uuid::new_v4();
         let rop_id = Uuid::new_v4();
-        let read_only_parent = Some(Box::new(VolumeConstructionRequest::Url {
-            id: rop_id,
-            block_size: BLOCK_SIZE as u64,
-            url: url.clone(),
-        }));
+        let read_only_parent =
+            Some(Box::new(VolumeConstructionRequest::File {
+                id: rop_id,
+                block_size: BLOCK_SIZE as u64,
+                path: parent_file.path().to_string_lossy().to_string(),
+            }));
 
         let vcr: VolumeConstructionRequest =
             VolumeConstructionRequest::Volume {

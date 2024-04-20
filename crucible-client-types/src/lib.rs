@@ -18,11 +18,6 @@ pub enum VolumeConstructionRequest {
         sub_volumes: Vec<VolumeConstructionRequest>,
         read_only_parent: Option<Box<VolumeConstructionRequest>>,
     },
-    Url {
-        id: Uuid,
-        block_size: u64,
-        url: String,
-    },
     Region {
         block_size: u64,
         blocks_per_extent: u64,

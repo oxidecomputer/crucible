@@ -998,19 +998,6 @@ impl Volume {
                 Ok(vol)
             }
 
-            VolumeConstructionRequest::Url {
-                id,
-                block_size,
-                url,
-            } => {
-                let mut vol = Volume::new(block_size, log.clone());
-                vol.add_subvolume(Arc::new(
-                    ReqwestBlockIO::new(id, block_size, url).await?,
-                ))
-                .await?;
-                Ok(vol)
-            }
-
             VolumeConstructionRequest::Region {
                 block_size,
                 blocks_per_extent,
@@ -1115,12 +1102,6 @@ impl Volume {
                     sub_volumes,
                     read_only_parent,
                 } => (id, block_size, sub_volumes, read_only_parent),
-                VolumeConstructionRequest::Url { .. } => {
-                    crucible_bail!(
-                        ReplaceRequestInvalid,
-                        "Cannot replace URL VCR"
-                    )
-                }
 
                 VolumeConstructionRequest::Region { .. } => {
                     crucible_bail!(
@@ -1145,12 +1126,6 @@ impl Volume {
                     sub_volumes,
                     read_only_parent,
                 } => (id, block_size, sub_volumes, read_only_parent),
-                VolumeConstructionRequest::Url { .. } => {
-                    crucible_bail!(
-                        ReplaceRequestInvalid,
-                        "Cannot replace URL VCR"
-                    )
-                }
 
                 VolumeConstructionRequest::Region { .. } => {
                     crucible_bail!(
