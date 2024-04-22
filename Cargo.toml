@@ -109,7 +109,6 @@ tracing-subscriber = "0.3.18"
 twox-hash = "1.6.3"
 usdt = "0.5.0"
 uuid = { version = "1", features = [ "serde", "v4" ] }
-zerocopy = "0.7.32"
 
 # git
 dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main", features = [ "usdt-probes" ] }

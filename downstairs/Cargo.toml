@@ -54,7 +54,6 @@ tracing-subscriber.workspace = true
 tracing.workspace = true
 usdt.workspace = true
 uuid.workspace = true
-zerocopy.workspace = true
 crucible-workspace-hack.workspace = true
 
 [dev-dependencies]
