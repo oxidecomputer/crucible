@@ -412,7 +412,7 @@ async fn validate(
     Ok(HttpResponseOk(ValidateResponse { job_id }))
 }
 
-/// Flush and close a volume, removing it from the Pantry
+/// Deactivate a volume, removing it from the Pantry
 #[endpoint {
     method = DELETE,
     path = "/crucible/pantry/0/volume/{id}",

@@ -396,7 +396,6 @@ impl PantryEntry {
     }
 
     pub async fn detach(&self) -> Result<(), CrucibleError> {
-        self.volume.flush(None).await?;
         self.volume.deactivate().await?;
         Ok(())
     }

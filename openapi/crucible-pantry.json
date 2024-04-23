@@ -175,7 +175,7 @@
         }
       },
       "delete": {
-        "summary": "Flush and close a volume, removing it from the Pantry",
+        "summary": "Deactivate a volume, removing it from the Pantry",
         "operationId": "detach",
         "parameters": [
           {
