@@ -97,6 +97,7 @@ impl std::fmt::Display for CrucibleOpts {
 }
 
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum ReplaceResult {
     Started,
     StartedAlready,

@@ -363,6 +363,50 @@
         }
       }
     },
+    "/crucible/pantry/0/volume/{id}/replace": {
+      "post": {
+        "summary": "Call a volume's target_replace function",
+        "operationId": "replace",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplaceResult"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/crucible/pantry/0/volume/{id}/scrub": {
       "post": {
         "summary": "Scrub the volume (copy blocks from read-only parent to subvolumes)",
@@ -714,15 +758,36 @@
             "minimum": 0
           },
           "volumes": {
-            "description": "How many Volumes?",
-            "type": "integer",
-            "format": "uint",
-            "minimum": 0
+            "description": "Which volumes does this Pantry know about? Note this may include volumes that are no longer active, and haven't been garbage collected yet.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         },
         "required": [
           "num_job_handles",
           "volumes"
+        ]
+      },
+      "ReplaceRequest": {
+        "type": "object",
+        "properties": {
+          "volume_construction_request": {
+            "$ref": "#/components/schemas/VolumeConstructionRequest"
+          }
+        },
+        "required": [
+          "volume_construction_request"
+        ]
+      },
+      "ReplaceResult": {
+        "type": "string",
+        "enum": [
+          "started",
+          "started_already",
+          "completed_already",
+          "missing"
         ]
       },
       "ScrubResponse": {
