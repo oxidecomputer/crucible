@@ -32,10 +32,24 @@ use crate::server::ExpectedDigest;
 use crate::server::PantryStatus;
 use crate::server::VolumeStatus;
 
+pub enum ActiveState {
+    /// This Pantry has never seen this Volume active
+    NeverSawActive,
+
+    /// At one point, this Pantry saw this Volume active
+    SawActive,
+}
+
+pub struct PantryEntryInner {
+    volume_construction_request: VolumeConstructionRequest,
+    active_state: ActiveState,
+    activation_job_id: Option<String>,
+}
+
 pub struct PantryEntry {
     log: Logger,
     volume: Volume,
-    volume_construction_request: Mutex<VolumeConstructionRequest>,
+    inner: Mutex<PantryEntryInner>,
 }
 
 /// Retry a request in the face of network weather
@@ -401,19 +415,54 @@ impl PantryEntry {
     }
 
     pub async fn volume_is_active(&self) -> Result<bool, CrucibleError> {
-        self.volume.query_is_active().await
+        if self.volume.query_is_active().await? {
+            let mut inner = self.inner.lock().await;
+            inner.active_state = ActiveState::SawActive;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     pub async fn activate(&self) -> Result<(), CrucibleError> {
-        self.volume.activate().await
+        if self.volume.query_is_active().await? {
+            let mut inner = self.inner.lock().await;
+            inner.active_state = ActiveState::SawActive;
+        } else {
+            let inner = self.inner.lock().await;
+
+            match inner.active_state {
+                ActiveState::NeverSawActive => {
+                    drop(inner);
+
+                    self.volume.activate().await?;
+                }
+
+                ActiveState::SawActive => {
+                    // We're in the else branch, meaning this volume is no
+                    // longer active.
+                    crucible_bail!(
+                        Unsupported,
+                        "pantry saw this volume active but cannot reactive volume",
+                    );
+                }
+            }
+
+            let mut inner = self.inner.lock().await;
+            inner.active_state = ActiveState::SawActive;
+            drop(inner);
+        }
+
+        Ok(())
     }
 
     pub async fn replace(
         &self,
         new_vcr: VolumeConstructionRequest,
     ) -> Result<ReplaceResult, CrucibleError> {
-        let mut mg = self.volume_construction_request.lock().await;
-        let current_vcr = mg.clone();
+        let mut inner = self.inner.lock().await;
+
+        let current_vcr = inner.volume_construction_request.clone();
 
         let result = self
             .volume
@@ -422,7 +471,7 @@ impl PantryEntry {
 
         // If target_replace returned Ok, then replace this entry's vcr with the
         // new one.
-        *mg = new_vcr;
+        inner.volume_construction_request = new_vcr;
 
         Ok(result)
     }
@@ -561,8 +610,19 @@ impl Pantry {
             // This function must be idempotent for the same inputs. If an entry
             // at this ID exists already, compare the existing volume
             // construction request, and return either Ok or conflict
-            if *entry.volume_construction_request.lock().await
-                == volume_construction_request
+
+            let inner = entry.inner.lock().await;
+
+            if let Some(job_id) = &inner.activation_job_id {
+                crucible_bail!(
+                    Unsupported,
+                    "existing entry for {} with activation job id {}",
+                    volume_id,
+                    job_id,
+                );
+            }
+
+            if inner.volume_construction_request == volume_construction_request
             {
                 info!(
                     self.log,
@@ -613,9 +673,11 @@ impl Pantry {
             Arc::new(PantryEntry {
                 log: self.log.new(o!("volume" => volume_id.clone())),
                 volume,
-                volume_construction_request: Mutex::new(
+                inner: Mutex::new(PantryEntryInner {
                     volume_construction_request,
-                ),
+                    active_state: ActiveState::SawActive,
+                    activation_job_id: None,
+                }),
             }),
         );
 
@@ -636,8 +698,34 @@ impl Pantry {
             // This function must be idempotent for the same inputs. If an entry
             // at this ID exists already, compare the existing volume
             // construction request, and return either Ok or conflict
-            if *entry.volume_construction_request.lock().await
-                == volume_construction_request
+
+            let inner = entry.inner.lock().await;
+
+            match &inner.activation_job_id {
+                Some(entry_job_id) => {
+                    if *entry_job_id != job_id {
+                        crucible_bail!(
+                            Unsupported,
+                            "existing entry for {} with different activation job id {}",
+                            volume_id,
+                            job_id,
+                        );
+                    }
+                }
+
+                None => {
+                    // volume was attached with `attach`, not with this
+                    // function. return an error!
+
+                    crucible_bail!(
+                        Unsupported,
+                        "existing entry for {} with no activation job id",
+                        volume_id,
+                    );
+                }
+            }
+
+            if inner.volume_construction_request == volume_construction_request
             {
                 error!(
                     self.log,
@@ -690,9 +778,11 @@ impl Pantry {
         let entry = Arc::new(PantryEntry {
             log: self.log.new(o!("volume" => volume_id.clone())),
             volume,
-            volume_construction_request: Mutex::new(
+            inner: Mutex::new(PantryEntryInner {
                 volume_construction_request,
-            ),
+                active_state: ActiveState::NeverSawActive,
+                activation_job_id: Some(job_id.clone()),
+            }),
         });
 
         entries.insert(volume_id.clone(), entry.clone());
@@ -723,17 +813,36 @@ impl Pantry {
                 // no longer active then it's likely a Propolis has activated
                 // and taken over from the Pantry. Do not return 503 in this
                 // case, no operation will be retryable if inactive.
-                if !entry.volume.query_is_active().await? {
-                    Err(HttpError::for_client_error(
-                        Some(format!(
-                            "volume {} is no longer active!",
-                            volume_id
-                        )),
-                        http::StatusCode::GONE,
-                        format!("volume {} is no longer active!", volume_id),
-                    ))
-                } else {
-                    Ok(entry)
+
+                let inner = entry.inner.lock().await;
+
+                match &inner.active_state {
+                    ActiveState::NeverSawActive => {
+                        // Return the entry so that it can receive commands.
+                        drop(inner);
+                        Ok(entry)
+                    }
+
+                    ActiveState::SawActive => {
+                        // Before returning the entry, check if something else
+                        // activated it.
+                        if !entry.volume.query_is_active().await? {
+                            Err(HttpError::for_client_error(
+                                Some(format!(
+                                    "volume {} is no longer active!",
+                                    volume_id
+                                )),
+                                http::StatusCode::GONE,
+                                format!(
+                                    "volume {} is no longer active!",
+                                    volume_id
+                                ),
+                            ))
+                        } else {
+                            drop(inner);
+                            Ok(entry)
+                        }
+                    }
                 }
             }
 
@@ -755,6 +864,7 @@ impl Pantry {
 
         Ok(VolumeStatus {
             active: entry.volume_is_active().await?,
+            // XXX put active_state here
             num_job_handles: jobs.num_job_handles_for_volume(&volume_id),
         })
     }
