@@ -32,7 +32,7 @@ use crate::server::ExpectedDigest;
 use crate::server::PantryStatus;
 use crate::server::VolumeStatus;
 
-pub enum ActiveState {
+pub enum ActiveObservation {
     /// This Pantry has never seen this Volume active
     NeverSawActive,
 
@@ -42,7 +42,7 @@ pub enum ActiveState {
 
 pub struct PantryEntryInner {
     volume_construction_request: VolumeConstructionRequest,
-    active_state: ActiveState,
+    active_observation: ActiveObservation,
     activation_job_id: Option<String>,
 }
 
@@ -417,7 +417,7 @@ impl PantryEntry {
     pub async fn volume_is_active(&self) -> Result<bool, CrucibleError> {
         if self.volume.query_is_active().await? {
             let mut inner = self.inner.lock().await;
-            inner.active_state = ActiveState::SawActive;
+            inner.active_observation = ActiveObservation::SawActive;
             Ok(true)
         } else {
             Ok(false)
@@ -427,29 +427,29 @@ impl PantryEntry {
     pub async fn activate(&self) -> Result<(), CrucibleError> {
         if self.volume.query_is_active().await? {
             let mut inner = self.inner.lock().await;
-            inner.active_state = ActiveState::SawActive;
+            inner.active_observation = ActiveObservation::SawActive;
         } else {
             let inner = self.inner.lock().await;
 
-            match inner.active_state {
-                ActiveState::NeverSawActive => {
+            match inner.active_observation {
+                ActiveObservation::NeverSawActive => {
                     drop(inner);
 
                     self.volume.activate().await?;
                 }
 
-                ActiveState::SawActive => {
+                ActiveObservation::SawActive => {
                     // We're in the else branch, meaning this volume is no
                     // longer active.
                     crucible_bail!(
                         Unsupported,
-                        "pantry saw this volume active but cannot reactive volume",
+                        "pantry saw this volume active but cannot reactivate volume",
                     );
                 }
             }
 
             let mut inner = self.inner.lock().await;
-            inner.active_state = ActiveState::SawActive;
+            inner.active_observation = ActiveObservation::SawActive;
             drop(inner);
         }
 
@@ -675,7 +675,7 @@ impl Pantry {
                 volume,
                 inner: Mutex::new(PantryEntryInner {
                     volume_construction_request,
-                    active_state: ActiveState::SawActive,
+                    active_observation: ActiveObservation::SawActive,
                     activation_job_id: None,
                 }),
             }),
@@ -780,7 +780,7 @@ impl Pantry {
             volume,
             inner: Mutex::new(PantryEntryInner {
                 volume_construction_request,
-                active_state: ActiveState::NeverSawActive,
+                active_observation: ActiveObservation::NeverSawActive,
                 activation_job_id: Some(job_id.clone()),
             }),
         });
@@ -809,24 +809,24 @@ impl Pantry {
                 let entry = entry.clone();
                 drop(entries);
 
-                // If it's not active, then return "410 Gone". If this volume is
-                // no longer active then it's likely a Propolis has activated
-                // and taken over from the Pantry. Do not return 503 in this
-                // case, no operation will be retryable if inactive.
-
                 let inner = entry.inner.lock().await;
-
-                match &inner.active_state {
-                    ActiveState::NeverSawActive => {
-                        // Return the entry so that it can receive commands.
+                match &inner.active_observation {
+                    ActiveObservation::NeverSawActive => {
+                        // Return the entry so that it can receive commands before it is
+                        // active.
                         drop(inner);
                         Ok(entry)
                     }
 
-                    ActiveState::SawActive => {
-                        // Before returning the entry, check if something else
-                        // activated it.
+                    ActiveObservation::SawActive => {
+                        // Before returning the entry, check if something else activated
+                        // the volume.
                         if !entry.volume.query_is_active().await? {
+                            // If it's not active, then return "410 Gone". If this volume
+                            // is no longer active then it's likely a Propolis has
+                            // activated and taken over from the Pantry. Do not return 503
+                            // in this case, no operation will be retryable if inactive.
+
                             Err(HttpError::for_client_error(
                                 Some(format!(
                                     "volume {} is no longer active!",
@@ -860,11 +860,17 @@ impl Pantry {
     ) -> Result<VolumeStatus, HttpError> {
         let entry = self.entry(volume_id.clone()).await?;
 
+        let active = entry.volume_is_active().await?;
+        let seen_active = matches!(
+            entry.inner.lock().await.active_observation,
+            ActiveObservation::SawActive,
+        );
+
         let jobs = self.jobs.lock().await;
 
         Ok(VolumeStatus {
-            active: entry.volume_is_active().await?,
-            // XXX put active_state here
+            active,
+            seen_active,
             num_job_handles: jobs.num_job_handles_for_volume(&volume_id),
         })
     }
