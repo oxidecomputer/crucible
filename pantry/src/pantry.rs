@@ -799,7 +799,8 @@ impl Pantry {
         Ok(())
     }
 
-    pub async fn entry(
+    /// Return a PantryEntry if it's in the map, or a 404.
+    pub(crate) async fn entry_get(
         &self,
         volume_id: String,
     ) -> Result<Arc<PantryEntry>, HttpError> {
@@ -808,48 +809,55 @@ impl Pantry {
             Some(entry) => {
                 let entry = entry.clone();
                 drop(entries);
-
-                let inner = entry.inner.lock().await;
-                match &inner.active_observation {
-                    ActiveObservation::NeverSawActive => {
-                        // Return the entry so that it can receive commands before it is
-                        // active.
-                        drop(inner);
-                        Ok(entry)
-                    }
-
-                    ActiveObservation::SawActive => {
-                        // Before returning the entry, check if something else activated
-                        // the volume.
-                        if !entry.volume.query_is_active().await? {
-                            // If it's not active, then return "410 Gone". If this volume
-                            // is no longer active then it's likely a Propolis has
-                            // activated and taken over from the Pantry. Do not return 503
-                            // in this case, no operation will be retryable if inactive.
-
-                            Err(HttpError::for_client_error(
-                                Some(format!(
-                                    "volume {} is no longer active!",
-                                    volume_id
-                                )),
-                                http::StatusCode::GONE,
-                                format!(
-                                    "volume {} is no longer active!",
-                                    volume_id
-                                ),
-                            ))
-                        } else {
-                            drop(inner);
-                            Ok(entry)
-                        }
-                    }
-                }
+                Ok(entry)
             }
 
             None => {
                 error!(self.log, "volume {} not in pantry", volume_id);
-
                 Err(HttpError::for_not_found(None, volume_id))
+            }
+        }
+    }
+
+    /// Return a PantryEntry if it's in the map and still active, 410 if the
+    /// PantryEntry's Volume _was_ active but is no longer active, or a 404.
+    pub async fn entry(
+        &self,
+        volume_id: String,
+    ) -> Result<Arc<PantryEntry>, HttpError> {
+        let entry = self.entry_get(volume_id.clone()).await?;
+
+        let inner = entry.inner.lock().await;
+        match &inner.active_observation {
+            ActiveObservation::NeverSawActive => {
+                // Return the entry so that it can receive commands before it is
+                // active.
+                drop(inner);
+                Ok(entry)
+            }
+
+            ActiveObservation::SawActive => {
+                // Before returning the entry, check if something else activated
+                // the volume.
+                if !entry.volume.query_is_active().await? {
+                    // If it's not active, then return "410 Gone". If this
+                    // volume is no longer active then it's likely a Propolis
+                    // has activated and taken over from the Pantry. Do not
+                    // return 503 in this case, no operation will be retryable
+                    // if inactive.
+
+                    Err(HttpError::for_client_error(
+                        Some(format!(
+                            "volume {} is no longer active!",
+                            volume_id
+                        )),
+                        http::StatusCode::GONE,
+                        format!("volume {} is no longer active!", volume_id),
+                    ))
+                } else {
+                    drop(inner);
+                    Ok(entry)
+                }
             }
         }
     }
@@ -858,7 +866,10 @@ impl Pantry {
         &self,
         volume_id: String,
     ) -> Result<VolumeStatus, HttpError> {
-        let entry = self.entry(volume_id.clone()).await?;
+        // Use entry_get here to bypass returning 410 Gone, to provide status
+        // even if the PantryEntry's Volume's activation was taken over.
+
+        let entry = self.entry_get(volume_id.clone()).await?;
 
         let active = entry.volume_is_active().await?;
         let seen_active = matches!(
