@@ -988,7 +988,7 @@
         "type": "object",
         "properties": {
           "active": {
-            "description": "Is the Volume active?",
+            "description": "Is the Volume currently active?",
             "type": "boolean"
           },
           "num_job_handles": {
@@ -996,11 +996,16 @@
             "type": "integer",
             "format": "uint",
             "minimum": 0
+          },
+          "seen_active": {
+            "description": "Has the Pantry ever seen this Volume active?",
+            "type": "boolean"
           }
         },
         "required": [
           "active",
-          "num_job_handles"
+          "num_job_handles",
+          "seen_active"
         ]
       }
     },
