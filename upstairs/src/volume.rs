@@ -1407,13 +1407,13 @@ impl Volume {
 
     // Given two VolumeConstructionRequests, compare them to verify they
     // only have the proper differences and if the VCRs are valid, submit
-    // the targets for replacement.  A success here means the upstairs has
+    // the targets for replacement. A success here means the upstairs has
     // accepted the replacement and the process has started.
     pub async fn target_replace(
         &self,
         original: VolumeConstructionRequest,
         replacement: VolumeConstructionRequest,
-    ) -> Result<(), CrucibleError> {
+    ) -> Result<ReplaceResult, CrucibleError> {
         let (original_target, new_target) =
             Self::compare_vcr_for_target_replacement(
                 original,
@@ -1439,15 +1439,31 @@ impl Volume {
                     original_target,
                 )
             }
-            Ok(ReplaceResult::Started)
-            | Ok(ReplaceResult::StartedAlready)
-            | Ok(ReplaceResult::CompletedAlready) => {
+
+            Ok(ReplaceResult::Started) => {
+                info!(self.log, "Replace downstairs started for {}", self.uuid);
+
+                Ok(ReplaceResult::Started)
+            }
+
+            Ok(ReplaceResult::StartedAlready) => {
                 info!(
                     self.log,
-                    "Replace downstairs underway for {}", self.uuid
+                    "Replace downstairs already started for {}", self.uuid
                 );
-                Ok(())
+
+                Ok(ReplaceResult::StartedAlready)
             }
+
+            Ok(ReplaceResult::CompletedAlready) => {
+                info!(
+                    self.log,
+                    "Replace downstairs completed already for {}", self.uuid
+                );
+
+                Ok(ReplaceResult::CompletedAlready)
+            }
+
             Err(e) => {
                 crucible_bail!(
                     ReplaceRequestInvalid,

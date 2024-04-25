@@ -5694,4 +5694,67 @@ mod test {
 
         assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
     }
+
+    /// Getting a volume's status should work even if something else took over
+    #[tokio::test]
+    async fn test_pantry_get_status_after_activation() {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = TestDownstairsSet::big(false).await.unwrap();
+        let opts = tds.opts();
+
+        // Start a pantry, get the client for it, then use it to bulk_write in data
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
+
+        // volume status should return active = true, and seen_active = true.
+
+        let status =
+            client.volume_status(&volume_id.to_string()).await.unwrap();
+
+        assert!(matches!(
+            status.into_inner(),
+            crucible_pantry_client::types::VolumeStatus {
+                active: true,
+                seen_active: true,
+                num_job_handles: 0,
+            }
+        ));
+
+        // Take over the Volume activation here
+
+        let vcr: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
+                    opts,
+                    gen: 2,
+                }],
+                read_only_parent: None,
+            };
+
+        let log = csl();
+        let volume = Volume::construct(vcr, None, log.clone()).await.unwrap();
+        volume.activate().await.unwrap();
+
+        // volume status should return active = false, and seen_active = true.
+
+        let status =
+            client.volume_status(&volume_id.to_string()).await.unwrap();
+
+        assert!(matches!(
+            status.into_inner(),
+            crucible_pantry_client::types::VolumeStatus {
+                active: false,
+                seen_active: true,
+                num_job_handles: 0,
+            }
+        ));
+    }
 }
