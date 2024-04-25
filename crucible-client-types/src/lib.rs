@@ -103,6 +103,7 @@ pub enum ReplaceResult {
     StartedAlready,
     CompletedAlready,
     Missing,
+    VcrMatches,
 }
 
 impl Debug for ReplaceResult {
@@ -120,6 +121,21 @@ impl Debug for ReplaceResult {
             ReplaceResult::Missing => {
                 write!(f, "Missing")
             }
+            ReplaceResult::VcrMatches { .. } => {
+                write!(f, "VcrMatches")
+            }
         }
     }
+}
+
+/// Result of comparing an original volume construction request to a candidate
+/// replacement one.
+pub enum ReplacementRequestCheck {
+    /// The replacement was validated, and this variant holds the old downstairs
+    /// target and the new one replacing it.
+    Valid { old: SocketAddr, new: SocketAddr },
+
+    /// The replacement is not necessary because the replacement matches the
+    /// original.
+    ReplacementMatchesOriginal,
 }
