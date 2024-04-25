@@ -157,45 +157,6 @@ pub struct ReadRequest {
     pub offset: Block,
 }
 
-/// Read response data, containing data from all blocks
-///
-/// Do not derive `Clone` on this type; it will be expensive and tempting to
-/// call by accident!
-#[derive(Debug, Default)]
-pub struct RawReadResponse {
-    /// Per-block metadata
-    pub blocks: Vec<ReadResponseBlockMetadata>,
-    /// Raw data
-    pub data: bytes::BytesMut,
-}
-
-impl RawReadResponse {
-    /// Builds a new empty `RawReadResponse` with the given capacity
-    pub fn with_capacity(block_count: usize, block_size: u64) -> Self {
-        Self {
-            blocks: Vec::with_capacity(block_count),
-            data: bytes::BytesMut::with_capacity(
-                block_count * block_size as usize,
-            ),
-        }
-    }
-
-    pub fn hashes(&self, i: usize) -> Vec<u64> {
-        self.blocks[i].hashes()
-    }
-
-    pub fn first_hash(&self, i: usize) -> Option<u64> {
-        self.blocks[i].first_hash()
-    }
-
-    pub fn encryption_contexts(
-        &self,
-        i: usize,
-    ) -> Vec<Option<&EncryptionContext>> {
-        self.blocks[i].encryption_contexts()
-    }
-}
-
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BlockContext {

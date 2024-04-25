@@ -3,12 +3,12 @@ use crate::{
     cdt, integrity_hash, live_repair::ExtentInfo, upstairs::UpstairsConfig,
     upstairs::UpstairsState, ClientIOStateCount, ClientId, CrucibleDecoder,
     CrucibleError, DownstairsIO, DsState, EncryptionContext, IOState, IOop,
-    JobId, Message, ReconcileIO, RegionDefinitionStatus, RegionMetadata,
+    JobId, Message, RawReadResponse, ReconcileIO, RegionDefinitionStatus,
+    RegionMetadata,
 };
 use crucible_common::{deadline_secs, verbose_timeout, x509::TLSContext};
 use crucible_protocol::{
-    BlockContext, MessageWriter, RawReadResponse, ReconciliationId,
-    CRUCIBLE_MESSAGE_VERSION,
+    BlockContext, MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
 };
 
 use std::{

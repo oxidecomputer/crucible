@@ -4,11 +4,10 @@ use crate::{
     extent::{check_input, extent_path, DownstairsBlockContext, ExtentInner},
     integrity_hash,
     region::{BatchedPwritev, JobOrReconciliationId},
-    Block, BlockContext, CrucibleError, JobId, RegionDefinition,
+    Block, BlockContext, CrucibleError, ExtentReadRequest, ExtentReadResponse,
+    JobId, RegionDefinition,
 };
-use crucible_protocol::{
-    EncryptionContext, RawReadResponse, ReadResponseBlockMetadata,
-};
+use crucible_protocol::EncryptionContext;
 
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, Transaction};
@@ -43,14 +42,13 @@ impl ExtentInner for SqliteInner {
         self.0.lock().unwrap().flush(new_flush, new_gen, job_id)
     }
 
-    fn read_into(
+    fn read(
         &mut self,
         job_id: JobId,
-        requests: &[crucible_protocol::ReadRequest],
-        out: &mut RawReadResponse,
+        req: ExtentReadRequest,
         _iov_max: usize, // unused by SQLite backend
-    ) -> Result<(), CrucibleError> {
-        self.0.lock().unwrap().read_into(job_id, requests, out)
+    ) -> Result<ExtentReadResponse, CrucibleError> {
+        self.0.lock().unwrap().read(job_id, req)
     }
 
     fn write(
@@ -280,141 +278,80 @@ impl SqliteMoreInner {
         Ok(())
     }
 
-    fn read_into(
+    fn read(
         &mut self,
         job_id: JobId,
-        requests: &[crucible_protocol::ReadRequest],
-        out: &mut RawReadResponse,
-    ) -> Result<(), CrucibleError> {
-        // This code batches up operations for contiguous regions of
-        // ReadRequests, so we can perform larger read syscalls and sqlite
-        // queries. This significantly improves read throughput.
+        req: ExtentReadRequest,
+    ) -> Result<ExtentReadResponse, CrucibleError> {
+        let mut buf = req.data;
 
-        // Keep track of the index of the first request in any contiguous run
-        // of requests. Of course, a "contiguous run" might just be a single
-        // request.
-        let mut req_run_start = 0;
-        let mut buf = out.data.split_off(out.data.len());
-        while req_run_start < requests.len() {
-            let first_req = &requests[req_run_start];
+        let block_size = self.extent_size.block_size_in_bytes() as u64;
+        let num_blocks = buf.capacity() as u64 / block_size;
+        check_input(self.extent_size, req.offset, buf.capacity())?;
 
-            // Starting from the first request in the potential run, we scan
-            // forward until we find a request with a block that isn't
-            // contiguous with the request before it. Since we're counting
-            // pairs, and the number of pairs is one less than the number of
-            // requests, we need to add 1 to get our actual run length.
-            let mut n_contiguous_blocks = 1;
+        // Query the block metadata
+        cdt::extent__read__get__contexts__start!(|| {
+            (job_id.0, self.extent_number, num_blocks)
+        });
+        let block_contexts =
+            self.get_block_contexts(req.offset.value, num_blocks)?;
+        cdt::extent__read__get__contexts__done!(|| {
+            (job_id.0, self.extent_number, num_blocks)
+        });
+        // Convert from DownstairsBlockContext -> BlockContext
+        let blocks = block_contexts
+            .into_iter()
+            .map(|bs| bs.into_iter().map(|b| b.block_context).collect())
+            .collect();
 
-            for request_window in requests[req_run_start..].windows(2) {
-                if request_window[0].offset.value + 1
-                    == request_window[1].offset.value
-                {
-                    n_contiguous_blocks += 1;
-                } else {
-                    break;
-                }
-            }
+        // To avoid a `memset`, we're reading directly into uninitialized
+        // memory in the buffer.  This is fine; we sized the buffer
+        // appropriately in advance (and will panic here if we messed up).
+        assert!(buf.is_empty());
 
-            // Create our responses and push them into the output. While we're
-            // at it, check for overflows.
-            let resp_run_start = out.blocks.len();
-            let block_size = self.extent_size.block_size_in_bytes() as u64;
-            for req in requests[req_run_start..][..n_contiguous_blocks].iter() {
-                let resp = ReadResponseBlockMetadata {
-                    eid: req.eid,
-                    offset: req.offset,
-                    block_contexts: Vec::with_capacity(1),
-                };
-                out.blocks.push(resp);
-            }
+        // Finally we get to read the actual data. That's why we're here
+        cdt::extent__read__file__start!(|| {
+            (job_id.0, self.extent_number, num_blocks)
+        });
 
-            // To avoid a `memset`, we're reading directly into uninitialized
-            // memory in the buffer.  This is fine; we sized the buffer
-            // appropriately in advance (and will panic here if we messed up).
-            let expected_bytes = n_contiguous_blocks * block_size as usize;
-            assert!(buf.spare_capacity_mut().len() >= expected_bytes);
-
-            let first_resp = &out.blocks[resp_run_start];
-            check_input(self.extent_size, first_resp.offset, &buf)?;
-
-            // Finally we get to read the actual data. That's why we're here
-            cdt::extent__read__file__start!(|| {
-                (job_id.0, self.extent_number, n_contiguous_blocks as u64)
-            });
-
-            // SAFETY: the buffer has sufficient capacity, and this is a valid
-            // file descriptor.
-            let r = unsafe {
-                libc::pread(
-                    self.file.as_raw_fd(),
-                    buf.spare_capacity_mut().as_mut_ptr() as *mut libc::c_void,
-                    expected_bytes as libc::size_t,
-                    first_req.offset.value as i64 * block_size as i64,
-                )
-            };
-            // Check against the expected number of bytes.  We could do more
-            // robust error handling here (e.g. retrying in a loop), but for
-            // now, simply bailing out seems wise.
-            let r = nix::errno::Errno::result(r).map(|r| r as usize);
-            let num_bytes = r.map_err(|e| {
-                CrucibleError::IoError(format!(
-                    "extent {}: read failed: {e}",
-                    self.extent_number
-                ))
-            })?;
-            if num_bytes != expected_bytes {
-                return Err(CrucibleError::IoError(format!(
-                    "extent {}: incomplete read \
-                     (expected {expected_bytes}, got {num_bytes})",
-                    self.extent_number
-                )));
-            }
-            // SAFETY: we just initialized this chunk of the buffer
-            unsafe {
-                buf.set_len(expected_bytes);
-            }
-
-            cdt::extent__read__file__done!(|| {
-                (job_id.0, self.extent_number, n_contiguous_blocks as u64)
-            });
-
-            // Reattach this chunk to the main `BytesMut` array
-            //
-            // This should be O(1), because we allocated enough space to not
-            // reallocate anywhere in the process.
-            let chunk = buf.split_to(expected_bytes);
-            out.data.unsplit(chunk);
-
-            // Query the block metadata
-            cdt::extent__read__get__contexts__start!(|| {
-                (job_id.0, self.extent_number, n_contiguous_blocks as u64)
-            });
-            let block_contexts = self.get_block_contexts(
-                first_req.offset.value,
-                n_contiguous_blocks as u64,
-            )?;
-            cdt::extent__read__get__contexts__done!(|| {
-                (job_id.0, self.extent_number, n_contiguous_blocks as u64)
-            });
-
-            // Now it's time to put block contexts into the responses.
-            // We use into_iter here to move values out of enc_ctxts/hashes,
-            // avoiding a clone(). For code consistency, we use iters for the
-            // response and data chunks too. These iters will be the same length
-            // (equal to n_contiguous_requests) so zipping is fine
-            let resp_iter =
-                out.blocks[resp_run_start..][..n_contiguous_blocks].iter_mut();
-            let ctx_iter = block_contexts.into_iter();
-
-            for (resp, r_ctx) in resp_iter.zip(ctx_iter) {
-                resp.block_contexts =
-                    r_ctx.into_iter().map(|x| x.block_context).collect();
-            }
-
-            req_run_start += n_contiguous_blocks;
+        // SAFETY: the buffer has sufficient capacity, and this is a valid
+        // file descriptor.
+        let expected_bytes = buf.capacity();
+        let r = unsafe {
+            libc::pread(
+                self.file.as_raw_fd(),
+                buf.spare_capacity_mut().as_mut_ptr() as *mut libc::c_void,
+                expected_bytes as libc::size_t,
+                req.offset.value as i64 * block_size as i64,
+            )
+        };
+        // Check against the expected number of bytes.  We could do more
+        // robust error handling here (e.g. retrying in a loop), but for
+        // now, simply bailing out seems wise.
+        let r = nix::errno::Errno::result(r).map(|r| r as usize);
+        let num_bytes = r.map_err(|e| {
+            CrucibleError::IoError(format!(
+                "extent {}: read failed: {e}",
+                self.extent_number
+            ))
+        })?;
+        if num_bytes != expected_bytes {
+            return Err(CrucibleError::IoError(format!(
+                "extent {}: incomplete read \
+                      (expected {expected_bytes}, got {num_bytes})",
+                self.extent_number
+            )));
         }
-        out.data.unsplit(buf);
-        Ok(())
+        // SAFETY: we just initialized this chunk of the buffer
+        unsafe {
+            buf.set_len(expected_bytes);
+        }
+
+        cdt::extent__read__file__done!(|| {
+            (job_id.0, self.extent_number, num_blocks)
+        });
+
+        Ok(ExtentReadResponse { data: buf, blocks })
     }
 
     fn write(
@@ -425,7 +362,7 @@ impl SqliteMoreInner {
         iov_max: usize,
     ) -> Result<(), CrucibleError> {
         for write in writes {
-            check_input(self.extent_size, write.offset, &write.data)?;
+            check_input(self.extent_size, write.offset, write.data.len())?;
         }
 
         /*
@@ -1253,7 +1190,6 @@ fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
 mod test {
     use super::*;
     use bytes::{Bytes, BytesMut};
-    use crucible_protocol::ReadRequest;
     use rand::Rng;
     use tempfile::tempdir;
 
@@ -1686,21 +1622,14 @@ mod test {
             };
             inner.write(JobId(20), &[write], true, IOV_MAX_TEST)?;
 
-            let read = ReadRequest {
-                eid: 0,
+            let read = ExtentReadRequest {
                 offset: Block::new_512(0),
+                data: BytesMut::with_capacity(512),
             };
-            let resp = inner.read(JobId(21), &[read], IOV_MAX_TEST)?;
+            let resp = inner.read(JobId(21), read, IOV_MAX_TEST)?;
 
             // We should not get back our data, because block 0 was written.
-            assert_ne!(
-                resp.blocks,
-                vec![ReadResponseBlockMetadata {
-                    eid: 0,
-                    offset: Block::new_512(0),
-                    block_contexts: vec![block_context]
-                }]
-            );
+            assert_ne!(resp.blocks, vec![vec![block_context]]);
             assert_ne!(resp.data, BytesMut::from(data.as_ref()));
         }
 
@@ -1720,21 +1649,14 @@ mod test {
             };
             inner.write(JobId(30), &[write], true, IOV_MAX_TEST)?;
 
-            let read = ReadRequest {
-                eid: 0,
+            let read = ExtentReadRequest {
                 offset: Block::new_512(1),
+                data: BytesMut::with_capacity(512),
             };
-            let resp = inner.read(JobId(31), &[read], IOV_MAX_TEST)?;
+            let resp = inner.read(JobId(31), read, IOV_MAX_TEST)?;
 
             // We should get back our data! Block 1 was never written.
-            assert_eq!(
-                resp.blocks,
-                vec![ReadResponseBlockMetadata {
-                    eid: 0,
-                    offset: Block::new_512(1),
-                    block_contexts: vec![block_context]
-                }]
-            );
+            assert_eq!(resp.blocks, vec![vec![block_context]]);
             assert_eq!(resp.data, BytesMut::from(data.as_ref()));
         }
 
@@ -1786,21 +1708,14 @@ mod test {
             };
             inner.write(JobId(30), &[write], true, IOV_MAX_TEST)?;
 
-            let read = ReadRequest {
-                eid: 0,
+            let read = ExtentReadRequest {
                 offset: Block::new_512(0),
+                data: BytesMut::with_capacity(512),
             };
-            let resp = inner.read(JobId(31), &[read], IOV_MAX_TEST)?;
+            let resp = inner.read(JobId(31), read, IOV_MAX_TEST)?;
 
             // We should get back our data! Block 1 was never written.
-            assert_eq!(
-                resp.blocks,
-                vec![ReadResponseBlockMetadata {
-                    eid: 0,
-                    offset: Block::new_512(0),
-                    block_contexts: vec![block_context]
-                }]
-            );
+            assert_eq!(resp.blocks, vec![vec![block_context]]);
             assert_eq!(resp.data, BytesMut::from(data.as_ref()));
         }
 
