@@ -21,7 +21,7 @@ tick-1s
 {
     printf("%6s ", "PID");
     printf("%17s %17s %17s", "DS STATE 0", "DS STATE 1", "DS STATE 2");
-    printf("  %5s %5s %5s %5s", "UPW", "DSW", "DELTA", "BAKPR");
+    printf("  %5s %5s %9s %5s", "UPW", "DSW", "JOBID", "BAKPR");
     printf(" %10s", "WRITE_BO");
     printf("  %5s %5s %5s", "NEW0", "NEW1", "NEW2");
     printf("  %5s %5s %5s", "IP0", "IP1", "IP2");
@@ -50,17 +50,9 @@ crucible_upstairs*:::up-status
     printf(" %5s", json(copyinstr(arg1), "ok.ds_count"));
 
     /*
-     * Job ID delta and backpressure
+     * Job ID and backpressure
      */
-    current_str = json(copyinstr(arg1), "ok.next_job_id");
-    current = strtoll(current_str, 10);
-    if (last[pid] == 0)
-        delta = current;
-    else
-        delta = current - last[pid];
-
-    last[pid] = current;
-    printf(" %5d", delta);
+    printf(" %9d", json(copyinstr(arg1), "ok.next_job_id"));
     printf(" %5s", json(copyinstr(arg1), "ok.up_backpressure"));
     printf(" %10s", json(copyinstr(arg1), "ok.write_bytes_out"));
 
