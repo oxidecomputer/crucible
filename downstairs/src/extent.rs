@@ -639,7 +639,7 @@ impl Extent {
     ///
     /// # Panics
     /// If the inner extent implementation does not support setting block
-    /// contexts separately from a read operation
+    /// contexts separately from a write operation
     #[cfg(test)]
     #[allow(clippy::unused_async)] // this will be async again in the future
     pub async fn set_dirty_and_block_context(
