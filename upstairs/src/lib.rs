@@ -853,7 +853,7 @@ impl std::fmt::Display for DsState {
 /*
  * A unit of work for downstairs that is put into the hashmap.
  */
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct DownstairsIO {
     ds_id: JobId, // This MUST match our hashmap index
 
@@ -879,7 +879,7 @@ struct DownstairsIO {
      * If the operation is a Read, this holds the resulting buffer
      * The hashes vec holds the valid hash(es) for the read.
      */
-    data: Option<Vec<ReadResponse>>,
+    data: Option<RawReadResponse>,
     read_response_hashes: Vec<Option<u64>>,
 
     /// Number of bytes that this job has contributed to guest backpressure
@@ -913,13 +913,11 @@ impl DownstairsIO {
             IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
                 data.len()
             }
-            IOop::Read { .. } => {
-                if self.data.is_some() {
-                    let rrs = self.data.as_ref().unwrap();
-                    rrs.iter().map(|r| r.data.len()).sum()
-                } else {
-                    0
-                }
+            IOop::Read { requests, .. } => {
+                let Some(r) = requests.first() else {
+                    return 0;
+                };
+                r.offset.block_size_in_bytes() as usize * requests.len()
             }
             IOop::Flush { .. }
             | IOop::ExtentFlushClose { .. }

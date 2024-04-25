@@ -1,6 +1,7 @@
 // Copyright 2023 Oxide Computer Company
-use crate::ReadResponse;
+use crate::RawReadResponse;
 use bytes::{Bytes, BytesMut};
+use itertools::Itertools;
 
 /*
  * Provides a strongly-owned Buffer that Read operations will write into.
@@ -133,28 +134,46 @@ impl Buffer {
         }
     }
 
-    /// Writes a `ReadResponse` into the buffer, setting `owned` to true
-    ///
-    /// The `ReadResponse` must contain a single block's worth of data.
+    /// Writes a `RawReadResponse` into the buffer, setting `owned` to true for
+    /// any block which has a context in the response.
     ///
     /// # Panics
-    /// - The offset must be block-aligned
-    /// - The response data length must be block size
-    /// - Data cannot exceed the buffer's length
-    ///
-    /// If any of these conditions are not met, the function will panic.
-    pub(crate) fn write_read_response(
-        &mut self,
-        offset: usize,
-        response: &ReadResponse,
-    ) {
-        assert!(offset + response.data.len() <= self.data.len());
-        assert_eq!(offset % self.block_size, 0);
-        assert_eq!(response.data.len(), self.block_size);
-        if !response.block_contexts.is_empty() {
-            let block = offset / self.block_size;
-            self.owned[block] = 1;
-            self.block_mut(block).copy_from_slice(&response.data);
+    /// The response data length must be the same as our buffer length (which
+    /// must be an even multiple of block size, ensured at construction)
+    pub(crate) fn write_read_response(&mut self, response: RawReadResponse) {
+        assert!(response.data.len() == self.data.len());
+        assert_eq!(response.data.len() % self.block_size, 0);
+        let bs = self.block_size;
+
+        // Build contiguous chunks which are all owned, to copy in bulk
+        for (empty, mut group) in &response
+            .blocks
+            .iter()
+            .enumerate()
+            .group_by(|(_i, b)| b.block_contexts.is_empty())
+        {
+            if empty {
+                continue;
+            }
+            let (block, _b) = group.next().unwrap();
+            let count = 1 + group.count();
+
+            // Mark the owned flag (on a per-block basis)
+            self.owned[block..][..count].fill(1);
+
+            // Special case: if the entire buffer is owned, then we swap it
+            // instead of copying element-by-element.
+            if count == response.blocks.len()
+                && self.data.len() == response.data.len()
+            {
+                self.data = response.data;
+                break;
+            } else {
+                // Otherwise, just copy the sub-region
+                self.data[(block * bs)..][..(count * bs)].copy_from_slice(
+                    &response.data[(block * bs)..][..(count * bs)],
+                );
+            }
         }
     }
 
@@ -355,6 +374,8 @@ impl UninitializedBuffer {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::{Block, BlockContext, ReadResponseBlockMetadata};
+    use rand::RngCore;
 
     #[test]
     fn test_buffer_sane() {
@@ -457,5 +478,111 @@ mod test {
         let prev_ptr = lower.as_ptr();
         let _ = upper.eat(0, lower);
         assert_eq!(prev_ptr, upper.as_ptr());
+    }
+
+    /// Test `Buffer::write_read_response` with a mix of owned / unowned blocks
+    ///
+    /// `f` determines which blocks are owned and is specified in various unit
+    /// tests calling this function.
+    fn write_read_response_partial_generic<F: Fn(u64) -> bool>(f: F) -> Buffer {
+        let mut buf = Buffer::new(10, 512);
+
+        // Build a write which only writes the first 4 blocks
+        let mut data = BytesMut::new();
+        data.resize(10 * 512, 0u8);
+        let mut rng = rand::thread_rng();
+        rng.fill_bytes(&mut data);
+
+        let blocks = (0..10)
+            .map(|i| ReadResponseBlockMetadata {
+                eid: 0,
+                offset: Block::new_512(i),
+                block_contexts: if f(i) {
+                    vec![BlockContext {
+                        hash: 123,
+                        encryption_context: None,
+                    }]
+                } else {
+                    vec![]
+                },
+            })
+            .collect();
+
+        buf.write_read_response(RawReadResponse {
+            blocks,
+            data: data.clone(),
+        });
+
+        for i in 0..10 {
+            let buf_chunk = &buf[i * 512..][..512];
+            let data_chunk = &data[i * 512..][..512];
+            if f(i as u64) {
+                assert_eq!(buf.owned[i], 1);
+                assert_eq!(buf_chunk, data_chunk);
+            } else {
+                assert_eq!(buf.owned[i], 0);
+                assert_eq!(buf_chunk, [0; 512]);
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn write_read_response_partial_all() {
+        let buf = write_read_response_partial_generic(|_i| true);
+        assert_eq!(&buf.owned[..], [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn write_read_response_partial_none() {
+        let buf = write_read_response_partial_generic(|_i| true);
+        assert_eq!(&buf.owned[..], [1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn write_read_response_partial_mixed() {
+        let buf = write_read_response_partial_generic(|i| i % 4 < 2);
+        assert_eq!(&buf.owned[..], [1, 1, 0, 0, 1, 1, 0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn write_read_response_partial_low() {
+        let buf = write_read_response_partial_generic(|i| i < 4);
+        assert_eq!(&buf.owned[..], [1, 1, 1, 1, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn write_read_response_partial_high() {
+        let buf = write_read_response_partial_generic(|i| i > 4);
+        assert_eq!(&buf.owned[..], [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]);
+    }
+
+    /// Test that `Buffer::write_read_response` becomes a pointer swap if the
+    /// incoming data is fully owned.
+    #[test]
+    fn write_read_response_full_swap() {
+        let mut buf = Buffer::new(10, 512);
+
+        // Build a write which only writes the first 4 blocks
+        let mut data = BytesMut::new();
+        data.resize(10 * 512, 0u8);
+        let mut rng = rand::thread_rng();
+        rng.fill_bytes(&mut data);
+
+        let blocks = (0..10)
+            .map(|i| ReadResponseBlockMetadata {
+                eid: 0,
+                offset: Block::new_512(i),
+                block_contexts: vec![BlockContext {
+                    hash: 123,
+                    encryption_context: None,
+                }],
+            })
+            .collect();
+
+        let prev_data_ptr = data.as_ptr();
+        buf.write_read_response(RawReadResponse { blocks, data });
+
+        assert_eq!(buf.data.as_ptr(), prev_data_ptr);
     }
 }
