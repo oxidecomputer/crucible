@@ -52,7 +52,7 @@ crucible_upstairs*:::up-status
     /*
      * Job ID and backpressure
      */
-    printf(" %9d", json(copyinstr(arg1), "ok.next_job_id"));
+    printf(" %9s", json(copyinstr(arg1), "ok.next_job_id"));
     printf(" %5s", json(copyinstr(arg1), "ok.up_backpressure"));
     printf(" %10s", json(copyinstr(arg1), "ok.write_bytes_out"));
 
