@@ -2117,7 +2117,12 @@ impl Downstairs {
         {
             let reconcile_id = reconcile.id;
             let current_task = reconcile.reconcile_task_list_index;
-            let task_count = self.reconcile_repair_needed;
+
+            // `on_reconciliation_job_done` increments one of these and
+            // decrements the other, so add them together to get total task
+            // count to send to Nexus.
+            let task_count =
+                self.reconcile_repaired + self.reconcile_repair_needed;
 
             self.notify_nexus_of_reconcile_progress(
                 reconcile_id,
