@@ -48,6 +48,7 @@ impl ExtentInner for SqliteInner {
         job_id: JobId,
         requests: &[crucible_protocol::ReadRequest],
         out: &mut RawReadResponse,
+        _iov_max: usize, // unused by SQLite backend
     ) -> Result<(), CrucibleError> {
         self.0.lock().unwrap().read_into(job_id, requests, out)
     }
@@ -1663,7 +1664,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(0),
             };
-            let resp = inner.read(JobId(21), &[read])?;
+            let resp = inner.read(JobId(21), &[read], IOV_MAX_TEST)?;
 
             // We should not get back our data, because block 0 was written.
             assert_ne!(
@@ -1697,7 +1698,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(1),
             };
-            let resp = inner.read(JobId(31), &[read])?;
+            let resp = inner.read(JobId(31), &[read], IOV_MAX_TEST)?;
 
             // We should get back our data! Block 1 was never written.
             assert_eq!(
@@ -1763,7 +1764,7 @@ mod test {
                 eid: 0,
                 offset: Block::new_512(0),
             };
-            let resp = inner.read(JobId(31), &[read])?;
+            let resp = inner.read(JobId(31), &[read], IOV_MAX_TEST)?;
 
             // We should get back our data! Block 1 was never written.
             assert_eq!(
