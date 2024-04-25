@@ -3454,16 +3454,15 @@ mod test {
         let new_downstairs = test_downstairs_set.new_downstairs().await?;
 
         // Replace a downstairs.
-        let res = volume
+        assert!(volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
                 test_downstairs_set.downstairs1_address().await,
                 new_downstairs.address().await,
             )
             .await
-            .unwrap();
+            .is_err());
 
-        assert_eq!(res, ReplaceResult::Started);
         Ok(())
     }
 

@@ -104,6 +104,7 @@ pub enum ReplaceResult {
     CompletedAlready,
     Missing,
     VcrMatches,
+    NotActive,
 }
 
 impl Debug for ReplaceResult {
@@ -123,6 +124,9 @@ impl Debug for ReplaceResult {
             }
             ReplaceResult::VcrMatches { .. } => {
                 write!(f, "VcrMatches")
+            }
+            ReplaceResult::NotActive => {
+                write!(f, "NotActive")
             }
         }
     }

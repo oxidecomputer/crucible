@@ -788,7 +788,8 @@
           "started_already",
           "completed_already",
           "missing",
-          "vcr_matches"
+          "vcr_matches",
+          "not_active"
         ]
       },
       "ScrubResponse": {

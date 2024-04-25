@@ -2625,10 +2625,19 @@ impl Downstairs {
         new: SocketAddr,
         up_state: &UpstairsState,
     ) -> Result<ReplaceResult, CrucibleError> {
-        warn!(
-            self.log,
-            "{id} request to replace downstairs {old} with {new}"
-        );
+        match up_state {
+            UpstairsState::Active => {
+                warn!(
+                    self.log,
+                    "{id} request to replace downstairs {old} with {new}"
+                );
+            }
+            _ => {
+                return Err(CrucibleError::ReplaceRequestInvalid(
+                    "Can't replace while Upstairs is not Active".to_string(),
+                ));
+            }
+        }
 
         // We check all targets first to not only find our current target,
         // but to be sure our new target is not an already active target

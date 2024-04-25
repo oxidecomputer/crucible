@@ -785,6 +785,13 @@ impl BlockIO for Volume {
                     // found the subvolume, so stop!
                     return Ok(result);
                 }
+                ReplaceResult::NotActive => {
+                    crucible_bail!(
+                        ReplaceRequestInvalid,
+                        "Volume {} not active",
+                        id,
+                    )
+                }
 
                 ReplaceResult::Missing => {
                     // keep looking!
@@ -1444,8 +1451,10 @@ impl Volume {
 
         info!(
             self.log,
-            "Volume {}, OK to replace: {original_target} with {new_target}",
-            self.uuid
+            "Volume {}, VCRs valid to replace: {} with {}",
+            self.uuid,
+            original_target,
+            new_target,
         );
 
         match self
@@ -1465,6 +1474,14 @@ impl Volume {
                 info!(self.log, "Replace downstairs started for {}", self.uuid);
 
                 Ok(ReplaceResult::Started)
+            }
+
+            Ok(ReplaceResult::NotActive) => {
+                crucible_bail!(
+                    ReplaceRequestInvalid,
+                    "Volume {} not active",
+                    self.uuid,
+                )
             }
 
             Ok(ReplaceResult::StartedAlready) => {
