@@ -93,3 +93,20 @@ pub(super) fn pwrite_all<F: AsFd + Copy>(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn on_disk_meta_serialized_size() {
+        let m = OnDiskMeta {
+            dirty: true,
+            gen_number: u64::MAX,
+            flush_number: u64::MAX,
+            ext_version: u32::MAX,
+        };
+        let mut meta_buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
+        bincode::serialize_into(meta_buf.as_mut_slice(), &Some(m)).unwrap();
+    }
+}

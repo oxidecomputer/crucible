@@ -2372,7 +2372,7 @@ mod test {
     }
 
     #[test]
-    fn test_serialized_sizes() {
+    fn test_serialized_context_size() {
         let c = OnDiskDownstairsBlockContext {
             block_context: BlockContext {
                 hash: u64::MAX,
@@ -2385,15 +2385,6 @@ mod test {
         };
         let mut ctx_buf = [0u8; BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize];
         bincode::serialize_into(ctx_buf.as_mut_slice(), &Some(c)).unwrap();
-
-        let m = OnDiskMeta {
-            dirty: true,
-            gen_number: u64::MAX,
-            flush_number: u64::MAX,
-            ext_version: u32::MAX,
-        };
-        let mut meta_buf = [0u8; BLOCK_META_SIZE_BYTES as usize];
-        bincode::serialize_into(meta_buf.as_mut_slice(), &Some(m)).unwrap();
     }
 
     /// Test that multiple writes to the same location work
