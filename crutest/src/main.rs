@@ -766,7 +766,7 @@ async fn main() -> Result<()> {
     let pr;
     if opt.metrics {
         // If metrics are desired, we create and register the server
-        // first. Once we have the server, we clone the ProducerRegister
+        // first. Once we have the server, we clone the ProducerRegistry
         // so we can pass that on to the upstairs.
         // Finally, spin out a task with the server to provide the endpoint
         // so metrics can be collected by Oximeter.
@@ -774,7 +774,7 @@ async fn main() -> Result<()> {
             "Creating a metric collect endpoint at {}",
             opt.metric_collect
         );
-        match client_oximeter(opt.metric_collect, opt.metric_register).await {
+        match client_oximeter(opt.metric_collect, opt.metric_register) {
             Err(e) => {
                 println!("Failed to register with Oximeter {:?}", e);
                 pr = None;

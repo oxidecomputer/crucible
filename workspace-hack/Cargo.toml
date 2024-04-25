@@ -17,6 +17,8 @@ publish = false
 bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["cargo", "derive", "env", "wrap_help"] }
+clap_builder = { version = "4", default-features = false, features = ["cargo", "color", "env", "std", "suggestions", "usage", "wrap_help"] }
 crossbeam-utils = { version = "0.8" }
 crypto-common = { version = "0.1", default-features = false, features = ["getrandom", "std"] }
 digest = { version = "0.10", features = ["mac", "std"] }
