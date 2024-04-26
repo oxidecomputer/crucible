@@ -9,6 +9,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use tokio::time::Instant;
 
+use crucible_client_types::ReplacementRequestCheck;
 use crucible_client_types::VolumeConstructionRequest;
 
 pub struct RegionExtentInfo {
@@ -779,7 +780,8 @@ impl BlockIO for Volume {
             match result {
                 ReplaceResult::Started
                 | ReplaceResult::StartedAlready
-                | ReplaceResult::CompletedAlready => {
+                | ReplaceResult::CompletedAlready
+                | ReplaceResult::VcrMatches => {
                     // found the subvolume, so stop!
                     return Ok(result);
                 }
@@ -1092,16 +1094,26 @@ impl Volume {
         original: VolumeConstructionRequest,
         replacement: VolumeConstructionRequest,
         log: &Logger,
-    ) -> Result<(SocketAddr, SocketAddr), CrucibleError> {
+    ) -> Result<ReplacementRequestCheck, CrucibleError> {
         match Self::compare_vcr_for_update(original, replacement, log)? {
-            Some((o, n)) => Ok((o, n)),
-            None => crucible_bail!(
-                ReplaceRequestInvalid,
-                "VCR targets are the same"
-            ),
+            Some((o, n)) => {
+                Ok(ReplacementRequestCheck::Valid { old: o, new: n })
+            }
+
+            None => Ok(ReplacementRequestCheck::ReplacementMatchesOriginal),
         }
     }
 
+    /// Given two VolumeConstructionRequests, compare them, and return:
+    ///
+    /// - Ok(Some(old, new)) if there's a single target difference in one of the
+    ///   Region variants, and the replacement argument is a valid replacement
+    ///   for the original argument
+    ///
+    /// - Ok(None) if there are no differences between them
+    ///
+    /// - Err(e) if there's a difference that means the replacement argument is
+    ///   not a valid replacement for the original argument
     pub fn compare_vcr_for_update(
         original: VolumeConstructionRequest,
         replacement: VolumeConstructionRequest,
@@ -1408,18 +1420,27 @@ impl Volume {
     // Given two VolumeConstructionRequests, compare them to verify they
     // only have the proper differences and if the VCRs are valid, submit
     // the targets for replacement. A success here means the upstairs has
-    // accepted the replacement and the process has started.
+    // accepted the replacement and the process has started, or there's
+    // no work to do because the original and replacement match.
     pub async fn target_replace(
         &self,
         original: VolumeConstructionRequest,
         replacement: VolumeConstructionRequest,
     ) -> Result<ReplaceResult, CrucibleError> {
         let (original_target, new_target) =
-            Self::compare_vcr_for_target_replacement(
+            match Self::compare_vcr_for_target_replacement(
                 original,
                 replacement,
                 &self.log,
-            )?;
+            )? {
+                ReplacementRequestCheck::Valid { old, new } => (old, new),
+
+                ReplacementRequestCheck::ReplacementMatchesOriginal => {
+                    // The replacement VCR they sent is the same the original.
+                    // No replacement is required
+                    return Ok(ReplaceResult::VcrMatches);
+                }
+            };
 
         info!(
             self.log,
@@ -1462,6 +1483,15 @@ impl Volume {
                 );
 
                 Ok(ReplaceResult::CompletedAlready)
+            }
+
+            Ok(ReplaceResult::VcrMatches) => {
+                info!(
+                    self.log,
+                    "No work required for replace for {}", self.uuid
+                );
+
+                Ok(ReplaceResult::VcrMatches)
             }
 
             Err(e) => {
@@ -3174,15 +3204,19 @@ mod test {
 
         let log = csl();
         info!(log, "Test replacement of CID {cid}");
-        let (old_t, new_t) = Volume::compare_vcr_for_target_replacement(
-            original,
-            replacement,
-            &log,
-        )?;
+        let ReplacementRequestCheck::Valid { old, new } =
+            Volume::compare_vcr_for_target_replacement(
+                original,
+                replacement,
+                &log,
+            )?
+        else {
+            panic!("wrong variant returned!");
+        };
 
-        info!(log, "replace {old_t} with {new_t}");
-        assert_eq!(original_target, old_t);
-        assert_eq!(new_target, new_t);
+        info!(log, "replace {old} with {new}");
+        assert_eq!(original_target, old);
+        assert_eq!(new_target, new);
         Ok(())
     }
 
@@ -3239,15 +3273,19 @@ mod test {
             };
 
         let log = csl();
-        let (old_t, new_t) = Volume::compare_vcr_for_target_replacement(
-            original,
-            replacement,
-            &log,
-        )
-        .unwrap();
+        let ReplacementRequestCheck::Valid { old, new } =
+            Volume::compare_vcr_for_target_replacement(
+                original,
+                replacement,
+                &log,
+            )
+            .unwrap()
+        else {
+            panic!("wrong variant returned!");
+        };
 
-        assert_eq!(original_target, old_t);
-        assert_eq!(new_target, new_t);
+        assert_eq!(original_target, old);
+        assert_eq!(new_target, new);
     }
 
     #[tokio::test]
@@ -3304,15 +3342,19 @@ mod test {
             };
 
         let log = csl();
-        let (old_t, new_t) = Volume::compare_vcr_for_target_replacement(
-            original,
-            replacement,
-            &log,
-        )
-        .unwrap();
+        let ReplacementRequestCheck::Valid { old, new } =
+            Volume::compare_vcr_for_target_replacement(
+                original,
+                replacement,
+                &log,
+            )
+            .unwrap()
+        else {
+            panic!("wrong variant returned!");
+        };
 
-        assert_eq!(original_target, old_t);
-        assert_eq!(new_target, new_t);
+        assert_eq!(original_target, old);
+        assert_eq!(new_target, new);
     }
 
     #[tokio::test]
@@ -3392,13 +3434,15 @@ mod test {
 
         let log = csl();
 
-        // Replacement should return error.
-        assert!(Volume::compare_vcr_for_target_replacement(
-            original.clone(),
-            replacement.clone(),
-            &log,
-        )
-        .is_err());
+        // Replacement should return ReplacementMatchesOriginal
+        assert!(matches!(
+            Volume::compare_vcr_for_target_replacement(
+                original.clone(),
+                replacement.clone(),
+                &log,
+            ),
+            Ok(ReplacementRequestCheck::ReplacementMatchesOriginal),
+        ));
 
         // Migration is valid with these VCRs
         Volume::compare_vcr_for_migration(original, replacement, &log).unwrap();
@@ -3745,7 +3789,17 @@ mod test {
             };
 
         let log = csl();
-        Volume::compare_vcr_for_target_replacement(original, replacement, &log)
+        let ReplacementRequestCheck::Valid { old, new } =
+            Volume::compare_vcr_for_target_replacement(
+                original,
+                replacement,
+                &log,
+            )?
+        else {
+            panic!("wrong variant returned!");
+        };
+
+        Ok((old, new))
     }
 
     #[tokio::test]
