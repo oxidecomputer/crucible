@@ -3152,17 +3152,9 @@ pub async fn start_downstairs(
         let log = dssw.log.new(o!("task" => "oximeter".to_string()));
 
         tokio::spawn(async move {
-            let new_address = match address {
-                IpAddr::V4(ipv4) => {
-                    SocketAddr::new(std::net::IpAddr::V4(ipv4), 0)
-                }
-                IpAddr::V6(ipv6) => {
-                    SocketAddr::new(std::net::IpAddr::V6(ipv6), 0)
-                }
-            };
-
+            let producer_address = SocketAddr::new(address, 0);
             if let Err(e) =
-                stats::ox_stats(dss, oximeter, new_address, &log).await
+                stats::ox_stats(dss, oximeter, producer_address, &log).await
             {
                 error!(log, "ERROR: oximeter failed: {:?}", e);
             } else {

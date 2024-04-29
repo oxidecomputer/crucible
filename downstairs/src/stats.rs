@@ -1,10 +1,7 @@
 // Copyright 2023 Oxide Computer Company
 use super::*;
 
-use dropshot::{
-    ConfigDropshot, ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel,
-    HandlerTaskMode,
-};
+use dropshot::{ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel};
 use omicron_common::api::internal::nexus::ProducerEndpoint;
 use omicron_common::api::internal::nexus::ProducerKind;
 use oximeter::{
@@ -140,37 +137,33 @@ pub async fn ox_stats(
     my_address: SocketAddr,
     log: &Logger,
 ) -> Result<()> {
-    let dropshot_config = ConfigDropshot {
-        bind_address: my_address,
-        request_body_max_bytes: 2048,
-        default_handler_task_mode: HandlerTaskMode::Detached,
-    };
     let logging_config = ConfigLogging::File {
         level: ConfigLoggingLevel::Error,
         path: "/dev/stdout".into(),
         if_exists: ConfigLoggingIfExists::Append,
     };
 
+    // Use the downstairs's UUID itself in the producer registration, to keep
+    // the same identity across restarts (if any).
     let server_info = ProducerEndpoint {
-        id: Uuid::new_v4(),
+        id: dss.ds_stat_wrap.lock().unwrap().stat_name.downstairs_uuid,
         kind: ProducerKind::Service,
         address: my_address,
-        base_route: "/collect".to_string(),
+        base_route: String::new(),
         interval: Duration::from_secs(10),
     };
 
     let config = Config {
         server_info,
-        registration_address,
-        dropshot: dropshot_config,
+        registration_address: Some(registration_address),
+        request_body_max_bytes: 2048,
         log: LogConfig::Config(logging_config),
     };
 
     // If the server is not responding when the downstairs starts, keep
     // trying.
     loop {
-        let server = Server::start(&config).await;
-        match server {
+        match Server::start(&config) {
             Ok(server) => {
                 server.registry().register_producer(dss.clone()).unwrap();
                 info!(log, "Oximeter producer registered, now serve_forever");
