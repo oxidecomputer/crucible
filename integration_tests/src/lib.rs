@@ -5695,6 +5695,140 @@ mod test {
         assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
     }
 
+    #[tokio::test]
+    async fn test_volume_replace_rop_in_vcr() {
+        // Verify that we can do replacement of a read_only_parent target
+        // for a volume.
+        const BLOCK_SIZE: usize = 512;
+        let log = csl();
+
+        // Make three downstairs
+        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let opts = tds.opts();
+        let volume_id = Uuid::new_v4();
+
+        let original: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: vec![VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
+                    opts: opts.clone(),
+                    gen: 1,
+                }],
+                read_only_parent: None,
+            };
+
+        let volume = Volume::construct(original.clone(), None, log.clone())
+            .await
+            .unwrap();
+        volume.activate().await.unwrap();
+
+        // Write data in
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
+            )
+            .await
+            .unwrap();
+
+        // Read parent, verify contents
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+            .await
+            .unwrap();
+
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
+        volume.deactivate().await.unwrap();
+
+        drop(volume);
+
+        // Make a new volume, and make the original volume the read only
+        // parent.
+        // Make three new downstairs for the new volume.
+        let sv_tds = TestDownstairsSet::small(false).await.unwrap();
+        let sv_opts = sv_tds.opts();
+        let sv_volume_id = Uuid::new_v4();
+
+        // Use the original opts above, but now for the ROP.
+        let rop = Box::new(VolumeConstructionRequest::Region {
+            block_size: BLOCK_SIZE as u64,
+            blocks_per_extent: tds.blocks_per_extent(),
+            extent_count: tds.extent_count(),
+            opts: opts.clone(),
+            gen: 2,
+        });
+
+        let new_sub_vol = vec![VolumeConstructionRequest::Region {
+            block_size: BLOCK_SIZE as u64,
+            blocks_per_extent: sv_tds.blocks_per_extent(),
+            extent_count: sv_tds.extent_count(),
+            opts: sv_opts.clone(),
+            gen: 1,
+        }];
+
+        let new_vol: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: sv_volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: new_sub_vol.clone(),
+                read_only_parent: Some(rop),
+            };
+
+        // Make our new volume that has a read_only_parent.
+        let volume = Volume::construct(new_vol.clone(), None, log.clone())
+            .await
+            .unwrap();
+        volume.activate().await.unwrap();
+
+        // Make one new downstairs
+        let new_downstairs = tds.new_downstairs().await.unwrap();
+        info!(
+            log,
+            "A New downstairs: {:?}",
+            new_downstairs.address().await
+        );
+
+        let mut new_opts = tds.opts().clone();
+        new_opts.target[0] = new_downstairs.address().await;
+        info!(log, "Old ops target: {:?}", opts.target);
+        info!(log, "New ops target: {:?}", new_opts.target);
+        let new_rop = Box::new(VolumeConstructionRequest::Region {
+            block_size: BLOCK_SIZE as u64,
+            blocks_per_extent: tds.blocks_per_extent(),
+            extent_count: tds.extent_count(),
+            opts: new_opts.clone(),
+            gen: 3,
+        });
+
+        // Our "new" VCR must have a new downstairs in the opts, and have
+        // the generation number be larger than the original.
+        let replacement: VolumeConstructionRequest =
+            VolumeConstructionRequest::Volume {
+                id: sv_volume_id,
+                block_size: BLOCK_SIZE as u64,
+                sub_volumes: new_sub_vol.clone(),
+                read_only_parent: Some(new_rop),
+            };
+
+        info!(log, "Replace VCR now: {:?}", replacement);
+        let rop_replace = volume.target_replace(new_vol, replacement).await;
+        info!(log, "Replace VCR returns: {:?}", rop_replace);
+        assert!(rop_replace.is_ok());
+        info!(log, "send read now");
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+            .await
+            .unwrap();
+
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
+    }
+
     /// Getting a volume's status should work even if something else took over
     #[tokio::test]
     async fn test_pantry_get_status_after_activation() {
@@ -5705,7 +5839,8 @@ mod test {
         let tds = TestDownstairsSet::big(false).await.unwrap();
         let opts = tds.opts();
 
-        // Start a pantry, get the client for it, then use it to bulk_write in data
+        // Start a pantry, get the client for it, then use it to bulk_write
+        // in data
         let (_pantry, volume_id, client) =
             get_pantry_and_client_for_tds(&tds).await;
 
