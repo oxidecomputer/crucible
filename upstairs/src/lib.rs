@@ -270,14 +270,21 @@ pub type CrucibleBlockIOFuture<'a> = Pin<
 /// has received or is acting on the IO yet, it just means the notification
 /// has been sent.
 ///
-/// ds__*__io__start: This is when a downstairs task puts an IO on the
-/// wire to the actual downstairs that will do the work. This probe has
+/// ds__*__client__start: This is when a job is sent to the client task
+/// who will handle the network transfer
+///
+/// ds__*__net__start: This is when a downstairs client task puts an IO on
+/// the wire to the actual downstairs that will do the work. This probe has
 /// both the job ID and the client ID so we can tell the individual
 /// downstairs apart.
 ///
-/// ds__*__io_done: An ACK has been received from a downstairs for an IO
+/// ds__*__net__done: An ACK has been received from a downstairs for an IO
 /// sent to it. At the point of this probe the IO has just come off the
 /// wire and we have not processed it yet.
+///
+/// ds__*__client__done: This probe indicates a message off the wire has
+/// been sent back from the client rx task to the main task and is now being
+/// processed.
 ///
 /// up__to__ds__*__done: (Upstairs__to__Downstairs) This is the point where
 /// the upstairs has decided that it has enough data to complete an IO
@@ -328,18 +335,31 @@ mod cdt {
     fn up__to__ds__write__unwritten__start(_: u64) {}
     fn up__to__ds__flush__start(_: u64) {}
     fn up__block__req__dropped() {}
-    fn ds__read__io__start(_: u64, _: u8) {}
-    fn ds__write__io__start(_: u64, _: u8) {}
-    fn ds__write__unwritten__io__start(_: u64, _: u8) {}
-    fn ds__flush__io__start(_: u64, _: u8) {}
+    fn ds__read__client__start(_: u64, _: u8) {}
+    fn ds__write__client__start(_: u64, _: u8) {}
+    fn ds__write__unwritten__client__start(_: u64, _: u8) {}
+    fn ds__flush__client__start(_: u64, _: u8) {}
     fn ds__close__start(_: u64, _: u8, _: usize) {}
     fn ds__repair__start(_: u64, _: u8, _: usize) {}
     fn ds__noop__start(_: u64, _: u8) {}
     fn ds__reopen__start(_: u64, _: u8, _: usize) {}
-    fn ds__read__io__done(_: u64, _: u8) {}
-    fn ds__write__io__done(_: u64, _: u8) {}
-    fn ds__write__unwritten__io__done(_: u64, _: u8) {}
-    fn ds__flush__io__done(_: u64, _: u8) {}
+    fn ds__read__net__start(_: u64, _: u8) {}
+    fn ds__write__net__start(_: u64, _: u8) {}
+    fn ds__write__unwritten__net__start(_: u64, _: u8) {}
+    fn ds__flush__net__start(_: u64, _: u8) {}
+    fn ds__close__net__start(_: u64, _: u8, _: usize) {}
+    fn ds__repair__net__start(_: u64, _: u8, _: usize) {}
+    fn ds__noop__net__start(_: u64, _: u8) {}
+    fn ds__reopen__net__start(_: u64, _: u8, _: usize) {}
+    fn ds__read__net__done(_: u64, _: u8) {}
+    fn ds__write__net__done(_: u64, _: u8) {}
+    fn ds__write__unwritten__net__done(_: u64, _: u8) {}
+    fn ds__flush__net__done(_: u64, _: u8) {}
+    fn ds__close__net__done(_: u64, _: u8) {}
+    fn ds__read__client__done(_: u64, _: u8) {}
+    fn ds__write__client__done(_: u64, _: u8) {}
+    fn ds__write__unwritten__client__done(_: u64, _: u8) {}
+    fn ds__flush__client__done(_: u64, _: u8) {}
     fn ds__close__done(_: u64, _: u8) {}
     fn ds__repair__done(_: u64, _: u8) {}
     fn ds__noop__done(_: u64, _: u8) {}
