@@ -2839,7 +2839,7 @@ where
 
 fn update_net_start_probes(m: &Message, cid: ClientId) {
     match m {
-        Message::ReadRequest { ref job_id, .. } => {
+        Message::ReadRequest { job_id, .. } => {
             cdt::ds__read__net__start!(|| (job_id.0, cid.get()));
         }
         Message::Write { ref header, .. } => {
@@ -2851,7 +2851,7 @@ fn update_net_start_probes(m: &Message, cid: ClientId) {
                 cid.get()
             ));
         }
-        Message::Flush { ref job_id, .. } => {
+        Message::Flush { job_id, .. } => {
             cdt::ds__flush__net__start!(|| (job_id.0, cid.get()));
         }
         _ => {}
@@ -2862,13 +2862,13 @@ fn update_net_done_probes(m: &Message, cid: ClientId) {
         Message::ReadResponse { ref header, .. } => {
             cdt::ds__read__net__done!(|| (header.job_id.0, cid.get()));
         }
-        Message::WriteAck { ref job_id, .. } => {
+        Message::WriteAck { job_id, .. } => {
             cdt::ds__write__net__done!(|| (job_id.0, cid.get()));
         }
-        Message::WriteUnwrittenAck { ref job_id, .. } => {
+        Message::WriteUnwrittenAck { job_id, .. } => {
             cdt::ds__write__unwritten__net__done!(|| (job_id.0, cid.get()));
         }
-        Message::FlushAck { ref job_id, .. } => {
+        Message::FlushAck { job_id, .. } => {
             cdt::ds__flush__net__done!(|| (job_id.0, cid.get()));
         }
         _ => {}
