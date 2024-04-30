@@ -82,18 +82,22 @@ queue of work for the three downstairs.
 IO that it is ready to ack.
 3: From the IO being ready to ack, to that ack being sent.
 
-## perfdw.d
-This is a simple dtrace script that measures latency times for when a r/w/f
+## perf-ds-client.d
+A DTrace script that records the time in the Upstairs from when a Message
+is sent to a client task to when that client task returns the response.
+
+## perf-ds-net.d
+This is a simple DTrace script that measures latency times for when a r/w/f
 job is sent over the network to each downstairs to when the ACK for that job
 is returned to the upstairs. Jobs are sorted by type (r/w/f) and by each
 downstairs client ID.
 ```
-sudo dtrace -s perfdw.d
+sudo dtrace -s perf-net-ds.d
 ```
 
 Here is an example of how it might look:
 ```
-final:crucible alan$ sudo sudo dtrace -Z -s perfdw.d
+final:crucible alan$ sudo sudo dtrace -Z -s perf-net-ds.d
 Password:
 dtrace: system integrity protection is on, some features will not be available
 
@@ -220,7 +224,7 @@ dtrace: script 'perfdw.d' matched 0 probes
 ```
 
 ## perfgw.d
-This is a simple dtrace script that measures latency times for when a r/w/f
+This is a simple DTrace script that measures latency times for when a r/w/f
 job is submitted to the internal upstairs work queue, to when that job has
 completed and the notification was sent back to the guest.
 If the upstairs is not yet running, add the -Z flag to dtrace so it will

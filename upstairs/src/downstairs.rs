@@ -529,7 +529,10 @@ impl Downstairs {
                     blocks,
                     data,
                 } => {
-                    cdt::ds__write__io__start!(|| (new_id.0, client_id.get()));
+                    cdt::ds__write__client__start!(|| (
+                        new_id.0,
+                        client_id.get()
+                    ));
                     Message::Write {
                         header: WriteHeader {
                             upstairs_id: self.cfg.upstairs_id,
@@ -546,7 +549,7 @@ impl Downstairs {
                     dependencies,
                     data,
                 } => {
-                    cdt::ds__write__unwritten__io__start!(|| (
+                    cdt::ds__write__unwritten__client__start!(|| (
                         new_id.0,
                         client_id.get()
                     ));
@@ -568,7 +571,10 @@ impl Downstairs {
                     snapshot_details,
                     extent_limit,
                 } => {
-                    cdt::ds__flush__io__start!(|| (new_id.0, client_id.get()));
+                    cdt::ds__flush__client__start!(|| (
+                        new_id.0,
+                        client_id.get()
+                    ));
                     Message::Flush {
                         upstairs_id: self.cfg.upstairs_id,
                         session_id: self.cfg.session_id,
@@ -584,7 +590,10 @@ impl Downstairs {
                     dependencies,
                     requests,
                 } => {
-                    cdt::ds__read__io__start!(|| (new_id.0, client_id.get()));
+                    cdt::ds__read__client__start!(|| (
+                        new_id.0,
+                        client_id.get()
+                    ));
                     Message::ReadRequest {
                         upstairs_id: self.cfg.upstairs_id,
                         session_id: self.cfg.session_id,
@@ -3090,7 +3099,7 @@ impl Downstairs {
                 job_id,
                 result,
             } => {
-                cdt::ds__write__io__done!(|| (job_id.0, client_id.get()));
+                cdt::ds__write__client__done!(|| (job_id.0, client_id.get()));
                 (
                     upstairs_id,
                     session_id,
@@ -3105,7 +3114,7 @@ impl Downstairs {
                 job_id,
                 result,
             } => {
-                cdt::ds__write__unwritten__io__done!(|| (
+                cdt::ds__write__unwritten__client__done!(|| (
                     job_id.0,
                     client_id.get()
                 ));
@@ -3123,7 +3132,7 @@ impl Downstairs {
                 job_id,
                 result,
             } => {
-                cdt::ds__flush__io__done!(|| (job_id.0, client_id.get()));
+                cdt::ds__flush__client__done!(|| (job_id.0, client_id.get()));
                 (
                     upstairs_id,
                     session_id,
@@ -3133,7 +3142,10 @@ impl Downstairs {
                 )
             }
             Message::ReadResponse { header, data } => {
-                cdt::ds__read__io__done!(|| (header.job_id.0, client_id.get()));
+                cdt::ds__read__client__done!(|| (
+                    header.job_id.0,
+                    client_id.get()
+                ));
                 let upstairs_id = header.upstairs_id;
                 let session_id = header.session_id;
                 let job_id = header.job_id;
