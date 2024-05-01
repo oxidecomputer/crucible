@@ -328,11 +328,11 @@ impl SqliteMoreInner {
                 out.blocks.push(resp);
             }
 
-            // Calculate the number of expected bytes, then resize our buffer
-            //
-            // This should fill memory, but should not reallocate
+            // To avoid a `memset`, we're reading directly into uninitialized
+            // memory in the buffer.  This is fine; we sized the buffer
+            // appropriately in advance (and will panic here if we messed up).
             let expected_bytes = n_contiguous_blocks * block_size as usize;
-            buf.resize(expected_bytes, 1);
+            assert!(buf.capacity() >= expected_bytes);
 
             let first_resp = &out.blocks[resp_run_start];
             check_input(self.extent_size, first_resp.offset, &buf)?;
