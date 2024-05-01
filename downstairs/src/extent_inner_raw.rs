@@ -238,7 +238,7 @@ impl ExtentInner for RawInner {
             let r = unsafe {
                 libc::pread(
                     self.file.as_raw_fd(),
-                    buf.spare_capacity_mut().as_mut_ptr().cast(),
+                    buf.spare_capacity_mut().as_mut_ptr() as *mut libc::c_void,
                     expected_bytes as libc::size_t,
                     first_req.offset.value as i64 * block_size as i64,
                 )
