@@ -223,7 +223,7 @@ impl ExtentInner for RawInner {
             // memory in the buffer.  This is fine; we sized the buffer
             // appropriately in advance (and will panic here if we messed up).
             let expected_bytes = n_contiguous_blocks * block_size as usize;
-            assert!(buf.capacity() >= expected_bytes);
+            assert!(buf.spare_capacity_mut().len() >= expected_bytes);
 
             let first_resp = &out.blocks[resp_run_start];
             check_input(self.extent_size, first_resp.offset, &buf)?;
