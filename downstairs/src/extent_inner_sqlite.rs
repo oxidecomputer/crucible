@@ -17,7 +17,7 @@ use slog::{error, Logger};
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 
 #[derive(Debug)]
@@ -328,11 +328,11 @@ impl SqliteMoreInner {
                 out.blocks.push(resp);
             }
 
-            // Calculate the number of expected bytes, then resize our buffer
-            //
-            // This should fill memory, but should not reallocate
+            // To avoid a `memset`, we're reading directly into uninitialized
+            // memory in the buffer.  This is fine; we sized the buffer
+            // appropriately in advance (and will panic here if we messed up).
             let expected_bytes = n_contiguous_blocks * block_size as usize;
-            buf.resize(expected_bytes, 1);
+            assert!(buf.spare_capacity_mut().len() >= expected_bytes);
 
             let first_resp = &out.blocks[resp_run_start];
             check_input(self.extent_size, first_resp.offset, &buf)?;
@@ -342,12 +342,37 @@ impl SqliteMoreInner {
                 (job_id.0, self.extent_number, n_contiguous_blocks as u64)
             });
 
-            nix::sys::uio::pread(
-                self.file.as_fd(),
-                &mut buf,
-                first_req.offset.value as i64 * block_size as i64,
-            )
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+            // SAFETY: the buffer has sufficient capacity, and this is a valid
+            // file descriptor.
+            let r = unsafe {
+                libc::pread(
+                    self.file.as_raw_fd(),
+                    buf.spare_capacity_mut().as_mut_ptr() as *mut libc::c_void,
+                    expected_bytes as libc::size_t,
+                    first_req.offset.value as i64 * block_size as i64,
+                )
+            };
+            // Check against the expected number of bytes.  We could do more
+            // robust error handling here (e.g. retrying in a loop), but for
+            // now, simply bailing out seems wise.
+            let r = nix::errno::Errno::result(r).map(|r| r as usize);
+            let num_bytes = r.map_err(|e| {
+                CrucibleError::IoError(format!(
+                    "extent {}: read failed: {e}",
+                    self.extent_number
+                ))
+            })?;
+            if num_bytes != expected_bytes {
+                return Err(CrucibleError::IoError(format!(
+                    "extent {}: incomplete read \
+                     (expected {expected_bytes}, got {num_bytes})",
+                    self.extent_number
+                )));
+            }
+            // SAFETY: we just initialized this chunk of the buffer
+            unsafe {
+                buf.set_len(expected_bytes);
+            }
 
             cdt::extent__read__file__done!(|| {
                 (job_id.0, self.extent_number, n_contiguous_blocks as u64)
@@ -388,6 +413,7 @@ impl SqliteMoreInner {
 
             req_run_start += n_contiguous_blocks;
         }
+        out.data.unsplit(buf);
         Ok(())
     }
 
