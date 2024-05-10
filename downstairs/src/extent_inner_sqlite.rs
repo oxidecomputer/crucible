@@ -338,7 +338,7 @@ impl SqliteMoreInner {
         if num_bytes != expected_bytes {
             return Err(CrucibleError::IoError(format!(
                 "extent {}: incomplete read \
-                      (expected {expected_bytes}, got {num_bytes})",
+                 (expected {expected_bytes}, got {num_bytes})",
                 self.extent_number
             )));
         }
