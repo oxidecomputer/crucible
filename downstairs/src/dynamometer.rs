@@ -73,9 +73,9 @@ pub async fn dynamometer(
                                 },
                             ),
                         };
-                        (
-                            eid as u64,
-                            ExtentWrite {
+                        RegionWriteReq {
+                            extent: eid as u64,
+                            write: ExtentWrite {
                                 offset: Block::new_with_ddef(
                                     i as u64 + block_offset,
                                     &ddef,
@@ -83,7 +83,7 @@ pub async fn dynamometer(
                                 data: block_bytes.clone(),
                                 block_contexts: vec![ctx],
                             },
-                        )
+                        }
                     })
                     .collect();
                 let rw = RegionWrite(writes);

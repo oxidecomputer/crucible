@@ -320,11 +320,18 @@ pub(crate) struct ExtentWrite {
 
 /// A `RegionWrite` is an ordered list of extent writes
 ///
-/// Each element is a tuple of `(extent id, write)`. The same extent may appear
-/// multiple times in the output list, if the source write has multiple
-/// non-contiguous writes to that extent.
-#[derive(Debug, Default, Clone, Eq, PartialEq)]
-pub(crate) struct RegionWrite(Vec<(u64, ExtentWrite)>);
+/// Each element is a `RegionWriteReq`, i.e. a tuple of `(extent id, write)`.
+/// The same extent may appear multiple times in the output list, if the source
+/// write has multiple non-contiguous writes to that extent.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct RegionWrite(Vec<RegionWriteReq>);
+
+/// A single request within a `RegionWrite`
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct RegionWriteReq {
+    extent: u64,
+    write: ExtentWrite,
+}
 
 impl RegionWrite {
     /// Destructures into a list of contiguous writes, borrowing the buffer
@@ -368,10 +375,10 @@ impl RegionWrite {
     fn can_append(&self, b: &crucible_protocol::WriteBlockMetadata) -> bool {
         match self.0.last() {
             None => false,
-            Some((prev_extent, prev_write)) => {
-                *prev_extent == b.eid
-                    && prev_write.offset.value
-                        + prev_write.block_contexts.len() as u64
+            Some(prev) => {
+                prev.extent == b.eid
+                    && prev.write.offset.value
+                        + prev.write.block_contexts.len() as u64
                         == b.offset.value
             }
         }
@@ -382,10 +389,11 @@ impl RegionWrite {
     /// # Panics
     /// If the last write already has data
     fn set_last_data(&mut self, block_size: usize, buf: &mut Bytes) {
-        if let Some((_, prev)) = self.0.last_mut() {
-            assert!(prev.data.is_empty());
-            let data = buf.split_to(prev.block_contexts.len() * block_size);
-            prev.data = data;
+        if let Some(prev) = self.0.last_mut() {
+            assert!(prev.write.data.is_empty());
+            let data =
+                buf.split_to(prev.write.block_contexts.len() * block_size);
+            prev.write.data = data;
         }
     }
 
@@ -394,28 +402,28 @@ impl RegionWrite {
     /// # Panics
     /// If there is no write
     fn append_block_context(&mut self, ctx: BlockContext) {
-        self.0.last_mut().unwrap().1.block_contexts.push(ctx);
+        self.0.last_mut().unwrap().write.block_contexts.push(ctx);
     }
 
     /// Begins a new write, guided by the given metadata
     fn begin_write(&mut self, b: crucible_protocol::WriteBlockMetadata) {
-        self.0.push((
-            b.eid,
-            ExtentWrite {
+        self.0.push(RegionWriteReq {
+            extent: b.eid,
+            write: ExtentWrite {
                 offset: b.offset,
                 block_contexts: vec![b.block_context],
                 data: bytes::Bytes::default(),
             },
-        ));
+        });
     }
 
-    fn iter(&self) -> impl Iterator<Item = &(u64, ExtentWrite)> {
+    fn iter(&self) -> impl Iterator<Item = &RegionWriteReq> {
         self.0.iter()
     }
 }
 
 impl IntoIterator for RegionWrite {
-    type Item = (u64, ExtentWrite);
+    type Item = RegionWriteReq;
     type IntoIter = std::vec::IntoIter<Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -4229,9 +4237,9 @@ mod test {
         let data = Bytes::from(vec![9u8; 512]);
         let offset = Block::new_512(1);
 
-        RegionWrite(vec![(
-            eid,
-            ExtentWrite {
+        RegionWrite(vec![RegionWriteReq {
+            extent: eid,
+            write: ExtentWrite {
                 offset,
                 data,
                 block_contexts: vec![BlockContext {
@@ -4247,7 +4255,7 @@ mod test {
                     hash: 14137680576404864188, // Hash for all 9s
                 }],
             },
-        )])
+        }])
     }
 
     #[tokio::test]
@@ -6748,9 +6756,9 @@ mod test {
         let data = Bytes::from(vec![1u8; 512 * 2]);
         let w = RegionWrite::new(&blocks, data).unwrap();
         assert_eq!(w.0.len(), 1);
-        assert_eq!(w.0[0].0, 0);
-        assert_eq!(w.0[0].1.offset, Block::new_512(0));
-        assert_eq!(w.0[0].1.data.len(), 512 * 2);
+        assert_eq!(w.0[0].extent, 0);
+        assert_eq!(w.0[0].write.offset, Block::new_512(0));
+        assert_eq!(w.0[0].write.data.len(), 512 * 2);
 
         // Two non-contiguous blocks
         let blocks = vec![
@@ -6774,12 +6782,12 @@ mod test {
         let data = Bytes::from(vec![1u8; 512 * 2]);
         let w = RegionWrite::new(&blocks, data).unwrap();
         assert_eq!(w.0.len(), 2);
-        assert_eq!(w.0[0].0, 1);
-        assert_eq!(w.0[0].1.offset, Block::new_512(0));
-        assert_eq!(w.0[0].1.data.len(), 512);
-        assert_eq!(w.0[1].0, 2);
-        assert_eq!(w.0[1].1.offset, Block::new_512(1));
-        assert_eq!(w.0[1].1.data.len(), 512);
+        assert_eq!(w.0[0].extent, 1);
+        assert_eq!(w.0[0].write.offset, Block::new_512(0));
+        assert_eq!(w.0[0].write.data.len(), 512);
+        assert_eq!(w.0[1].extent, 2);
+        assert_eq!(w.0[1].write.offset, Block::new_512(1));
+        assert_eq!(w.0[1].write.data.len(), 512);
 
         // Overlapping writes to the same block
         let blocks = vec![
@@ -6803,12 +6811,12 @@ mod test {
         let data = Bytes::from(vec![1u8; 512 * 2]);
         let w = RegionWrite::new(&blocks, data).unwrap();
         assert_eq!(w.0.len(), 2);
-        assert_eq!(w.0[0].0, 1);
-        assert_eq!(w.0[0].1.offset, Block::new_512(3));
-        assert_eq!(w.0[0].1.data.len(), 512);
-        assert_eq!(w.0[1].0, 1);
-        assert_eq!(w.0[1].1.offset, Block::new_512(3));
-        assert_eq!(w.0[1].1.data.len(), 512);
+        assert_eq!(w.0[0].extent, 1);
+        assert_eq!(w.0[0].write.offset, Block::new_512(3));
+        assert_eq!(w.0[0].write.data.len(), 512);
+        assert_eq!(w.0[1].extent, 1);
+        assert_eq!(w.0[1].write.offset, Block::new_512(3));
+        assert_eq!(w.0[1].write.data.len(), 512);
 
         // Mismatched block / data sizes
         let blocks = vec![WriteBlockMetadata {

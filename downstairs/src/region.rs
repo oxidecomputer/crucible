@@ -768,8 +768,9 @@ impl Region {
         write: &RegionWrite,
     ) -> Result<(), CrucibleError> {
         let block_size = self.def().block_size() as usize;
-        for (_eid, w) in write.iter() {
+        for req in write.iter() {
             // TODO do some of `check_input` here instead of panicking?
+            let w = &req.write;
             if w.data.len() / block_size != w.block_contexts.len() {
                 panic!("invalid write; block count must match context count");
             }
@@ -818,12 +819,14 @@ impl Region {
         } else {
             cdt::os__write__start!(|| job_id.0);
         }
-        for (extent_id, w) in writes {
-            let extent = self.get_opened_extent_mut(extent_id as usize);
-            extent.write(job_id, w, only_write_unwritten).await?;
+        for req in writes {
+            let extent = self.get_opened_extent_mut(req.extent as usize);
+            extent
+                .write(job_id, req.write, only_write_unwritten)
+                .await?;
 
             // Mark any extents we sent a write-command to as potentially dirty
-            self.dirty_extents.insert(extent_id as usize);
+            self.dirty_extents.insert(req.extent as usize);
         }
 
         if only_write_unwritten {
@@ -1680,9 +1683,9 @@ pub(crate) mod test {
         region
             .region_write(
                 RegionWrite(vec![
-                    (
-                        1,
-                        ExtentWrite {
+                    RegionWriteReq {
+                        extent: 1,
+                        write: ExtentWrite {
                             offset: Block::new_512(0),
                             data: Bytes::from(vec![1u8; 512]),
                             block_contexts: vec![BlockContext {
@@ -1690,10 +1693,10 @@ pub(crate) mod test {
                                 hash: 8717892996238908351, // hash for all 1s
                             }],
                         },
-                    ),
-                    (
-                        2,
-                        ExtentWrite {
+                    },
+                    RegionWriteReq {
+                        extent: 2,
+                        write: ExtentWrite {
                             offset: Block::new_512(0),
                             data: Bytes::from(vec![2u8; 512]),
                             block_contexts: vec![BlockContext {
@@ -1701,7 +1704,7 @@ pub(crate) mod test {
                                 hash: 2192425179333611943, // hash for all 2s
                             }],
                         },
-                    ),
+                    },
                 ]),
                 JobId(0),
                 false,
@@ -1786,9 +1789,9 @@ pub(crate) mod test {
         region
             .region_write(
                 RegionWrite(vec![
-                    (
-                        1,
-                        ExtentWrite {
+                    RegionWriteReq {
+                        extent: 1,
+                        write: ExtentWrite {
                             offset: Block::new_512(0),
                             data: Bytes::from(vec![1u8; 512]),
                             block_contexts: vec![BlockContext {
@@ -1796,10 +1799,10 @@ pub(crate) mod test {
                                 hash: 8717892996238908351, // hash for all 1s
                             }],
                         },
-                    ),
-                    (
-                        2,
-                        ExtentWrite {
+                    },
+                    RegionWriteReq {
+                        extent: 2,
+                        write: ExtentWrite {
                             offset: Block::new_512(0),
                             data: Bytes::from(vec![2u8; 512]),
                             block_contexts: vec![BlockContext {
@@ -1807,7 +1810,7 @@ pub(crate) mod test {
                                 hash: 2192425179333611943, // hash for all 2s
                             }],
                         },
-                    ),
+                    },
                 ]),
                 JobId(0),
                 false,
@@ -2255,14 +2258,14 @@ pub(crate) mod test {
                 })
                 .collect();
 
-            writes.push((
-                eid,
-                ExtentWrite {
+            writes.push(RegionWriteReq {
+                extent: eid,
+                write: ExtentWrite {
                     offset,
                     data,
                     block_contexts,
                 },
-            ));
+            });
         }
 
         region
@@ -2459,9 +2462,9 @@ pub(crate) mod test {
 
         region
             .region_write(
-                RegionWrite(vec![(
-                    0,
-                    ExtentWrite {
+                RegionWrite(vec![RegionWriteReq {
+                    extent: 0,
+                    write: ExtentWrite {
                         offset: Block::new_512(0),
                         data,
                         block_contexts: vec![BlockContext {
@@ -2469,7 +2472,7 @@ pub(crate) mod test {
                             hash,
                         }],
                     },
-                )]),
+                }]),
                 JobId(124),
                 true, // only_write_unwritten
             )
@@ -2523,7 +2526,11 @@ pub(crate) mod test {
         };
 
         region
-            .region_write(RegionWrite(vec![(0, write)]), JobId(0), false)
+            .region_write(
+                RegionWrite(vec![RegionWriteReq { extent: 0, write }]),
+                JobId(0),
+                false,
+            )
             .await
             .unwrap();
     }
@@ -2565,7 +2572,11 @@ pub(crate) mod test {
         };
 
         region
-            .region_write(RegionWrite(vec![(eid, write)]), JobId(0), true)
+            .region_write(
+                RegionWrite(vec![RegionWriteReq { extent: eid, write }]),
+                JobId(0),
+                true,
+            )
             .await
             .unwrap();
 
@@ -2629,7 +2640,11 @@ pub(crate) mod test {
         };
 
         region
-            .region_write(RegionWrite(vec![(eid, write)]), JobId(0), false)
+            .region_write(
+                RegionWrite(vec![RegionWriteReq { extent: eid, write }]),
+                JobId(0),
+                false,
+            )
             .await
             .unwrap();
 
@@ -2653,7 +2668,11 @@ pub(crate) mod test {
         };
         // Do the write again, but with only_write_unwritten set now.
         region
-            .region_write(RegionWrite(vec![(eid, write)]), JobId(1), true)
+            .region_write(
+                RegionWrite(vec![RegionWriteReq { extent: eid, write }]),
+                JobId(1),
+                true,
+            )
             .await
             .unwrap();
 
@@ -2717,7 +2736,11 @@ pub(crate) mod test {
         };
 
         region
-            .region_write(RegionWrite(vec![(eid, write)]), JobId(0), true)
+            .region_write(
+                RegionWrite(vec![RegionWriteReq { extent: eid, write }]),
+                JobId(0),
+                true,
+            )
             .await
             .unwrap();
 
@@ -2754,7 +2777,11 @@ pub(crate) mod test {
 
         // Do the write again, but with only_write_unwritten set now.
         region
-            .region_write(RegionWrite(vec![(eid, write)]), JobId(1), true)
+            .region_write(
+                RegionWrite(vec![RegionWriteReq { extent: eid, write }]),
+                JobId(1),
+                true,
+            )
             .await
             .unwrap();
 
@@ -2873,7 +2900,11 @@ pub(crate) mod test {
 
         // Now write just one block
         region
-            .region_write(RegionWrite(vec![(eid, write)]), JobId(0), false)
+            .region_write(
+                RegionWrite(vec![RegionWriteReq { extent: eid, write }]),
+                JobId(0),
+                false,
+            )
             .await
             .unwrap();
 
@@ -2956,7 +2987,11 @@ pub(crate) mod test {
 
         // Now write just to the second block.
         region
-            .region_write(RegionWrite(vec![(eid, write)]), JobId(0), false)
+            .region_write(
+                RegionWrite(vec![RegionWriteReq { extent: eid, write }]),
+                JobId(0),
+                false,
+            )
             .await
             .unwrap();
 
@@ -3043,7 +3078,11 @@ pub(crate) mod test {
 
         // Now write just to the second block.
         region
-            .region_write(RegionWrite(vec![(eid, write)]), JobId(0), false)
+            .region_write(
+                RegionWrite(vec![RegionWriteReq { extent: eid, write }]),
+                JobId(0),
+                false,
+            )
             .await
             .unwrap();
 
@@ -3070,7 +3109,11 @@ pub(crate) mod test {
 
         // send only_write_unwritten command.
         region
-            .region_write(RegionWrite(vec![(eid, write)]), JobId(0), true)
+            .region_write(
+                RegionWrite(vec![RegionWriteReq { extent: eid, write }]),
+                JobId(0),
+                true,
+            )
             .await
             .unwrap();
 
@@ -3148,7 +3191,11 @@ pub(crate) mod test {
 
             // Now write just one block
             region
-                .region_write(RegionWrite(vec![(eid, write)]), JobId(0), false)
+                .region_write(
+                    RegionWrite(vec![RegionWriteReq { extent: eid, write }]),
+                    JobId(0),
+                    false,
+                )
                 .await
                 .unwrap();
         }
@@ -3192,9 +3239,9 @@ pub(crate) mod test {
         offset: crucible_common::Block,
     ) -> RegionWrite {
         let data = Bytes::from(vec![9u8; 512]);
-        RegionWrite(vec![(
-            eid,
-            ExtentWrite {
+        RegionWrite(vec![RegionWriteReq {
+            extent: eid,
+            write: ExtentWrite {
                 offset,
                 data,
                 block_contexts: vec![BlockContext {
@@ -3210,7 +3257,7 @@ pub(crate) mod test {
                     hash: 14137680576404864188, // Hash for all 9s
                 }],
             },
-        )])
+        }])
     }
 
     async fn test_flush_extent_limit_base(backend: Backend) {
@@ -3408,7 +3455,11 @@ pub(crate) mod test {
         };
 
         region
-            .region_write(RegionWrite(vec![(eid, write)]), JobId(0), true)
+            .region_write(
+                RegionWrite(vec![RegionWriteReq { extent: eid, write }]),
+                JobId(0),
+                true,
+            )
             .await
             .unwrap();
 
@@ -3467,7 +3518,11 @@ pub(crate) mod test {
         };
 
         region
-            .region_write(RegionWrite(vec![(eid, write)]), JobId(0), true)
+            .region_write(
+                RegionWrite(vec![RegionWriteReq { extent: eid, write }]),
+                JobId(0),
+                true,
+            )
             .await
             .unwrap();
 
@@ -3546,14 +3601,14 @@ pub(crate) mod test {
                                 encryption_context: None,
                             })
                             .collect();
-                        (
-                            0,
-                            ExtentWrite {
+                        RegionWriteReq {
+                            extent: 0,
+                            write: ExtentWrite {
                                 offset: Block::new_512(range.start),
                                 data: Bytes::from(data.as_slice().to_vec()),
                                 block_contexts,
                             },
-                        )
+                        }
                     })
                     .collect();
                 RegionWrite(writes)
@@ -3597,7 +3652,7 @@ pub(crate) mod test {
 
             // What we expect is the hashes for the last write we did
             let expected_ctxts: Vec<_> =
-                last_writes.0[i].1.block_contexts.clone();
+                last_writes.0[i].write.block_contexts.clone();
 
             // Check that they're right.
             assert_eq!(expected_ctxts, actual_ctxts);
@@ -3643,7 +3698,10 @@ pub(crate) mod test {
         for w in &writes {
             region
                 .region_write(
-                    RegionWrite(vec![(0, w.clone())]),
+                    RegionWrite(vec![RegionWriteReq {
+                        extent: 0,
+                        write: w.clone(),
+                    }]),
                     JobId(0),
                     false,
                 )
@@ -3712,7 +3770,11 @@ pub(crate) mod test {
         };
 
         let result = region
-            .region_write(RegionWrite(vec![(0, write)]), JobId(0), false)
+            .region_write(
+                RegionWrite(vec![RegionWriteReq { extent: 0, write }]),
+                JobId(0),
+                false,
+            )
             .await;
 
         assert!(result.is_err());
@@ -3798,14 +3860,14 @@ pub(crate) mod test {
                 })
                 .collect();
 
-            writes.push((
-                u64::from(eid),
-                ExtentWrite {
+            writes.push(RegionWriteReq {
+                extent: u64::from(eid),
+                write: ExtentWrite {
                     offset: Block::new_512(0),
                     data,
                     block_contexts,
                 },
-            ));
+            });
         }
 
         region
@@ -3938,7 +4000,7 @@ pub(crate) mod test {
     fn prepare_writes(
         offsets: std::ops::Range<usize>,
         data: &mut [u8],
-    ) -> Vec<(u64, ExtentWrite)> {
+    ) -> Vec<RegionWriteReq> {
         let mut writes = vec![];
         let mut rng = rand::thread_rng();
 
@@ -3963,16 +4025,16 @@ pub(crate) mod test {
             // alter data as writes are prepared
             data[start * 512..][..buffer.len()].copy_from_slice(&buffer);
 
-            writes.push((
-                eid as u64,
-                ExtentWrite {
+            writes.push(RegionWriteReq {
+                extent: eid as u64,
+                write: ExtentWrite {
                     offset: Block::new_512(
                         (start as u64) % (EXTENT_SIZE as u64),
                     ),
                     data: Bytes::from(buffer),
                     block_contexts,
                 },
-            ));
+            });
         }
         assert!(!writes.is_empty());
 
