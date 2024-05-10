@@ -173,7 +173,7 @@ impl ExtentInner for RawInner {
         &mut self,
         job_id: JobId,
         req: ExtentReadRequest,
-        _iov_max: usize, // unused by SQLite backend
+        _iov_max: usize, // unused by raw backend
     ) -> Result<ExtentReadResponse, CrucibleError> {
         let mut buf = req.data;
         let block_size = self.extent_size.block_size_in_bytes() as u64;

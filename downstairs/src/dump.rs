@@ -539,11 +539,11 @@ async fn show_extent(
 
             let response = region
                 .region_read(
-                    &RegionReadRequest(vec![(
-                        cmp_extent as u64,
-                        Block::new_with_ddef(block, &region.def()),
-                        NonZeroUsize::new(1).unwrap(),
-                    )]),
+                    &RegionReadRequest(vec![RegionReadReq {
+                        extent: cmp_extent as u64,
+                        offset: Block::new_with_ddef(block, &region.def()),
+                        count: NonZeroUsize::new(1).unwrap(),
+                    }]),
                     JobId(0),
                 )
                 .await?;
@@ -654,11 +654,14 @@ async fn show_extent_block(
 
         let response = region
             .region_read(
-                &RegionReadRequest(vec![(
-                    cmp_extent as u64,
-                    Block::new_with_ddef(block_in_extent, &region.def()),
-                    NonZeroUsize::new(1).unwrap(),
-                )]),
+                &RegionReadRequest(vec![RegionReadReq {
+                    extent: cmp_extent as u64,
+                    offset: Block::new_with_ddef(
+                        block_in_extent,
+                        &region.def(),
+                    ),
+                    count: NonZeroUsize::new(1).unwrap(),
+                }]),
                 JobId(0),
             )
             .await?;

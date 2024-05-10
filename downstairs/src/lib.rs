@@ -135,9 +135,17 @@ pub(crate) struct ExtentReadRequest {
     data: BytesMut,
 }
 
-/// Ordered list of read requests, as `(extent, block, count)` tuples
+/// Ordered list of read requests
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub(crate) struct RegionReadRequest(Vec<(u64, Block, NonZeroUsize)>);
+pub(crate) struct RegionReadRequest(Vec<RegionReadReq>);
+
+/// Inner type for a single read requests
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct RegionReadReq {
+    extent: u64,
+    offset: Block,
+    count: NonZeroUsize,
+}
 
 impl RegionReadRequest {
     fn new(reqs: &[crucible_protocol::ReadRequest]) -> Self {
@@ -146,34 +154,34 @@ impl RegionReadRequest {
             match out.0.last_mut() {
                 // Check whether this read request is contiguous and in the same
                 // extent as the previous read request
-                Some((eid, offset, size))
-                    if *eid == req.eid
-                        && offset.value + size.get() as u64
+                Some(prev)
+                    if prev.extent == req.eid
+                        && prev.offset.value + prev.count.get() as u64
                             == req.offset.value =>
                 {
                     // If so, enlarge it by one block
-                    *size = size.saturating_add(1);
+                    prev.count = prev.count.saturating_add(1);
                 }
                 _ => {
                     // Otherwise, begin a new request
-                    out.0.push((
-                        req.eid,
-                        req.offset,
-                        NonZeroUsize::new(1).unwrap(),
-                    ));
+                    out.0.push(RegionReadReq {
+                        extent: req.eid,
+                        offset: req.offset,
+                        count: NonZeroUsize::new(1).unwrap(),
+                    });
                 }
             }
         }
         out
     }
 
-    fn iter(&self) -> impl Iterator<Item = &(u64, Block, NonZeroUsize)> {
+    fn iter(&self) -> impl Iterator<Item = &RegionReadReq> {
         self.0.iter()
     }
 }
 
 impl IntoIterator for RegionReadRequest {
-    type Item = (u64, Block, NonZeroUsize);
+    type Item = RegionReadReq;
     type IntoIter = std::vec::IntoIter<Self::Item>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -347,11 +355,14 @@ pub async fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
 
                 let response = region
                     .region_read(
-                        &RegionReadRequest(vec![(
-                            eid as u64,
-                            Block::new_with_ddef(block_offset, &region.def()),
-                            NonZeroUsize::new(1).unwrap(),
-                        )]),
+                        &RegionReadRequest(vec![RegionReadReq {
+                            extent: eid as u64,
+                            offset: Block::new_with_ddef(
+                                block_offset,
+                                &region.def(),
+                            ),
+                            count: NonZeroUsize::new(1).unwrap(),
+                        }]),
                         JobId(0),
                     )
                     .await?;
@@ -1849,16 +1860,16 @@ impl Downstairs {
                     Ok(r) => (
                         Ok(requests
                             .iter()
-                            .flat_map(|(eid, offset, size)| {
+                            .flat_map(|req| {
                                 // Iterate over blocks within this extent.  By
                                 // construction, each `ReadRequest` will never
                                 // overstep the bounds of the extent.
-                                (0..size.get()).map(|i| {
+                                (0..req.count.get()).map(|i| {
                                     (
-                                        *eid,
+                                        req.extent,
                                         Block {
-                                            value: offset.value + i as u64,
-                                            shift: offset.shift,
+                                            value: req.offset.value + i as u64,
+                                            shift: req.offset.shift,
                                         },
                                     )
                                 })
@@ -3615,11 +3626,11 @@ mod test {
                 } else {
                     IOop::Read {
                         dependencies: deps,
-                        requests: RegionReadRequest(vec![(
-                            1,
-                            Block::new_512(1),
-                            NonZeroUsize::new(1).unwrap(),
-                        )]),
+                        requests: RegionReadRequest(vec![RegionReadReq {
+                            extent: 1,
+                            offset: Block::new_512(1),
+                            count: NonZeroUsize::new(1).unwrap(),
+                        }]),
                     }
                 },
                 state: WorkState::New,
@@ -3785,22 +3796,22 @@ mod test {
 
         let rio = IOop::Read {
             dependencies: Vec::new(),
-            requests: RegionReadRequest(vec![(
-                0,
-                Block::new_512(1),
-                NonZeroUsize::new(1).unwrap(),
-            )]),
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: 0,
+                offset: Block::new_512(1),
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection, JobId(1000), rio)?;
 
         let deps = vec![JobId(1000)];
         let rio = IOop::Read {
             dependencies: deps,
-            requests: RegionReadRequest(vec![(
-                1,
-                Block::new_512(1),
-                NonZeroUsize::new(1).unwrap(),
-            )]),
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: 1,
+                offset: Block::new_512(1),
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection, JobId(1001), rio)?;
 
@@ -3901,11 +3912,11 @@ mod test {
         let deps = vec![JobId(1000), JobId(1001)];
         let rio = IOop::Read {
             dependencies: deps,
-            requests: RegionReadRequest(vec![(
-                2,
-                Block::new_512(1),
-                NonZeroUsize::new(1).unwrap(),
-            )]),
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: 2,
+                offset: Block::new_512(1),
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection, JobId(1002), rio)?;
 
@@ -5645,11 +5656,11 @@ mod test {
             for offset in 0..region.def().extent_size().value {
                 let response = region
                     .region_read(
-                        &RegionReadRequest(vec![(
-                            eid.into(),
-                            Block::new_512(offset),
-                            NonZeroUsize::new(1).unwrap(),
-                        )]),
+                        &RegionReadRequest(vec![RegionReadReq {
+                            extent: eid.into(),
+                            offset: Block::new_512(offset),
+                            count: NonZeroUsize::new(1).unwrap(),
+                        }]),
                         JobId(0),
                     )
                     .await?;
@@ -6032,21 +6043,21 @@ mod test {
 
         let read_1 = IOop::Read {
             dependencies: Vec::new(),
-            requests: RegionReadRequest(vec![(
-                0,
-                Block::new_512(1),
-                NonZeroUsize::new(1).unwrap(),
-            )]),
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: 0,
+                offset: Block::new_512(1),
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection_1, JobId(1000), read_1.clone())?;
 
         let read_2 = IOop::Read {
             dependencies: Vec::new(),
-            requests: RegionReadRequest(vec![(
-                1,
-                Block::new_512(2),
-                NonZeroUsize::new(1).unwrap(),
-            )]),
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: 1,
+                offset: Block::new_512(2),
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection_2, JobId(1000), read_2.clone())?;
 
@@ -6118,11 +6129,11 @@ mod test {
         // Add one job, id 1000
         let rio = IOop::Read {
             dependencies: Vec::new(),
-            requests: RegionReadRequest(vec![(
-                0,
-                Block::new_512(1),
-                NonZeroUsize::new(1).unwrap(),
-            )]),
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: 0,
+                offset: Block::new_512(1),
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection_1, JobId(1000), rio)?;
 
@@ -6209,11 +6220,11 @@ mod test {
         // Add one job, id 1000
         let rio = IOop::Read {
             dependencies: Vec::new(),
-            requests: RegionReadRequest(vec![(
-                0,
-                Block::new_512(1),
-                NonZeroUsize::new(1).unwrap(),
-            )]),
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: 0,
+                offset: Block::new_512(1),
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection_1, JobId(1000), rio)?;
 
@@ -6300,11 +6311,11 @@ mod test {
         // Add one job, id 1000
         let rio = IOop::Read {
             dependencies: Vec::new(),
-            requests: RegionReadRequest(vec![(
-                0,
-                Block::new_512(1),
-                NonZeroUsize::new(1).unwrap(),
-            )]),
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: 0,
+                offset: Block::new_512(1),
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection_1, JobId(1000), rio)?;
 

@@ -846,14 +846,14 @@ impl Region {
         job_id: JobId,
     ) -> Result<RegionReadResponse, CrucibleError> {
         let mut response = RegionReadResponse::with_capacity(
-            req.iter().map(|(_eid, _offset, size)| size.get()).sum(),
+            req.iter().map(|req| req.count.get()).sum(),
             self.def.block_size(),
         );
 
         cdt::os__read__start!(|| job_id.0);
-        for &(eid, offset, size) in req.iter() {
-            let extent = self.get_opened_extent_mut(eid as usize);
-            let req = response.request(offset, size.get());
+        for req in req.iter() {
+            let extent = self.get_opened_extent_mut(req.extent as usize);
+            let req = response.request(req.offset, req.count.get());
             let out = extent.read(job_id, req).await?;
 
             // Note that we only call `unsplit` here if `Extent::read` returned
@@ -1858,8 +1858,16 @@ pub(crate) mod test {
         let out = region
             .region_read(
                 &RegionReadRequest(vec![
-                    (1, Block::new_512(0), NonZeroUsize::new(1).unwrap()),
-                    (2, Block::new_512(0), NonZeroUsize::new(1).unwrap()),
+                    RegionReadReq {
+                        extent: 1,
+                        offset: Block::new_512(0),
+                        count: NonZeroUsize::new(1).unwrap(),
+                    },
+                    RegionReadReq {
+                        extent: 2,
+                        offset: Block::new_512(0),
+                        count: NonZeroUsize::new(1).unwrap(),
+                    },
                 ]),
                 JobId(0),
             )
@@ -1953,8 +1961,16 @@ pub(crate) mod test {
         let out = region
             .region_read(
                 &RegionReadRequest(vec![
-                    (1, Block::new_512(0), NonZeroUsize::new(1).unwrap()),
-                    (2, Block::new_512(0), NonZeroUsize::new(1).unwrap()),
+                    RegionReadReq {
+                        extent: 1,
+                        offset: Block::new_512(0),
+                        count: NonZeroUsize::new(1).unwrap(),
+                    },
+                    RegionReadReq {
+                        extent: 2,
+                        offset: Block::new_512(0),
+                        count: NonZeroUsize::new(1).unwrap(),
+                    },
                 ]),
                 JobId(0),
             )
@@ -2576,11 +2592,11 @@ pub(crate) mod test {
 
         let responses = region
             .region_read(
-                &RegionReadRequest(vec![(
-                    0,
-                    Block::new_512(0),
-                    NonZeroUsize::new(1).unwrap(),
-                )]),
+                &RegionReadRequest(vec![RegionReadReq {
+                    extent: 0,
+                    offset: Block::new_512(0),
+                    count: NonZeroUsize::new(1).unwrap(),
+                }]),
                 JobId(125),
             )
             .await
@@ -2672,11 +2688,11 @@ pub(crate) mod test {
         // Now read back that block, make sure it is updated.
         let responses = region
             .region_read(
-                &RegionReadRequest(vec![(
-                    eid,
+                &RegionReadRequest(vec![RegionReadReq {
+                    extent: eid,
                     offset,
-                    NonZeroUsize::new(1).unwrap(),
-                )]),
+                    count: NonZeroUsize::new(1).unwrap(),
+                }]),
                 JobId(0),
             )
             .await
@@ -2754,11 +2770,11 @@ pub(crate) mod test {
         // Now read back that block, make sure it has the first write
         let responses = region
             .region_read(
-                &RegionReadRequest(vec![(
-                    eid,
+                &RegionReadRequest(vec![RegionReadReq {
+                    extent: eid,
                     offset,
-                    NonZeroUsize::new(1).unwrap(),
-                )]),
+                    count: NonZeroUsize::new(1).unwrap(),
+                }]),
                 JobId(2),
             )
             .await
@@ -2856,11 +2872,11 @@ pub(crate) mod test {
         // Read back our block, make sure it has the first write data
         let responses = region
             .region_read(
-                &RegionReadRequest(vec![(
-                    eid,
+                &RegionReadRequest(vec![RegionReadReq {
+                    extent: eid,
                     offset,
-                    NonZeroUsize::new(1).unwrap(),
-                )]),
+                    count: NonZeroUsize::new(1).unwrap(),
+                }]),
                 JobId(2),
             )
             .await
@@ -3947,11 +3963,11 @@ pub(crate) mod test {
 
         let responses = region
             .region_read(
-                &RegionReadRequest(vec![(
-                    0,
-                    Block::new_512(0),
-                    NonZeroUsize::new(1).unwrap(),
-                )]),
+                &RegionReadRequest(vec![RegionReadReq {
+                    extent: 0,
+                    offset: Block::new_512(0),
+                    count: NonZeroUsize::new(1).unwrap(),
+                }]),
                 JobId(0),
             )
             .await
