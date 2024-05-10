@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::convert::TryInto;
 use std::fmt::Debug;
 use std::fs::{rename, File, OpenOptions};
-use std::io::{IoSlice, Write};
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -758,27 +758,39 @@ impl Region {
         Ok(result)
     }
 
-    pub fn validate_hashes(
+    /// Checks that the hashes are valid for all of the input writes
+    ///
+    /// # Panics
+    /// If any write is structurally invalid, i.e. having a different number of
+    /// blocks and block contexts.
+    fn validate_hashes(
         &self,
-        writes: &[crucible_protocol::Write],
+        write: &RegionWrite,
     ) -> Result<(), CrucibleError> {
-        for write in writes {
-            let computed_hash = if let Some(encryption_context) =
-                &write.block_context.encryption_context
+        let block_size = self.def().block_size() as usize;
+        for (_eid, w) in write.iter() {
+            // TODO do some of `check_input` here instead of panicking?
+            if w.data.len() / block_size != w.block_contexts.len() {
+                panic!("invalid write; block count must match context count");
+            }
+            for (block, ctx) in w.data.chunks(block_size).zip(&w.block_contexts)
             {
-                integrity_hash(&[
-                    &encryption_context.nonce[..],
-                    &encryption_context.tag[..],
-                    &write.data[..],
-                ])
-            } else {
-                integrity_hash(&[&write.data[..]])
-            };
+                let computed_hash =
+                    if let Some(encryption_context) = &ctx.encryption_context {
+                        integrity_hash(&[
+                            &encryption_context.nonce[..],
+                            &encryption_context.tag[..],
+                            &block,
+                        ])
+                    } else {
+                        integrity_hash(&[&block])
+                    };
 
-            if computed_hash != write.block_context.hash {
-                error!(self.log, "Failed write hash validation");
-                // TODO: print out the extent and block where this failed!!
-                crucible_bail!(HashMismatch);
+                if computed_hash != ctx.hash {
+                    error!(self.log, "Failed write hash validation");
+                    // TODO: print out the extent and block where this failed!!
+                    crucible_bail!(HashMismatch);
+                }
             }
         }
 
@@ -788,7 +800,7 @@ impl Region {
     #[instrument]
     pub async fn region_write(
         &mut self,
-        writes: &[crucible_protocol::Write],
+        writes: RegionWrite,
         job_id: JobId,
         only_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
@@ -799,36 +811,20 @@ impl Region {
         /*
          * Before anything, validate hashes
          */
-        self.validate_hashes(writes)?;
-
-        /*
-         * Batch writes so they can all be sent to the appropriate extent
-         * together.
-         */
-        let mut batched_writes: HashMap<usize, Vec<crucible_protocol::Write>> =
-            HashMap::new();
-
-        for write in writes {
-            let extent_vec =
-                batched_writes.entry(write.eid as usize).or_default();
-            extent_vec.push(write.clone());
-        }
+        self.validate_hashes(&writes)?;
 
         if only_write_unwritten {
             cdt::os__writeunwritten__start!(|| job_id.0);
         } else {
             cdt::os__write__start!(|| job_id.0);
         }
-        for eid in batched_writes.keys() {
-            let extent = self.get_opened_extent_mut(*eid);
-            let writes = batched_writes.get(eid).unwrap();
-            extent
-                .write(job_id, &writes[..], only_write_unwritten)
-                .await?;
-        }
+        for (extent_id, w) in writes {
+            let extent = self.get_opened_extent_mut(extent_id as usize);
+            extent.write(job_id, w, only_write_unwritten).await?;
 
-        // Mark any extents we sent a write-command to as potentially dirty
-        self.dirty_extents.extend(batched_writes.keys());
+            // Mark any extents we sent a write-command to as potentially dirty
+            self.dirty_extents.insert(extent_id as usize);
+        }
 
         if only_write_unwritten {
             cdt::os__writeunwritten__done!(|| job_id.0);
@@ -1150,117 +1146,6 @@ pub async fn save_stream_to_file(
     Ok(())
 }
 
-struct BatchedPwritevState<'a> {
-    byte_offset: u64,
-    iovecs: Vec<IoSlice<'a>>,
-    next_block_in_run: u64,
-    expected_bytes: usize,
-}
-
-pub(crate) struct BatchedPwritev<'a> {
-    fd: std::os::fd::BorrowedFd<'a>,
-    capacity: usize,
-    state: Option<BatchedPwritevState<'a>>,
-    block_size: u64,
-    iov_max: usize,
-}
-
-impl<'a> BatchedPwritev<'a> {
-    pub fn new(
-        fd: std::os::fd::BorrowedFd<'a>,
-        capacity: usize,
-        block_size: u64,
-        iov_max: usize,
-    ) -> Self {
-        Self {
-            fd,
-            capacity,
-            state: None,
-            block_size,
-            iov_max,
-        }
-    }
-
-    /// Add a write to the batch. If the write would cause the list of iovecs to
-    /// be larger than IOV_MAX, then `perform_writes` is called.
-    pub fn add_write(
-        &mut self,
-        write: &'a crucible_protocol::Write,
-    ) -> Result<(), CrucibleError> {
-        let block = write.offset.value;
-
-        let should_perform_writes = if let Some(state) = &self.state {
-            // Is this write contiguous with the last?
-            if block == state.next_block_in_run {
-                // If so, then add it to the list. Make sure to flush if the
-                // total size would become larger than IOV_MAX.
-                (state.iovecs.len() + 1) >= self.iov_max
-            } else {
-                // If not, then flush, and start the state all over.
-                true
-            }
-        } else {
-            false
-        };
-
-        if should_perform_writes {
-            self.perform_writes()?;
-        }
-
-        // If perform_writes was called above, then state will be None. If
-        // perform_writes was not called, then:
-        //
-        // - block == state.next_block_in_run, and
-        // - (state.iovecs.len() + 1) <= self.iov_max
-        //
-        // hence the assertion below.
-        if let Some(state) = &mut self.state {
-            assert_eq!(block, state.next_block_in_run);
-            state.iovecs.push(IoSlice::new(&write.data));
-            state.next_block_in_run += 1;
-            state.expected_bytes += write.data.len();
-        } else {
-            // start fresh
-            self.state = Some(BatchedPwritevState {
-                byte_offset: write.offset.value * self.block_size,
-                iovecs: {
-                    let mut iovecs = Vec::with_capacity(self.capacity);
-                    iovecs.push(IoSlice::new(&write.data));
-                    iovecs
-                },
-                expected_bytes: write.data.len(),
-                next_block_in_run: block + 1,
-            });
-        }
-
-        Ok(())
-    }
-
-    // Write bytes out to file target
-    pub fn perform_writes(&mut self) -> Result<(), CrucibleError> {
-        if let Some(state) = &mut self.state {
-            assert!(!state.iovecs.is_empty());
-
-            let n = nix::sys::uio::pwritev(
-                self.fd,
-                &state.iovecs[..],
-                state.byte_offset as i64,
-            )
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
-            if n != state.expected_bytes {
-                return Err(CrucibleError::IoError(format!(
-                    "pwritev incomplete (expected {}, got {n} bytes)",
-                    state.expected_bytes
-                )));
-            }
-
-            self.state = None;
-        }
-
-        Ok(())
-    }
-}
-
 pub fn config_path<P: AsRef<Path>>(dir: P) -> PathBuf {
     let mut out = dir.as_ref().to_path_buf();
     out.push("region.json");
@@ -1270,10 +1155,11 @@ pub fn config_path<P: AsRef<Path>>(dir: P) -> PathBuf {
 #[cfg(test)]
 pub(crate) mod test {
     use bytes::Bytes;
+    use itertools::Itertools;
     use std::fs::rename;
     use std::path::PathBuf;
 
-    use rand::{Rng, RngCore};
+    use rand::RngCore;
     use tempfile::tempdir;
     use uuid::Uuid;
 
@@ -1793,26 +1679,30 @@ pub(crate) mod test {
 
         region
             .region_write(
-                &[
-                    crucible_protocol::Write {
-                        eid: 1,
-                        offset: Block::new_512(0),
-                        data: Bytes::from(vec![1u8; 512]),
-                        block_context: BlockContext {
-                            encryption_context: None,
-                            hash: 8717892996238908351, // hash for all 1s
+                RegionWrite(vec![
+                    (
+                        1,
+                        ExtentWrite {
+                            offset: Block::new_512(0),
+                            data: Bytes::from(vec![1u8; 512]),
+                            block_contexts: vec![BlockContext {
+                                encryption_context: None,
+                                hash: 8717892996238908351, // hash for all 1s
+                            }],
                         },
-                    },
-                    crucible_protocol::Write {
-                        eid: 2,
-                        offset: Block::new_512(0),
-                        data: Bytes::from(vec![2u8; 512]),
-                        block_context: BlockContext {
-                            encryption_context: None,
-                            hash: 2192425179333611943, // hash for all 2s
+                    ),
+                    (
+                        2,
+                        ExtentWrite {
+                            offset: Block::new_512(0),
+                            data: Bytes::from(vec![2u8; 512]),
+                            block_contexts: vec![BlockContext {
+                                encryption_context: None,
+                                hash: 2192425179333611943, // hash for all 2s
+                            }],
                         },
-                    },
-                ],
+                    ),
+                ]),
                 JobId(0),
                 false,
             )
@@ -1895,26 +1785,30 @@ pub(crate) mod test {
         // Make some writes, which we'll check after migration
         region
             .region_write(
-                &[
-                    crucible_protocol::Write {
-                        eid: 1,
-                        offset: Block::new_512(0),
-                        data: Bytes::from(vec![1u8; 512]),
-                        block_context: BlockContext {
-                            encryption_context: None,
-                            hash: 8717892996238908351, // hash for all 1s
+                RegionWrite(vec![
+                    (
+                        1,
+                        ExtentWrite {
+                            offset: Block::new_512(0),
+                            data: Bytes::from(vec![1u8; 512]),
+                            block_contexts: vec![BlockContext {
+                                encryption_context: None,
+                                hash: 8717892996238908351, // hash for all 1s
+                            }],
                         },
-                    },
-                    crucible_protocol::Write {
-                        eid: 2,
-                        offset: Block::new_512(0),
-                        data: Bytes::from(vec![2u8; 512]),
-                        block_context: BlockContext {
-                            encryption_context: None,
-                            hash: 2192425179333611943, // hash for all 2s
+                    ),
+                    (
+                        2,
+                        ExtentWrite {
+                            offset: Block::new_512(0),
+                            data: Bytes::from(vec![2u8; 512]),
+                            block_contexts: vec![BlockContext {
+                                encryption_context: None,
+                                hash: 2192425179333611943, // hash for all 2s
+                            }],
                         },
-                    },
-                ],
+                    ),
+                ]),
                 JobId(0),
                 false,
             )
@@ -2331,6 +2225,53 @@ pub(crate) mod test {
         out
     }
 
+    async fn region_write_all(
+        region: &mut Region,
+        ddef: &RegionDefinition,
+        only_write_unwritten: bool,
+    ) -> Vec<u8> {
+        let total_size: usize = ddef.total_size() as usize;
+        let mut rng = rand::thread_rng();
+        let mut buffer: Vec<u8> = vec![0; total_size];
+        rng.fill_bytes(&mut buffer);
+
+        let mut writes = vec![];
+
+        let bytes_per_extent = ddef.extent_size().value * ddef.block_size();
+        for eid in 0..ddef.extent_count() as u64 {
+            let offset = Block::new_512(0);
+
+            let data = Bytes::from(
+                buffer[(eid * bytes_per_extent) as usize..]
+                    [..bytes_per_extent as usize]
+                    .to_vec(),
+            );
+
+            let block_contexts = data
+                .chunks(512)
+                .map(|chunk| BlockContext {
+                    encryption_context: None,
+                    hash: integrity_hash(&[chunk]),
+                })
+                .collect();
+
+            writes.push((
+                eid,
+                ExtentWrite {
+                    offset,
+                    data,
+                    block_contexts,
+                },
+            ));
+        }
+
+        region
+            .region_write(RegionWrite(writes), JobId(0), only_write_unwritten)
+            .await
+            .unwrap();
+        buffer
+    }
+
     async fn test_big_write(backend: Backend) {
         let dir = tempdir().unwrap();
         let mut region = Region::create_with_backend(
@@ -2344,40 +2285,11 @@ pub(crate) mod test {
         region.extend(3).await.unwrap();
 
         let ddef = region.def();
-        let total_size: usize = ddef.total_size() as usize;
         let num_blocks: usize =
             ddef.extent_size().value as usize * ddef.extent_count() as usize;
 
-        // use region_write to fill region
-
-        let mut rng = rand::thread_rng();
-        let mut buffer: Vec<u8> = vec![0; total_size];
-        rng.fill_bytes(&mut buffer);
-
-        let mut writes: Vec<crucible_protocol::Write> =
-            Vec::with_capacity(num_blocks);
-
-        for i in 0..num_blocks {
-            let eid: u64 = i as u64 / ddef.extent_size().value;
-            let offset: Block =
-                Block::new_512((i as u64) % ddef.extent_size().value);
-
-            let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
-            let data = data.freeze();
-            let hash = integrity_hash(&[&data[..]]);
-
-            writes.push(crucible_protocol::Write {
-                eid,
-                offset,
-                data,
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash,
-                },
-            });
-        }
-
-        region.region_write(&writes, JobId(0), false).await.unwrap();
+        // use region_write_all to fill the entire region
+        let buffer = region_write_all(&mut region, &ddef, false).await;
 
         // read data into File, compare what was written to buffer
         let read_from_files = read_file_data(ddef, dir.path(), backend);
@@ -2419,40 +2331,12 @@ pub(crate) mod test {
         region.extend(3).await?;
 
         let ddef = region.def();
-        let total_size: usize = ddef.total_size() as usize;
         let num_blocks: usize =
             ddef.extent_size().value as usize * ddef.extent_count() as usize;
 
         // use region_write to fill region
+        let buffer = region_write_all(&mut region, &ddef, false).await;
 
-        let mut rng = rand::thread_rng();
-        let mut buffer: Vec<u8> = vec![0; total_size];
-        rng.fill_bytes(&mut buffer);
-
-        let mut writes: Vec<crucible_protocol::Write> =
-            Vec::with_capacity(num_blocks);
-
-        for i in 0..num_blocks {
-            let eid: u64 = i as u64 / ddef.extent_size().value;
-            let offset: Block =
-                Block::new_512((i as u64) % ddef.extent_size().value);
-
-            let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
-            let data = data.freeze();
-            let hash = integrity_hash(&[&data[..]]);
-
-            writes.push(crucible_protocol::Write {
-                eid,
-                offset,
-                data,
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash,
-                },
-            });
-        }
-
-        region.region_write(&writes, JobId(0), false).await?;
         for i in 0..3 {
             region.region_flush_extent(i, 10, 15, JobId(21)).await?;
         }
@@ -2575,15 +2459,17 @@ pub(crate) mod test {
 
         region
             .region_write(
-                &[crucible_protocol::Write {
-                    eid: 0,
-                    offset: Block::new_512(0),
-                    data,
-                    block_context: BlockContext {
-                        encryption_context: None,
-                        hash,
+                RegionWrite(vec![(
+                    0,
+                    ExtentWrite {
+                        offset: Block::new_512(0),
+                        data,
+                        block_contexts: vec![BlockContext {
+                            encryption_context: None,
+                            hash,
+                        }],
                     },
-                }],
+                )]),
                 JobId(124),
                 true, // only_write_unwritten
             )
@@ -2617,28 +2503,29 @@ pub(crate) mod test {
         .unwrap();
         region.extend(1).await.unwrap();
 
-        let data = BytesMut::from(&[1u8; 512][..]);
+        let data = Bytes::from(vec![1u8; 512]);
 
-        let writes: Vec<crucible_protocol::Write> =
-            vec![crucible_protocol::Write {
-                eid: 0,
-                offset: Block::new_512(0),
-                data: data.freeze(),
-                block_context: BlockContext {
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext {
-                            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                            tag: [
-                                4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-                                17, 18, 19,
-                            ],
-                        },
-                    ),
-                    hash: 9163319254371683066,
-                },
-            }];
+        let write = ExtentWrite {
+            offset: Block::new_512(0),
+            data,
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                        tag: [
+                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                            18, 19,
+                        ],
+                    },
+                ),
+                hash: 9163319254371683066,
+            }],
+        };
 
-        region.region_write(&writes, JobId(0), false).await.unwrap();
+        region
+            .region_write(RegionWrite(vec![(0, write)]), JobId(0), false)
+            .await
+            .unwrap();
     }
 
     async fn test_write_unwritten_when_empty(backend: Backend) {
@@ -2656,30 +2543,31 @@ pub(crate) mod test {
         region.extend(1).await.unwrap();
 
         // Fill a buffer with "9"'s (random)
-        let data = BytesMut::from(&[9u8; 512][..]);
+        let data = Bytes::from(vec![9u8; 512]);
         let eid = 0;
         let offset = Block::new_512(0);
 
-        let writes: Vec<crucible_protocol::Write> =
-            vec![crucible_protocol::Write {
-                eid,
-                offset,
-                data: data.freeze(),
-                block_context: BlockContext {
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext {
-                            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                            tag: [
-                                4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-                                17, 18, 19,
-                            ],
-                        },
-                    ),
-                    hash: 14137680576404864188, // Hash for all 9's
-                },
-            }];
+        let write = ExtentWrite {
+            offset,
+            data,
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                        tag: [
+                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                            18, 19,
+                        ],
+                    },
+                ),
+                hash: 14137680576404864188, // Hash for all 9's
+            }],
+        };
 
-        region.region_write(&writes, JobId(0), true).await.unwrap();
+        region
+            .region_write(RegionWrite(vec![(eid, write)]), JobId(0), true)
+            .await
+            .unwrap();
 
         // Verify the dirty bit is now set.
         // We know our EID, so we can shortcut to getting the actual extent.
@@ -2718,54 +2606,56 @@ pub(crate) mod test {
         region.extend(1).await.unwrap();
 
         // Fill a buffer with "9"'s (random)
-        let data = BytesMut::from(&[9u8; 512][..]);
+        let data = Bytes::from(vec![9u8; 512]);
         let eid = 0;
         let offset = Block::new_512(0);
 
         // Write the block
-        let writes: Vec<crucible_protocol::Write> =
-            vec![crucible_protocol::Write {
-                eid,
-                offset,
-                data: data.freeze(),
-                block_context: BlockContext {
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext {
-                            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                            tag: [
-                                4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-                                17, 18, 19,
-                            ],
-                        },
-                    ),
-                    hash: 14137680576404864188, // Hash for all 9's
-                },
-            }];
+        let write = ExtentWrite {
+            offset,
+            data,
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                        tag: [
+                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                            18, 19,
+                        ],
+                    },
+                ),
+                hash: 14137680576404864188, // Hash for all 9's
+            }],
+        };
 
-        region.region_write(&writes, JobId(0), false).await.unwrap();
+        region
+            .region_write(RegionWrite(vec![(eid, write)]), JobId(0), false)
+            .await
+            .unwrap();
 
         // Same block, now try to write something else to it.
-        let data = BytesMut::from(&[1u8; 512][..]);
-        let writes: Vec<crucible_protocol::Write> =
-            vec![crucible_protocol::Write {
-                eid,
-                offset,
-                data: data.freeze(),
-                block_context: BlockContext {
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext {
-                            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                            tag: [
-                                4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-                                17, 18, 19,
-                            ],
-                        },
-                    ),
-                    hash: 9163319254371683066, // hash for all 1s
-                },
-            }];
+        let data = Bytes::from(vec![1u8; 512]);
+        let write = ExtentWrite {
+            offset,
+            data,
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                        tag: [
+                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                            18, 19,
+                        ],
+                    },
+                ),
+                hash: 9163319254371683066, // hash for all 1s
+            }],
+        };
         // Do the write again, but with only_write_unwritten set now.
-        region.region_write(&writes, JobId(1), true).await.unwrap();
+        region
+            .region_write(RegionWrite(vec![(eid, write)]), JobId(1), true)
+            .await
+            .unwrap();
 
         // Now read back that block, make sure it has the first write
         let responses = region
@@ -2804,31 +2694,32 @@ pub(crate) mod test {
         region.extend(1).await.unwrap();
 
         // Fill a buffer with "9"'s
-        let data = BytesMut::from(&[9u8; 512][..]);
+        let data = Bytes::from(vec![9u8; 512]);
         let eid = 0;
         let offset = Block::new_512(0);
 
         // Write the block
-        let writes: Vec<crucible_protocol::Write> =
-            vec![crucible_protocol::Write {
-                eid,
-                offset,
-                data: data.freeze(),
-                block_context: BlockContext {
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext {
-                            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                            tag: [
-                                4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-                                17, 18, 19,
-                            ],
-                        },
-                    ),
-                    hash: 14137680576404864188, // Hash for all 9s
-                },
-            }];
+        let write = ExtentWrite {
+            offset,
+            data,
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                        tag: [
+                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                            18, 19,
+                        ],
+                    },
+                ),
+                hash: 14137680576404864188, // Hash for all 9s
+            }],
+        };
 
-        region.region_write(&writes, JobId(0), true).await.unwrap();
+        region
+            .region_write(RegionWrite(vec![(eid, write)]), JobId(0), true)
+            .await
+            .unwrap();
 
         // Verify the dirty bit is now set.
         assert!(region.get_opened_extent(eid as usize).dirty().await);
@@ -2843,28 +2734,29 @@ pub(crate) mod test {
         assert!(!region.get_opened_extent(eid as usize).dirty().await);
 
         // Create a new write IO with different data.
-        let data = BytesMut::from(&[1u8; 512][..]);
-        let writes: Vec<crucible_protocol::Write> =
-            vec![crucible_protocol::Write {
-                eid,
-                offset,
-                data: data.freeze(),
-                block_context: BlockContext {
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext {
-                            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                            tag: [
-                                4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-                                17, 18, 19,
-                            ],
-                        },
-                    ),
-                    hash: 9163319254371683066, // hash for all 1s
-                },
-            }];
+        let data = Bytes::from(vec![1u8; 512]);
+        let write = ExtentWrite {
+            offset,
+            data,
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                        tag: [
+                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                            18, 19,
+                        ],
+                    },
+                ),
+                hash: 9163319254371683066, // hash for all 1s
+            }],
+        };
 
         // Do the write again, but with only_write_unwritten set now.
-        region.region_write(&writes, JobId(1), true).await.unwrap();
+        region
+            .region_write(RegionWrite(vec![(eid, write)]), JobId(1), true)
+            .await
+            .unwrap();
 
         // Verify the dirty bit is not set.
         assert!(!region.get_opened_extent(eid as usize).dirty().await);
@@ -2905,40 +2797,11 @@ pub(crate) mod test {
         region.extend(3).await.unwrap();
 
         let ddef = region.def();
-        let total_size: usize = ddef.total_size() as usize;
         let num_blocks: usize =
             ddef.extent_size().value as usize * ddef.extent_count() as usize;
 
-        // use region_write to fill region
-
-        let mut rng = rand::thread_rng();
-        let mut buffer: Vec<u8> = vec![0; total_size];
-        rng.fill_bytes(&mut buffer);
-
-        let mut writes: Vec<crucible_protocol::Write> =
-            Vec::with_capacity(num_blocks);
-
-        for i in 0..num_blocks {
-            let eid: u64 = i as u64 / ddef.extent_size().value;
-            let offset: Block =
-                Block::new_512((i as u64) % ddef.extent_size().value);
-
-            let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
-            let data = data.freeze();
-            let hash = integrity_hash(&[&data[..]]);
-
-            writes.push(crucible_protocol::Write {
-                eid,
-                offset,
-                data,
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash,
-                },
-            });
-        }
-
-        region.region_write(&writes, JobId(0), true).await.unwrap();
+        // use region_write_all to fill region with write_unwritten = true
+        let buffer = region_write_all(&mut region, &ddef, true).await;
 
         // read data into File, compare what was written to buffer
         let read_from_files = read_file_data(ddef, dir.path(), backend);
@@ -2986,62 +2849,36 @@ pub(crate) mod test {
             ddef.extent_size().value as usize * ddef.extent_count() as usize;
 
         // Fill a buffer with "9"'s
-        let data = BytesMut::from(&[9u8; 512][..]);
+        let data = Bytes::from(vec![9u8; 512]);
         let eid = 0;
         let offset = Block::new_512(0);
 
         // Write the block
-        let writes: Vec<crucible_protocol::Write> =
-            vec![crucible_protocol::Write {
-                eid,
-                offset,
-                data: data.freeze(),
-                block_context: BlockContext {
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext {
-                            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                            tag: [
-                                4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-                                17, 18, 19,
-                            ],
-                        },
-                    ),
-                    hash: 14137680576404864188, // Hash for all 9s
-                },
-            }];
+        let write = ExtentWrite {
+            offset,
+            data,
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                        tag: [
+                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                            18, 19,
+                        ],
+                    },
+                ),
+                hash: 14137680576404864188, // Hash for all 9s
+            }],
+        };
 
         // Now write just one block
-        region.region_write(&writes, JobId(0), false).await.unwrap();
+        region
+            .region_write(RegionWrite(vec![(eid, write)]), JobId(0), false)
+            .await
+            .unwrap();
 
-        // Now use region_write to fill entire region
-        let mut rng = rand::thread_rng();
-        let mut buffer: Vec<u8> = vec![0; total_size];
-        rng.fill_bytes(&mut buffer);
-
-        let mut writes: Vec<crucible_protocol::Write> =
-            Vec::with_capacity(num_blocks);
-
-        for i in 0..num_blocks {
-            let eid: u64 = i as u64 / ddef.extent_size().value;
-            let offset: Block =
-                Block::new_512((i as u64) % ddef.extent_size().value);
-
-            let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
-            let data = data.freeze();
-            let hash = integrity_hash(&[&data[..]]);
-
-            writes.push(crucible_protocol::Write {
-                eid,
-                offset,
-                data,
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash,
-                },
-            });
-        }
-
-        region.region_write(&writes, JobId(0), true).await.unwrap();
+        // use region_write_all to fill region with only_write_unwritten = true
+        let mut buffer = region_write_all(&mut region, &ddef, true).await;
 
         // Because we set only_write_unwritten, the block we already written
         // should still have the data from the first write.  Update our buffer
@@ -3091,68 +2928,40 @@ pub(crate) mod test {
         region.extend(3).await.unwrap();
 
         let ddef = region.def();
-        let total_size: usize = ddef.total_size() as usize;
         let num_blocks: usize =
             ddef.extent_size().value as usize * ddef.extent_count() as usize;
 
         // Fill a buffer with "9"'s
-        let data = BytesMut::from(&[9u8; 512][..]);
+        let data = Bytes::from(vec![9u8; 512]);
 
         // Construct the write for the second block on the first EID.
         let eid = 0;
         let offset = Block::new_512(1);
-        let writes: Vec<crucible_protocol::Write> =
-            vec![crucible_protocol::Write {
-                eid,
-                offset,
-                data: data.freeze(),
-                block_context: BlockContext {
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext {
-                            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                            tag: [
-                                4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-                                17, 18, 19,
-                            ],
-                        },
-                    ),
-                    hash: 14137680576404864188, // Hash for all 9s,
-                },
-            }];
+        let write = ExtentWrite {
+            offset,
+            data,
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                        tag: [
+                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                            18, 19,
+                        ],
+                    },
+                ),
+                hash: 14137680576404864188, // Hash for all 9s,
+            }],
+        };
 
         // Now write just to the second block.
-        region.region_write(&writes, JobId(0), false).await.unwrap();
+        region
+            .region_write(RegionWrite(vec![(eid, write)]), JobId(0), false)
+            .await
+            .unwrap();
 
-        // Now use region_write to fill entire region
-        let mut rng = rand::thread_rng();
-        let mut buffer: Vec<u8> = vec![0; total_size];
-        rng.fill_bytes(&mut buffer);
-
-        let mut writes: Vec<crucible_protocol::Write> =
-            Vec::with_capacity(num_blocks);
-
-        for i in 0..num_blocks {
-            let eid: u64 = i as u64 / ddef.extent_size().value;
-            let offset: Block =
-                Block::new_512((i as u64) % ddef.extent_size().value);
-
-            let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
-            let data = data.freeze();
-            let hash = integrity_hash(&[&data[..]]);
-
-            writes.push(crucible_protocol::Write {
-                eid,
-                offset,
-                data,
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash,
-                },
-            });
-        }
-
-        // send write_unwritten command.
-        region.region_write(&writes, JobId(0), true).await.unwrap();
+        // Use region_write_all to fill entire region, write_unwritten = true
+        let mut buffer = region_write_all(&mut region, &ddef, true).await;
 
         // Because we set only_write_unwritten, the block we already written
         // should still have the data from the first write.  Update our buffer
@@ -3210,64 +3019,60 @@ pub(crate) mod test {
         let total_size: usize = ddef.block_size() as usize * num_blocks;
 
         // Fill a buffer with "9"'s
-        let data = BytesMut::from(&[9u8; 512][..]);
+        let data = Bytes::from(vec![9u8; 512]);
 
         // Construct the write for the second block on the first EID.
         let eid = 0;
         let offset = Block::new_512(3);
-        let writes: Vec<crucible_protocol::Write> =
-            vec![crucible_protocol::Write {
-                eid,
-                offset,
-                data: data.freeze(),
-                block_context: BlockContext {
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext {
-                            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                            tag: [
-                                4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-                                17, 18, 19,
-                            ],
-                        },
-                    ),
-                    hash: 14137680576404864188, // Hash for all 9s
-                },
-            }];
+        let write = ExtentWrite {
+            offset,
+            data,
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                        tag: [
+                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                            18, 19,
+                        ],
+                    },
+                ),
+                hash: 14137680576404864188, // Hash for all 9s
+            }],
+        };
 
         // Now write just to the second block.
-        region.region_write(&writes, JobId(0), false).await.unwrap();
+        region
+            .region_write(RegionWrite(vec![(eid, write)]), JobId(0), false)
+            .await
+            .unwrap();
 
         // Now use region_write to fill four blocks
+        //
+        // They're all within the same extent, so we just need one ExtentWrite
         let mut rng = rand::thread_rng();
         let mut buffer: Vec<u8> = vec![0; total_size];
         println!("buffer size:{}", buffer.len());
         rng.fill_bytes(&mut buffer);
 
-        let mut writes: Vec<crucible_protocol::Write> =
-            Vec::with_capacity(num_blocks);
-
-        for i in 0..num_blocks {
-            let eid: u64 = i as u64 / ddef.extent_size().value;
-            let offset: Block =
-                Block::new_512((i as u64) % ddef.extent_size().value);
-
-            let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
-            let data = data.freeze();
-            let hash = integrity_hash(&[&data[..]]);
-
-            writes.push(crucible_protocol::Write {
-                eid,
-                offset,
-                data,
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash,
-                },
-            });
-        }
+        let block_contexts = buffer
+            .chunks(512)
+            .map(|chunk| BlockContext {
+                hash: integrity_hash(&[chunk]),
+                encryption_context: None,
+            })
+            .collect();
+        let write = ExtentWrite {
+            offset: Block::new_512(0),
+            data: Bytes::from(buffer.as_slice().to_vec()),
+            block_contexts,
+        };
 
         // send only_write_unwritten command.
-        region.region_write(&writes, JobId(0), true).await.unwrap();
+        region
+            .region_write(RegionWrite(vec![(eid, write)]), JobId(0), true)
+            .await
+            .unwrap();
 
         // Because we set only_write_unwritten, the block we already written
         // should still have the data from the first write.  Update our
@@ -3318,64 +3123,38 @@ pub(crate) mod test {
         // Fill a buffer with "9"s
         let blocks_to_write = [1, 3, 7, 8, 11, 12, 13];
         for b in blocks_to_write {
-            let data = BytesMut::from(&[9u8; 512][..]);
+            let data = Bytes::from(vec![9u8; 512]);
             let eid: u64 = b as u64 / ddef.extent_size().value;
             let offset: Block =
                 Block::new_512((b as u64) % ddef.extent_size().value);
 
             // Write a few different blocks
-            let writes: Vec<crucible_protocol::Write> =
-                vec![crucible_protocol::Write {
-                    eid,
-                    offset,
-                    data: data.freeze(),
-                    block_context: BlockContext {
-                        encryption_context: Some(
-                            crucible_protocol::EncryptionContext {
-                                nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                                tag: [
-                                    4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-                                    16, 17, 18, 19,
-                                ],
-                            },
-                        ),
-                        hash: 14137680576404864188, // Hash for all 9s
-                    },
-                }];
-
-            // Now write just one block
-            region.region_write(&writes, JobId(0), false).await.unwrap();
-        }
-
-        // Now use region_write to fill entire region
-        let mut rng = rand::thread_rng();
-        let mut buffer: Vec<u8> = vec![0; total_size];
-        rng.fill_bytes(&mut buffer);
-
-        let mut writes: Vec<crucible_protocol::Write> =
-            Vec::with_capacity(num_blocks);
-
-        for i in 0..num_blocks {
-            let eid: u64 = i as u64 / ddef.extent_size().value;
-            let offset: Block =
-                Block::new_512((i as u64) % ddef.extent_size().value);
-
-            let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
-            let data = data.freeze();
-            let hash = integrity_hash(&[&data[..]]);
-
-            writes.push(crucible_protocol::Write {
-                eid,
+            let write = ExtentWrite {
                 offset,
                 data,
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash,
-                },
-            });
+                block_contexts: vec![BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                            tag: [
+                                4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+                                17, 18, 19,
+                            ],
+                        },
+                    ),
+                    hash: 14137680576404864188, // Hash for all 9s
+                }],
+            };
+
+            // Now write just one block
+            region
+                .region_write(RegionWrite(vec![(eid, write)]), JobId(0), false)
+                .await
+                .unwrap();
         }
 
-        region.region_write(&writes, JobId(0), true).await.unwrap();
+        // Use region_write_all to fill entire region, with only_write_unwritten
+        let mut buffer = region_write_all(&mut region, &ddef, true).await;
 
         // Because we did write_unwritten, the block we already written should
         // still have the data from the first write.  Update our buffer
@@ -3411,14 +3190,14 @@ pub(crate) mod test {
     fn create_generic_write(
         eid: u64,
         offset: crucible_common::Block,
-    ) -> Vec<crucible_protocol::Write> {
-        let data = BytesMut::from(&[9u8; 512][..]);
-        let writes: Vec<crucible_protocol::Write> =
-            vec![crucible_protocol::Write {
-                eid,
+    ) -> RegionWrite {
+        let data = Bytes::from(vec![9u8; 512]);
+        RegionWrite(vec![(
+            eid,
+            ExtentWrite {
                 offset,
-                data: data.freeze(),
-                block_context: BlockContext {
+                data,
+                block_contexts: vec![BlockContext {
                     encryption_context: Some(
                         crucible_protocol::EncryptionContext {
                             nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
@@ -3429,9 +3208,9 @@ pub(crate) mod test {
                         },
                     ),
                     hash: 14137680576404864188, // Hash for all 9s
-                },
-            }];
-        writes
+                }],
+            },
+        )])
     }
 
     async fn test_flush_extent_limit_base(backend: Backend) {
@@ -3449,12 +3228,12 @@ pub(crate) mod test {
 
         // Write to extent 0 block 0 first
         let writes = create_generic_write(0, Block::new_512(0));
-        region.region_write(&writes, JobId(0), true).await.unwrap();
+        region.region_write(writes, JobId(0), true).await.unwrap();
 
         // Now write to extent 1 block 0
         let writes = create_generic_write(1, Block::new_512(0));
 
-        region.region_write(&writes, JobId(0), true).await.unwrap();
+        region.region_write(writes, JobId(0), true).await.unwrap();
 
         // Verify the dirty bit is now set for both extents.
         assert!(region.get_opened_extent(0).dirty().await);
@@ -3488,11 +3267,11 @@ pub(crate) mod test {
 
         // Write to extent 1 block 9 first
         let writes = create_generic_write(1, Block::new_512(9));
-        region.region_write(&writes, JobId(1), true).await.unwrap();
+        region.region_write(writes, JobId(1), true).await.unwrap();
 
         // Now write to extent 2 block 9
         let writes = create_generic_write(2, Block::new_512(9));
-        region.region_write(&writes, JobId(2), true).await.unwrap();
+        region.region_write(writes, JobId(2), true).await.unwrap();
 
         // Verify the dirty bit is now set for both extents.
         assert!(region.get_opened_extent(1).dirty().await);
@@ -3538,7 +3317,7 @@ pub(crate) mod test {
         for ext in 0..10 {
             let writes = create_generic_write(ext, Block::new_512(5));
             region
-                .region_write(&writes, JobId(job_id), true)
+                .region_write(writes, JobId(job_id), true)
                 .await
                 .unwrap();
             job_id += 1;
@@ -3606,31 +3385,32 @@ pub(crate) mod test {
         region.extend(1).await.unwrap();
 
         // Fill a buffer with "9"'s
-        let data = BytesMut::from(&[9u8; 512][..]);
+        let data = Bytes::from(vec![9u8; 512]);
         let eid = 0;
         let offset = Block::new_512(0);
 
         // Write the block
-        let writes: Vec<crucible_protocol::Write> =
-            vec![crucible_protocol::Write {
-                eid,
-                offset,
-                data: data.freeze(),
-                block_context: BlockContext {
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext {
-                            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                            tag: [
-                                4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-                                17, 18, 19,
-                            ],
-                        },
-                    ),
-                    hash: 14137680576404864188, // Hash for all 9s
-                },
-            }];
+        let write = ExtentWrite {
+            offset,
+            data,
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                        tag: [
+                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                            18, 19,
+                        ],
+                    },
+                ),
+                hash: 14137680576404864188, // Hash for all 9s
+            }],
+        };
 
-        region.region_write(&writes, JobId(0), true).await.unwrap();
+        region
+            .region_write(RegionWrite(vec![(eid, write)]), JobId(0), true)
+            .await
+            .unwrap();
 
         // Flush extent with eid, fn, gen
         region
@@ -3664,31 +3444,32 @@ pub(crate) mod test {
         region.extend(1).await.unwrap();
 
         // Fill a buffer with "9"'s
-        let data = BytesMut::from(&[9u8; 512][..]);
+        let data = Bytes::from(vec![9u8; 512]);
         let eid = 0;
         let offset = Block::new_512(0);
 
         // Write the block
-        let writes: Vec<crucible_protocol::Write> =
-            vec![crucible_protocol::Write {
-                eid,
-                offset,
-                data: data.freeze(),
-                block_context: BlockContext {
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext {
-                            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                            tag: [
-                                4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-                                17, 18, 19,
-                            ],
-                        },
-                    ),
-                    hash: 14137680576404864188, // Hash for all 9s
-                },
-            }];
+        let write = ExtentWrite {
+            offset,
+            data,
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                        tag: [
+                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                            18, 19,
+                        ],
+                    },
+                ),
+                hash: 14137680576404864188, // Hash for all 9s
+            }],
+        };
 
-        region.region_write(&writes, JobId(0), true).await.unwrap();
+        region
+            .region_write(RegionWrite(vec![(eid, write)]), JobId(0), true)
+            .await
+            .unwrap();
 
         // Close extent 0 without a flush
         let (gen, flush, dirty) =
@@ -3748,41 +3529,43 @@ pub(crate) mod test {
 
         // We will write these ranges multiple times so that there's multiple
         // hashes in the DB, so we need multiple sets of data.
-        let writes: Vec<Vec<Vec<crucible_protocol::Write>>> = (0..3)
+        let writes: Vec<RegionWrite> = (0..3)
             .map(|_| {
-                ranges
+                let writes = ranges
                     .iter()
                     .map(|range| {
-                        range
-                            .clone()
-                            .map(|idx| {
-                                // Generate data for this block
-                                let data = thread_rng().gen::<[u8; 512]>();
-                                let hash = integrity_hash(&[&data]);
-                                crucible_protocol::Write {
-                                    eid: 0,
-                                    offset: Block::new_512(idx),
-                                    data: Bytes::copy_from_slice(&data),
-                                    block_context: BlockContext {
-                                        hash,
-                                        encryption_context: None,
-                                    },
-                                }
+                        let n = range.clone().count();
+                        let mut rng = rand::thread_rng();
+                        let mut data: Vec<u8> = vec![0; 512 * n];
+                        rng.fill_bytes(&mut data);
+
+                        let block_contexts = data
+                            .chunks(512)
+                            .map(|chunk| BlockContext {
+                                hash: integrity_hash(&[chunk]),
+                                encryption_context: None,
                             })
-                            .collect()
+                            .collect();
+                        (
+                            0,
+                            ExtentWrite {
+                                offset: Block::new_512(range.start),
+                                data: Bytes::from(data.as_slice().to_vec()),
+                                block_contexts,
+                            },
+                        )
                     })
-                    .collect()
+                    .collect();
+                RegionWrite(writes)
             })
             .collect();
 
         // Write all the writes
-        for write_iteration in &writes {
-            for write_chunk in write_iteration {
-                region
-                    .region_write(write_chunk, JobId(0), false)
-                    .await
-                    .unwrap();
-            }
+        for w in &writes {
+            region
+                .region_write(w.clone(), JobId(0), false)
+                .await
+                .unwrap();
         }
 
         // Flush
@@ -3810,13 +3593,11 @@ pub(crate) mod test {
 
             // Now that we've checked that, flatten out for an easier eq
             let actual_ctxts: Vec<_> =
-                resp.blocks.iter().flat_map(|b| b.iter()).collect();
+                resp.blocks.iter().map(|b| b[0]).collect();
 
             // What we expect is the hashes for the last write we did
-            let expected_ctxts: Vec<_> = last_writes[i]
-                .iter()
-                .map(|write| &write.block_context)
-                .collect();
+            let expected_ctxts: Vec<_> =
+                last_writes.0[i].1.block_contexts.clone();
 
             // Check that they're right.
             assert_eq!(expected_ctxts, actual_ctxts);
@@ -3836,33 +3617,36 @@ pub(crate) mod test {
                 .await
                 .unwrap();
         region.extend(1).await.unwrap();
+        eprintln!("created region");
 
         // writing the entire region a few times over before the flush.
-        let writes: Vec<Vec<crucible_protocol::Write>> = (0..3)
+        let writes: Vec<ExtentWrite> = (0..3)
             .map(|_| {
-                (0..EXTENT_SIZE)
-                    .map(|idx| {
-                        // Generate data for this block
-                        let data = thread_rng().gen::<[u8; 512]>();
-                        let hash = integrity_hash(&[&data]);
-                        crucible_protocol::Write {
-                            eid: 0,
-                            offset: Block::new_512(idx),
-                            data: Bytes::copy_from_slice(&data),
-                            block_context: BlockContext {
-                                hash,
-                                encryption_context: None,
-                            },
-                        }
+                let mut data = vec![0u8; 512 * EXTENT_SIZE as usize];
+                rand::thread_rng().fill_bytes(&mut data);
+                let block_contexts = data
+                    .chunks(512)
+                    .map(|chunk| BlockContext {
+                        hash: integrity_hash(&[chunk]),
+                        encryption_context: None,
                     })
-                    .collect()
+                    .collect();
+                ExtentWrite {
+                    offset: Block::new_512(0),
+                    data: Bytes::from(data.as_slice().to_vec()),
+                    block_contexts,
+                }
             })
             .collect();
 
         // Write all the writes
-        for write_iteration in &writes {
+        for w in &writes {
             region
-                .region_write(write_iteration, JobId(0), false)
+                .region_write(
+                    RegionWrite(vec![(0, w.clone())]),
+                    JobId(0),
+                    false,
+                )
                 .await
                 .unwrap();
         }
@@ -3874,7 +3658,7 @@ pub(crate) mod test {
             .unwrap();
 
         // compare against the last write iteration
-        let last_writes = writes.last().unwrap();
+        let last_write = writes.last().unwrap();
 
         let ext = region.get_opened_extent_mut(0);
 
@@ -3889,17 +3673,11 @@ pub(crate) mod test {
         assert_eq!(out.blocks.iter().map(|b| b.len()).max(), Some(1));
 
         // Now that we've checked that, flatten out for an easier eq
-        let actual_ctxts: Vec<_> =
-            out.blocks.iter().flat_map(|b| b.iter()).collect();
+        let actual_ctxts: Vec<_> = out.blocks.iter().map(|b| b[0]).collect();
 
         // What we expect is the hashes for the last write we did
-        let expected_ctxts: Vec<_> = last_writes
-            .iter()
-            .map(|write| &write.block_context)
-            .collect();
-
         // Check that they're right.
-        assert_eq!(expected_ctxts, actual_ctxts);
+        assert_eq!(last_write.block_contexts, actual_ctxts);
     }
 
     async fn test_bad_hash_bad(backend: Backend) {
@@ -3914,28 +3692,28 @@ pub(crate) mod test {
         .unwrap();
         region.extend(1).await.unwrap();
 
-        let data = BytesMut::from(&[1u8; 512][..]);
+        let data = Bytes::from(vec![1u8; 512]);
 
-        let writes: Vec<crucible_protocol::Write> =
-            vec![crucible_protocol::Write {
-                eid: 0,
-                offset: Block::new_512(0),
-                data: data.freeze(),
-                block_context: BlockContext {
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext {
-                            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                            tag: [
-                                4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-                                17, 18, 19,
-                            ],
-                        },
-                    ),
-                    hash: 2398419238764,
-                },
-            }];
+        let write = ExtentWrite {
+            offset: Block::new_512(0),
+            data,
+            block_contexts: vec![BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext {
+                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                        tag: [
+                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                            18, 19,
+                        ],
+                    },
+                ),
+                hash: 2398419238764,
+            }],
+        };
 
-        let result = region.region_write(&writes, JobId(0), false).await;
+        let result = region
+            .region_write(RegionWrite(vec![(0, write)]), JobId(0), false)
+            .await;
 
         assert!(result.is_err());
 
@@ -3992,8 +3770,9 @@ pub(crate) mod test {
         .unwrap();
 
         // Create 3 extents, each size 10 blocks
+        const EXTENT_COUNT: u32 = 3;
         assert_eq!(region.def().extent_size().value, 10);
-        region.extend(3).await.unwrap();
+        region.extend(EXTENT_COUNT).await.unwrap();
 
         let ddef = region.def();
         let total_size = ddef.total_size() as usize;
@@ -4005,30 +3784,34 @@ pub(crate) mod test {
         let mut buffer: Vec<u8> = vec![0; total_size];
         rng.fill_bytes(&mut buffer);
 
-        let mut writes: Vec<crucible_protocol::Write> =
-            Vec::with_capacity(num_blocks);
+        let mut writes = Vec::with_capacity(num_blocks);
 
-        for i in 0..num_blocks {
-            let eid: u64 = i as u64 / ddef.extent_size().value;
-            let offset: Block =
-                Block::new_512((i as u64) % ddef.extent_size().value);
-
-            let data = BytesMut::from(&buffer[(i * 512)..((i + 1) * 512)]);
-            let data = data.freeze();
-            let hash = integrity_hash(&[&data[..]]);
-
-            writes.push(crucible_protocol::Write {
-                eid,
-                offset,
-                data,
-                block_context: BlockContext {
+        for eid in 0..EXTENT_COUNT {
+            let data = Bytes::from(
+                buffer[(eid as usize * 10 * 512)..][..512 * 10].to_vec(),
+            );
+            let block_contexts = data
+                .chunks(512)
+                .map(|chunk| BlockContext {
                     encryption_context: None,
-                    hash,
+                    hash: integrity_hash(&[chunk]),
+                })
+                .collect();
+
+            writes.push((
+                u64::from(eid),
+                ExtentWrite {
+                    offset: Block::new_512(0),
+                    data,
+                    block_contexts,
                 },
-            });
+            ));
         }
 
-        region.region_write(&writes, JobId(0), false).await.unwrap();
+        region
+            .region_write(RegionWrite(writes), JobId(0), false)
+            .await
+            .unwrap();
 
         (dir, region, buffer)
     }
@@ -4155,31 +3938,42 @@ pub(crate) mod test {
     fn prepare_writes(
         offsets: std::ops::Range<usize>,
         data: &mut [u8],
-    ) -> Vec<crucible_protocol::Write> {
-        let mut writes: Vec<crucible_protocol::Write> =
-            Vec::with_capacity(offsets.len());
+    ) -> Vec<(u64, ExtentWrite)> {
+        let mut writes = vec![];
         let mut rng = rand::thread_rng();
 
-        for i in offsets {
-            let mut buffer: Vec<u8> = vec![0; 512];
+        // Offsets are given as blocks; we convert to extents here
+        const EXTENT_SIZE: usize = 10; // hard-coded default
+        for (eid, mut group) in
+            offsets.group_by(|o| o / EXTENT_SIZE).into_iter()
+        {
+            let start = group.next().unwrap();
+            let n = group.count() + 1;
+            let mut buffer = vec![0; n * 512];
             rng.fill_bytes(&mut buffer);
 
-            // alter data as writes are prepared
-            data[(i * 512)..((i + 1) * 512)].copy_from_slice(&buffer[..]);
-
-            let hash = integrity_hash(&[&buffer]);
-
-            writes.push(crucible_protocol::Write {
-                eid: (i as u64) / 10,
-                offset: Block::new_512((i as u64) % 10),
-                data: Bytes::from(buffer),
-                block_context: BlockContext {
+            let block_contexts = buffer
+                .chunks(512)
+                .map(|chunk| BlockContext {
                     encryption_context: None,
-                    hash,
-                },
-            });
-        }
+                    hash: integrity_hash(&[chunk]),
+                })
+                .collect();
 
+            // alter data as writes are prepared
+            data[start * 512..][..buffer.len()].copy_from_slice(&buffer);
+
+            writes.push((
+                eid as u64,
+                ExtentWrite {
+                    offset: Block::new_512(
+                        (start as u64) % (EXTENT_SIZE as u64),
+                    ),
+                    data: Bytes::from(buffer),
+                    block_contexts,
+                },
+            ));
+        }
         assert!(!writes.is_empty());
 
         writes
@@ -4206,9 +4000,9 @@ pub(crate) mod test {
         let (_dir, mut region, mut data) = prepare_random_region(backend).await;
 
         // Call region_write with a single large contiguous range
-        let writes = prepare_writes(1..8, &mut data);
+        let writes = RegionWrite(prepare_writes(1..8, &mut data));
 
-        region.region_write(&writes, JobId(0), false).await.unwrap();
+        region.region_write(writes, JobId(0), false).await.unwrap();
 
         // Validate written data by reading everything back and comparing with
         // data buffer
@@ -4220,9 +4014,9 @@ pub(crate) mod test {
 
         // Call region_write with a single large contiguous range that spans
         // multiple extents
-        let writes = prepare_writes(9..28, &mut data);
+        let writes = RegionWrite(prepare_writes(9..28, &mut data));
 
-        region.region_write(&writes, JobId(0), false).await.unwrap();
+        region.region_write(writes, JobId(0), false).await.unwrap();
 
         // Validate written data by reading everything back and comparing with
         // data buffer
@@ -4233,14 +4027,16 @@ pub(crate) mod test {
         let (_dir, mut region, mut data) = prepare_random_region(backend).await;
 
         // Call region_write with a multiple disjoint large contiguous ranges
-        let writes = [
-            prepare_writes(1..4, &mut data),
-            prepare_writes(15..24, &mut data),
-            prepare_writes(27..28, &mut data),
-        ]
-        .concat();
+        let writes = RegionWrite(
+            [
+                prepare_writes(1..4, &mut data),
+                prepare_writes(15..24, &mut data),
+                prepare_writes(27..28, &mut data),
+            ]
+            .concat(),
+        );
 
-        region.region_write(&writes, JobId(0), false).await.unwrap();
+        region.region_write(writes, JobId(0), false).await.unwrap();
 
         // Validate written data by reading everything back and comparing with
         // data buffer
@@ -4251,15 +4047,17 @@ pub(crate) mod test {
         let (_dir, mut region, mut data) = prepare_random_region(backend).await;
 
         // Call region_write with a multiple disjoint non-contiguous ranges
-        let writes = [
-            prepare_writes(0..1, &mut data),
-            prepare_writes(14..15, &mut data),
-            prepare_writes(19..20, &mut data),
-            prepare_writes(24..25, &mut data),
-        ]
-        .concat();
+        let writes = RegionWrite(
+            [
+                prepare_writes(0..1, &mut data),
+                prepare_writes(14..15, &mut data),
+                prepare_writes(19..20, &mut data),
+                prepare_writes(24..25, &mut data),
+            ]
+            .concat(),
+        );
 
-        region.region_write(&writes, JobId(0), false).await.unwrap();
+        region.region_write(writes, JobId(0), false).await.unwrap();
 
         // Validate written data by reading everything back and comparing with
         // data buffer
@@ -4285,10 +4083,10 @@ pub(crate) mod test {
         let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
 
         // Call region_write with a single large contiguous range
-        let writes = prepare_writes(1..8, &mut data);
+        let writes = RegionWrite(prepare_writes(1..8, &mut data));
 
         // write_unwritten = true
-        region.region_write(&writes, JobId(0), true).await.unwrap();
+        region.region_write(writes, JobId(0), true).await.unwrap();
 
         // Validate written data by reading everything back and comparing with
         // data buffer
@@ -4317,10 +4115,10 @@ pub(crate) mod test {
 
         // Call region_write with a single large contiguous range that spans
         // multiple extents
-        let writes = prepare_writes(9..28, &mut data);
+        let writes = RegionWrite(prepare_writes(9..28, &mut data));
 
         // write_unwritten = true
-        region.region_write(&writes, JobId(0), true).await.unwrap();
+        region.region_write(writes, JobId(0), true).await.unwrap();
 
         // Validate written data by reading everything back and comparing with
         // data buffer
@@ -4348,15 +4146,17 @@ pub(crate) mod test {
         let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
 
         // Call region_write with a multiple disjoint large contiguous ranges
-        let writes = [
-            prepare_writes(1..4, &mut data),
-            prepare_writes(15..24, &mut data),
-            prepare_writes(27..28, &mut data),
-        ]
-        .concat();
+        let writes = RegionWrite(
+            [
+                prepare_writes(1..4, &mut data),
+                prepare_writes(15..24, &mut data),
+                prepare_writes(27..28, &mut data),
+            ]
+            .concat(),
+        );
 
         // write_unwritten = true
-        region.region_write(&writes, JobId(0), true).await.unwrap();
+        region.region_write(writes, JobId(0), true).await.unwrap();
 
         // Validate written data by reading everything back and comparing with
         // data buffer
@@ -4384,16 +4184,18 @@ pub(crate) mod test {
         let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
 
         // Call region_write with a multiple disjoint non-contiguous ranges
-        let writes = [
-            prepare_writes(0..1, &mut data),
-            prepare_writes(14..15, &mut data),
-            prepare_writes(19..20, &mut data),
-            prepare_writes(24..25, &mut data),
-        ]
-        .concat();
+        let writes = RegionWrite(
+            [
+                prepare_writes(0..1, &mut data),
+                prepare_writes(14..15, &mut data),
+                prepare_writes(19..20, &mut data),
+                prepare_writes(24..25, &mut data),
+            ]
+            .concat(),
+        );
 
         // write_unwritten = true
-        region.region_write(&writes, JobId(0), true).await.unwrap();
+        region.region_write(writes, JobId(0), true).await.unwrap();
 
         // Validate written data by reading everything back and comparing with
         // data buffer

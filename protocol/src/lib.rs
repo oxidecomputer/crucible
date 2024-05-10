@@ -115,41 +115,6 @@ impl std::fmt::Display for ClientId {
     }
 }
 
-/// Deserialized write operation
-///
-/// `data` should be a borrowed section of the received `Message::Write`, to
-/// reduce memory copies.
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-pub struct Write {
-    pub eid: u64,
-    pub offset: Block,
-    pub data: bytes::Bytes,
-
-    pub block_context: BlockContext,
-}
-
-/// Write data, containing data from all blocks
-#[derive(Debug)]
-pub struct RawWrite {
-    /// Per-block metadata
-    pub blocks: Vec<WriteBlockMetadata>,
-    /// Raw data
-    pub data: bytes::BytesMut,
-}
-
-impl RawWrite {
-    /// Builds a new empty `RawWrite` with the given capacity
-    pub fn with_capacity(block_count: usize, block_size: u64) -> Self {
-        Self {
-            blocks: Vec::with_capacity(block_count),
-            data: bytes::BytesMut::with_capacity(
-                block_count * block_size as usize,
-            ),
-        }
-    }
-}
-
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReadRequest {
@@ -157,8 +122,7 @@ pub struct ReadRequest {
     pub offset: Block,
 }
 
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BlockContext {
     /// If this is a non-encrypted write, then the integrity hasher has the
     /// data as an input:
@@ -183,8 +147,7 @@ pub struct BlockContext {
     pub encryption_context: Option<EncryptionContext>,
 }
 
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EncryptionContext {
     pub nonce: [u8; 12],
     pub tag: [u8; 16],
@@ -581,29 +544,6 @@ pub struct WriteHeader {
     pub job_id: JobId,
     pub dependencies: Vec<JobId>,
     pub blocks: Vec<WriteBlockMetadata>,
-}
-
-impl WriteHeader {
-    /// Destructures into a list of block-size writes which borrow our data
-    ///
-    /// # Panics
-    /// `buf.len()` must be an even multiple of `self.blocks.len()`, which is
-    /// assumed to be the block size.
-    pub fn get_writes(&self, mut buf: bytes::Bytes) -> Vec<Write> {
-        assert_eq!(buf.len() % self.blocks.len(), 0);
-        let block_size = buf.len() / self.blocks.len();
-        let mut out = Vec::with_capacity(self.blocks.len());
-        for b in &self.blocks {
-            let data = buf.split_to(block_size);
-            out.push(Write {
-                eid: b.eid,
-                offset: b.offset,
-                block_context: b.block_context,
-                data,
-            })
-        }
-        out
-    }
 }
 
 #[derive(Debug, PartialEq, Copy, Clone, Serialize, Deserialize)]

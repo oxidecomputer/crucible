@@ -26,7 +26,7 @@ use crucible_protocol::{
 use repair_client::Client;
 
 use anyhow::{bail, Result};
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use rand::prelude::*;
 use slog::{debug, error, info, o, warn, Logger};
@@ -61,11 +61,11 @@ pub use stats::{DsCountStat, DsStatOuter};
 enum IOop {
     Write {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        writes: Vec<crucible_protocol::Write>,
+        writes: RegionWrite,
     },
     WriteUnwritten {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        writes: Vec<crucible_protocol::Write>,
+        writes: RegionWrite,
     },
     Read {
         dependencies: Vec<JobId>, // Jobs that must finish before this
@@ -307,6 +307,122 @@ pub(crate) struct ExtentReadResponse {
     data: BytesMut,
 }
 
+/// Deserialized write operation, contiguous to a single extent
+///
+/// `data` should be a borrowed section of the received `Message::Write`, to
+/// reduce memory copies.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct ExtentWrite {
+    pub offset: Block,
+    pub block_contexts: Vec<BlockContext>,
+    pub data: bytes::Bytes,
+}
+
+/// A `RegionWrite` is an ordered list of extent writes
+///
+/// Each element is a tuple of `(extent id, write)`. The same extent may appear
+/// multiple times in the output list, if the source write has multiple
+/// non-contiguous writes to that extent.
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+pub(crate) struct RegionWrite(Vec<(u64, ExtentWrite)>);
+
+impl RegionWrite {
+    /// Destructures into a list of contiguous writes, borrowing the buffer
+    ///
+    /// Returns an error if `buf.len()` is not an even multiple of
+    /// `header.blocks.len()`.
+    pub fn new(
+        blocks: &[crucible_protocol::WriteBlockMetadata],
+        mut buf: bytes::Bytes,
+    ) -> Result<Self, CrucibleError> {
+        let block_size = if let Some(b) = blocks.first() {
+            b.offset.block_size_in_bytes() as usize
+        } else {
+            return Ok(Self(vec![]));
+        };
+        if buf.len() % block_size != 0 {
+            return Err(CrucibleError::DataLenUnaligned);
+        } else if buf.len() / block_size != blocks.len() {
+            return Err(CrucibleError::InvalidNumberOfBlocks(format!(
+                "got {} contexts but {} blocks",
+                blocks.len(),
+                buf.len() / block_size
+            )));
+        }
+        let mut out = Self(vec![]);
+        for b in blocks {
+            let append = out.can_append(b);
+            if append {
+                out.append_block_context(b.block_context);
+            } else {
+                out.set_last_data(block_size, &mut buf);
+                out.begin_write(*b);
+            }
+        }
+        out.set_last_data(block_size, &mut buf);
+        assert!(buf.is_empty());
+        Ok(out)
+    }
+
+    /// Checks whether the next write can be appended to our existing write
+    fn can_append(&self, b: &crucible_protocol::WriteBlockMetadata) -> bool {
+        match self.0.last() {
+            None => false,
+            Some((prev_extent, prev_write)) => {
+                *prev_extent == b.eid
+                    && prev_write.offset.value
+                        + prev_write.block_contexts.len() as u64
+                        == b.offset.value
+            }
+        }
+    }
+
+    /// Sets the data member of the last write as part of construction
+    ///
+    /// # Panics
+    /// If the last write already has data
+    fn set_last_data(&mut self, block_size: usize, buf: &mut Bytes) {
+        if let Some((_, prev)) = self.0.last_mut() {
+            assert!(prev.data.is_empty());
+            let data = buf.split_to(prev.block_contexts.len() * block_size);
+            prev.data = data;
+        }
+    }
+
+    /// Appends the given block context to an existing write
+    ///
+    /// # Panics
+    /// If there is no write
+    fn append_block_context(&mut self, ctx: BlockContext) {
+        self.0.last_mut().unwrap().1.block_contexts.push(ctx);
+    }
+
+    /// Begins a new write, guided by the given metadata
+    fn begin_write(&mut self, b: crucible_protocol::WriteBlockMetadata) {
+        self.0.push((
+            b.eid,
+            ExtentWrite {
+                offset: b.offset,
+                block_contexts: vec![b.block_context],
+                data: bytes::Bytes::default(),
+            },
+        ));
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &(u64, ExtentWrite)> {
+        self.0.iter()
+    }
+}
+
+impl IntoIterator for RegionWrite {
+    type Item = (u64, ExtentWrite);
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
 /*
  * Export the contents or partial contents of a Downstairs Region to
  * the file indicated.
@@ -432,7 +548,8 @@ pub async fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
 
     let mut offset = Block::new_with_ddef(0, &region.def());
     loop {
-        let mut buffer = vec![0; CHUNK_SIZE];
+        let mut buffer = BytesMut::new();
+        buffer.resize(CHUNK_SIZE, 0u8);
 
         /*
          * Read data into the buffer until it is full, or we hit EOF.
@@ -473,40 +590,39 @@ pub async fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
             break;
         }
 
+        // Crop the buffer to exactly our write size
+        buffer.resize(total, 0u8);
+        let buffer = buffer.freeze();
+
         /*
          * Use the same function upstairs uses to decide where to put the
          * data based on the LBA offset.
          */
         let nblocks = Block::from_bytes(total, &rm);
-        let mut pos = Block::from_bytes(0, &rm);
-        let mut writes = vec![];
-        for (eid, offset) in
-            extent_from_offset(&rm, offset, nblocks).blocks(&rm)
-        {
-            let len = Block::new_with_ddef(1, &region.def());
-            let data = &buffer[pos.bytes()..(pos.bytes() + len.bytes())];
-            let mut buffer = BytesMut::with_capacity(data.len());
-            buffer.resize(data.len(), 0);
-            buffer.copy_from_slice(data);
+        let block_size = region.def().block_size() as usize;
+        let blocks: Vec<_> = extent_from_offset(&rm, offset, nblocks)
+            .blocks(&rm)
+            .zip(
+                buffer
+                    .chunks(block_size)
+                    .map(|chunk| integrity_hash(&[chunk])),
+            )
+            .map(|((eid, offset), hash)| {
+                crucible_protocol::WriteBlockMetadata {
+                    eid,
+                    offset,
+                    block_context: BlockContext {
+                        hash,
+                        encryption_context: None,
+                    },
+                }
+            })
+            .collect();
 
-            writes.push(crucible_protocol::Write {
-                eid,
-                offset,
-                data: buffer.freeze(),
-                block_context: BlockContext {
-                    hash: integrity_hash(&[data]),
-                    encryption_context: None,
-                },
-            });
-
-            pos.advance(len);
-        }
+        let write = RegionWrite::new(&blocks, buffer)?;
 
         // We have no job ID, so it makes no sense for accounting.
-        region.region_write(&writes, JobId(0), false).await?;
-
-        assert_eq!(nblocks, pos);
-        assert_eq!(total, pos.bytes());
+        region.region_write(write, JobId(0), false).await?;
         offset.advance(nblocks);
     }
 
@@ -1898,11 +2014,14 @@ impl Downstairs {
                     data,
                 }))
             }
-            IOop::WriteUnwritten { writes, .. } => {
+            IOop::WriteUnwritten { .. } => {
                 /*
                  * Any error from an IO should be intercepted here and passed
                  * back to the upstairs.
                  */
+                let IOop::WriteUnwritten { writes, .. } = job.work else {
+                    unreachable!();
+                };
                 let result = if self.write_errors && random() && random() {
                     warn!(self.log, "returning error on writeunwritten!");
                     Err(CrucibleError::GenericError("test error".to_string()))
@@ -1922,10 +2041,14 @@ impl Downstairs {
                     result,
                 }))
             }
-            IOop::Write {
-                dependencies,
-                writes,
-            } => {
+            IOop::Write { .. } => {
+                let IOop::Write {
+                    writes,
+                    dependencies,
+                } = job.work
+                else {
+                    unreachable!();
+                };
                 let result = if self.write_errors && random() && random() {
                     warn!(self.log, "returning error on write!");
                     Err(CrucibleError::GenericError("test error".to_string()))
@@ -2612,7 +2735,7 @@ impl Downstairs {
         let r = match m {
             Message::Write { header, data } => {
                 cdt::submit__write__start!(|| header.job_id.0);
-                let writes = header.get_writes(data);
+                let writes = RegionWrite::new(&header.blocks, data)?;
 
                 let new_write = IOop::Write {
                     dependencies: header.dependencies,
@@ -2648,7 +2771,7 @@ impl Downstairs {
             }
             Message::WriteUnwritten { header, data } => {
                 cdt::submit__writeunwritten__start!(|| header.job_id.0);
-                let writes = header.get_writes(data);
+                let writes = RegionWrite::new(&header.blocks, data)?;
 
                 let new_write = IOop::WriteUnwritten {
                     dependencies: header.dependencies,
@@ -3651,7 +3774,7 @@ mod test {
                 ds_id,
                 work: IOop::WriteUnwritten {
                     dependencies: deps,
-                    writes: Vec::with_capacity(1),
+                    writes: RegionWrite(vec![]),
                 },
                 state: WorkState::New,
             },
@@ -4102,27 +4225,29 @@ mod test {
     // A test function that will return a generic crucible write command
     // for use when building the IOop::Write structure.  The data (of 9's)
     // matches the hash.
-    fn create_generic_test_write(eid: u64) -> Vec<crucible_protocol::Write> {
-        let data = BytesMut::from(&[9u8; 512][..]);
+    fn create_generic_test_write(eid: u64) -> RegionWrite {
+        let data = Bytes::from(vec![9u8; 512]);
         let offset = Block::new_512(1);
 
-        vec![crucible_protocol::Write {
+        RegionWrite(vec![(
             eid,
-            offset,
-            data: data.freeze(),
-            block_context: BlockContext {
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                        tag: [
-                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
-                            18, 19,
-                        ],
-                    },
-                ),
-                hash: 14137680576404864188, // Hash for all 9s
+            ExtentWrite {
+                offset,
+                data,
+                block_contexts: vec![BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                            tag: [
+                                4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+                                17, 18, 19,
+                            ],
+                        },
+                    ),
+                    hash: 14137680576404864188, // Hash for all 9s
+                }],
             },
-        }]
+        )])
     }
 
     #[tokio::test]
@@ -6584,5 +6709,122 @@ mod test {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn decode_write() {
+        use crucible_protocol::WriteBlockMetadata;
+        let blocks = vec![WriteBlockMetadata {
+            eid: 0,
+            offset: Block::new_512(0),
+            block_context: BlockContext {
+                hash: 123,
+                encryption_context: None,
+            },
+        }];
+        let data = Bytes::from(vec![1u8; 512]);
+        let w = RegionWrite::new(&blocks, data).unwrap();
+        assert_eq!(w.0.len(), 1);
+
+        // Two contiguous blocks
+        let blocks = vec![
+            WriteBlockMetadata {
+                eid: 0,
+                offset: Block::new_512(0),
+                block_context: BlockContext {
+                    hash: 123,
+                    encryption_context: None,
+                },
+            },
+            WriteBlockMetadata {
+                eid: 0,
+                offset: Block::new_512(1),
+                block_context: BlockContext {
+                    hash: 123,
+                    encryption_context: None,
+                },
+            },
+        ];
+        let data = Bytes::from(vec![1u8; 512 * 2]);
+        let w = RegionWrite::new(&blocks, data).unwrap();
+        assert_eq!(w.0.len(), 1);
+        assert_eq!(w.0[0].0, 0);
+        assert_eq!(w.0[0].1.offset, Block::new_512(0));
+        assert_eq!(w.0[0].1.data.len(), 512 * 2);
+
+        // Two non-contiguous blocks
+        let blocks = vec![
+            WriteBlockMetadata {
+                eid: 1,
+                offset: Block::new_512(0),
+                block_context: BlockContext {
+                    hash: 123,
+                    encryption_context: None,
+                },
+            },
+            WriteBlockMetadata {
+                eid: 2,
+                offset: Block::new_512(1),
+                block_context: BlockContext {
+                    hash: 123,
+                    encryption_context: None,
+                },
+            },
+        ];
+        let data = Bytes::from(vec![1u8; 512 * 2]);
+        let w = RegionWrite::new(&blocks, data).unwrap();
+        assert_eq!(w.0.len(), 2);
+        assert_eq!(w.0[0].0, 1);
+        assert_eq!(w.0[0].1.offset, Block::new_512(0));
+        assert_eq!(w.0[0].1.data.len(), 512);
+        assert_eq!(w.0[1].0, 2);
+        assert_eq!(w.0[1].1.offset, Block::new_512(1));
+        assert_eq!(w.0[1].1.data.len(), 512);
+
+        // Overlapping writes to the same block
+        let blocks = vec![
+            WriteBlockMetadata {
+                eid: 1,
+                offset: Block::new_512(3),
+                block_context: BlockContext {
+                    hash: 123,
+                    encryption_context: None,
+                },
+            },
+            WriteBlockMetadata {
+                eid: 1,
+                offset: Block::new_512(3),
+                block_context: BlockContext {
+                    hash: 123,
+                    encryption_context: None,
+                },
+            },
+        ];
+        let data = Bytes::from(vec![1u8; 512 * 2]);
+        let w = RegionWrite::new(&blocks, data).unwrap();
+        assert_eq!(w.0.len(), 2);
+        assert_eq!(w.0[0].0, 1);
+        assert_eq!(w.0[0].1.offset, Block::new_512(3));
+        assert_eq!(w.0[0].1.data.len(), 512);
+        assert_eq!(w.0[1].0, 1);
+        assert_eq!(w.0[1].1.offset, Block::new_512(3));
+        assert_eq!(w.0[1].1.data.len(), 512);
+
+        // Mismatched block / data sizes
+        let blocks = vec![WriteBlockMetadata {
+            eid: 1,
+            offset: Block::new_512(3),
+            block_context: BlockContext {
+                hash: 123,
+                encryption_context: None,
+            },
+        }];
+        let data = Bytes::from(vec![1u8; 512 * 2]);
+        let r = RegionWrite::new(&blocks, data);
+        assert!(r.is_err());
+
+        let data = Bytes::from(vec![1u8; 513]);
+        let r = RegionWrite::new(&blocks, data);
+        assert!(r.is_err());
     }
 }
