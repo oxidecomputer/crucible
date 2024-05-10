@@ -16,10 +16,11 @@ use crate::{
     AckStatus, ActiveJobs, AllocRingBuffer, ClientData, ClientIOStateCount,
     ClientId, ClientMap, CrucibleError, DownstairsIO, DownstairsMend, DsState,
     ExtentFix, ExtentRepairIDs, GuestWorkId, IOState, IOStateCount, IOop,
-    ImpactedBlocks, JobId, Message, ReadRequest, ReconcileIO, ReconciliationId,
-    RegionDefinition, ReplaceResult, SnapshotDetails, WorkSummary,
+    ImpactedBlocks, JobId, Message, RawReadResponse, ReadRequest, ReconcileIO,
+    ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
+    WorkSummary,
 };
-use crucible_protocol::{RawReadResponse, RawWrite, WriteHeader};
+use crucible_protocol::{RawWrite, WriteHeader};
 
 use rand::prelude::*;
 use ringbuffer::RingBuffer;
@@ -4486,14 +4487,13 @@ pub(crate) mod test {
         live_repair::ExtentInfo,
         upstairs::UpstairsState,
         ClientId, CrucibleError, DownstairsIO, DsState, ExtentFix, GuestWorkId,
-        IOState, IOop, ImpactedAddr, ImpactedBlocks, JobId, ReconcileIO,
-        ReconciliationId, SnapshotDetails,
+        IOState, IOop, ImpactedAddr, ImpactedBlocks, JobId, RawReadResponse,
+        ReconcileIO, ReconciliationId, SnapshotDetails,
     };
 
     use bytes::BytesMut;
     use crucible_protocol::{
-        BlockContext, Message, RawReadResponse, ReadRequest,
-        ReadResponseBlockMetadata,
+        BlockContext, Message, ReadRequest, ReadResponseBlockMetadata,
     };
     use ringbuffer::RingBuffer;
 

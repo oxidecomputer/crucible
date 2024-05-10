@@ -12,7 +12,7 @@ use futures::TryStreamExt;
 use tracing::instrument;
 
 use crucible_common::*;
-use crucible_protocol::{RawReadResponse, SnapshotDetails};
+use crucible_protocol::SnapshotDetails;
 use repair_client::Client;
 
 use super::*;
@@ -842,52 +842,25 @@ impl Region {
     #[instrument]
     pub async fn region_read(
         &mut self,
-        requests: &[crucible_protocol::ReadRequest],
+        req: &RegionReadRequest,
         job_id: JobId,
-    ) -> Result<RawReadResponse, CrucibleError> {
-        let mut response = RawReadResponse::with_capacity(
-            requests.len(),
+    ) -> Result<RegionReadResponse, CrucibleError> {
+        let mut response = RegionReadResponse::with_capacity(
+            req.iter().map(|req| req.count.get()).sum(),
             self.def.block_size(),
         );
 
-        /*
-         * Batch reads so they can all be sent to the appropriate extent
-         * together.
-         *
-         * Note: Have to maintain order with reads! The Upstairs expects read
-         * responses to be in the same order as read requests, so we can't
-         * use a hashmap in the same way that batching writes can.
-         */
-        let mut eid: Option<u64> = None;
-        let mut batched_reads = Vec::with_capacity(requests.len());
-
         cdt::os__read__start!(|| job_id.0);
-        for request in requests {
-            if let Some(_eid) = eid {
-                if request.eid == _eid {
-                    batched_reads.push(request.clone());
-                } else {
-                    let extent = self.get_opened_extent_mut(_eid as usize);
-                    extent
-                        .read_into(job_id, &batched_reads[..], &mut response)
-                        .await?;
+        for req in req.iter() {
+            let extent = self.get_opened_extent_mut(req.extent as usize);
+            let req = response.request(req.offset, req.count.get());
+            let out = extent.read(job_id, req).await?;
 
-                    eid = Some(request.eid);
-                    batched_reads.clear();
-                    batched_reads.push(request.clone());
-                }
-            } else {
-                eid = Some(request.eid);
-                batched_reads.clear();
-                batched_reads.push(request.clone());
-            }
-        }
-
-        if let Some(_eid) = eid {
-            let extent = self.get_opened_extent_mut(_eid as usize);
-            extent
-                .read_into(job_id, &batched_reads[..], &mut response)
-                .await?;
+            // Note that we only call `unsplit` here if `Extent::read` returned
+            // `Ok(..)` (indicating that the data is fully populated); this
+            // means that the preconditions for `RegionReadResponse::unsplit`
+            // are met and it will not panic.
+            response.unsplit(out);
         }
         cdt::os__read__done!(|| job_id.0);
 
@@ -1884,16 +1857,18 @@ pub(crate) mod test {
             Region::open(&dir, new_region_options(), true, false, &log).await?;
         let out = region
             .region_read(
-                &[
-                    ReadRequest {
-                        eid: 1,
+                &RegionReadRequest(vec![
+                    RegionReadReq {
+                        extent: 1,
                         offset: Block::new_512(0),
+                        count: NonZeroUsize::new(1).unwrap(),
                     },
-                    ReadRequest {
-                        eid: 2,
+                    RegionReadReq {
+                        extent: 2,
                         offset: Block::new_512(0),
+                        count: NonZeroUsize::new(1).unwrap(),
                     },
-                ],
+                ]),
                 JobId(0),
             )
             .await?;
@@ -1985,16 +1960,18 @@ pub(crate) mod test {
             Region::open(&dir, new_region_options(), true, false, &log).await?;
         let out = region
             .region_read(
-                &[
-                    ReadRequest {
-                        eid: 1,
+                &RegionReadRequest(vec![
+                    RegionReadReq {
+                        extent: 1,
                         offset: Block::new_512(0),
+                        count: NonZeroUsize::new(1).unwrap(),
                     },
-                    ReadRequest {
-                        eid: 2,
+                    RegionReadReq {
+                        extent: 2,
                         offset: Block::new_512(0),
+                        count: NonZeroUsize::new(1).unwrap(),
                     },
-                ],
+                ]),
                 JobId(0),
             )
             .await?;
@@ -2421,7 +2398,8 @@ pub(crate) mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let responses = region.region_read(&requests, JobId(0)).await.unwrap();
+        let req = RegionReadRequest::new(&requests);
+        let responses = region.region_read(&req, JobId(0)).await.unwrap();
 
         assert_eq!(buffer.len(), responses.data.len());
         assert_eq!(buffer, responses.data);
@@ -2509,8 +2487,8 @@ pub(crate) mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let read_from_region =
-            region.region_read(&requests, JobId(0)).await?.data;
+        let req = RegionReadRequest::new(&requests);
+        let read_from_region = region.region_read(&req, JobId(0)).await?.data;
 
         assert_eq!(buffer.len(), read_from_region.len());
         assert_eq!(buffer, read_from_region);
@@ -2529,8 +2507,7 @@ pub(crate) mod test {
                 .join(extent_file_name(i, ExtentType::Db))
                 .exists());
         }
-        let read_from_region =
-            region.region_read(&requests, JobId(0)).await?.data;
+        let read_from_region = region.region_read(&req, JobId(0)).await?.data;
 
         assert_eq!(buffer.len(), read_from_region.len());
         assert_eq!(buffer, read_from_region);
@@ -2615,10 +2592,11 @@ pub(crate) mod test {
 
         let responses = region
             .region_read(
-                &[crucible_protocol::ReadRequest {
-                    eid: 0,
+                &RegionReadRequest(vec![RegionReadReq {
+                    extent: 0,
                     offset: Block::new_512(0),
-                }],
+                    count: NonZeroUsize::new(1).unwrap(),
+                }]),
                 JobId(125),
             )
             .await
@@ -2710,14 +2688,18 @@ pub(crate) mod test {
         // Now read back that block, make sure it is updated.
         let responses = region
             .region_read(
-                &[crucible_protocol::ReadRequest { eid, offset }],
+                &RegionReadRequest(vec![RegionReadReq {
+                    extent: eid,
+                    offset,
+                    count: NonZeroUsize::new(1).unwrap(),
+                }]),
                 JobId(0),
             )
             .await
             .unwrap();
 
         assert_eq!(responses.blocks.len(), 1);
-        assert_eq!(responses.blocks[0].hashes().len(), 1);
+        assert_eq!(responses.hashes(0).len(), 1);
         assert_eq!(responses.data[..], [9u8; 512][..]);
     }
 
@@ -2788,7 +2770,11 @@ pub(crate) mod test {
         // Now read back that block, make sure it has the first write
         let responses = region
             .region_read(
-                &[crucible_protocol::ReadRequest { eid, offset }],
+                &RegionReadRequest(vec![RegionReadReq {
+                    extent: eid,
+                    offset,
+                    count: NonZeroUsize::new(1).unwrap(),
+                }]),
                 JobId(2),
             )
             .await
@@ -2797,7 +2783,7 @@ pub(crate) mod test {
         // We should still have one response.
         assert_eq!(responses.blocks.len(), 1);
         // Hash should be just 1
-        assert_eq!(responses.blocks[0].hashes().len(), 1);
+        assert_eq!(responses.hashes(0).len(), 1);
         // Data should match first write
         assert_eq!(responses.data[..], [9u8; 512][..]);
     }
@@ -2886,7 +2872,11 @@ pub(crate) mod test {
         // Read back our block, make sure it has the first write data
         let responses = region
             .region_read(
-                &[crucible_protocol::ReadRequest { eid, offset }],
+                &RegionReadRequest(vec![RegionReadReq {
+                    extent: eid,
+                    offset,
+                    count: NonZeroUsize::new(1).unwrap(),
+                }]),
                 JobId(2),
             )
             .await
@@ -2895,7 +2885,7 @@ pub(crate) mod test {
         // We should still have one response.
         assert_eq!(responses.blocks.len(), 1);
         // Hash should be just 1
-        assert_eq!(responses.blocks[0].hashes().len(), 1);
+        assert_eq!(responses.hashes(0).len(), 1);
         // Data should match first write
         assert_eq!(responses.data[..], [9u8; 512][..]);
     }
@@ -2968,7 +2958,8 @@ pub(crate) mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let responses = region.region_read(&requests, JobId(0)).await.unwrap();
+        let req = RegionReadRequest::new(&requests);
+        let responses = region.region_read(&req, JobId(0)).await.unwrap();
 
         assert_eq!(buffer, responses.data);
     }
@@ -3077,7 +3068,8 @@ pub(crate) mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let responses = region.region_read(&requests, JobId(0)).await.unwrap();
+        let req = RegionReadRequest::new(&requests);
+        let responses = region.region_read(&req, JobId(0)).await.unwrap();
 
         assert_eq!(buffer, responses.data);
     }
@@ -3187,7 +3179,8 @@ pub(crate) mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let responses = region.region_read(&requests, JobId(0)).await.unwrap();
+        let req = RegionReadRequest::new(&requests);
+        let responses = region.region_read(&req, JobId(0)).await.unwrap();
 
         assert_eq!(buffer, responses.data);
     }
@@ -3296,7 +3289,8 @@ pub(crate) mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let responses = region.region_read(&requests, JobId(0)).await.unwrap();
+        let req = RegionReadRequest::new(&requests);
+        let responses = region.region_read(&req, JobId(0)).await.unwrap();
 
         assert_eq!(buffer, responses.data);
     }
@@ -3406,7 +3400,8 @@ pub(crate) mod test {
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
 
-        let responses = region.region_read(&requests, JobId(0)).await.unwrap();
+        let req = RegionReadRequest::new(&requests);
+        let responses = region.region_read(&req, JobId(0)).await.unwrap();
 
         assert_eq!(buffer, responses.data);
     }
@@ -3802,34 +3797,20 @@ pub(crate) mod test {
         let ext = region.get_opened_extent_mut(0);
 
         for (i, range) in ranges.iter().enumerate() {
-            // Get the contexts for the range
-            let mut resp = RawReadResponse::with_capacity(
-                (range.end - range.start) as usize,
-                512,
-            );
-            let reqs = range
-                .clone()
-                .map(|i| ReadRequest {
-                    eid: 0,
-                    offset: Block::new_512(i),
-                })
-                .collect::<Vec<_>>();
-            ext.read_into(JobId(i as u64), &reqs, &mut resp)
-                .await
-                .unwrap();
+            let req = ExtentReadRequest {
+                offset: Block::new_512(range.start),
+                data: BytesMut::with_capacity(
+                    512 * (range.end - range.start) as usize,
+                ),
+            };
+            let resp = ext.read(JobId(i as u64), req).await.unwrap();
 
-            // Every block should have at most 1 block
-            assert_eq!(
-                resp.blocks.iter().map(|b| b.block_contexts.len()).max(),
-                Some(1)
-            );
+            // Every block should have at most 1 block context
+            assert_eq!(resp.blocks.iter().map(|b| b.len()).max(), Some(1));
 
             // Now that we've checked that, flatten out for an easier eq
-            let actual_ctxts: Vec<_> = resp
-                .blocks
-                .iter()
-                .flat_map(|b| b.block_contexts.iter())
-                .collect();
+            let actual_ctxts: Vec<_> =
+                resp.blocks.iter().flat_map(|b| b.iter()).collect();
 
             // What we expect is the hashes for the last write we did
             let expected_ctxts: Vec<_> = last_writes[i]
@@ -3898,27 +3879,18 @@ pub(crate) mod test {
         let ext = region.get_opened_extent_mut(0);
 
         // Get the contexts for the range
-        let reqs = (0..EXTENT_SIZE)
-            .map(|i| ReadRequest {
-                eid: 0,
-                offset: Block::new_512(i),
-            })
-            .collect::<Vec<_>>();
-        let mut out = RawReadResponse::with_capacity(EXTENT_SIZE as usize, 512);
-        ext.read_into(JobId(0), &reqs, &mut out).await.unwrap();
+        let req = ExtentReadRequest {
+            offset: Block::new_512(0),
+            data: BytesMut::with_capacity(512 * EXTENT_SIZE as usize),
+        };
+        let out = ext.read(JobId(0), req).await.unwrap();
 
         // Every block should have at most 1 block
-        assert_eq!(
-            out.blocks.iter().map(|b| b.block_contexts.len()).max(),
-            Some(1)
-        );
+        assert_eq!(out.blocks.iter().map(|b| b.len()).max(), Some(1));
 
         // Now that we've checked that, flatten out for an easier eq
-        let actual_ctxts: Vec<_> = out
-            .blocks
-            .iter()
-            .flat_map(|b| b.block_contexts.iter())
-            .collect();
+        let actual_ctxts: Vec<_> =
+            out.blocks.iter().flat_map(|b| b.iter()).collect();
 
         // What we expect is the hashes for the last write we did
         let expected_ctxts: Vec<_> = last_writes
@@ -3991,17 +3963,18 @@ pub(crate) mod test {
 
         let responses = region
             .region_read(
-                &[crucible_protocol::ReadRequest {
-                    eid: 0,
+                &RegionReadRequest(vec![RegionReadReq {
+                    extent: 0,
                     offset: Block::new_512(0),
-                }],
+                    count: NonZeroUsize::new(1).unwrap(),
+                }]),
                 JobId(0),
             )
             .await
             .unwrap();
 
         assert_eq!(responses.blocks.len(), 1);
-        assert_eq!(responses.blocks[0].hashes().len(), 0);
+        assert_eq!(responses.hashes(0).len(), 0);
         assert_eq!(responses.data[..], [0u8; 512][..]);
     }
 
@@ -4071,7 +4044,8 @@ pub(crate) mod test {
             })
             .collect();
 
-        let responses = region.region_read(&requests, JobId(0)).await.unwrap();
+        let req = RegionReadRequest::new(&requests);
+        let responses = region.region_read(&req, JobId(0)).await.unwrap();
 
         // Validate returned data
         assert_eq!(responses.data, &data[512..(8 * 512)],);
@@ -4089,7 +4063,8 @@ pub(crate) mod test {
             })
             .collect();
 
-        let responses = region.region_read(&requests, JobId(0)).await.unwrap();
+        let req = RegionReadRequest::new(&requests);
+        let responses = region.region_read(&req, JobId(0)).await.unwrap();
 
         // Validate returned data
         assert_eq!(&responses.data, &data[(9 * 512)..(28 * 512)],);
@@ -4123,7 +4098,8 @@ pub(crate) mod test {
         .flatten()
         .collect();
 
-        let responses = region.region_read(&requests, JobId(0)).await.unwrap();
+        let req = RegionReadRequest::new(&requests);
+        let responses = region.region_read(&req, JobId(0)).await.unwrap();
 
         // Validate returned data
         assert_eq!(
@@ -4160,7 +4136,8 @@ pub(crate) mod test {
             },
         ];
 
-        let responses = region.region_read(&requests, JobId(0)).await.unwrap();
+        let req = RegionReadRequest::new(&requests);
+        let responses = region.region_read(&req, JobId(0)).await.unwrap();
 
         // Validate returned data
         assert_eq!(
@@ -4219,7 +4196,8 @@ pub(crate) mod test {
             })
             .collect();
 
-        let responses = region.region_read(&requests, JobId(1)).await.unwrap();
+        let req = RegionReadRequest::new(&requests);
+        let responses = region.region_read(&req, JobId(1)).await.unwrap();
 
         assert_eq!(&responses.data, &data,);
     }

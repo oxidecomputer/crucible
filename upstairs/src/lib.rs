@@ -641,6 +641,18 @@ impl RegionDefinitionStatus {
     }
 }
 
+/// Read response data, containing data from all blocks
+///
+/// Do not derive `Clone` on this type; it will be expensive and tempting to
+/// call by accident!
+#[derive(Debug, Default)]
+pub(crate) struct RawReadResponse {
+    /// Per-block metadata
+    pub blocks: Vec<ReadResponseBlockMetadata>,
+    /// Raw data
+    pub data: bytes::BytesMut,
+}
+
 /*
  * States of a downstairs
  *

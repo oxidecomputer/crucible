@@ -12,7 +12,6 @@ use tracing::instrument;
 
 use crate::region::JobOrReconciliationId;
 use crucible_common::*;
-use crucible_protocol::RawReadResponse;
 use repair_client::types::FileType;
 
 use super::*;
@@ -42,30 +41,12 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
         job_id: JobOrReconciliationId,
     ) -> Result<(), CrucibleError>;
 
-    fn read_into(
-        &mut self,
-        job_id: JobId,
-        requests: &[crucible_protocol::ReadRequest],
-        out: &mut RawReadResponse,
-        iov_max: usize,
-    ) -> Result<(), CrucibleError>;
-
-    /// Performs a read then destructures into a `Vec<ReadResponse>`
-    #[cfg(test)]
     fn read(
         &mut self,
         job_id: JobId,
-        requests: &[crucible_protocol::ReadRequest],
+        req: ExtentReadRequest,
         iov_max: usize,
-    ) -> Result<RawReadResponse, CrucibleError> {
-        let block_size = requests[0].offset.block_size_in_bytes();
-        let mut out =
-            RawReadResponse::with_capacity(requests.len(), block_size as u64);
-        if !requests.is_empty() {
-            self.read_into(job_id, requests, &mut out, iov_max)?;
-        }
-        Ok(out)
-    }
+    ) -> Result<ExtentReadResponse, CrucibleError>;
 
     fn write(
         &mut self,
@@ -549,26 +530,28 @@ impl Extent {
         self.number
     }
 
-    /// Read the real data off underlying storage, and get block metadata. If
-    /// an error occurs while processing any of the requests, the state of
-    /// `responses` is undefined.
+    /// Read the data and metadata off underlying storage
+    ///
+    /// The size of the read is determined by the `capacity` of the (allocated
+    /// but uninitialized) buffer in `req`.
+    ///
+    /// If an error occurs while processing any of the requests, an error is
+    /// returned.  Otherwise, the value in `ExtentReadResponse::data` is
+    /// guaranteed to be fully initialized and of the requested length.
     #[instrument]
-    pub async fn read_into(
+    pub async fn read(
         &mut self,
         job_id: JobId,
-        requests: &[crucible_protocol::ReadRequest],
-        out: &mut RawReadResponse,
-    ) -> Result<(), CrucibleError> {
-        cdt::extent__read__start!(|| {
-            (job_id.0, self.number, requests.len() as u64)
-        });
+        req: ExtentReadRequest,
+    ) -> Result<ExtentReadResponse, CrucibleError> {
+        let num_blocks =
+            (req.data.len() / req.offset.block_size_in_bytes() as usize) as u64;
+        cdt::extent__read__start!(|| { (job_id.0, self.number, num_blocks,) });
 
-        self.inner.read_into(job_id, requests, out, self.iov_max)?;
-        cdt::extent__read__done!(|| {
-            (job_id.0, self.number, requests.len() as u64)
-        });
+        let out = self.inner.read(job_id, req, self.iov_max)?;
+        cdt::extent__read__done!(|| { (job_id.0, self.number, num_blocks) });
 
-        Ok(())
+        Ok(out)
     }
 
     #[instrument]
@@ -848,13 +831,13 @@ pub fn sync_path<P: AsRef<Path> + std::fmt::Debug>(
 pub(crate) fn check_input(
     extent_size: Block,
     offset: Block,
-    data: &[u8],
+    data_len: usize,
 ) -> Result<(), CrucibleError> {
     let block_size = extent_size.block_size_in_bytes() as u64;
     /*
      * Only accept block-aligned operations
      */
-    if data.len() % block_size as usize != 0 {
+    if data_len % block_size as usize != 0 {
         crucible_bail!(DataLenUnaligned);
     }
 
@@ -869,7 +852,7 @@ pub(crate) fn check_input(
     let total_size = block_size * extent_size.value;
     let byte_offset = offset.value * block_size;
 
-    if (byte_offset + data.len() as u64) > total_size {
+    if (byte_offset + data_len as u64) > total_size {
         crucible_bail!(OffsetInvalid);
     }
 
@@ -887,8 +870,8 @@ mod test {
         let mut data = BytesMut::with_capacity(512);
         data.put(&[1; 512][..]);
 
-        check_input(extent_size, Block::new_512(0), &data).unwrap();
-        check_input(extent_size, Block::new_512(99), &data).unwrap();
+        check_input(extent_size, Block::new_512(0), data.len()).unwrap();
+        check_input(extent_size, Block::new_512(99), data.len()).unwrap();
     }
 
     #[test]
@@ -898,7 +881,7 @@ mod test {
         let mut data = BytesMut::with_capacity(513);
         data.put(&[1; 513][..]);
 
-        check_input(extent_size, Block::new_512(0), &data).unwrap();
+        check_input(extent_size, Block::new_512(0), data.len()).unwrap();
     }
 
     #[test]
@@ -908,7 +891,7 @@ mod test {
         let mut data = BytesMut::with_capacity(511);
         data.put(&[1; 511][..]);
 
-        check_input(extent_size, Block::new_512(0), &data).unwrap();
+        check_input(extent_size, Block::new_512(0), data.len()).unwrap();
     }
 
     #[test]
@@ -918,7 +901,7 @@ mod test {
         let mut data = BytesMut::with_capacity(512);
         data.put(&[1; 512][..]);
 
-        check_input(extent_size, Block::new_512(100), &data).unwrap();
+        check_input(extent_size, Block::new_512(100), data.len()).unwrap();
     }
 
     #[test]
@@ -928,7 +911,7 @@ mod test {
         let mut data = BytesMut::with_capacity(1024);
         data.put(&[1; 1024][..]);
 
-        check_input(extent_size, Block::new_512(99), &data).unwrap();
+        check_input(extent_size, Block::new_512(99), data.len()).unwrap();
     }
 
     #[test]
@@ -938,7 +921,7 @@ mod test {
         let mut data = BytesMut::with_capacity(512 * 100);
         data.put(&[1; 512 * 100][..]);
 
-        check_input(extent_size, Block::new_512(1), &data).unwrap();
+        check_input(extent_size, Block::new_512(1), data.len()).unwrap();
     }
 
     #[test]

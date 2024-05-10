@@ -9,6 +9,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +20,7 @@ use crucible_common::{
     verbose_timeout, Block, CrucibleError, RegionDefinition, MAX_BLOCK_SIZE,
 };
 use crucible_protocol::{
-    BlockContext, CrucibleDecoder, JobId, Message, MessageWriter, ReadRequest,
+    BlockContext, CrucibleDecoder, JobId, Message, MessageWriter,
     ReconciliationId, SnapshotDetails, CRUCIBLE_MESSAGE_VERSION,
 };
 use repair_client::Client;
@@ -68,7 +69,7 @@ enum IOop {
     },
     Read {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        requests: Vec<ReadRequest>,
+        requests: RegionReadRequest,
     },
     Flush {
         dependencies: Vec<JobId>, // Jobs that must finish before this
@@ -120,6 +121,192 @@ impl IOop {
     }
 }
 
+/// Read request for a particular extent
+///
+/// `data` should be an uninitializezd borrowed section of the outgoing buffer
+/// (i.e. from a [`RegionReadResponse`]), to reduce memory copies.
+///
+/// Do not derive `Clone` on this type; cloning the object will break the borrow
+/// of `data`, so it's rarely the correct choice.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct ExtentReadRequest {
+    offset: Block,
+    /// This buffer should be uninitialized; read size is set by its capacity
+    data: BytesMut,
+}
+
+/// Ordered list of read requests
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct RegionReadRequest(Vec<RegionReadReq>);
+
+/// Inner type for a single read requests
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct RegionReadReq {
+    extent: u64,
+    offset: Block,
+    count: NonZeroUsize,
+}
+
+impl RegionReadRequest {
+    fn new(reqs: &[crucible_protocol::ReadRequest]) -> Self {
+        let mut out = Self(vec![]);
+        for req in reqs {
+            match out.0.last_mut() {
+                // Check whether this read request is contiguous and in the same
+                // extent as the previous read request
+                Some(prev)
+                    if prev.extent == req.eid
+                        && prev.offset.value + prev.count.get() as u64
+                            == req.offset.value =>
+                {
+                    // If so, enlarge it by one block
+                    prev.count = prev.count.saturating_add(1);
+                }
+                _ => {
+                    // Otherwise, begin a new request
+                    out.0.push(RegionReadReq {
+                        extent: req.eid,
+                        offset: req.offset,
+                        count: NonZeroUsize::new(1).unwrap(),
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &RegionReadReq> {
+        self.0.iter()
+    }
+}
+
+impl IntoIterator for RegionReadRequest {
+    type Item = RegionReadReq;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+/// Read response data, designed to prevent copies and reallocations
+///
+/// We initialize a read response before performing any reads, then chop up its
+/// (allocated but uninitialized) buffer space into a set of
+/// `ExtentReadRequest`.  Each `ExtentReadRequest` is transformed into an
+/// `ExtentReadResponse` (reusing that chunk of buffer), which are then
+/// reassembled into the original `RegionReadResponse`.
+///
+/// Do not derive `Clone` on this type; it will be expensive and tempting to
+/// call by accident!
+pub(crate) struct RegionReadResponse {
+    blocks: Vec<Vec<BlockContext>>,
+    data: BytesMut,
+    uninit: BytesMut,
+}
+
+impl RegionReadResponse {
+    /// Builds a new empty `ReadResponse` with the given capacity
+    fn with_capacity(block_count: usize, block_size: u64) -> Self {
+        Self {
+            blocks: vec![],
+            data: BytesMut::new(),
+            uninit: BytesMut::with_capacity(block_size as usize * block_count),
+        }
+    }
+
+    /// Borrow the head of this `ReadResponse`, turning it into a read request
+    ///
+    /// ## Before
+    /// ```text
+    /// self.uninit = [ ----------------------------------- ]
+    /// ```
+    ///
+    /// ## After
+    /// ```text
+    /// self.uninit =             [ ----------------------- ]
+    /// req         = [ -------- ]
+    /// ```
+    ///
+    /// Note that the `BytesMut` objects remain uninitialized throughout this
+    /// whole procedure (to avoid `memset` calls).  We'll read directly into the
+    /// uninitialized request buffer, then call `unsplit` to build it back up.
+    ///
+    /// # Panics
+    /// If the size of the request is larger than our remaining buffer capacity
+    fn request(
+        &mut self,
+        offset: Block,
+        block_count: usize,
+    ) -> ExtentReadRequest {
+        let mut data = self
+            .uninit
+            .split_off(block_count * offset.block_size_in_bytes() as usize);
+        std::mem::swap(&mut data, &mut self.uninit);
+        ExtentReadRequest { offset, data }
+    }
+
+    /// Merge the given `ExtentReadResponse` into the tail of this response
+    ///
+    /// ## Before
+    /// ```text
+    /// self.data = [ -------- ]
+    /// r.data    =             [ ----------------------- ]
+    /// ```
+    ///
+    /// ## After
+    /// ```text
+    /// self.data = [ ----------------------------------- ]
+    /// ```
+    ///
+    /// # Panics
+    /// If the buffers cannot be unsplit without a reallocation; this indicates
+    /// a logic error in our code.
+    fn unsplit(&mut self, r: ExtentReadResponse) {
+        // The most common case is for a read to only touch one extent, so we
+        // have a fast path for just moving the blocks Vec.
+        if self.blocks.is_empty() {
+            self.blocks = r.blocks;
+        } else {
+            self.blocks.extend(r.blocks);
+        }
+        let prev_ptr = self.data.as_ptr();
+        let was_empty = self.data.is_empty();
+        self.data.unsplit(r.data);
+        assert!(was_empty || prev_ptr == self.data.as_ptr());
+    }
+
+    /// Returns hashes for the given response
+    ///
+    /// This is expensive and should only be used for debugging
+    pub fn hashes(&self, i: usize) -> Vec<u64> {
+        self.blocks[i].iter().map(|ctx| ctx.hash).collect()
+    }
+
+    /// Returns encryption contexts for the given response
+    ///
+    /// This is expensive and should only be used for debugging
+    pub fn encryption_contexts(
+        &self,
+        i: usize,
+    ) -> Vec<Option<&crucible_protocol::EncryptionContext>> {
+        self.blocks[i]
+            .iter()
+            .map(|ctx| ctx.encryption_context.as_ref())
+            .collect()
+    }
+}
+
+/// Read response from a single extent
+///
+/// Do not derive `Clone` on this type; it will be expensive and tempting to
+/// call by accident!
+pub(crate) struct ExtentReadResponse {
+    blocks: Vec<Vec<BlockContext>>,
+    /// At this point, the buffer must be fully initialized
+    data: BytesMut,
+}
+
 /*
  * Export the contents or partial contents of a Downstairs Region to
  * the file indicated.
@@ -168,13 +355,14 @@ pub async fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
 
                 let response = region
                     .region_read(
-                        &[ReadRequest {
-                            eid: eid as u64,
+                        &RegionReadRequest(vec![RegionReadReq {
+                            extent: eid as u64,
                             offset: Block::new_with_ddef(
                                 block_offset,
                                 &region.def(),
                             ),
-                        }],
+                            count: NonZeroUsize::new(1).unwrap(),
+                        }]),
                         JobId(0),
                     )
                     .await?;
@@ -1644,13 +1832,15 @@ impl Downstairs {
                  * Any error from an IO should be intercepted here and passed
                  * back to the upstairs.
                  */
-                let responses = if self.read_errors && random() && random() {
+                let response = if self.read_errors && random() && random() {
                     warn!(self.log, "returning error on read!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
+                    // This clone shouldn't be too expensive, since it's only
+                    // 32 bytes per extent (and should usually only be 1 extent)
                     self.region.region_read(requests, job_id).await
                 };
                 debug!(
@@ -1658,13 +1848,46 @@ impl Downstairs {
                     "Read      :{} deps:{:?} res:{}",
                     job_id,
                     dependencies,
-                    responses.is_ok(),
+                    response.is_ok(),
                 );
 
-                let (blocks, data) = match responses {
-                    Ok(r) => (Ok(r.blocks), r.data),
+                // We've got one or more block contexts per block returned, but
+                // the response format need to be in the form of
+                // `ReadResponseBlockMetadata` (which also contains extent and
+                // offset); we inject that extra information in this terrible
+                // match statement.
+                let (blocks, data) = match response {
+                    Ok(r) => (
+                        Ok(requests
+                            .iter()
+                            .flat_map(|req| {
+                                // Iterate over blocks within this extent.  By
+                                // construction, each `ReadRequest` will never
+                                // overstep the bounds of the extent.
+                                (0..req.count.get()).map(|i| {
+                                    (
+                                        req.extent,
+                                        Block {
+                                            value: req.offset.value + i as u64,
+                                            shift: req.offset.shift,
+                                        },
+                                    )
+                                })
+                            })
+                            .zip(r.blocks)
+                            .map(|((eid, offset), block_contexts)| {
+                                crucible_protocol::ReadResponseBlockMetadata {
+                                    eid,
+                                    offset,
+                                    block_contexts,
+                                }
+                            })
+                            .collect()),
+                        r.data,
+                    ),
                     Err(e) => (Err(e), Default::default()),
                 };
+
                 Ok(Some(Message::ReadResponse {
                     header: crucible_protocol::ReadResponseHeader {
                         upstairs_id: job.upstairs_connection.upstairs_id,
@@ -2446,7 +2669,7 @@ impl Downstairs {
 
                 let new_read = IOop::Read {
                     dependencies,
-                    requests,
+                    requests: RegionReadRequest::new(&requests),
                 };
 
                 let mut d = ad.lock().await;
@@ -3403,10 +3626,11 @@ mod test {
                 } else {
                     IOop::Read {
                         dependencies: deps,
-                        requests: vec![ReadRequest {
-                            eid: 1,
+                        requests: RegionReadRequest(vec![RegionReadReq {
+                            extent: 1,
                             offset: Block::new_512(1),
-                        }],
+                            count: NonZeroUsize::new(1).unwrap(),
+                        }]),
                     }
                 },
                 state: WorkState::New,
@@ -3572,20 +3796,22 @@ mod test {
 
         let rio = IOop::Read {
             dependencies: Vec::new(),
-            requests: vec![ReadRequest {
-                eid: 0,
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: 0,
                 offset: Block::new_512(1),
-            }],
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection, JobId(1000), rio)?;
 
         let deps = vec![JobId(1000)];
         let rio = IOop::Read {
             dependencies: deps,
-            requests: vec![ReadRequest {
-                eid: 1,
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: 1,
                 offset: Block::new_512(1),
-            }],
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection, JobId(1001), rio)?;
 
@@ -3686,10 +3912,11 @@ mod test {
         let deps = vec![JobId(1000), JobId(1001)];
         let rio = IOop::Read {
             dependencies: deps,
-            requests: vec![ReadRequest {
-                eid: 2,
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: 2,
                 offset: Block::new_512(1),
-            }],
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection, JobId(1002), rio)?;
 
@@ -5429,22 +5656,20 @@ mod test {
             for offset in 0..region.def().extent_size().value {
                 let response = region
                     .region_read(
-                        &[crucible_protocol::ReadRequest {
-                            eid: eid.into(),
+                        &RegionReadRequest(vec![RegionReadReq {
+                            extent: eid.into(),
                             offset: Block::new_512(offset),
-                        }],
+                            count: NonZeroUsize::new(1).unwrap(),
+                        }]),
                         JobId(0),
                     )
                     .await?;
 
                 assert_eq!(response.blocks.len(), 1);
 
-                let r = &response.blocks[0];
-                assert_eq!(r.hashes().len(), 1);
-                assert_eq!(
-                    integrity_hash(&[&response.data[..]]),
-                    r.hashes()[0],
-                );
+                let hashes = response.hashes(0);
+                assert_eq!(hashes.len(), 1);
+                assert_eq!(integrity_hash(&[&response.data[..]]), hashes[0],);
 
                 read_data.extend_from_slice(&response.data[..]);
             }
@@ -5818,19 +6043,21 @@ mod test {
 
         let read_1 = IOop::Read {
             dependencies: Vec::new(),
-            requests: vec![ReadRequest {
-                eid: 0,
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: 0,
                 offset: Block::new_512(1),
-            }],
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection_1, JobId(1000), read_1.clone())?;
 
         let read_2 = IOop::Read {
             dependencies: Vec::new(),
-            requests: vec![ReadRequest {
-                eid: 1,
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: 1,
                 offset: Block::new_512(2),
-            }],
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection_2, JobId(1000), read_2.clone())?;
 
@@ -5902,10 +6129,11 @@ mod test {
         // Add one job, id 1000
         let rio = IOop::Read {
             dependencies: Vec::new(),
-            requests: vec![ReadRequest {
-                eid: 0,
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: 0,
                 offset: Block::new_512(1),
-            }],
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection_1, JobId(1000), rio)?;
 
@@ -5992,10 +6220,11 @@ mod test {
         // Add one job, id 1000
         let rio = IOop::Read {
             dependencies: Vec::new(),
-            requests: vec![ReadRequest {
-                eid: 0,
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: 0,
                 offset: Block::new_512(1),
-            }],
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection_1, JobId(1000), rio)?;
 
@@ -6082,10 +6311,11 @@ mod test {
         // Add one job, id 1000
         let rio = IOop::Read {
             dependencies: Vec::new(),
-            requests: vec![ReadRequest {
-                eid: 0,
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: 0,
                 offset: Block::new_512(1),
-            }],
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection_1, JobId(1000), rio)?;
 
