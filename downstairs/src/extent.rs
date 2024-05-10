@@ -530,9 +530,14 @@ impl Extent {
         self.number
     }
 
-    /// Read the real data off underlying storage, and get block metadata. If
-    /// an error occurs while processing any of the requests, the state of
-    /// `responses` is undefined.
+    /// Read the data and metadata off underlying storage
+    ///
+    /// The size of the read is determined by the `capacity` of the (allocated
+    /// but uninitialized) buffer in `req`.
+    ///
+    /// If an error occurs while processing any of the requests, an error is
+    /// returned.  Otherwise, the value in `ExtentReadResponse::data` is
+    /// guaranteed to be fully initialized and of the requested length.
     #[instrument]
     pub async fn read(
         &mut self,

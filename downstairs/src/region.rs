@@ -855,6 +855,11 @@ impl Region {
             let extent = self.get_opened_extent_mut(eid as usize);
             let req = response.request(offset, size.get());
             let out = extent.read(job_id, req).await?;
+
+            // Note that we only call `unsplit` here if `Extent::read` returned
+            // `Ok(..)` (indicating that the data is fully populated); this
+            // means that the preconditions for `RegionReadResponse::unsplit`
+            // are met and it will not panic.
             response.unsplit(out);
         }
         cdt::os__read__done!(|| job_id.0);
