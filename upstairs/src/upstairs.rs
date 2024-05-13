@@ -37,6 +37,9 @@ use uuid::Uuid;
 /// How often to log stats for DTrace
 const STAT_INTERVAL_SECS: f32 = 1.0;
 
+/// Minimum IO size (in bytes) before encryption / decryption is done off-thread
+const MIN_DEFER_SIZE_BYTES: u64 = 8192;
+
 /// High-level upstairs state, from the perspective of the guest
 #[derive(Debug)]
 pub(crate) enum UpstairsState {
@@ -1373,11 +1376,10 @@ impl Upstairs {
         data: BytesMut,
         is_write_unwritten: bool,
     ) {
-        if let Some(w) = self
-            .compute_deferred_write(offset, data, None, is_write_unwritten)
-            .and_then(DeferredWrite::run)
+        if let Some(w) =
+            self.compute_deferred_write(offset, data, None, is_write_unwritten)
         {
-            self.submit_write(w)
+            self.submit_write(DeferredWrite::run(w))
         }
     }
 
@@ -1399,11 +1401,18 @@ impl Upstairs {
         if let Some(w) =
             self.compute_deferred_write(offset, data, res, is_write_unwritten)
         {
-            let tx = self.deferred_ops.push_oneshot();
-            self.pool.spawn(move || {
-                let out = w.run().map(DeferredBlockOp::Write);
-                let _ = tx.send(out);
-            });
+            let should_defer = !self.deferred_msgs.is_empty()
+                || w.data.len() > MIN_DEFER_SIZE_BYTES as usize;
+            if should_defer {
+                let tx = self.deferred_ops.push_oneshot();
+                self.pool.spawn(move || {
+                    let out = DeferredBlockOp::Write(w.run());
+                    let _ = tx.send(Some(out));
+                });
+            } else {
+                let out = DeferredBlockOp::Write(w.run());
+                self.apply_guest_request(out);
+            }
         }
     }
 
@@ -1532,7 +1541,6 @@ impl Upstairs {
                     // Any read larger than this constant should be deferred to
                     // the worker pool; smaller reads can be processed in-thread
                     // (since the overhead isn't worth it)
-                    const MIN_DEFER_SIZE_BYTES: u64 = 8192;
                     let should_defer = !self.deferred_msgs.is_empty()
                         || match &header.blocks {
                             Ok(rs) => {
@@ -3643,8 +3651,7 @@ pub(crate) mod test {
             .encryption_context
             .as_ref()
             .unwrap()
-            .encrypt_in_place(&mut data)
-            .unwrap();
+            .encrypt_in_place(&mut data);
 
         let blocks = Ok(vec![ReadResponseBlockMetadata {
             eid: 0,
@@ -3699,8 +3706,7 @@ pub(crate) mod test {
             .encryption_context
             .as_ref()
             .unwrap()
-            .encrypt_in_place(&mut data)
-            .unwrap();
+            .encrypt_in_place(&mut data);
 
         let nonce: [u8; 12] = nonce.into();
         let tag: [u8; 16] = tag.into();
@@ -3767,8 +3773,7 @@ pub(crate) mod test {
             .encryption_context
             .as_ref()
             .unwrap()
-            .encrypt_in_place(&mut data)
-            .unwrap();
+            .encrypt_in_place(&mut data);
 
         let nonce: [u8; 12] = nonce.into();
         let mut tag: [u8; 16] = tag.into();
@@ -3856,8 +3861,7 @@ pub(crate) mod test {
             .encryption_context
             .as_ref()
             .unwrap()
-            .encrypt_in_place(&mut data)
-            .unwrap();
+            .encrypt_in_place(&mut data);
 
         let nonce: [u8; 12] = nonce.into();
         let mut tag: [u8; 16] = tag.into();
@@ -3934,8 +3938,7 @@ pub(crate) mod test {
             .encryption_context
             .as_ref()
             .unwrap()
-            .encrypt_in_place(&mut data)
-            .unwrap();
+            .encrypt_in_place(&mut data);
 
         let nonce: [u8; 12] = nonce.into();
         let tag: [u8; 16] = tag.into();
