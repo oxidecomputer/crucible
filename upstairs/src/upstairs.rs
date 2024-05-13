@@ -40,6 +40,15 @@ const STAT_INTERVAL_SECS: f32 = 1.0;
 /// Minimum IO size (in bytes) before encryption / decryption is done off-thread
 const MIN_DEFER_SIZE_BYTES: u64 = 8192;
 
+/// Number of threads to dedicate to encryption / decryption
+///
+/// This number is picked somewhat arbitrarily by eyeballing flamegraphs until
+/// `WorkerThread::wait_until_cold` looks like a reasonable fraction of CPU
+/// time.  Rayon's default is "number of CPU threads", which is dramatic
+/// overkill on a 128-thread system; in such a system, we see a ton of CPU time
+/// being spent spinning in `WorkerThread::wait_until_cold`.
+const WORKER_POOL_SIZE: usize = 16;
+
 /// High-level upstairs state, from the perspective of the guest
 #[derive(Debug)]
 pub(crate) enum UpstairsState {
@@ -241,7 +250,7 @@ pub(crate) struct Upstairs {
     pub(crate) control_tx: mpsc::Sender<ControlRequest>,
 
     /// Stream of post-processed `BlockOp` futures
-    deferred_ops: DeferredQueue<Option<DeferredBlockOp>>,
+    deferred_ops: DeferredQueue<DeferredBlockOp>,
 
     /// Stream of decrypted `Message` futures
     deferred_msgs: DeferredQueue<DeferredMessage>,
@@ -359,7 +368,7 @@ impl Upstairs {
         };
 
         let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(16)
+            .num_threads(WORKER_POOL_SIZE)
             .build()
             .expect("failed to build rayon thread pool");
 
@@ -480,13 +489,7 @@ impl Upstairs {
                 match d {
                     // Normal operation: the deferred task gave us back a
                     // DeferredBlockOp, which we need to handle.
-                    Some(Some(d)) => UpstairsAction::DeferredBlockOp(d),
-
-                    // The innermost Option is None if the deferred task handled
-                    // the request on its own (and replied to the `BlockOp`
-                    // already). This happens if encryption fails, which would
-                    // be odd, but possible?
-                    Some(None) => UpstairsAction::NoOp,
+                    Some(d) => UpstairsAction::DeferredBlockOp(d),
 
                     // The outer Option is None if the FuturesOrdered is empty
                     None => {
@@ -687,7 +690,6 @@ impl Upstairs {
     #[cfg(test)]
     async fn await_deferred_ops(&mut self) {
         while let Some(req) = self.deferred_ops.next().await {
-            let req = req.unwrap(); // the deferred request should not fail
             self.apply(UpstairsAction::DeferredBlockOp(req));
         }
         assert!(self.deferred_ops.is_empty());
@@ -936,8 +938,7 @@ impl Upstairs {
             // have to keep using it for subsequent requests (even ones that are
             // not writes) to preserve FIFO ordering
             _ if !self.deferred_ops.is_empty() => {
-                self.deferred_ops
-                    .push_immediate(Some(DeferredBlockOp::Other(op)));
+                self.deferred_ops.push_immediate(DeferredBlockOp::Other(op));
             }
             // Otherwise, we can apply a non-write operation immediately, saving
             // a trip through the FuturesUnordered
@@ -1407,7 +1408,7 @@ impl Upstairs {
                 let tx = self.deferred_ops.push_oneshot();
                 self.pool.spawn(move || {
                     let out = DeferredBlockOp::Write(w.run());
-                    let _ = tx.send(Some(out));
+                    let _ = tx.send(out);
                 });
             } else {
                 let out = DeferredBlockOp::Write(w.run());
