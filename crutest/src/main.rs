@@ -1345,8 +1345,10 @@ fn fill_vec(
     for (block_offset, chunk) in (block_index..(block_index + blocks))
         .zip(vec.spare_capacity_mut().chunks_mut(bs as usize))
     {
+        // The start of each block contains that block's index mod 255
         chunk[0].write((block_offset % 255) as u8);
 
+        // Fill the rest of the buffer with the new write count
         let seed = wl.get_seed(block_offset);
         chunk[1..].iter_mut().for_each(|b| {
             b.write(seed);
