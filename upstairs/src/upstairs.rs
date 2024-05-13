@@ -242,6 +242,9 @@ pub(crate) struct Upstairs {
 
     /// Stream of decrypted `Message` futures
     deferred_msgs: DeferredQueue<DeferredMessage>,
+
+    /// Thread pool for doing heavy CPU work outside the Tokio runtime
+    pool: rayon::ThreadPool,
 }
 
 /// Action to be taken which modifies the [`Upstairs`] state
@@ -352,6 +355,11 @@ impl Upstairs {
             Some(d) => RegionDefinitionStatus::ExpectingFromDownstairs(d),
         };
 
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(16)
+            .build()
+            .expect("failed to build rayon thread pool");
+
         let session_id = Uuid::new_v4();
         let log = guest.log.new(o!("session_id" => session_id.to_string()));
         info!(log, "Crucible {} has session id: {}", uuid, session_id);
@@ -396,6 +404,7 @@ impl Upstairs {
             control_tx,
             deferred_ops: DeferredQueue::new(),
             deferred_msgs: DeferredQueue::new(),
+            pool,
         }
     }
 
@@ -1391,7 +1400,7 @@ impl Upstairs {
             self.compute_deferred_write(offset, data, res, is_write_unwritten)
         {
             let tx = self.deferred_ops.push_oneshot();
-            rayon::spawn(move || {
+            self.pool.spawn(move || {
                 let out = w.run().map(DeferredBlockOp::Write);
                 let _ = tx.send(out);
             });
@@ -1549,7 +1558,7 @@ impl Upstairs {
                     };
                     if should_defer {
                         let tx = self.deferred_msgs.push_oneshot();
-                        rayon::spawn(move || {
+                        self.pool.spawn(move || {
                             let out = dr.run();
                             let _ = tx.send(out);
                         });
