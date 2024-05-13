@@ -1342,16 +1342,22 @@ fn fill_vec(
      * the write buffer with the correct seed value.
      */
     let mut vec = BytesMut::with_capacity(blocks * bs as usize);
-    for block_offset in block_index..(block_index + blocks) {
-        /*
-         * The start of each block contains that blocks index mod 255
-         */
-        vec.extend(&[(block_offset % 255) as u8]);
-        /*
-         * Fill the rest of the buffer with the new write count
-         */
+    for (block_offset, chunk) in (block_index..(block_index + blocks))
+        .zip(vec.spare_capacity_mut().chunks_mut(bs as usize))
+    {
+        chunk[0].write((block_offset % 255) as u8);
+
         let seed = wl.get_seed(block_offset);
-        vec.extend(std::iter::repeat(seed).take(bs as usize - 1));
+        chunk[1..].iter_mut().for_each(|b| {
+            b.write(seed);
+        });
+    }
+
+    // SAFETY:
+    // We initialized the entire buffer in the loop above
+    unsafe {
+        let n = vec.capacity();
+        vec.set_len(n);
     }
     vec
 }
