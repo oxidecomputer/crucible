@@ -367,8 +367,7 @@ impl RegionWrite {
         }
         let mut out = Self(vec![]);
         for b in blocks {
-            let append = out.can_append(b);
-            if append {
+            if out.can_append(b) {
                 out.append_block_context(b.block_context);
             } else {
                 out.set_last_data(block_size, &mut buf);
