@@ -325,9 +325,9 @@ checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
 
 [[package]]
 name = "base64"
-version = "0.22.0"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9475866fec1451be56a3c2400fd081ff546538961565ccb5b7142cbd22bc7a51"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "base64ct"
@@ -764,7 +764,7 @@ dependencies = [
  "anyhow",
  "async-recursion",
  "async-trait",
- "base64 0.22.0",
+ "base64 0.22.1",
  "bincode",
  "bytes",
  "cfg-if",
@@ -864,7 +864,7 @@ dependencies = [
 name = "crucible-client-types"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.0",
+ "base64 0.22.1",
  "crucible-workspace-hack",
  "schemars",
  "serde",
@@ -1001,7 +1001,7 @@ name = "crucible-integration-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.22.0",
+ "base64 0.22.1",
  "bytes",
  "crucible",
  "crucible-client-types",
@@ -1066,7 +1066,7 @@ name = "crucible-pantry"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "base64 0.22.0",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "clap",
@@ -1453,7 +1453,7 @@ source = "git+https://github.com/oxidecomputer/dropshot?branch=main#773889e5ab24
 dependencies = [
  "async-stream",
  "async-trait",
- "base64 0.22.0",
+ "base64 0.22.1",
  "bytes",
  "camino",
  "chrono",
@@ -1811,7 +1811,7 @@ name = "gateway-client"
 version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/omicron?branch=main#6605093292c8b4b0ea3ccc96017cc3a299b1c377"
 dependencies = [
- "base64 0.22.0",
+ "base64 0.22.1",
  "chrono",
  "gateway-messages",
  "omicron-workspace-hack",
@@ -2712,7 +2712,7 @@ source = "git+https://github.com/oxidecomputer/omicron?branch=main#6605093292c8b
 dependencies = [
  "anyhow",
  "api_identity",
- "base64 0.22.0",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "dns-service-client",
