@@ -46,8 +46,8 @@ const MIN_DEFER_SIZE_BYTES: u64 = 8192;
 /// `WorkerThread::wait_until_cold` looks like a reasonable fraction of CPU
 /// time.  Rayon's default is "number of CPU threads", which is dramatic
 /// overkill on a 128-thread system; in such a system, we see a ton of CPU time
-/// being spent spinning in `WorkerThread::wait_until_cold`.
-const WORKER_POOL_SIZE: usize = 16;
+/// being spent spinning in `wait_until_cold`.
+const WORKER_POOL_SIZE: usize = 8;
 
 /// High-level upstairs state, from the perspective of the guest
 #[derive(Debug)]
