@@ -20,7 +20,7 @@ struct ExtInfo {
  */
 pub async fn dump_region(
     region_dir: Vec<PathBuf>,
-    mut cmp_extent: Option<u32>,
+    mut cmp_extent: Option<ExtentId>,
     block: Option<u64>,
     only_show_differences: bool,
     nc: bool,
@@ -37,7 +37,7 @@ pub async fn dump_region(
      * We build this first because it makes it easier to print it all out
      * at the end.
      */
-    let mut all_extents: HashMap<u32, ExtInfo> = HashMap::new();
+    let mut all_extents: HashMap<ExtentId, ExtInfo> = HashMap::new();
     let dir_count = region_dir.len();
     let mut blocks_per_extent = 0;
     let mut total_extents = 0;
@@ -81,7 +81,7 @@ pub async fn dump_region(
                             max_block - 1,
                         );
                     }
-                    cmp_extent = Some(ce);
+                    cmp_extent = Some(ExtentId(ce));
                 }
             }
 
@@ -114,7 +114,7 @@ pub async fn dump_region(
      *       compare every time.
      */
     if let Some(ce) = cmp_extent {
-        if ce >= total_extents {
+        if ce.0 >= total_extents {
             bail!(
                 "Requested extent {} is a higher index than valid ({})",
                 ce,
@@ -161,7 +161,7 @@ pub async fn dump_region(
     /*
      * Print out the extent info one extent at a time, in order
      */
-    let mut ext_num = all_extents.keys().collect::<Vec<&u32>>();
+    let mut ext_num = all_extents.keys().collect::<Vec<_>>();
     ext_num.sort_unstable();
 
     // Width for EXT column.
@@ -273,8 +273,8 @@ pub async fn dump_region(
             // Blocks
             print!(
                 "{:0width$}-{:0width$}",
-                blocks_per_extent * (**en as u64),
-                blocks_per_extent * (**en as u64) + blocks_per_extent - 1,
+                blocks_per_extent * (en.0 as u64),
+                blocks_per_extent * (en.0 as u64) + blocks_per_extent - 1,
                 width = block_width,
             );
 
@@ -440,7 +440,7 @@ fn return_status_letters<'a, U: std::cmp::PartialEq>(
 async fn show_extent(
     region_dir: Vec<PathBuf>,
     ei_hm: &HashMap<u32, ExtentMeta>,
-    cmp_extent: u32,
+    cmp_extent: ExtentId,
     blocks_per_extent: u64,
     only_show_differences: bool,
     nc: bool,
@@ -492,7 +492,7 @@ async fn show_extent(
     println!();
     // Width for BLOCKS column
     let max_block =
-        blocks_per_extent * cmp_extent as u64 + blocks_per_extent - 1;
+        blocks_per_extent * cmp_extent.0 as u64 + blocks_per_extent - 1;
     // Get the max possible width for a single block
     let block_width = std::cmp::max(3, max_block.to_string().len());
 
@@ -540,7 +540,7 @@ async fn show_extent(
             let response = region
                 .region_read(
                     &RegionReadRequest(vec![RegionReadReq {
-                        extent: cmp_extent as u64,
+                        extent: cmp_extent,
                         offset: Block::new_with_ddef(block, &region.def()),
                         count: NonZeroUsize::new(1).unwrap(),
                     }]),
@@ -583,7 +583,7 @@ async fn show_extent(
         let different = data_different || bc_different;
 
         // Now that we have collected all the results, print them
-        let real_block = (blocks_per_extent * cmp_extent as u64) + block;
+        let real_block = (blocks_per_extent * cmp_extent.0 as u64) + block;
         if !only_show_differences || different {
             print!("{:0width$} ", real_block, width = block_width);
 
@@ -621,7 +621,7 @@ fn is_all_same<T: PartialEq>(slice: &[T]) -> bool {
  */
 async fn show_extent_block(
     region_dir: Vec<PathBuf>,
-    cmp_extent: u32,
+    cmp_extent: ExtentId,
     block: u64,
     blocks_per_extent: u64,
     only_show_differences: bool,
@@ -655,7 +655,7 @@ async fn show_extent_block(
         let response = region
             .region_read(
                 &RegionReadRequest(vec![RegionReadReq {
-                    extent: cmp_extent as u64,
+                    extent: cmp_extent,
                     offset: Block::new_with_ddef(
                         block_in_extent,
                         &region.def(),

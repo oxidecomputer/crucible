@@ -13,7 +13,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
 
-use crucible_common::build_logger;
+use crucible_common::{build_logger, ExtentId};
 use crucible_downstairs::admin::*;
 use crucible_downstairs::*;
 use crucible_protocol::{JobId, CRUCIBLE_MESSAGE_VERSION};
@@ -362,7 +362,7 @@ async fn main() -> Result<()> {
             }
             dump_region(
                 data,
-                extent,
+                extent.map(ExtentId),
                 block,
                 only_show_differences,
                 no_color,

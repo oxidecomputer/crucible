@@ -13,6 +13,7 @@ use crate::{
     Block, BlockContext, CrucibleError, ExtentReadRequest, ExtentReadResponse,
     ExtentWrite, JobId, RegionDefinition,
 };
+use crucible_common::ExtentId;
 
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -73,7 +74,7 @@ pub struct RawInner {
     file: File,
 
     /// Our extent number
-    extent_number: u32,
+    extent_number: ExtentId,
 
     /// Extent size, in blocks
     extent_size: Block,
@@ -192,7 +193,7 @@ impl ExtentInner for RawInner {
         let mut writes_to_skip = HashSet::new();
         if only_write_unwritten {
             cdt::extent__write__get__hashes__start!(|| {
-                (job_id.0, self.extent_number, num_blocks)
+                (job_id.0, self.extent_number.0, num_blocks)
             });
 
             // Query hashes for the write range.
@@ -206,7 +207,7 @@ impl ExtentInner for RawInner {
             }
 
             cdt::extent__write__get__hashes__done!(|| {
-                (job_id.0, self.extent_number, num_blocks)
+                (job_id.0, self.extent_number.0, num_blocks)
             });
 
             if writes_to_skip.len() == write.block_contexts.len() {
@@ -222,7 +223,7 @@ impl ExtentInner for RawInner {
         // TODO right now we're including the integrity_hash() time in the
         // measured time.  Is it small enough to be ignored?
         cdt::extent__write__raw__context__insert__start!(|| {
-            (job_id.0, self.extent_number, num_blocks)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
 
         // Compute block contexts, then write them to disk
@@ -249,7 +250,7 @@ impl ExtentInner for RawInner {
         self.set_block_contexts(&block_ctx)?;
 
         cdt::extent__write__raw__context__insert__done!(|| {
-            (job_id.0, self.extent_number, num_blocks)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
 
         // PERFORMANCE TODO:
@@ -270,7 +271,7 @@ impl ExtentInner for RawInner {
         // complexity. The time spent implementing that would probably better be
         // spent switching to aio or something like that.
         cdt::extent__write__file__start!(|| {
-            (job_id.0, self.extent_number, num_blocks)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
 
         let r = self.write_inner(write, &writes_to_skip);
@@ -297,7 +298,7 @@ impl ExtentInner for RawInner {
         }
 
         cdt::extent__write__file__done!(|| {
-            (job_id.0, self.extent_number, num_blocks)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
 
         Ok(())
@@ -316,12 +317,12 @@ impl ExtentInner for RawInner {
 
         // Query the block metadata
         cdt::extent__read__get__contexts__start!(|| {
-            (job_id.0, self.extent_number, num_blocks)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
         let block_contexts =
             self.get_block_contexts(req.offset.value, num_blocks)?;
         cdt::extent__read__get__contexts__done!(|| {
-            (job_id.0, self.extent_number, num_blocks)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
 
         // Convert from DownstairsBlockContext -> BlockContext
@@ -337,7 +338,7 @@ impl ExtentInner for RawInner {
 
         // Finally we get to read the actual data. That's why we're here
         cdt::extent__read__file__start!(|| {
-            (job_id.0, self.extent_number, num_blocks)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
 
         // SAFETY: the buffer has sufficient capacity, and this is a valid
@@ -374,7 +375,7 @@ impl ExtentInner for RawInner {
         }
 
         cdt::extent__read__file__done!(|| {
-            (job_id.0, self.extent_number, num_blocks)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
 
         Ok(ExtentReadResponse { data: buf, blocks })
@@ -395,7 +396,7 @@ impl ExtentInner for RawInner {
         }
 
         cdt::extent__flush__start!(|| {
-            (job_id.get(), self.extent_number, 0)
+            (job_id.get(), self.extent_number.0, 0)
         });
 
         // We put all of our metadata updates into a single write to make this
@@ -405,7 +406,7 @@ impl ExtentInner for RawInner {
         // Now, we fsync to ensure data is flushed to disk.  It's okay to crash
         // before this point, because setting the flush number is atomic.
         cdt::extent__flush__file__start!(|| {
-            (job_id.get(), self.extent_number, 0)
+            (job_id.get(), self.extent_number.0, 0)
         });
         if let Err(e) = self.file.sync_all() {
             /*
@@ -418,7 +419,7 @@ impl ExtentInner for RawInner {
         }
         self.context_slot_dirty.fill(0);
         cdt::extent__flush__file__done!(|| {
-            (job_id.get(), self.extent_number, 0)
+            (job_id.get(), self.extent_number.0, 0)
         });
 
         // Check for fragmentation in the context slots leading to worse
@@ -435,7 +436,9 @@ impl ExtentInner for RawInner {
             Ok(())
         };
 
-        cdt::extent__flush__done!(|| { (job_id.get(), self.extent_number, 0) });
+        cdt::extent__flush__done!(|| {
+            (job_id.get(), self.extent_number.0, 0)
+        });
 
         r
     }
@@ -509,7 +512,7 @@ impl RawInner {
     pub fn create(
         dir: &Path,
         def: &RegionDefinition,
-        extent_number: u32,
+        extent_number: ExtentId,
     ) -> Result<Self, CrucibleError> {
         let path = extent_path(dir, extent_number);
         let extent_size = def.extent_size();
@@ -557,7 +560,7 @@ impl RawInner {
     pub fn open(
         dir: &Path,
         def: &RegionDefinition,
-        extent_number: u32,
+        extent_number: ExtentId,
         read_only: bool,
         log: &Logger,
     ) -> Result<Self, CrucibleError> {
@@ -807,7 +810,7 @@ impl RawInner {
             }
         }
         cdt::extent__set__block__contexts__write__count!(|| (
-            self.extent_number,
+            self.extent_number.0,
             write_count,
         ));
         Ok(())
@@ -1327,9 +1330,12 @@ mod test {
     #[test]
     fn encryption_context() -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = RawInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Encryption context for blocks 0 and 1 should start blank
 
@@ -1398,9 +1404,12 @@ mod test {
     #[test]
     fn multiple_context() -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = RawInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Encryption context for blocks 0 and 1 should start blank
 
@@ -1528,9 +1537,12 @@ mod test {
     #[test]
     fn test_write_unwritten_without_flush() -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = RawInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Write a block, but don't flush.
         let data = Bytes::from(vec![0x55; 512]);
@@ -1606,9 +1618,12 @@ mod test {
     #[test]
     fn test_auto_sync() -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = RawInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Write a block, but don't flush.
         let data = Bytes::from(vec![0x55; 512]);
@@ -1661,9 +1676,12 @@ mod test {
     #[test]
     fn test_auto_sync_flush() -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = RawInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Write a block, but don't flush.
         let data = Bytes::from(vec![0x55; 512]);
@@ -1707,9 +1725,12 @@ mod test {
     #[test]
     fn test_auto_sync_flush_2() -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = RawInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Write a block, but don't flush.
         let data = Bytes::from(vec![0x55; 512]);
@@ -1764,9 +1785,12 @@ mod test {
     fn test_reopen_marks_blocks_unwritten_if_data_never_hit_disk() -> Result<()>
     {
         let dir = tempdir()?;
-        let mut inner =
-            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = RawInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Partial write, the data never hits disk, but there's a context
         // in the DB and the dirty flag is set.
@@ -1782,9 +1806,12 @@ mod test {
 
         // Reopen, which should note that the hash doesn't match on-disk values
         // and decide that block 0 is unwritten.
-        let mut inner =
-            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = RawInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Writing to block 0 should succeed with only_write_unwritten
         {
@@ -1818,9 +1845,12 @@ mod test {
     #[test]
     fn test_defragment_full() -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = RawInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Write every other block, so that the active context slot alternates
         let data = Bytes::from(vec![0x55; 512]);
@@ -1915,9 +1945,12 @@ mod test {
     #[test]
     fn test_defragment_into_b() -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = RawInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Write every other block, so that the active context slot alternates
         let data = Bytes::from(vec![0x55; 512]);
@@ -2019,9 +2052,12 @@ mod test {
         // Identical to `test_defragment_a`, except that we force the
         // defragmentation to copy into the A slots
         let dir = tempdir()?;
-        let mut inner =
-            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = RawInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Write every other block, so that the active context slot alternates
         let data = Bytes::from(vec![0x55; 512]);
@@ -2124,9 +2160,12 @@ mod test {
         // Identical to `test_defragment_a`, except that we force the
         // defragmentation to copy into the A slots
         let dir = tempdir()?;
-        let mut inner =
-            RawInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = RawInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Write every other block, so that the active context slot alternates
         let data = Bytes::from(vec![0x55; 512]);

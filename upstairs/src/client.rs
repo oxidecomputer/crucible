@@ -6,7 +6,9 @@ use crate::{
     JobId, Message, RawReadResponse, ReconcileIO, RegionDefinitionStatus,
     RegionMetadata,
 };
-use crucible_common::{deadline_secs, verbose_timeout, x509::TLSContext};
+use crucible_common::{
+    deadline_secs, verbose_timeout, x509::TLSContext, ExtentId,
+};
 use crucible_protocol::{
     BlockContext, MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
 };
@@ -886,7 +888,7 @@ impl DownstairsClient {
     pub(crate) fn enqueue(
         &mut self,
         io: &mut DownstairsIO,
-        last_repair_extent: Option<u64>,
+        last_repair_extent: Option<ExtentId>,
     ) -> IOState {
         assert_eq!(io.state[self.client_id], IOState::New);
 

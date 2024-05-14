@@ -8,6 +8,7 @@ use crate::{
     Block, BlockContext, CrucibleError, ExtentReadRequest, ExtentReadResponse,
     ExtentWrite, JobId, RegionDefinition,
 };
+use crucible_common::ExtentId;
 use crucible_protocol::EncryptionContext;
 
 use anyhow::{bail, Result};
@@ -94,7 +95,7 @@ impl SqliteInner {
     pub fn create(
         dir: &Path,
         def: &RegionDefinition,
-        extent_number: u32,
+        extent_number: ExtentId,
     ) -> Result<Self> {
         let i = SqliteMoreInner::create(dir, def, extent_number)?;
         Ok(Self(i.into()))
@@ -103,7 +104,7 @@ impl SqliteInner {
     pub fn open(
         dir: &Path,
         def: &RegionDefinition,
-        extent_number: u32,
+        extent_number: ExtentId,
         read_only: bool,
         log: &Logger,
     ) -> Result<Self> {
@@ -148,7 +149,7 @@ struct SqliteMoreInner {
     metadb: Connection,
 
     /// Our extent number
-    extent_number: u32,
+    extent_number: ExtentId,
 
     /// Extent size, in blocks
     extent_size: Block,
@@ -203,7 +204,7 @@ impl SqliteMoreInner {
         let n_dirty_blocks = self.dirty_blocks.len() as u64;
 
         cdt::extent__flush__start!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0, n_dirty_blocks)
         });
 
         /*
@@ -211,7 +212,7 @@ impl SqliteMoreInner {
          * This must be done before we update the flush number.
          */
         cdt::extent__flush__file__start!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0, n_dirty_blocks)
         });
         if let Err(e) = self.file.sync_all() {
             /*
@@ -224,7 +225,7 @@ impl SqliteMoreInner {
             );
         }
         cdt::extent__flush__file__done!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0, n_dirty_blocks)
         });
 
         // Clear old block contexts. In order to be crash consistent, only
@@ -236,7 +237,7 @@ impl SqliteMoreInner {
         // file is rehashed, since in that case we don't have that luxury.
 
         cdt::extent__flush__collect__hashes__start!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0, n_dirty_blocks)
         });
 
         // Rehash any parts of the file that we *may have written* data to since
@@ -245,11 +246,11 @@ impl SqliteMoreInner {
         let n_rehashed = self.rehash_dirty_blocks()?;
 
         cdt::extent__flush__collect__hashes__done!(|| {
-            (job_id.get(), self.extent_number, n_rehashed as u64)
+            (job_id.get(), self.extent_number.0, n_rehashed as u64)
         });
 
         cdt::extent__flush__sqlite__insert__start!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0, n_dirty_blocks)
         });
 
         // We put all of our metadb updates into a single transaction to
@@ -264,7 +265,7 @@ impl SqliteMoreInner {
         )?;
 
         cdt::extent__flush__sqlite__insert__done!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0, n_dirty_blocks)
         });
 
         self.set_flush_number(new_flush, new_gen)?;
@@ -275,7 +276,7 @@ impl SqliteMoreInner {
         self.file.seek(SeekFrom::Start(0))?;
 
         cdt::extent__flush__done!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0, n_dirty_blocks)
         });
         Ok(())
     }
@@ -293,12 +294,12 @@ impl SqliteMoreInner {
 
         // Query the block metadata
         cdt::extent__read__get__contexts__start!(|| {
-            (job_id.0, self.extent_number, num_blocks)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
         let block_contexts =
             self.get_block_contexts(req.offset.value, num_blocks)?;
         cdt::extent__read__get__contexts__done!(|| {
-            (job_id.0, self.extent_number, num_blocks)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
         // Convert from DownstairsBlockContext -> BlockContext
         let blocks = block_contexts
@@ -313,7 +314,7 @@ impl SqliteMoreInner {
 
         // Finally we get to read the actual data. That's why we're here
         cdt::extent__read__file__start!(|| {
-            (job_id.0, self.extent_number, num_blocks)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
 
         // SAFETY: the buffer has sufficient capacity, and this is a valid
@@ -350,7 +351,7 @@ impl SqliteMoreInner {
         }
 
         cdt::extent__read__file__done!(|| {
-            (job_id.0, self.extent_number, num_blocks)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
 
         Ok(ExtentReadResponse { data: buf, blocks })
@@ -415,7 +416,7 @@ impl SqliteMoreInner {
         let mut writes_to_skip = HashSet::new();
         if only_write_unwritten {
             cdt::extent__write__get__hashes__start!(|| {
-                (job_id.0, self.extent_number, num_blocks)
+                (job_id.0, self.extent_number.0, num_blocks)
             });
 
             // Query hashes for the write range.
@@ -431,7 +432,7 @@ impl SqliteMoreInner {
             }
 
             cdt::extent__write__get__hashes__done!(|| {
-                (job_id.0, self.extent_number, num_blocks)
+                (job_id.0, self.extent_number.0, num_blocks)
             });
 
             if writes_to_skip.len() == write.block_contexts.len() {
@@ -453,7 +454,7 @@ impl SqliteMoreInner {
         // TODO right now we're including the integrity_hash() time in the sqlite time. It's small in
         // comparison right now, but worth being aware of when looking at dtrace numbers
         cdt::extent__write__sqlite__insert__start!(|| {
-            (job_id.0, self.extent_number, num_blocks)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
 
         let mut hashes_to_write =
@@ -492,7 +493,7 @@ impl SqliteMoreInner {
         tx.commit()?;
 
         cdt::extent__write__sqlite__insert__done!(|| {
-            (job_id.0, self.extent_number, num_blocks)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
 
         // PERFORMANCE TODO:
@@ -513,7 +514,7 @@ impl SqliteMoreInner {
         // introduces complexity. The time spent implementing that would
         // probably better be spent switching to aio or something like that.
         cdt::extent__write__file__start!(|| {
-            (job_id.0, self.extent_number, num_blocks)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
 
         // Perform writes, which may be broken up by skipped blocks
@@ -540,7 +541,7 @@ impl SqliteMoreInner {
         }
 
         cdt::extent__write__file__done!(|| {
-            (job_id.0, self.extent_number, num_blocks)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
 
         // At this point, we know that the written data for the target blocks
@@ -660,7 +661,7 @@ impl SqliteMoreInner {
     fn create(
         dir: &Path,
         def: &RegionDefinition,
-        extent_number: u32,
+        extent_number: ExtentId,
     ) -> Result<Self> {
         use crate::{
             extent::{ExtentMeta, EXTENT_META_SQLITE},
@@ -814,7 +815,7 @@ impl SqliteMoreInner {
     fn open(
         dir: &Path,
         def: &RegionDefinition,
-        extent_number: u32,
+        extent_number: ExtentId,
         read_only: bool,
         log: &Logger,
     ) -> Result<Self> {
@@ -1186,9 +1187,12 @@ mod test {
     #[test]
     fn encryption_context() -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = SqliteInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Encryption context for blocks 0 and 1 should start blank
 
@@ -1340,9 +1344,12 @@ mod test {
     #[test]
     fn duplicate_context_insert() -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = SqliteInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         assert!(inner.get_block_contexts(0, 1)?[0].is_empty());
 
@@ -1377,9 +1384,12 @@ mod test {
     #[test]
     fn multiple_context() -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = SqliteInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Encryption context for blocks 0 and 1 should start blank
 
@@ -1567,9 +1577,12 @@ mod test {
     fn test_fully_rehash_and_clean_does_not_mark_blocks_as_written(
     ) -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = SqliteInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Write a block, but don't flush.
         let data = Bytes::from(vec![0x55; 512]);
@@ -1654,9 +1667,12 @@ mod test {
     fn test_fully_rehash_marks_blocks_unwritten_if_data_never_hit_disk(
     ) -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = SqliteInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Partial write, the data never hits disk, but there's a context
         // in the DB and the dirty flag is set.
@@ -1704,9 +1720,12 @@ mod test {
     #[test]
     fn test_dirty_hash_correct() -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = SqliteInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Run a full rehash, which should clear out that partial write.
         inner.fully_rehash_and_clean_all_stale_contexts(false)?;

@@ -50,7 +50,7 @@ pub async fn dynamometer(
 
         let block_bytes = bytes::Bytes::from(block.clone());
 
-        for eid in 0..ddef.extent_count() {
+        for eid in (0..ddef.extent_count()).map(ExtentId) {
             let mut block_offset = 0;
             loop {
                 if (block_offset + num_writes as u64)
@@ -74,7 +74,7 @@ pub async fn dynamometer(
                             ),
                         };
                         RegionWriteReq {
-                            extent: eid as u64,
+                            extent: eid,
                             write: ExtentWrite {
                                 offset: Block::new_with_ddef(
                                     i as u64 + block_offset,

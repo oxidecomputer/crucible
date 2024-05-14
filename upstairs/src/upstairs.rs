@@ -767,7 +767,7 @@ impl Upstairs {
                 ds_extent_limit: self
                     .downstairs
                     .active_repair_extent()
-                    .map(|v| v as usize)
+                    .map(|v| v.0 as usize)
                     .unwrap_or(0),
                 ds_delay_us: self
                     .downstairs
@@ -802,7 +802,7 @@ impl Upstairs {
                         if b {
                             self.downstairs
                                 .active_repair_extent()
-                                .map(|v| v as usize)
+                                .map(|v| v.0 as usize)
                         } else {
                             None
                         }
@@ -2095,7 +2095,7 @@ pub(crate) mod test {
         BlockContext, BlockOp, BlockOpWaiter, DsState, JobId,
     };
     use bytes::BytesMut;
-    use crucible_common::integrity_hash;
+    use crucible_common::{integrity_hash, ExtentId};
     use crucible_protocol::{ReadResponseBlockMetadata, ReadResponseHeader};
     use futures::FutureExt;
 
@@ -3656,7 +3656,7 @@ pub(crate) mod test {
             .encrypt_in_place(&mut data);
 
         let blocks = Ok(vec![ReadResponseBlockMetadata {
-            eid: 0,
+            eid: ExtentId(0),
             offset,
             block_contexts: vec![BlockContext {
                 encryption_context: Some(
@@ -3719,7 +3719,7 @@ pub(crate) mod test {
         let mut buf = BytesMut::new();
         for i in 0..blocks {
             responses.push(ReadResponseBlockMetadata {
-                eid: 0,
+                eid: ExtentId(0),
                 offset: Block::new_512(offset.value + i as u64),
                 block_contexts: vec![BlockContext {
                     encryption_context: Some(
@@ -3797,7 +3797,7 @@ pub(crate) mod test {
         let mut buf = BytesMut::new();
         for i in 0..blocks {
             responses.push(ReadResponseBlockMetadata {
-                eid: 0,
+                eid: ExtentId(0),
                 offset: Block::new_512(offset.value + i as u64),
                 block_contexts: vec![BlockContext {
                     encryption_context: Some(
@@ -3880,7 +3880,7 @@ pub(crate) mod test {
         let hash = integrity_hash(&[&nonce, &tag, &data]);
 
         let responses = Ok(vec![ReadResponseBlockMetadata {
-            eid: 0,
+            eid: ExtentId(0),
             offset,
             block_contexts: vec![BlockContext {
                 encryption_context: Some(
@@ -3946,7 +3946,7 @@ pub(crate) mod test {
         let tag: [u8; 16] = tag.into();
 
         let responses = Ok(vec![ReadResponseBlockMetadata {
-            eid: 0,
+            eid: ExtentId(0),
             offset,
             block_contexts: vec![BlockContext {
                 encryption_context: Some(
@@ -3999,7 +3999,7 @@ pub(crate) mod test {
         // fake read response from downstairs that will fail integrity hash
         // check
         let responses = Ok(vec![ReadResponseBlockMetadata {
-            eid: 0,
+            eid: ExtentId(0),
             offset,
             block_contexts: vec![BlockContext {
                 encryption_context: None,
@@ -4050,7 +4050,7 @@ pub(crate) mod test {
         let data = BytesMut::from([1u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
         let r1 = Ok(vec![ReadResponseBlockMetadata {
-            eid: 0,
+            eid: ExtentId(0),
             offset,
             block_contexts: vec![BlockContext {
                 encryption_context: None,
@@ -4078,7 +4078,7 @@ pub(crate) mod test {
         let data = BytesMut::from([2u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
         let r2 = Ok(vec![ReadResponseBlockMetadata {
-            eid: 0,
+            eid: ExtentId(0),
             offset,
             block_contexts: vec![BlockContext {
                 encryption_context: None,
@@ -4127,7 +4127,7 @@ pub(crate) mod test {
             let data = BytesMut::from([1u8; 512].as_slice());
             let hash = integrity_hash(&[&data]);
             let r = Ok(vec![ReadResponseBlockMetadata {
-                eid: 0,
+                eid: ExtentId(0),
                 offset,
                 block_contexts: vec![BlockContext {
                     encryption_context: None,
@@ -4156,7 +4156,7 @@ pub(crate) mod test {
         let data = BytesMut::from([2u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
         let r = Ok(vec![ReadResponseBlockMetadata {
-            eid: 0,
+            eid: ExtentId(0),
             offset,
             block_contexts: vec![BlockContext {
                 encryption_context: None,
@@ -4204,7 +4204,7 @@ pub(crate) mod test {
         let data = BytesMut::from([1u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
         let r1 = Ok(vec![ReadResponseBlockMetadata {
-            eid: 0,
+            eid: ExtentId(0),
             offset,
             block_contexts: vec![BlockContext {
                 encryption_context: None,
@@ -4229,7 +4229,7 @@ pub(crate) mod test {
         let data = BytesMut::from([1u8; 512 * 2].as_slice());
         let hash = integrity_hash(&[&data[0..512]]);
         let response = ReadResponseBlockMetadata {
-            eid: 0,
+            eid: ExtentId(0),
             offset,
             block_contexts: vec![BlockContext {
                 encryption_context: None,
@@ -4279,7 +4279,7 @@ pub(crate) mod test {
         // The first read has no block contexts, because it was unwritten
         let data = BytesMut::from([0u8; 512].as_slice());
         let r1 = Ok(vec![ReadResponseBlockMetadata {
-            eid: 0,
+            eid: ExtentId(0),
             offset,
             block_contexts: vec![],
         }]);
@@ -4299,7 +4299,7 @@ pub(crate) mod test {
         // Send back a second response with actual block contexts (oh no!)
         let hash = integrity_hash(&[&data]);
         let r2 = Ok(vec![ReadResponseBlockMetadata {
-            eid: 0,
+            eid: ExtentId(0),
             offset,
             block_contexts: vec![BlockContext {
                 encryption_context: None,
@@ -4348,7 +4348,7 @@ pub(crate) mod test {
         let data = BytesMut::from([0u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
         let r1 = Ok(vec![ReadResponseBlockMetadata {
-            eid: 0,
+            eid: ExtentId(0),
             offset,
             block_contexts: vec![BlockContext {
                 encryption_context: None,
@@ -4370,7 +4370,7 @@ pub(crate) mod test {
 
         // Send back a second response with no actual data (oh no!)
         let r2 = Ok(vec![ReadResponseBlockMetadata {
-            eid: 0,
+            eid: ExtentId(0),
             offset,
             block_contexts: vec![
                 // No block contexts!

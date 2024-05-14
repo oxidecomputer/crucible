@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 const MAX_FRM_LEN: usize = 100 * 1024 * 1024; // 100M
 
-use crucible_common::{Block, CrucibleError, RegionDefinition};
+use crucible_common::{Block, CrucibleError, ExtentId, RegionDefinition};
 
 /// Wrapper type for a job ID
 ///
@@ -118,7 +118,7 @@ impl std::fmt::Display for ClientId {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReadRequest {
-    pub eid: u64,
+    pub eid: ExtentId,
     pub offset: Block,
 }
 
@@ -169,6 +169,10 @@ pub struct SnapshotDetails {
 #[repr(u32)]
 #[derive(IntoPrimitive)]
 pub enum MessageVersion {
+    /// Switched to using `ExtentId(pub u32)` everywhere, instead of a mix of
+    /// `u32` / `u64` / `usize`.
+    V7 = 7,
+
     /// Changed `Write`, `WriteUnwritten`, and `ReadResponse` variants to have a
     /// clean split between header and bulk data, to reduce `memcpy`
     ///
@@ -196,7 +200,7 @@ pub enum MessageVersion {
 }
 impl MessageVersion {
     pub const fn current() -> Self {
-        Self::V6
+        Self::V7
     }
 }
 
@@ -205,7 +209,7 @@ impl MessageVersion {
  * This, along with the MessageVersion enum above should be updated whenever
  * changes are made to the Message enum below.
  */
-pub const CRUCIBLE_MESSAGE_VERSION: u32 = 6;
+pub const CRUCIBLE_MESSAGE_VERSION: u32 = 7;
 
 /*
  * If you add or change the Message enum, you must also increment the
@@ -314,19 +318,19 @@ pub enum Message {
     /// Send a close the given extent ID on the downstairs.
     ExtentClose {
         repair_id: ReconciliationId,
-        extent_id: usize,
+        extent_id: ExtentId,
     },
 
     /// Send a request to reopen the given extent.
     ExtentReopen {
         repair_id: ReconciliationId,
-        extent_id: usize,
+        extent_id: ExtentId,
     },
 
     /// Flush just this extent on just this downstairs client.
     ExtentFlush {
         repair_id: ReconciliationId,
-        extent_id: usize,
+        extent_id: ExtentId,
         client_id: ClientId,
         flush_number: u64,
         gen_number: u64,
@@ -335,7 +339,7 @@ pub enum Message {
     /// Replace an extent with data from the given downstairs.
     ExtentRepair {
         repair_id: ReconciliationId,
-        extent_id: usize,
+        extent_id: ExtentId,
         source_client_id: ClientId,
         source_repair_address: SocketAddr,
         dest_clients: Vec<ClientId>,
@@ -349,7 +353,7 @@ pub enum Message {
     /// A problem with the given extent
     ExtentError {
         repair_id: ReconciliationId,
-        extent_id: usize,
+        extent_id: ExtentId,
         error: CrucibleError,
     },
 
@@ -365,7 +369,7 @@ pub enum Message {
         session_id: Uuid,
         job_id: JobId,
         dependencies: Vec<JobId>,
-        extent_id: usize,
+        extent_id: ExtentId,
     },
     /// Flush and then close an extent.
     ExtentLiveFlushClose {
@@ -373,7 +377,7 @@ pub enum Message {
         session_id: Uuid,
         job_id: JobId,
         dependencies: Vec<JobId>,
-        extent_id: usize,
+        extent_id: ExtentId,
         flush_number: u64,
         gen_number: u64,
     },
@@ -383,7 +387,7 @@ pub enum Message {
         session_id: Uuid,
         job_id: JobId,
         dependencies: Vec<JobId>,
-        extent_id: usize,
+        extent_id: ExtentId,
         source_client_id: ClientId,
         source_repair_address: SocketAddr,
     },
@@ -393,7 +397,7 @@ pub enum Message {
         session_id: Uuid,
         job_id: JobId,
         dependencies: Vec<JobId>,
-        extent_id: usize,
+        extent_id: ExtentId,
     },
     /// There is no real work to do, but we need to complete this job id
     ExtentLiveNoOp {
@@ -487,7 +491,7 @@ pub enum Message {
          * The ending extent where a flush should stop.
          * This value is unique per downstairs.
          */
-        extent_limit: Option<usize>,
+        extent_limit: Option<ExtentId>,
     },
     FlushAck {
         upstairs_id: Uuid,
@@ -548,7 +552,7 @@ pub struct WriteHeader {
 
 #[derive(Debug, PartialEq, Copy, Clone, Serialize, Deserialize)]
 pub struct WriteBlockMetadata {
-    pub eid: u64,
+    pub eid: ExtentId,
     pub offset: Block,
     pub block_context: BlockContext,
 }
@@ -563,7 +567,7 @@ pub struct ReadResponseHeader {
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReadResponseBlockMetadata {
-    pub eid: u64,
+    pub eid: ExtentId,
     pub offset: Block,
     pub block_contexts: Vec<BlockContext>,
 }
@@ -819,7 +823,7 @@ impl CrucibleEncoder {
 
     fn a_write(bs: usize) -> WriteBlockMetadata {
         WriteBlockMetadata {
-            eid: 1,
+            eid: ExtentId(1),
             offset: Block::new(1, bs.trailing_zeros()),
             block_context: BlockContext {
                 hash: 0,
@@ -1245,7 +1249,7 @@ mod tests {
                 job_id: JobId(1),
                 dependencies: vec![],
                 blocks: vec![WriteBlockMetadata {
-                    eid: 0,
+                    eid: ExtentId(0),
                     offset: Block::new_512(0),
                     block_context: BlockContext {
                         hash,
