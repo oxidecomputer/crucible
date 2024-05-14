@@ -51,7 +51,7 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
     fn write(
         &mut self,
         job_id: JobId,
-        writes: &[crucible_protocol::Write],
+        write: &ExtentWrite,
         only_write_unwritten: bool,
         iov_max: usize,
     ) -> Result<(), CrucibleError>;
@@ -558,23 +558,20 @@ impl Extent {
     pub async fn write(
         &mut self,
         job_id: JobId,
-        writes: &[crucible_protocol::Write],
+        write: ExtentWrite,
         only_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
         if self.read_only {
             crucible_bail!(ModifyingReadOnlyRegion);
         }
 
-        cdt::extent__write__start!(|| {
-            (job_id.0, self.number, writes.len() as u64)
-        });
+        let num_blocks = write.block_contexts.len() as u64;
+        cdt::extent__write__start!(|| { (job_id.0, self.number, num_blocks) });
 
         self.inner
-            .write(job_id, writes, only_write_unwritten, self.iov_max)?;
+            .write(job_id, &write, only_write_unwritten, self.iov_max)?;
 
-        cdt::extent__write__done!(|| {
-            (job_id.0, self.number, writes.len() as u64)
-        });
+        cdt::extent__write__done!(|| { (job_id.0, self.number, num_blocks) });
 
         Ok(())
     }

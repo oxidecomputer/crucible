@@ -63,14 +63,8 @@ pub async fn dynamometer(
                 let tag = tag.clone();
 
                 let writes: Vec<_> = (0..num_writes)
-                    .map(|i| crucible_protocol::Write {
-                        eid: eid as u64,
-                        offset: Block::new_with_ddef(
-                            i as u64 + block_offset,
-                            &ddef,
-                        ),
-                        data: block_bytes.clone(),
-                        block_context: BlockContext {
+                    .map(|i| {
+                        let ctx = BlockContext {
                             hash,
                             encryption_context: Some(
                                 crucible_protocol::EncryptionContext {
@@ -78,12 +72,24 @@ pub async fn dynamometer(
                                     tag: tag.as_slice().try_into().unwrap(),
                                 },
                             ),
-                        },
+                        };
+                        RegionWriteReq {
+                            extent: eid as u64,
+                            write: ExtentWrite {
+                                offset: Block::new_with_ddef(
+                                    i as u64 + block_offset,
+                                    &ddef,
+                                ),
+                                data: block_bytes.clone(),
+                                block_contexts: vec![ctx],
+                            },
+                        }
                     })
                     .collect();
+                let rw = RegionWrite(writes);
 
                 let io_operation_time = Instant::now();
-                region.region_write(&writes, JobId(1000), false).await?;
+                region.region_write(rw, JobId(1000), false).await?;
 
                 total_io_time += io_operation_time.elapsed();
                 io_operations_sent += num_writes;

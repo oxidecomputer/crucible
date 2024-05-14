@@ -16,11 +16,11 @@ use crate::{
     AckStatus, ActiveJobs, AllocRingBuffer, ClientData, ClientIOStateCount,
     ClientId, ClientMap, CrucibleError, DownstairsIO, DownstairsMend, DsState,
     ExtentFix, ExtentRepairIDs, GuestWorkId, IOState, IOStateCount, IOop,
-    ImpactedBlocks, JobId, Message, RawReadResponse, ReadRequest, ReconcileIO,
-    ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
-    WorkSummary,
+    ImpactedBlocks, JobId, Message, RawReadResponse, RawWrite, ReadRequest,
+    ReconcileIO, ReconciliationId, RegionDefinition, ReplaceResult,
+    SnapshotDetails, WorkSummary,
 };
-use crucible_protocol::{RawWrite, WriteHeader};
+use crucible_protocol::WriteHeader;
 
 use rand::prelude::*;
 use ringbuffer::RingBuffer;
