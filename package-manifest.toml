@@ -22,5 +22,8 @@ source.paths = [
   { from = "tools/dtrace/upstairs_raw.d", to = "/opt/oxide/dtrace/upstairs_raw.d" },
   { from = "tools/dtrace/get-lr-state.sh", to = "/opt/oxide/dtrace/get-lr-state.sh" },
   { from = "tools/dtrace/get-ds-state.sh", to = "/opt/oxide/dtrace/get-ds-state.sh" },
+  { from = "tools/dtrace/single_up_info.d", to = "/opt/oxide/dtrace/single_up_info.d" },
+  { from = "tools/dtrace/sled_upstairs_info.d", to = "/opt/oxide/dtrace/sled_upstairs_info.d" },
+  { from = "tools/dtrace/all_downstairs.d", to = "/opt/oxide/dtrace/all_downstairs.d" },
 ]
 output.type = "zone"

@@ -1,0 +1,106 @@
+/*
+ * Display internal Upstairs status for the PID provided as $1
+ */
+#pragma D option quiet
+#pragma D option strsize=1k
+/*
+ * Print the header right away
+ */
+dtrace:::BEGIN
+{
+    show = 21;
+}
+
+/*
+ * Every second, check and see if we have printed enough that it is
+ * time to print the header again
+ */
+tick-1s
+/show > 20/
+{
+    printf("%8s ", "SESSION");
+    printf("%17s %17s %17s", "DS STATE 0", "DS STATE 1", "DS STATE 2");
+    printf(" %5s %5s %9s %5s", "UPW", "DSW", "NEXT_JOB", "BAKPR");
+    printf(" %10s", "WRITE_BO");
+    printf("  %5s %5s %5s", "NEW0", "NEW1", "NEW2");
+    printf("  %5s %5s %5s", "IP0", "IP1", "IP2");
+    printf("  %5s %5s %5s", "D0", "D1", "D2");
+    printf("  %5s %5s %5s", "S0", "S1", "S2");
+    printf("  %5s %5s %5s", "ER0", "ER1", "ER2");
+    printf("  %5s %5s %5s", "EC0", "EC1", "EC2");
+    printf("\n");
+    show = 0;
+}
+
+crucible_upstairs*:::up-status
+/pid==$1/
+{
+    show = show + 1;
+    session_id = json(copyinstr(arg1), "ok.session_id");
+
+    /*
+     * I'm not very happy about this, but if we don't print it all on one
+     * line, then multiple sessions will clobber each others output.
+     */
+    printf("%8s %17s %17s %17s %5s %5s %9s %5s %10s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s\n",
+
+    substr(session_id, 0, 8),
+
+    /*
+     * State for the three downstairs
+     */
+    json(copyinstr(arg1), "ok.ds_state[0]"),
+    json(copyinstr(arg1), "ok.ds_state[1]"),
+    json(copyinstr(arg1), "ok.ds_state[2]"),
+
+    /*
+     * Work queue counts for Upstairs and Downstairs
+     */
+    json(copyinstr(arg1), "ok.up_count"),
+    json(copyinstr(arg1), "ok.ds_count"),
+
+    /*
+     * Job ID delta and backpressure
+     */
+    json(copyinstr(arg1), "ok.next_job_id"),
+    json(copyinstr(arg1), "ok.up_backpressure"),
+    json(copyinstr(arg1), "ok.write_bytes_out"),
+
+    /*
+     * New jobs on the work list for each downstairs
+     */
+    json(copyinstr(arg1), "ok.ds_io_count.new[0]"),
+    json(copyinstr(arg1), "ok.ds_io_count.new[1]"),
+    json(copyinstr(arg1), "ok.ds_io_count.new[2]"),
+
+    /*
+     * In progress jobs on the work list for each downstairs
+     */
+    json(copyinstr(arg1), "ok.ds_io_count.in_progress[0]"),
+    json(copyinstr(arg1), "ok.ds_io_count.in_progress[1]"),
+    json(copyinstr(arg1), "ok.ds_io_count.in_progress[2]"),
+
+    /*
+     * Completed (done) jobs on the work list for each downstairs
+     */
+    json(copyinstr(arg1), "ok.ds_io_count.done[0]"),
+    json(copyinstr(arg1), "ok.ds_io_count.done[1]"),
+    json(copyinstr(arg1), "ok.ds_io_count.done[2]"),
+
+    /*
+     * Skipped jobs on the work list for each downstairs
+     */
+    json(copyinstr(arg1), "ok.ds_io_count.skipped[0]"),
+    json(copyinstr(arg1), "ok.ds_io_count.skipped[1]"),
+    json(copyinstr(arg1), "ok.ds_io_count.skipped[2]"),
+
+    /* Extents Repaired */
+    json(copyinstr(arg1), "ok.ds_extents_repaired[0]"),
+    json(copyinstr(arg1), "ok.ds_extents_repaired[1]"),
+    json(copyinstr(arg1), "ok.ds_extents_repaired[2]"),
+    /* Extents Confirmed */
+    json(copyinstr(arg1), "ok.ds_extents_confirmed[0]"),
+    json(copyinstr(arg1), "ok.ds_extents_confirmed[1]"),
+    json(copyinstr(arg1), "ok.ds_extents_confirmed[2]"));
+
+}
