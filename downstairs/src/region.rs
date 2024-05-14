@@ -820,13 +820,13 @@ impl Region {
             cdt::os__write__start!(|| job_id.0);
         }
         for req in writes {
+            // Mark any extents we sent a write-command to as potentially dirty
+            self.dirty_extents.insert(req.extent as usize);
+
             let extent = self.get_opened_extent_mut(req.extent as usize);
             extent
                 .write(job_id, req.write, only_write_unwritten)
                 .await?;
-
-            // Mark any extents we sent a write-command to as potentially dirty
-            self.dirty_extents.insert(req.extent as usize);
         }
 
         if only_write_unwritten {
