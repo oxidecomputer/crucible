@@ -15,6 +15,15 @@ use crucible_common::*;
 use crucible_protocol::SnapshotDetails;
 use repair_client::Client;
 
+/// Number of worker threads in the Rayon thread pool
+///
+/// This is only used when synching extents to disk; we spawn separate Rayon
+/// tasks to call `fdsync` on each extent in parallel.  The value is picked
+/// somewhat arbitrarily as a number that doesn't seem to affect performance,
+/// but is significantly lower than the default of "number of system threads"
+/// (i.e. 128 for the Gimlet server sleds).
+const WORKER_POOL_SIZE: usize = 8;
+
 use super::*;
 use crate::extent::{
     copy_dir, extent_dir, extent_file_name, move_replacement_extent,
@@ -107,6 +116,9 @@ pub struct Region {
     /// The SQLite backend is only allowed in tests; all new extents must be raw
     /// files
     backend: Backend,
+
+    /// Thread pool for doing long-running CPU work outside the Tokio runtime
+    pool: rayon::ThreadPool,
 }
 
 impl Region {
@@ -231,6 +243,10 @@ impl Region {
         write_json(&cp, &def, false)?;
         info!(log, "Created new region file {:?}", cp);
 
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(WORKER_POOL_SIZE)
+            .build()?;
+
         let mut region = Region {
             dir: dir.as_ref().to_path_buf(),
             def,
@@ -239,6 +255,7 @@ impl Region {
             read_only: false,
             log,
             backend,
+            pool,
         };
         region.open_extents(true).await?;
         Ok(region)
@@ -321,6 +338,10 @@ impl Region {
             );
         }
 
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(WORKER_POOL_SIZE)
+            .build()?;
+
         /*
          * Open every extent that presently exists.
          */
@@ -332,6 +353,7 @@ impl Region {
             read_only,
             log: log.clone(),
             backend,
+            pool,
         };
 
         region.open_extents(false).await?;
@@ -951,7 +973,7 @@ impl Region {
             let mut slice_start = 0;
             let mut slice = self.extents.as_mut_slice();
             let h = tokio::runtime::Handle::current();
-            rayon::scope(|s| {
+            self.pool.scope(|s| {
                 for (eid, r) in dirty_extents.iter().zip(results.iter_mut()) {
                     let next = eid - slice_start;
                     slice = &mut slice[next..];
