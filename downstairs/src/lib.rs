@@ -1947,7 +1947,7 @@ impl Downstairs {
         };
 
         assert_eq!(job.ds_id, job_id);
-        match &job.work {
+        match job.work {
             IOop::Read {
                 dependencies,
                 requests,
@@ -1965,7 +1965,7 @@ impl Downstairs {
                 } else {
                     // This clone shouldn't be too expensive, since it's only
                     // 32 bytes per extent (and should usually only be 1 extent)
-                    self.region.region_read(requests, job_id).await
+                    self.region.region_read(&requests, job_id).await
                 };
                 debug!(
                     self.log,
@@ -2022,14 +2022,11 @@ impl Downstairs {
                     data,
                 }))
             }
-            IOop::WriteUnwritten { .. } => {
+            IOop::WriteUnwritten { writes, .. } => {
                 /*
                  * Any error from an IO should be intercepted here and passed
                  * back to the upstairs.
                  */
-                let IOop::WriteUnwritten { writes, .. } = job.work else {
-                    unreachable!();
-                };
                 let result = if self.write_errors && random() && random() {
                     warn!(self.log, "returning error on writeunwritten!");
                     Err(CrucibleError::GenericError("test error".to_string()))
@@ -2049,14 +2046,10 @@ impl Downstairs {
                     result,
                 }))
             }
-            IOop::Write { .. } => {
-                let IOop::Write {
-                    writes,
-                    dependencies,
-                } = job.work
-                else {
-                    unreachable!();
-                };
+            IOop::Write {
+                writes,
+                dependencies,
+            } => {
                 let result = if self.write_errors && random() && random() {
                     warn!(self.log, "returning error on write!");
                     Err(CrucibleError::GenericError("test error".to_string()))
@@ -2097,11 +2090,11 @@ impl Downstairs {
                 } else {
                     self.region
                         .region_flush(
-                            *flush_number,
-                            *gen_number,
-                            snapshot_details,
+                            flush_number,
+                            gen_number,
+                            &snapshot_details,
                             job_id,
-                            *extent_limit,
+                            extent_limit,
                         )
                         .await
                 };
@@ -2127,7 +2120,7 @@ impl Downstairs {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    self.region.close_extent(*extent).await
+                    self.region.close_extent(extent).await
                 };
                 debug!(
                     self.log,
@@ -2161,15 +2154,15 @@ impl Downstairs {
                     match self
                         .region
                         .region_flush_extent(
-                            *extent,
-                            *gen_number,
-                            *flush_number,
+                            extent,
+                            gen_number,
+                            flush_number,
                             job_id,
                         )
                         .await
                     {
                         Err(f_res) => Err(f_res),
-                        Ok(_) => self.region.close_extent(*extent).await,
+                        Ok(_) => self.region.close_extent(extent).await,
                     }
                 };
 
@@ -2207,7 +2200,7 @@ impl Downstairs {
                     Err(CrucibleError::UpstairsInactive)
                 } else {
                     self.region
-                        .repair_extent(*extent, *source_repair_address, false)
+                        .repair_extent(extent, source_repair_address, false)
                         .await
                 };
                 debug!(
@@ -2234,7 +2227,7 @@ impl Downstairs {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    self.region.reopen_extent(*extent).await
+                    self.region.reopen_extent(extent).await
                 };
                 debug!(
                     self.log,
