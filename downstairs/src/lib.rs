@@ -313,8 +313,17 @@ pub(crate) struct ExtentReadResponse {
 /// reduce memory copies.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct ExtentWrite {
+    /// Block offset, relative to the start of this extent
     pub offset: Block,
+
+    /// One context per block to be written
     pub block_contexts: Vec<BlockContext>,
+
+    /// Raw block data to be written
+    ///
+    /// This must be compatible with `block_contexts`, i.e.
+    /// `block_contexts.len() == data.len() / block_size` for this extent's
+    /// chosen block size.
     pub data: bytes::Bytes,
 }
 
