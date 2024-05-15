@@ -730,7 +730,7 @@ mod test {
 
     fn reify_impacted_blocks(
         test_iblocks: ArbitraryImpactedBlocks,
-        extent_count: usize,
+        extent_count: u32,
         extent_size: usize,
     ) -> ImpactedBlocks {
         match test_iblocks {
@@ -740,15 +740,23 @@ mod test {
                 (right_eid_offset, right_block_offset),
             ) => {
                 let left_addr = ImpactedAddr {
-                    extent_id: ExtentId(left_eid.index(extent_count) as u32),
+                    extent_id: ExtentId(
+                        left_eid
+                            .index(extent_count as usize)
+                            .try_into()
+                            .unwrap(),
+                    ),
                     block: left_block.index(extent_size) as u64,
                 };
 
+                let extent_offset: u32 = right_eid_offset
+                    .index(
+                        extent_count as usize - left_addr.extent_id.0 as usize,
+                    )
+                    .try_into()
+                    .unwrap();
                 let right_addr = ImpactedAddr {
-                    extent_id: right_eid_offset
-                        .index(extent_count - left_addr.extent_id.0 as usize)
-                        as u32
-                        + left_addr.extent_id,
+                    extent_id: left_addr.extent_id + extent_offset,
                     block: right_block_offset
                         .index(extent_size - left_addr.block as usize)
                         as u64
@@ -767,7 +775,7 @@ mod test {
     ) -> ImpactedBlocks {
         reify_impacted_blocks(
             test_iblocks,
-            ddef.extent_count() as usize,
+            ddef.extent_count(),
             ddef.extent_size().value as usize,
         )
     }
@@ -776,7 +784,7 @@ mod test {
     fn reify_impacted_blocks_without_region(
         test_iblocks: ArbitraryImpactedBlocks,
     ) -> ImpactedBlocks {
-        reify_impacted_blocks(test_iblocks, usize::MAX, usize::MAX)
+        reify_impacted_blocks(test_iblocks, u32::MAX, usize::MAX)
     }
 
     fn region_def_strategy() -> impl Strategy<Value = RegionDefinition> {
@@ -1003,10 +1011,10 @@ mod test {
         #[strategy(1..=128u32)] extent_count: u32,
         #[strategy(1..=128u64)] extent_size: u64,
 
-        #[strategy(0..#extent_count as u32)] start_eid: u32,
+        #[strategy(0..#extent_count)] start_eid: u32,
         #[strategy(0..#extent_size)] start_block: u64,
 
-        #[strategy(#start_eid..#extent_count as u32)] end_eid: u32,
+        #[strategy(#start_eid..#extent_count)] end_eid: u32,
         #[strategy(#start_block..#extent_size)] end_block: u64,
     ) {
         let start_eid = ExtentId(start_eid);
