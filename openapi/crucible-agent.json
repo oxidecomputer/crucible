@@ -439,7 +439,6 @@
           },
           "source": {
             "nullable": true,
-            "default": null,
             "type": "string"
           },
           "state": {
