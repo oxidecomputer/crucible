@@ -7,7 +7,7 @@ use crate::{
     BlockRes, ClientId, ImpactedBlocks, Message, RawWrite,
 };
 use bytes::BytesMut;
-use crucible_common::{integrity_hash, CrucibleError, RegionDefinition};
+use crucible_common::{integrity_hash, RegionDefinition};
 use crucible_protocol::WriteBlockMetadata;
 use futures::{
     future::{ready, Either, Ready},
@@ -132,7 +132,7 @@ pub(crate) struct EncryptedWrite {
 }
 
 impl DeferredWrite {
-    pub fn run(mut self) -> Option<EncryptedWrite> {
+    pub fn run(mut self) -> EncryptedWrite {
         let num_blocks = self.impacted_blocks.blocks(&self.ddef).len();
         let mut blocks = Vec::with_capacity(num_blocks);
         let block_size = self.ddef.block_size() as usize;
@@ -145,17 +145,7 @@ impl DeferredWrite {
             {
                 // Encrypt here
                 let mut_data = &mut self.data[pos..][..block_size];
-                let (nonce, tag, hash) = match ctx.encrypt_in_place(mut_data) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        if let Some(res) = self.res {
-                            res.send_err(CrucibleError::EncryptionError(
-                                e.to_string(),
-                            ));
-                        }
-                        return None;
-                    }
-                };
+                let (nonce, tag, hash) = ctx.encrypt_in_place(mut_data);
 
                 (
                     Some(crucible_protocol::EncryptionContext {
@@ -186,12 +176,12 @@ impl DeferredWrite {
             data: self.data,
         };
 
-        Some(EncryptedWrite {
+        EncryptedWrite {
             data,
             impacted_blocks: self.impacted_blocks,
             res: self.res,
             is_write_unwritten: self.is_write_unwritten,
-        })
+        }
     }
 }
 

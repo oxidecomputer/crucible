@@ -549,25 +549,24 @@ impl EncryptionContext {
         random_iv
     }
 
-    pub fn encrypt_in_place(
-        &self,
-        data: &mut [u8],
-    ) -> Result<(Nonce, Tag, u64)> {
+    pub fn encrypt_in_place(&self, data: &mut [u8]) -> (Nonce, Tag, u64) {
         let nonce = self.get_random_nonce();
 
-        let tag = self.cipher.encrypt_in_place_detached(&nonce, b"", data);
-
-        if tag.is_err() {
-            bail!("Could not encrypt! {:?}", tag.err());
-        }
-
-        let tag = tag.unwrap();
+        // Encryption is infallible as long as the data and nonce are both below
+        // 1 << 36 bytes (A_MAX and P_MAX from RFC8452 § 6).  We encrypt on a
+        // per-block basis (max of 1 << 15) with a 12-byte nonce, so these
+        // conditions should never fail.
+        let tag = match self.cipher.encrypt_in_place_detached(&nonce, b"", data)
+        {
+            Ok(tag) => tag,
+            Err(e) => panic!("Could not encrypt! {e:?}"),
+        };
 
         // Hash [nonce + tag + data] in that order. Perform this after
         // encryption so that the downstairs can verify it without the key.
         let computed_hash = integrity_hash(&[&nonce[..], &tag[..], data]);
 
-        Ok((nonce, tag, computed_hash))
+        (nonce, tag, computed_hash)
     }
 
     pub fn decrypt_in_place(

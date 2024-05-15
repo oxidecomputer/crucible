@@ -37,6 +37,18 @@ use uuid::Uuid;
 /// How often to log stats for DTrace
 const STAT_INTERVAL_SECS: f32 = 1.0;
 
+/// Minimum IO size (in bytes) before encryption / decryption is done off-thread
+const MIN_DEFER_SIZE_BYTES: u64 = 8192;
+
+/// Number of threads to dedicate to encryption / decryption
+///
+/// This number is picked somewhat arbitrarily by eyeballing flamegraphs until
+/// `WorkerThread::wait_until_cold` looks like a reasonable fraction of CPU
+/// time.  Rayon's default is "number of CPU threads", which is dramatic
+/// overkill on a 128-thread system; in such a system, we see a ton of CPU time
+/// being spent spinning in `wait_until_cold`.
+const WORKER_POOL_SIZE: usize = 8;
+
 /// High-level upstairs state, from the perspective of the guest
 #[derive(Debug)]
 pub(crate) enum UpstairsState {
@@ -238,10 +250,13 @@ pub(crate) struct Upstairs {
     pub(crate) control_tx: mpsc::Sender<ControlRequest>,
 
     /// Stream of post-processed `BlockOp` futures
-    deferred_ops: DeferredQueue<Option<DeferredBlockOp>>,
+    deferred_ops: DeferredQueue<DeferredBlockOp>,
 
     /// Stream of decrypted `Message` futures
     deferred_msgs: DeferredQueue<DeferredMessage>,
+
+    /// Thread pool for doing heavy CPU work outside the Tokio runtime
+    pool: rayon::ThreadPool,
 }
 
 /// Action to be taken which modifies the [`Upstairs`] state
@@ -352,6 +367,11 @@ impl Upstairs {
             Some(d) => RegionDefinitionStatus::ExpectingFromDownstairs(d),
         };
 
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(WORKER_POOL_SIZE)
+            .build()
+            .expect("failed to build rayon thread pool");
+
         let session_id = Uuid::new_v4();
         let log = guest.log.new(o!("session_id" => session_id.to_string()));
         info!(log, "Crucible {} has session id: {}", uuid, session_id);
@@ -396,6 +416,7 @@ impl Upstairs {
             control_tx,
             deferred_ops: DeferredQueue::new(),
             deferred_msgs: DeferredQueue::new(),
+            pool,
         }
     }
 
@@ -468,13 +489,7 @@ impl Upstairs {
                 match d {
                     // Normal operation: the deferred task gave us back a
                     // DeferredBlockOp, which we need to handle.
-                    Some(Some(d)) => UpstairsAction::DeferredBlockOp(d),
-
-                    // The innermost Option is None if the deferred task handled
-                    // the request on its own (and replied to the `BlockOp`
-                    // already). This happens if encryption fails, which would
-                    // be odd, but possible?
-                    Some(None) => UpstairsAction::NoOp,
+                    Some(d) => UpstairsAction::DeferredBlockOp(d),
 
                     // The outer Option is None if the FuturesOrdered is empty
                     None => {
@@ -675,7 +690,6 @@ impl Upstairs {
     #[cfg(test)]
     async fn await_deferred_ops(&mut self) {
         while let Some(req) = self.deferred_ops.next().await {
-            let req = req.unwrap(); // the deferred request should not fail
             self.apply(UpstairsAction::DeferredBlockOp(req));
         }
         assert!(self.deferred_ops.is_empty());
@@ -924,8 +938,7 @@ impl Upstairs {
             // have to keep using it for subsequent requests (even ones that are
             // not writes) to preserve FIFO ordering
             _ if !self.deferred_ops.is_empty() => {
-                self.deferred_ops
-                    .push_immediate(Some(DeferredBlockOp::Other(op)));
+                self.deferred_ops.push_immediate(DeferredBlockOp::Other(op));
             }
             // Otherwise, we can apply a non-write operation immediately, saving
             // a trip through the FuturesUnordered
@@ -1364,11 +1377,10 @@ impl Upstairs {
         data: BytesMut,
         is_write_unwritten: bool,
     ) {
-        if let Some(w) = self
-            .compute_deferred_write(offset, data, None, is_write_unwritten)
-            .and_then(DeferredWrite::run)
+        if let Some(w) =
+            self.compute_deferred_write(offset, data, None, is_write_unwritten)
         {
-            self.submit_write(w)
+            self.submit_write(DeferredWrite::run(w))
         }
     }
 
@@ -1390,11 +1402,18 @@ impl Upstairs {
         if let Some(w) =
             self.compute_deferred_write(offset, data, res, is_write_unwritten)
         {
-            let tx = self.deferred_ops.push_oneshot();
-            rayon::spawn(move || {
-                let out = w.run().map(DeferredBlockOp::Write);
-                let _ = tx.send(out);
-            });
+            let should_defer = !self.deferred_msgs.is_empty()
+                || w.data.len() > MIN_DEFER_SIZE_BYTES as usize;
+            if should_defer {
+                let tx = self.deferred_ops.push_oneshot();
+                self.pool.spawn(move || {
+                    let out = DeferredBlockOp::Write(w.run());
+                    let _ = tx.send(out);
+                });
+            } else {
+                let out = DeferredBlockOp::Write(w.run());
+                self.apply_guest_request(out);
+            }
         }
     }
 
@@ -1520,10 +1539,10 @@ impl Upstairs {
                 // decryption, or there are other deferred messages in the queue
                 // (to preserve order).  Otherwise, handle it immediately.
                 if let Message::ReadResponse { header, .. } = &m {
-                    // Any read larger than this constant should be deferred to
-                    // the worker pool; smaller reads can be processed in-thread
-                    // (since the overhead isn't worth it)
-                    const MIN_DEFER_SIZE_BYTES: u64 = 8192;
+                    // Any read larger than `MIN_DEFER_SIZE_BYTES` constant
+                    // should be deferred to the worker pool; smaller reads can
+                    // be processed in-thread (since the overhead isn't worth
+                    // it)
                     let should_defer = !self.deferred_msgs.is_empty()
                         || match &header.blocks {
                             Ok(rs) => {
@@ -1549,7 +1568,7 @@ impl Upstairs {
                     };
                     if should_defer {
                         let tx = self.deferred_msgs.push_oneshot();
-                        rayon::spawn(move || {
+                        self.pool.spawn(move || {
                             let out = dr.run();
                             let _ = tx.send(out);
                         });
@@ -3634,8 +3653,7 @@ pub(crate) mod test {
             .encryption_context
             .as_ref()
             .unwrap()
-            .encrypt_in_place(&mut data)
-            .unwrap();
+            .encrypt_in_place(&mut data);
 
         let blocks = Ok(vec![ReadResponseBlockMetadata {
             eid: 0,
@@ -3690,8 +3708,7 @@ pub(crate) mod test {
             .encryption_context
             .as_ref()
             .unwrap()
-            .encrypt_in_place(&mut data)
-            .unwrap();
+            .encrypt_in_place(&mut data);
 
         let nonce: [u8; 12] = nonce.into();
         let tag: [u8; 16] = tag.into();
@@ -3758,8 +3775,7 @@ pub(crate) mod test {
             .encryption_context
             .as_ref()
             .unwrap()
-            .encrypt_in_place(&mut data)
-            .unwrap();
+            .encrypt_in_place(&mut data);
 
         let nonce: [u8; 12] = nonce.into();
         let mut tag: [u8; 16] = tag.into();
@@ -3847,8 +3863,7 @@ pub(crate) mod test {
             .encryption_context
             .as_ref()
             .unwrap()
-            .encrypt_in_place(&mut data)
-            .unwrap();
+            .encrypt_in_place(&mut data);
 
         let nonce: [u8; 12] = nonce.into();
         let mut tag: [u8; 16] = tag.into();
@@ -3925,8 +3940,7 @@ pub(crate) mod test {
             .encryption_context
             .as_ref()
             .unwrap()
-            .encrypt_in_place(&mut data)
-            .unwrap();
+            .encrypt_in_place(&mut data);
 
         let nonce: [u8; 12] = nonce.into();
         let tag: [u8; 16] = tag.into();

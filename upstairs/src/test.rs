@@ -279,7 +279,7 @@ pub(crate) mod up_test {
 
         let orig_block = block;
 
-        let (nonce, tag, _) = context.encrypt_in_place(&mut block[..])?;
+        let (nonce, tag, _) = context.encrypt_in_place(&mut block[..]);
         assert_ne!(block, orig_block);
 
         context.decrypt_in_place(&mut block[..], &nonce, &tag)?;
@@ -302,7 +302,7 @@ pub(crate) mod up_test {
 
         let orig_block = block;
 
-        let (_, tag, _) = context.encrypt_in_place(&mut block[..])?;
+        let (_, tag, _) = context.encrypt_in_place(&mut block[..]);
         assert_ne!(block, orig_block);
 
         let nonce = context.get_random_nonce();
@@ -336,7 +336,7 @@ pub(crate) mod up_test {
 
         let orig_block = block;
 
-        let (nonce, mut tag, _) = context.encrypt_in_place(&mut block[..])?;
+        let (nonce, mut tag, _) = context.encrypt_in_place(&mut block[..]);
         assert_ne!(block, orig_block);
 
         tag[2] = tag[2].wrapping_add(1);
@@ -373,7 +373,7 @@ pub(crate) mod up_test {
 
         let original_data = data.clone();
 
-        let (nonce, tag, _) = context.encrypt_in_place(&mut data[..])?;
+        let (nonce, tag, _) = context.encrypt_in_place(&mut data[..]);
 
         assert_ne!(original_data, data);
 
@@ -424,7 +424,7 @@ pub(crate) mod up_test {
 
         let original_data = data.clone();
 
-        let (nonce, tag, _) = context.encrypt_in_place(&mut data[..])?;
+        let (nonce, tag, _) = context.encrypt_in_place(&mut data[..]);
 
         assert_ne!(original_data, data);
 
