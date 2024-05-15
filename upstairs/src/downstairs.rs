@@ -4110,7 +4110,7 @@ impl Downstairs {
                         &RepairProgress {
                             time: now,
                             // surely we won't have u64::MAX extents
-                            current_item: current_extent as i64,
+                            current_item: current_extent.0 as i64,
                             // i am serious, and don't call me shirley
                             total_items: extent_count as i64,
                         },
