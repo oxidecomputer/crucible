@@ -72,7 +72,7 @@ enum Args {
 
         /// Number of extent files.
         #[clap(long, default_value = "15", action)]
-        extent_count: u64,
+        extent_count: u32,
 
         /// Import data for the extent from this file.
         #[clap(
@@ -235,7 +235,7 @@ enum Args {
         extent_size: u64,
 
         #[clap(long, default_value_t = 15)]
-        extent_count: u64,
+        extent_count: u32,
 
         #[clap(long)]
         encrypted: bool,

@@ -3442,7 +3442,7 @@ pub async fn create_region(
     block_size: u64,
     data: PathBuf,
     extent_size: u64,
-    extent_count: u64,
+    extent_count: u32,
     uuid: Uuid,
     encrypted: bool,
     log: Logger,
@@ -3465,7 +3465,7 @@ pub async fn create_region(
 pub async fn create_region_with_backend(
     data: PathBuf,
     extent_size: Block,
-    extent_count: u64,
+    extent_count: u32,
     uuid: Uuid,
     encrypted: bool,
     backend: Backend,

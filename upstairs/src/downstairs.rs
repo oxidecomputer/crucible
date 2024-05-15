@@ -229,7 +229,7 @@ pub(crate) struct LiveRepairData {
     id: Uuid,
 
     /// Total number of extents that need checking
-    extent_count: u64,
+    extent_count: u32,
 
     /// Extent being repaired
     pub active_extent: ExtentId,
@@ -1105,7 +1105,7 @@ impl Downstairs {
         &mut self,
         up_state: &UpstairsState,
         gw: &mut GuestWork,
-        extent_count: u64,
+        extent_count: u32,
     ) -> bool {
         assert!(self.repair.is_none());
 
@@ -1377,7 +1377,7 @@ impl Downstairs {
             LiveRepairState::Reopening { .. } => {
                 // It's possible that we've reached the end of our extents!
                 let next_extent = repair.active_extent + 1;
-                let finished = next_extent.0 as u64 == repair.extent_count;
+                let finished = next_extent.0 == repair.extent_count;
 
                 // If we have reserved jobs for this extent, then we have to
                 // keep doing (sending no-ops) because otherwise dependencies
@@ -4076,7 +4076,7 @@ impl Downstairs {
         &self,
         repair_id: Uuid,
         current_extent: ExtentId,
-        extent_count: u64,
+        extent_count: u32,
     ) {
         let upstairs_id: TypedUuid<UpstairsKind> =
             TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
