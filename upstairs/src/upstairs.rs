@@ -1539,9 +1539,10 @@ impl Upstairs {
                 // decryption, or there are other deferred messages in the queue
                 // (to preserve order).  Otherwise, handle it immediately.
                 if let Message::ReadResponse { header, .. } = &m {
-                    // Any read larger than this constant should be deferred to
-                    // the worker pool; smaller reads can be processed in-thread
-                    // (since the overhead isn't worth it)
+                    // Any read larger than `MIN_DEFER_SIZE_BYTES` constant
+                    // should be deferred to the worker pool; smaller reads can
+                    // be processed in-thread (since the overhead isn't worth
+                    // it)
                     let should_defer = !self.deferred_msgs.is_empty()
                         || match &header.blocks {
                             Ok(rs) => {
