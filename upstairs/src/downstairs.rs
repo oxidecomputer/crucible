@@ -2982,7 +2982,7 @@ impl Downstairs {
             "ACK",
             "DSID",
             "TYPE",
-            "BLOCKS",
+            "BKS/EXT",
             "DS:0",
             "DS:1",
             "DS:2",
@@ -2996,7 +2996,8 @@ impl Downstairs {
                 AckStatus::NotAcked
             };
 
-            let (job_type, num_blocks): (String, usize) = match &job.work {
+            let (job_type, blocks_or_extent): (String, usize) = match &job.work
+            {
                 IOop::Read { requests, .. } => {
                     let job_type = "Read".to_string();
                     let num_blocks = requests.len();
@@ -3016,7 +3017,7 @@ impl Downstairs {
                 }
                 IOop::ExtentFlushClose { extent, .. } => {
                     let job_type = "FClose".to_string();
-                    (job_type, extent.0 as usize) // XXX this isn't blocks!
+                    (job_type, extent.0 as usize)
                 }
                 IOop::ExtentLiveRepair { extent, .. } => {
                     let job_type = "Repair".to_string();
@@ -3034,7 +3035,7 @@ impl Downstairs {
 
             print!(
                 "{0:>5} {1:>8} {2:>5} {3:>7} {4:>7}",
-                job.guest_id, ack, id, job_type, num_blocks
+                job.guest_id, ack, id, job_type, blocks_or_extent
             );
 
             for cid in ClientId::iter() {
