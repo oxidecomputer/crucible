@@ -72,7 +72,7 @@ pub async fn repair_main(
      */
     let ds = downstairs.lock().await;
     let region_dir = ds.region.dir.clone();
-    let read_only = ds.read_only;
+    let read_only = ds.flags.read_only;
     let region_definition = ds.region.def();
     drop(ds);
 

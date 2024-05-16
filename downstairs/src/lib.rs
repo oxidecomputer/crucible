@@ -1139,9 +1139,9 @@ where
                         // Upstairs will not be able to successfully negotiate.
                         {
                             let ds = ads.lock().await;
-                            if ds.read_only != read_only {
+                            if ds.flags.read_only != read_only {
                                 if let Err(e) = fw.send(Message::ReadOnlyMismatch {
-                                    expected: ds.read_only,
+                                    expected: ds.flags.read_only,
                                 }).await {
                                     warn!(log, "Failed to send ReadOnlyMismatch: {}", e);
                                 }
@@ -1150,9 +1150,9 @@ where
                                     mismatch");
                             }
 
-                            if ds.encrypted != encrypted {
+                            if ds.flags.encrypted != encrypted {
                                 if let Err(e) = fw.send(Message::EncryptedMismatch {
-                                    expected: ds.encrypted,
+                                    expected: ds.flags.encrypted,
                                 }).await {
                                     warn!(log, "Failed to send EncryptedMismatch: {}", e);
                                 }
@@ -1688,19 +1688,32 @@ impl DownstairsBuilder<'_> {
 
         Ok(Arc::new(Mutex::new(Downstairs {
             region,
-            lossy,
-            read_errors,
-            write_errors,
-            flush_errors,
+            flags: DownstairsFlags {
+                lossy,
+                read_errors,
+                write_errors,
+                flush_errors,
+                read_only: self.read_only,
+                encrypted,
+            },
             active_upstairs: HashMap::new(),
             dss,
-            read_only: self.read_only,
-            encrypted,
             address: None,
             repair_address: None,
             log,
         })))
     }
+}
+
+/// Configuration flags for the Downstairs
+#[derive(Debug)]
+struct DownstairsFlags {
+    lossy: bool,        // Test flag, enables pauses and skipped jobs
+    read_errors: bool,  // Test flag
+    write_errors: bool, // Test flag
+    flush_errors: bool, // Test flag
+    read_only: bool,
+    encrypted: bool,
 }
 
 /*
@@ -1711,14 +1724,9 @@ impl DownstairsBuilder<'_> {
 #[derive(Debug)]
 pub struct Downstairs {
     pub region: Region,
-    lossy: bool,        // Test flag, enables pauses and skipped jobs
-    read_errors: bool,  // Test flag
-    write_errors: bool, // Test flag
-    flush_errors: bool, // Test flag
+    flags: DownstairsFlags,
     active_upstairs: HashMap<Uuid, ActiveUpstairs>,
     dss: DsStatOuter,
-    read_only: bool,
-    encrypted: bool,
     pub address: Option<SocketAddr>,
     pub repair_address: Option<SocketAddr>,
     log: Logger,
@@ -1820,7 +1828,7 @@ impl Downstairs {
     ) -> Result<()> {
         // The Upstairs will send Flushes periodically, even in read only mode
         // we have to accept them. But read-only should never accept writes!
-        if self.read_only {
+        if self.flags.read_only {
             let is_write = match work {
                 IOop::Write { .. }
                 | IOop::WriteUnwritten { .. }
@@ -1924,7 +1932,8 @@ impl Downstairs {
                  * Any error from an IO should be intercepted here and passed
                  * back to the upstairs.
                  */
-                let response = if self.read_errors && random() && random() {
+                let response = if self.flags.read_errors && random() && random()
+                {
                     warn!(self.log, "returning error on read!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
@@ -1995,7 +2004,8 @@ impl Downstairs {
                  * Any error from an IO should be intercepted here and passed
                  * back to the upstairs.
                  */
-                let result = if self.write_errors && random() && random() {
+                let result = if self.flags.write_errors && random() && random()
+                {
                     warn!(self.log, "returning error on writeunwritten!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
@@ -2018,7 +2028,8 @@ impl Downstairs {
                 writes,
                 dependencies,
             } => {
-                let result = if self.write_errors && random() && random() {
+                let result = if self.flags.write_errors && random() && random()
+                {
                     warn!(self.log, "returning error on write!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
@@ -2049,7 +2060,8 @@ impl Downstairs {
                 snapshot_details,
                 extent_limit,
             } => {
-                let result = if self.flush_errors && random() && random() {
+                let result = if self.flags.flush_errors && random() && random()
+                {
                     warn!(self.log, "returning error on flush!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
@@ -2338,7 +2350,7 @@ impl Downstairs {
         upstairs_connection: UpstairsConnection,
         tx: oneshot::Sender<UpstairsConnection>,
     ) -> Result<()> {
-        if self.read_only {
+        if self.flags.read_only {
             // Multiple active read-only sessions are allowed, but multiple
             // sessions for the same Upstairs UUID are not. Kick out a
             // previously active session for this UUID if one exists. This
@@ -3002,7 +3014,7 @@ impl Downstairs {
                 return Ok(());
             }
         };
-        let is_lossy = ds.lossy;
+        let is_lossy = ds.flags.lossy;
         drop(ds);
 
         /*
