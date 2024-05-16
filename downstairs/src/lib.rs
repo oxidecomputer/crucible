@@ -911,6 +911,34 @@ pub struct UpstairsConnection {
     gen: u64,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum NegotiationState {
+    Start,
+    ConnectedToUpstairs,
+    PromotedToActive,
+    SentRegionInfo,
+    Ready,
+}
+
+struct NegotiationData {
+    /// State machine progress
+    negotiated: NegotiationState,
+
+    /// Repair address, guaranteed to be valid by this point
+    repair_addr: SocketAddr,
+
+    /// Upstairs connection, populated at `HelloItsMe`
+    upstairs_connection: Option<UpstairsConnection>,
+
+    /// Channel used to kill this Downstairs' IO tasks
+    ///
+    /// The value is moved out of the option when
+    /// `Downstairs::promote_to_active` is called, i.e. between
+    /// `NegotiationState::ConnectedToUpstairs` and
+    /// `NegotiationState::PromotedToActive`
+    another_upstairs_active_tx: Option<oneshot::Sender<UpstairsConnection>>,
+}
+
 /*
  * This function handles the initial negotiation steps between the
  * upstairs and the downstairs.  Either we return error, or we call
@@ -933,24 +961,17 @@ where
     // it here.
     let repair_addr = ads.lock().await.repair_address.unwrap();
 
-    let mut upstairs_connection: Option<UpstairsConnection> = None;
-
     let (another_upstairs_active_tx, mut another_upstairs_active_rx) =
         oneshot::channel::<UpstairsConnection>();
+    let mut state = NegotiationData {
+        repair_addr,
+        upstairs_connection: None,
+        // Put the oneshot tx side into an Option so we can move it out at the
+        // appropriate point in negotiation.
+        another_upstairs_active_tx: Some(another_upstairs_active_tx),
+        negotiated: NegotiationState::Start,
+    };
 
-    // Put the oneshot tx side into an Option so we can move it out at the
-    // appropriate point in negotiation.
-    let mut another_upstairs_active_tx = Some(another_upstairs_active_tx);
-
-    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-    enum NegotiationState {
-        Start,
-        ConnectedToUpstairs,
-        PromotedToActive,
-        SentRegionInfo,
-        Ready,
-    }
-    let mut negotiated = NegotiationState::Start;
     let log = ads.lock().await.log.new(o!("task" => "proc".to_string()));
     /*
      * See the comment in the proc() function on the upstairs side that
@@ -961,7 +982,7 @@ where
      * that message, we can move forward and start receiving IO from
      * the upstairs.
      */
-    while negotiated != NegotiationState::Ready {
+    while state.negotiated != NegotiationState::Ready {
         tokio::select! {
             /*
              * Don't wait more than 50 seconds to hear from the other side.
@@ -997,14 +1018,15 @@ where
                         // running without the ability for another Upstairs to
                         // kick out the previous one during activation.
                         bail!("another_upstairs_active_rx closed during \
-                            negotiation: {e:?}");
+                               negotiation: {e:?}");
                     }
 
                     Ok(new_upstairs_connection) => {
                         // another upstairs negotiated and went active after
                         // this one did (and before this one completed
                         // negotiation)
-                        let upstairs_connection = upstairs_connection.unwrap();
+                        let upstairs_connection = state.upstairs_connection
+                            .unwrap();
                         warn!(
                             log,
                             "Another upstairs {:?} promoted to active, \
@@ -1039,319 +1061,19 @@ where
                     None => {
                         // Upstairs disconnected
                         let mut ds = ads.lock().await;
-
-                        if let Some(upstairs_connection) = upstairs_connection {
-
-                            // If our upstairs never completed activation,
-                            // or some other upstairs activated, we won't
-                            // be able to report how many jobs.
-                            match ds.jobs(upstairs_connection){
-                                Ok(jobs) => {
-                                    info!(
-                                        log,
-                                        "upstairs {:?} disconnected, {} jobs left",
-                                        upstairs_connection,
-                                        jobs,
-                                    );
-                                }
-                                Err(e) => {
-                                    info!(
-                                        log,
-                                        "upstairs {:?} disconnected, {}",
-                                        upstairs_connection, e
-                                    );
-                                }
-                            }
-
-                            if ds.is_active(upstairs_connection) {
-                                info!(
-                                    log,
-                                    "upstairs {:?} was previously \
-                                    active, clearing", upstairs_connection);
-                                ds.clear_active(upstairs_connection)?;
-                            }
+                        if let Some(upstairs_connection) =
+                            state.upstairs_connection
+                        {
+                            ds.on_disconnected(upstairs_connection)?;
                         } else {
                             info!(log, "unknown upstairs disconnected");
                         }
 
                         return Ok(());
                     }
-                    Some(Message::Ruok) => {
-                        if let Err(e) = fw.send(Message::Imok).await {
-                            bail!("Failed to answer ping: {}", e);
-                        }
-                    }
-                    Some(Message::HereIAm {
-                        version,
-                        upstairs_id,
-                        session_id,
-                        gen,
-                        read_only,
-                        encrypted,
-                        alternate_versions,
-                    }) => {
-                        if negotiated != NegotiationState::Start {
-                            bail!("Received connect out of order {:?}",
-                                negotiated);
-                        }
-                        info!(log, "Connection request from {} with version {}",
-                            upstairs_id, version);
-
-                        // Verify we can communicate with the upstairs.  First
-                        // check our message version.  If that fails,  check
-                        // to see if our version is one of the supported
-                        // versions the upstairs has told us it can support.
-                        if version != CRUCIBLE_MESSAGE_VERSION {
-                            if alternate_versions
-                                .contains(&CRUCIBLE_MESSAGE_VERSION)
-                            {
-                                warn!(
-                                    log,
-                                    "downstairs and upstairs using different \
-                                     but compatible versions, Upstairs is {}, \
-                                     but supports {:?}, downstairs is {}",
-                                    version,
-                                    alternate_versions,
-                                    CRUCIBLE_MESSAGE_VERSION,
-                                );
-                            } else {
-                                let m = Message::VersionMismatch {
-                                    version: CRUCIBLE_MESSAGE_VERSION,
-                                };
-                                if let Err(e) = fw.send(m).await {
-                                    warn!(
-                                        log,
-                                        "Failed to send VersionMismatch: {}",
-                                        e
-                                    );
-                                }
-                                bail!(
-                                    "Required version {}, Or {:?} got {}",
-                                    CRUCIBLE_MESSAGE_VERSION,
-                                    alternate_versions,
-                                    version,
-                                );
-                            }
-                        }
-
-                        // Reject an Upstairs negotiation if there is a mismatch
-                        // of expectation, and terminate the connection - the
-                        // Upstairs will not be able to successfully negotiate.
-                        {
-                            let ds = ads.lock().await;
-                            if ds.flags.read_only != read_only {
-                                if let Err(e) = fw.send(Message::ReadOnlyMismatch {
-                                    expected: ds.flags.read_only,
-                                }).await {
-                                    warn!(log, "Failed to send ReadOnlyMismatch: {}", e);
-                                }
-
-                                bail!("closing connection due to read-only \
-                                    mismatch");
-                            }
-
-                            if ds.flags.encrypted != encrypted {
-                                if let Err(e) = fw.send(Message::EncryptedMismatch {
-                                    expected: ds.flags.encrypted,
-                                }).await {
-                                    warn!(log, "Failed to send EncryptedMismatch: {}", e);
-                                }
-
-                                bail!("closing connection due to encryption \
-                                    mismatch");
-                            }
-                        }
-
-                        negotiated = NegotiationState::ConnectedToUpstairs;
-                        upstairs_connection = Some(UpstairsConnection {
-                            upstairs_id,
-                            session_id,
-                            gen,
-                        });
-                        info!(
-                            log, "upstairs {:?} connected, version {}",
-                            upstairs_connection.unwrap(),
-                            CRUCIBLE_MESSAGE_VERSION);
-
-                        if let Err(e) = fw.send(
-                            Message::YesItsMe {
-                                version: CRUCIBLE_MESSAGE_VERSION,
-                                repair_addr
-                            }
-                        ).await {
-                            bail!("Failed sending YesItsMe: {}", e);
-                        }
-                    }
-                    Some(Message::PromoteToActive {
-                        upstairs_id,
-                        session_id,
-                        gen,
-                    }) => {
-                        if negotiated != NegotiationState::ConnectedToUpstairs {
-                            bail!("Received activate out of order {:?}",
-                                negotiated);
-                        }
-
-                        // Only allowed to promote or demote self
-                        let upstairs_connection =
-                            upstairs_connection.as_mut().unwrap();
-                        let matches_self =
-                            upstairs_connection.upstairs_id == upstairs_id &&
-                            upstairs_connection.session_id == session_id;
-
-                        if !matches_self {
-                            if let Err(e) = fw.send(
-                                Message::UuidMismatch {
-                                    expected_id:
-                                        upstairs_connection.upstairs_id,
-                                }
-                            ).await {
-                                warn!(log, "Failed sending UuidMismatch: {}", e);
-                            }
-                            bail!(
-                                "Upstairs connection expected \
-                                upstairs_id:{} session_id:{}  received \
-                                upstairs_id:{} session_id:{}",
-                                upstairs_connection.upstairs_id,
-                                upstairs_connection.session_id,
-                                upstairs_id,
-                                session_id
-                            );
-
-                        } else {
-                            if upstairs_connection.gen != gen {
-                                warn!(
-                                    log,
-                                    "warning: generation number at \
-                                    negotiation was {} and {} at \
-                                    activation, updating",
-                                    upstairs_connection.gen,
-                                    gen,
-                                );
-
-                                upstairs_connection.gen = gen;
-                            }
-
-                            {
-                                let mut ds = ads.lock().await;
-
-                                ds.promote_to_active(
-                                    *upstairs_connection,
-                                    another_upstairs_active_tx
-                                        .take()
-                                        .expect("no oneshot tx"),
-                                ).await?;
-                            }
-                            negotiated = NegotiationState::PromotedToActive;
-
-                            if let Err(e) = fw.send(Message::YouAreNowActive {
-                                upstairs_id,
-                                session_id,
-                                gen,
-                            }).await {
-                                bail!("Failed sending YouAreNewActive: {}", e);
-                            }
-                        }
-                    }
-                    Some(Message::RegionInfoPlease) => {
-                        if negotiated != NegotiationState::PromotedToActive {
-                            bail!("Received RegionInfo out of order {:?}",
-                                negotiated);
-                        }
-                        negotiated = NegotiationState::SentRegionInfo;
-                        let region_def = {
-                            let ds = ads.lock().await;
-                            ds.region.def()
-                        };
-
-                        if let Err(e) = fw.send(Message::RegionInfo { region_def }).await {
-                            bail!("Failed sending RegionInfo: {}", e);
-                        }
-                    }
-                    Some(Message::LastFlush { last_flush_number }) => {
-                        if negotiated != NegotiationState::SentRegionInfo {
-                            bail!("Received LastFlush out of order {:?}",
-                                negotiated);
-                        }
-
-                        negotiated = NegotiationState::Ready;
-
-                        {
-                            let mut ds = ads.lock().await;
-                            let work = ds.work_mut(
-                                upstairs_connection.unwrap(),
-                            )?;
-                            work.last_flush = last_flush_number;
-                            info!(
-                                log,
-                                "Set last flush {}", last_flush_number);
-                        }
-
-                        if let Err(e) = fw.send(Message::LastFlushAck {
-                            last_flush_number
-                        }).await {
-                            bail!("Failed sending LastFlushAck: {}", e);
-                        }
-
-                        /*
-                         * Once this command is sent, we are ready to exit
-                         * the loop and move forward with receiving IOs
-                         */
-                    }
-                    Some(Message::ExtentVersionsPlease) => {
-                        if negotiated != NegotiationState::SentRegionInfo {
-                            bail!("Received ExtentVersions out of order {:?}",
-                                negotiated);
-                        }
-                        negotiated = NegotiationState::Ready;
-                        let ds = ads.lock().await;
-                        let meta_info = ds.region.meta_info().await?;
-                        drop(ds);
-
-                        let flush_numbers: Vec<_> = meta_info
-                            .iter()
-                            .map(|m| m.flush_number)
-                            .collect();
-                        let gen_numbers: Vec<_> = meta_info
-                            .iter()
-                            .map(|m| m.gen_number)
-                            .collect();
-                        let dirty_bits: Vec<_> = meta_info
-                            .iter()
-                            .map(|m| m.dirty)
-                            .collect();
-                        if flush_numbers.len() > 12 {
-                            info!(
-                                log,
-                                "Current flush_numbers [0..12]: {:?}",
-                                &flush_numbers[0..12]
-                            );
-                        } else {
-                            info!(
-                                log,
-                                "Current flush_numbers [0..12]: {:?}",
-                                flush_numbers);
-                        }
-
-                        if let Err(e) = fw.send(Message::ExtentVersions {
-                            gen_numbers,
-                            flush_numbers,
-                            dirty_bits,
-                        })
-                        .await {
-                            bail!("Failed sending ExtentVersions: {}", e);
-                        }
-
-                        /*
-                         * Once this command is sent, we are ready to exit
-                         * the loop and move forward with receiving IOs
-                         */
-                    }
-                    Some(_msg) => {
-                        warn!(
-                            log,
-                            "Ignored message received during negotiation"
-                        );
+                    Some(m) => {
+                        let mut ds = ads.lock().await;
+                        ds.on_negotiation_step(m, &mut state, &mut fw).await?;
                     }
                 }
             }
@@ -1359,8 +1081,8 @@ where
     }
 
     info!(log, "Downstairs has completed Negotiation");
-    assert!(upstairs_connection.is_some());
-    let upstairs_connection = upstairs_connection.unwrap();
+    assert!(state.upstairs_connection.is_some());
+    let upstairs_connection = state.upstairs_connection.unwrap();
 
     resp_loop(ads, fr, fw, another_upstairs_active_rx, upstairs_connection)
         .await
@@ -3224,6 +2946,340 @@ impl Downstairs {
                 }
             }
         }
+    }
+
+    /// Function called when the given upstairs disconnects
+    fn on_disconnected(
+        &mut self,
+        upstairs_connection: UpstairsConnection,
+    ) -> Result<()> {
+        // If our upstairs never completed activation,
+        // or some other upstairs activated, we won't
+        // be able to report how many jobs.
+        match self.jobs(upstairs_connection) {
+            Ok(jobs) => {
+                info!(
+                    self.log,
+                    "upstairs {:?} disconnected, {} jobs left",
+                    upstairs_connection,
+                    jobs,
+                );
+            }
+            Err(e) => {
+                info!(
+                    self.log,
+                    "upstairs {:?} disconnected, {}", upstairs_connection, e
+                );
+            }
+        }
+
+        if self.is_active(upstairs_connection) {
+            info!(
+                self.log,
+                "upstairs {:?} was previously active, clearing",
+                upstairs_connection
+            );
+            self.clear_active(upstairs_connection)?;
+        }
+        Ok(())
+    }
+
+    async fn on_negotiation_step<W>(
+        &mut self,
+        m: Message,
+        state: &mut NegotiationData,
+        fw: &mut crucible_protocol::MessageWriter<W>,
+    ) -> Result<()>
+    where
+        W: tokio::io::AsyncWrite
+            + std::marker::Unpin
+            + std::marker::Send
+            + 'static,
+    {
+        match m {
+            Message::Ruok => {
+                if let Err(e) = fw.send(Message::Imok).await {
+                    bail!("Failed to answer ping: {}", e);
+                }
+            }
+            Message::HereIAm {
+                version,
+                upstairs_id,
+                session_id,
+                gen,
+                read_only,
+                encrypted,
+                alternate_versions,
+            } => {
+                if state.negotiated != NegotiationState::Start {
+                    bail!(
+                        "Received connect out of order {:?}",
+                        state.negotiated
+                    );
+                }
+                info!(
+                    self.log,
+                    "Connection request from {} with version {}",
+                    upstairs_id,
+                    version
+                );
+
+                // Verify we can communicate with the upstairs.  First
+                // check our message version.  If that fails,  check
+                // to see if our version is one of the supported
+                // versions the upstairs has told us it can support.
+                if version != CRUCIBLE_MESSAGE_VERSION {
+                    if alternate_versions.contains(&CRUCIBLE_MESSAGE_VERSION) {
+                        warn!(
+                            self.log,
+                            "downstairs and upstairs using different \
+                             but compatible versions, Upstairs is {}, \
+                             but supports {:?}, downstairs is {}",
+                            version,
+                            alternate_versions,
+                            CRUCIBLE_MESSAGE_VERSION,
+                        );
+                    } else {
+                        let m = Message::VersionMismatch {
+                            version: CRUCIBLE_MESSAGE_VERSION,
+                        };
+                        if let Err(e) = fw.send(m).await {
+                            warn!(
+                                self.log,
+                                "Failed to send VersionMismatch: {}", e
+                            );
+                        }
+                        bail!(
+                            "Required version {}, Or {:?} got {}",
+                            CRUCIBLE_MESSAGE_VERSION,
+                            alternate_versions,
+                            version,
+                        );
+                    }
+                }
+
+                // Reject an Upstairs negotiation if there is a mismatch
+                // of expectation, and terminate the connection - the
+                // Upstairs will not be able to successfully negotiate.
+                {
+                    if self.flags.read_only != read_only {
+                        if let Err(e) = fw
+                            .send(Message::ReadOnlyMismatch {
+                                expected: self.flags.read_only,
+                            })
+                            .await
+                        {
+                            warn!(
+                                self.log,
+                                "Failed to send ReadOnlyMismatch: {}", e
+                            );
+                        }
+
+                        bail!("closing connection due to read-only mismatch");
+                    }
+
+                    if self.flags.encrypted != encrypted {
+                        if let Err(e) = fw
+                            .send(Message::EncryptedMismatch {
+                                expected: self.flags.encrypted,
+                            })
+                            .await
+                        {
+                            warn!(
+                                self.log,
+                                "Failed to send EncryptedMismatch: {}", e
+                            );
+                        }
+
+                        bail!("closing connection due to encryption mismatch");
+                    }
+                }
+
+                state.negotiated = NegotiationState::ConnectedToUpstairs;
+                state.upstairs_connection = Some(UpstairsConnection {
+                    upstairs_id,
+                    session_id,
+                    gen,
+                });
+                info!(
+                    self.log,
+                    "upstairs {:?} connected, version {}",
+                    state.upstairs_connection.unwrap(),
+                    CRUCIBLE_MESSAGE_VERSION
+                );
+
+                if let Err(e) = fw
+                    .send(Message::YesItsMe {
+                        version: CRUCIBLE_MESSAGE_VERSION,
+                        repair_addr: state.repair_addr,
+                    })
+                    .await
+                {
+                    bail!("Failed sending YesItsMe: {}", e);
+                }
+            }
+            Message::PromoteToActive {
+                upstairs_id,
+                session_id,
+                gen,
+            } => {
+                if state.negotiated != NegotiationState::ConnectedToUpstairs {
+                    bail!(
+                        "Received activate out of order {:?}",
+                        state.negotiated
+                    );
+                }
+
+                // Only allowed to promote or demote self
+                let upstairs_connection =
+                    state.upstairs_connection.as_mut().unwrap();
+                let matches_self = upstairs_connection.upstairs_id
+                    == upstairs_id
+                    && upstairs_connection.session_id == session_id;
+
+                if !matches_self {
+                    if let Err(e) = fw
+                        .send(Message::UuidMismatch {
+                            expected_id: upstairs_connection.upstairs_id,
+                        })
+                        .await
+                    {
+                        warn!(self.log, "Failed sending UuidMismatch: {}", e);
+                    }
+                    bail!(
+                        "Upstairs connection expected \
+                         upstairs_id:{} session_id:{}  received \
+                         upstairs_id:{} session_id:{}",
+                        upstairs_connection.upstairs_id,
+                        upstairs_connection.session_id,
+                        upstairs_id,
+                        session_id
+                    );
+                } else {
+                    if upstairs_connection.gen != gen {
+                        warn!(
+                            self.log,
+                            "warning: generation number at negotiation was {} \
+                             and {} at activation, updating",
+                            upstairs_connection.gen,
+                            gen,
+                        );
+
+                        upstairs_connection.gen = gen;
+                    }
+
+                    self.promote_to_active(
+                        *upstairs_connection,
+                        state
+                            .another_upstairs_active_tx
+                            .take()
+                            .expect("no oneshot tx"),
+                    )
+                    .await?;
+                    state.negotiated = NegotiationState::PromotedToActive;
+
+                    if let Err(e) = fw
+                        .send(Message::YouAreNowActive {
+                            upstairs_id,
+                            session_id,
+                            gen,
+                        })
+                        .await
+                    {
+                        bail!("Failed sending YouAreNewActive: {}", e);
+                    }
+                }
+            }
+            Message::RegionInfoPlease => {
+                if state.negotiated != NegotiationState::PromotedToActive {
+                    bail!(
+                        "Received RegionInfo out of order {:?}",
+                        state.negotiated
+                    );
+                }
+                state.negotiated = NegotiationState::SentRegionInfo;
+                let region_def = { self.region.def() };
+
+                if let Err(e) =
+                    fw.send(Message::RegionInfo { region_def }).await
+                {
+                    bail!("Failed sending RegionInfo: {}", e);
+                }
+            }
+            Message::LastFlush { last_flush_number } => {
+                if state.negotiated != NegotiationState::SentRegionInfo {
+                    bail!(
+                        "Received LastFlush out of order {:?}",
+                        state.negotiated
+                    );
+                }
+                state.negotiated = NegotiationState::Ready;
+
+                let work = self.work_mut(state.upstairs_connection.unwrap())?;
+                work.last_flush = last_flush_number;
+                info!(self.log, "Set last flush {}", last_flush_number);
+
+                if let Err(e) =
+                    fw.send(Message::LastFlushAck { last_flush_number }).await
+                {
+                    bail!("Failed sending LastFlushAck: {}", e);
+                }
+
+                /*
+                 * Once this command is sent, we are ready to exit
+                 * the loop and move forward with receiving IOs
+                 */
+            }
+            Message::ExtentVersionsPlease => {
+                if state.negotiated != NegotiationState::SentRegionInfo {
+                    bail!(
+                        "Received ExtentVersions out of order {:?}",
+                        state.negotiated
+                    );
+                }
+                state.negotiated = NegotiationState::Ready;
+                let meta_info = self.region.meta_info().await?;
+
+                let flush_numbers: Vec<_> =
+                    meta_info.iter().map(|m| m.flush_number).collect();
+                let gen_numbers: Vec<_> =
+                    meta_info.iter().map(|m| m.gen_number).collect();
+                let dirty_bits: Vec<_> =
+                    meta_info.iter().map(|m| m.dirty).collect();
+                if flush_numbers.len() > 12 {
+                    info!(
+                        self.log,
+                        "Current flush_numbers [0..12]: {:?}",
+                        &flush_numbers[0..12]
+                    );
+                } else {
+                    info!(
+                        self.log,
+                        "Current flush_numbers [0..12]: {:?}", flush_numbers
+                    );
+                }
+
+                if let Err(e) = fw
+                    .send(Message::ExtentVersions {
+                        gen_numbers,
+                        flush_numbers,
+                        dirty_bits,
+                    })
+                    .await
+                {
+                    bail!("Failed sending ExtentVersions: {}", e);
+                }
+
+                /*
+                 * Once this command is sent, we are ready to exit
+                 * the loop and move forward with receiving IOs
+                 */
+            }
+            _msg => {
+                warn!(self.log, "Ignored message received during negotiation");
+            }
+        }
+        Ok(())
     }
 }
 
