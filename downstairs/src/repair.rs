@@ -25,7 +25,7 @@ pub struct FileServerContext {
     region_dir: PathBuf,
     read_only: bool,
     region_definition: RegionDefinition,
-    downstairs: Arc<Mutex<Downstairs>>,
+    downstairs: DownstairsHandle,
 }
 
 pub fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
@@ -74,6 +74,7 @@ pub async fn repair_main(
     let region_dir = ds.region.dir.clone();
     let read_only = ds.flags.read_only;
     let region_definition = ds.region.def();
+    let handle = ds.handle();
     drop(ds);
 
     info!(log, "Repair listens on {} for path:{:?}", addr, region_dir);
@@ -81,7 +82,7 @@ pub async fn repair_main(
         region_dir,
         read_only,
         region_definition,
-        downstairs,
+        downstairs: handle,
     };
 
     /*
@@ -207,12 +208,11 @@ async fn extent_repair_ready(
         return Ok(HttpResponseOk(true));
     }
 
-    let res = {
-        let ds = downstairs.lock().await;
-        matches!(ds.region.extents[eid], ExtentState::Closed)
-    };
-
-    Ok(HttpResponseOk(res))
+    downstairs
+        .is_extent_closed(ExtentId(eid as u32))
+        .await
+        .map(HttpResponseOk)
+        .map_err(|e| HttpError::for_internal_error(e.to_string()))
 }
 
 /**
@@ -320,10 +320,11 @@ async fn get_work(
     rqctx: RequestContext<Arc<FileServerContext>>,
 ) -> Result<HttpResponseOk<bool>, HttpError> {
     let downstairs = &rqctx.context().downstairs;
-    let mut ds = downstairs.lock().await;
-
-    show_work(&mut ds);
-    Ok(HttpResponseOk(true))
+    downstairs
+        .show_work()
+        .await
+        .map(|_| HttpResponseOk(true))
+        .map_err(|e| HttpError::for_internal_error(e.to_string()))
 }
 
 #[cfg(test)]

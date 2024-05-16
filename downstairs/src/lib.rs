@@ -26,7 +26,7 @@ use crucible_protocol::{
 };
 use repair_client::Client;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use rand::prelude::*;
@@ -1686,6 +1686,7 @@ impl DownstairsBuilder<'_> {
             region.def().extent_count(),
         );
 
+        let (request_tx, request_rx) = mpsc::channel(256); // TODO size?
         Ok(Arc::new(Mutex::new(Downstairs {
             region,
             flags: DownstairsFlags {
@@ -1701,6 +1702,8 @@ impl DownstairsBuilder<'_> {
             address: None,
             repair_address: None,
             log,
+            request_tx,
+            request_rx: Some(request_rx),
         })))
     }
 }
@@ -1730,6 +1733,9 @@ pub struct Downstairs {
     pub address: Option<SocketAddr>,
     pub repair_address: Option<SocketAddr>,
     log: Logger,
+
+    request_tx: mpsc::Sender<DownstairsRequest>,
+    request_rx: Option<mpsc::Receiver<DownstairsRequest>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3111,6 +3117,85 @@ impl Downstairs {
         }
         Ok(())
     }
+
+    /// Returns a handle for making async calls against the Downstairs task
+    pub fn handle(&self) -> DownstairsHandle {
+        DownstairsHandle {
+            tx: self.request_tx.clone(),
+        }
+    }
+
+    async fn spawn_runner(
+        d: Arc<Mutex<Downstairs>>,
+    ) -> tokio::task::JoinHandle<()> {
+        let (request_rx, log) = {
+            let mut ds = d.lock().await;
+            let request_rx = ds.request_rx.take().unwrap();
+            let log = ds.log.new(o!("task" => "runner".to_string()));
+            (request_rx, log)
+        };
+        tokio::spawn(Downstairs::run(d, request_rx, log))
+    }
+
+    async fn run(
+        ds: Arc<Mutex<Downstairs>>,
+        mut request_rx: mpsc::Receiver<DownstairsRequest>,
+        log: Logger,
+    ) {
+        while let Some(v) = request_rx.recv().await {
+            match v {
+                DownstairsRequest::ShowWork => {
+                    let mut d = ds.lock().await;
+                    show_work(&mut d);
+                }
+                DownstairsRequest::IsExtentClosed { eid, done } => {
+                    let d = ds.lock().await;
+                    let closed = matches!(
+                        d.region.extents[eid.0 as usize],
+                        ExtentState::Closed
+                    );
+                    if done.send(closed).is_err() {
+                        warn!(log, "failed to reply to IsExtentClosed");
+                    }
+                }
+            }
+        }
+    }
+}
+
+enum DownstairsRequest {
+    /// Checks whether the given extent is closed
+    IsExtentClosed {
+        eid: ExtentId,
+        done: oneshot::Sender<bool>,
+    },
+
+    /// Prints downstairs work
+    ///
+    /// This is fire-and-forget, so there's no oneshot reply channel
+    ShowWork,
+}
+
+/// Handle allowing for async calls to the Downstairs task
+pub struct DownstairsHandle {
+    tx: mpsc::Sender<DownstairsRequest>,
+}
+
+impl DownstairsHandle {
+    pub async fn is_extent_closed(&self, eid: ExtentId) -> Result<bool> {
+        let (done, rx) = oneshot::channel();
+        self.tx
+            .send(DownstairsRequest::IsExtentClosed { eid, done })
+            .await
+            .context("could not send message on channel")?;
+        rx.await.context("could not receive result")
+    }
+    pub async fn show_work(&self) -> Result<()> {
+        self.tx
+            .send(DownstairsRequest::ShowWork)
+            .await
+            .context("could not send message on channel")
+    }
 }
 
 /*
@@ -3559,6 +3644,10 @@ pub async fn start_downstairs(
         None
     };
 
+    // We'll run a lightweight Downstairs loop which handles certain operations
+    // using message-passing
+    let mut ds_runner = Downstairs::spawn_runner(d.clone()).await;
+
     let join_handle = tokio::spawn(async move {
         /*
          * We now loop listening for a connection from the Upstairs.
@@ -3568,7 +3657,14 @@ pub async fn start_downstairs(
          */
         info!(log, "downstairs listening on {}", listen_on);
         loop {
-            let (sock, raddr) = listener.accept().await?;
+            let v = tokio::select! {
+                _ = &mut ds_runner => {
+                    info!(log, "downstairs runner stopped; exiting");
+                    break Ok(());
+                }
+                v = listener.accept() => {v}
+            };
+            let (sock, raddr) = v?;
 
             /*
              * We have a new connection; before we wrap it, set TCP_NODELAY
