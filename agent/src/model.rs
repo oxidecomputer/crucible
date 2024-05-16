@@ -36,7 +36,7 @@ pub struct Region {
     // Creation parameters
     pub block_size: u64,
     pub extent_size: u64,
-    pub extent_count: u64,
+    pub extent_count: u32,
     pub encrypted: bool,
 
     // Run-time parameters
@@ -130,7 +130,7 @@ pub struct CreateRegion {
 
     pub block_size: u64,
     pub extent_size: u64,
-    pub extent_count: u64,
+    pub extent_count: u32,
     pub encrypted: bool,
 
     pub cert_pem: Option<String>,

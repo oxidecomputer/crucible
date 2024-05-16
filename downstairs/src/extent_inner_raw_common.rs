@@ -1,4 +1,5 @@
 use crate::{extent::extent_path, CrucibleError};
+use crucible_common::ExtentId;
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom};
@@ -25,7 +26,7 @@ impl OnDiskMeta {
     /// so we can get a tag without knowing anything else about the file.
     pub fn get_version_tag(
         dir: &Path,
-        extent_number: u32,
+        extent_number: ExtentId,
     ) -> Result<u32, CrucibleError> {
         let path = extent_path(dir, extent_number);
         let mut f = OpenOptions::new()

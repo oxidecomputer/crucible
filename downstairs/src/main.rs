@@ -13,7 +13,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
 
-use crucible_common::build_logger;
+use crucible_common::{build_logger, ExtentId};
 use crucible_downstairs::admin::*;
 use crucible_downstairs::*;
 use crucible_protocol::{JobId, CRUCIBLE_MESSAGE_VERSION};
@@ -72,7 +72,7 @@ enum Args {
 
         /// Number of extent files.
         #[clap(long, default_value = "15", action)]
-        extent_count: u64,
+        extent_count: u32,
 
         /// Import data for the extent from this file.
         #[clap(
@@ -235,7 +235,7 @@ enum Args {
         extent_size: u64,
 
         #[clap(long, default_value_t = 15)]
-        extent_count: u64,
+        extent_count: u32,
 
         #[clap(long)]
         encrypted: bool,
@@ -362,7 +362,7 @@ async fn main() -> Result<()> {
             }
             dump_region(
                 data,
-                extent,
+                extent.map(ExtentId),
                 block,
                 only_show_differences,
                 no_color,

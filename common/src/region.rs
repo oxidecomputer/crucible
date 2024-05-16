@@ -421,6 +421,70 @@ impl Default for RegionOptions {
     }
 }
 
+/// Wrapper type for a particular extent
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Eq,
+    Hash,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    Serialize,
+    Deserialize,
+)]
+#[serde(transparent)]
+pub struct ExtentId(pub u32);
+
+impl std::fmt::Display for ExtentId {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> Result<(), std::fmt::Error> {
+        self.0.fmt(f)
+    }
+}
+
+impl From<u32> for ExtentId {
+    fn from(v: u32) -> Self {
+        Self(v)
+    }
+}
+
+impl std::ops::Add<u32> for ExtentId {
+    type Output = Self;
+    fn add(self, rhs: u32) -> Self {
+        Self(self.0 + rhs)
+    }
+}
+
+impl std::ops::Add<ExtentId> for u32 {
+    type Output = ExtentId;
+    fn add(self, rhs: ExtentId) -> ExtentId {
+        ExtentId(self + rhs.0)
+    }
+}
+
+impl std::ops::AddAssign<u32> for ExtentId {
+    fn add_assign(&mut self, rhs: u32) {
+        self.0 += rhs;
+    }
+}
+
+impl std::ops::SubAssign<u32> for ExtentId {
+    fn sub_assign(&mut self, rhs: u32) {
+        self.0 -= rhs;
+    }
+}
+
+impl std::ops::Sub<ExtentId> for ExtentId {
+    type Output = u32;
+    fn sub(self, rhs: ExtentId) -> u32 {
+        self.0 - rhs.0
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;

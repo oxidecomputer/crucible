@@ -326,10 +326,10 @@ mod cdt {
     fn gw__write__unwritten__start(_: u64) {}
     fn gw__write__deps(_: u64, _: u64) {}
     fn gw__flush__start(_: u64) {}
-    fn gw__close__start(_: u64, _: u64) {}
-    fn gw__repair__start(_: u64, _: u64) {}
+    fn gw__close__start(_: u64, _: u32) {}
+    fn gw__repair__start(_: u64, _: u32) {}
     fn gw__noop__start(_: u64) {}
-    fn gw__reopen__start(_: u64, _: u64) {}
+    fn gw__reopen__start(_: u64, _: u32) {}
     fn up__to__ds__read__start(_: u64) {}
     fn up__to__ds__write__start(_: u64) {}
     fn up__to__ds__write__unwritten__start(_: u64) {}
@@ -339,18 +339,18 @@ mod cdt {
     fn ds__write__client__start(_: u64, _: u8) {}
     fn ds__write__unwritten__client__start(_: u64, _: u8) {}
     fn ds__flush__client__start(_: u64, _: u8) {}
-    fn ds__close__start(_: u64, _: u8, _: usize) {}
-    fn ds__repair__start(_: u64, _: u8, _: usize) {}
+    fn ds__close__start(_: u64, _: u8, _: u32) {}
+    fn ds__repair__start(_: u64, _: u8, _: u32) {}
     fn ds__noop__start(_: u64, _: u8) {}
-    fn ds__reopen__start(_: u64, _: u8, _: usize) {}
+    fn ds__reopen__start(_: u64, _: u8, _: u32) {}
     fn ds__read__net__start(_: u64, _: u8) {}
     fn ds__write__net__start(_: u64, _: u8) {}
     fn ds__write__unwritten__net__start(_: u64, _: u8) {}
     fn ds__flush__net__start(_: u64, _: u8) {}
-    fn ds__close__net__start(_: u64, _: u8, _: usize) {}
-    fn ds__repair__net__start(_: u64, _: u8, _: usize) {}
+    fn ds__close__net__start(_: u64, _: u8, _: u32) {}
+    fn ds__repair__net__start(_: u64, _: u8, _: u32) {}
     fn ds__noop__net__start(_: u64, _: u8) {}
-    fn ds__reopen__net__start(_: u64, _: u8, _: usize) {}
+    fn ds__reopen__net__start(_: u64, _: u8, _: u32) {}
     fn ds__read__net__done(_: u64, _: u8) {}
     fn ds__write__net__done(_: u64, _: u8) {}
     fn ds__write__unwritten__net__done(_: u64, _: u8) {}
@@ -372,10 +372,10 @@ mod cdt {
     fn gw__write__done(_: u64) {}
     fn gw__write__unwritten__done(_: u64) {}
     fn gw__flush__done(_: u64) {}
-    fn gw__close__done(_: u64, _: usize) {}
-    fn gw__repair__done(_: u64, _: usize) {}
+    fn gw__close__done(_: u64, _: u32) {}
+    fn gw__repair__done(_: u64, _: u32) {}
     fn gw__noop__done(_: u64) {}
-    fn gw__reopen__done(_: u64, _: usize) {}
+    fn gw__reopen__done(_: u64, _: u32) {}
     fn extent__or__done(_: u64) {}
     fn reqwest__read__start(_: u32, _: Uuid) {}
     fn reqwest__read__done(_: u32, _: Uuid) {}
@@ -1115,28 +1115,28 @@ enum IOop {
         flush_number: u64,
         gen_number: u64,
         snapshot_details: Option<SnapshotDetails>,
-        extent_limit: Option<usize>,
+        extent_limit: Option<ExtentId>,
     },
     /*
      * These operations are for repairing a bad downstairs
      */
     ExtentFlushClose {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
+        extent: ExtentId,
         flush_number: u64,
         gen_number: u64,
         repair_downstairs: Vec<ClientId>,
     },
     ExtentLiveRepair {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
+        extent: ExtentId,
         source_downstairs: ClientId,
         source_repair_address: SocketAddr,
         repair_downstairs: Vec<ClientId>,
     },
     ExtentLiveReopen {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
+        extent: ExtentId,
     },
     ExtentLiveNoOp {
         dependencies: Vec<JobId>, // Jobs that must finish before this
@@ -1221,7 +1221,7 @@ impl IOop {
                 repair_downstairs: _,
             } => {
                 let job_type = "FClose".to_string();
-                (job_type, *extent, dependencies.clone())
+                (job_type, extent.0 as usize, dependencies.clone())
             }
             IOop::ExtentLiveRepair {
                 dependencies,
@@ -1231,14 +1231,14 @@ impl IOop {
                 repair_downstairs: _,
             } => {
                 let job_type = "Repair".to_string();
-                (job_type, *extent, dependencies.clone())
+                (job_type, extent.0 as usize, dependencies.clone())
             }
             IOop::ExtentLiveReopen {
                 dependencies,
                 extent,
             } => {
                 let job_type = "Reopen".to_string();
-                (job_type, *extent, dependencies.clone())
+                (job_type, extent.0 as usize, dependencies.clone())
             }
             IOop::ExtentLiveNoOp { dependencies } => {
                 let job_type = "NoOp".to_string();
@@ -1253,7 +1253,7 @@ impl IOop {
     // repair), and determine if this IO should be sent to the downstairs or not
     // (skipped).
     // Return true if we should send it.
-    fn send_io_live_repair(&self, extent_limit: Option<u64>) -> bool {
+    fn send_io_live_repair(&self, extent_limit: Option<ExtentId>) -> bool {
         if let Some(extent_limit) = extent_limit {
             // The extent_limit has been set, so we have repair work in
             // progress.  If our IO touches an extent less than or equal

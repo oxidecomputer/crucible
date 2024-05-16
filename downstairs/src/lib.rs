@@ -17,7 +17,8 @@ use std::time::Duration;
 use crucible_common::{
     build_logger, crucible_bail, deadline_secs,
     impacted_blocks::extent_from_offset, integrity_hash, mkdir_for_file,
-    verbose_timeout, Block, CrucibleError, RegionDefinition, MAX_BLOCK_SIZE,
+    verbose_timeout, Block, CrucibleError, ExtentId, RegionDefinition,
+    MAX_BLOCK_SIZE,
 };
 use crucible_protocol::{
     BlockContext, CrucibleDecoder, JobId, Message, MessageWriter,
@@ -76,29 +77,29 @@ enum IOop {
         flush_number: u64,
         gen_number: u64,
         snapshot_details: Option<SnapshotDetails>,
-        extent_limit: Option<usize>,
+        extent_limit: Option<ExtentId>,
     },
     /*
      * These operations are for repairing a bad downstairs
      */
     ExtentClose {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
+        extent: ExtentId,
     },
     ExtentFlushClose {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
+        extent: ExtentId,
         flush_number: u64,
         gen_number: u64,
     },
     ExtentLiveRepair {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
+        extent: ExtentId,
         source_repair_address: SocketAddr,
     },
     ExtentLiveReopen {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
+        extent: ExtentId,
     },
     ExtentLiveNoOp {
         dependencies: Vec<JobId>, // Jobs that must finish before this
@@ -142,7 +143,7 @@ pub(crate) struct RegionReadRequest(Vec<RegionReadReq>);
 /// Inner type for a single read requests
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct RegionReadReq {
-    extent: u64,
+    extent: ExtentId,
     offset: Block,
     count: NonZeroUsize,
 }
@@ -338,7 +339,7 @@ pub(crate) struct RegionWrite(Vec<RegionWriteReq>);
 /// A single request within a `RegionWrite`
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct RegionWriteReq {
-    extent: u64,
+    extent: ExtentId,
     write: ExtentWrite,
 }
 
@@ -479,8 +480,8 @@ pub async fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
     let mut out_file = File::create(export_path)?;
     let mut blocks_copied = 0;
 
-    'eid_loop: for eid in 0..extent_count {
-        let extent_offset = space_per_extent * eid as u64;
+    'eid_loop: for eid in (0..extent_count).map(ExtentId) {
+        let extent_offset = space_per_extent * eid.0 as u64;
         for block_offset in 0..extent_size.value {
             if (extent_offset + block_offset) >= start_block {
                 blocks_copied += 1;
@@ -488,7 +489,7 @@ pub async fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
                 let response = region
                     .region_read(
                         &RegionReadRequest(vec![RegionReadReq {
-                            extent: eid as u64,
+                            extent: eid,
                             offset: Block::new_with_ddef(
                                 block_offset,
                                 &region.def(),
@@ -3441,7 +3442,7 @@ pub async fn create_region(
     block_size: u64,
     data: PathBuf,
     extent_size: u64,
-    extent_count: u64,
+    extent_count: u32,
     uuid: Uuid,
     encrypted: bool,
     log: Logger,
@@ -3464,7 +3465,7 @@ pub async fn create_region(
 pub async fn create_region_with_backend(
     data: PathBuf,
     extent_size: Block,
-    extent_count: u64,
+    extent_count: u32,
     uuid: Uuid,
     encrypted: bool,
     backend: Backend,
@@ -3709,7 +3710,7 @@ pub async fn clone_region(
         bail!("Failed to close all extents: {e}");
     }
 
-    for eid in 0..my_def.extent_count() as usize {
+    for eid in (0..my_def.extent_count()).map(ExtentId) {
         info!(log, "Repair extent {eid}");
 
         if let Err(e) = ds.region.repair_extent(eid, source, true).await {
@@ -3759,7 +3760,7 @@ mod test {
                     IOop::Read {
                         dependencies: deps,
                         requests: RegionReadRequest(vec![RegionReadReq {
-                            extent: 1,
+                            extent: ExtentId(1),
                             offset: Block::new_512(1),
                             count: NonZeroUsize::new(1).unwrap(),
                         }]),
@@ -3929,7 +3930,7 @@ mod test {
         let rio = IOop::Read {
             dependencies: Vec::new(),
             requests: RegionReadRequest(vec![RegionReadReq {
-                extent: 0,
+                extent: ExtentId(0),
                 offset: Block::new_512(1),
                 count: NonZeroUsize::new(1).unwrap(),
             }]),
@@ -3940,7 +3941,7 @@ mod test {
         let rio = IOop::Read {
             dependencies: deps,
             requests: RegionReadRequest(vec![RegionReadReq {
-                extent: 1,
+                extent: ExtentId(1),
                 offset: Block::new_512(1),
                 count: NonZeroUsize::new(1).unwrap(),
             }]),
@@ -4029,13 +4030,13 @@ mod test {
 
         let rio = IOop::ExtentClose {
             dependencies: Vec::new(),
-            extent: 0,
+            extent: ExtentId(0),
         };
         ds.add_work(upstairs_connection, JobId(1000), rio)?;
 
         let rio = IOop::ExtentFlushClose {
             dependencies: vec![],
-            extent: 1,
+            extent: ExtentId(1),
             flush_number: 1,
             gen_number: 2,
         };
@@ -4045,7 +4046,7 @@ mod test {
         let rio = IOop::Read {
             dependencies: deps,
             requests: RegionReadRequest(vec![RegionReadReq {
-                extent: 2,
+                extent: ExtentId(2),
                 offset: Block::new_512(1),
                 count: NonZeroUsize::new(1).unwrap(),
             }]),
@@ -4059,7 +4060,7 @@ mod test {
         let deps = vec![JobId(1000), JobId(1001), JobId(1002), JobId(1003)];
         let rio = IOop::ExtentLiveReopen {
             dependencies: deps,
-            extent: 0,
+            extent: ExtentId(0),
         };
         ds.add_work(upstairs_connection, JobId(1004), rio)?;
 
@@ -4115,13 +4116,13 @@ mod test {
 
         let rio = IOop::ExtentClose {
             dependencies: Vec::new(),
-            extent: 0,
+            extent: ExtentId(0),
         };
         ds.add_work(upstairs_connection, JobId(1000), rio)?;
 
         let rio = IOop::ExtentFlushClose {
             dependencies: vec![],
-            extent: 1,
+            extent: ExtentId(1),
             flush_number: 1,
             gen_number: gen,
         };
@@ -4130,12 +4131,12 @@ mod test {
         // Add the two reopen commands for the two extents we closed.
         let rio = IOop::ExtentLiveReopen {
             dependencies: vec![JobId(1000)],
-            extent: 0,
+            extent: ExtentId(0),
         };
         ds.add_work(upstairs_connection, JobId(1002), rio)?;
         let rio = IOop::ExtentLiveReopen {
             dependencies: vec![JobId(1001)],
-            extent: 1,
+            extent: ExtentId(1),
         };
         ds.add_work(upstairs_connection, JobId(1003), rio)?;
         show_work(&mut ds);
@@ -4234,7 +4235,7 @@ mod test {
     // A test function that will return a generic crucible write command
     // for use when building the IOop::Write structure.  The data (of 9's)
     // matches the hash.
-    fn create_generic_test_write(eid: u64) -> RegionWrite {
+    fn create_generic_test_write(eid: ExtentId) -> RegionWrite {
         let data = Bytes::from(vec![9u8; 512]);
         let offset = Block::new_512(1);
 
@@ -4284,7 +4285,7 @@ mod test {
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection, tx).await?;
 
-        let eid = 3;
+        let eid = ExtentId(3);
 
         // Create and add the first write
         let writes = create_generic_test_write(eid);
@@ -4316,7 +4317,7 @@ mod test {
         // Now close the extent
         let rio = IOop::ExtentClose {
             dependencies: vec![JobId(1000), JobId(1001), JobId(1002)],
-            extent: eid as usize,
+            extent: eid,
         };
         ds.add_work(upstairs_connection, JobId(1003), rio)?;
 
@@ -4404,7 +4405,7 @@ mod test {
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection, tx).await?;
 
-        let eid = 0;
+        let eid = ExtentId(0);
 
         // Create the write
         let writes = create_generic_test_write(eid);
@@ -4416,7 +4417,7 @@ mod test {
 
         let rio = IOop::ExtentClose {
             dependencies: vec![JobId(1000)],
-            extent: eid as usize,
+            extent: eid,
         };
         ds.add_work(upstairs_connection, JobId(1001), rio)?;
 
@@ -4514,7 +4515,7 @@ mod test {
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection, tx).await?;
 
-        let eid = 1;
+        let eid = ExtentId(1);
 
         // Create the write
         let writes = create_generic_test_write(eid);
@@ -4526,7 +4527,7 @@ mod test {
 
         let rio = IOop::ExtentFlushClose {
             dependencies: vec![JobId(1000)],
-            extent: eid as usize,
+            extent: eid,
             flush_number: 3,
             gen_number: gen,
         };
@@ -4624,8 +4625,8 @@ mod test {
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection, tx).await?;
 
-        let eid_one = 1;
-        let eid_two = 2;
+        let eid_one = ExtentId(1);
+        let eid_two = ExtentId(2);
 
         // Create the write for extent 1
         let writes = create_generic_test_write(eid_one);
@@ -4646,7 +4647,7 @@ mod test {
         // Flush and close extent 1
         let rio = IOop::ExtentFlushClose {
             dependencies: vec![JobId(1000)],
-            extent: eid_one as usize,
+            extent: eid_one,
             flush_number: 6,
             gen_number: gen,
         };
@@ -4655,7 +4656,7 @@ mod test {
         // Just close extent 2
         let rio = IOop::ExtentClose {
             dependencies: vec![JobId(1001)],
-            extent: eid_two as usize,
+            extent: eid_two,
         };
         ds.add_work(upstairs_connection, JobId(1003), rio)?;
 
@@ -4793,7 +4794,7 @@ mod test {
     #[test]
     fn jobs_extent_close() {
         // Verify ExtentClose jobs move through the work queue
-        let eid = 1;
+        let eid = ExtentId(1);
         let ioop = IOop::ExtentClose {
             dependencies: vec![],
             extent: eid,
@@ -4805,7 +4806,7 @@ mod test {
     fn jobs_extent_flush_close() {
         // Verify ExtentFlushClose jobs move through the work queue
 
-        let eid = 1;
+        let eid = ExtentId(1);
         let ioop = IOop::ExtentFlushClose {
             dependencies: vec![],
             extent: eid,
@@ -4819,7 +4820,7 @@ mod test {
     fn jobs_extent_live_repair() {
         // Verify ExtentLiveRepair jobs move through the work queue
 
-        let eid = 1;
+        let eid = ExtentId(1);
         let source_repair_address =
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
 
@@ -4834,7 +4835,7 @@ mod test {
     #[test]
     fn jobs_extent_live_reopen() {
         // Verify ExtentLiveReopen jobs move through the work queue
-        let eid = 1;
+        let eid = ExtentId(1);
 
         let ioop = IOop::ExtentLiveReopen {
             dependencies: vec![],
@@ -5786,12 +5787,12 @@ mod test {
 
         // read block by block
         let mut read_data = Vec::with_capacity(total_bytes as usize);
-        for eid in 0..region.def().extent_count() {
+        for eid in (0..region.def().extent_count()).map(ExtentId) {
             for offset in 0..region.def().extent_size().value {
                 let response = region
                     .region_read(
                         &RegionReadRequest(vec![RegionReadReq {
-                            extent: eid.into(),
+                            extent: eid,
                             offset: Block::new_512(offset),
                             count: NonZeroUsize::new(1).unwrap(),
                         }]),
@@ -6178,7 +6179,7 @@ mod test {
         let read_1 = IOop::Read {
             dependencies: Vec::new(),
             requests: RegionReadRequest(vec![RegionReadReq {
-                extent: 0,
+                extent: ExtentId(0),
                 offset: Block::new_512(1),
                 count: NonZeroUsize::new(1).unwrap(),
             }]),
@@ -6188,7 +6189,7 @@ mod test {
         let read_2 = IOop::Read {
             dependencies: Vec::new(),
             requests: RegionReadRequest(vec![RegionReadReq {
-                extent: 1,
+                extent: ExtentId(1),
                 offset: Block::new_512(2),
                 count: NonZeroUsize::new(1).unwrap(),
             }]),
@@ -6264,7 +6265,7 @@ mod test {
         let rio = IOop::Read {
             dependencies: Vec::new(),
             requests: RegionReadRequest(vec![RegionReadReq {
-                extent: 0,
+                extent: ExtentId(0),
                 offset: Block::new_512(1),
                 count: NonZeroUsize::new(1).unwrap(),
             }]),
@@ -6355,7 +6356,7 @@ mod test {
         let rio = IOop::Read {
             dependencies: Vec::new(),
             requests: RegionReadRequest(vec![RegionReadReq {
-                extent: 0,
+                extent: ExtentId(0),
                 offset: Block::new_512(1),
                 count: NonZeroUsize::new(1).unwrap(),
             }]),
@@ -6446,7 +6447,7 @@ mod test {
         let rio = IOop::Read {
             dependencies: Vec::new(),
             requests: RegionReadRequest(vec![RegionReadReq {
-                extent: 0,
+                extent: ExtentId(0),
                 offset: Block::new_512(1),
                 count: NonZeroUsize::new(1).unwrap(),
             }]),
@@ -6724,7 +6725,7 @@ mod test {
     fn decode_write() {
         use crucible_protocol::WriteBlockMetadata;
         let blocks = vec![WriteBlockMetadata {
-            eid: 0,
+            eid: ExtentId(0),
             offset: Block::new_512(0),
             block_context: BlockContext {
                 hash: 123,
@@ -6738,7 +6739,7 @@ mod test {
         // Two contiguous blocks
         let blocks = vec![
             WriteBlockMetadata {
-                eid: 0,
+                eid: ExtentId(0),
                 offset: Block::new_512(0),
                 block_context: BlockContext {
                     hash: 123,
@@ -6746,7 +6747,7 @@ mod test {
                 },
             },
             WriteBlockMetadata {
-                eid: 0,
+                eid: ExtentId(0),
                 offset: Block::new_512(1),
                 block_context: BlockContext {
                     hash: 123,
@@ -6757,14 +6758,14 @@ mod test {
         let data = Bytes::from(vec![1u8; 512 * 2]);
         let w = RegionWrite::new(&blocks, data).unwrap();
         assert_eq!(w.0.len(), 1);
-        assert_eq!(w.0[0].extent, 0);
+        assert_eq!(w.0[0].extent, ExtentId(0));
         assert_eq!(w.0[0].write.offset, Block::new_512(0));
         assert_eq!(w.0[0].write.data.len(), 512 * 2);
 
         // Two non-contiguous blocks
         let blocks = vec![
             WriteBlockMetadata {
-                eid: 1,
+                eid: ExtentId(1),
                 offset: Block::new_512(0),
                 block_context: BlockContext {
                     hash: 123,
@@ -6772,7 +6773,7 @@ mod test {
                 },
             },
             WriteBlockMetadata {
-                eid: 2,
+                eid: ExtentId(2),
                 offset: Block::new_512(1),
                 block_context: BlockContext {
                     hash: 123,
@@ -6783,17 +6784,17 @@ mod test {
         let data = Bytes::from(vec![1u8; 512 * 2]);
         let w = RegionWrite::new(&blocks, data).unwrap();
         assert_eq!(w.0.len(), 2);
-        assert_eq!(w.0[0].extent, 1);
+        assert_eq!(w.0[0].extent, ExtentId(1));
         assert_eq!(w.0[0].write.offset, Block::new_512(0));
         assert_eq!(w.0[0].write.data.len(), 512);
-        assert_eq!(w.0[1].extent, 2);
+        assert_eq!(w.0[1].extent, ExtentId(2));
         assert_eq!(w.0[1].write.offset, Block::new_512(1));
         assert_eq!(w.0[1].write.data.len(), 512);
 
         // Overlapping writes to the same block
         let blocks = vec![
             WriteBlockMetadata {
-                eid: 1,
+                eid: ExtentId(1),
                 offset: Block::new_512(3),
                 block_context: BlockContext {
                     hash: 123,
@@ -6801,7 +6802,7 @@ mod test {
                 },
             },
             WriteBlockMetadata {
-                eid: 1,
+                eid: ExtentId(1),
                 offset: Block::new_512(3),
                 block_context: BlockContext {
                     hash: 123,
@@ -6812,16 +6813,16 @@ mod test {
         let data = Bytes::from(vec![1u8; 512 * 2]);
         let w = RegionWrite::new(&blocks, data).unwrap();
         assert_eq!(w.0.len(), 2);
-        assert_eq!(w.0[0].extent, 1);
+        assert_eq!(w.0[0].extent, ExtentId(1));
         assert_eq!(w.0[0].write.offset, Block::new_512(3));
         assert_eq!(w.0[0].write.data.len(), 512);
-        assert_eq!(w.0[1].extent, 1);
+        assert_eq!(w.0[1].extent, ExtentId(1));
         assert_eq!(w.0[1].write.offset, Block::new_512(3));
         assert_eq!(w.0[1].write.data.len(), 512);
 
         // Mismatched block / data sizes
         let blocks = vec![WriteBlockMetadata {
-            eid: 1,
+            eid: ExtentId(1),
             offset: Block::new_512(3),
             block_context: BlockContext {
                 hash: 123,
