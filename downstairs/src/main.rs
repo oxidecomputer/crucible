@@ -300,8 +300,8 @@ async fn main() -> Result<()> {
                 .set_logger(log)
                 .build()
                 .await?;
-
-            clone_region(d, source).await
+            d.lock().await.clone_region(source).await?;
+            Ok(())
         }
         Args::Create {
             block_size,
@@ -337,7 +337,7 @@ async fn main() -> Result<()> {
                     .set_logger(log.clone())
                     .build()
                     .await?;
-                clone_region(d, *clone_source).await?
+                d.lock().await.clone_region(*clone_source).await?;
             }
 
             info!(log, "UUID: {:?}", region.def().uuid());
