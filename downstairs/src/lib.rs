@@ -3482,7 +3482,7 @@ pub async fn create_region_with_backend(
 
     let mut region =
         Region::create_with_backend(data, region_options, backend, log).await?;
-    region.extend(extent_count as u32).await?;
+    region.extend(extent_count).await?;
 
     Ok(region)
 }

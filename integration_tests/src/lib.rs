@@ -60,7 +60,7 @@ mod test {
                     value: blocks_per_extent,
                     shift: 9,
                 },
-                extent_count.into(),
+                extent_count,
                 Uuid::new_v4(),
                 encrypted,
                 backend,

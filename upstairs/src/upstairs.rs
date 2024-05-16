@@ -907,7 +907,7 @@ impl Upstairs {
         } else if !self.downstairs.start_live_repair(
             &self.state,
             &mut self.guest.guest_work,
-            self.ddef.get_def().unwrap().extent_count().into(),
+            self.ddef.get_def().unwrap().extent_count(),
         ) {
             // It's hard to hit this condition; we need a Downstairs to be in
             // LiveRepairReady, but for no other downstairs to be in Active.

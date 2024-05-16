@@ -498,7 +498,7 @@ impl TestHarness {
             // Extent count is picked so that we can hit
             // IO_OUTSTANDING_MAX_BYTES in less than IO_OUTSTANDING_MAX_JOBS,
             // i.e. letting us test both byte and job fault conditions.
-            extent_count: DEFAULT_EXTENT_COUNT as u32,
+            extent_count: DEFAULT_EXTENT_COUNT,
             extent_size: Block::new_512(10),
 
             gen_numbers: vec![0u64; DEFAULT_EXTENT_COUNT as usize],
