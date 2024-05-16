@@ -879,33 +879,6 @@ fn is_message_valid(
     }
 }
 
-async fn do_work_task(
-    ads: &Mutex<Downstairs>,
-    upstairs_connection: UpstairsConnection,
-    mut job_channel_rx: mpsc::UnboundedReceiver<()>,
-    resp_tx: mpsc::UnboundedSender<Message>,
-) -> Result<()> {
-    // The lossy attribute currently does not change at runtime. To avoid
-    // continually locking the downstairs, cache the result here.
-    let is_lossy = ads.lock().await.lossy;
-
-    /*
-     * job_channel_rx is a notification that we should look for new work.
-     */
-    while job_channel_rx.recv().await.is_some() {
-        // Add a little time to completion for this operation.
-        if is_lossy && random() && random() {
-            info!(ads.lock().await.log, "[lossy] sleeping 1 second");
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-
-        Downstairs::do_work_for(ads, upstairs_connection, &resp_tx).await?;
-    }
-
-    // None means the channel is closed
-    Ok(())
-}
-
 async fn proc_stream(
     ads: &Arc<Mutex<Downstairs>>,
     stream: WrappedStream,
@@ -1433,7 +1406,6 @@ where
 
     // We rely on backpressure to limit total jobs in flight, so these channels
     // can be unbounded.
-    let (job_channel_tx, job_channel_rx) = mpsc::unbounded_channel();
     let (resp_channel_tx, resp_channel_rx) = mpsc::unbounded_channel();
     let mut framed_write_task = tokio::spawn(reply_task(resp_channel_rx, fw));
 
@@ -1467,9 +1439,9 @@ where
      *        │                 │errors, pings     │responses
      *        │                 │                  │
      *        │                 │                  │
-     *   ┌────▼────┐ message   ┌┴──────┐  job     ┌┴────────┐
-     *   │resp_loop├──────────►│pf_task├─────────►│ dw_task │
-     *   └─────────┘ channel   └──┬────┘ channel  └▲────────┘
+     *   ┌────▼────┐ message   ┌┴──────────────────┴────────┐
+     *   │resp_loop├──────────►│        pf_task             │
+     *   └─────────┘ channel   └──┬─────────────────────────┘
      *                            │                │
      *                         add│work         new│work
      *   per-connection           │                │
@@ -1478,27 +1450,12 @@ where
      *                         │           Downstairs           │
      *                         └────────────────────────────────┘
      */
-    let mut dw_task = {
-        let adc = ads.clone();
-        let resp_channel_tx = resp_channel_tx.clone();
-        tokio::spawn(async move {
-            do_work_task(
-                &adc,
-                upstairs_connection,
-                job_channel_rx,
-                resp_channel_tx,
-            )
-            .await
-        })
-    };
-
     // The Upstairs uses backpressure to limit total outstanding jobs, so these
     // channels can be unbounded.
     let (message_channel_tx, mut message_channel_rx) =
         mpsc::unbounded_channel();
     let mut pf_task = {
         let adc = ads.clone();
-        let tx = job_channel_tx.clone();
         let resp_channel_tx = resp_channel_tx.clone();
         tokio::spawn(async move {
             while let Some(m) = message_channel_rx.recv().await {
@@ -1513,7 +1470,12 @@ where
                     // If we added work, tell the work task to get busy.
                     Ok(Some(new_ds_id)) => {
                         cdt::work__start!(|| new_ds_id.0);
-                        tx.send(())?;
+                        Downstairs::do_work_for(
+                            &adc,
+                            upstairs_connection,
+                            &resp_channel_tx,
+                        )
+                        .await?;
                     }
                     // If we handled the job locally, nothing to do here
                     Ok(None) => (),
@@ -1534,9 +1496,6 @@ where
     const TIMEOUT_LIMIT: usize = 3;
     loop {
         tokio::select! {
-            e = &mut dw_task => {
-                bail!("do_work_task task has ended: {:?}", e);
-            }
             e = &mut pf_task => {
                 bail!("pf task ended: {:?}", e);
             }
