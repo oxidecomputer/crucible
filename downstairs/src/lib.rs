@@ -882,6 +882,7 @@ async fn proc_stream(
     ads: &Arc<Mutex<Downstairs>>,
     id: ConnectionId,
     stream: WrappedStream,
+    log: Logger,
 ) -> Result<()> {
     match stream {
         WrappedStream::Http(sock) => {
@@ -890,7 +891,7 @@ async fn proc_stream(
             let fr = FramedRead::new(read, CrucibleDecoder::new());
             let fw = MessageWriter::new(write);
 
-            proc(ads, id, fr, fw).await
+            proc(ads, id, fr, fw, log).await
         }
         WrappedStream::Https(stream) => {
             let (read, write) = tokio::io::split(stream);
@@ -898,7 +899,7 @@ async fn proc_stream(
             let fr = FramedRead::new(read, CrucibleDecoder::new());
             let fw = MessageWriter::new(write);
 
-            proc(ads, id, fr, fw).await
+            proc(ads, id, fr, fw, log).await
         }
     }
 }
@@ -953,6 +954,7 @@ async fn proc<RT, WT>(
     id: ConnectionId,
     fr: FramedRead<RT, CrucibleDecoder>,
     fw: MessageWriter<WT>,
+    log: Logger,
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send + 'static,
@@ -961,8 +963,6 @@ where
         + std::marker::Send
         + 'static,
 {
-    let log = ads.lock().await.log.clone();
-
     // Create tasks for:
     //     Reading data from the socket (including deserialization)
     //     Doing the actual work (proc, this function right here)
@@ -1021,7 +1021,10 @@ where
         id,
         msg_channel_rx,
         reply_channel_tx,
+        log.new(o!("task" => "proc_task")),
     ));
+
+    let log = log.new(o!("task" => "proc"));
 
     // proc itself waits for any of the three tasks to die and aborts the other
     // two when that happens.
@@ -1056,17 +1059,10 @@ async fn proc_task(
     id: ConnectionId,
     mut msg_channel_rx: mpsc::UnboundedReceiver<Message>,
     reply_channel_tx: mpsc::UnboundedSender<Message>,
+    log: Logger,
 ) -> Result<()> {
     // Populate our state in the Downstairs, keyed by our `id`
-    let (log, cancel_io) = {
-        let mut ds = ads.lock().await;
-        (
-            ds.log.new(
-                o!("task" => "proc_task".to_string(), "id" => id.0.to_string()),
-            ),
-            ds.new_connection(id, reply_channel_tx),
-        )
-    };
+    let cancel_io = ads.lock().await.new_connection(id, reply_channel_tx);
 
     /*
      * See the comment in the proc() function on the upstairs side that
@@ -3616,10 +3612,11 @@ pub async fn start_downstairs(
     key_pem: Option<String>,
     root_cert_pem: Option<String>,
 ) -> Result<tokio::task::JoinHandle<Result<()>>> {
+    let root_log = d.lock().await.log.clone();
     if let Some(oximeter) = oximeter {
         let dssw = d.lock().await;
         let dss = dssw.dss.clone();
-        let log = dssw.log.new(o!("task" => "oximeter".to_string()));
+        let log = root_log.new(o!("task" => "oximeter".to_string()));
 
         tokio::spawn(async move {
             let producer_address = SocketAddr::new(address, 0);
@@ -3634,7 +3631,7 @@ pub async fn start_downstairs(
     }
 
     // Setup a log for this task
-    let log = d.lock().await.log.new(o!("task" => "main".to_string()));
+    let log = root_log.new(o!("task" => "main".to_string()));
 
     let listen_on = match address {
         IpAddr::V4(ipv4) => SocketAddr::new(std::net::IpAddr::V4(ipv4), port),
@@ -3661,7 +3658,7 @@ pub async fn start_downstairs(
     };
 
     let dss = d.clone();
-    let repair_log = d.lock().await.log.new(o!("task" => "repair".to_string()));
+    let repair_log = root_log.new(o!("task" => "repair".to_string()));
 
     let repair_listener =
         match repair::repair_main(dss, repair_address, &repair_log).await {
@@ -3760,18 +3757,17 @@ pub async fn start_downstairs(
             }
 
             let dd = d.clone();
-
+            let task_log = root_log.new(o!("id" => id.0.to_string()));
             tokio::spawn(async move {
-                if let Err(e) = proc_stream(&dd, id, stream).await {
+                if let Err(e) =
+                    proc_stream(&dd, id, stream, task_log.clone()).await
+                {
                     error!(
-                        dd.lock().await.log,
+                        task_log,
                         "connection ({}) Exits with error: {:?}", raddr, e
                     );
                 } else {
-                    info!(
-                        dd.lock().await.log,
-                        "connection ({}): all done", raddr
-                    );
+                    info!(task_log, "connection ({}): all done", raddr);
                 }
             });
             id.0 += 1;
