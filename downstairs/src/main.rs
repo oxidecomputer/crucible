@@ -296,11 +296,11 @@ async fn main() -> Result<()> {
                     .expect("Error init tracing subscriber");
             }
 
-            let d = Downstairs::new_builder(&data, true)
+            let mut ds = Downstairs::new_builder(&data, true)
                 .set_logger(log)
                 .build()
                 .await?;
-            d.lock().await.clone_region(source).await?;
+            ds.clone_region(source).await?;
             Ok(())
         }
         Args::Create {
@@ -333,11 +333,11 @@ async fn main() -> Result<()> {
                 region.region_flush(1, 0, &None, JobId(0), None).await?;
             } else if let Some(ref clone_source) = clone_source {
                 info!(log, "Cloning from: {:?}", clone_source);
-                let d = Downstairs::new_builder(&data, false)
+                let mut ds = Downstairs::new_builder(&data, false)
                     .set_logger(log.clone())
                     .build()
                     .await?;
-                d.lock().await.clone_region(*clone_source).await?;
+                ds.clone_region(*clone_source).await?;
             }
 
             info!(log, "UUID: {:?}", region.def().uuid());
@@ -429,7 +429,7 @@ async fn main() -> Result<()> {
                 .build()
                 .await?;
 
-            let downstairs_join_handle = start_downstairs(
+            let downstairs = start_downstairs(
                 d,
                 address,
                 oximeter,
@@ -442,7 +442,7 @@ async fn main() -> Result<()> {
             )
             .await?;
 
-            downstairs_join_handle.await?
+            downstairs.join_handle.await?
         }
         Args::RepairAPI => repair::write_openapi(&mut std::io::stdout()),
         Args::Serve {
