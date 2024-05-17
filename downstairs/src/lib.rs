@@ -1065,28 +1065,8 @@ async fn proc_task(
     let handle = ads.lock().await.handle();
     let cancel_io = handle.new_connection(id, reply_channel_tx).await?;
 
-    /*
-     * See the comment in the proc() function on the upstairs side that
-     * describes how this negotiation takes place.
-     *
-     * The final step in negotiation (as dictated by the upstairs) is
-     * either LastFlush, or ExtentVersionsPlease.  Once we respond to
-     * that message, we can move forward and start receiving IO from
-     * the upstairs.
-     */
     loop {
         tokio::select! {
-            /*
-             * This Upstairs' thread will receive this signal when another
-             * Upstairs promotes itself to active. The only way this path is
-             * reached is if this Upstairs promoted itself to active, storing
-             * another_upstairs_active_tx in the Downstairs active_upstairs
-             * tuple.
-             *
-             * The two unwraps here should be safe: this thread negotiated and
-             * activated, and then another did (in order to send this thread
-             * this signal).
-             */
             _ = cancel_io.cancelled() => {
                 info!(log, "proc_loop cancelled; returning now");
                 return Ok(());
@@ -2836,6 +2816,13 @@ impl Downstairs {
         Ok(())
     }
 
+    /// See the comment in the `continue_negotiation()` function (on the
+    /// upstairs side) that describes how this negotiation takes place.
+    ///
+    /// The final step in negotiation (as dictated by the upstairs) is
+    /// either LastFlush, or ExtentVersionsPlease.  Once we respond to
+    /// that message, we can move forward and start receiving IO from
+    /// the upstairs.
     async fn on_negotiation_step(
         &mut self,
         m: Message,
