@@ -878,7 +878,7 @@ fn is_message_valid(
 
 /// Spawns tasks for the given stream
 async fn proc_stream(
-    ads: &Arc<Mutex<Downstairs>>,
+    handle: DownstairsHandle,
     id: ConnectionId,
     stream: WrappedStream,
     log: &Logger,
@@ -890,7 +890,7 @@ async fn proc_stream(
             let fr = FramedRead::new(read, CrucibleDecoder::new());
             let fw = MessageWriter::new(write);
 
-            proc(ads, id, fr, fw, log).await
+            proc(handle, id, fr, fw, log).await
         }
         WrappedStream::Https(stream) => {
             let (read, write) = tokio::io::split(stream);
@@ -898,7 +898,7 @@ async fn proc_stream(
             let fr = FramedRead::new(read, CrucibleDecoder::new());
             let fw = MessageWriter::new(write);
 
-            proc(ads, id, fr, fw, log).await
+            proc(handle, id, fr, fw, log).await
         }
     }
 }
@@ -949,7 +949,7 @@ struct ConnectionState {
 
 /// Spawn tasks for this Upstairs connection, then return
 async fn proc<RT, WT>(
-    ads: &Arc<Mutex<Downstairs>>,
+    handle: DownstairsHandle,
     id: ConnectionId,
     fr: FramedRead<RT, CrucibleDecoder>,
     fw: MessageWriter<WT>,
@@ -1016,7 +1016,6 @@ where
     let (reply_channel_tx, reply_channel_rx) = mpsc::unbounded_channel();
 
     // Populate our state in the Downstairs, keyed by our `id`
-    let handle = ads.lock().await.handle();
     let cancel_io = handle.new_connection(id, reply_channel_tx).await?;
 
     let reply_task = tokio::spawn(reply_task(reply_channel_rx, fw));
@@ -3266,6 +3265,7 @@ enum DownstairsRequest {
 }
 
 /// Handle allowing for async calls to the Downstairs task
+#[derive(Clone)]
 pub struct DownstairsHandle {
     tx: mpsc::UnboundedSender<DownstairsRequest>,
 }
@@ -3751,6 +3751,7 @@ pub async fn start_downstairs(
     // We'll run a lightweight Downstairs loop which handles certain operations
     // using message-passing
     let mut ds_runner = Downstairs::spawn_runner(d.clone()).await;
+    let handle = d.lock().await.handle();
 
     let join_handle = tokio::spawn(async move {
         // We now loop listening for a connection from the Upstairs.
@@ -3802,9 +3803,9 @@ pub async fn start_downstairs(
                 ds.dss.add_connection();
             }
 
-            let dd = d.clone();
             let task_log = root_log.new(o!("id" => id.0.to_string()));
-            if let Err(e) = proc_stream(&dd, id, stream, &task_log).await {
+            let handle = handle.clone();
+            if let Err(e) = proc_stream(handle, id, stream, &task_log).await {
                 error!(
                     task_log,
                     "connection ({raddr}) failed to spawn tasks: {e:?}",
