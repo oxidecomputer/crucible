@@ -1062,7 +1062,8 @@ async fn proc_task(
     log: Logger,
 ) -> Result<()> {
     // Populate our state in the Downstairs, keyed by our `id`
-    let cancel_io = ads.lock().await.new_connection(id, reply_channel_tx);
+    let handle = ads.lock().await.handle();
+    let cancel_io = handle.new_connection(id, reply_channel_tx).await?;
 
     /*
      * See the comment in the proc() function on the upstairs side that
@@ -2784,6 +2785,17 @@ impl Downstairs {
                         warn!(log, "failed to reply to IsExtentClosed");
                     }
                 }
+                DownstairsRequest::NewConnection {
+                    id,
+                    reply_channel_tx,
+                    done,
+                } => {
+                    let mut d = ds.lock().await;
+                    let out = d.new_connection(id, reply_channel_tx);
+                    if done.send(out).is_err() {
+                        warn!(log, "failed to reply to NewConnection");
+                    }
+                }
             }
         }
     }
@@ -3224,6 +3236,13 @@ enum DownstairsRequest {
         done: oneshot::Sender<bool>,
     },
 
+    /// Requests that the Downstairs allocates a new connection for this id
+    NewConnection {
+        id: ConnectionId,
+        reply_channel_tx: mpsc::UnboundedSender<Message>,
+        done: oneshot::Sender<tokio_util::sync::CancellationToken>,
+    },
+
     /// Prints downstairs work
     ///
     /// This is fire-and-forget, so there's no oneshot reply channel
@@ -3249,6 +3268,23 @@ impl DownstairsHandle {
             .send(DownstairsRequest::ShowWork)
             .await
             .context("could not send message on channel")
+    }
+
+    async fn new_connection(
+        &self,
+        id: ConnectionId,
+        reply_channel_tx: mpsc::UnboundedSender<Message>,
+    ) -> Result<tokio_util::sync::CancellationToken> {
+        let (done, rx) = oneshot::channel();
+        self.tx
+            .send(DownstairsRequest::NewConnection {
+                id,
+                reply_channel_tx,
+                done,
+            })
+            .await
+            .context("could not send message on channel")?;
+        rx.await.context("could not receive result")
     }
 }
 
