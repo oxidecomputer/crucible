@@ -1053,6 +1053,28 @@ impl ActiveConnection {
         self.data.reply_channel_tx.send(msg)
     }
 
+    async fn handle_frame(
+        &mut self,
+        m: Message,
+        flags: &DownstairsFlags,
+        reqwest_client: &reqwest::Client,
+        dss: &mut DsStatOuter,
+        region: &mut Region,
+    ) -> Result<()> {
+        if let Some(new_ds_id) = self
+            .proc_frame(m, flags, reqwest_client, region)
+            .await
+            .context("proc_frame")?
+        {
+            // If we added work, then do it!
+            cdt::work__start!(|| new_ds_id.0);
+            self.do_ready_work(flags, reqwest_client, dss, region)
+                .await
+                .context("do_work_for")?;
+        }
+        Ok(())
+    }
+
     /// Handle a new message from the upstairs
     ///
     /// If the message is an IO, then put the new IO the work hashmap. If the
@@ -2986,43 +3008,21 @@ impl Downstairs {
             return;
         };
         if let ConnectionState::Running(state) = state {
-            match state
-                .proc_frame(
+            if let Err(e) = state
+                .handle_frame(
                     m,
                     &self.flags,
                     &self.reqwest_client,
+                    &mut self.dss,
                     &mut self.region,
                 )
                 .await
             {
-                // If we added work, then do it!
-                Ok(Some(new_ds_id)) => {
-                    cdt::work__start!(|| new_ds_id.0);
-                    if let Err(e) = state
-                        .do_ready_work(
-                            &self.flags,
-                            &self.reqwest_client,
-                            &mut self.dss,
-                            &mut self.region,
-                        )
-                        .await
-                    {
-                        warn!(
-                            self.log,
-                            "do_ready_work returns error {e:?}; disconnecting"
-                        );
-                        self.remove_connection(id);
-                    }
-                }
-                // If we handled the job locally, nothing to do
-                Ok(None) => (),
-                Err(e) => {
-                    warn!(
-                        self.log,
-                        "proc_frame returns error {e:?}; disconnecting"
-                    );
-                    self.remove_connection(id);
-                }
+                warn!(
+                    self.log,
+                    "handle_frame returns error {e:?}; disconnecting"
+                );
+                self.remove_connection(id);
             }
         } else if let Err(e) = self.on_negotiation_step(m, id).await {
             warn!(
