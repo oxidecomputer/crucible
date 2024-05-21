@@ -96,6 +96,38 @@ impl DsStatOuter {
         let datum = dss.flush_count.datum_mut();
         *datum += 1;
     }
+
+    /// Marks this job as complete, updating our stats and firing `cdt` probes
+    pub fn on_complete(&mut self, m: &Message) {
+        match m {
+            Message::FlushAck { job_id, .. } => {
+                cdt::submit__flush__done!(|| job_id.0);
+                self.add_flush();
+            }
+            Message::WriteAck { job_id, .. } => {
+                cdt::submit__write__done!(|| job_id.0);
+                self.add_write();
+            }
+            Message::WriteUnwrittenAck { job_id, .. } => {
+                cdt::submit__writeunwritten__done!(|| job_id.0);
+                self.add_write();
+            }
+            Message::ReadResponse { header, .. } => {
+                cdt::submit__read__done!(|| header.job_id.0);
+                self.add_read();
+            }
+            Message::ExtentLiveCloseAck { job_id, .. } => {
+                cdt::submit__el__close__done!(|| job_id.0);
+            }
+            Message::ExtentLiveRepairAckId { job_id, .. } => {
+                cdt::submit__el__repair__done!(|| job_id.0);
+            }
+            Message::ExtentLiveAckId { job_id, .. } => {
+                cdt::submit__el__done!(|| job_id.0);
+            }
+            _ => (),
+        }
+    }
 }
 
 // This trait is what is called to update the data to send to Oximeter.
