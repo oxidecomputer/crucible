@@ -3329,12 +3329,6 @@ impl Work {
                 // return idempotently.
                 true
             }
-            WorkState::Done => {
-                /*
-                 * job id is not new, we can't run it.
-                 */
-                false
-            }
         }
     }
 
@@ -3361,17 +3355,12 @@ impl Work {
     }
 }
 
-/*
- * XXX We may not need Done. At the moment all we actually look at is New or
- * InProgress.
- */
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkState {
     New,
     DepWait,
     InProgress,
-    Done,
 }
 
 impl fmt::Display for WorkState {
@@ -3385,9 +3374,6 @@ impl fmt::Display for WorkState {
             }
             WorkState::InProgress => {
                 write!(f, "In P")
-            }
-            WorkState::Done => {
-                write!(f, "Done")
             }
         }
     }
