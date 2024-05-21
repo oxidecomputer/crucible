@@ -936,9 +936,26 @@ struct ActiveConnection {
     data: ConnectionData,
     upstairs_connection: UpstairsConnection,
     work: Work,
+    log: Logger,
 }
 
 impl ActiveConnection {
+    fn new(
+        data: ConnectionData,
+        upstairs_connection: UpstairsConnection,
+        log: &Logger,
+    ) -> Self {
+        let log = log.new(o!(
+           "upstairs_id" => upstairs_connection.upstairs_id.to_string()
+        ));
+        Self {
+            data,
+            upstairs_connection,
+            work: Work::new(log.new(o!("role" => "work"))),
+            log,
+        }
+    }
+
     fn add_work(&mut self, ds_id: JobId, work: IOop) {
         let dsw = DownstairsWork {
             ds_id,
@@ -1025,6 +1042,322 @@ impl ActiveConnection {
                 }
             }
             _ => true,
+        };
+        Ok(r)
+    }
+
+    fn reply(
+        &self,
+        msg: Message,
+    ) -> Result<(), mpsc::error::SendError<Message>> {
+        self.data.reply_channel_tx.send(msg)
+    }
+
+    /// Handle a new message from the upstairs
+    ///
+    /// If the message is an IO, then put the new IO the work hashmap. If the
+    /// message is a repair message, then we handle it right here.
+    async fn proc_frame(
+        &mut self,
+        m: Message,
+        flags: &DownstairsFlags,
+        reqwest_client: &reqwest::Client,
+        region: &mut Region,
+    ) -> Result<Option<JobId>> {
+        if !self.is_message_valid(&m)? {
+            return Ok(None);
+        }
+
+        // The Upstairs will send Flushes periodically, even in read only mode
+        // we have to accept them. But read-only should never accept writes!
+        if flags.read_only {
+            let is_write = matches!(
+                m,
+                Message::Write { .. }
+                    | Message::WriteUnwritten { .. }
+                    | Message::ExtentClose { .. }
+                    | Message::ExtentLiveFlushClose { .. }
+                    | Message::ExtentLiveRepair { .. }
+                    | Message::ExtentLiveReopen { .. }
+                    | Message::ExtentLiveNoOp { .. }
+            );
+
+            if is_write {
+                error!(self.log, "read-only but received write {:?}", m);
+                bail!(CrucibleError::ModifyingReadOnlyRegion);
+            }
+        }
+
+        let r = match m {
+            Message::Write { header, data } => {
+                cdt::submit__write__start!(|| header.job_id.0);
+                let writes = RegionWrite::new(&header.blocks, data)?;
+
+                let new_write = IOop::Write {
+                    dependencies: header.dependencies,
+                    writes,
+                };
+
+                self.add_work(header.job_id, new_write);
+                Some(header.job_id)
+            }
+            Message::Flush {
+                job_id,
+                dependencies,
+                flush_number,
+                gen_number,
+                snapshot_details,
+                extent_limit,
+                ..
+            } => {
+                cdt::submit__flush__start!(|| job_id.0);
+
+                let new_flush = IOop::Flush {
+                    dependencies,
+                    flush_number,
+                    gen_number,
+                    snapshot_details,
+                    extent_limit,
+                };
+
+                self.add_work(job_id, new_flush);
+                Some(job_id)
+            }
+            Message::WriteUnwritten { header, data } => {
+                cdt::submit__writeunwritten__start!(|| header.job_id.0);
+                let writes = RegionWrite::new(&header.blocks, data)?;
+
+                let new_write = IOop::WriteUnwritten {
+                    dependencies: header.dependencies,
+                    writes,
+                };
+
+                self.add_work(header.job_id, new_write);
+                Some(header.job_id)
+            }
+            Message::ReadRequest {
+                job_id,
+                dependencies,
+                requests,
+                ..
+            } => {
+                cdt::submit__read__start!(|| job_id.0);
+
+                let new_read = IOop::Read {
+                    dependencies,
+                    requests: RegionReadRequest::new(&requests),
+                };
+
+                self.add_work(job_id, new_read);
+                Some(job_id)
+            }
+            // These are for repair while taking live IO
+            Message::ExtentLiveClose {
+                job_id,
+                dependencies,
+                extent_id,
+                ..
+            } => {
+                cdt::submit__el__close__start!(|| job_id.0);
+                // TODO: Add dtrace probes
+                let ext_close = IOop::ExtentClose {
+                    dependencies,
+                    extent: extent_id,
+                };
+
+                self.add_work(job_id, ext_close);
+                Some(job_id)
+            }
+            Message::ExtentLiveFlushClose {
+                job_id,
+                dependencies,
+                extent_id,
+                flush_number,
+                gen_number,
+                ..
+            } => {
+                cdt::submit__el__flush__close__start!(|| job_id.0);
+                // Do both the flush, and then the close
+                let new_flush = IOop::ExtentFlushClose {
+                    dependencies,
+                    extent: extent_id,
+                    flush_number,
+                    gen_number,
+                };
+
+                self.add_work(job_id, new_flush);
+                Some(job_id)
+            }
+            Message::ExtentLiveRepair {
+                job_id,
+                dependencies,
+                extent_id,
+                source_repair_address,
+                ..
+            } => {
+                cdt::submit__el__repair__start!(|| job_id.0);
+                // Do both the flush, and then the close
+                let new_repair = IOop::ExtentLiveRepair {
+                    dependencies,
+                    extent: extent_id,
+
+                    source_repair_address,
+                };
+
+                self.add_work(job_id, new_repair);
+                debug!(self.log, "Received ExtentLiveRepair {}", job_id);
+                Some(job_id)
+            }
+            Message::ExtentLiveReopen {
+                job_id,
+                dependencies,
+                extent_id,
+                ..
+            } => {
+                cdt::submit__el__reopen__start!(|| job_id.0);
+                let new_open = IOop::ExtentLiveReopen {
+                    dependencies,
+                    extent: extent_id,
+                };
+
+                self.add_work(job_id, new_open);
+                Some(job_id)
+            }
+            Message::ExtentLiveNoOp {
+                job_id,
+                dependencies,
+                ..
+            } => {
+                cdt::submit__el__noop__start!(|| job_id.0);
+                let new_open = IOop::ExtentLiveNoOp { dependencies };
+
+                self.add_work(job_id, new_open);
+                debug!(self.log, "Received NoOP {}", job_id);
+                Some(job_id)
+            }
+
+            // These messages arrive during initial reconciliation.
+            Message::ExtentFlush {
+                repair_id,
+                extent_id,
+                client_id: _,
+                flush_number,
+                gen_number,
+            } => {
+                let msg = {
+                    debug!(
+                        self.log,
+                        "{} Flush extent {} with f:{} g:{}",
+                        repair_id,
+                        extent_id,
+                        flush_number,
+                        gen_number
+                    );
+
+                    match region
+                        .region_flush_extent(
+                            extent_id,
+                            gen_number,
+                            flush_number,
+                            repair_id,
+                        )
+                        .await
+                    {
+                        Ok(()) => Message::RepairAckId { repair_id },
+                        Err(error) => Message::ExtentError {
+                            repair_id,
+                            extent_id,
+                            error,
+                        },
+                    }
+                };
+                self.reply(msg)?;
+                None
+            }
+            Message::ExtentClose {
+                repair_id,
+                extent_id,
+            } => {
+                let msg = {
+                    debug!(
+                        self.log,
+                        "{} Close extent {}", repair_id, extent_id
+                    );
+                    match region.close_extent(extent_id).await {
+                        Ok(_) => Message::RepairAckId { repair_id },
+                        Err(error) => Message::ExtentError {
+                            repair_id,
+                            extent_id,
+                            error,
+                        },
+                    }
+                };
+                self.reply(msg)?;
+                None
+            }
+            Message::ExtentRepair {
+                repair_id,
+                extent_id,
+                source_client_id,
+                source_repair_address,
+                dest_clients,
+            } => {
+                let msg = {
+                    debug!(
+                        self.log,
+                        "{} Repair extent {} source:[{}] {:?} dest:{:?}",
+                        repair_id,
+                        extent_id,
+                        source_client_id,
+                        source_repair_address,
+                        dest_clients
+                    );
+                    match region
+                        .repair_extent(
+                            reqwest_client.clone(),
+                            extent_id,
+                            source_repair_address,
+                            false,
+                        )
+                        .await
+                    {
+                        Ok(()) => Message::RepairAckId { repair_id },
+                        Err(error) => Message::ExtentError {
+                            repair_id,
+                            extent_id,
+                            error,
+                        },
+                    }
+                };
+                self.reply(msg)?;
+                None
+            }
+            Message::ExtentReopen {
+                repair_id,
+                extent_id,
+            } => {
+                let msg = {
+                    debug!(
+                        self.log,
+                        "{} Reopen extent {}", repair_id, extent_id
+                    );
+                    match region.reopen_extent(extent_id).await {
+                        Ok(()) => Message::RepairAckId { repair_id },
+                        Err(error) => Message::ExtentError {
+                            repair_id,
+                            extent_id,
+                            error,
+                        },
+                    }
+                };
+                self.reply(msg)?;
+                None
+            }
+            Message::Ruok => {
+                self.reply(Message::Imok)?;
+                None
+            }
+            x => bail!("unexpected frame {:?}", x),
         };
         Ok(r)
     }
@@ -1886,16 +2219,16 @@ impl Downstairs {
         let Some(ConnectionState::Open(data)) = prev else {
             panic!();
         };
+        let log = self.log.new(o!(
+           "upstairs_id" => upstairs_connection.upstairs_id.to_string()
+        ));
         self.connection_state.insert(
             conn_id,
             ConnectionState::Running(ActiveConnection {
                 data,
                 upstairs_connection,
-                work: Work::new(self.log.new(o!(
-                   "role" => "work",
-                   "upstairs_id" =>
-                    upstairs_connection.upstairs_id.to_string()
-                ))),
+                work: Work::new(log.new(o!("role" => "work"))),
+                log,
             }),
         );
         cancel
@@ -2076,321 +2409,6 @@ impl Downstairs {
 
     fn active_upstairs(&self) -> Vec<ConnectionId> {
         self.active_upstairs.values().cloned().collect()
-    }
-
-    /// Handle a new message from the upstairs
-    ///
-    /// If the message is an IO, then put the new IO the work hashmap. If the
-    /// message is a repair message, then we handle it right here.
-    ///
-    /// # Panics
-    /// If the given `ConnectionId` does not represent a running connection
-    async fn proc_frame(
-        &mut self,
-        m: Message,
-        id: ConnectionId,
-    ) -> Result<Option<JobId>> {
-        let state = self.active_mut(id);
-        if !state.is_message_valid(&m)? {
-            return Ok(None);
-        }
-
-        // The Upstairs will send Flushes periodically, even in read only mode
-        // we have to accept them. But read-only should never accept writes!
-        if self.flags.read_only {
-            let is_write = matches!(
-                m,
-                Message::Write { .. }
-                    | Message::WriteUnwritten { .. }
-                    | Message::ExtentClose { .. }
-                    | Message::ExtentLiveFlushClose { .. }
-                    | Message::ExtentLiveRepair { .. }
-                    | Message::ExtentLiveReopen { .. }
-                    | Message::ExtentLiveNoOp { .. }
-            );
-
-            if is_write {
-                error!(self.log, "read-only but received write {:?}", m);
-                bail!(CrucibleError::ModifyingReadOnlyRegion);
-            }
-        }
-
-        // Reborrow
-        let state = self.active_mut(id);
-        let r = match m {
-            Message::Write { header, data } => {
-                cdt::submit__write__start!(|| header.job_id.0);
-                let writes = RegionWrite::new(&header.blocks, data)?;
-
-                let new_write = IOop::Write {
-                    dependencies: header.dependencies,
-                    writes,
-                };
-
-                state.add_work(header.job_id, new_write);
-                Some(header.job_id)
-            }
-            Message::Flush {
-                job_id,
-                dependencies,
-                flush_number,
-                gen_number,
-                snapshot_details,
-                extent_limit,
-                ..
-            } => {
-                cdt::submit__flush__start!(|| job_id.0);
-
-                let new_flush = IOop::Flush {
-                    dependencies,
-                    flush_number,
-                    gen_number,
-                    snapshot_details,
-                    extent_limit,
-                };
-
-                state.add_work(job_id, new_flush);
-                Some(job_id)
-            }
-            Message::WriteUnwritten { header, data } => {
-                cdt::submit__writeunwritten__start!(|| header.job_id.0);
-                let writes = RegionWrite::new(&header.blocks, data)?;
-
-                let new_write = IOop::WriteUnwritten {
-                    dependencies: header.dependencies,
-                    writes,
-                };
-
-                state.add_work(header.job_id, new_write);
-                Some(header.job_id)
-            }
-            Message::ReadRequest {
-                job_id,
-                dependencies,
-                requests,
-                ..
-            } => {
-                cdt::submit__read__start!(|| job_id.0);
-
-                let new_read = IOop::Read {
-                    dependencies,
-                    requests: RegionReadRequest::new(&requests),
-                };
-
-                state.add_work(job_id, new_read);
-                Some(job_id)
-            }
-            // These are for repair while taking live IO
-            Message::ExtentLiveClose {
-                job_id,
-                dependencies,
-                extent_id,
-                ..
-            } => {
-                cdt::submit__el__close__start!(|| job_id.0);
-                // TODO: Add dtrace probes
-                let ext_close = IOop::ExtentClose {
-                    dependencies,
-                    extent: extent_id,
-                };
-
-                state.add_work(job_id, ext_close);
-                Some(job_id)
-            }
-            Message::ExtentLiveFlushClose {
-                job_id,
-                dependencies,
-                extent_id,
-                flush_number,
-                gen_number,
-                ..
-            } => {
-                cdt::submit__el__flush__close__start!(|| job_id.0);
-                // Do both the flush, and then the close
-                let new_flush = IOop::ExtentFlushClose {
-                    dependencies,
-                    extent: extent_id,
-                    flush_number,
-                    gen_number,
-                };
-
-                state.add_work(job_id, new_flush);
-                Some(job_id)
-            }
-            Message::ExtentLiveRepair {
-                job_id,
-                dependencies,
-                extent_id,
-                source_repair_address,
-                ..
-            } => {
-                cdt::submit__el__repair__start!(|| job_id.0);
-                // Do both the flush, and then the close
-                let new_repair = IOop::ExtentLiveRepair {
-                    dependencies,
-                    extent: extent_id,
-
-                    source_repair_address,
-                };
-
-                state.add_work(job_id, new_repair);
-                debug!(self.log, "Received ExtentLiveRepair {}", job_id);
-                Some(job_id)
-            }
-            Message::ExtentLiveReopen {
-                job_id,
-                dependencies,
-                extent_id,
-                ..
-            } => {
-                cdt::submit__el__reopen__start!(|| job_id.0);
-                let new_open = IOop::ExtentLiveReopen {
-                    dependencies,
-                    extent: extent_id,
-                };
-
-                state.add_work(job_id, new_open);
-                Some(job_id)
-            }
-            Message::ExtentLiveNoOp {
-                job_id,
-                dependencies,
-                ..
-            } => {
-                cdt::submit__el__noop__start!(|| job_id.0);
-                let new_open = IOop::ExtentLiveNoOp { dependencies };
-
-                state.add_work(job_id, new_open);
-                debug!(self.log, "Received NoOP {}", job_id);
-                Some(job_id)
-            }
-
-            // These messages arrive during initial reconciliation.
-            Message::ExtentFlush {
-                repair_id,
-                extent_id,
-                client_id: _,
-                flush_number,
-                gen_number,
-            } => {
-                let msg = {
-                    debug!(
-                        self.log,
-                        "{} Flush extent {} with f:{} g:{}",
-                        repair_id,
-                        extent_id,
-                        flush_number,
-                        gen_number
-                    );
-
-                    match self
-                        .region
-                        .region_flush_extent(
-                            extent_id,
-                            gen_number,
-                            flush_number,
-                            repair_id,
-                        )
-                        .await
-                    {
-                        Ok(()) => Message::RepairAckId { repair_id },
-                        Err(error) => Message::ExtentError {
-                            repair_id,
-                            extent_id,
-                            error,
-                        },
-                    }
-                };
-                self.connection_state[&id].reply(msg)?;
-                None
-            }
-            Message::ExtentClose {
-                repair_id,
-                extent_id,
-            } => {
-                let msg = {
-                    debug!(
-                        self.log,
-                        "{} Close extent {}", repair_id, extent_id
-                    );
-                    match self.region.close_extent(extent_id).await {
-                        Ok(_) => Message::RepairAckId { repair_id },
-                        Err(error) => Message::ExtentError {
-                            repair_id,
-                            extent_id,
-                            error,
-                        },
-                    }
-                };
-                self.connection_state[&id].reply(msg)?;
-                None
-            }
-            Message::ExtentRepair {
-                repair_id,
-                extent_id,
-                source_client_id,
-                source_repair_address,
-                dest_clients,
-            } => {
-                let msg = {
-                    debug!(
-                        self.log,
-                        "{} Repair extent {} source:[{}] {:?} dest:{:?}",
-                        repair_id,
-                        extent_id,
-                        source_client_id,
-                        source_repair_address,
-                        dest_clients
-                    );
-                    match self
-                        .region
-                        .repair_extent(
-                            self.reqwest_client.clone(),
-                            extent_id,
-                            source_repair_address,
-                            false,
-                        )
-                        .await
-                    {
-                        Ok(()) => Message::RepairAckId { repair_id },
-                        Err(error) => Message::ExtentError {
-                            repair_id,
-                            extent_id,
-                            error,
-                        },
-                    }
-                };
-                self.connection_state[&id].reply(msg)?;
-                None
-            }
-            Message::ExtentReopen {
-                repair_id,
-                extent_id,
-            } => {
-                let msg = {
-                    debug!(
-                        self.log,
-                        "{} Reopen extent {}", repair_id, extent_id
-                    );
-                    match self.region.reopen_extent(extent_id).await {
-                        Ok(()) => Message::RepairAckId { repair_id },
-                        Err(error) => Message::ExtentError {
-                            repair_id,
-                            extent_id,
-                            error,
-                        },
-                    }
-                };
-                self.connection_state[&id].reply(msg)?;
-                None
-            }
-            Message::Ruok => {
-                self.connection_state[&id].reply(Message::Imok)?;
-                None
-            }
-            x => bail!("unexpected frame {:?}", x),
-        };
-        Ok(r)
     }
 
     fn in_progress(
@@ -2862,15 +2880,11 @@ impl Downstairs {
 
                 let data = std::mem::replace(data, ConnectionData::dummy());
                 let upstairs_connection = *upstairs_connection;
-                *state = ConnectionState::Running(ActiveConnection {
+                *state = ConnectionState::Running(ActiveConnection::new(
                     data,
                     upstairs_connection,
-                    work: Work::new(self.log.new(o!(
-                       "role" => "work",
-                       "upstairs_id" =>
-                        upstairs_connection.upstairs_id.to_string()
-                    ))),
-                });
+                    &self.log,
+                ));
 
                 let work = self.work_mut(conn_id);
                 work.last_flush = last_flush_number;
@@ -2907,15 +2921,11 @@ impl Downstairs {
 
                 let data = std::mem::replace(data, ConnectionData::dummy());
                 let upstairs_connection = *upstairs_connection;
-                *state = ConnectionState::Running(ActiveConnection {
+                *state = ConnectionState::Running(ActiveConnection::new(
                     data,
                     upstairs_connection,
-                    work: Work::new(self.log.new(o!(
-                       "role" => "work",
-                       "upstairs_id" =>
-                        upstairs_connection.upstairs_id.to_string()
-                    ))),
-                });
+                    &self.log,
+                ));
 
                 let meta_info = self.region.meta_info().await?;
 
@@ -3040,8 +3050,16 @@ impl Downstairs {
             warn!(self.log, "got message for disconnected id {id:?}; ignoring");
             return;
         };
-        if matches!(state, ConnectionState::Running(..)) {
-            match self.proc_frame(m, id).await {
+        if let ConnectionState::Running(state) = state {
+            match state
+                .proc_frame(
+                    m,
+                    &self.flags,
+                    &self.reqwest_client,
+                    &mut self.region,
+                )
+                .await
+            {
                 // If we added work, then do it!
                 Ok(Some(new_ds_id)) => {
                     cdt::work__start!(|| new_ds_id.0);
