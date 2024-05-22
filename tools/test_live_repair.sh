@@ -38,7 +38,7 @@ loops=5
 
 usage () {
     echo "Usage: $0 [-l #]]" >&2
-    echo " -l loops   Number of test loops to perform (default 10)" >&2
+    echo " -l loops   Number of test loops to perform (default 5)" >&2
 }
 
 while getopts 'l:' opt; do
@@ -60,7 +60,8 @@ echo "Tail $test_log for test output"
 if ! ${dsc} create --cleanup \
   --region-count 4 \
   --ds-bin "$downstairs" \
-  --extent-count 50 >> "$test_log"; then
+  --extent-size 4000 \
+  --extent-count 200 >> "$test_log"; then
     echo "Failed to create downstairs regions"
     exit 1
 fi
@@ -91,11 +92,13 @@ fi
 count=1
 while [[ $count -le $loops ]]; do
     SECONDS=0
+    cp "$test_log" "$test_log".last
     echo "" > "$test_log"
-    echo "New loop starts now $(date)" >> "$test_log"
-    "$crucible_test" replace "${args[@]}" -c 50 \
+    echo "New loop, $count starts now $(date)" >> "$test_log"
+    "$crucible_test" replace "${args[@]}" -c 5 \
             --replacement 127.0.0.1:8840 \
             --stable -g "$gen" --verify-out alan \
+            --verify-at-start \
             --verify-in alan >> "$test_log" 2>&1
     result=$?
     if [[ $result -ne 0 ]]; then
