@@ -123,12 +123,7 @@ fi
 
 banner dtrace
 # Start up a dtrace script to record upstairs activity.
-ls -l $input/scripts
-pfexec dtrace -Z -s $input/scripts/upstairs-info.d > /tmp/upstairs_info.txt 2>&1 &
-
-banner why
-ps -ef | grep dtrace
-ls -l /tmp
+pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/upstairs_info.txt 2>&1 &
 
 banner LR
 ptime -m "$BINDIR"/crutest replace \
