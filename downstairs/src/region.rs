@@ -883,7 +883,7 @@ impl Region {
         //   multiple at the same time.
         let mut results = vec![Ok(()); dirty_extents.len()];
         let log = self.log.clone();
-        let mut f = || {
+        run_blocking(|| {
             let mut slice_start = 0;
             let mut slice = self.extents.as_mut_slice();
             self.pool.scope(|s| {
@@ -903,15 +903,7 @@ impl Region {
                     });
                 }
             })
-        };
-        if matches!(
-            tokio::runtime::Handle::try_current().map(|r| r.runtime_flavor()),
-            Ok(tokio::runtime::RuntimeFlavor::MultiThread)
-        ) {
-            tokio::task::block_in_place(f)
-        } else {
-            f()
-        }
+        });
 
         cdt::os__flush__done!(|| job_id.0);
 

@@ -10,8 +10,8 @@ use crate::{
     },
     integrity_hash, mkdir_for_file,
     region::JobOrReconciliationId,
-    Block, BlockContext, CrucibleError, ExtentReadRequest, ExtentReadResponse,
-    ExtentWrite, JobId, RegionDefinition,
+    run_blocking, Block, BlockContext, CrucibleError, ExtentReadRequest,
+    ExtentReadResponse, ExtentWrite, JobId, RegionDefinition,
 };
 use crucible_common::ExtentId;
 
@@ -344,14 +344,15 @@ impl ExtentInner for RawInner {
         // SAFETY: the buffer has sufficient capacity, and this is a valid
         // file descriptor.
         let expected_bytes = buf.capacity();
-        let r = unsafe {
+        let r = run_blocking(|| unsafe {
             libc::pread(
                 self.file.as_raw_fd(),
                 buf.spare_capacity_mut().as_mut_ptr() as *mut libc::c_void,
                 expected_bytes as libc::size_t,
                 req.offset.value as i64 * block_size as i64,
             )
-        };
+        });
+
         // Check against the expected number of bytes.  We could do more
         // robust error handling here (e.g. retrying in a loop), but for
         // now, simply bailing out seems wise.
@@ -888,12 +889,14 @@ impl RawInner {
                 [..count * block_size as usize];
             let start_block = write.offset.value + start as u64;
 
-            pwrite_all(
-                self.file.as_fd(),
-                data,
-                (start_block * block_size) as i64,
-            )
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
+            run_blocking(|| {
+                pwrite_all(
+                    self.file.as_fd(),
+                    data,
+                    (start_block * block_size) as i64,
+                )
+                .map_err(|e| CrucibleError::IoError(e.to_string()))
+            })?;
         }
         Ok(())
     }

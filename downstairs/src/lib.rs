@@ -654,6 +654,20 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
     Ok(())
 }
 
+/// Run the given function in the Tokio blocking IO pool if present
+///
+/// Otherwise, the function is run locally
+pub(crate) fn run_blocking<R, F: FnOnce() -> R>(f: F) -> R {
+    if matches!(
+        tokio::runtime::Handle::try_current().map(|r| r.runtime_flavor()),
+        Ok(tokio::runtime::RuntimeFlavor::MultiThread)
+    ) {
+        tokio::task::block_in_place(f)
+    } else {
+        f()
+    }
+}
+
 /*
  * Debug function to dump the work list.
  */
