@@ -762,7 +762,9 @@ impl Region {
             self.dirty_extents.insert(req.extent);
 
             let extent = self.get_opened_extent_mut(req.extent);
-            extent.write(job_id, req.write, only_write_unwritten)?;
+            run_blocking(|| {
+                extent.write(job_id, req.write, only_write_unwritten)
+            })?;
         }
 
         if only_write_unwritten {
@@ -789,7 +791,8 @@ impl Region {
         for req in req.iter() {
             let extent = self.get_opened_extent_mut(req.extent);
             let req = response.request(req.offset, req.count.get());
-            let out = extent.read(job_id, req)?;
+
+            let out = run_blocking(|| extent.read(job_id, req))?;
 
             // Note that we only call `unsplit` here if `Extent::read` returned
             // `Ok(..)` (indicating that the data is fully populated); this
