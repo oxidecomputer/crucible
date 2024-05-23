@@ -6,6 +6,7 @@
 #: output_rules = [
 #:  "=/tmp/perf*.csv",
 #:  "/tmp/perfout.txt",
+#:  "/tmp/upstairs-info.txt",
 #:  "%/tmp/debug/*.txt",
 #:  "/tmp/dsc/*.txt",
 #:  "/tmp/core.*",
@@ -42,6 +43,9 @@ export BINDIR=/var/tmp/bins
 
 banner setup
 pfexec plimit -n 9123456 $$
+
+banner dtrace
+pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/upstairs-info.txt 2>&1 &
 
 echo "Setup self timeout"
 # This timeout is from issue 520

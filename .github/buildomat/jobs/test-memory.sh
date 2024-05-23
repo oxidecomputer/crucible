@@ -4,7 +4,7 @@
 #: variety = "basic"
 #: target = "helios-2.0"
 #: output_rules = [
-#:  "/tmp/test_mem_log.txt",
+#:  "/tmp/*.txt",
 #:  "/tmp/dsc/*.txt",
 #:  "/tmp/core.*",
 #: ]
@@ -40,6 +40,10 @@ export BINDIR=/var/tmp/bins
 
 banner setup
 pfexec plimit -n 9123456 $$
+
+banner dtrace
+ls -l $input/scripts
+pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/upstairs-info.txt 2>&1 &
 
 banner start
 ptime -m bash $input/scripts/test_mem.sh
