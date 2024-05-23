@@ -71,7 +71,6 @@ pub async fn run_downstairs_for_region(
             run_params.flush_errors,
         )
         .build()
-        .await
         .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
     let handle = d.handle();
