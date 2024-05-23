@@ -37,7 +37,7 @@ const SERVICE: &str = "oxide/crucible/downstairs";
  */
 const RESERVATION_FACTOR: f64 = 1.25;
 const QUOTA_FACTOR: u64 = 3;
-const RECORD_SIZE: &str = "4k";
+const RECORD_SIZE: &str = "4K";
 
 mod datafile;
 mod model;
