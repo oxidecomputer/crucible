@@ -37,6 +37,7 @@ const SERVICE: &str = "oxide/crucible/downstairs";
  */
 const RESERVATION_FACTOR: f64 = 1.25;
 const QUOTA_FACTOR: u64 = 3;
+const RECORD_SIZE: &str = "4k";
 
 mod datafile;
 mod model;
@@ -147,6 +148,14 @@ impl ZFSDataset {
         // If not, create it
         let mut cmd = std::process::Command::new("zfs");
         cmd.arg("create");
+
+        // XXX Hardcoded recordsize for testing, but do we want this
+        // configurable in the VCR? Conceivably we might want a customer to be
+        // able to optimize for small or big IOPS. Also We are setting this here
+        // only during creation- but if we like this change we should maybe move
+        // it up a few lines before the return to apply even if the dataset
+        // already exists.
+        cmd.arg("-o").arg(format!("recordsize={}", RECORD_SIZE));
 
         if let Some(reservation) = reservation {
             info!(log, "zfs set reservation of {reservation} for {dataset}");
