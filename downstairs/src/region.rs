@@ -23,6 +23,11 @@ use repair_client::Client;
 /// (i.e. 128 for the Gimlet server sleds).
 const WORKER_POOL_SIZE: usize = 8;
 
+/// Size at which reads and writes should be done in the Tokio blocking pool
+///
+/// This is chosen somewhat arbitrarily.
+const MIN_BLOCKING_SIZE: usize = 64 * 1024; // 64 KiB
+
 use super::*;
 use crate::extent::{
     copy_dir, extent_dir, extent_file_name, move_replacement_extent,
@@ -762,9 +767,13 @@ impl Region {
             self.dirty_extents.insert(req.extent);
 
             let extent = self.get_opened_extent_mut(req.extent);
-            run_blocking(|| {
+            if req.write.data.len() > MIN_BLOCKING_SIZE {
+                run_blocking(|| {
+                    extent.write(job_id, req.write, only_write_unwritten)
+                })
+            } else {
                 extent.write(job_id, req.write, only_write_unwritten)
-            })?;
+            }?;
         }
 
         if only_write_unwritten {
@@ -792,7 +801,12 @@ impl Region {
             let extent = self.get_opened_extent_mut(req.extent);
             let req = response.request(req.offset, req.count.get());
 
-            let out = run_blocking(|| extent.read(job_id, req))?;
+            // Run sufficiently large reads on in the blocking pool
+            let out = if req.data.capacity() > MIN_BLOCKING_SIZE {
+                run_blocking(|| extent.read(job_id, req))
+            } else {
+                extent.read(job_id, req)
+            }?;
 
             // Note that we only call `unsplit` here if `Extent::read` returned
             // `Ok(..)` (indicating that the data is fully populated); this

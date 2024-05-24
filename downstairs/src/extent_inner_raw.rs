@@ -352,7 +352,6 @@ impl ExtentInner for RawInner {
                 req.offset.value as i64 * block_size as i64,
             )
         };
-
         // Check against the expected number of bytes.  We could do more
         // robust error handling here (e.g. retrying in a loop), but for
         // now, simply bailing out seems wise.
