@@ -1380,8 +1380,6 @@ impl ActiveConnection {
         dss: &mut DsStatOuter,
         region: &mut Region,
     ) -> Result<()> {
-        let upstairs_connection = self.upstairs_connection;
-
         /*
          * Build ourselves a list of all the jobs on the work hashmap that
          * are New or DepWait.
@@ -1410,56 +1408,83 @@ impl ActiveConnection {
                 continue;
             };
 
-            cdt::work__process!(|| new_id.0);
-            let m = self.do_work(&dw, flags, reqwest_client, region).await;
-
-            if let Some(error) = m.err() {
-                self.reply(Message::ErrorReport {
-                    upstairs_id: upstairs_connection.upstairs_id,
-                    session_id: upstairs_connection.session_id,
-                    job_id: new_id,
-                    error: error.clone(),
-                })?;
-
-                // If the job errored, do not consider it completed.
-                // Retry it.
-                new_work.push_back(new_id);
-                self.work.active.insert(dw.ds_id, dw);
-
-                // If this is a repair job, and that repair failed, we
-                // can do no more work on this downstairs and should
-                // force everything to come down before more work arrives.
-                //
-                // We have replied to the Upstairs above, which lets the
-                // upstairs take action to abort the repair and continue
-                // working in some degraded state.
-                //
-                // If you change this, change how the Upstairs processes
-                // ErrorReports!
-                if matches!(m, Message::ExtentLiveRepairAckId { .. }) {
-                    bail!("Repair has failed, exiting task");
-                }
-            } else {
-                // The job completed successfully, so update our stats
-                dss.on_complete(&m);
-
-                // Notify the upstairs before completing work, which
-                // consumes the message (so we'll check whether it's
-                // a FlushAck beforehand)
-                let is_flush = matches!(m, Message::FlushAck { .. });
-                self.reply(m)?;
-
-                if is_flush {
-                    self.work.last_flush = new_id;
-                    self.work.completed = Vec::with_capacity(32);
-                } else {
-                    self.work.completed.push(new_id);
-                }
-
-                cdt::work__done!(|| new_id.0);
+            if let Some(failed) =
+                self.do_work(dw, flags, reqwest_client, dss, region).await?
+            {
+                new_work.push_back(failed);
             }
         }
         Ok(())
+    }
+
+    /// Do work for the given IO job
+    ///
+    /// This function will either complete the work (adding it to the completed
+    /// list), fail to complete the work (re-adding it to the active list and
+    /// returning the `JobId`), or fail to communicate when replying to the
+    /// Upstairs (which returns an error).
+    async fn do_work(
+        &mut self,
+        job: DownstairsWork,
+        flags: &DownstairsFlags,
+        reqwest_client: &reqwest::Client,
+        dss: &mut DsStatOuter,
+        region: &mut Region,
+    ) -> Result<Option<JobId>> {
+        let new_id = job.ds_id;
+        let upstairs_connection = self.upstairs_connection;
+
+        cdt::work__process!(|| new_id.0);
+        let m = self
+            .do_work_inner(&job, flags, reqwest_client, region)
+            .await;
+
+        if let Some(error) = m.err() {
+            self.reply(Message::ErrorReport {
+                upstairs_id: upstairs_connection.upstairs_id,
+                session_id: upstairs_connection.session_id,
+                job_id: new_id,
+                error: error.clone(),
+            })?;
+
+            // If the job errored, do not consider it completed.
+            // Retry it.
+            self.work.active.insert(new_id, job);
+
+            // If this is a repair job, and that repair failed, we
+            // can do no more work on this downstairs and should
+            // force everything to come down before more work arrives.
+            //
+            // We have replied to the Upstairs above, which lets the
+            // upstairs take action to abort the repair and continue
+            // working in some degraded state.
+            //
+            // If you change this, change how the Upstairs processes
+            // ErrorReports!
+            if matches!(m, Message::ExtentLiveRepairAckId { .. }) {
+                bail!("Repair has failed, exiting task");
+            }
+            Ok(Some(new_id))
+        } else {
+            // The job completed successfully, so update our stats
+            dss.on_complete(&m);
+
+            // Notify the upstairs before completing work, which
+            // consumes the message (so we'll check whether it's
+            // a FlushAck beforehand)
+            let is_flush = matches!(m, Message::FlushAck { .. });
+            self.reply(m)?;
+
+            if is_flush {
+                self.work.last_flush = new_id;
+                self.work.completed = Vec::with_capacity(32);
+            } else {
+                self.work.completed.push(new_id);
+            }
+
+            cdt::work__done!(|| new_id.0);
+            Ok(None)
+        }
     }
 
     /// Given a `DownstairsWork` job, do the work for that IO
@@ -1471,7 +1496,7 @@ impl ActiveConnection {
     ///
     /// This function is nominally infallible, because any errors are encoded as
     /// an error field in the returned `Message`.
-    async fn do_work(
+    async fn do_work_inner(
         &mut self,
         job: &DownstairsWork,
         flags: &DownstairsFlags,
