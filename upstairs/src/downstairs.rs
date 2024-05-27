@@ -131,6 +131,9 @@ pub(crate) struct Downstairs {
     ///
     /// This must be handled after every event
     ackable_work: BTreeSet<JobId>,
+
+    /// A reqwest client, to be reused when creating Nexus clients
+    reqwest_client: reqwest::Client,
 }
 
 /// Helper struct to contain a count of backpressure bytes
@@ -338,6 +341,11 @@ impl Downstairs {
             log: log.new(o!("" => "downstairs".to_string())),
             ackable_work: BTreeSet::new(),
             repair: None,
+            reqwest_client: reqwest::ClientBuilder::new()
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap(),
         }
     }
 
@@ -3951,9 +3959,10 @@ impl Downstairs {
         // Spawn a task so we don't block the main loop talking to
         // Nexus.
         let target_addrs = self.get_target_addrs();
+        let client = self.reqwest_client.clone();
         tokio::spawn(async move {
             let Some(nexus_client) =
-                get_nexus_client(&log, &target_addrs).await
+                get_nexus_client(&log, client, &target_addrs).await
             else {
                 // Exit if no Nexus client returned from DNS - our notification
                 // is best effort.
@@ -4031,9 +4040,10 @@ impl Downstairs {
         // Spawn a task so we don't block the main loop talking to
         // Nexus.
         let target_addrs = self.get_target_addrs();
+        let client = self.reqwest_client.clone();
         tokio::spawn(async move {
             let Some(nexus_client) =
-                get_nexus_client(&log, &target_addrs).await
+                get_nexus_client(&log, client, &target_addrs).await
             else {
                 // Exit if no Nexus client returned from DNS - our notification
                 // is best effort.
@@ -4090,9 +4100,10 @@ impl Downstairs {
         // Spawn a task so we don't block the main loop talking to
         // Nexus.
         let target_addrs = self.get_target_addrs();
+        let client = self.reqwest_client.clone();
         tokio::spawn(async move {
             let Some(nexus_client) =
-                get_nexus_client(&log, &target_addrs).await
+                get_nexus_client(&log, client, &target_addrs).await
             else {
                 // Exit if no Nexus client returned from DNS - our notification
                 // is best effort.
@@ -4173,9 +4184,10 @@ impl Downstairs {
         // Spawn a task so we don't block the main loop talking to
         // Nexus.
         let target_addrs = self.get_target_addrs();
+        let client = self.reqwest_client.clone();
         tokio::spawn(async move {
             let Some(nexus_client) =
-                get_nexus_client(&log, &target_addrs).await
+                get_nexus_client(&log, client, &target_addrs).await
             else {
                 // Exit if no Nexus client returned from DNS - our notification
                 // is best effort.
@@ -4259,9 +4271,10 @@ impl Downstairs {
         // Spawn a task so we don't block the main loop talking to
         // Nexus.
         let target_addrs = self.get_target_addrs();
+        let client = self.reqwest_client.clone();
         tokio::spawn(async move {
             let Some(nexus_client) =
-                get_nexus_client(&log, &target_addrs).await
+                get_nexus_client(&log, client, &target_addrs).await
             else {
                 // Exit if no Nexus client returned from DNS - our notification
                 // is best effort.
@@ -4321,9 +4334,10 @@ impl Downstairs {
         // Spawn a task so we don't block the main loop talking to
         // Nexus.
         let target_addrs = self.get_target_addrs();
+        let client = self.reqwest_client.clone();
         tokio::spawn(async move {
             let Some(nexus_client) =
-                get_nexus_client(&log, &target_addrs).await
+                get_nexus_client(&log, client, &target_addrs).await
             else {
                 // Exit if no Nexus client returned from DNS - our notification
                 // is best effort.
@@ -4422,9 +4436,10 @@ impl Downstairs {
         // Spawn a task so we don't block the main loop talking to
         // Nexus.
         let target_addrs = self.get_target_addrs();
+        let client = self.reqwest_client.clone();
         tokio::spawn(async move {
             let Some(nexus_client) =
-                get_nexus_client(&log, &target_addrs).await
+                get_nexus_client(&log, client, &target_addrs).await
             else {
                 // Exit if no Nexus client returned from DNS - our notification
                 // is best effort.
