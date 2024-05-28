@@ -3308,45 +3308,35 @@ impl Work {
     /// Updates `self.outstanding_deps` and prints a warning message the first
     /// time a job with unmet dependencies is checked.
     fn check_ready(&mut self, ds_id: JobId, work: &mut IOop) -> bool {
-        /*
-         * Before we can make this in_progress, we have to check the dep
-         * list if there is one and make sure all dependencies are
-         * completed.
-         */
-        let dep_list = work.deps();
+        // Before we can make this in_progress, we have to check the dep
+        // list if there is one and make sure all dependencies are
+        // completed.
+        //
+        // The Downstairs currently assumes that all jobs previous
+        // to the last flush have completed, hence this early out.
+        //
+        // Currently `work.completed` is cleared out when
+        // `ActiveConnection::do_ready_work` (or `complete` in mod test) is
+        // called with a `FlushAck`, so this early out cannot be removed unless
+        // that is changed too.
+        //
+        // XXX Make this better/faster by removing the ones that
+        // are met, so next lap we don't have to check again?  There
+        // may be some debug value to knowing what the dep list was,
+        // so consider that before making this faster.
+        let num_deps_outstanding = work
+            .deps()
+            .iter()
+            .filter(|&dep| {
+                *dep > self.last_flush && !self.completed.contains(dep)
+            })
+            .count();
 
-        /*
-         * See which of our dependencies are met.
-         * XXX Make this better/faster by removing the ones that
-         * are met, so next lap we don't have to check again?  There
-         * may be some debug value to knowing what the dep list was,
-         * so consider that before making this faster.
-         */
-        let mut deps_outstanding: Vec<JobId> =
-            Vec::with_capacity(dep_list.len());
-
-        for dep in dep_list.iter() {
-            // The Downstairs currently assumes that all jobs previous
-            // to the last flush have completed, hence this early out.
-            //
-            // Currently `work.completed` is cleared out when
-            // `ActiveConnection::do_ready_work` (or `complete` in mod test) is
-            // called with a `FlushAck`, so this early out cannot be removed
-            // unless that is changed too.
-            if dep <= &self.last_flush {
-                continue;
-            }
-
-            if !self.completed.contains(dep) {
-                deps_outstanding.push(*dep);
-            }
-        }
-
-        if !deps_outstanding.is_empty() {
+        if num_deps_outstanding > 0 {
             let print = if let Some(existing_outstanding_deps) =
                 self.outstanding_deps.get(&ds_id)
             {
-                *existing_outstanding_deps != deps_outstanding.len()
+                *existing_outstanding_deps != num_deps_outstanding
             } else {
                 false
             };
@@ -3367,11 +3357,11 @@ impl Work {
                         IOop::ExtentLiveReopen { .. } => "ELiveReopen",
                         IOop::ExtentLiveNoOp { .. } => "NoOp",
                     },
-                    deps_outstanding.len(),
+                    num_deps_outstanding
                 );
             }
 
-            let _ = self.outstanding_deps.insert(ds_id, deps_outstanding.len());
+            let _ = self.outstanding_deps.insert(ds_id, num_deps_outstanding);
             false
         } else {
             true
