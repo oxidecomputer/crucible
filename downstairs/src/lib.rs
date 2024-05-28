@@ -5,7 +5,6 @@
 use futures::lock::Mutex;
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
-use std::fmt;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr};
@@ -721,10 +720,7 @@ pub fn show_work(ds: &mut Downstairs) {
                         ("NoOp", dependencies)
                     }
                 };
-                info!(
-                    ds.log,
-                    "{:8} {:>7}  {:>5} {:?}", id, dsw_type, dsw.state, dep_list,
-                );
+                info!(ds.log, "{:8} {:>7}  {:?}", id, dsw_type, dep_list,);
             }
         }
 
@@ -956,11 +952,7 @@ impl ActiveConnection {
 
     #[cfg(test)]
     fn add_work(&mut self, ds_id: JobId, work: IOop) {
-        let dsw = DownstairsWork {
-            ds_id,
-            work,
-            state: WorkState::New,
-        };
+        let dsw = DownstairsWork { ds_id, work };
         self.work.add_work(dsw);
     }
 
@@ -3226,16 +3218,11 @@ pub struct Work {
 struct DownstairsWork {
     ds_id: JobId,
     work: IOop,
-    state: WorkState,
 }
 
 impl DownstairsWork {
     fn new(ds_id: JobId, work: IOop) -> Self {
-        DownstairsWork {
-            ds_id,
-            work,
-            state: WorkState::New,
-        }
+        DownstairsWork { ds_id, work }
     }
 }
 
@@ -3257,14 +3244,7 @@ impl Work {
     /// Returns a sorted list of downstairs request IDs that are new or have
     /// been waiting for other dependencies to finish.
     fn new_work(&self) -> VecDeque<JobId> {
-        let mut result: VecDeque<_> = self
-            .active
-            .values()
-            .filter(|job| {
-                matches!(job.state, WorkState::New | WorkState::DepWait)
-            })
-            .map(|job| job.ds_id)
-            .collect();
+        let mut result: VecDeque<_> = self.active.keys().cloned().collect();
         result.make_contiguous().sort_unstable();
 
         result
@@ -3281,7 +3261,8 @@ impl Work {
 
     /// Checks whether the given job is ready
     ///
-    /// Updates `self.outstanding_deps` and `job.state`
+    /// Updates `self.outstanding_deps` and prints a warning message the first
+    /// time a job with unmet dependencies is checked.
     fn check_ready(&mut self, job: &mut DownstairsWork) -> bool {
         /*
          * Before we can make this in_progress, we have to check the dep
@@ -3349,23 +3330,13 @@ impl Work {
             let _ = self
                 .outstanding_deps
                 .insert(job.ds_id, deps_outstanding.len());
-
-            /*
-             * If we got here, then the dep is not met.
-             * Set DepWait if not already set.
-             */
-            if job.state == WorkState::New {
-                job.state = WorkState::DepWait;
-            }
             false
         } else {
-            job.state = WorkState::InProgress;
             true
         }
     }
 
-    /// If the requested job is still new, and the dependencies are all met,
-    /// remove the job from the active map and return it.
+    /// If the job is ready, remove it from the active map and return it
     ///
     /// Otherwise, leave the job in the map and return `None`
     ///
@@ -3377,45 +3348,12 @@ impl Work {
             panic!("called in_progress for invalid job");
         };
 
-        match job.state {
-            WorkState::New | WorkState::DepWait => {
-                if self.check_ready(&mut job) {
-                    Some(job)
-                } else {
-                    // Return the job to the map
-                    self.active.insert(ds_id, job);
-                    None
-                }
-            }
-            WorkState::InProgress => {
-                // A previous call of this function put this job in progress, so
-                // return idempotently.
-                Some(job)
-            }
-        }
-    }
-}
-
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, Clone, PartialEq)]
-pub enum WorkState {
-    New,
-    DepWait,
-    InProgress,
-}
-
-impl fmt::Display for WorkState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            WorkState::New => {
-                write!(f, " New")
-            }
-            WorkState::DepWait => {
-                write!(f, "DepW")
-            }
-            WorkState::InProgress => {
-                write!(f, "In P")
-            }
+        if self.check_ready(&mut job) {
+            Some(job)
+        } else {
+            // Return the job to the map
+            self.active.insert(ds_id, job);
+            None
         }
     }
 }
@@ -3700,7 +3638,6 @@ mod test {
                     }]),
                 }
             },
-            state: WorkState::New,
         });
     }
 
@@ -3711,7 +3648,6 @@ mod test {
                 dependencies: deps,
                 writes: RegionWrite(vec![]),
             },
-            state: WorkState::New,
         });
     }
 
@@ -3754,10 +3690,6 @@ mod test {
             if let Some(job) = work.in_progress(new_id) {
                 jobs.push(job);
             }
-        }
-
-        for job in &jobs {
-            assert_eq!(job.state, WorkState::InProgress);
         }
 
         jobs
@@ -4623,11 +4555,7 @@ mod test {
     fn test_misc_work_through_work_queue(ds_id: JobId, ioop: IOop) {
         // Verify that a IOop work request will move through the work queue.
         let mut work = Work::new(csl());
-        work.add_work(DownstairsWork {
-            ds_id,
-            work: ioop,
-            state: WorkState::New,
-        });
+        work.add_work(DownstairsWork { ds_id, work: ioop });
 
         assert_eq!(work.new_work(), vec![ds_id]);
 
@@ -4979,10 +4907,6 @@ mod test {
         assert!(work.completed.is_empty());
 
         assert_eq!(work.new_work(), vec![JobId(1003)]);
-        assert_eq!(
-            work.active.get(&JobId(1003)).unwrap().state,
-            WorkState::DepWait
-        );
     }
 
     #[test]
@@ -5881,11 +5805,9 @@ mod test {
 
         assert_eq!(job_1.ds_id, JobId(1000));
         assert_eq!(job_1.work, read_1());
-        assert_eq!(job_1.state, WorkState::New);
 
         assert_eq!(job_2.ds_id, JobId(1000));
         assert_eq!(job_2.work, read_2());
-        assert_eq!(job_2.state, WorkState::New);
 
         Ok(())
     }
