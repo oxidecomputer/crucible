@@ -319,17 +319,14 @@ impl ExtentInner for RawInner {
         cdt::extent__read__get__contexts__start!(|| {
             (job_id.0, self.extent_number.0, num_blocks)
         });
-        let block_contexts =
-            self.get_block_contexts(req.offset.value, num_blocks)?;
+        let blocks = self.get_block_contexts_inner(
+            req.offset.value,
+            num_blocks,
+            |ctx, _block| ctx.map(|c| c.block_context),
+        )?;
         cdt::extent__read__get__contexts__done!(|| {
             (job_id.0, self.extent_number.0, num_blocks)
         });
-
-        // Convert from DownstairsBlockContext -> BlockContext
-        let blocks = block_contexts
-            .into_iter()
-            .map(|b| b.map(|b| b.block_context))
-            .collect();
 
         // To avoid a `memset`, we're reading directly into uninitialized
         // memory in the buffer.  This is fine; we sized the buffer
@@ -883,7 +880,26 @@ impl RawInner {
         block: u64,
         count: u64,
     ) -> Result<Vec<Option<DownstairsBlockContext>>, CrucibleError> {
-        let mut out = vec![];
+        self.get_block_contexts_inner(block, count, |ctx, block| {
+            ctx.map(|c| DownstairsBlockContext {
+                block,
+                block_context: c.block_context,
+                on_disk_hash: c.on_disk_hash,
+            })
+        })
+    }
+
+    /// Maps a function across block contexts, return a `Vec<T>`
+    fn get_block_contexts_inner<F, T>(
+        &mut self,
+        block: u64,
+        count: u64,
+        f: F,
+    ) -> Result<Vec<T>, CrucibleError>
+    where
+        F: Fn(Option<OnDiskDownstairsBlockContext>, u64) -> T,
+    {
+        let mut out = Vec::with_capacity(count as usize);
         let mut reads = 0u64;
         for (slot, group) in (block..block + count)
             .group_by(|block| self.active_context[*block as usize])
@@ -892,12 +908,14 @@ impl RawInner {
             let mut group = group.peekable();
             let start = *group.peek().unwrap();
             let count = group.count();
-            out.extend(self.layout.read_context_slots_contiguous(
+            self.layout.read_context_slots_contiguous_inner(
                 &self.file,
                 start,
                 count as u64,
                 slot,
-            )?);
+                &f,
+                &mut out,
+            )?;
             reads += 1;
         }
         if let Some(reads) = reads.checked_sub(1) {
@@ -1205,6 +1223,40 @@ impl RawLayout {
         block_count: u64,
         slot: ContextSlot,
     ) -> Result<Vec<Option<DownstairsBlockContext>>, CrucibleError> {
+        let mut out = Vec::with_capacity(block_count as usize);
+        self.read_context_slots_contiguous_inner(
+            file,
+            block_start,
+            block_count,
+            slot,
+            |ctx, block| {
+                ctx.map(|c| DownstairsBlockContext {
+                    block,
+                    block_context: c.block_context,
+                    on_disk_hash: c.on_disk_hash,
+                })
+            },
+            &mut out,
+        )?;
+        Ok(out)
+    }
+
+    /// Low-level function to read context slots
+    ///
+    /// This function takes a generic transform function and writes to a
+    /// user-provided array, to minimize allocations.
+    fn read_context_slots_contiguous_inner<F, T>(
+        &self,
+        file: &File,
+        block_start: u64,
+        block_count: u64,
+        slot: ContextSlot,
+        f: F,
+        out: &mut Vec<T>,
+    ) -> Result<(), CrucibleError>
+    where
+        F: Fn(Option<OnDiskDownstairsBlockContext>, u64) -> T,
+    {
         let mut buf =
             vec![0u8; (BLOCK_CONTEXT_SLOT_SIZE_BYTES * block_count) as usize];
 
@@ -1213,7 +1265,6 @@ impl RawLayout {
             CrucibleError::IoError(format!("reading context slots failed: {e}"))
         })?;
 
-        let mut out = vec![];
         for (i, chunk) in buf
             .chunks_exact(BLOCK_CONTEXT_SLOT_SIZE_BYTES as usize)
             .enumerate()
@@ -1222,13 +1273,10 @@ impl RawLayout {
                 bincode::deserialize(chunk).map_err(|e| {
                     CrucibleError::BadContextSlot(e.to_string())
                 })?;
-            out.push(ctx.map(|c| DownstairsBlockContext {
-                block: block_start + i as u64,
-                block_context: c.block_context,
-                on_disk_hash: c.on_disk_hash,
-            }));
+            let v = f(ctx, block_start + i as u64);
+            out.push(v);
         }
-        Ok(out)
+        Ok(())
     }
 
     /// Write out the active context array and metadata section of the file
