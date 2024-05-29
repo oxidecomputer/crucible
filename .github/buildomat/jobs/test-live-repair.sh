@@ -85,10 +85,14 @@ ls -ltr "$BINDIR" || true
 banner CreateDS
 echo $BINDIR/dsc create \
   --ds-bin "$BINDIR"/crucible-downstairs \
+  --extent-size 4000 \
+  --extent-count 200 \
   --region-count 4 \
   --cleanup
 $BINDIR/dsc create \
   --ds-bin "$BINDIR"/crucible-downstairs \
+  --extent-size 4000 \
+  --extent-count 200 \
   --region-count 4 \
   --cleanup
 
@@ -116,6 +120,10 @@ else
     cat /tmp/dsc.log || true
     exit 1
 fi
+
+banner dtrace
+# Start up a dtrace script to record upstairs activity.
+pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/upstairs-info.txt 2>&1 &
 
 banner LR
 ptime -m "$BINDIR"/crutest replace \

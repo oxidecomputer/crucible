@@ -1,4 +1,5 @@
 // Copyright 2023 Oxide Computer Company
+use std::fmt;
 use std::fs::File;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
@@ -24,6 +25,7 @@ use signal_hook::consts::signal::*;
 use signal_hook_tokio::Signals;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod cli;
@@ -105,7 +107,7 @@ enum Workload {
     },
     Repair,
     /// Test the downstairs replay path.
-    /// Top a downstairs, then run some IO, then start that downstairs back
+    /// Stop a downstairs, then run some IO, then start that downstairs back
     /// up.  Verify all IO to all downstairs finishes.
     Replay {
         /// URL location of the running dsc server
@@ -124,10 +126,6 @@ enum Workload {
         /// The address:port of a running downstairs for replacement
         #[clap(long, action)]
         replacement: SocketAddr,
-
-        /// Number of IOs to do after replacement has started.
-        #[clap(long, default_value_t = 1800, action)]
-        work: usize,
     },
     Span,
     Verify,
@@ -702,26 +700,11 @@ async fn main() -> Result<()> {
         bail!("Verify requires verify_in file");
     }
 
-    // If we are running the replace workload, we need to know the
-    // current list of targets the upstairs will be started with.
-    let full_target = if let Workload::Replace {
-        fast_fill: _,
-        replacement,
-        work: _,
-    } = opt.workload
-    {
-        let mut full_target = opt.target.clone();
-        full_target.push(replacement);
-        Some(full_target)
-    } else {
-        None
-    };
-
     let up_uuid = opt.uuid.unwrap_or_else(Uuid::new_v4);
 
     let crucible_opts = CrucibleOpts {
         id: up_uuid,
-        target: opt.target,
+        target: opt.target.clone(),
         lossy: opt.lossy,
         flush_timeout: opt.flush_timeout,
         key: opt.key,
@@ -1090,8 +1073,7 @@ async fn main() -> Result<()> {
         }
         Workload::Replace {
             fast_fill,
-            replacement: _,
-            work,
+            replacement,
         } => {
             // Either we have a count, or we run until we get a signal.
             let mut wtq = {
@@ -1103,14 +1085,16 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // This should already be setup for us.
-            let full_target = full_target.unwrap();
+            // Build the list of targets we use during the replace test.
+            // The first three are provided in the crucible opts, and the
+            // final one (the replacement) is a test specific arg.
+            let mut targets = opt.target.clone();
+            targets.push(replacement);
             replace_workload(
                 &guest,
                 &mut wtq,
                 &mut region_info,
-                &full_target,
-                work,
+                targets,
                 fast_fill,
             )
             .await?;
@@ -1378,12 +1362,46 @@ fn fill_vec(
  * expect the same value (i.e. we cut off any higher write count).
  */
 #[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum ValidateStatus {
     Good,
     InRange,
     Bad,
 }
+
+// Block mismatch summary.
+// When we have a mismatch on a block, don't print a line for every single
+// byte that is wrong, collect the range and print a single summary at the
+// end of the range.
+struct BlockErr {
+    block: usize,
+    starting_offset: usize,
+    ending_offset: usize,
+    starting_volume_offset: u64,
+    ending_volume_offset: u64,
+    expected_value: u8,
+    found_value: u8,
+    status: ValidateStatus,
+    msg: String,
+}
+
+impl fmt::Display for BlockErr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}:{} bo:{}-{} Volume offset:{}-{}  Expected:{} Got:{}",
+            self.msg,
+            self.block,
+            self.starting_offset,
+            self.ending_offset,
+            self.starting_volume_offset,
+            self.ending_volume_offset,
+            self.expected_value,
+            self.found_value,
+        )
+    }
+}
+
 /*
  * Compare a vec buffer with what we expect to be written for that offset.
  * This assumes you used the fill_vec function (with get_seed) to write
@@ -1443,6 +1461,7 @@ fn validate_vec<V: AsRef<[u8]>>(
         }
 
         let seed = wl.get_seed(block_offset);
+        let mut block_err: Option<BlockErr> = None;
         for i in 1..bs {
             if data[data_offset + i] != seed {
                 // Our data is not what we expect.
@@ -1470,16 +1489,51 @@ fn validate_vec<V: AsRef<[u8]>>(
                     res = ValidateStatus::Bad;
                 }
 
-                println!(
-                    "{}:{} bo:{} Volume offset:{}  Expected:{} Got:{}",
-                    msg,
-                    block_offset,
-                    i,
-                    byte_offset + i as u64,
-                    seed,
-                    data[data_offset + i],
-                );
+                // Check to see if we have an error already
+                block_err = match block_err {
+                    // The error is contiguous with our current error
+                    Some(mut be)
+                        if be.status == res
+                            && be.found_value == data[data_offset + i]
+                            && be.ending_offset + 1 == i =>
+                    {
+                        be.ending_offset = i;
+                        be.ending_volume_offset = byte_offset;
+                        Some(be)
+                    }
+                    _ => {
+                        // Print the previous range, if it exists
+                        if let Some(be) = block_err {
+                            println!("{}", be);
+                        }
+
+                        // Start a new range.
+                        Some(BlockErr {
+                            block: block_offset,
+                            starting_offset: i,
+                            ending_offset: i,
+                            starting_volume_offset: byte_offset,
+                            ending_volume_offset: byte_offset,
+                            expected_value: seed,
+                            found_value: data[data_offset + i],
+                            status: res.clone(),
+                            msg,
+                        })
+                    }
+                };
+            } else {
+                // This check was valid. If we have seen previous errors,
+                // print out the summary report now.
+                if let Some(be) = block_err.take() {
+                    println!("{}", be);
+                }
             }
+        }
+
+        // If the last check was bad, we will exit the loop without having
+        // printed any errors yet. Print the summary now.
+        if let Some(be) = block_err {
+            println!("{}", be);
         }
         data_offset += bs;
     }
@@ -1691,8 +1745,9 @@ async fn generic_workload(
     let block_width = ri.total_blocks.to_string().len();
     let size_width = (10 * ri.block_size).to_string().len();
 
-    let mut c = 1;
-    loop {
+    let max_io_size = std::cmp::min(10, ri.total_blocks);
+
+    for c in 1.. {
         let op = rng.gen_range(0..10);
         if op == 0 {
             // flush
@@ -1714,8 +1769,8 @@ async fn generic_workload(
             guest.flush(None).await?;
         } else {
             // Read or Write both need this
-            // Pick a random size (in blocks) for the IO, up to 10
-            let size = rng.gen_range(1..=10);
+            // Pick a random size (in blocks) for the IO, up to max_io_size
+            let size = rng.gen_range(1..=max_io_size);
 
             // Once we have our IO size, decide where the starting offset should
             // be, which is the total possible size minus the randomly chosen
@@ -1815,7 +1870,6 @@ async fn generic_workload(
                 }
             }
         }
-        c += 1;
         match wtq {
             WhenToQuit::Count { count } => {
                 if c > *count {
@@ -1854,8 +1908,7 @@ async fn replay_workload(
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
     let mut generic_wtq = WhenToQuit::Count { count: 300 };
 
-    let mut c = 1;
-    loop {
+    for c in 1.. {
         // Pick a DS at random
         let stopped_ds = rng.gen_range(0..3);
         dsc_client.dsc_stop(stopped_ds).await.unwrap();
@@ -1887,7 +1940,6 @@ async fn replay_workload(
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
 
-        c += 1;
         match wtq {
             WhenToQuit::Count { count } => {
                 if c > *count {
@@ -1924,77 +1976,119 @@ async fn replace_workload(
     guest: &Arc<Guest>,
     wtq: &mut WhenToQuit,
     ri: &mut RegionInfo,
-    full_targets: &[SocketAddr],
-    work: usize,
+    targets: Vec<SocketAddr>,
     fill: bool,
 ) -> Result<()> {
-    assert!(full_targets.len() == 4);
+    assert!(targets.len() == 4);
 
-    let mut preload_wtq = WhenToQuit::Count { count: 100 };
-    let mut replace_wtq = WhenToQuit::Count { count: work };
+    if fill {
+        fill_sparse_workload(guest, ri).await?;
+    }
+    // Make a copy of the stop at counter if one was provided so the
+    // IO task and the replace task don't have to share wtq
+    let stop_at = match wtq {
+        WhenToQuit::Count { count } => Some(*count),
+        _ => None,
+    };
 
-    let mut c = 1;
-    let mut old_ds = 0;
-    let mut new_ds = 3;
-    loop {
-        println!("[{c}] Replace loop starts");
-        if fill {
-            fill_sparse_workload(guest, ri).await?;
-        }
-        generic_workload(guest, &mut preload_wtq, ri, false).await?;
-
-        println!(
-            "[{c}] Replacing DS {old_ds}:{} with {new_ds}:{}",
-            full_targets[old_ds], full_targets[new_ds],
-        );
-        let res = guest
-            .replace_downstairs(
-                Uuid::new_v4(),
-                full_targets[old_ds],
-                full_targets[new_ds],
-            )
-            .await;
-
-        match res {
-            Ok(ReplaceResult::Started) => {}
-            x => {
-                bail!("[{c}] Failed replace: {:?}", x);
-            }
-        }
-        old_ds = (old_ds + 1) % 4;
-        new_ds = (new_ds + 1) % 4;
-
-        generic_workload(guest, &mut replace_wtq, ri, false).await?;
-
-        // Wait for all IO to settle down before we continue
+    // Start up a task to do the replacement workload
+    let stop_token = CancellationToken::new();
+    let stop_token_c = stop_token.clone();
+    let (work_count_tx, mut work_count_rx) = mpsc::channel(1);
+    let guest_c = guest.clone();
+    let handle = tokio::spawn(async move {
+        let mut old_ds = 0;
+        let mut new_ds = 3;
+        let mut c = 1;
         loop {
-            let wc = guest.show_work().await?;
             println!(
-                "[{c}] Replace: Up:{} ds:{} act:{}",
-                wc.up_count, wc.ds_count, wc.active_count
+                "[{c}] Replacing DS {old_ds}:{} with {new_ds}:{}",
+                targets[old_ds], targets[new_ds],
             );
-            if wc.up_count + wc.ds_count == 0 && wc.active_count == 3 {
-                println!("[{c}] Replace: All jobs finished, all DS active.");
+            match guest_c
+                .replace_downstairs(
+                    Uuid::new_v4(),
+                    targets[old_ds],
+                    targets[new_ds],
+                )
+                .await
+            {
+                Ok(ReplaceResult::Started) => {}
+                x => {
+                    bail!("[{c}] Failed replace: {:?}", x);
+                }
+            }
+            // Wait for the replacement to be reflected in the downstairs status.
+            let mut wc = guest_c.show_work().await?;
+            while wc.active_count == 3 {
+                // Wait for one of the DS to start repair
+                println!(
+                    "[{c}] Waiting for replace to start: up:{} ds:{} act:{}",
+                    wc.up_count, wc.ds_count, wc.active_count
+                );
+                tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+                wc = guest_c.show_work().await?;
+            }
+
+            // We have started live repair, now wait for it to finish.
+            while wc.active_count != 3 {
+                println!(
+                    "[{c}] Waiting for replace to finish: up:{} ds:{} act:{}",
+                    wc.up_count, wc.ds_count, wc.active_count
+                );
+                tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+                wc = guest_c.show_work().await?;
+            }
+            // Tell the global thread that a repair is done and what count we
+            // are at.
+            work_count_tx.send(c).await.expect("Failed to send count");
+
+            // Check if the IO task has asked us to quit.
+            if stop_token_c.is_cancelled() {
                 break;
             }
-            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
-        }
+            // See (if provided) we have reached a requested number of loops
+            if let Some(stop_at) = stop_at {
+                if c >= stop_at {
+                    println!("[{c}] Replace task ends as count was reached");
+                    break;
+                }
+            }
 
-        c += 1;
+            // No stopping yet, let's do another loop.
+            old_ds = (old_ds + 1) % 4;
+            new_ds = (new_ds + 1) % 4;
+            c += 1;
+        }
+        println!("Replace tasks ends after {c} loops");
+        Ok(())
+    });
+
+    // The replace is started, now generate traffic through the guest
+    // in a loop, checking to see if it is time to stop.
+    loop {
+        let mut workload_wtq = WhenToQuit::Count { count: 100 };
+        generic_workload(guest, &mut workload_wtq, ri, false)
+            .await
+            .unwrap();
+
+        let io_count = work_count_rx.try_recv().unwrap_or(0);
+        println!("IO task with {io_count} replacements ");
+
         match wtq {
             WhenToQuit::Count { count } => {
-                if c > *count {
+                if io_count >= *count {
+                    println!("IO task shutting down for count");
                     break;
                 }
             }
             WhenToQuit::Signal { shutdown_rx } => {
                 match shutdown_rx.try_recv() {
                     Ok(SignalAction::Shutdown) => {
-                        println!("shutting down in response to SIGUSR1");
+                        println!("IO task shutting down from SIGUSR1");
                         break;
                     }
                     Ok(SignalAction::Verify) => {
-                        println!("Verify Volume");
                         if let Err(e) = verify_volume(guest, ri, false).await {
                             bail!("Requested volume verify failed: {:?}", e)
                         }
@@ -2005,9 +2099,31 @@ async fn replace_workload(
         }
     }
 
+    // The replace task may have already exited.
+    stop_token.cancel();
+    if let Err(e) = handle.await.unwrap() {
+        bail!("Failed in replace workload: {:?}", e);
+    }
+
+    // Wait for all IO to settle down and all downstairs to be active
+    // before we do the next loop.
+    loop {
+        let wc = guest.show_work().await?;
+        println!(
+            "Replace test done: up:{} ds:{} act:{}",
+            wc.up_count, wc.ds_count, wc.active_count
+        );
+        if wc.up_count + wc.ds_count == 0 && wc.active_count == 3 {
+            println!("Replace: All jobs finished, all DS active.");
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+    }
+
     println!("Test replace has completed");
     Ok(())
 }
+
 /*
  * Do a few writes to random offsets then exit as soon as they finish.
  * We are trying to leave extents "dirty" so we want to exit before the
