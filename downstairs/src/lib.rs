@@ -26,7 +26,7 @@ use crucible_protocol::{
 };
 use repair_client::Client;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use rand::prelude::*;
@@ -879,33 +879,6 @@ fn is_message_valid(
     }
 }
 
-async fn do_work_task(
-    ads: &Mutex<Downstairs>,
-    upstairs_connection: UpstairsConnection,
-    mut job_channel_rx: mpsc::UnboundedReceiver<()>,
-    resp_tx: mpsc::UnboundedSender<Message>,
-) -> Result<()> {
-    // The lossy attribute currently does not change at runtime. To avoid
-    // continually locking the downstairs, cache the result here.
-    let is_lossy = ads.lock().await.lossy;
-
-    /*
-     * job_channel_rx is a notification that we should look for new work.
-     */
-    while job_channel_rx.recv().await.is_some() {
-        // Add a little time to completion for this operation.
-        if is_lossy && random() && random() {
-            info!(ads.lock().await.log, "[lossy] sleeping 1 second");
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-
-        Downstairs::do_work_for(ads, upstairs_connection, &resp_tx).await?;
-    }
-
-    // None means the channel is closed
-    Ok(())
-}
-
 async fn proc_stream(
     ads: &Arc<Mutex<Downstairs>>,
     stream: WrappedStream,
@@ -1166,9 +1139,9 @@ where
                         // Upstairs will not be able to successfully negotiate.
                         {
                             let ds = ads.lock().await;
-                            if ds.read_only != read_only {
+                            if ds.flags.read_only != read_only {
                                 if let Err(e) = fw.send(Message::ReadOnlyMismatch {
-                                    expected: ds.read_only,
+                                    expected: ds.flags.read_only,
                                 }).await {
                                     warn!(log, "Failed to send ReadOnlyMismatch: {}", e);
                                 }
@@ -1177,9 +1150,9 @@ where
                                     mismatch");
                             }
 
-                            if ds.encrypted != encrypted {
+                            if ds.flags.encrypted != encrypted {
                                 if let Err(e) = fw.send(Message::EncryptedMismatch {
-                                    expected: ds.encrypted,
+                                    expected: ds.flags.encrypted,
                                 }).await {
                                     warn!(log, "Failed to send EncryptedMismatch: {}", e);
                                 }
@@ -1433,7 +1406,6 @@ where
 
     // We rely on backpressure to limit total jobs in flight, so these channels
     // can be unbounded.
-    let (job_channel_tx, job_channel_rx) = mpsc::unbounded_channel();
     let (resp_channel_tx, resp_channel_rx) = mpsc::unbounded_channel();
     let mut framed_write_task = tokio::spawn(reply_task(resp_channel_rx, fw));
 
@@ -1467,9 +1439,9 @@ where
      *        │                 │errors, pings     │responses
      *        │                 │                  │
      *        │                 │                  │
-     *   ┌────▼────┐ message   ┌┴──────┐  job     ┌┴────────┐
-     *   │resp_loop├──────────►│pf_task├─────────►│ dw_task │
-     *   └─────────┘ channel   └──┬────┘ channel  └▲────────┘
+     *   ┌────▼────┐ message   ┌┴──────────────────┴────────┐
+     *   │resp_loop├──────────►│        pf_task             │
+     *   └─────────┘ channel   └──┬────────────────▲────────┘
      *                            │                │
      *                         add│work         new│work
      *   per-connection           │                │
@@ -1478,27 +1450,12 @@ where
      *                         │           Downstairs           │
      *                         └────────────────────────────────┘
      */
-    let mut dw_task = {
-        let adc = ads.clone();
-        let resp_channel_tx = resp_channel_tx.clone();
-        tokio::spawn(async move {
-            do_work_task(
-                &adc,
-                upstairs_connection,
-                job_channel_rx,
-                resp_channel_tx,
-            )
-            .await
-        })
-    };
-
     // The Upstairs uses backpressure to limit total outstanding jobs, so these
     // channels can be unbounded.
     let (message_channel_tx, mut message_channel_rx) =
         mpsc::unbounded_channel();
     let mut pf_task = {
         let adc = ads.clone();
-        let tx = job_channel_tx.clone();
         let resp_channel_tx = resp_channel_tx.clone();
         tokio::spawn(async move {
             while let Some(m) = message_channel_rx.recv().await {
@@ -1513,7 +1470,12 @@ where
                     // If we added work, tell the work task to get busy.
                     Ok(Some(new_ds_id)) => {
                         cdt::work__start!(|| new_ds_id.0);
-                        tx.send(())?;
+                        Downstairs::do_work_for(
+                            &adc,
+                            upstairs_connection,
+                            &resp_channel_tx,
+                        )
+                        .await?;
                     }
                     // If we handled the job locally, nothing to do here
                     Ok(None) => (),
@@ -1534,9 +1496,6 @@ where
     const TIMEOUT_LIMIT: usize = 3;
     loop {
         tokio::select! {
-            e = &mut dw_task => {
-                bail!("do_work_task task has ended: {:?}", e);
-            }
             e = &mut pf_task => {
                 bail!("pf task ended: {:?}", e);
             }
@@ -1727,21 +1686,37 @@ impl DownstairsBuilder<'_> {
             region.def().extent_count(),
         );
 
+        let (request_tx, request_rx) = mpsc::channel(256); // TODO size?
         Ok(Arc::new(Mutex::new(Downstairs {
             region,
-            lossy,
-            read_errors,
-            write_errors,
-            flush_errors,
+            flags: DownstairsFlags {
+                lossy,
+                read_errors,
+                write_errors,
+                flush_errors,
+                read_only: self.read_only,
+                encrypted,
+            },
             active_upstairs: HashMap::new(),
             dss,
-            read_only: self.read_only,
-            encrypted,
             address: None,
             repair_address: None,
             log,
+            request_tx,
+            request_rx: Some(request_rx),
         })))
     }
+}
+
+/// Configuration flags for the Downstairs
+#[derive(Debug)]
+struct DownstairsFlags {
+    lossy: bool,        // Test flag, enables pauses and skipped jobs
+    read_errors: bool,  // Test flag
+    write_errors: bool, // Test flag
+    flush_errors: bool, // Test flag
+    read_only: bool,
+    encrypted: bool,
 }
 
 /*
@@ -1752,17 +1727,15 @@ impl DownstairsBuilder<'_> {
 #[derive(Debug)]
 pub struct Downstairs {
     pub region: Region,
-    lossy: bool,        // Test flag, enables pauses and skipped jobs
-    read_errors: bool,  // Test flag
-    write_errors: bool, // Test flag
-    flush_errors: bool, // Test flag
+    flags: DownstairsFlags,
     active_upstairs: HashMap<Uuid, ActiveUpstairs>,
     dss: DsStatOuter,
-    read_only: bool,
-    encrypted: bool,
     pub address: Option<SocketAddr>,
     pub repair_address: Option<SocketAddr>,
     log: Logger,
+
+    request_tx: mpsc::Sender<DownstairsRequest>,
+    request_rx: Option<mpsc::Receiver<DownstairsRequest>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1861,7 +1834,7 @@ impl Downstairs {
     ) -> Result<()> {
         // The Upstairs will send Flushes periodically, even in read only mode
         // we have to accept them. But read-only should never accept writes!
-        if self.read_only {
+        if self.flags.read_only {
             let is_write = match work {
                 IOop::Write { .. }
                 | IOop::WriteUnwritten { .. }
@@ -1965,7 +1938,8 @@ impl Downstairs {
                  * Any error from an IO should be intercepted here and passed
                  * back to the upstairs.
                  */
-                let response = if self.read_errors && random() && random() {
+                let response = if self.flags.read_errors && random() && random()
+                {
                     warn!(self.log, "returning error on read!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
@@ -2036,7 +2010,8 @@ impl Downstairs {
                  * Any error from an IO should be intercepted here and passed
                  * back to the upstairs.
                  */
-                let result = if self.write_errors && random() && random() {
+                let result = if self.flags.write_errors && random() && random()
+                {
                     warn!(self.log, "returning error on writeunwritten!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
@@ -2059,7 +2034,8 @@ impl Downstairs {
                 writes,
                 dependencies,
             } => {
-                let result = if self.write_errors && random() && random() {
+                let result = if self.flags.write_errors && random() && random()
+                {
                     warn!(self.log, "returning error on write!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
@@ -2090,7 +2066,8 @@ impl Downstairs {
                 snapshot_details,
                 extent_limit,
             } => {
-                let result = if self.flush_errors && random() && random() {
+                let result = if self.flags.flush_errors && random() && random()
+                {
                     warn!(self.log, "returning error on flush!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
@@ -2379,7 +2356,7 @@ impl Downstairs {
         upstairs_connection: UpstairsConnection,
         tx: oneshot::Sender<UpstairsConnection>,
     ) -> Result<()> {
-        if self.read_only {
+        if self.flags.read_only {
             // Multiple active read-only sessions are allowed, but multiple
             // sessions for the same Upstairs UUID are not. Kick out a
             // previously active session for this UUID if one exists. This
@@ -3043,7 +3020,7 @@ impl Downstairs {
                 return Ok(());
             }
         };
-        let is_lossy = ds.lossy;
+        let is_lossy = ds.flags.lossy;
         drop(ds);
 
         /*
@@ -3139,6 +3116,149 @@ impl Downstairs {
             }
         }
         Ok(())
+    }
+
+    /// Returns a handle for making async calls against the Downstairs task
+    pub fn handle(&self) -> DownstairsHandle {
+        DownstairsHandle {
+            tx: self.request_tx.clone(),
+        }
+    }
+
+    /// Clone the extent files in a region from another running downstairs.
+    ///
+    /// Use the reconcile/repair extent methods to copy another downstairs.
+    /// The source downstairs must have the same RegionDefinition as we do,
+    /// and both downstairs must be running in read only mode.
+    pub async fn clone_region(&mut self, source: SocketAddr) -> Result<()> {
+        let info = crucible_common::BuildInfo::default();
+        let log = self.log.new(o!("task" => "clone".to_string()));
+        info!(log, "Crucible Version: {}", info);
+        info!(
+            log,
+            "Upstairs <-> Downstairs Message Version: {}",
+            CRUCIBLE_MESSAGE_VERSION
+        );
+
+        info!(log, "Connecting to {source} to obtain our extent files.");
+
+        let url = format!("http://{:?}", source);
+        let repair_server = Client::new(&url);
+
+        let source_def = match repair_server.get_region_info().await {
+            Ok(def) => def.into_inner(),
+            Err(e) => {
+                bail!("Failed to get source region definition: {e}");
+            }
+        };
+
+        info!(log, "The source RegionDefinition is: {:?}", source_def);
+
+        let source_ro_mode = match repair_server.get_region_mode().await {
+            Ok(ro) => ro.into_inner(),
+            Err(e) => {
+                bail!("Failed to get source mode: {e}");
+            }
+        };
+
+        info!(log, "The source mode is: {:?}", source_ro_mode);
+        if !source_ro_mode {
+            bail!("Source downstairs is not read only");
+        }
+
+        let my_def = self.region.def();
+        info!(log, "my def is {:?}", my_def);
+
+        if let Err(e) = my_def.compatible(source_def) {
+            bail!("Incompatible region definitions: {e}");
+        }
+
+        if let Err(e) = self.region.close_all_extents().await {
+            bail!("Failed to close all extents: {e}");
+        }
+
+        for eid in (0..my_def.extent_count()).map(ExtentId) {
+            info!(log, "Repair extent {eid}");
+
+            if let Err(e) = self.region.repair_extent(eid, source, true).await {
+                bail!("repair extent {eid} returned: {e}");
+            }
+        }
+        info!(log, "Region has been cloned");
+
+        Ok(())
+    }
+
+    async fn spawn_runner(
+        d: Arc<Mutex<Downstairs>>,
+    ) -> tokio::task::JoinHandle<()> {
+        let (request_rx, log) = {
+            let mut ds = d.lock().await;
+            let request_rx = ds.request_rx.take().unwrap();
+            let log = ds.log.new(o!("task" => "runner".to_string()));
+            (request_rx, log)
+        };
+        tokio::spawn(Downstairs::run(d, request_rx, log))
+    }
+
+    async fn run(
+        ds: Arc<Mutex<Downstairs>>,
+        mut request_rx: mpsc::Receiver<DownstairsRequest>,
+        log: Logger,
+    ) {
+        while let Some(v) = request_rx.recv().await {
+            match v {
+                DownstairsRequest::ShowWork => {
+                    let mut d = ds.lock().await;
+                    show_work(&mut d);
+                }
+                DownstairsRequest::IsExtentClosed { eid, done } => {
+                    let d = ds.lock().await;
+                    let closed = matches!(
+                        d.region.extents[eid.0 as usize],
+                        ExtentState::Closed
+                    );
+                    if done.send(closed).is_err() {
+                        warn!(log, "failed to reply to IsExtentClosed");
+                    }
+                }
+            }
+        }
+    }
+}
+
+enum DownstairsRequest {
+    /// Checks whether the given extent is closed
+    IsExtentClosed {
+        eid: ExtentId,
+        done: oneshot::Sender<bool>,
+    },
+
+    /// Prints downstairs work
+    ///
+    /// This is fire-and-forget, so there's no oneshot reply channel
+    ShowWork,
+}
+
+/// Handle allowing for async calls to the Downstairs task
+pub struct DownstairsHandle {
+    tx: mpsc::Sender<DownstairsRequest>,
+}
+
+impl DownstairsHandle {
+    pub async fn is_extent_closed(&self, eid: ExtentId) -> Result<bool> {
+        let (done, rx) = oneshot::channel();
+        self.tx
+            .send(DownstairsRequest::IsExtentClosed { eid, done })
+            .await
+            .context("could not send message on channel")?;
+        rx.await.context("could not receive result")
+    }
+    pub async fn show_work(&self) -> Result<()> {
+        self.tx
+            .send(DownstairsRequest::ShowWork)
+            .await
+            .context("could not send message on channel")
     }
 }
 
@@ -3588,6 +3708,10 @@ pub async fn start_downstairs(
         None
     };
 
+    // We'll run a lightweight Downstairs loop which handles certain operations
+    // using message-passing
+    let mut ds_runner = Downstairs::spawn_runner(d.clone()).await;
+
     let join_handle = tokio::spawn(async move {
         /*
          * We now loop listening for a connection from the Upstairs.
@@ -3597,7 +3721,14 @@ pub async fn start_downstairs(
          */
         info!(log, "downstairs listening on {}", listen_on);
         loop {
-            let (sock, raddr) = listener.accept().await?;
+            let v = tokio::select! {
+                _ = &mut ds_runner => {
+                    info!(log, "downstairs runner stopped; exiting");
+                    break Ok(());
+                }
+                v = listener.accept() => {v}
+            };
+            let (sock, raddr) = v?;
 
             /*
              * We have a new connection; before we wrap it, set TCP_NODELAY
@@ -3652,74 +3783,6 @@ pub async fn start_downstairs(
     });
 
     Ok(join_handle)
-}
-
-/// Clone the extent files in a region from another running downstairs.
-///
-/// Use the reconcile/repair extent methods to copy another downstairs.
-/// The source downstairs must have the same RegionDefinition as we do,
-/// and both downstairs must be running in read only mode.
-pub async fn clone_region(
-    d: Arc<Mutex<Downstairs>>,
-    source: SocketAddr,
-) -> Result<()> {
-    let info = crucible_common::BuildInfo::default();
-    let log = d.lock().await.log.new(o!("task" => "clone".to_string()));
-    info!(log, "Crucible Version: {}", info);
-    info!(
-        log,
-        "Upstairs <-> Downstairs Message Version: {}", CRUCIBLE_MESSAGE_VERSION
-    );
-
-    info!(log, "Connecting to {source} to obtain our extent files.");
-
-    let url = format!("http://{:?}", source);
-    let repair_server = Client::new(&url);
-
-    let source_def = match repair_server.get_region_info().await {
-        Ok(def) => def.into_inner(),
-        Err(e) => {
-            bail!("Failed to get source region definition: {e}");
-        }
-    };
-
-    info!(log, "The source RegionDefinition is: {:?}", source_def);
-
-    let source_ro_mode = match repair_server.get_region_mode().await {
-        Ok(ro) => ro.into_inner(),
-        Err(e) => {
-            bail!("Failed to get source mode: {e}");
-        }
-    };
-
-    info!(log, "The source mode is: {:?}", source_ro_mode);
-    if !source_ro_mode {
-        bail!("Source downstairs is not read only");
-    }
-
-    let mut ds = d.lock().await;
-
-    let my_def = ds.region.def();
-    info!(log, "my def is {:?}", my_def);
-
-    if let Err(e) = my_def.compatible(source_def) {
-        bail!("Incompatible region definitions: {e}");
-    }
-
-    if let Err(e) = ds.region.close_all_extents().await {
-        bail!("Failed to close all extents: {e}");
-    }
-
-    for eid in (0..my_def.extent_count()).map(ExtentId) {
-        info!(log, "Repair extent {eid}");
-
-        if let Err(e) = ds.region.repair_extent(eid, source, true).await {
-            bail!("repair extent {eid} returned: {e}");
-        }
-    }
-    info!(log, "Region has been cloned");
-
-    Ok(())
 }
 
 #[cfg(test)]
