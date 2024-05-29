@@ -3254,8 +3254,12 @@ impl DownstairsHandle {
  */
 #[derive(Debug)]
 pub struct Work {
-    /// Jobs whose dependencies are not yet complete
     dep_wait: HashMap<JobId, IOop>,
+
+    /// Map of jobs with outstanding (unmet) dependencies
+    ///
+    /// The value stored in this map is the number of unmet dependencies for the
+    /// given job.
     outstanding_deps: HashMap<JobId, usize>,
 
     /*
@@ -3381,6 +3385,7 @@ impl Work {
         };
 
         if self.check_ready(ds_id, &mut work) {
+            let _ = self.outstanding_deps.remove(&ds_id);
             Some(work)
         } else {
             // Return the work to the map
