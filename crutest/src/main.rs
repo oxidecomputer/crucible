@@ -25,6 +25,7 @@ use signal_hook::consts::signal::*;
 use signal_hook_tokio::Signals;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod cli;
@@ -1087,10 +1088,7 @@ async fn main() -> Result<()> {
             // Build the list of targets we use during the replace test.
             // The first three are provided in the crucible opts, and the
             // final one (the replacement) is a test specific arg.
-            let mut targets = Vec::with_capacity(4);
-            for t in opt.target.iter() {
-                targets.push(*t);
-            }
+            let mut targets = opt.target.clone();
             targets.push(replacement);
             replace_workload(
                 &guest,
@@ -1493,51 +1491,41 @@ fn validate_vec<V: AsRef<[u8]>>(
 
                 // Check to see if we have an error already
                 block_err = match block_err {
-                    None => Some(BlockErr {
-                        block: block_offset,
-                        starting_offset: i,
-                        ending_offset: i,
-                        starting_volume_offset: byte_offset,
-                        ending_volume_offset: byte_offset,
-                        expected_value: seed,
-                        found_value: data[data_offset + i],
-                        status: res.clone(),
-                        msg,
-                    }),
-                    Some(mut be) => {
-                        // We have an existing error, does this extend our
-                        // range or start a new one?
+                    // The error is contiguous with our current error
+                    Some(mut be)
                         if be.status == res
                             && be.found_value == data[data_offset + i]
-                            && be.ending_offset + 1 == i
-                        {
-                            be.ending_offset = i;
-                            be.ending_volume_offset = byte_offset;
-                            Some(be)
-                        } else {
-                            // Print the current range
+                            && be.ending_offset + 1 == i =>
+                    {
+                        be.ending_offset = i;
+                        be.ending_volume_offset = byte_offset;
+                        Some(be)
+                    }
+                    _ => {
+                        // Print the previous range, if it exists
+                        if let Some(be) = block_err {
                             println!("{}", be);
-                            // Start a new range.
-                            Some(BlockErr {
-                                block: block_offset,
-                                starting_offset: i,
-                                ending_offset: i,
-                                starting_volume_offset: byte_offset,
-                                ending_volume_offset: byte_offset,
-                                expected_value: seed,
-                                found_value: data[data_offset + i],
-                                status: res.clone(),
-                                msg,
-                            })
                         }
+
+                        // Start a new range.
+                        Some(BlockErr {
+                            block: block_offset,
+                            starting_offset: i,
+                            ending_offset: i,
+                            starting_volume_offset: byte_offset,
+                            ending_volume_offset: byte_offset,
+                            expected_value: seed,
+                            found_value: data[data_offset + i],
+                            status: res.clone(),
+                            msg,
+                        })
                     }
                 };
             } else {
                 // This check was valid. If we have seen previous errors,
                 // print out the summary report now.
-                if let Some(be) = block_err {
+                if let Some(be) = block_err.take() {
                     println!("{}", be);
-                    block_err = None;
                 }
             }
         }
@@ -1757,8 +1745,9 @@ async fn generic_workload(
     let block_width = ri.total_blocks.to_string().len();
     let size_width = (10 * ri.block_size).to_string().len();
 
-    let mut c = 1;
-    loop {
+    let max_io_size = std::cmp::min(10, ri.total_blocks);
+
+    for c in 1.. {
         let op = rng.gen_range(0..10);
         if op == 0 {
             // flush
@@ -1780,8 +1769,8 @@ async fn generic_workload(
             guest.flush(None).await?;
         } else {
             // Read or Write both need this
-            // Pick a random size (in blocks) for the IO, up to 10
-            let size = rng.gen_range(1..=10);
+            // Pick a random size (in blocks) for the IO, up to max_io_size
+            let size = rng.gen_range(1..=max_io_size);
 
             // Once we have our IO size, decide where the starting offset should
             // be, which is the total possible size minus the randomly chosen
@@ -1881,7 +1870,6 @@ async fn generic_workload(
                 }
             }
         }
-        c += 1;
         match wtq {
             WhenToQuit::Count { count } => {
                 if c > *count {
@@ -1920,8 +1908,7 @@ async fn replay_workload(
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
     let mut generic_wtq = WhenToQuit::Count { count: 300 };
 
-    let mut c = 1;
-    loop {
+    for c in 1.. {
         // Pick a DS at random
         let stopped_ds = rng.gen_range(0..3);
         dsc_client.dsc_stop(stopped_ds).await.unwrap();
@@ -1953,7 +1940,6 @@ async fn replay_workload(
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
 
-        c += 1;
         match wtq {
             WhenToQuit::Count { count } => {
                 if c > *count {
@@ -2006,13 +1992,14 @@ async fn replace_workload(
     };
 
     // Start up a task to do the replacement workload
-    let (work_stop_tx, mut work_stop_rx) = mpsc::channel(1);
+    let stop_token = CancellationToken::new();
+    let stop_token_c = stop_token.clone();
     let (work_count_tx, mut work_count_rx) = mpsc::channel(1);
     let guest_c = guest.clone();
     let handle = tokio::spawn(async move {
-        let mut c: usize = 1;
         let mut old_ds = 0;
         let mut new_ds = 3;
+        let mut c = 1;
         loop {
             println!(
                 "[{c}] Replacing DS {old_ds}:{} with {new_ds}:{}",
@@ -2057,7 +2044,7 @@ async fn replace_workload(
             work_count_tx.send(c).await.expect("Failed to send count");
 
             // Check if the IO task has asked us to quit.
-            if work_stop_rx.try_recv().is_ok() {
+            if stop_token_c.is_cancelled() {
                 break;
             }
             // See (if provided) we have reached a requested number of loops
@@ -2068,7 +2055,7 @@ async fn replace_workload(
                 }
             }
 
-            // No stopping yet, lets do another loop.
+            // No stopping yet, let's do another loop.
             old_ds = (old_ds + 1) % 4;
             new_ds = (new_ds + 1) % 4;
             c += 1;
@@ -2113,9 +2100,9 @@ async fn replace_workload(
     }
 
     // The replace task may have already exited.
-    let _ = work_stop_tx.send(true).await;
+    stop_token.cancel();
     if let Err(e) = handle.await.unwrap() {
-        bail!("Failed in IO workload: {:?}", e);
+        bail!("Failed in replace workload: {:?}", e);
     }
 
     // Wait for all IO to settle down and all downstairs to be active
