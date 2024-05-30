@@ -1765,6 +1765,7 @@ pub fn up_main(
 #[cfg(feature = "notify-nexus")]
 pub(crate) async fn get_nexus_client(
     log: &Logger,
+    client: reqwest::Client,
     target_addrs: &[SocketAddr],
 ) -> Option<nexus_client::Client> {
     use internal_dns::resolver::Resolver;
@@ -1813,8 +1814,9 @@ pub(crate) async fn get_nexus_client(
             }
         };
 
-    Some(nexus_client::Client::new(
+    Some(nexus_client::Client::new_with_client(
         &format!("http://{}", nexus_address),
+        client,
         log.clone(),
     ))
 }
