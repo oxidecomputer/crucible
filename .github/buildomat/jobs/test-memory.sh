@@ -5,6 +5,7 @@
 #: target = "helios-2.0"
 #: output_rules = [
 #:  "/tmp/*.txt",
+#:  "%/tmp/dtrace/*",
 #:  "/tmp/dsc/*.txt",
 #:  "/tmp/core.*",
 #: ]
@@ -43,7 +44,7 @@ pfexec plimit -n 9123456 $$
 
 banner dtrace
 ls -l $input/scripts
-pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/upstairs-info.txt 2>&1 &
+pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/dtrace/upstairs-info.txt 2>&1 &
 
 banner start
 ptime -m bash $input/scripts/test_mem.sh
