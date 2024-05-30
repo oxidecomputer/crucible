@@ -1704,6 +1704,11 @@ impl DownstairsBuilder<'_> {
             log,
             request_tx,
             request_rx: Some(request_rx),
+            reqwest_client: reqwest::ClientBuilder::new()
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap(),
         })))
     }
 }
@@ -1736,6 +1741,9 @@ pub struct Downstairs {
 
     request_tx: mpsc::Sender<DownstairsRequest>,
     request_rx: Option<mpsc::Receiver<DownstairsRequest>>,
+
+    // A reqwest client, to be reused when creating progenitor clients
+    pub reqwest_client: reqwest::Client,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2186,7 +2194,12 @@ impl Downstairs {
                     Err(CrucibleError::UpstairsInactive)
                 } else {
                     self.region
-                        .repair_extent(extent, source_repair_address, false)
+                        .repair_extent(
+                            self.reqwest_client.clone(),
+                            extent,
+                            source_repair_address,
+                            false,
+                        )
                         .await
                 };
                 debug!(
@@ -2955,7 +2968,12 @@ impl Downstairs {
                     );
                     match d
                         .region
-                        .repair_extent(extent_id, source_repair_address, false)
+                        .repair_extent(
+                            d.reqwest_client.clone(),
+                            extent_id,
+                            source_repair_address,
+                            false,
+                        )
                         .await
                     {
                         Ok(()) => Message::RepairAckId { repair_id },
@@ -3143,7 +3161,8 @@ impl Downstairs {
         info!(log, "Connecting to {source} to obtain our extent files.");
 
         let url = format!("http://{:?}", source);
-        let repair_server = Client::new(&url);
+        let repair_server =
+            Client::new_with_client(&url, self.reqwest_client.clone());
 
         let source_def = match repair_server.get_region_info().await {
             Ok(def) => def.into_inner(),
@@ -3180,7 +3199,11 @@ impl Downstairs {
         for eid in (0..my_def.extent_count()).map(ExtentId) {
             info!(log, "Repair extent {eid}");
 
-            if let Err(e) = self.region.repair_extent(eid, source, true).await {
+            if let Err(e) = self
+                .region
+                .repair_extent(self.reqwest_client.clone(), eid, source, true)
+                .await
+            {
                 bail!("repair extent {eid} returned: {e}");
             }
         }

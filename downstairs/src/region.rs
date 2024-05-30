@@ -560,6 +560,7 @@ impl Region {
      */
     pub async fn repair_extent(
         &self,
+        client: reqwest::Client,
         eid: ExtentId,
         repair_addr: SocketAddr,
         clone: bool,
@@ -573,7 +574,8 @@ impl Region {
             assert!(!self.read_only);
         }
 
-        self.get_extent_copy(eid, repair_addr, clone).await?;
+        self.get_extent_copy(client, eid, repair_addr, clone)
+            .await?;
 
         // Returning from get_extent_copy means we have copied all our
         // files and moved the copy directory to replace directory.
@@ -592,6 +594,7 @@ impl Region {
      */
     pub async fn get_extent_copy(
         &self,
+        client: reqwest::Client,
         eid: ExtentId,
         repair_addr: SocketAddr,
         clone: bool,
@@ -616,7 +619,7 @@ impl Region {
 
         // XXX TLS someday?  Authentication?
         let url = format!("http://{:?}", repair_addr);
-        let repair_server = Client::new(&url);
+        let repair_server = Client::new_with_client(&url, client);
 
         let mut repair_files =
             match repair_server.get_files_for_extent(eid.0).await {
