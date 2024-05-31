@@ -133,6 +133,7 @@ pub(crate) struct Downstairs {
     ackable_work: BTreeSet<JobId>,
 
     /// A reqwest client, to be reused when creating Nexus clients
+    #[cfg(feature = "notify-nexus")]
     reqwest_client: reqwest::Client,
 }
 
@@ -341,6 +342,8 @@ impl Downstairs {
             log: log.new(o!("" => "downstairs".to_string())),
             ackable_work: BTreeSet::new(),
             repair: None,
+
+            #[cfg(feature = "notify-nexus")]
             reqwest_client: reqwest::ClientBuilder::new()
                 .connect_timeout(std::time::Duration::from_secs(15))
                 .timeout(std::time::Duration::from_secs(15))
