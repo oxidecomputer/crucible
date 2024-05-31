@@ -5770,13 +5770,12 @@ mod test {
             gen: 1,
         }];
 
-        let new_vol: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: sv_volume_id,
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: new_sub_vol.clone(),
-                read_only_parent: Some(rop),
-            };
+        let new_vol = VolumeConstructionRequest::Volume {
+            id: sv_volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: new_sub_vol.clone(),
+            read_only_parent: Some(rop),
+        };
 
         // Make our new volume that has a read_only_parent.
         let volume = Volume::construct(new_vol.clone(), None, log.clone())
@@ -5806,13 +5805,12 @@ mod test {
 
         // Our "new" VCR must have a new downstairs in the opts, and have
         // the generation number be larger than the original.
-        let replacement: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: sv_volume_id,
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: new_sub_vol.clone(),
-                read_only_parent: Some(new_rop),
-            };
+        let replacement = VolumeConstructionRequest::Volume {
+            id: sv_volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: new_sub_vol.clone(),
+            read_only_parent: Some(new_rop),
+        };
 
         info!(log, "Replace VCR now: {:?}", replacement);
         let rop_replace = volume.target_replace(new_vol, replacement).await;
