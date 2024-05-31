@@ -42,6 +42,18 @@ fn build_region_definition(
     Ok(region_def)
 }
 
+#[derive(Debug)]
+enum VCRDelta {
+    /// The VCRs are identical.
+    Same,
+    /// The newer VCR only has a higher generation number.
+    Generation,
+    /// The newer VCR has higher generation and just one target different.
+    Target { old: SocketAddr, new: SocketAddr },
+    /// The newer VCR was None.
+    NewMissing,
+}
+
 #[derive(Debug, Clone)]
 pub struct Volume {
     uuid: Uuid,
@@ -806,9 +818,7 @@ impl BlockIO for Volume {
                     return Ok(result);
                 }
 
-                ReplaceResult::Missing => {
-                    // keep looking!
-                }
+                ReplaceResult::Missing => {}
             }
         }
 
@@ -1124,13 +1134,15 @@ impl Volume {
     ///
     /// - Ok(Some(old, new)) if there's a single target difference in one of the
     ///   Region variants, and the replacement argument is a valid replacement
-    ///   for the original argument
+    ///   for the original argument.  This also requires that the generation
+    ///   number of the replacement VCR is higher than the original VCR.
     ///
     /// - Ok(None) if there are no differences between them, but the
-    ///   generation number is higher in the new VCR.
+    ///   generation number is higher in the replacement VCR.
     ///
     /// - Err(e) if there's a difference that means the replacement argument is
-    ///   not a valid replacement for the original argument
+    ///   not a valid replacement for the original argument, or the two VCRs are
+    ///   identical.
     pub fn compare_vcr_for_update(
         original: VolumeConstructionRequest,
         replacement: VolumeConstructionRequest,
@@ -1239,50 +1251,29 @@ impl Volume {
         // same rules as sub_volume targets, however, for any single VCR
         // update, only one of the sub_volume or read_only_parent targets
         // can change.
-        let rop_result = {
-            if n_read_only_parent.is_some() {
-                if o_read_only_parent.is_none() {
-                    // We support a VCR where a read_only_parent has gone away,
-                    // but we should never see addition of a read_only_parent
-                    // to a VCR where there was not one originally.
-                    crucible_bail!(
-                        ReplaceRequestInvalid,
-                        "Unexpected read_only_parent on new VCR"
-                    )
-                }
-
-                if o_read_only_parent != n_read_only_parent {
-                    // To get here, both read only parents are populated.
-
-                    let old_rop = o_read_only_parent.unwrap();
-                    let new_rop = n_read_only_parent.unwrap();
-                    // So, the ROPs are different.  Now let's be sure
-                    // they are different in only a target.
-                    Self::compare_vcr_region_for_replacement(&old_rop, &new_rop)
-                } else {
-                    // If the read_only_parents are the same, then this is
-                    // technically an error (from the ROP replacement point of
-                    // view) as it means the targets and generation numbers
-                    // are the same as what we have.
-                    Err(CrucibleError::ReplaceRequestInvalid(
-                        "read_only_parent generation numbers match".to_string(),
-                    ))
-                }
-            } else {
-                // New read_only_parent is none, so the read_only_parents can't
-                // be considered for replacement.
-                Err(CrucibleError::ReplaceRequestInvalid(
-                    "read_only_parent does not exist in replacement"
-                        .to_string(),
-                ))
+        let rop_result = match Self::compare_vcr_region_for_replacement(
+            o_read_only_parent,
+            n_read_only_parent,
+        ) {
+            Err(e) => {
+                warn!(log, "read_only_parent error: {}", e);
+                return Err(e);
             }
+            Ok(rr) => rr,
         };
 
         // Determine the sub_volume difference if there is any.
-        let sub_volume_result = Self::compare_vcr_region_for_replacement(
-            &o_sub_volumes[0],
-            &n_sub_volumes[0],
-        );
+        let sub_volume_result = match Self::compare_vcr_region_for_replacement(
+            Some(Box::new(o_sub_volumes[0].clone())),
+            Some(Box::new(n_sub_volumes[0].clone())),
+        ) {
+            Err(e) => {
+                warn!(log, "sub_volume has invalid differences: {}", e);
+                return Err(e);
+            }
+            Ok(svr) => svr,
+        };
+
         info!(
             log,
             "sub_volume_result is: {:?}, ROP:{:?}",
@@ -1290,17 +1281,18 @@ impl Volume {
             rop_result
         );
 
-        // So, now time for the truth.
         // We use the same function to compare both the region in the
         // sub_volumes and the region in the read_only_parent.  Only one
-        // can be different, so we walk the cases.
+        // can have a different target, so we walk the cases.  As some
+        // deltas are okay for a read only parent that are not for
+        // a sub_volume, we need to look at all the possible permutations.
         match sub_volume_result {
-            Ok(Some((old, new))) => {
+            VCRDelta::Target { old, new } => {
                 // The sub_volume had a valid difference, if the
                 // read_only_parent also had a difference, then that is an
                 // error, otherwise, we return what the sub_volume found.
                 match rop_result {
-                    Ok(Some((_, _))) => {
+                    VCRDelta::Target { .. } => {
                         // Both have changes, this is no good
                         crucible_bail!(
                             ReplaceRequestInvalid,
@@ -1310,46 +1302,92 @@ impl Volume {
                     _ => Ok(Some((old, new))),
                 }
             }
-            Ok(None) => {
-                // The sub_volume VCR is the same as what we have, but with
-                // updated generation numbers, so this qualifies for the
-                // Ok(None) state.  Check what the ROP found.
+            VCRDelta::Same => {
                 match rop_result {
-                    Ok(Some((read_only_old, read_only_new))) => {
+                    VCRDelta::Target { old, new } => {
                         // Just the ROP has changes, so let's return those.
-                        Ok(Some((read_only_old, read_only_new)))
+                        Ok(Some((old, new)))
+                    }
+                    VCRDelta::Same => {
+                        crucible_bail!(
+                            ReplaceRequestInvalid,
+                            "The VCRs have no difference"
+                        )
+                    }
+                    VCRDelta::NewMissing => {
+                        crucible_bail!(
+                            ReplaceRequestInvalid,
+                            "The VCRs have no meaningful difference"
+                        )
+                    }
+                    VCRDelta::Generation => Ok(None),
+                }
+            }
+            VCRDelta::Generation => {
+                // The sub_volume VCR is the same as what we have, but with
+                // updated generation numbers.  Check what the ROP found.
+                match rop_result {
+                    VCRDelta::Target { old, new } => {
+                        // Just the ROP has changes, so let's return those.
+                        Ok(Some((old, new)))
                     }
                     _ => Ok(None),
                 }
             }
-            Err(e) => {
-                // The sub_volume replacement is not acceptable.  Check if
-                // the read_only_parent has a valid change.  If not, then
-                // return the error from the sub_volume.
-                match rop_result {
-                    Ok(Some((ro, rn))) => {
-                        // Just the ROP has changes, return those.
-                        Ok(Some((ro, rn)))
-                    }
-                    Ok(None) => Ok(None),
-                    Err(_) => Err(e),
-                }
+            VCRDelta::NewMissing => {
+                // This should not be possible for sub volumes as the VCR
+                // is a required argument to this function.
+                panic!("New VCR is missing when comparing regions to replace");
             }
         }
     }
 
     // Given two VCRs where we expect the only type to be a
-    // VolumeConstructionRequest::Region, verify that the differences
-    // between them are:
-    // 1) Generation number increase
-    // 2) One target is different.
+    // VolumeConstructionRequest::Region.  The VCR can be from a sub_volume
+    // or a read_only_parent.  The caller is expected to know how to
+    // handle the result depending on what it sends us.
     //
-    // Return Ok(None) if it's just a generation number increase.
-    // Return OK(old_target, new_target) if we have both 1 and 2 above.
-    pub fn compare_vcr_region_for_replacement(
-        o_vol: &VolumeConstructionRequest,
-        n_vol: &VolumeConstructionRequest,
-    ) -> Result<Option<(SocketAddr, SocketAddr)>, CrucibleError> {
+    // We return:
+    // VCRDelta::Same
+    // If the two VCRs are identical
+    //
+    // VCRDelta::Generation
+    // If it's just a generation number increase in the new VCR.
+    //
+    // VCRDelta::NewMissing
+    // If the new VCR is missing (None).
+    //
+    // VCRDelta::Target(old_target, new_target)
+    // If we have both a generation number increase, and one and only
+    // one target is different in the new VCR.
+    //
+    // Any other difference is an error, and an error returned here means the
+    // VCRs are incompatible in a way that prevents one from replacing another.
+    fn compare_vcr_region_for_replacement(
+        opt_o_vol: Option<Box<VolumeConstructionRequest>>,
+        opt_n_vol: Option<Box<VolumeConstructionRequest>>,
+    ) -> Result<VCRDelta, CrucibleError> {
+        if opt_n_vol.is_some() {
+            if opt_o_vol.is_none() {
+                // We support a VCR where a read_only_parent has gone away,
+                // but we should never see addition of a read_only_parent
+                // to a VCR where there was not one originally.
+                crucible_bail!(
+                    ReplaceRequestInvalid,
+                    "VCR added where there should not be one"
+                )
+            }
+        } else {
+            // New VCR is none. When comparing read_only_parents this is
+            // okay.  We indicate that with this return status and let the
+            // caller decide what action to take
+            return Ok(VCRDelta::NewMissing);
+        }
+
+        // To get here, both VCRs are populated.
+        let o_vol = opt_o_vol.unwrap();
+        let n_vol = opt_n_vol.unwrap();
+
         // Volumes to compare must all be VolumeConstructionRequest::Region
         let (
             o_sv_block_size,
@@ -1357,18 +1395,18 @@ impl Volume {
             o_sv_extent_count,
             o_sv_opts,
             o_sv_gen,
-        ) = match &o_vol {
+        ) = match *o_vol {
             VolumeConstructionRequest::Region {
                 block_size,
                 blocks_per_extent,
                 extent_count,
-                opts,
+                ref opts,
                 gen,
             } => (block_size, blocks_per_extent, extent_count, opts, gen),
             _ => {
                 crucible_bail!(
                     ReplaceRequestInvalid,
-                    "Invalid VCR type for sub_volume"
+                    "Invalid VCR type for region replacement"
                 )
             }
         };
@@ -1379,21 +1417,25 @@ impl Volume {
             n_sv_extent_count,
             n_sv_opts,
             n_sv_gen,
-        ) = match &n_vol {
+        ) = match *n_vol {
             VolumeConstructionRequest::Region {
                 block_size,
                 blocks_per_extent,
                 extent_count,
-                opts,
+                ref opts,
                 gen,
             } => (block_size, blocks_per_extent, extent_count, opts, gen),
             _ => {
                 crucible_bail!(
                     ReplaceRequestInvalid,
-                    "Invalid VCR type for sub_volume"
+                    "Invalid VCR type for region replacement"
                 )
             }
         };
+
+        if n_vol == o_vol {
+            return Ok(VCRDelta::Same);
+        }
 
         if o_sv_block_size != n_sv_block_size {
             crucible_bail!(
@@ -1520,12 +1562,15 @@ impl Volume {
 
         // If we found a old/new target, we can return that now.
         if let Some(cid) = new_target_cid {
-            Ok(Some((o_sv_opts.target[cid], n_sv_opts.target[cid])))
+            Ok(VCRDelta::Target {
+                old: o_sv_opts.target[cid],
+                new: n_sv_opts.target[cid],
+            })
         } else {
             // We failed to find any targets different, but all the other
-            // checks between the VCRs found the required differences,
-            // so return Ok(None).
-            Ok(None)
+            // checks between the VCRs found the required differences which
+            // includes a generation number bump.
+            Ok(VCRDelta::Generation)
         }
     }
 
@@ -4260,7 +4305,7 @@ mod test {
     async fn volume_replace_mismatch_opts_control() {
         // A replacement VCR is provided with one target being
         // different, but with the replacement volume having a sub_volume
-        // with a different opts.lossy.
+        // with a different opts.control.
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
@@ -4286,7 +4331,7 @@ mod test {
     async fn volume_replace_mismatch_opts_read_only() {
         // A replacement VCR is provided with one target being
         // different, but with the replacement volume having a sub_volume
-        // with a different opts.lossy.
+        // with a different opts.read_only.
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
