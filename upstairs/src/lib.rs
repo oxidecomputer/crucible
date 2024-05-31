@@ -270,14 +270,21 @@ pub type CrucibleBlockIOFuture<'a> = Pin<
 /// has received or is acting on the IO yet, it just means the notification
 /// has been sent.
 ///
-/// ds__*__io__start: This is when a downstairs task puts an IO on the
-/// wire to the actual downstairs that will do the work. This probe has
+/// ds__*__client__start: This is when a job is sent to the client task
+/// who will handle the network transfer
+///
+/// ds__*__net__start: This is when a downstairs client task puts an IO on
+/// the wire to the actual downstairs that will do the work. This probe has
 /// both the job ID and the client ID so we can tell the individual
 /// downstairs apart.
 ///
-/// ds__*__io_done: An ACK has been received from a downstairs for an IO
+/// ds__*__net__done: An ACK has been received from a downstairs for an IO
 /// sent to it. At the point of this probe the IO has just come off the
 /// wire and we have not processed it yet.
+///
+/// ds__*__client__done: This probe indicates a message off the wire has
+/// been sent back from the client rx task to the main task and is now being
+/// processed.
 ///
 /// up__to__ds__*__done: (Upstairs__to__Downstairs) This is the point where
 /// the upstairs has decided that it has enough data to complete an IO
@@ -319,27 +326,40 @@ mod cdt {
     fn gw__write__unwritten__start(_: u64) {}
     fn gw__write__deps(_: u64, _: u64) {}
     fn gw__flush__start(_: u64) {}
-    fn gw__close__start(_: u64, _: u64) {}
-    fn gw__repair__start(_: u64, _: u64) {}
+    fn gw__close__start(_: u64, _: u32) {}
+    fn gw__repair__start(_: u64, _: u32) {}
     fn gw__noop__start(_: u64) {}
-    fn gw__reopen__start(_: u64, _: u64) {}
+    fn gw__reopen__start(_: u64, _: u32) {}
     fn up__to__ds__read__start(_: u64) {}
     fn up__to__ds__write__start(_: u64) {}
     fn up__to__ds__write__unwritten__start(_: u64) {}
     fn up__to__ds__flush__start(_: u64) {}
     fn up__block__req__dropped() {}
-    fn ds__read__io__start(_: u64, _: u8) {}
-    fn ds__write__io__start(_: u64, _: u8) {}
-    fn ds__write__unwritten__io__start(_: u64, _: u8) {}
-    fn ds__flush__io__start(_: u64, _: u8) {}
-    fn ds__close__start(_: u64, _: u8, _: usize) {}
-    fn ds__repair__start(_: u64, _: u8, _: usize) {}
+    fn ds__read__client__start(_: u64, _: u8) {}
+    fn ds__write__client__start(_: u64, _: u8) {}
+    fn ds__write__unwritten__client__start(_: u64, _: u8) {}
+    fn ds__flush__client__start(_: u64, _: u8) {}
+    fn ds__close__start(_: u64, _: u8, _: u32) {}
+    fn ds__repair__start(_: u64, _: u8, _: u32) {}
     fn ds__noop__start(_: u64, _: u8) {}
-    fn ds__reopen__start(_: u64, _: u8, _: usize) {}
-    fn ds__read__io__done(_: u64, _: u8) {}
-    fn ds__write__io__done(_: u64, _: u8) {}
-    fn ds__write__unwritten__io__done(_: u64, _: u8) {}
-    fn ds__flush__io__done(_: u64, _: u8) {}
+    fn ds__reopen__start(_: u64, _: u8, _: u32) {}
+    fn ds__read__net__start(_: u64, _: u8) {}
+    fn ds__write__net__start(_: u64, _: u8) {}
+    fn ds__write__unwritten__net__start(_: u64, _: u8) {}
+    fn ds__flush__net__start(_: u64, _: u8) {}
+    fn ds__close__net__start(_: u64, _: u8, _: u32) {}
+    fn ds__repair__net__start(_: u64, _: u8, _: u32) {}
+    fn ds__noop__net__start(_: u64, _: u8) {}
+    fn ds__reopen__net__start(_: u64, _: u8, _: u32) {}
+    fn ds__read__net__done(_: u64, _: u8) {}
+    fn ds__write__net__done(_: u64, _: u8) {}
+    fn ds__write__unwritten__net__done(_: u64, _: u8) {}
+    fn ds__flush__net__done(_: u64, _: u8) {}
+    fn ds__close__net__done(_: u64, _: u8) {}
+    fn ds__read__client__done(_: u64, _: u8) {}
+    fn ds__write__client__done(_: u64, _: u8) {}
+    fn ds__write__unwritten__client__done(_: u64, _: u8) {}
+    fn ds__flush__client__done(_: u64, _: u8) {}
     fn ds__close__done(_: u64, _: u8) {}
     fn ds__repair__done(_: u64, _: u8) {}
     fn ds__noop__done(_: u64, _: u8) {}
@@ -352,10 +372,10 @@ mod cdt {
     fn gw__write__done(_: u64) {}
     fn gw__write__unwritten__done(_: u64) {}
     fn gw__flush__done(_: u64) {}
-    fn gw__close__done(_: u64, _: usize) {}
-    fn gw__repair__done(_: u64, _: usize) {}
+    fn gw__close__done(_: u64, _: u32) {}
+    fn gw__repair__done(_: u64, _: u32) {}
     fn gw__noop__done(_: u64) {}
-    fn gw__reopen__done(_: u64, _: usize) {}
+    fn gw__reopen__done(_: u64, _: u32) {}
     fn extent__or__done(_: u64) {}
     fn reqwest__read__start(_: u32, _: Uuid) {}
     fn reqwest__read__done(_: u32, _: Uuid) {}
@@ -529,25 +549,24 @@ impl EncryptionContext {
         random_iv
     }
 
-    pub fn encrypt_in_place(
-        &self,
-        data: &mut [u8],
-    ) -> Result<(Nonce, Tag, u64)> {
+    pub fn encrypt_in_place(&self, data: &mut [u8]) -> (Nonce, Tag, u64) {
         let nonce = self.get_random_nonce();
 
-        let tag = self.cipher.encrypt_in_place_detached(&nonce, b"", data);
-
-        if tag.is_err() {
-            bail!("Could not encrypt! {:?}", tag.err());
-        }
-
-        let tag = tag.unwrap();
+        // Encryption is infallible as long as the data and nonce are both below
+        // 1 << 36 bytes (A_MAX and P_MAX from RFC8452 § 6).  We encrypt on a
+        // per-block basis (max of 1 << 15) with a 12-byte nonce, so these
+        // conditions should never fail.
+        let tag = match self.cipher.encrypt_in_place_detached(&nonce, b"", data)
+        {
+            Ok(tag) => tag,
+            Err(e) => panic!("Could not encrypt! {e:?}"),
+        };
 
         // Hash [nonce + tag + data] in that order. Perform this after
         // encryption so that the downstairs can verify it without the key.
         let computed_hash = integrity_hash(&[&nonce[..], &tag[..], data]);
 
-        Ok((nonce, tag, computed_hash))
+        (nonce, tag, computed_hash)
     }
 
     pub fn decrypt_in_place(
@@ -564,6 +583,27 @@ impl EncryptionContext {
         }
 
         Ok(())
+    }
+}
+
+/// Write data, containing data from all blocks
+#[derive(Debug)]
+pub struct RawWrite {
+    /// Per-block metadata
+    pub blocks: Vec<WriteBlockMetadata>,
+    /// Raw data
+    pub data: bytes::BytesMut,
+}
+
+impl RawWrite {
+    /// Builds a new empty `RawWrite` with the given capacity
+    pub fn with_capacity(block_count: usize, block_size: u64) -> Self {
+        Self {
+            blocks: Vec::with_capacity(block_count),
+            data: bytes::BytesMut::with_capacity(
+                block_count * block_size as usize,
+            ),
+        }
     }
 }
 
@@ -619,6 +659,18 @@ impl RegionDefinitionStatus {
             Received(rd) => Some(*rd),
         }
     }
+}
+
+/// Read response data, containing data from all blocks
+///
+/// Do not derive `Clone` on this type; it will be expensive and tempting to
+/// call by accident!
+#[derive(Debug, Default)]
+pub(crate) struct RawReadResponse {
+    /// Per-block metadata
+    pub blocks: Vec<ReadResponseBlockMetadata>,
+    /// Raw data
+    pub data: bytes::BytesMut,
 }
 
 /*
@@ -1063,28 +1115,28 @@ enum IOop {
         flush_number: u64,
         gen_number: u64,
         snapshot_details: Option<SnapshotDetails>,
-        extent_limit: Option<usize>,
+        extent_limit: Option<ExtentId>,
     },
     /*
      * These operations are for repairing a bad downstairs
      */
     ExtentFlushClose {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
+        extent: ExtentId,
         flush_number: u64,
         gen_number: u64,
         repair_downstairs: Vec<ClientId>,
     },
     ExtentLiveRepair {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
+        extent: ExtentId,
         source_downstairs: ClientId,
         source_repair_address: SocketAddr,
         repair_downstairs: Vec<ClientId>,
     },
     ExtentLiveReopen {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
+        extent: ExtentId,
     },
     ExtentLiveNoOp {
         dependencies: Vec<JobId>, // Jobs that must finish before this
@@ -1169,7 +1221,7 @@ impl IOop {
                 repair_downstairs: _,
             } => {
                 let job_type = "FClose".to_string();
-                (job_type, *extent, dependencies.clone())
+                (job_type, extent.0 as usize, dependencies.clone())
             }
             IOop::ExtentLiveRepair {
                 dependencies,
@@ -1179,14 +1231,14 @@ impl IOop {
                 repair_downstairs: _,
             } => {
                 let job_type = "Repair".to_string();
-                (job_type, *extent, dependencies.clone())
+                (job_type, extent.0 as usize, dependencies.clone())
             }
             IOop::ExtentLiveReopen {
                 dependencies,
                 extent,
             } => {
                 let job_type = "Reopen".to_string();
-                (job_type, *extent, dependencies.clone())
+                (job_type, extent.0 as usize, dependencies.clone())
             }
             IOop::ExtentLiveNoOp { dependencies } => {
                 let job_type = "NoOp".to_string();
@@ -1201,7 +1253,7 @@ impl IOop {
     // repair), and determine if this IO should be sent to the downstairs or not
     // (skipped).
     // Return true if we should send it.
-    fn send_io_live_repair(&self, extent_limit: Option<u64>) -> bool {
+    fn send_io_live_repair(&self, extent_limit: Option<ExtentId>) -> bool {
         if let Some(extent_limit) = extent_limit {
             // The extent_limit has been set, so we have repair work in
             // progress.  If our IO touches an extent less than or equal
@@ -1713,6 +1765,7 @@ pub fn up_main(
 #[cfg(feature = "notify-nexus")]
 pub(crate) async fn get_nexus_client(
     log: &Logger,
+    client: reqwest::Client,
     target_addrs: &[SocketAddr],
 ) -> Option<nexus_client::Client> {
     use internal_dns::resolver::Resolver;
@@ -1761,8 +1814,9 @@ pub(crate) async fn get_nexus_client(
             }
         };
 
-    Some(nexus_client::Client::new(
+    Some(nexus_client::Client::new_with_client(
         &format!("http://{}", nexus_address),
+        client,
         log.clone(),
     ))
 }

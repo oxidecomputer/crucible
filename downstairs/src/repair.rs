@@ -25,7 +25,7 @@ pub struct FileServerContext {
     region_dir: PathBuf,
     read_only: bool,
     region_definition: RegionDefinition,
-    downstairs: Arc<Mutex<Downstairs>>,
+    downstairs: DownstairsHandle,
 }
 
 pub fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
@@ -72,8 +72,9 @@ pub async fn repair_main(
      */
     let ds = downstairs.lock().await;
     let region_dir = ds.region.dir.clone();
-    let read_only = ds.read_only;
+    let read_only = ds.flags.read_only;
     let region_definition = ds.region.def();
+    let handle = ds.handle();
     drop(ds);
 
     info!(log, "Repair listens on {} for path:{:?}", addr, region_dir);
@@ -81,7 +82,7 @@ pub async fn repair_main(
         region_dir,
         read_only,
         region_definition,
-        downstairs,
+        downstairs: handle,
     };
 
     /*
@@ -132,7 +133,7 @@ async fn get_extent_file(
     path: Path<FileSpec>,
 ) -> Result<Response<Body>, HttpError> {
     let fs = path.into_inner();
-    let eid = fs.eid;
+    let eid = ExtentId(fs.eid);
 
     let mut extent_path = extent_path(rqctx.context().region_dir.clone(), eid);
     match fs.file_type {
@@ -207,12 +208,11 @@ async fn extent_repair_ready(
         return Ok(HttpResponseOk(true));
     }
 
-    let res = {
-        let ds = downstairs.lock().await;
-        matches!(ds.region.extents[eid], ExtentState::Closed)
-    };
-
-    Ok(HttpResponseOk(res))
+    downstairs
+        .is_extent_closed(ExtentId(eid as u32))
+        .await
+        .map(HttpResponseOk)
+        .map_err(|e| HttpError::for_internal_error(e.to_string()))
 }
 
 /**
@@ -229,7 +229,7 @@ async fn get_files_for_extent(
     rqctx: RequestContext<Arc<FileServerContext>>,
     path: Path<Eid>,
 ) -> Result<HttpResponseOk<Vec<String>>, HttpError> {
-    let eid = path.into_inner().eid;
+    let eid = ExtentId(path.into_inner().eid);
     let extent_dir = extent_dir(rqctx.context().region_dir.clone(), eid);
 
     // Some sanity checking on the extent path
@@ -262,7 +262,7 @@ async fn get_files_for_extent(
  */
 fn extent_file_list(
     extent_dir: PathBuf,
-    eid: u32,
+    eid: ExtentId,
 ) -> Result<Vec<String>, HttpError> {
     let mut files = Vec::new();
     let possible_files = [
@@ -320,10 +320,11 @@ async fn get_work(
     rqctx: RequestContext<Arc<FileServerContext>>,
 ) -> Result<HttpResponseOk<bool>, HttpError> {
     let downstairs = &rqctx.context().downstairs;
-    let mut ds = downstairs.lock().await;
-
-    show_work(&mut ds);
-    Ok(HttpResponseOk(true))
+    downstairs
+        .show_work()
+        .await
+        .map(|_| HttpResponseOk(true))
+        .map_err(|e| HttpError::for_internal_error(e.to_string()))
 }
 
 #[cfg(test)]
@@ -359,8 +360,9 @@ mod test {
         region.extend(3).await?;
 
         // Determine the directory and name for expected extent files.
-        let ed = extent_dir(&dir, 1);
-        let mut ex_files = extent_file_list(ed, 1).unwrap();
+        let eid = ExtentId(1);
+        let ed = extent_dir(&dir, eid);
+        let mut ex_files = extent_file_list(ed, eid).unwrap();
         ex_files.sort();
         let expected = vec!["001"];
         println!("files: {:?}", ex_files);
@@ -380,12 +382,13 @@ mod test {
             Region::create(&dir, new_region_options(), csl()).await?;
         region.extend(3).await?;
 
-        region.close_extent(1).await.unwrap();
+        let eid = ExtentId(1);
+        region.close_extent(eid).await.unwrap();
 
         // Determine the directory and name for expected extent files.
-        let extent_dir = extent_dir(&dir, 1);
+        let extent_dir = extent_dir(&dir, eid);
 
-        let mut ex_files = extent_file_list(extent_dir, 1).unwrap();
+        let mut ex_files = extent_file_list(extent_dir, eid).unwrap();
         ex_files.sort();
         let expected = vec!["001"];
         println!("files: {:?}", ex_files);
@@ -404,14 +407,15 @@ mod test {
         region.extend(3).await?;
 
         // Determine the directory and name for expected extent files.
-        let extent_dir = extent_dir(&dir, 1);
+        let eid = ExtentId(1);
+        let extent_dir = extent_dir(&dir, eid);
 
         // Delete the extent file
         let mut rm_file = extent_dir.clone();
-        rm_file.push(extent_file_name(1, ExtentType::Data));
+        rm_file.push(extent_file_name(eid, ExtentType::Data));
         std::fs::remove_file(&rm_file).unwrap();
 
-        assert!(extent_file_list(extent_dir, 1).is_err());
+        assert!(extent_file_list(extent_dir, eid).is_err());
 
         Ok(())
     }

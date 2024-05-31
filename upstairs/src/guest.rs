@@ -10,11 +10,12 @@ use std::{
 };
 
 use crate::{
-    BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, JobId, ReplaceResult,
-    UpstairsAction, IO_OUTSTANDING_MAX_BYTES, IO_OUTSTANDING_MAX_JOBS,
+    BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, JobId, RawReadResponse,
+    ReplaceResult, UpstairsAction, IO_OUTSTANDING_MAX_BYTES,
+    IO_OUTSTANDING_MAX_JOBS,
 };
 use crucible_common::{build_logger, crucible_bail, Block, CrucibleError};
-use crucible_protocol::{RawReadResponse, SnapshotDetails};
+use crucible_protocol::SnapshotDetails;
 
 use async_trait::async_trait;
 use bytes::BytesMut;

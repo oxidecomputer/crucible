@@ -60,7 +60,7 @@ mod test {
                     value: blocks_per_extent,
                     shift: 9,
                 },
-                extent_count.into(),
+                extent_count,
                 Uuid::new_v4(),
                 encrypted,
                 backend,
@@ -77,7 +77,7 @@ mod test {
                 .await?;
 
             if let Some(ref clone_source) = clone_source {
-                clone_region(downstairs.clone(), *clone_source).await?
+                downstairs.lock().await.clone_region(*clone_source).await?
             }
 
             let _join_handle = start_downstairs(
@@ -153,8 +153,7 @@ mod test {
                     .set_logger(csl())
                     .build()
                     .await?;
-
-            clone_region(self.downstairs.clone(), source).await
+            self.downstairs.lock().await.clone_region(source).await
         }
 
         pub async fn address(&self) -> SocketAddr {

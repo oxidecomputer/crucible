@@ -3,12 +3,14 @@ use crate::{
     cdt, integrity_hash, live_repair::ExtentInfo, upstairs::UpstairsConfig,
     upstairs::UpstairsState, ClientIOStateCount, ClientId, CrucibleDecoder,
     CrucibleError, DownstairsIO, DsState, EncryptionContext, IOState, IOop,
-    JobId, Message, ReconcileIO, RegionDefinitionStatus, RegionMetadata,
+    JobId, Message, RawReadResponse, ReconcileIO, RegionDefinitionStatus,
+    RegionMetadata,
 };
-use crucible_common::{deadline_secs, verbose_timeout, x509::TLSContext};
+use crucible_common::{
+    deadline_secs, verbose_timeout, x509::TLSContext, ExtentId,
+};
 use crucible_protocol::{
-    BlockContext, MessageWriter, RawReadResponse, ReconciliationId,
-    CRUCIBLE_MESSAGE_VERSION,
+    BlockContext, MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
 };
 
 use std::{
@@ -886,7 +888,7 @@ impl DownstairsClient {
     pub(crate) fn enqueue(
         &mut self,
         io: &mut DownstairsIO,
-        last_repair_extent: Option<u64>,
+        last_repair_extent: Option<ExtentId>,
     ) -> IOState {
         assert_eq!(io.state[self.client_id], IOState::New);
 
@@ -2665,6 +2667,7 @@ impl ClientIoTask {
             self.response_tx.clone(),
             fr,
             self.log.clone(),
+            self.client_id,
         )));
 
         let mut ping_interval = deadline_secs(PING_INTERVAL_SECS);
@@ -2759,6 +2762,7 @@ impl ClientIoTask {
             }
         }
 
+        update_net_start_probes(&m, self.client_id);
         // There's some duplication between this function and `cmd_loop` above,
         // but it's not obvious whether there's a cleaner way to organize stuff.
         tokio::select! {
@@ -2795,6 +2799,7 @@ async fn rx_loop<R>(
     response_tx: mpsc::UnboundedSender<ClientResponse>,
     mut fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
     log: Logger,
+    cid: ClientId,
 ) -> ClientRunResult
 where
     R: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send + 'static,
@@ -2804,6 +2809,7 @@ where
             f = fr.next() => {
                 match f {
                     Some(Ok(m)) => {
+                        update_net_done_probes(&m, cid);
                         if let Err(e) =
                             response_tx.send(ClientResponse::Message(m))
                         {
@@ -2830,6 +2836,44 @@ where
                 break ClientRunResult::Timeout;
             }
         }
+    }
+}
+
+fn update_net_start_probes(m: &Message, cid: ClientId) {
+    match m {
+        Message::ReadRequest { job_id, .. } => {
+            cdt::ds__read__net__start!(|| (job_id.0, cid.get()));
+        }
+        Message::Write { ref header, .. } => {
+            cdt::ds__write__net__start!(|| (header.job_id.0, cid.get()));
+        }
+        Message::WriteUnwritten { ref header, .. } => {
+            cdt::ds__write__unwritten__net__start!(|| (
+                header.job_id.0,
+                cid.get()
+            ));
+        }
+        Message::Flush { job_id, .. } => {
+            cdt::ds__flush__net__start!(|| (job_id.0, cid.get()));
+        }
+        _ => {}
+    }
+}
+fn update_net_done_probes(m: &Message, cid: ClientId) {
+    match m {
+        Message::ReadResponse { ref header, .. } => {
+            cdt::ds__read__net__done!(|| (header.job_id.0, cid.get()));
+        }
+        Message::WriteAck { job_id, .. } => {
+            cdt::ds__write__net__done!(|| (job_id.0, cid.get()));
+        }
+        Message::WriteUnwrittenAck { job_id, .. } => {
+            cdt::ds__write__unwritten__net__done!(|| (job_id.0, cid.get()));
+        }
+        Message::FlushAck { job_id, .. } => {
+            cdt::ds__flush__net__done!(|| (job_id.0, cid.get()));
+        }
+        _ => {}
     }
 }
 

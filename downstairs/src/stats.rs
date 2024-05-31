@@ -149,7 +149,6 @@ pub async fn ox_stats(
         id: dss.ds_stat_wrap.lock().unwrap().stat_name.downstairs_uuid,
         kind: ProducerKind::Service,
         address: my_address,
-        base_route: String::new(),
         interval: Duration::from_secs(10),
     };
 

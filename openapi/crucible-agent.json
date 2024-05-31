@@ -319,7 +319,7 @@
           },
           "extent_count": {
             "type": "integer",
-            "format": "uint64",
+            "format": "uint32",
             "minimum": 0
           },
           "extent_size": {
@@ -409,7 +409,7 @@
           },
           "extent_count": {
             "type": "integer",
-            "format": "uint64",
+            "format": "uint32",
             "minimum": 0
           },
           "extent_size": {
@@ -439,7 +439,6 @@
           },
           "source": {
             "nullable": true,
-            "default": null,
             "type": "string"
           },
           "state": {

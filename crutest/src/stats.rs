@@ -26,7 +26,6 @@ pub fn client_oximeter(
         id: Uuid::new_v4(),
         kind: ProducerKind::Service,
         address: my_address,
-        base_route: String::new(),
         interval: tokio::time::Duration::from_secs(10),
     };
 

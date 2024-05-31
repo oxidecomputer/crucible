@@ -2,22 +2,24 @@
 use crate::{
     cdt, crucible_bail,
     extent::{check_input, extent_path, DownstairsBlockContext, ExtentInner},
+    extent_inner_raw_common::pwrite_all,
     integrity_hash,
-    region::{BatchedPwritev, JobOrReconciliationId},
-    Block, BlockContext, CrucibleError, JobId, RegionDefinition,
+    region::JobOrReconciliationId,
+    Block, BlockContext, CrucibleError, ExtentReadRequest, ExtentReadResponse,
+    ExtentWrite, JobId, RegionDefinition,
 };
-use crucible_protocol::{
-    EncryptionContext, RawReadResponse, ReadResponseBlockMetadata,
-};
+use crucible_common::ExtentId;
+use crucible_protocol::EncryptionContext;
 
 use anyhow::{bail, Result};
+use itertools::Itertools;
 use rusqlite::{params, Connection, Transaction};
 use slog::{error, Logger};
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::path::Path;
 
 #[derive(Debug)]
@@ -43,26 +45,25 @@ impl ExtentInner for SqliteInner {
         self.0.lock().unwrap().flush(new_flush, new_gen, job_id)
     }
 
-    fn read_into(
+    fn read(
         &mut self,
         job_id: JobId,
-        requests: &[crucible_protocol::ReadRequest],
-        out: &mut RawReadResponse,
+        req: ExtentReadRequest,
         _iov_max: usize, // unused by SQLite backend
-    ) -> Result<(), CrucibleError> {
-        self.0.lock().unwrap().read_into(job_id, requests, out)
+    ) -> Result<ExtentReadResponse, CrucibleError> {
+        self.0.lock().unwrap().read(job_id, req)
     }
 
     fn write(
         &mut self,
         job_id: JobId,
-        writes: &[crucible_protocol::Write],
+        write: &ExtentWrite,
         only_write_unwritten: bool,
         iov_max: usize,
     ) -> Result<(), CrucibleError> {
         self.0.lock().unwrap().write(
             job_id,
-            writes,
+            write,
             only_write_unwritten,
             iov_max,
         )
@@ -94,7 +95,7 @@ impl SqliteInner {
     pub fn create(
         dir: &Path,
         def: &RegionDefinition,
-        extent_number: u32,
+        extent_number: ExtentId,
     ) -> Result<Self> {
         let i = SqliteMoreInner::create(dir, def, extent_number)?;
         Ok(Self(i.into()))
@@ -103,7 +104,7 @@ impl SqliteInner {
     pub fn open(
         dir: &Path,
         def: &RegionDefinition,
-        extent_number: u32,
+        extent_number: ExtentId,
         read_only: bool,
         log: &Logger,
     ) -> Result<Self> {
@@ -148,7 +149,7 @@ struct SqliteMoreInner {
     metadb: Connection,
 
     /// Our extent number
-    extent_number: u32,
+    extent_number: ExtentId,
 
     /// Extent size, in blocks
     extent_size: Block,
@@ -203,7 +204,7 @@ impl SqliteMoreInner {
         let n_dirty_blocks = self.dirty_blocks.len() as u64;
 
         cdt::extent__flush__start!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0, n_dirty_blocks)
         });
 
         /*
@@ -211,7 +212,7 @@ impl SqliteMoreInner {
          * This must be done before we update the flush number.
          */
         cdt::extent__flush__file__start!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0, n_dirty_blocks)
         });
         if let Err(e) = self.file.sync_all() {
             /*
@@ -224,7 +225,7 @@ impl SqliteMoreInner {
             );
         }
         cdt::extent__flush__file__done!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0, n_dirty_blocks)
         });
 
         // Clear old block contexts. In order to be crash consistent, only
@@ -236,7 +237,7 @@ impl SqliteMoreInner {
         // file is rehashed, since in that case we don't have that luxury.
 
         cdt::extent__flush__collect__hashes__start!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0, n_dirty_blocks)
         });
 
         // Rehash any parts of the file that we *may have written* data to since
@@ -245,11 +246,11 @@ impl SqliteMoreInner {
         let n_rehashed = self.rehash_dirty_blocks()?;
 
         cdt::extent__flush__collect__hashes__done!(|| {
-            (job_id.get(), self.extent_number, n_rehashed as u64)
+            (job_id.get(), self.extent_number.0, n_rehashed as u64)
         });
 
         cdt::extent__flush__sqlite__insert__start!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0, n_dirty_blocks)
         });
 
         // We put all of our metadb updates into a single transaction to
@@ -264,7 +265,7 @@ impl SqliteMoreInner {
         )?;
 
         cdt::extent__flush__sqlite__insert__done!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0, n_dirty_blocks)
         });
 
         self.set_flush_number(new_flush, new_gen)?;
@@ -275,132 +276,95 @@ impl SqliteMoreInner {
         self.file.seek(SeekFrom::Start(0))?;
 
         cdt::extent__flush__done!(|| {
-            (job_id.get(), self.extent_number, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0, n_dirty_blocks)
         });
         Ok(())
     }
 
-    fn read_into(
+    fn read(
         &mut self,
         job_id: JobId,
-        requests: &[crucible_protocol::ReadRequest],
-        out: &mut RawReadResponse,
-    ) -> Result<(), CrucibleError> {
-        // This code batches up operations for contiguous regions of
-        // ReadRequests, so we can perform larger read syscalls and sqlite
-        // queries. This significantly improves read throughput.
+        req: ExtentReadRequest,
+    ) -> Result<ExtentReadResponse, CrucibleError> {
+        let mut buf = req.data;
 
-        // Keep track of the index of the first request in any contiguous run
-        // of requests. Of course, a "contiguous run" might just be a single
-        // request.
-        let mut req_run_start = 0;
-        let mut buf = out.data.split_off(out.data.len());
-        while req_run_start < requests.len() {
-            let first_req = &requests[req_run_start];
+        let block_size = self.extent_size.block_size_in_bytes() as u64;
+        let num_blocks = buf.capacity() as u64 / block_size;
+        check_input(self.extent_size, req.offset, buf.capacity())?;
 
-            // Starting from the first request in the potential run, we scan
-            // forward until we find a request with a block that isn't
-            // contiguous with the request before it. Since we're counting
-            // pairs, and the number of pairs is one less than the number of
-            // requests, we need to add 1 to get our actual run length.
-            let mut n_contiguous_blocks = 1;
+        // Query the block metadata
+        cdt::extent__read__get__contexts__start!(|| {
+            (job_id.0, self.extent_number.0, num_blocks)
+        });
+        let block_contexts =
+            self.get_block_contexts(req.offset.value, num_blocks)?;
+        cdt::extent__read__get__contexts__done!(|| {
+            (job_id.0, self.extent_number.0, num_blocks)
+        });
+        // Convert from DownstairsBlockContext -> BlockContext
+        let blocks = block_contexts
+            .into_iter()
+            .map(|bs| bs.into_iter().map(|b| b.block_context).collect())
+            .collect();
 
-            for request_window in requests[req_run_start..].windows(2) {
-                if request_window[0].offset.value + 1
-                    == request_window[1].offset.value
-                {
-                    n_contiguous_blocks += 1;
-                } else {
-                    break;
-                }
-            }
+        // To avoid a `memset`, we're reading directly into uninitialized
+        // memory in the buffer.  This is fine; we sized the buffer
+        // appropriately in advance (and will panic here if we messed up).
+        assert!(buf.is_empty());
 
-            // Create our responses and push them into the output. While we're
-            // at it, check for overflows.
-            let resp_run_start = out.blocks.len();
-            let block_size = self.extent_size.block_size_in_bytes() as u64;
-            for req in requests[req_run_start..][..n_contiguous_blocks].iter() {
-                let resp = ReadResponseBlockMetadata {
-                    eid: req.eid,
-                    offset: req.offset,
-                    block_contexts: Vec::with_capacity(1),
-                };
-                out.blocks.push(resp);
-            }
+        // Finally we get to read the actual data. That's why we're here
+        cdt::extent__read__file__start!(|| {
+            (job_id.0, self.extent_number.0, num_blocks)
+        });
 
-            // Calculate the number of expected bytes, then resize our buffer
-            //
-            // This should fill memory, but should not reallocate
-            let expected_bytes = n_contiguous_blocks * block_size as usize;
-            buf.resize(expected_bytes, 1);
-
-            let first_resp = &out.blocks[resp_run_start];
-            check_input(self.extent_size, first_resp.offset, &buf)?;
-
-            // Finally we get to read the actual data. That's why we're here
-            cdt::extent__read__file__start!(|| {
-                (job_id.0, self.extent_number, n_contiguous_blocks as u64)
-            });
-
-            nix::sys::uio::pread(
-                self.file.as_fd(),
-                &mut buf,
-                first_req.offset.value as i64 * block_size as i64,
+        // SAFETY: the buffer has sufficient capacity, and this is a valid
+        // file descriptor.
+        let expected_bytes = buf.capacity();
+        let r = unsafe {
+            libc::pread(
+                self.file.as_raw_fd(),
+                buf.spare_capacity_mut().as_mut_ptr() as *mut libc::c_void,
+                expected_bytes as libc::size_t,
+                req.offset.value as i64 * block_size as i64,
             )
-            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
-
-            cdt::extent__read__file__done!(|| {
-                (job_id.0, self.extent_number, n_contiguous_blocks as u64)
-            });
-
-            // Reattach this chunk to the main `BytesMut` array
-            //
-            // This should be O(1), because we allocated enough space to not
-            // reallocate anywhere in the process.
-            let chunk = buf.split_to(expected_bytes);
-            out.data.unsplit(chunk);
-
-            // Query the block metadata
-            cdt::extent__read__get__contexts__start!(|| {
-                (job_id.0, self.extent_number, n_contiguous_blocks as u64)
-            });
-            let block_contexts = self.get_block_contexts(
-                first_req.offset.value,
-                n_contiguous_blocks as u64,
-            )?;
-            cdt::extent__read__get__contexts__done!(|| {
-                (job_id.0, self.extent_number, n_contiguous_blocks as u64)
-            });
-
-            // Now it's time to put block contexts into the responses.
-            // We use into_iter here to move values out of enc_ctxts/hashes,
-            // avoiding a clone(). For code consistency, we use iters for the
-            // response and data chunks too. These iters will be the same length
-            // (equal to n_contiguous_requests) so zipping is fine
-            let resp_iter =
-                out.blocks[resp_run_start..][..n_contiguous_blocks].iter_mut();
-            let ctx_iter = block_contexts.into_iter();
-
-            for (resp, r_ctx) in resp_iter.zip(ctx_iter) {
-                resp.block_contexts =
-                    r_ctx.into_iter().map(|x| x.block_context).collect();
-            }
-
-            req_run_start += n_contiguous_blocks;
+        };
+        // Check against the expected number of bytes.  We could do more
+        // robust error handling here (e.g. retrying in a loop), but for
+        // now, simply bailing out seems wise.
+        let r = nix::errno::Errno::result(r).map(|r| r as usize);
+        let num_bytes = r.map_err(|e| {
+            CrucibleError::IoError(format!(
+                "extent {}: read failed: {e}",
+                self.extent_number
+            ))
+        })?;
+        if num_bytes != expected_bytes {
+            return Err(CrucibleError::IoError(format!(
+                "extent {}: incomplete read \
+                 (expected {expected_bytes}, got {num_bytes})",
+                self.extent_number
+            )));
         }
-        Ok(())
+        // SAFETY: we just initialized this chunk of the buffer
+        unsafe {
+            buf.set_len(expected_bytes);
+        }
+
+        cdt::extent__read__file__done!(|| {
+            (job_id.0, self.extent_number.0, num_blocks)
+        });
+
+        Ok(ExtentReadResponse { data: buf, blocks })
     }
 
     fn write(
         &mut self,
         job_id: JobId,
-        writes: &[crucible_protocol::Write],
+        write: &ExtentWrite,
         only_write_unwritten: bool,
-        iov_max: usize,
+        _iov_max: usize,
     ) -> Result<(), CrucibleError> {
-        for write in writes {
-            check_input(self.extent_size, write.offset, &write.data)?;
-        }
+        check_input(self.extent_size, write.offset, write.data.len())?;
 
         /*
          * In order to be crash consistent, perform the following steps in
@@ -443,6 +407,8 @@ impl SqliteMoreInner {
          * a checksum or not.  So it is required that a written block has
          * a checksum.
          */
+        let num_blocks = write.block_contexts.len() as u64;
+        let block_size = self.extent_size.block_size_in_bytes() as u64;
 
         // If `only_write_written`, we need to skip writing to blocks that
         // already contain data. We'll first query the metadata to see which
@@ -450,47 +416,26 @@ impl SqliteMoreInner {
         let mut writes_to_skip = HashSet::new();
         if only_write_unwritten {
             cdt::extent__write__get__hashes__start!(|| {
-                (job_id.0, self.extent_number, writes.len() as u64)
+                (job_id.0, self.extent_number.0, num_blocks)
             });
-            let mut write_run_start = 0;
-            while write_run_start < writes.len() {
-                let first_write = &writes[write_run_start];
 
-                // Starting from the first write in the potential run, we scan
-                // forward until we find a write with a block that isn't
-                // contiguous with the request before it. Since we're counting
-                // pairs, and the number of pairs is one less than the number of
-                // writes, we need to add 1 to get our actual run length.
-                let n_contiguous_writes = writes[write_run_start..]
-                    .windows(2)
-                    .take_while(|wr_pair| {
-                        wr_pair[0].offset.value + 1 == wr_pair[1].offset.value
-                    })
-                    .count()
-                    + 1;
+            // Query hashes for the write range.
+            // TODO we should consider adding a query that doesnt actually
+            // give us back the data, just checks for its presence.
+            let block_contexts =
+                self.get_block_contexts(write.offset.value, num_blocks)?;
 
-                // Query hashes for the write range.
-                // TODO we should consider adding a query that doesnt actually
-                // give us back the data, just checks for its presence.
-                let block_contexts = self.get_block_contexts(
-                    first_write.offset.value,
-                    n_contiguous_writes as u64,
-                )?;
-
-                for (i, block_contexts) in block_contexts.iter().enumerate() {
-                    if !block_contexts.is_empty() {
-                        let _ = writes_to_skip
-                            .insert(i as u64 + first_write.offset.value);
-                    }
+            for (i, block_contexts) in block_contexts.iter().enumerate() {
+                if !block_contexts.is_empty() {
+                    writes_to_skip.insert(i);
                 }
-
-                write_run_start += n_contiguous_writes;
             }
+
             cdt::extent__write__get__hashes__done!(|| {
-                (job_id.0, self.extent_number, writes.len() as u64)
+                (job_id.0, self.extent_number.0, num_blocks)
             });
 
-            if writes_to_skip.len() == writes.len() {
+            if writes_to_skip.len() == write.block_contexts.len() {
                 // Nothing to do
                 return Ok(());
             }
@@ -509,23 +454,27 @@ impl SqliteMoreInner {
         // TODO right now we're including the integrity_hash() time in the sqlite time. It's small in
         // comparison right now, but worth being aware of when looking at dtrace numbers
         cdt::extent__write__sqlite__insert__start!(|| {
-            (job_id.0, self.extent_number, writes.len() as u64)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
 
-        let mut hashes_to_write = Vec::with_capacity(writes.len());
-        for write in writes {
-            if writes_to_skip.contains(&write.offset.value) {
+        let mut hashes_to_write =
+            Vec::with_capacity(write.block_contexts.len());
+        for (i, ctx) in write.block_contexts.iter().enumerate() {
+            if writes_to_skip.contains(&i) {
                 hashes_to_write.push(None);
                 continue;
             }
 
             // TODO it would be nice if we could profile what % of time we're
             // spending on hashes locally vs sqlite
-            let on_disk_hash = integrity_hash(&[&write.data[..]]);
+            let on_disk_hash =
+                integrity_hash(&[&write.data[i * block_size as usize..]
+                    [..block_size as usize]]);
+            let offset = i as u64 + write.offset.value;
 
             self.set_block_context(&DownstairsBlockContext {
-                block_context: write.block_context,
-                block: write.offset.value,
+                block_context: *ctx,
+                block: offset,
                 on_disk_hash,
             })?;
 
@@ -538,13 +487,13 @@ impl SqliteMoreInner {
             // lets us easily test specific edge-cases of the database state.
             // Could make another function that wraps tx_set_block_context
             // and handles this as well.
-            self.dirty_blocks.insert(write.offset.value as usize, None);
+            self.dirty_blocks.insert(offset as usize, None);
             hashes_to_write.push(Some(on_disk_hash));
         }
         tx.commit()?;
 
         cdt::extent__write__sqlite__insert__done!(|| {
-            (job_id.0, self.extent_number, writes.len() as u64)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
 
         // PERFORMANCE TODO:
@@ -565,48 +514,45 @@ impl SqliteMoreInner {
         // introduces complexity. The time spent implementing that would
         // probably better be spent switching to aio or something like that.
         cdt::extent__write__file__start!(|| {
-            (job_id.0, self.extent_number, writes.len() as u64)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
 
-        // Now, batch writes into iovecs and use pwritev to write them all out.
-        let mut batched_pwritev = BatchedPwritev::new(
-            self.file.as_fd(),
-            writes.len(),
-            self.extent_size.block_size_in_bytes() as u64,
-            iov_max,
-        );
-
-        for write in writes {
-            let block = write.offset.value;
-
-            // TODO, can this be `only_write_unwritten &&
-            // write_to_skip.contains()`?
-            if writes_to_skip.contains(&block) {
-                debug_assert!(only_write_unwritten);
-                batched_pwritev.perform_writes()?;
+        // Perform writes, which may be broken up by skipped blocks
+        for (skip, mut group) in (0..write.block_contexts.len())
+            .group_by(|i| writes_to_skip.contains(i))
+            .into_iter()
+        {
+            if skip {
                 continue;
             }
+            let start = group.next().unwrap();
+            let count = group.count() + 1;
 
-            batched_pwritev.add_write(write)?;
+            let data = &write.data[start * block_size as usize..]
+                [..count * block_size as usize];
+            let start_block = write.offset.value + start as u64;
+
+            pwrite_all(
+                self.file.as_fd(),
+                data,
+                (start_block * block_size) as i64,
+            )
+            .map_err(|e| CrucibleError::IoError(e.to_string()))?;
         }
 
-        // Write any remaining data
-        batched_pwritev.perform_writes()?;
-
         cdt::extent__write__file__done!(|| {
-            (job_id.0, self.extent_number, writes.len() as u64)
+            (job_id.0, self.extent_number.0, num_blocks)
         });
 
         // At this point, we know that the written data for the target blocks
         // must match the integrity hashes calculated above (and stored to
         // SQLite).  We can therefore store pre-computed hash values for these
         // dirty blocks, allowing us to skip rehashing during a flush operation.
-        for (write, hash) in writes.iter().zip(&hashes_to_write) {
+        for (i, hash) in (0..num_blocks).zip(&hashes_to_write) {
+            let offset = i + write.offset.value;
             if let Some(h) = hash {
                 // This overwrites the `None` value written above!
-                let prev = self
-                    .dirty_blocks
-                    .insert(write.offset.value as usize, Some(*h));
+                let prev = self.dirty_blocks.insert(offset as usize, Some(*h));
                 assert_eq!(prev, Some(None));
             }
         }
@@ -715,7 +661,7 @@ impl SqliteMoreInner {
     fn create(
         dir: &Path,
         def: &RegionDefinition,
-        extent_number: u32,
+        extent_number: ExtentId,
     ) -> Result<Self> {
         use crate::{
             extent::{ExtentMeta, EXTENT_META_SQLITE},
@@ -869,7 +815,7 @@ impl SqliteMoreInner {
     fn open(
         dir: &Path,
         def: &RegionDefinition,
-        extent_number: u32,
+        extent_number: ExtentId,
         read_only: bool,
         log: &Logger,
     ) -> Result<Self> {
@@ -1227,8 +1173,8 @@ fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
 mod test {
     use super::*;
     use bytes::{Bytes, BytesMut};
-    use crucible_protocol::ReadRequest;
     use rand::Rng;
+    use rand::RngCore;
     use tempfile::tempdir;
 
     const IOV_MAX_TEST: usize = 1000;
@@ -1241,9 +1187,12 @@ mod test {
     #[test]
     fn encryption_context() -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = SqliteInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Encryption context for blocks 0 and 1 should start blank
 
@@ -1395,9 +1344,12 @@ mod test {
     #[test]
     fn duplicate_context_insert() -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = SqliteInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         assert!(inner.get_block_contexts(0, 1)?[0].is_empty());
 
@@ -1432,9 +1384,12 @@ mod test {
     #[test]
     fn multiple_context() -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = SqliteInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Encryption context for blocks 0 and 1 should start blank
 
@@ -1622,23 +1577,25 @@ mod test {
     fn test_fully_rehash_and_clean_does_not_mark_blocks_as_written(
     ) -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = SqliteInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Write a block, but don't flush.
         let data = Bytes::from(vec![0x55; 512]);
         let hash = integrity_hash(&[&data[..]]);
-        let write = crucible_protocol::Write {
-            eid: 0,
+        let write = ExtentWrite {
             offset: Block::new_512(0),
             data,
-            block_context: BlockContext {
+            block_contexts: vec![BlockContext {
                 encryption_context: None,
                 hash,
-            },
+            }],
         };
-        inner.write(JobId(10), &[write], false, IOV_MAX_TEST)?;
+        inner.write(JobId(10), &write, false, IOV_MAX_TEST)?;
 
         // We haven't flushed, but this should leave our context in place.
         inner.fully_rehash_and_clean_all_stale_contexts(false)?;
@@ -1652,29 +1609,21 @@ mod test {
                 encryption_context: None,
                 hash,
             };
-            let write = crucible_protocol::Write {
-                eid: 0,
+            let write = ExtentWrite {
                 offset: Block::new_512(0),
                 data: data.clone(),
-                block_context,
+                block_contexts: vec![block_context],
             };
-            inner.write(JobId(20), &[write], true, IOV_MAX_TEST)?;
+            inner.write(JobId(20), &write, true, IOV_MAX_TEST)?;
 
-            let read = ReadRequest {
-                eid: 0,
+            let read = ExtentReadRequest {
                 offset: Block::new_512(0),
+                data: BytesMut::with_capacity(512),
             };
-            let resp = inner.read(JobId(21), &[read], IOV_MAX_TEST)?;
+            let resp = inner.read(JobId(21), read, IOV_MAX_TEST)?;
 
             // We should not get back our data, because block 0 was written.
-            assert_ne!(
-                resp.blocks,
-                vec![ReadResponseBlockMetadata {
-                    eid: 0,
-                    offset: Block::new_512(0),
-                    block_contexts: vec![block_context]
-                }]
-            );
+            assert_ne!(resp.blocks, vec![vec![block_context]]);
             assert_ne!(resp.data, BytesMut::from(data.as_ref()));
         }
 
@@ -1686,29 +1635,21 @@ mod test {
                 encryption_context: None,
                 hash,
             };
-            let write = crucible_protocol::Write {
-                eid: 0,
+            let write = ExtentWrite {
                 offset: Block::new_512(1),
                 data: data.clone(),
-                block_context,
+                block_contexts: vec![block_context],
             };
-            inner.write(JobId(30), &[write], true, IOV_MAX_TEST)?;
+            inner.write(JobId(30), &write, true, IOV_MAX_TEST)?;
 
-            let read = ReadRequest {
-                eid: 0,
+            let read = ExtentReadRequest {
                 offset: Block::new_512(1),
+                data: BytesMut::with_capacity(512),
             };
-            let resp = inner.read(JobId(31), &[read], IOV_MAX_TEST)?;
+            let resp = inner.read(JobId(31), read, IOV_MAX_TEST)?;
 
             // We should get back our data! Block 1 was never written.
-            assert_eq!(
-                resp.blocks,
-                vec![ReadResponseBlockMetadata {
-                    eid: 0,
-                    offset: Block::new_512(1),
-                    block_contexts: vec![block_context]
-                }]
-            );
+            assert_eq!(resp.blocks, vec![vec![block_context]]);
             assert_eq!(resp.data, BytesMut::from(data.as_ref()));
         }
 
@@ -1726,9 +1667,12 @@ mod test {
     fn test_fully_rehash_marks_blocks_unwritten_if_data_never_hit_disk(
     ) -> Result<()> {
         let dir = tempdir()?;
-        let mut inner =
-            SqliteInner::create(dir.as_ref(), &new_region_definition(), 0)
-                .unwrap();
+        let mut inner = SqliteInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
 
         // Partial write, the data never hits disk, but there's a context
         // in the DB and the dirty flag is set.
@@ -1752,31 +1696,74 @@ mod test {
                 encryption_context: None,
                 hash,
             };
-            let write = crucible_protocol::Write {
-                eid: 0,
+            let write = ExtentWrite {
                 offset: Block::new_512(0),
                 data: data.clone(),
-                block_context,
+                block_contexts: vec![block_context],
             };
-            inner.write(JobId(30), &[write], true, IOV_MAX_TEST)?;
+            inner.write(JobId(30), &write, true, IOV_MAX_TEST)?;
 
-            let read = ReadRequest {
-                eid: 0,
+            let read = ExtentReadRequest {
                 offset: Block::new_512(0),
+                data: BytesMut::with_capacity(512),
             };
-            let resp = inner.read(JobId(31), &[read], IOV_MAX_TEST)?;
+            let resp = inner.read(JobId(31), read, IOV_MAX_TEST)?;
 
             // We should get back our data! Block 1 was never written.
-            assert_eq!(
-                resp.blocks,
-                vec![ReadResponseBlockMetadata {
-                    eid: 0,
-                    offset: Block::new_512(0),
-                    block_contexts: vec![block_context]
-                }]
-            );
+            assert_eq!(resp.blocks, vec![vec![block_context]]);
             assert_eq!(resp.data, BytesMut::from(data.as_ref()));
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_dirty_hash_correct() -> Result<()> {
+        let dir = tempdir()?;
+        let mut inner = SqliteInner::create(
+            dir.as_ref(),
+            &new_region_definition(),
+            ExtentId(0),
+        )
+        .unwrap();
+
+        // Run a full rehash, which should clear out that partial write.
+        inner.fully_rehash_and_clean_all_stale_contexts(false)?;
+
+        // Writing to block 0 should succeed with only_write_unwritten
+        let mut data = BytesMut::from(&vec![0u8; 512 * 2] as &[u8]);
+        let mut rng = rand::thread_rng();
+        rng.fill_bytes(&mut data);
+        let data = data.freeze();
+
+        let block_contexts: Vec<_> = data
+            .chunks(512)
+            .map(|c| BlockContext {
+                encryption_context: None,
+                hash: integrity_hash(&[c]),
+            })
+            .collect();
+        let write = ExtentWrite {
+            offset: Block::new_512(0),
+            data: data.clone(),
+            block_contexts: block_contexts.clone(),
+        };
+        inner.write(JobId(30), &write, true, IOV_MAX_TEST)?;
+
+        let read = || ExtentReadRequest {
+            offset: Block::new_512(0),
+            data: BytesMut::with_capacity(512 * 2),
+        };
+        let resp = inner.read(JobId(31), read(), IOV_MAX_TEST)?;
+        let expected_blocks: Vec<_> =
+            block_contexts.iter().map(|b| vec![*b]).collect();
+        assert_eq!(resp.blocks, expected_blocks);
+        assert_eq!(resp.data, BytesMut::from(data.as_ref()));
+
+        inner.fully_rehash_and_clean_all_stale_contexts(true)?;
+        let resp = inner.read(JobId(31), read(), IOV_MAX_TEST)?;
+        assert_eq!(resp.blocks, expected_blocks);
+        assert_eq!(resp.data, BytesMut::from(data.as_ref()));
 
         Ok(())
     }

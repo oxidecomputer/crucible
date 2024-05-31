@@ -1,5 +1,46 @@
 # Oxide DTrace Crucible scripts
 
+## all_downstairs.d
+A DTrace script to show IOs coming and going on all downstairs as well as the
+work task geting new work, performing the work and completing the work. Stats
+are printed at a 4 second interval.
+
+The columns show counts in the last 4 seconds of:
+F>  Flush coming in from the upstairs
+F<  Flush completed message being sent back to the upstairs.
+W>  Write coming in from the upstairs
+W<  Write completed message being sent back to the upstairs.
+R>  Read coming in from the upstairs
+R<  Read completed message being sent back to the upstairs.
+WS  An IO has been submitted to the work task in the downstairs
+WIP An IO is taken off the work queue by the downstairs work task.
+WD  An IO is completed by the downstairs work task.
+
+If a downstairs has not done any IOs it will either print no line, or
+print a line of zeros.
+
+```
+EVT22200005 # dtrace -s /alan/dtrace/all_downstairs.d
+  PID   F>   F<   W>   W<    R>    R<    WS   WIP    WD
+13790   10    9 1911 1835     0     0  1943  1867  1867
+25574   10   10 2204 2082     0     0  2237  2115  2114
+25442   10   10 2204 2089     0     0  2236  2122  2121
+  PID   F>   F<   W>   W<    R>    R<    WS   WIP    WD
+17147    2    2    0    0   389   389   391   391   391
+25492    2    2    0    0   389   389   391   391   391
+25627    2    2    0    0   389   389   391   391   391
+25442   10    9 2283 2177     0     0  2315  2207  2208
+25574   10    9 2283 2184     0     0  2314  2214  2215
+13790   10   10 2054 2030     0     0  2085  2061  2061
+  PID   F>   F<   W>   W<    R>    R<    WS   WIP    WD
+17147    2    2    2    2     0     0     4     4     4
+25492    2    2    2    2     0     0     4     4     4
+25627    2    2    2    2     0     0     4     4     4
+13790   10   10 1961 1985     0     0  1994  2018  2018
+25442   10   10 2042 2185     0     0  2074  2218  2217
+25574   10   10 2045 2185     0     0  2077  2218  2217
+```
+
 ## downstairs_count.d
 A DTrace script to show IOs coming and going on a downstairs as well as the
 work task geting new work, performing the work and completing the work.  This
@@ -82,18 +123,22 @@ queue of work for the three downstairs.
 IO that it is ready to ack.
 3: From the IO being ready to ack, to that ack being sent.
 
-## perfdw.d
-This is a simple dtrace script that measures latency times for when a r/w/f
+## perf-ds-client.d
+A DTrace script that records the time in the Upstairs from when a Message
+is sent to a client task to when that client task returns the response.
+
+## perf-ds-net.d
+This is a simple DTrace script that measures latency times for when a r/w/f
 job is sent over the network to each downstairs to when the ACK for that job
 is returned to the upstairs. Jobs are sorted by type (r/w/f) and by each
 downstairs client ID.
 ```
-sudo dtrace -s perfdw.d
+sudo dtrace -s perf-net-ds.d
 ```
 
 Here is an example of how it might look:
 ```
-final:crucible alan$ sudo sudo dtrace -Z -s perfdw.d
+final:crucible alan$ sudo sudo dtrace -Z -s perf-net-ds.d
 Password:
 dtrace: system integrity protection is on, some features will not be available
 
@@ -220,7 +265,7 @@ dtrace: script 'perfdw.d' matched 0 probes
 ```
 
 ## perfgw.d
-This is a simple dtrace script that measures latency times for when a r/w/f
+This is a simple DTrace script that measures latency times for when a r/w/f
 job is submitted to the internal upstairs work queue, to when that job has
 completed and the notification was sent back to the guest.
 If the upstairs is not yet running, add the -Z flag to dtrace so it will
@@ -334,6 +379,50 @@ Trace a downstairs IO and measure time for in in the following three parts:
 * 1st report is time for IO received (from upstairs) to sending it to the OS.
 * 2nd report is OS time (for flush, to flush all extents)
 * 3rd report is OS done to downstairs sending the ACK back to upstairs
+
+## single_up_info.d
+Similar to upstairs_info.d, this script prints out various counters in
+the upstairs.  However, you specify a PID and it will display stats for
+only that PID.  See upstairs_info.d for a description of the columns.
+
+```
+EVT22200005 # dtrace -s single_up_info.d 15579
+ SESSION        DS STATE 0        DS STATE 1        DS STATE 2   UPW   DSW  NEXT_JOB BAKPR   WRITE_BO   NEW0  NEW1  NEW2    IP0   IP1   IP2     D0    D1    D2     S0    S1    S2    ER0   ER1   ER2    EC0   EC1   EC2
+c0b92059       live_repair            active            active     3   435    570215  2761  226492416      0     0     0     40   241   241     24   194   194    371     0     0   9384     0     0      0     0     0
+a666a8bd       live_repair            active            active     2     3     90656     0          0      0     0     0      2     1     1      1     2     2      0     0     0   7561     0     0  11640     0     0
+a666a8bd       live_repair            active            active     2    11     90664     0          0      0     0     0      2     1     1      9    10    10      0     0     0   7563     0     0  11640     0     0
+c0b92059       live_repair            active            active     3   514    570762  3111  237219840      0     0     0     67   234   234     33   280   280    414     0     0   9385     0     0      0     0     0
+c0b92059       live_repair            active            active     3   329    571129  2929  231735296      0     0     0      1   227   251     59   102    78    269     0     0   9386     0     0      0     0     0
+a666a8bd       live_repair            active            active     2    19     90672     0          0      0     0     0      2     1     1     17    18    18      0     0     0   7565     0     0  11640     0     0
+c0b92059       live_repair            active            active     3   339    571544   512  127401984      0     0     0      1   139   137     54   200   202    284     0     0   9387     0     0      0     0     0
+a666a8bd       live_repair            active            active     2    23     90676     0          0      0     0     0      2     1     1     21    22    22      0     0     0   7566     0     0  11640     0     0
+c0b92059       live_repair            active            active     3   389    572038   221  101711872      0     0     0      1   112   112     67   277   277    321     0     0   9388     0     0      0     0     0
+a666a8bd       live_repair            active            active     2    31     90684     0          0      0     0     0      2     1     1     29    30    30      0     0     0   7568     0     0  11640     0     0
+```
+## sled_upstairs_info.d
+Similar to upstairs_info.d, this script prints out various counters in
+the upstairs for all process that have an upstairs running on the system.
+See upstairs_info.d for a description of the columns.
+This script adds a PID and a SESSION to identify which upstairs we are
+reporting stats for.
+
+```
+EVT22200005 # dtrace -s sled_upstairs_info.d 
+  PID  SESSION        DS STATE 0        DS STATE 1        DS STATE 2   UPW   DSW  NEXT_JOB BAKPR   WRITE_BO   NEW0  NEW1  NEW2    IP0   IP1   IP2     D0    D1    D2     S0    S1    S2    ER0   ER1   ER2    EC0   EC1   EC2
+15579 c0b92059       live_repair            active            active     3   367    656347  1616  185597952      0     0     0     75   195   195     69   172   172    223     0     0   9589     0     0      0     0     0
+15579 a666a8bd       live_repair            active            active     2    95     91960     0          0      0     0     0      2     1     1     93    94    94      0     0     0   7827     0     0  11667     0     0
+24948 fac8cbba               new               new               new     0     0      1000     0          0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0
+24948 fac8cbba               new               new               new     0     0      1000     0          0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0
+24948 79d92ceb            active            active            active     0     0      1000     0          0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0
+15579 c0b92059       live_repair            active            active     3   432    656863  2077  203423744      0     0     0    104   168   168     68   264   264    260     0     0   9590     0     0      0     0     0
+15579 a666a8bd       live_repair            active            active     2    99     91964     0          0      0     0     0      2     1     1     97    98    98      0     0     0   7828     0     0  11667     0     0
+24948 127b8de5               new               new               new     0     0      1000     0          0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0
+24948 fac8cbba               new               new               new     0     0      1000     0          0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0
+24948 79d92ceb            active            active            active     0     0      1000     0          0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0
+15579 c0b92059       live_repair            active            active     4   529    657227  4805  282066944      0     0     0     95   296   296     80   233   233    354     0     0   9591     0     0      0     0     0
+15579 a666a8bd       live_repair            active            active     2   107     91972     0          0      0     0     0      2     1     1    105   106   106      0     0     0   7830     0     0  11667     0     0
+
+```
 
 ## upstairs_action.d
 This is a dtrace script for printing the counts of the upstairs main action

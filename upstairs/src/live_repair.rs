@@ -234,7 +234,10 @@ pub mod repair_test {
         }
 
         // The extent repair task should complete without error.
-        assert_eq!(up.downstairs.repair().as_ref().unwrap().active_extent, 1);
+        assert_eq!(
+            up.downstairs.repair().as_ref().unwrap().active_extent,
+            ExtentId(1)
+        );
 
         // We should have 6 jobs on the queue; 4 from the first extent, and 2
         // more for the next extent (which was started when the job was acked)
@@ -377,7 +380,10 @@ pub mod repair_test {
         }
 
         // The extent repair task should complete without error.
-        assert_eq!(up.downstairs.repair().as_ref().unwrap().active_extent, 1);
+        assert_eq!(
+            up.downstairs.repair().as_ref().unwrap().active_extent,
+            ExtentId(1)
+        );
 
         // We should have 6 jobs on the queue.
         // Four from the first extent we just repaired, and two more for the
@@ -1090,13 +1096,13 @@ pub mod repair_test {
         client.checked_state_transition(&up.state, DsState::LiveRepairReady);
         up.on_repair_check();
         assert!(up.downstairs.live_repair_in_progress());
-        assert_eq!(up.downstairs.last_repair_extent(), Some(0));
+        assert_eq!(up.downstairs.last_repair_extent(), Some(ExtentId(0)));
 
         // We should have reserved ids 1000 -> 1003
         assert_eq!(up.downstairs.peek_next_id(), JobId(1004));
 
         // Now, reserve IDs for extent 1
-        up.downstairs.reserve_repair_ids_for_extent(1);
+        up.downstairs.reserve_repair_ids_for_extent(ExtentId(1));
         // The reservation should have taken 1004 -> 1007
         assert_eq!(up.downstairs.peek_next_id(), JobId(1008));
     }

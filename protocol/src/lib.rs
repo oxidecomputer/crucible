@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 const MAX_FRM_LEN: usize = 100 * 1024 * 1024; // 100M
 
-use crucible_common::{Block, CrucibleError, RegionDefinition};
+use crucible_common::{Block, CrucibleError, ExtentId, RegionDefinition};
 
 /// Wrapper type for a job ID
 ///
@@ -115,89 +115,14 @@ impl std::fmt::Display for ClientId {
     }
 }
 
-/// Deserialized write operation
-///
-/// `data` should be a borrowed section of the received `Message::Write`, to
-/// reduce memory copies.
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-pub struct Write {
-    pub eid: u64,
-    pub offset: Block,
-    pub data: bytes::Bytes,
-
-    pub block_context: BlockContext,
-}
-
-/// Write data, containing data from all blocks
-#[derive(Debug)]
-pub struct RawWrite {
-    /// Per-block metadata
-    pub blocks: Vec<WriteBlockMetadata>,
-    /// Raw data
-    pub data: bytes::BytesMut,
-}
-
-impl RawWrite {
-    /// Builds a new empty `RawWrite` with the given capacity
-    pub fn with_capacity(block_count: usize, block_size: u64) -> Self {
-        Self {
-            blocks: Vec::with_capacity(block_count),
-            data: bytes::BytesMut::with_capacity(
-                block_count * block_size as usize,
-            ),
-        }
-    }
-}
-
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReadRequest {
-    pub eid: u64,
+    pub eid: ExtentId,
     pub offset: Block,
 }
 
-/// Read response data, containing data from all blocks
-///
-/// Do not derive `Clone` on this type; it will be expensive and tempting to
-/// call by accident!
-#[derive(Debug, Default)]
-pub struct RawReadResponse {
-    /// Per-block metadata
-    pub blocks: Vec<ReadResponseBlockMetadata>,
-    /// Raw data
-    pub data: bytes::BytesMut,
-}
-
-impl RawReadResponse {
-    /// Builds a new empty `RawReadResponse` with the given capacity
-    pub fn with_capacity(block_count: usize, block_size: u64) -> Self {
-        Self {
-            blocks: Vec::with_capacity(block_count),
-            data: bytes::BytesMut::with_capacity(
-                block_count * block_size as usize,
-            ),
-        }
-    }
-
-    pub fn hashes(&self, i: usize) -> Vec<u64> {
-        self.blocks[i].hashes()
-    }
-
-    pub fn first_hash(&self, i: usize) -> Option<u64> {
-        self.blocks[i].first_hash()
-    }
-
-    pub fn encryption_contexts(
-        &self,
-        i: usize,
-    ) -> Vec<Option<&EncryptionContext>> {
-        self.blocks[i].encryption_contexts()
-    }
-}
-
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BlockContext {
     /// If this is a non-encrypted write, then the integrity hasher has the
     /// data as an input:
@@ -222,8 +147,7 @@ pub struct BlockContext {
     pub encryption_context: Option<EncryptionContext>,
 }
 
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EncryptionContext {
     pub nonce: [u8; 12],
     pub tag: [u8; 16],
@@ -245,6 +169,10 @@ pub struct SnapshotDetails {
 #[repr(u32)]
 #[derive(IntoPrimitive)]
 pub enum MessageVersion {
+    /// Switched to using `ExtentId(pub u32)` everywhere, instead of a mix of
+    /// `u32` / `u64` / `usize`.
+    V7 = 7,
+
     /// Changed `Write`, `WriteUnwritten`, and `ReadResponse` variants to have a
     /// clean split between header and bulk data, to reduce `memcpy`
     ///
@@ -272,7 +200,7 @@ pub enum MessageVersion {
 }
 impl MessageVersion {
     pub const fn current() -> Self {
-        Self::V6
+        Self::V7
     }
 }
 
@@ -281,7 +209,7 @@ impl MessageVersion {
  * This, along with the MessageVersion enum above should be updated whenever
  * changes are made to the Message enum below.
  */
-pub const CRUCIBLE_MESSAGE_VERSION: u32 = 6;
+pub const CRUCIBLE_MESSAGE_VERSION: u32 = 7;
 
 /*
  * If you add or change the Message enum, you must also increment the
@@ -390,19 +318,19 @@ pub enum Message {
     /// Send a close the given extent ID on the downstairs.
     ExtentClose {
         repair_id: ReconciliationId,
-        extent_id: usize,
+        extent_id: ExtentId,
     },
 
     /// Send a request to reopen the given extent.
     ExtentReopen {
         repair_id: ReconciliationId,
-        extent_id: usize,
+        extent_id: ExtentId,
     },
 
     /// Flush just this extent on just this downstairs client.
     ExtentFlush {
         repair_id: ReconciliationId,
-        extent_id: usize,
+        extent_id: ExtentId,
         client_id: ClientId,
         flush_number: u64,
         gen_number: u64,
@@ -411,7 +339,7 @@ pub enum Message {
     /// Replace an extent with data from the given downstairs.
     ExtentRepair {
         repair_id: ReconciliationId,
-        extent_id: usize,
+        extent_id: ExtentId,
         source_client_id: ClientId,
         source_repair_address: SocketAddr,
         dest_clients: Vec<ClientId>,
@@ -425,7 +353,7 @@ pub enum Message {
     /// A problem with the given extent
     ExtentError {
         repair_id: ReconciliationId,
-        extent_id: usize,
+        extent_id: ExtentId,
         error: CrucibleError,
     },
 
@@ -441,7 +369,7 @@ pub enum Message {
         session_id: Uuid,
         job_id: JobId,
         dependencies: Vec<JobId>,
-        extent_id: usize,
+        extent_id: ExtentId,
     },
     /// Flush and then close an extent.
     ExtentLiveFlushClose {
@@ -449,7 +377,7 @@ pub enum Message {
         session_id: Uuid,
         job_id: JobId,
         dependencies: Vec<JobId>,
-        extent_id: usize,
+        extent_id: ExtentId,
         flush_number: u64,
         gen_number: u64,
     },
@@ -459,7 +387,7 @@ pub enum Message {
         session_id: Uuid,
         job_id: JobId,
         dependencies: Vec<JobId>,
-        extent_id: usize,
+        extent_id: ExtentId,
         source_client_id: ClientId,
         source_repair_address: SocketAddr,
     },
@@ -469,7 +397,7 @@ pub enum Message {
         session_id: Uuid,
         job_id: JobId,
         dependencies: Vec<JobId>,
-        extent_id: usize,
+        extent_id: ExtentId,
     },
     /// There is no real work to do, but we need to complete this job id
     ExtentLiveNoOp {
@@ -563,7 +491,7 @@ pub enum Message {
          * The ending extent where a flush should stop.
          * This value is unique per downstairs.
          */
-        extent_limit: Option<usize>,
+        extent_limit: Option<ExtentId>,
     },
     FlushAck {
         upstairs_id: Uuid,
@@ -622,32 +550,9 @@ pub struct WriteHeader {
     pub blocks: Vec<WriteBlockMetadata>,
 }
 
-impl WriteHeader {
-    /// Destructures into a list of block-size writes which borrow our data
-    ///
-    /// # Panics
-    /// `buf.len()` must be an even multiple of `self.blocks.len()`, which is
-    /// assumed to be the block size.
-    pub fn get_writes(&self, mut buf: bytes::Bytes) -> Vec<Write> {
-        assert_eq!(buf.len() % self.blocks.len(), 0);
-        let block_size = buf.len() / self.blocks.len();
-        let mut out = Vec::with_capacity(self.blocks.len());
-        for b in &self.blocks {
-            let data = buf.split_to(block_size);
-            out.push(Write {
-                eid: b.eid,
-                offset: b.offset,
-                block_context: b.block_context,
-                data,
-            })
-        }
-        out
-    }
-}
-
 #[derive(Debug, PartialEq, Copy, Clone, Serialize, Deserialize)]
 pub struct WriteBlockMetadata {
-    pub eid: u64,
+    pub eid: ExtentId,
     pub offset: Block,
     pub block_context: BlockContext,
 }
@@ -662,7 +567,7 @@ pub struct ReadResponseHeader {
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReadResponseBlockMetadata {
-    pub eid: u64,
+    pub eid: ExtentId,
     pub offset: Block,
     pub block_contexts: Vec<BlockContext>,
 }
@@ -918,7 +823,7 @@ impl CrucibleEncoder {
 
     fn a_write(bs: usize) -> WriteBlockMetadata {
         WriteBlockMetadata {
-            eid: 1,
+            eid: ExtentId(1),
             offset: Block::new(1, bs.trailing_zeros()),
             block_context: BlockContext {
                 hash: 0,
@@ -1344,7 +1249,7 @@ mod tests {
                 job_id: JobId(1),
                 dependencies: vec![],
                 blocks: vec![WriteBlockMetadata {
-                    eid: 0,
+                    eid: ExtentId(0),
                     offset: Block::new_512(0),
                     block_context: BlockContext {
                         hash,

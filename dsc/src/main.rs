@@ -74,7 +74,7 @@ enum Action {
 
         /// The extent count for the region
         #[clap(long, default_value = "15", action)]
-        extent_count: u64,
+        extent_count: u32,
 
         /// default output directory
         #[clap(long, global = true, default_value = "/tmp/dsc", action)]
@@ -183,7 +183,7 @@ enum Action {
 
         /// If creating, the extent count for the region
         #[clap(long, default_value = "15", action)]
-        extent_count: u64,
+        extent_count: u32,
 
         /// Downstairs will all be started read only (default: false)
         #[clap(long, action, default_value = "false")]
@@ -453,7 +453,7 @@ impl DscInfo {
     async fn create_region_set(
         &self,
         extent_size: u64,
-        extent_count: u64,
+        extent_count: u32,
         block_size: u32,
         encrypted: bool,
         region_count: usize,
@@ -483,7 +483,7 @@ impl DscInfo {
         &self,
         ds_id: usize,
         extent_size: u64,
-        extent_count: u64,
+        extent_count: u32,
         block_size: u32,
         quiet: bool,
         encrypted: bool,
@@ -1175,7 +1175,7 @@ async fn ds_start_monitor(
 async fn loop_create_test(
     dsci: &DscInfo,
     extent_size: u64,
-    extent_count: u64,
+    extent_count: u32,
     block_size: u32,
 ) -> Result<()> {
     let mut times = Vec::new();
@@ -1217,8 +1217,8 @@ async fn loop_create_test(
 /*
  * Return a formatted string of the region size in SI units.
  */
-fn region_si(es: u64, ec: u64, bs: u32) -> String {
-    let sz = Byte::from_u64(bs as u64 * es * ec);
+fn region_si(es: u64, ec: u32, bs: u32) -> String {
+    let sz = Byte::from_u64(bs as u64 * es * ec as u64);
     format!("{sz:#>11}")
 }
 
@@ -1237,7 +1237,7 @@ fn efile_si(es: u64, bs: u32) -> String {
 async fn single_create_test(
     dsci: &DscInfo,
     extent_size: u64,
-    extent_count: u64,
+    extent_count: u32,
     block_size: u32,
     csv: &mut Option<&mut csv::Writer<File>>,
 ) -> Result<()> {
@@ -1257,7 +1257,7 @@ async fn single_create_test(
     if let Some(csv) = csv {
         csv.serialize((
             ct,
-            block_size as u64 * extent_size * extent_count,
+            block_size as u64 * extent_size * extent_count as u64,
             block_size as u64 * extent_size,
             extent_size,
             extent_count,
@@ -1336,7 +1336,7 @@ async fn region_create_test(
         for es in extent_size.iter() {
             // With power of 2 region sizes, the rs/es should always yield
             // a correct ec.
-            let ec = (rs / (block_size as u64)) / es;
+            let ec = ((rs / (block_size as u64)) / es) as u32;
             if long {
                 loop_create_test(dsci, *es, ec, block_size).await?;
             } else {

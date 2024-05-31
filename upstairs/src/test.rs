@@ -59,8 +59,8 @@ pub(crate) mod up_test {
         build_logger()
     }
 
-    fn extent_tuple(eid: u64, offset: u64) -> (u64, Block) {
-        (eid, Block::new_512(offset))
+    fn extent_tuple(eid: u32, offset: u64) -> (ExtentId, Block) {
+        (ExtentId(eid), Block::new_512(offset))
     }
 
     #[test]
@@ -131,7 +131,7 @@ pub(crate) mod up_test {
         up: &Upstairs,
         offset: Block,
         num_blocks: u64,
-    ) -> Vec<(u64, Block)> {
+    ) -> Vec<(ExtentId, Block)> {
         let ddef = up.get_region_definition();
         let num_blocks = Block::new_with_ddef(num_blocks, &ddef);
         extent_from_offset(&ddef, offset, num_blocks)
@@ -215,10 +215,18 @@ pub(crate) mod up_test {
          * Largest buffer at different offsets
          */
         for offset in 0..100 {
-            let expected: Vec<(u64, Block)> = (0..100)
-                .map(|i| extent_tuple((offset + i) / 100, (offset + i) % 100))
+            let expected: Vec<_> = (0..100)
+                .map(|i| {
+                    extent_tuple(
+                        (offset + i) / 100,
+                        u64::from((offset + i) % 100),
+                    )
+                })
                 .collect();
-            assert_eq!(up_efo(&up, Block::new_512(offset), 100), expected);
+            assert_eq!(
+                up_efo(&up, Block::new_512(u64::from(offset)), 100),
+                expected
+            );
         }
     }
 
@@ -279,7 +287,7 @@ pub(crate) mod up_test {
 
         let orig_block = block;
 
-        let (nonce, tag, _) = context.encrypt_in_place(&mut block[..])?;
+        let (nonce, tag, _) = context.encrypt_in_place(&mut block[..]);
         assert_ne!(block, orig_block);
 
         context.decrypt_in_place(&mut block[..], &nonce, &tag)?;
@@ -302,7 +310,7 @@ pub(crate) mod up_test {
 
         let orig_block = block;
 
-        let (_, tag, _) = context.encrypt_in_place(&mut block[..])?;
+        let (_, tag, _) = context.encrypt_in_place(&mut block[..]);
         assert_ne!(block, orig_block);
 
         let nonce = context.get_random_nonce();
@@ -336,7 +344,7 @@ pub(crate) mod up_test {
 
         let orig_block = block;
 
-        let (nonce, mut tag, _) = context.encrypt_in_place(&mut block[..])?;
+        let (nonce, mut tag, _) = context.encrypt_in_place(&mut block[..]);
         assert_ne!(block, orig_block);
 
         tag[2] = tag[2].wrapping_add(1);
@@ -373,7 +381,7 @@ pub(crate) mod up_test {
 
         let original_data = data.clone();
 
-        let (nonce, tag, _) = context.encrypt_in_place(&mut data[..])?;
+        let (nonce, tag, _) = context.encrypt_in_place(&mut data[..]);
 
         assert_ne!(original_data, data);
 
@@ -424,7 +432,7 @@ pub(crate) mod up_test {
 
         let original_data = data.clone();
 
-        let (nonce, tag, _) = context.encrypt_in_place(&mut data[..])?;
+        let (nonce, tag, _) = context.encrypt_in_place(&mut data[..]);
 
         assert_ne!(original_data, data);
 
@@ -671,28 +679,28 @@ pub(crate) mod up_test {
 
         // Below limit
         let request = ReadRequest {
-            eid: 0,
+            eid: ExtentId(0),
             offset: Block::new_512(7),
         };
         let op = IOop::Read {
             dependencies: vec![],
             requests: vec![request],
         };
-        assert!(op.send_io_live_repair(Some(2)));
+        assert!(op.send_io_live_repair(Some(ExtentId(2))));
 
         // At limit
         let request = ReadRequest {
-            eid: 2,
+            eid: ExtentId(2),
             offset: Block::new_512(7),
         };
         let op = IOop::Read {
             dependencies: vec![],
             requests: vec![request],
         };
-        assert!(op.send_io_live_repair(Some(2)));
+        assert!(op.send_io_live_repair(Some(ExtentId(2))));
 
         let request = ReadRequest {
-            eid: 3,
+            eid: ExtentId(3),
             offset: Block::new_512(7),
         };
         let op = IOop::Read {
@@ -700,14 +708,14 @@ pub(crate) mod up_test {
             requests: vec![request],
         };
         // We are past the extent limit, so this should return false
-        assert!(!op.send_io_live_repair(Some(2)));
+        assert!(!op.send_io_live_repair(Some(ExtentId(2))));
 
         // If we change the extent limit, it should become true
-        assert!(op.send_io_live_repair(Some(3)));
+        assert!(op.send_io_live_repair(Some(ExtentId(3))));
     }
 
     // Construct an IOop::Write or IOop::WriteUnwritten at the given extent
-    fn write_at_extent(eid: u64, wu: bool) -> IOop {
+    fn write_at_extent(eid: ExtentId, wu: bool) -> IOop {
         let request = crucible_protocol::WriteBlockMetadata {
             eid,
             offset: Block::new_512(7),
@@ -740,19 +748,19 @@ pub(crate) mod up_test {
         // at extent limit, and above extent limit.
 
         // Below limit
-        let wr = write_at_extent(0, false);
-        assert!(wr.send_io_live_repair(Some(2)));
+        let wr = write_at_extent(ExtentId(0), false);
+        assert!(wr.send_io_live_repair(Some(ExtentId(2))));
 
         // At the limit
-        let wr = write_at_extent(2, false);
-        assert!(wr.send_io_live_repair(Some(2)));
+        let wr = write_at_extent(ExtentId(2), false);
+        assert!(wr.send_io_live_repair(Some(ExtentId(2))));
 
         // Above the limit
-        let wr = write_at_extent(3, false);
-        assert!(!wr.send_io_live_repair(Some(2)));
+        let wr = write_at_extent(ExtentId(3), false);
+        assert!(!wr.send_io_live_repair(Some(ExtentId(2))));
 
         // Back to being below the limit
-        assert!(wr.send_io_live_repair(Some(3)));
+        assert!(wr.send_io_live_repair(Some(ExtentId(3))));
     }
 
     #[test]
@@ -761,18 +769,18 @@ pub(crate) mod up_test {
         // at extent limit, and above extent limit.
 
         // Below limit
-        let wr = write_at_extent(0, true);
-        assert!(wr.send_io_live_repair(Some(2)));
+        let wr = write_at_extent(ExtentId(0), true);
+        assert!(wr.send_io_live_repair(Some(ExtentId(2))));
 
         // At the limit
-        let wr = write_at_extent(2, true);
-        assert!(wr.send_io_live_repair(Some(2)));
+        let wr = write_at_extent(ExtentId(2), true);
+        assert!(wr.send_io_live_repair(Some(ExtentId(2))));
 
         // Above the limit
-        let wr = write_at_extent(3, true);
-        assert!(!wr.send_io_live_repair(Some(2)));
+        let wr = write_at_extent(ExtentId(3), true);
+        assert!(!wr.send_io_live_repair(Some(ExtentId(2))));
 
         // Back to being below the limit
-        assert!(wr.send_io_live_repair(Some(3)));
+        assert!(wr.send_io_live_repair(Some(ExtentId(3))));
     }
 }

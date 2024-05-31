@@ -5,6 +5,7 @@
 #: target = "helios-2.0"
 #: output_rules = [
 #:	"/tmp/*.txt",
+#:	"%/tmp/dtrace/*",
 #:	"/tmp/core.*",
 #: ]
 #: skip_clone = true
@@ -44,6 +45,9 @@ for t in "$input/bins/"*.gz; do
 done
 
 export BINDIR=/var/tmp/bins
+
+banner dtrace
+pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/dtrace/upstairs-info.txt 2>&1 &
 
 banner repair
 ptime -m bash "$input/scripts/test_repair.sh" "-N"

@@ -9,6 +9,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,23 +17,24 @@ use std::time::Duration;
 use crucible_common::{
     build_logger, crucible_bail, deadline_secs,
     impacted_blocks::extent_from_offset, integrity_hash, mkdir_for_file,
-    verbose_timeout, Block, CrucibleError, RegionDefinition, MAX_BLOCK_SIZE,
+    verbose_timeout, Block, CrucibleError, ExtentId, RegionDefinition,
+    MAX_BLOCK_SIZE,
 };
 use crucible_protocol::{
-    BlockContext, CrucibleDecoder, CrucibleEncoder, JobId, Message,
-    ReadRequest, ReconciliationId, SnapshotDetails, CRUCIBLE_MESSAGE_VERSION,
+    BlockContext, CrucibleDecoder, JobId, Message, MessageWriter,
+    ReconciliationId, SnapshotDetails, CRUCIBLE_MESSAGE_VERSION,
 };
 use repair_client::Client;
 
-use anyhow::{bail, Result};
-use bytes::BytesMut;
-use futures::{SinkExt, StreamExt};
+use anyhow::{bail, Context, Result};
+use bytes::{Bytes, BytesMut};
+use futures::StreamExt;
 use rand::prelude::*;
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{sleep_until, Instant};
-use tokio_util::codec::{FramedRead, FramedWrite};
+use tokio_util::codec::FramedRead;
 use uuid::Uuid;
 
 pub mod admin;
@@ -60,44 +62,44 @@ pub use stats::{DsCountStat, DsStatOuter};
 enum IOop {
     Write {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        writes: Vec<crucible_protocol::Write>,
+        writes: RegionWrite,
     },
     WriteUnwritten {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        writes: Vec<crucible_protocol::Write>,
+        writes: RegionWrite,
     },
     Read {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        requests: Vec<ReadRequest>,
+        requests: RegionReadRequest,
     },
     Flush {
         dependencies: Vec<JobId>, // Jobs that must finish before this
         flush_number: u64,
         gen_number: u64,
         snapshot_details: Option<SnapshotDetails>,
-        extent_limit: Option<usize>,
+        extent_limit: Option<ExtentId>,
     },
     /*
      * These operations are for repairing a bad downstairs
      */
     ExtentClose {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
+        extent: ExtentId,
     },
     ExtentFlushClose {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
+        extent: ExtentId,
         flush_number: u64,
         gen_number: u64,
     },
     ExtentLiveRepair {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
+        extent: ExtentId,
         source_repair_address: SocketAddr,
     },
     ExtentLiveReopen {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
+        extent: ExtentId,
     },
     ExtentLiveNoOp {
         dependencies: Vec<JobId>, // Jobs that must finish before this
@@ -117,6 +119,324 @@ impl IOop {
             | IOop::ExtentLiveReopen { dependencies, .. }
             | IOop::ExtentLiveNoOp { dependencies } => dependencies,
         }
+    }
+}
+
+/// Read request for a particular extent
+///
+/// `data` should be an uninitializezd borrowed section of the outgoing buffer
+/// (i.e. from a [`RegionReadResponse`]), to reduce memory copies.
+///
+/// Do not derive `Clone` on this type; cloning the object will break the borrow
+/// of `data`, so it's rarely the correct choice.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct ExtentReadRequest {
+    offset: Block,
+    /// This buffer should be uninitialized; read size is set by its capacity
+    data: BytesMut,
+}
+
+/// Ordered list of read requests
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct RegionReadRequest(Vec<RegionReadReq>);
+
+/// Inner type for a single read requests
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct RegionReadReq {
+    extent: ExtentId,
+    offset: Block,
+    count: NonZeroUsize,
+}
+
+impl RegionReadRequest {
+    fn new(reqs: &[crucible_protocol::ReadRequest]) -> Self {
+        let mut out = Self(vec![]);
+        for req in reqs {
+            match out.0.last_mut() {
+                // Check whether this read request is contiguous and in the same
+                // extent as the previous read request
+                Some(prev)
+                    if prev.extent == req.eid
+                        && prev.offset.value + prev.count.get() as u64
+                            == req.offset.value =>
+                {
+                    // If so, enlarge it by one block
+                    prev.count = prev.count.saturating_add(1);
+                }
+                _ => {
+                    // Otherwise, begin a new request
+                    out.0.push(RegionReadReq {
+                        extent: req.eid,
+                        offset: req.offset,
+                        count: NonZeroUsize::new(1).unwrap(),
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &RegionReadReq> {
+        self.0.iter()
+    }
+}
+
+impl IntoIterator for RegionReadRequest {
+    type Item = RegionReadReq;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+/// Read response data, designed to prevent copies and reallocations
+///
+/// We initialize a read response before performing any reads, then chop up its
+/// (allocated but uninitialized) buffer space into a set of
+/// `ExtentReadRequest`.  Each `ExtentReadRequest` is transformed into an
+/// `ExtentReadResponse` (reusing that chunk of buffer), which are then
+/// reassembled into the original `RegionReadResponse`.
+///
+/// Do not derive `Clone` on this type; it will be expensive and tempting to
+/// call by accident!
+pub(crate) struct RegionReadResponse {
+    blocks: Vec<Vec<BlockContext>>,
+    data: BytesMut,
+    uninit: BytesMut,
+}
+
+impl RegionReadResponse {
+    /// Builds a new empty `ReadResponse` with the given capacity
+    fn with_capacity(block_count: usize, block_size: u64) -> Self {
+        Self {
+            blocks: vec![],
+            data: BytesMut::new(),
+            uninit: BytesMut::with_capacity(block_size as usize * block_count),
+        }
+    }
+
+    /// Borrow the head of this `ReadResponse`, turning it into a read request
+    ///
+    /// ## Before
+    /// ```text
+    /// self.uninit = [ ----------------------------------- ]
+    /// ```
+    ///
+    /// ## After
+    /// ```text
+    /// self.uninit =             [ ----------------------- ]
+    /// req         = [ -------- ]
+    /// ```
+    ///
+    /// Note that the `BytesMut` objects remain uninitialized throughout this
+    /// whole procedure (to avoid `memset` calls).  We'll read directly into the
+    /// uninitialized request buffer, then call `unsplit` to build it back up.
+    ///
+    /// # Panics
+    /// If the size of the request is larger than our remaining buffer capacity
+    fn request(
+        &mut self,
+        offset: Block,
+        block_count: usize,
+    ) -> ExtentReadRequest {
+        let mut data = self
+            .uninit
+            .split_off(block_count * offset.block_size_in_bytes() as usize);
+        std::mem::swap(&mut data, &mut self.uninit);
+        ExtentReadRequest { offset, data }
+    }
+
+    /// Merge the given `ExtentReadResponse` into the tail of this response
+    ///
+    /// ## Before
+    /// ```text
+    /// self.data = [ -------- ]
+    /// r.data    =             [ ----------------------- ]
+    /// ```
+    ///
+    /// ## After
+    /// ```text
+    /// self.data = [ ----------------------------------- ]
+    /// ```
+    ///
+    /// # Panics
+    /// If the buffers cannot be unsplit without a reallocation; this indicates
+    /// a logic error in our code.
+    fn unsplit(&mut self, r: ExtentReadResponse) {
+        // The most common case is for a read to only touch one extent, so we
+        // have a fast path for just moving the blocks Vec.
+        if self.blocks.is_empty() {
+            self.blocks = r.blocks;
+        } else {
+            self.blocks.extend(r.blocks);
+        }
+        let prev_ptr = self.data.as_ptr();
+        let was_empty = self.data.is_empty();
+        self.data.unsplit(r.data);
+        assert!(was_empty || prev_ptr == self.data.as_ptr());
+    }
+
+    /// Returns hashes for the given response
+    ///
+    /// This is expensive and should only be used for debugging
+    pub fn hashes(&self, i: usize) -> Vec<u64> {
+        self.blocks[i].iter().map(|ctx| ctx.hash).collect()
+    }
+
+    /// Returns encryption contexts for the given response
+    ///
+    /// This is expensive and should only be used for debugging
+    pub fn encryption_contexts(
+        &self,
+        i: usize,
+    ) -> Vec<Option<&crucible_protocol::EncryptionContext>> {
+        self.blocks[i]
+            .iter()
+            .map(|ctx| ctx.encryption_context.as_ref())
+            .collect()
+    }
+}
+
+/// Read response from a single extent
+///
+/// Do not derive `Clone` on this type; it will be expensive and tempting to
+/// call by accident!
+pub(crate) struct ExtentReadResponse {
+    blocks: Vec<Vec<BlockContext>>,
+    /// At this point, the buffer must be fully initialized
+    data: BytesMut,
+}
+
+/// Deserialized write operation, contiguous to a single extent
+///
+/// `data` should be a borrowed section of the received `Message::Write`, to
+/// reduce memory copies.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct ExtentWrite {
+    /// Block offset, relative to the start of this extent
+    pub offset: Block,
+
+    /// One context per block to be written
+    pub block_contexts: Vec<BlockContext>,
+
+    /// Raw block data to be written
+    ///
+    /// This must be compatible with `block_contexts`, i.e.
+    /// `block_contexts.len() == data.len() / block_size` for this extent's
+    /// chosen block size.
+    pub data: bytes::Bytes,
+}
+
+/// A `RegionWrite` is an ordered list of extent writes
+///
+/// Each element is a `RegionWriteReq`, i.e. a tuple of `(extent id, write)`.
+/// The same extent may appear multiple times in the output list, if the source
+/// write has multiple non-contiguous writes to that extent.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct RegionWrite(Vec<RegionWriteReq>);
+
+/// A single request within a `RegionWrite`
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct RegionWriteReq {
+    extent: ExtentId,
+    write: ExtentWrite,
+}
+
+impl RegionWrite {
+    /// Destructures into a list of contiguous writes, borrowing the buffer
+    ///
+    /// Returns an error if `buf.len()` is not an even multiple of
+    /// `header.blocks.len()`.
+    pub fn new(
+        blocks: &[crucible_protocol::WriteBlockMetadata],
+        mut buf: bytes::Bytes,
+    ) -> Result<Self, CrucibleError> {
+        let block_size = if let Some(b) = blocks.first() {
+            b.offset.block_size_in_bytes() as usize
+        } else {
+            return Ok(Self(vec![]));
+        };
+        if buf.len() % block_size != 0 {
+            return Err(CrucibleError::DataLenUnaligned);
+        } else if buf.len() / block_size != blocks.len() {
+            return Err(CrucibleError::InvalidNumberOfBlocks(format!(
+                "got {} contexts but {} blocks",
+                blocks.len(),
+                buf.len() / block_size
+            )));
+        }
+        let mut out = Self(vec![]);
+        for b in blocks {
+            if out.can_append(b) {
+                out.append_block_context(b.block_context);
+            } else {
+                out.set_last_data(block_size, &mut buf);
+                out.begin_write(*b);
+            }
+        }
+        out.set_last_data(block_size, &mut buf);
+        assert!(buf.is_empty());
+        Ok(out)
+    }
+
+    /// Checks whether the next write can be appended to our existing write
+    fn can_append(&self, b: &crucible_protocol::WriteBlockMetadata) -> bool {
+        match self.0.last() {
+            None => false,
+            Some(prev) => {
+                prev.extent == b.eid
+                    && prev.write.offset.value
+                        + prev.write.block_contexts.len() as u64
+                        == b.offset.value
+            }
+        }
+    }
+
+    /// Sets the data member of the last write as part of construction
+    ///
+    /// # Panics
+    /// If the last write already has data
+    fn set_last_data(&mut self, block_size: usize, buf: &mut Bytes) {
+        if let Some(prev) = self.0.last_mut() {
+            assert!(prev.write.data.is_empty());
+            let data =
+                buf.split_to(prev.write.block_contexts.len() * block_size);
+            prev.write.data = data;
+        }
+    }
+
+    /// Appends the given block context to an existing write
+    ///
+    /// # Panics
+    /// If there is no write
+    fn append_block_context(&mut self, ctx: BlockContext) {
+        self.0.last_mut().unwrap().write.block_contexts.push(ctx);
+    }
+
+    /// Begins a new write, guided by the given metadata
+    fn begin_write(&mut self, b: crucible_protocol::WriteBlockMetadata) {
+        self.0.push(RegionWriteReq {
+            extent: b.eid,
+            write: ExtentWrite {
+                offset: b.offset,
+                block_contexts: vec![b.block_context],
+                data: bytes::Bytes::default(),
+            },
+        });
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &RegionWriteReq> {
+        self.0.iter()
+    }
+}
+
+impl IntoIterator for RegionWrite {
+    type Item = RegionWriteReq;
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
     }
 }
 
@@ -160,21 +480,22 @@ pub async fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
     let mut out_file = File::create(export_path)?;
     let mut blocks_copied = 0;
 
-    'eid_loop: for eid in 0..extent_count {
-        let extent_offset = space_per_extent * eid as u64;
+    'eid_loop: for eid in (0..extent_count).map(ExtentId) {
+        let extent_offset = space_per_extent * eid.0 as u64;
         for block_offset in 0..extent_size.value {
             if (extent_offset + block_offset) >= start_block {
                 blocks_copied += 1;
 
                 let response = region
                     .region_read(
-                        &[ReadRequest {
-                            eid: eid as u64,
+                        &RegionReadRequest(vec![RegionReadReq {
+                            extent: eid,
                             offset: Block::new_with_ddef(
                                 block_offset,
                                 &region.def(),
                             ),
-                        }],
+                            count: NonZeroUsize::new(1).unwrap(),
+                        }]),
                         JobId(0),
                     )
                     .await?;
@@ -244,7 +565,8 @@ pub async fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
 
     let mut offset = Block::new_with_ddef(0, &region.def());
     loop {
-        let mut buffer = vec![0; CHUNK_SIZE];
+        let mut buffer = BytesMut::new();
+        buffer.resize(CHUNK_SIZE, 0u8);
 
         /*
          * Read data into the buffer until it is full, or we hit EOF.
@@ -285,40 +607,39 @@ pub async fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
             break;
         }
 
+        // Crop the buffer to exactly our write size
+        buffer.resize(total, 0u8);
+        let buffer = buffer.freeze();
+
         /*
          * Use the same function upstairs uses to decide where to put the
          * data based on the LBA offset.
          */
         let nblocks = Block::from_bytes(total, &rm);
-        let mut pos = Block::from_bytes(0, &rm);
-        let mut writes = vec![];
-        for (eid, offset) in
-            extent_from_offset(&rm, offset, nblocks).blocks(&rm)
-        {
-            let len = Block::new_with_ddef(1, &region.def());
-            let data = &buffer[pos.bytes()..(pos.bytes() + len.bytes())];
-            let mut buffer = BytesMut::with_capacity(data.len());
-            buffer.resize(data.len(), 0);
-            buffer.copy_from_slice(data);
+        let block_size = region.def().block_size() as usize;
+        let blocks: Vec<_> = extent_from_offset(&rm, offset, nblocks)
+            .blocks(&rm)
+            .zip(
+                buffer
+                    .chunks(block_size)
+                    .map(|chunk| integrity_hash(&[chunk])),
+            )
+            .map(|((eid, offset), hash)| {
+                crucible_protocol::WriteBlockMetadata {
+                    eid,
+                    offset,
+                    block_context: BlockContext {
+                        hash,
+                        encryption_context: None,
+                    },
+                }
+            })
+            .collect();
 
-            writes.push(crucible_protocol::Write {
-                eid,
-                offset,
-                data: buffer.freeze(),
-                block_context: BlockContext {
-                    hash: integrity_hash(&[data]),
-                    encryption_context: None,
-                },
-            });
-
-            pos.advance(len);
-        }
+        let write = RegionWrite::new(&blocks, buffer)?;
 
         // We have no job ID, so it makes no sense for accounting.
-        region.region_write(&writes, JobId(0), false).await?;
-
-        assert_eq!(nblocks, pos);
-        assert_eq!(total, pos.bytes());
+        region.region_write(write, JobId(0), false).await?;
         offset.advance(nblocks);
     }
 
@@ -558,33 +879,6 @@ fn is_message_valid(
     }
 }
 
-async fn do_work_task(
-    ads: &Mutex<Downstairs>,
-    upstairs_connection: UpstairsConnection,
-    mut job_channel_rx: mpsc::UnboundedReceiver<()>,
-    resp_tx: mpsc::UnboundedSender<Message>,
-) -> Result<()> {
-    // The lossy attribute currently does not change at runtime. To avoid
-    // continually locking the downstairs, cache the result here.
-    let is_lossy = ads.lock().await.lossy;
-
-    /*
-     * job_channel_rx is a notification that we should look for new work.
-     */
-    while job_channel_rx.recv().await.is_some() {
-        // Add a little time to completion for this operation.
-        if is_lossy && random() && random() {
-            info!(ads.lock().await.log, "[lossy] sleeping 1 second");
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-
-        Downstairs::do_work_for(ads, upstairs_connection, &resp_tx).await?;
-    }
-
-    // None means the channel is closed
-    Ok(())
-}
-
 async fn proc_stream(
     ads: &Arc<Mutex<Downstairs>>,
     stream: WrappedStream,
@@ -594,7 +888,7 @@ async fn proc_stream(
             let (read, write) = sock.into_split();
 
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = FramedWrite::new(write, CrucibleEncoder::new());
+            let fw = MessageWriter::new(write);
 
             proc(ads, fr, fw).await
         }
@@ -602,7 +896,7 @@ async fn proc_stream(
             let (read, write) = tokio::io::split(stream);
 
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = FramedWrite::new(write, CrucibleEncoder::new());
+            let fw = MessageWriter::new(write);
 
             proc(ads, fr, fw).await
         }
@@ -626,7 +920,7 @@ pub struct UpstairsConnection {
 async fn proc<RT, WT>(
     ads: &Arc<Mutex<Downstairs>>,
     mut fr: FramedRead<RT, CrucibleDecoder>,
-    mut fw: FramedWrite<WT, CrucibleEncoder>,
+    mut fw: MessageWriter<WT>,
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
@@ -845,9 +1139,9 @@ where
                         // Upstairs will not be able to successfully negotiate.
                         {
                             let ds = ads.lock().await;
-                            if ds.read_only != read_only {
+                            if ds.flags.read_only != read_only {
                                 if let Err(e) = fw.send(Message::ReadOnlyMismatch {
-                                    expected: ds.read_only,
+                                    expected: ds.flags.read_only,
                                 }).await {
                                     warn!(log, "Failed to send ReadOnlyMismatch: {}", e);
                                 }
@@ -856,9 +1150,9 @@ where
                                     mismatch");
                             }
 
-                            if ds.encrypted != encrypted {
+                            if ds.flags.encrypted != encrypted {
                                 if let Err(e) = fw.send(Message::EncryptedMismatch {
-                                    expected: ds.encrypted,
+                                    expected: ds.flags.encrypted,
                                 }).await {
                                     warn!(log, "Failed to send EncryptedMismatch: {}", e);
                                 }
@@ -1074,7 +1368,7 @@ where
 
 async fn reply_task<WT>(
     mut resp_channel_rx: mpsc::UnboundedReceiver<Message>,
-    mut fw: FramedWrite<WT, CrucibleEncoder>,
+    mut fw: MessageWriter<WT>,
 ) -> Result<()>
 where
     WT: tokio::io::AsyncWrite
@@ -1096,7 +1390,7 @@ where
 async fn resp_loop<RT, WT>(
     ads: &Arc<Mutex<Downstairs>>,
     mut fr: FramedRead<RT, CrucibleDecoder>,
-    fw: FramedWrite<WT, CrucibleEncoder>,
+    fw: MessageWriter<WT>,
     mut another_upstairs_active_rx: oneshot::Receiver<UpstairsConnection>,
     upstairs_connection: UpstairsConnection,
 ) -> Result<()>
@@ -1112,7 +1406,6 @@ where
 
     // We rely on backpressure to limit total jobs in flight, so these channels
     // can be unbounded.
-    let (job_channel_tx, job_channel_rx) = mpsc::unbounded_channel();
     let (resp_channel_tx, resp_channel_rx) = mpsc::unbounded_channel();
     let mut framed_write_task = tokio::spawn(reply_task(resp_channel_rx, fw));
 
@@ -1120,7 +1413,7 @@ where
      * Create tasks for:
      *  Doing the work then sending the ACK
      *  Pulling work off the socket and putting on the work queue.
-     *  Sending messages back on the FramedWrite
+     *  Sending messages back on the MessageWriter
      *
      * These tasks and this function must be able to handle the
      * Upstairs connection going away at any time, as well as a forced
@@ -1146,9 +1439,9 @@ where
      *        │                 │errors, pings     │responses
      *        │                 │                  │
      *        │                 │                  │
-     *   ┌────▼────┐ message   ┌┴──────┐  job     ┌┴────────┐
-     *   │resp_loop├──────────►│pf_task├─────────►│ dw_task │
-     *   └─────────┘ channel   └──┬────┘ channel  └▲────────┘
+     *   ┌────▼────┐ message   ┌┴──────────────────┴────────┐
+     *   │resp_loop├──────────►│        pf_task             │
+     *   └─────────┘ channel   └──┬────────────────▲────────┘
      *                            │                │
      *                         add│work         new│work
      *   per-connection           │                │
@@ -1157,27 +1450,12 @@ where
      *                         │           Downstairs           │
      *                         └────────────────────────────────┘
      */
-    let mut dw_task = {
-        let adc = ads.clone();
-        let resp_channel_tx = resp_channel_tx.clone();
-        tokio::spawn(async move {
-            do_work_task(
-                &adc,
-                upstairs_connection,
-                job_channel_rx,
-                resp_channel_tx,
-            )
-            .await
-        })
-    };
-
     // The Upstairs uses backpressure to limit total outstanding jobs, so these
     // channels can be unbounded.
     let (message_channel_tx, mut message_channel_rx) =
         mpsc::unbounded_channel();
     let mut pf_task = {
         let adc = ads.clone();
-        let tx = job_channel_tx.clone();
         let resp_channel_tx = resp_channel_tx.clone();
         tokio::spawn(async move {
             while let Some(m) = message_channel_rx.recv().await {
@@ -1192,7 +1470,12 @@ where
                     // If we added work, tell the work task to get busy.
                     Ok(Some(new_ds_id)) => {
                         cdt::work__start!(|| new_ds_id.0);
-                        tx.send(())?;
+                        Downstairs::do_work_for(
+                            &adc,
+                            upstairs_connection,
+                            &resp_channel_tx,
+                        )
+                        .await?;
                     }
                     // If we handled the job locally, nothing to do here
                     Ok(None) => (),
@@ -1213,9 +1496,6 @@ where
     const TIMEOUT_LIMIT: usize = 3;
     loop {
         tokio::select! {
-            e = &mut dw_task => {
-                bail!("do_work_task task has ended: {:?}", e);
-            }
             e = &mut pf_task => {
                 bail!("pf task ended: {:?}", e);
             }
@@ -1406,21 +1686,42 @@ impl DownstairsBuilder<'_> {
             region.def().extent_count(),
         );
 
+        let (request_tx, request_rx) = mpsc::channel(256); // TODO size?
         Ok(Arc::new(Mutex::new(Downstairs {
             region,
-            lossy,
-            read_errors,
-            write_errors,
-            flush_errors,
+            flags: DownstairsFlags {
+                lossy,
+                read_errors,
+                write_errors,
+                flush_errors,
+                read_only: self.read_only,
+                encrypted,
+            },
             active_upstairs: HashMap::new(),
             dss,
-            read_only: self.read_only,
-            encrypted,
             address: None,
             repair_address: None,
             log,
+            request_tx,
+            request_rx: Some(request_rx),
+            reqwest_client: reqwest::ClientBuilder::new()
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap(),
         })))
     }
+}
+
+/// Configuration flags for the Downstairs
+#[derive(Debug)]
+struct DownstairsFlags {
+    lossy: bool,        // Test flag, enables pauses and skipped jobs
+    read_errors: bool,  // Test flag
+    write_errors: bool, // Test flag
+    flush_errors: bool, // Test flag
+    read_only: bool,
+    encrypted: bool,
 }
 
 /*
@@ -1431,17 +1732,18 @@ impl DownstairsBuilder<'_> {
 #[derive(Debug)]
 pub struct Downstairs {
     pub region: Region,
-    lossy: bool,        // Test flag, enables pauses and skipped jobs
-    read_errors: bool,  // Test flag
-    write_errors: bool, // Test flag
-    flush_errors: bool, // Test flag
+    flags: DownstairsFlags,
     active_upstairs: HashMap<Uuid, ActiveUpstairs>,
     dss: DsStatOuter,
-    read_only: bool,
-    encrypted: bool,
     pub address: Option<SocketAddr>,
     pub repair_address: Option<SocketAddr>,
     log: Logger,
+
+    request_tx: mpsc::Sender<DownstairsRequest>,
+    request_rx: Option<mpsc::Receiver<DownstairsRequest>>,
+
+    // A reqwest client, to be reused when creating progenitor clients
+    pub reqwest_client: reqwest::Client,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1540,7 +1842,7 @@ impl Downstairs {
     ) -> Result<()> {
         // The Upstairs will send Flushes periodically, even in read only mode
         // we have to accept them. But read-only should never accept writes!
-        if self.read_only {
+        if self.flags.read_only {
             let is_write = match work {
                 IOop::Write { .. }
                 | IOop::WriteUnwritten { .. }
@@ -1635,7 +1937,7 @@ impl Downstairs {
         };
 
         assert_eq!(job.ds_id, job_id);
-        match &job.work {
+        match job.work {
             IOop::Read {
                 dependencies,
                 requests,
@@ -1644,27 +1946,63 @@ impl Downstairs {
                  * Any error from an IO should be intercepted here and passed
                  * back to the upstairs.
                  */
-                let responses = if self.read_errors && random() && random() {
+                let response = if self.flags.read_errors && random() && random()
+                {
                     warn!(self.log, "returning error on read!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    self.region.region_read(requests, job_id).await
+                    // This clone shouldn't be too expensive, since it's only
+                    // 32 bytes per extent (and should usually only be 1 extent)
+                    self.region.region_read(&requests, job_id).await
                 };
                 debug!(
                     self.log,
                     "Read      :{} deps:{:?} res:{}",
                     job_id,
                     dependencies,
-                    responses.is_ok(),
+                    response.is_ok(),
                 );
 
-                let (blocks, data) = match responses {
-                    Ok(r) => (Ok(r.blocks), r.data),
+                // We've got one or more block contexts per block returned, but
+                // the response format need to be in the form of
+                // `ReadResponseBlockMetadata` (which also contains extent and
+                // offset); we inject that extra information in this terrible
+                // match statement.
+                let (blocks, data) = match response {
+                    Ok(r) => (
+                        Ok(requests
+                            .iter()
+                            .flat_map(|req| {
+                                // Iterate over blocks within this extent.  By
+                                // construction, each `ReadRequest` will never
+                                // overstep the bounds of the extent.
+                                (0..req.count.get()).map(|i| {
+                                    (
+                                        req.extent,
+                                        Block {
+                                            value: req.offset.value + i as u64,
+                                            shift: req.offset.shift,
+                                        },
+                                    )
+                                })
+                            })
+                            .zip(r.blocks)
+                            .map(|((eid, offset), block_contexts)| {
+                                crucible_protocol::ReadResponseBlockMetadata {
+                                    eid,
+                                    offset,
+                                    block_contexts,
+                                }
+                            })
+                            .collect()),
+                        r.data,
+                    ),
                     Err(e) => (Err(e), Default::default()),
                 };
+
                 Ok(Some(Message::ReadResponse {
                     header: crucible_protocol::ReadResponseHeader {
                         upstairs_id: job.upstairs_connection.upstairs_id,
@@ -1680,7 +2018,8 @@ impl Downstairs {
                  * Any error from an IO should be intercepted here and passed
                  * back to the upstairs.
                  */
-                let result = if self.write_errors && random() && random() {
+                let result = if self.flags.write_errors && random() && random()
+                {
                     warn!(self.log, "returning error on writeunwritten!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
@@ -1700,10 +2039,11 @@ impl Downstairs {
                 }))
             }
             IOop::Write {
-                dependencies,
                 writes,
+                dependencies,
             } => {
-                let result = if self.write_errors && random() && random() {
+                let result = if self.flags.write_errors && random() && random()
+                {
                     warn!(self.log, "returning error on write!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
@@ -1734,7 +2074,8 @@ impl Downstairs {
                 snapshot_details,
                 extent_limit,
             } => {
-                let result = if self.flush_errors && random() && random() {
+                let result = if self.flags.flush_errors && random() && random()
+                {
                     warn!(self.log, "returning error on flush!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else if !self.is_active(job.upstairs_connection) {
@@ -1743,11 +2084,11 @@ impl Downstairs {
                 } else {
                     self.region
                         .region_flush(
-                            *flush_number,
-                            *gen_number,
-                            snapshot_details,
+                            flush_number,
+                            gen_number,
+                            &snapshot_details,
                             job_id,
-                            *extent_limit,
+                            extent_limit,
                         )
                         .await
                 };
@@ -1773,7 +2114,7 @@ impl Downstairs {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    self.region.close_extent(*extent).await
+                    self.region.close_extent(extent).await
                 };
                 debug!(
                     self.log,
@@ -1807,15 +2148,15 @@ impl Downstairs {
                     match self
                         .region
                         .region_flush_extent(
-                            *extent,
-                            *gen_number,
-                            *flush_number,
+                            extent,
+                            gen_number,
+                            flush_number,
                             job_id,
                         )
                         .await
                     {
                         Err(f_res) => Err(f_res),
-                        Ok(_) => self.region.close_extent(*extent).await,
+                        Ok(_) => self.region.close_extent(extent).await,
                     }
                 };
 
@@ -1853,7 +2194,12 @@ impl Downstairs {
                     Err(CrucibleError::UpstairsInactive)
                 } else {
                     self.region
-                        .repair_extent(*extent, *source_repair_address, false)
+                        .repair_extent(
+                            self.reqwest_client.clone(),
+                            extent,
+                            source_repair_address,
+                            false,
+                        )
                         .await
                 };
                 debug!(
@@ -1880,7 +2226,7 @@ impl Downstairs {
                     error!(self.log, "Upstairs inactive error");
                     Err(CrucibleError::UpstairsInactive)
                 } else {
-                    self.region.reopen_extent(*extent).await
+                    self.region.reopen_extent(extent).await
                 };
                 debug!(
                     self.log,
@@ -2023,7 +2369,7 @@ impl Downstairs {
         upstairs_connection: UpstairsConnection,
         tx: oneshot::Sender<UpstairsConnection>,
     ) -> Result<()> {
-        if self.read_only {
+        if self.flags.read_only {
             // Multiple active read-only sessions are allowed, but multiple
             // sessions for the same Upstairs UUID are not. Kick out a
             // previously active session for this UUID if one exists. This
@@ -2389,7 +2735,7 @@ impl Downstairs {
         let r = match m {
             Message::Write { header, data } => {
                 cdt::submit__write__start!(|| header.job_id.0);
-                let writes = header.get_writes(data);
+                let writes = RegionWrite::new(&header.blocks, data)?;
 
                 let new_write = IOop::Write {
                     dependencies: header.dependencies,
@@ -2425,7 +2771,7 @@ impl Downstairs {
             }
             Message::WriteUnwritten { header, data } => {
                 cdt::submit__writeunwritten__start!(|| header.job_id.0);
-                let writes = header.get_writes(data);
+                let writes = RegionWrite::new(&header.blocks, data)?;
 
                 let new_write = IOop::WriteUnwritten {
                     dependencies: header.dependencies,
@@ -2446,7 +2792,7 @@ impl Downstairs {
 
                 let new_read = IOop::Read {
                     dependencies,
-                    requests,
+                    requests: RegionReadRequest::new(&requests),
                 };
 
                 let mut d = ad.lock().await;
@@ -2622,7 +2968,12 @@ impl Downstairs {
                     );
                     match d
                         .region
-                        .repair_extent(extent_id, source_repair_address, false)
+                        .repair_extent(
+                            d.reqwest_client.clone(),
+                            extent_id,
+                            source_repair_address,
+                            false,
+                        )
                         .await
                     {
                         Ok(()) => Message::RepairAckId { repair_id },
@@ -2687,7 +3038,7 @@ impl Downstairs {
                 return Ok(());
             }
         };
-        let is_lossy = ds.lossy;
+        let is_lossy = ds.flags.lossy;
         drop(ds);
 
         /*
@@ -2783,6 +3134,154 @@ impl Downstairs {
             }
         }
         Ok(())
+    }
+
+    /// Returns a handle for making async calls against the Downstairs task
+    pub fn handle(&self) -> DownstairsHandle {
+        DownstairsHandle {
+            tx: self.request_tx.clone(),
+        }
+    }
+
+    /// Clone the extent files in a region from another running downstairs.
+    ///
+    /// Use the reconcile/repair extent methods to copy another downstairs.
+    /// The source downstairs must have the same RegionDefinition as we do,
+    /// and both downstairs must be running in read only mode.
+    pub async fn clone_region(&mut self, source: SocketAddr) -> Result<()> {
+        let info = crucible_common::BuildInfo::default();
+        let log = self.log.new(o!("task" => "clone".to_string()));
+        info!(log, "Crucible Version: {}", info);
+        info!(
+            log,
+            "Upstairs <-> Downstairs Message Version: {}",
+            CRUCIBLE_MESSAGE_VERSION
+        );
+
+        info!(log, "Connecting to {source} to obtain our extent files.");
+
+        let url = format!("http://{:?}", source);
+        let repair_server =
+            Client::new_with_client(&url, self.reqwest_client.clone());
+
+        let source_def = match repair_server.get_region_info().await {
+            Ok(def) => def.into_inner(),
+            Err(e) => {
+                bail!("Failed to get source region definition: {e}");
+            }
+        };
+
+        info!(log, "The source RegionDefinition is: {:?}", source_def);
+
+        let source_ro_mode = match repair_server.get_region_mode().await {
+            Ok(ro) => ro.into_inner(),
+            Err(e) => {
+                bail!("Failed to get source mode: {e}");
+            }
+        };
+
+        info!(log, "The source mode is: {:?}", source_ro_mode);
+        if !source_ro_mode {
+            bail!("Source downstairs is not read only");
+        }
+
+        let my_def = self.region.def();
+        info!(log, "my def is {:?}", my_def);
+
+        if let Err(e) = my_def.compatible(source_def) {
+            bail!("Incompatible region definitions: {e}");
+        }
+
+        if let Err(e) = self.region.close_all_extents().await {
+            bail!("Failed to close all extents: {e}");
+        }
+
+        for eid in (0..my_def.extent_count()).map(ExtentId) {
+            info!(log, "Repair extent {eid}");
+
+            if let Err(e) = self
+                .region
+                .repair_extent(self.reqwest_client.clone(), eid, source, true)
+                .await
+            {
+                bail!("repair extent {eid} returned: {e}");
+            }
+        }
+        info!(log, "Region has been cloned");
+
+        Ok(())
+    }
+
+    async fn spawn_runner(
+        d: Arc<Mutex<Downstairs>>,
+    ) -> tokio::task::JoinHandle<()> {
+        let (request_rx, log) = {
+            let mut ds = d.lock().await;
+            let request_rx = ds.request_rx.take().unwrap();
+            let log = ds.log.new(o!("task" => "runner".to_string()));
+            (request_rx, log)
+        };
+        tokio::spawn(Downstairs::run(d, request_rx, log))
+    }
+
+    async fn run(
+        ds: Arc<Mutex<Downstairs>>,
+        mut request_rx: mpsc::Receiver<DownstairsRequest>,
+        log: Logger,
+    ) {
+        while let Some(v) = request_rx.recv().await {
+            match v {
+                DownstairsRequest::ShowWork => {
+                    let mut d = ds.lock().await;
+                    show_work(&mut d);
+                }
+                DownstairsRequest::IsExtentClosed { eid, done } => {
+                    let d = ds.lock().await;
+                    let closed = matches!(
+                        d.region.extents[eid.0 as usize],
+                        ExtentState::Closed
+                    );
+                    if done.send(closed).is_err() {
+                        warn!(log, "failed to reply to IsExtentClosed");
+                    }
+                }
+            }
+        }
+    }
+}
+
+enum DownstairsRequest {
+    /// Checks whether the given extent is closed
+    IsExtentClosed {
+        eid: ExtentId,
+        done: oneshot::Sender<bool>,
+    },
+
+    /// Prints downstairs work
+    ///
+    /// This is fire-and-forget, so there's no oneshot reply channel
+    ShowWork,
+}
+
+/// Handle allowing for async calls to the Downstairs task
+pub struct DownstairsHandle {
+    tx: mpsc::Sender<DownstairsRequest>,
+}
+
+impl DownstairsHandle {
+    pub async fn is_extent_closed(&self, eid: ExtentId) -> Result<bool> {
+        let (done, rx) = oneshot::channel();
+        self.tx
+            .send(DownstairsRequest::IsExtentClosed { eid, done })
+            .await
+            .context("could not send message on channel")?;
+        rx.await.context("could not receive result")
+    }
+    pub async fn show_work(&self) -> Result<()> {
+        self.tx
+            .send(DownstairsRequest::ShowWork)
+            .await
+            .context("could not send message on channel")
     }
 }
 
@@ -3086,7 +3585,7 @@ pub async fn create_region(
     block_size: u64,
     data: PathBuf,
     extent_size: u64,
-    extent_count: u64,
+    extent_count: u32,
     uuid: Uuid,
     encrypted: bool,
     log: Logger,
@@ -3109,7 +3608,7 @@ pub async fn create_region(
 pub async fn create_region_with_backend(
     data: PathBuf,
     extent_size: Block,
-    extent_count: u64,
+    extent_count: u32,
     uuid: Uuid,
     encrypted: bool,
     backend: Backend,
@@ -3126,7 +3625,7 @@ pub async fn create_region_with_backend(
 
     let mut region =
         Region::create_with_backend(data, region_options, backend, log).await?;
-    region.extend(extent_count as u32).await?;
+    region.extend(extent_count).await?;
 
     Ok(region)
 }
@@ -3232,6 +3731,10 @@ pub async fn start_downstairs(
         None
     };
 
+    // We'll run a lightweight Downstairs loop which handles certain operations
+    // using message-passing
+    let mut ds_runner = Downstairs::spawn_runner(d.clone()).await;
+
     let join_handle = tokio::spawn(async move {
         /*
          * We now loop listening for a connection from the Upstairs.
@@ -3241,7 +3744,14 @@ pub async fn start_downstairs(
          */
         info!(log, "downstairs listening on {}", listen_on);
         loop {
-            let (sock, raddr) = listener.accept().await?;
+            let v = tokio::select! {
+                _ = &mut ds_runner => {
+                    info!(log, "downstairs runner stopped; exiting");
+                    break Ok(());
+                }
+                v = listener.accept() => {v}
+            };
+            let (sock, raddr) = v?;
 
             /*
              * We have a new connection; before we wrap it, set TCP_NODELAY
@@ -3298,74 +3808,6 @@ pub async fn start_downstairs(
     Ok(join_handle)
 }
 
-/// Clone the extent files in a region from another running downstairs.
-///
-/// Use the reconcile/repair extent methods to copy another downstairs.
-/// The source downstairs must have the same RegionDefinition as we do,
-/// and both downstairs must be running in read only mode.
-pub async fn clone_region(
-    d: Arc<Mutex<Downstairs>>,
-    source: SocketAddr,
-) -> Result<()> {
-    let info = crucible_common::BuildInfo::default();
-    let log = d.lock().await.log.new(o!("task" => "clone".to_string()));
-    info!(log, "Crucible Version: {}", info);
-    info!(
-        log,
-        "Upstairs <-> Downstairs Message Version: {}", CRUCIBLE_MESSAGE_VERSION
-    );
-
-    info!(log, "Connecting to {source} to obtain our extent files.");
-
-    let url = format!("http://{:?}", source);
-    let repair_server = Client::new(&url);
-
-    let source_def = match repair_server.get_region_info().await {
-        Ok(def) => def.into_inner(),
-        Err(e) => {
-            bail!("Failed to get source region definition: {e}");
-        }
-    };
-
-    info!(log, "The source RegionDefinition is: {:?}", source_def);
-
-    let source_ro_mode = match repair_server.get_region_mode().await {
-        Ok(ro) => ro.into_inner(),
-        Err(e) => {
-            bail!("Failed to get source mode: {e}");
-        }
-    };
-
-    info!(log, "The source mode is: {:?}", source_ro_mode);
-    if !source_ro_mode {
-        bail!("Source downstairs is not read only");
-    }
-
-    let mut ds = d.lock().await;
-
-    let my_def = ds.region.def();
-    info!(log, "my def is {:?}", my_def);
-
-    if let Err(e) = my_def.compatible(source_def) {
-        bail!("Incompatible region definitions: {e}");
-    }
-
-    if let Err(e) = ds.region.close_all_extents().await {
-        bail!("Failed to close all extents: {e}");
-    }
-
-    for eid in 0..my_def.extent_count() as usize {
-        info!(log, "Repair extent {eid}");
-
-        if let Err(e) = ds.region.repair_extent(eid, source, true).await {
-            bail!("repair extent {eid} returned: {e}");
-        }
-    }
-    info!(log, "Region has been cloned");
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -3403,10 +3845,11 @@ mod test {
                 } else {
                     IOop::Read {
                         dependencies: deps,
-                        requests: vec![ReadRequest {
-                            eid: 1,
+                        requests: RegionReadRequest(vec![RegionReadReq {
+                            extent: ExtentId(1),
                             offset: Block::new_512(1),
-                        }],
+                            count: NonZeroUsize::new(1).unwrap(),
+                        }]),
                     }
                 },
                 state: WorkState::New,
@@ -3427,7 +3870,7 @@ mod test {
                 ds_id,
                 work: IOop::WriteUnwritten {
                     dependencies: deps,
-                    writes: Vec::with_capacity(1),
+                    writes: RegionWrite(vec![]),
                 },
                 state: WorkState::New,
             },
@@ -3572,20 +4015,22 @@ mod test {
 
         let rio = IOop::Read {
             dependencies: Vec::new(),
-            requests: vec![ReadRequest {
-                eid: 0,
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: ExtentId(0),
                 offset: Block::new_512(1),
-            }],
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection, JobId(1000), rio)?;
 
         let deps = vec![JobId(1000)];
         let rio = IOop::Read {
             dependencies: deps,
-            requests: vec![ReadRequest {
-                eid: 1,
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: ExtentId(1),
                 offset: Block::new_512(1),
-            }],
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection, JobId(1001), rio)?;
 
@@ -3671,13 +4116,13 @@ mod test {
 
         let rio = IOop::ExtentClose {
             dependencies: Vec::new(),
-            extent: 0,
+            extent: ExtentId(0),
         };
         ds.add_work(upstairs_connection, JobId(1000), rio)?;
 
         let rio = IOop::ExtentFlushClose {
             dependencies: vec![],
-            extent: 1,
+            extent: ExtentId(1),
             flush_number: 1,
             gen_number: 2,
         };
@@ -3686,10 +4131,11 @@ mod test {
         let deps = vec![JobId(1000), JobId(1001)];
         let rio = IOop::Read {
             dependencies: deps,
-            requests: vec![ReadRequest {
-                eid: 2,
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: ExtentId(2),
                 offset: Block::new_512(1),
-            }],
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection, JobId(1002), rio)?;
 
@@ -3700,7 +4146,7 @@ mod test {
         let deps = vec![JobId(1000), JobId(1001), JobId(1002), JobId(1003)];
         let rio = IOop::ExtentLiveReopen {
             dependencies: deps,
-            extent: 0,
+            extent: ExtentId(0),
         };
         ds.add_work(upstairs_connection, JobId(1004), rio)?;
 
@@ -3756,13 +4202,13 @@ mod test {
 
         let rio = IOop::ExtentClose {
             dependencies: Vec::new(),
-            extent: 0,
+            extent: ExtentId(0),
         };
         ds.add_work(upstairs_connection, JobId(1000), rio)?;
 
         let rio = IOop::ExtentFlushClose {
             dependencies: vec![],
-            extent: 1,
+            extent: ExtentId(1),
             flush_number: 1,
             gen_number: gen,
         };
@@ -3771,12 +4217,12 @@ mod test {
         // Add the two reopen commands for the two extents we closed.
         let rio = IOop::ExtentLiveReopen {
             dependencies: vec![JobId(1000)],
-            extent: 0,
+            extent: ExtentId(0),
         };
         ds.add_work(upstairs_connection, JobId(1002), rio)?;
         let rio = IOop::ExtentLiveReopen {
             dependencies: vec![JobId(1001)],
-            extent: 1,
+            extent: ExtentId(1),
         };
         ds.add_work(upstairs_connection, JobId(1003), rio)?;
         show_work(&mut ds);
@@ -3875,27 +4321,29 @@ mod test {
     // A test function that will return a generic crucible write command
     // for use when building the IOop::Write structure.  The data (of 9's)
     // matches the hash.
-    fn create_generic_test_write(eid: u64) -> Vec<crucible_protocol::Write> {
-        let data = BytesMut::from(&[9u8; 512][..]);
+    fn create_generic_test_write(eid: ExtentId) -> RegionWrite {
+        let data = Bytes::from(vec![9u8; 512]);
         let offset = Block::new_512(1);
 
-        vec![crucible_protocol::Write {
-            eid,
-            offset,
-            data: data.freeze(),
-            block_context: BlockContext {
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                        tag: [
-                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
-                            18, 19,
-                        ],
-                    },
-                ),
-                hash: 14137680576404864188, // Hash for all 9s
+        RegionWrite(vec![RegionWriteReq {
+            extent: eid,
+            write: ExtentWrite {
+                offset,
+                data,
+                block_contexts: vec![BlockContext {
+                    encryption_context: Some(
+                        crucible_protocol::EncryptionContext {
+                            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                            tag: [
+                                4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+                                17, 18, 19,
+                            ],
+                        },
+                    ),
+                    hash: 14137680576404864188, // Hash for all 9s
+                }],
             },
-        }]
+        }])
     }
 
     #[tokio::test]
@@ -3923,7 +4371,7 @@ mod test {
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection, tx).await?;
 
-        let eid = 3;
+        let eid = ExtentId(3);
 
         // Create and add the first write
         let writes = create_generic_test_write(eid);
@@ -3955,7 +4403,7 @@ mod test {
         // Now close the extent
         let rio = IOop::ExtentClose {
             dependencies: vec![JobId(1000), JobId(1001), JobId(1002)],
-            extent: eid as usize,
+            extent: eid,
         };
         ds.add_work(upstairs_connection, JobId(1003), rio)?;
 
@@ -4043,7 +4491,7 @@ mod test {
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection, tx).await?;
 
-        let eid = 0;
+        let eid = ExtentId(0);
 
         // Create the write
         let writes = create_generic_test_write(eid);
@@ -4055,7 +4503,7 @@ mod test {
 
         let rio = IOop::ExtentClose {
             dependencies: vec![JobId(1000)],
-            extent: eid as usize,
+            extent: eid,
         };
         ds.add_work(upstairs_connection, JobId(1001), rio)?;
 
@@ -4153,7 +4601,7 @@ mod test {
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection, tx).await?;
 
-        let eid = 1;
+        let eid = ExtentId(1);
 
         // Create the write
         let writes = create_generic_test_write(eid);
@@ -4165,7 +4613,7 @@ mod test {
 
         let rio = IOop::ExtentFlushClose {
             dependencies: vec![JobId(1000)],
-            extent: eid as usize,
+            extent: eid,
             flush_number: 3,
             gen_number: gen,
         };
@@ -4263,8 +4711,8 @@ mod test {
         let mut ds = ads.lock().await;
         ds.promote_to_active(upstairs_connection, tx).await?;
 
-        let eid_one = 1;
-        let eid_two = 2;
+        let eid_one = ExtentId(1);
+        let eid_two = ExtentId(2);
 
         // Create the write for extent 1
         let writes = create_generic_test_write(eid_one);
@@ -4285,7 +4733,7 @@ mod test {
         // Flush and close extent 1
         let rio = IOop::ExtentFlushClose {
             dependencies: vec![JobId(1000)],
-            extent: eid_one as usize,
+            extent: eid_one,
             flush_number: 6,
             gen_number: gen,
         };
@@ -4294,7 +4742,7 @@ mod test {
         // Just close extent 2
         let rio = IOop::ExtentClose {
             dependencies: vec![JobId(1001)],
-            extent: eid_two as usize,
+            extent: eid_two,
         };
         ds.add_work(upstairs_connection, JobId(1003), rio)?;
 
@@ -4432,7 +4880,7 @@ mod test {
     #[test]
     fn jobs_extent_close() {
         // Verify ExtentClose jobs move through the work queue
-        let eid = 1;
+        let eid = ExtentId(1);
         let ioop = IOop::ExtentClose {
             dependencies: vec![],
             extent: eid,
@@ -4444,7 +4892,7 @@ mod test {
     fn jobs_extent_flush_close() {
         // Verify ExtentFlushClose jobs move through the work queue
 
-        let eid = 1;
+        let eid = ExtentId(1);
         let ioop = IOop::ExtentFlushClose {
             dependencies: vec![],
             extent: eid,
@@ -4458,7 +4906,7 @@ mod test {
     fn jobs_extent_live_repair() {
         // Verify ExtentLiveRepair jobs move through the work queue
 
-        let eid = 1;
+        let eid = ExtentId(1);
         let source_repair_address =
             SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
 
@@ -4473,7 +4921,7 @@ mod test {
     #[test]
     fn jobs_extent_live_reopen() {
         // Verify ExtentLiveReopen jobs move through the work queue
-        let eid = 1;
+        let eid = ExtentId(1);
 
         let ioop = IOop::ExtentLiveReopen {
             dependencies: vec![],
@@ -5425,26 +5873,24 @@ mod test {
 
         // read block by block
         let mut read_data = Vec::with_capacity(total_bytes as usize);
-        for eid in 0..region.def().extent_count() {
+        for eid in (0..region.def().extent_count()).map(ExtentId) {
             for offset in 0..region.def().extent_size().value {
                 let response = region
                     .region_read(
-                        &[crucible_protocol::ReadRequest {
-                            eid: eid.into(),
+                        &RegionReadRequest(vec![RegionReadReq {
+                            extent: eid,
                             offset: Block::new_512(offset),
-                        }],
+                            count: NonZeroUsize::new(1).unwrap(),
+                        }]),
                         JobId(0),
                     )
                     .await?;
 
                 assert_eq!(response.blocks.len(), 1);
 
-                let r = &response.blocks[0];
-                assert_eq!(r.hashes().len(), 1);
-                assert_eq!(
-                    integrity_hash(&[&response.data[..]]),
-                    r.hashes()[0],
-                );
+                let hashes = response.hashes(0);
+                assert_eq!(hashes.len(), 1);
+                assert_eq!(integrity_hash(&[&response.data[..]]), hashes[0],);
 
                 read_data.extend_from_slice(&response.data[..]);
             }
@@ -5818,19 +6264,21 @@ mod test {
 
         let read_1 = IOop::Read {
             dependencies: Vec::new(),
-            requests: vec![ReadRequest {
-                eid: 0,
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: ExtentId(0),
                 offset: Block::new_512(1),
-            }],
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection_1, JobId(1000), read_1.clone())?;
 
         let read_2 = IOop::Read {
             dependencies: Vec::new(),
-            requests: vec![ReadRequest {
-                eid: 1,
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: ExtentId(1),
                 offset: Block::new_512(2),
-            }],
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection_2, JobId(1000), read_2.clone())?;
 
@@ -5902,10 +6350,11 @@ mod test {
         // Add one job, id 1000
         let rio = IOop::Read {
             dependencies: Vec::new(),
-            requests: vec![ReadRequest {
-                eid: 0,
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: ExtentId(0),
                 offset: Block::new_512(1),
-            }],
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection_1, JobId(1000), rio)?;
 
@@ -5992,10 +6441,11 @@ mod test {
         // Add one job, id 1000
         let rio = IOop::Read {
             dependencies: Vec::new(),
-            requests: vec![ReadRequest {
-                eid: 0,
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: ExtentId(0),
                 offset: Block::new_512(1),
-            }],
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection_1, JobId(1000), rio)?;
 
@@ -6082,10 +6532,11 @@ mod test {
         // Add one job, id 1000
         let rio = IOop::Read {
             dependencies: Vec::new(),
-            requests: vec![ReadRequest {
-                eid: 0,
+            requests: RegionReadRequest(vec![RegionReadReq {
+                extent: ExtentId(0),
                 offset: Block::new_512(1),
-            }],
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
         };
         ds.add_work(upstairs_connection_1, JobId(1000), rio)?;
 
@@ -6174,7 +6625,7 @@ mod test {
         let tcp = start_ds_and_connect(5555, 5556).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
-        let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
+        let mut fw = MessageWriter::new(write);
 
         // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
         let m = Message::HereIAm {
@@ -6212,7 +6663,7 @@ mod test {
         let tcp = start_ds_and_connect(5557, 5558).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
-        let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
+        let mut fw = MessageWriter::new(write);
 
         // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
         let m = Message::HereIAm {
@@ -6246,7 +6697,7 @@ mod test {
         let tcp = start_ds_and_connect(5579, 5560).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
-        let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
+        let mut fw = MessageWriter::new(write);
 
         // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
         let m = Message::HereIAm {
@@ -6280,7 +6731,7 @@ mod test {
         let tcp = start_ds_and_connect(5561, 5562).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
-        let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
+        let mut fw = MessageWriter::new(write);
 
         // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
         let m = Message::HereIAm {
@@ -6321,7 +6772,7 @@ mod test {
         let tcp = start_ds_and_connect(5563, 5564).await.unwrap();
         let (read, write) = tcp.into_split();
         let mut fr = FramedRead::new(read, CrucibleDecoder::new());
-        let mut fw = FramedWrite::new(write, CrucibleEncoder::new());
+        let mut fw = MessageWriter::new(write);
 
         // Our downstairs version is CRUCIBLE_MESSAGE_VERSION
         let m = Message::HereIAm {
@@ -6354,5 +6805,122 @@ mod test {
             }
         }
         Ok(())
+    }
+
+    #[test]
+    fn decode_write() {
+        use crucible_protocol::WriteBlockMetadata;
+        let blocks = vec![WriteBlockMetadata {
+            eid: ExtentId(0),
+            offset: Block::new_512(0),
+            block_context: BlockContext {
+                hash: 123,
+                encryption_context: None,
+            },
+        }];
+        let data = Bytes::from(vec![1u8; 512]);
+        let w = RegionWrite::new(&blocks, data).unwrap();
+        assert_eq!(w.0.len(), 1);
+
+        // Two contiguous blocks
+        let blocks = vec![
+            WriteBlockMetadata {
+                eid: ExtentId(0),
+                offset: Block::new_512(0),
+                block_context: BlockContext {
+                    hash: 123,
+                    encryption_context: None,
+                },
+            },
+            WriteBlockMetadata {
+                eid: ExtentId(0),
+                offset: Block::new_512(1),
+                block_context: BlockContext {
+                    hash: 123,
+                    encryption_context: None,
+                },
+            },
+        ];
+        let data = Bytes::from(vec![1u8; 512 * 2]);
+        let w = RegionWrite::new(&blocks, data).unwrap();
+        assert_eq!(w.0.len(), 1);
+        assert_eq!(w.0[0].extent, ExtentId(0));
+        assert_eq!(w.0[0].write.offset, Block::new_512(0));
+        assert_eq!(w.0[0].write.data.len(), 512 * 2);
+
+        // Two non-contiguous blocks
+        let blocks = vec![
+            WriteBlockMetadata {
+                eid: ExtentId(1),
+                offset: Block::new_512(0),
+                block_context: BlockContext {
+                    hash: 123,
+                    encryption_context: None,
+                },
+            },
+            WriteBlockMetadata {
+                eid: ExtentId(2),
+                offset: Block::new_512(1),
+                block_context: BlockContext {
+                    hash: 123,
+                    encryption_context: None,
+                },
+            },
+        ];
+        let data = Bytes::from(vec![1u8; 512 * 2]);
+        let w = RegionWrite::new(&blocks, data).unwrap();
+        assert_eq!(w.0.len(), 2);
+        assert_eq!(w.0[0].extent, ExtentId(1));
+        assert_eq!(w.0[0].write.offset, Block::new_512(0));
+        assert_eq!(w.0[0].write.data.len(), 512);
+        assert_eq!(w.0[1].extent, ExtentId(2));
+        assert_eq!(w.0[1].write.offset, Block::new_512(1));
+        assert_eq!(w.0[1].write.data.len(), 512);
+
+        // Overlapping writes to the same block
+        let blocks = vec![
+            WriteBlockMetadata {
+                eid: ExtentId(1),
+                offset: Block::new_512(3),
+                block_context: BlockContext {
+                    hash: 123,
+                    encryption_context: None,
+                },
+            },
+            WriteBlockMetadata {
+                eid: ExtentId(1),
+                offset: Block::new_512(3),
+                block_context: BlockContext {
+                    hash: 123,
+                    encryption_context: None,
+                },
+            },
+        ];
+        let data = Bytes::from(vec![1u8; 512 * 2]);
+        let w = RegionWrite::new(&blocks, data).unwrap();
+        assert_eq!(w.0.len(), 2);
+        assert_eq!(w.0[0].extent, ExtentId(1));
+        assert_eq!(w.0[0].write.offset, Block::new_512(3));
+        assert_eq!(w.0[0].write.data.len(), 512);
+        assert_eq!(w.0[1].extent, ExtentId(1));
+        assert_eq!(w.0[1].write.offset, Block::new_512(3));
+        assert_eq!(w.0[1].write.data.len(), 512);
+
+        // Mismatched block / data sizes
+        let blocks = vec![WriteBlockMetadata {
+            eid: ExtentId(1),
+            offset: Block::new_512(3),
+            block_context: BlockContext {
+                hash: 123,
+                encryption_context: None,
+            },
+        }];
+        let data = Bytes::from(vec![1u8; 512 * 2]);
+        let r = RegionWrite::new(&blocks, data);
+        assert!(r.is_err());
+
+        let data = Bytes::from(vec![1u8; 513]);
+        let r = RegionWrite::new(&blocks, data);
+        assert!(r.is_err());
     }
 }

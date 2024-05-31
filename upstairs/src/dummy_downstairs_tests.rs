@@ -18,6 +18,7 @@ use crate::DsState;
 use crate::{IO_OUTSTANDING_MAX_BYTES, IO_OUTSTANDING_MAX_JOBS};
 use crucible_client_types::CrucibleOpts;
 use crucible_common::Block;
+use crucible_common::ExtentId;
 use crucible_common::RegionDefinition;
 use crucible_common::RegionOptions;
 use crucible_protocol::ClientId;
@@ -474,7 +475,7 @@ pub struct TestHarness {
 }
 
 /// Number of extents in `TestHarness::default_config`
-const DEFAULT_EXTENT_COUNT: usize = 25;
+const DEFAULT_EXTENT_COUNT: u32 = 25;
 
 impl TestHarness {
     pub async fn new() -> TestHarness {
@@ -497,12 +498,12 @@ impl TestHarness {
             // Extent count is picked so that we can hit
             // IO_OUTSTANDING_MAX_BYTES in less than IO_OUTSTANDING_MAX_JOBS,
             // i.e. letting us test both byte and job fault conditions.
-            extent_count: DEFAULT_EXTENT_COUNT as u32,
+            extent_count: DEFAULT_EXTENT_COUNT,
             extent_size: Block::new_512(10),
 
-            gen_numbers: vec![0u64; DEFAULT_EXTENT_COUNT],
-            flush_numbers: vec![0u64; DEFAULT_EXTENT_COUNT],
-            dirty_bits: vec![false; DEFAULT_EXTENT_COUNT],
+            gen_numbers: vec![0u64; DEFAULT_EXTENT_COUNT as usize],
+            flush_numbers: vec![0u64; DEFAULT_EXTENT_COUNT as usize],
+            dirty_bits: vec![false; DEFAULT_EXTENT_COUNT as usize],
         }
     }
 
@@ -614,7 +615,7 @@ fn make_blank_read_response() -> (ReadResponseBlockMetadata, BytesMut) {
 
     (
         ReadResponseBlockMetadata {
-            eid: 0,
+            eid: ExtentId(0),
             offset: Block::new_512(0),
             block_contexts: vec![BlockContext {
                 hash,
@@ -810,7 +811,7 @@ async fn run_live_repair(mut harness: TestHarness) {
     let mut ds2_buffered_messages = vec![];
     let mut ds3_buffered_messages = vec![];
 
-    for eid in 0..DEFAULT_EXTENT_COUNT {
+    for eid in (0..DEFAULT_EXTENT_COUNT).map(ExtentId) {
         // The Upstairs first sends the close and reopen jobs
         for _ in 0..2 {
             ds1_buffered_messages.push(harness.ds1().recv().await.unwrap());
@@ -868,13 +869,13 @@ async fn run_live_repair(mut harness: TestHarness) {
 
         let mut responses = vec![Vec::new(); 3];
 
-        for io_eid in 0usize..DEFAULT_EXTENT_COUNT {
+        for io_eid in (0..DEFAULT_EXTENT_COUNT).map(ExtentId) {
             let mut dep_job_id = [reopen_job_id; 3];
             // read
             harness.spawn(move |guest| async move {
                 let mut buffer = Buffer::new(1, 512);
                 guest
-                    .read(Block::new_512(io_eid as u64 * 10), &mut buffer)
+                    .read(Block::new_512(io_eid.0 as u64 * 10), &mut buffer)
                     .await
                     .unwrap();
             });
@@ -988,7 +989,7 @@ async fn run_live_repair(mut harness: TestHarness) {
             harness.spawn(move |guest| async move {
                 let bytes = BytesMut::from(vec![1u8; 512].as_slice());
                 guest
-                    .write(Block::new_512(io_eid as u64 * 10), bytes)
+                    .write(Block::new_512(io_eid.0 as u64 * 10), bytes)
                     .await
                     .unwrap();
             });
@@ -1967,7 +1968,7 @@ async fn test_error_during_live_repair_no_halt() {
             extent_id,
             ..
         } => {
-            assert!(*extent_id == 0);
+            assert!(*extent_id == ExtentId(0));
 
             // ds1 didn't get the flush, it was set to faulted
             let gen = 1;
@@ -1995,7 +1996,7 @@ async fn test_error_during_live_repair_no_halt() {
             extent_id,
             ..
         } => {
-            assert!(*extent_id == 0);
+            assert!(*extent_id == ExtentId(0));
 
             // ds2 and ds3 did get a flush
             let gen = 0;
@@ -2023,7 +2024,7 @@ async fn test_error_during_live_repair_no_halt() {
             extent_id,
             ..
         } => {
-            assert!(*extent_id == 0);
+            assert!(*extent_id == ExtentId(0));
 
             // ds2 and ds3 did get a flush
             let gen = 0;
@@ -2061,7 +2062,7 @@ async fn test_error_during_live_repair_no_halt() {
             ..
         } => {
             assert!(*source_client_id != ClientId::new(0));
-            assert!(*extent_id == 0);
+            assert!(*extent_id == ExtentId(0));
 
             // send back error report here!
             harness
@@ -2231,12 +2232,18 @@ async fn test_error_during_live_repair_no_halt() {
     // send a bunch of work to ds1 again.
     assert!(matches!(
         harness.ds1().recv().await.unwrap(),
-        Message::ExtentLiveClose { extent_id: 0, .. },
+        Message::ExtentLiveClose {
+            extent_id: ExtentId(0),
+            ..
+        },
     ));
 
     assert!(matches!(
         harness.ds1().recv().await.unwrap(),
-        Message::ExtentLiveReopen { extent_id: 0, .. },
+        Message::ExtentLiveReopen {
+            extent_id: ExtentId(0),
+            ..
+        },
     ));
 }
 

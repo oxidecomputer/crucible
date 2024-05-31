@@ -1638,8 +1638,9 @@ fn worker(
                          * Compute the actual size required for a full region,
                          * then add our metadata overhead to that.
                          */
-                        let region_size =
-                            r.block_size * r.extent_size * r.extent_count;
+                        let region_size = r.block_size
+                            * r.extent_size
+                            * r.extent_count as u64;
                         let reservation =
                             (region_size as f64 * RESERVATION_FACTOR).round()
                                 as u64;
