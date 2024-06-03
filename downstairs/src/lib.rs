@@ -3166,6 +3166,8 @@ impl Downstairs {
     /// Binds the given `ConnectionId` to a new connection state
     ///
     /// # Panics
+    /// If there is no `repair_address`, or the new `ConnectionId` has already
+    /// been installed into the map
     fn new_connection(
         &mut self,
         id: ConnectionId,
