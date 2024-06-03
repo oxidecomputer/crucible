@@ -52,7 +52,6 @@ usdt.workspace = true
 uuid.workspace = true
 aes-gcm-siv.workspace = true
 rand_chacha.workspace = true
-reqwest.workspace = true
 crucible-workspace-hack.workspace = true
 nexus-client = { workspace = true, optional = true }
 internal-dns = { workspace = true, optional = true }

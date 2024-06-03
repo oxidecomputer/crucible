@@ -48,7 +48,7 @@ pub mod in_memory;
 pub use in_memory::InMemoryBlockIO;
 
 pub mod block_io;
-pub use block_io::{FileBlockIO, ReqwestBlockIO};
+pub use block_io::FileBlockIO;
 
 pub mod block_req;
 pub(crate) use block_req::{BlockOpWaiter, BlockRes};
@@ -295,10 +295,6 @@ pub type CrucibleBlockIOFuture<'a> = Pin<
 /// gw__*__done: An IO is completed and the Upstairs has sent the
 /// completion notice to the guest.
 ///
-/// reqwest__read__[start|done] a probe covering BlockIO reqwest read
-/// requests. These happen if a volume has a read only parent and either
-/// there is no sub volume, or the sub volume did not contain any data.
-///
 /// volume__*__done: An IO is completed at the volume layer.
 #[usdt::provider(provider = "crucible_upstairs")]
 mod cdt {
@@ -377,8 +373,6 @@ mod cdt {
     fn gw__noop__done(_: u64) {}
     fn gw__reopen__done(_: u64, _: u32) {}
     fn extent__or__done(_: u64) {}
-    fn reqwest__read__start(_: u32, _: Uuid) {}
-    fn reqwest__read__done(_: u32, _: Uuid) {}
     fn volume__read__done(_: u32, _: Uuid) {}
     fn volume__write__done(_: u32, _: Uuid) {}
     fn volume__writeunwritten__done(_: u32, _: Uuid) {}

@@ -309,15 +309,6 @@ dtrace: script 'perfgw.d' matched 6 probes
        134217728 |
 ```
 
-## perf-reqwest.d
-This is a simple dtrace script that measures latency times for reads
-to a volume having a read only parent.  The time is from when the
-volume read only parent (ReqwestBlockIO) layer receives a read to when
-that read has been completed.
-```
-pfexec dtrace -s perf-reqwest.d
-```
-
 ## perf-vol.d
 This dtrace script measures latency times for IOs at the volume layer.
 This is essentially where an IO first lands in crucible and is measured

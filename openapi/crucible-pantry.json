@@ -891,35 +891,6 @@
                 "format": "uint64",
                 "minimum": 0
               },
-              "id": {
-                "type": "string",
-                "format": "uuid"
-              },
-              "type": {
-                "type": "string",
-                "enum": [
-                  "url"
-                ]
-              },
-              "url": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "block_size",
-              "id",
-              "type",
-              "url"
-            ]
-          },
-          {
-            "type": "object",
-            "properties": {
-              "block_size": {
-                "type": "integer",
-                "format": "uint64",
-                "minimum": 0
-              },
               "blocks_per_extent": {
                 "type": "integer",
                 "format": "uint64",
