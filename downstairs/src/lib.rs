@@ -1049,9 +1049,10 @@ async fn proc_task(
         (ds.repair_address.unwrap(), ds.log.clone())
     };
 
-    // Prepare for the autonegotiation loop
+    // Prepare for the autonegotiation / IO loop
     let (another_upstairs_active_tx, mut another_upstairs_active_rx) =
         oneshot::channel::<UpstairsConnection>();
+
     let mut state = NegotiationData {
         repair_addr,
         upstairs_connection: None,
@@ -1071,106 +1072,6 @@ async fn proc_task(
      * that message, we can move forward and start receiving IO from
      * the upstairs.
      */
-    while state.negotiated != NegotiationState::Ready {
-        tokio::select! {
-            /*
-             * This Upstairs' thread will receive this signal when another
-             * Upstairs promotes itself to active. The only way this path is
-             * reached is if this Upstairs promoted itself to active, storing
-             * another_upstairs_active_tx in the Downstairs active_upstairs
-             * tuple.
-             *
-             * The two unwraps here should be safe: this thread negotiated and
-             * activated, and then another did (in order to send this thread
-             * this signal).
-             */
-            new_upstairs_connection = &mut another_upstairs_active_rx => {
-                match new_upstairs_connection {
-                    Err(e) => {
-                        // There shouldn't be a path through the code where we
-                        // close the channel before sending a message through it
-                        // (see [`promote_to_active`]), though [`clear_active`]
-                        // simply drops the active_upstairs tuple - but the only
-                        // place that calls `clear_active` is below when the
-                        // Upstairs disconnects.
-                        //
-                        // We have to bail here though - the Downstairs can't be
-                        // running without the ability for another Upstairs to
-                        // kick out the previous one during activation.
-                        bail!("another_upstairs_active_rx closed during \
-                               negotiation: {e:?}");
-                    }
-
-                    Ok(new_upstairs_connection) => {
-                        // another upstairs negotiated and went active after
-                        // this one did (and before this one completed
-                        // negotiation)
-                        let upstairs_connection = state.upstairs_connection
-                            .unwrap();
-                        warn!(
-                            log,
-                            "Another upstairs {:?} promoted to active, \
-                            shutting down connection for {:?}",
-                            new_upstairs_connection, upstairs_connection
-                        );
-
-                        if let Err(e) = reply_channel_tx
-                            .send(Message::YouAreNoLongerActive {
-                                new_upstairs_id:
-                                    new_upstairs_connection.upstairs_id,
-                                new_session_id:
-                                    new_upstairs_connection.session_id,
-                                new_gen: new_upstairs_connection.gen,
-                            })
-                        {
-                            warn!(
-                                log,
-                                "Notify upstairs:{} session:{} not active failed:{}",
-                                upstairs_connection.upstairs_id,
-                                upstairs_connection.session_id,
-                                e,
-                            );
-                        }
-                        return Ok(());
-                    }
-                }
-            }
-
-            new_read = msg_channel_rx.recv() => {
-                /*
-                 * Negotiate protocol before we take any IO requests.
-                 */
-                match new_read {
-                    None => {
-                        // Upstairs disconnected
-                        if let Some(upstairs_connection) =
-                            state.upstairs_connection
-                        {
-                            let mut ds = ads.lock().await;
-                            ds.on_disconnected(upstairs_connection)?;
-                        } else {
-                            info!(log, "unknown upstairs disconnected");
-                        }
-
-                        return Ok(());
-                    }
-                    Some(m) => {
-                        let mut ds = ads.lock().await;
-                        ds.on_negotiation_step(
-                            m,
-                            &mut state,
-                            &mut reply_channel_tx
-                        ).await?;
-                    }
-                }
-            }
-        }
-    }
-
-    info!(log, "Downstairs has completed Negotiation");
-    assert!(state.upstairs_connection.is_some());
-    let upstairs_connection = state.upstairs_connection.unwrap();
-
     loop {
         tokio::select! {
             /*
@@ -1207,8 +1108,9 @@ async fn proc_task(
                         warn!(
                             log,
                             "Another upstairs {:?} promoted to active, \
-                            shutting down connection for {:?}",
-                            new_upstairs_connection, upstairs_connection);
+                             shutting down connection for {:?}",
+                            new_upstairs_connection, state.upstairs_connection
+                        );
 
                         if let Err(e) = reply_channel_tx.send(
                             Message::YouAreNoLongerActive {
@@ -1219,58 +1121,68 @@ async fn proc_task(
                                 new_gen: new_upstairs_connection.gen,
                             })
                         {
-                            warn!(log, "Failed sending YouAreNoLongerActive: {}", e);
+                            warn!(
+                                log,
+                                "Failed sending YouAreNoLongerActive: {e}"
+                            );
                         }
 
                         return Ok(());
                     }
                 }
             }
+
             new_read = msg_channel_rx.recv() => {
+                /*
+                 * Negotiate protocol before we take any IO requests.
+                 */
                 match new_read {
                     None => {
                         // Upstairs disconnected
-                        let mut ds = ads.lock().await;
-
-                        warn!(
-                            log,
-                            "upstairs {:?} disconnected, {} jobs left",
-                            upstairs_connection,
-                            ds.jobs(upstairs_connection)?,
-                        );
-
-                        if ds.is_active(upstairs_connection) {
-                            warn!(log, "upstairs {:?} was previously \
-                                active, clearing", upstairs_connection);
-                            ds.clear_active(upstairs_connection)?;
+                        if let Some(upstairs_connection) =
+                            state.upstairs_connection
+                        {
+                            let mut ds = ads.lock().await;
+                            ds.on_disconnected(upstairs_connection)?;
+                        } else {
+                            info!(log, "unknown upstairs disconnected");
                         }
 
                         return Ok(());
                     }
-                    Some(msg) => {
-                        match Downstairs::proc_frame(
-                            &ads,
-                            upstairs_connection,
-                            msg,
-                            &reply_channel_tx,
-                        )
-                        .await
-                        {
-                            // If we added work, tell the work task to get busy.
-                            Ok(Some(new_ds_id)) => {
-                                cdt::work__start!(|| new_ds_id.0);
-                                Downstairs::do_work_for(
-                                    &ads,
-                                    upstairs_connection,
-                                    &reply_channel_tx,
-                                )
-                                .await?;
+                    Some(m) => {
+                        if state.negotiated == NegotiationState::Ready {
+                            match Downstairs::proc_frame(
+                                &ads,
+                                state.upstairs_connection.unwrap(),
+                                m,
+                                &reply_channel_tx,
+                            )
+                            .await
+                            {
+                                // If we added work, then do it!
+                                Ok(Some(new_ds_id)) => {
+                                    cdt::work__start!(|| new_ds_id.0);
+                                    Downstairs::do_work_for(
+                                        &ads,
+                                        state.upstairs_connection.unwrap(),
+                                        &reply_channel_tx,
+                                    )
+                                    .await?;
+                                }
+                                // If we handled the job locally, nothing to do
+                                Ok(None) => (),
+                                Err(e) => {
+                                    bail!("Proc frame returns error: {}", e);
+                                }
                             }
-                            // If we handled the job locally, nothing to do here
-                            Ok(None) => (),
-                            Err(e) => {
-                                bail!("Proc frame returns error: {}", e);
-                            }
+                        } else {
+                            let mut ds = ads.lock().await;
+                            ds.on_negotiation_step(
+                                m,
+                                &mut state,
+                                &mut reply_channel_tx
+                            ).await?;
                         }
                     }
                 }
@@ -3269,6 +3181,7 @@ impl Downstairs {
                  * Once this command is sent, we are ready to exit
                  * the loop and move forward with receiving IOs
                  */
+                info!(self.log, "Downstairs has completed Negotiation");
             }
             Message::ExtentVersionsPlease => {
                 if state.negotiated != NegotiationState::SentRegionInfo {
