@@ -2775,44 +2775,6 @@ impl Downstairs {
         }
     }
 
-    /// Function called when the given upstairs disconnects
-    fn on_disconnected(&mut self, upstairs_connection: UpstairsConnection) {
-        // If our upstairs never completed activation,
-        // or some other upstairs activated, we won't
-        // be able to report how many jobs.
-        match self.jobs(upstairs_connection) {
-            Ok(jobs) => {
-                info!(
-                    self.log,
-                    "upstairs {:?} disconnected, {} jobs left",
-                    upstairs_connection,
-                    jobs,
-                );
-            }
-            Err(e) => {
-                info!(
-                    self.log,
-                    "upstairs {:?} disconnected, {}", upstairs_connection, e
-                );
-            }
-        }
-
-        if self.is_active(upstairs_connection) {
-            info!(
-                self.log,
-                "upstairs {:?} was previously active, clearing",
-                upstairs_connection
-            );
-            if let Err(e) = self.clear_active(upstairs_connection) {
-                warn!(
-                    self.log,
-                    "error when clearing active for \
-                     {upstairs_connection:?}: {e:?}"
-                );
-            }
-        }
-    }
-
     /// See the comment in the `continue_negotiation()` function (on the
     /// upstairs side) that describes how this negotiation takes place.
     ///
@@ -3140,7 +3102,42 @@ impl Downstairs {
     fn remove_connection(&mut self, id: ConnectionId) {
         let state = self.connection_state.remove(&id).unwrap();
         if let Some(upstairs_connection) = state.upstairs_connection {
-            self.on_disconnected(upstairs_connection);
+            // If our upstairs never completed activation,
+            // or some other upstairs activated, we won't
+            // be able to report how many jobs.
+            match self.jobs(upstairs_connection) {
+                Ok(jobs) => {
+                    info!(
+                        self.log,
+                        "upstairs {:?} disconnected, {} jobs left",
+                        upstairs_connection,
+                        jobs,
+                    );
+                }
+                Err(e) => {
+                    info!(
+                        self.log,
+                        "upstairs {:?} disconnected, {}",
+                        upstairs_connection,
+                        e
+                    );
+                }
+            }
+
+            if self.is_active(upstairs_connection) {
+                info!(
+                    self.log,
+                    "upstairs {:?} was previously active, clearing",
+                    upstairs_connection
+                );
+                if let Err(e) = self.clear_active(upstairs_connection) {
+                    warn!(
+                        self.log,
+                        "error when clearing active for \
+                     {upstairs_connection:?}: {e:?}"
+                    );
+                }
+            }
         } else {
             info!(self.log, "unknown upstairs ({id:?}) removed");
         }
