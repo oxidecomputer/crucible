@@ -15,10 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crucible_common::{
-    build_logger, crucible_bail, deadline_secs,
-    impacted_blocks::extent_from_offset, integrity_hash, mkdir_for_file,
-    verbose_timeout, Block, CrucibleError, ExtentId, RegionDefinition,
-    MAX_BLOCK_SIZE,
+    build_logger, crucible_bail, impacted_blocks::extent_from_offset,
+    integrity_hash, mkdir_for_file, verbose_timeout, Block, CrucibleError,
+    ExtentId, RegionDefinition, MAX_BLOCK_SIZE,
 };
 use crucible_protocol::{
     BlockContext, CrucibleDecoder, JobId, Message, MessageWriter,
@@ -33,7 +32,7 @@ use rand::prelude::*;
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{sleep_until, Instant};
+use tokio::time::Instant;
 use tokio_util::codec::FramedRead;
 use uuid::Uuid;
 
@@ -939,28 +938,118 @@ struct NegotiationData {
     another_upstairs_active_tx: Option<oneshot::Sender<UpstairsConnection>>,
 }
 
-/*
- * This function handles the initial negotiation steps between the
- * upstairs and the downstairs.  Either we return error, or we call
- * the next function if everything was successful and we can start
- * taking IOs from the upstairs.
- */
+/// Handle all of the work for this Upstairs connection
 async fn proc<RT, WT>(
     ads: &Arc<Mutex<Downstairs>>,
-    mut fr: FramedRead<RT, CrucibleDecoder>,
-    mut fw: MessageWriter<WT>,
+    fr: FramedRead<RT, CrucibleDecoder>,
+    fw: MessageWriter<WT>,
 ) -> Result<()>
 where
-    RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
+    RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send + 'static,
     WT: tokio::io::AsyncWrite
         + std::marker::Unpin
         + std::marker::Send
         + 'static,
 {
+    let log = ads.lock().await.log.clone();
+
+    // Create tasks for:
+    //     Reading data from the socket (including deserialization)
+    //     Doing the actual work (proc, this function right here)
+    //     Sending data out on the socket (including serialization)
+    //
+    // These tasks and this function must be able to handle the
+    // Upstairs connection going away at any time, as well as a forced
+    // migration where a new Upstairs connects and the old (current from
+    // this threads point of view) work is discarded.
+    //
+    // As migration or upstairs failure can happen at any time, this
+    // function must watch for tasks going away and handle that
+    // gracefully.  By exiting the loop here, we allow the calling
+    // function to take over and handle a reconnect or a new upstairs
+    // takeover.
+    //
+    // Tasks are organized as follows, with tasks in `snake_case`
+    //
+    //   ┌──────────┐           ┌───────────┐
+    //   │FramedRead│           │FramedWrite│
+    //   └────┬─────┘           └─────▲─────┘
+    //        │                       │
+    //  ┌─────▼──────┐       ┌────────┴───────┐
+    //  │ recv_task  │       │   reply_task   │
+    //  └─────┬──────┘       └────────▲───────┘
+    //        │                       │
+    //        │message          reply │responses,
+    //        │channel         channel│invalid frame
+    //        │                       │errors, pings
+    //        │                       │
+    //        │              ┌────────┴───────┐  ┌──────┐ monitors other tasks
+    //        └──────────────►   proc_task    │  │ proc │ and aborts them if
+    //                       └──┬───────────▲─┘  └──────┘ any have stopped
+    //                          │           │
+    //                       add│work    new│work
+    //   per-connection         │           │
+    //  ======================= │ ========= │ =======
+    //   shared state        ┌──▼───────────┴─┐
+    //                       │   Downstairs   │
+    //                       └────────────────┘
+
+    // We rely on backpressure in the upstairs to limit total jobs in flight, so
+    // these channels can be unbounded.
+    let (msg_channel_tx, msg_channel_rx) = mpsc::unbounded_channel();
+    let mut recv_task = tokio::spawn(recv_task(
+        fr,
+        msg_channel_tx,
+        log.new(o!("task" => "recv")),
+    ));
+
+    let (reply_channel_tx, reply_channel_rx) = mpsc::unbounded_channel();
+    let mut reply_task = tokio::spawn(reply_task(reply_channel_rx, fw));
+
+    let mut proc_task =
+        tokio::spawn(proc_task(ads.clone(), msg_channel_rx, reply_channel_tx));
+
+    // proc itself waits for any of the three tasks to die and aborts the other
+    // two when that happens.
+    let (name, result) = tokio::select! {
+        e = &mut recv_task => {
+            reply_task.abort();
+            proc_task.abort();
+            ("recv_task", e)
+        },
+        e = &mut reply_task => {
+            recv_task.abort();
+            proc_task.abort();
+            ("reply_task", e)
+        },
+        e = &mut proc_task => {
+            reply_task.abort();
+            recv_task.abort();
+            ("proc_task", e)
+        },
+    };
+
+    match &result {
+        Err(e) => warn!(log, "{name} failed with JoinError: {e:?}"),
+        Ok(Err(e)) => warn!(log, "{name} failed with error: {e:?}"),
+        Ok(Ok(())) => info!(log, "{name} exited cleanly"),
+    }
+    result? // coerce the outer JoinError into anyhow::Error
+}
+
+async fn proc_task(
+    ads: Arc<Mutex<Downstairs>>,
+    mut msg_channel_rx: mpsc::UnboundedReceiver<Message>,
+    mut reply_channel_tx: mpsc::UnboundedSender<Message>,
+) -> Result<()> {
     // In this function, repair address should exist, and shouldn't change. Grab
     // it here.
-    let repair_addr = ads.lock().await.repair_address.unwrap();
+    let (repair_addr, log) = {
+        let ds = ads.lock().await;
+        (ds.repair_address.unwrap(), ds.log.clone())
+    };
 
+    // Prepare for the autonegotiation loop
     let (another_upstairs_active_tx, mut another_upstairs_active_rx) =
         oneshot::channel::<UpstairsConnection>();
     let mut state = NegotiationData {
@@ -972,7 +1061,7 @@ where
         negotiated: NegotiationState::Start,
     };
 
-    let log = ads.lock().await.log.new(o!("task" => "proc".to_string()));
+    let log = log.new(o!("task" => "proc".to_string()));
     /*
      * See the comment in the proc() function on the upstairs side that
      * describes how this negotiation takes place.
@@ -984,15 +1073,6 @@ where
      */
     while state.negotiated != NegotiationState::Ready {
         tokio::select! {
-            /*
-             * Don't wait more than 50 seconds to hear from the other side.
-             * XXX Timeouts, timeouts: always wrong!  Some too short and
-             * some too long.
-             */
-            _ = sleep_until(deadline_secs(50.0)) => {
-                bail!("did not negotiate a protocol");
-            }
-
             /*
              * This Upstairs' thread will receive this signal when another
              * Upstairs promotes itself to active. The only way this path is
@@ -1034,13 +1114,15 @@ where
                             new_upstairs_connection, upstairs_connection
                         );
 
-                        if let Err(e) = fw.send(Message::YouAreNoLongerActive {
-                            new_upstairs_id:
-                                new_upstairs_connection.upstairs_id,
-                            new_session_id:
-                                new_upstairs_connection.session_id,
-                            new_gen: new_upstairs_connection.gen,
-                        }).await {
+                        if let Err(e) = reply_channel_tx
+                            .send(Message::YouAreNoLongerActive {
+                                new_upstairs_id:
+                                    new_upstairs_connection.upstairs_id,
+                                new_session_id:
+                                    new_upstairs_connection.session_id,
+                                new_gen: new_upstairs_connection.gen,
+                            })
+                        {
                             warn!(
                                 log,
                                 "Notify upstairs:{} session:{} not active failed:{}",
@@ -1054,17 +1136,17 @@ where
                 }
             }
 
-            new_read = fr.next() => {
+            new_read = msg_channel_rx.recv() => {
                 /*
                  * Negotiate protocol before we take any IO requests.
                  */
-                match new_read.transpose()? {
+                match new_read {
                     None => {
                         // Upstairs disconnected
-                        let mut ds = ads.lock().await;
                         if let Some(upstairs_connection) =
                             state.upstairs_connection
                         {
+                            let mut ds = ads.lock().await;
                             ds.on_disconnected(upstairs_connection)?;
                         } else {
                             info!(log, "unknown upstairs disconnected");
@@ -1074,7 +1156,11 @@ where
                     }
                     Some(m) => {
                         let mut ds = ads.lock().await;
-                        ds.on_negotiation_step(m, &mut state, &mut fw).await?;
+                        ds.on_negotiation_step(
+                            m,
+                            &mut state,
+                            &mut reply_channel_tx
+                        ).await?;
                     }
                 }
             }
@@ -1085,157 +1171,8 @@ where
     assert!(state.upstairs_connection.is_some());
     let upstairs_connection = state.upstairs_connection.unwrap();
 
-    resp_loop(ads, fr, fw, another_upstairs_active_rx, upstairs_connection)
-        .await
-}
-
-async fn reply_task<WT>(
-    mut resp_channel_rx: mpsc::UnboundedReceiver<Message>,
-    mut fw: MessageWriter<WT>,
-) -> Result<()>
-where
-    WT: tokio::io::AsyncWrite
-        + std::marker::Unpin
-        + std::marker::Send
-        + 'static,
-{
-    while let Some(m) = resp_channel_rx.recv().await {
-        fw.send(m).await?;
-    }
-    Ok(())
-}
-
-/*
- * This function listens for and answers requests from the upstairs.
- * We assume here that correct negotiation has taken place and this
- * downstairs is ready to receive IO.
- */
-async fn resp_loop<RT, WT>(
-    ads: &Arc<Mutex<Downstairs>>,
-    mut fr: FramedRead<RT, CrucibleDecoder>,
-    fw: MessageWriter<WT>,
-    mut another_upstairs_active_rx: oneshot::Receiver<UpstairsConnection>,
-    upstairs_connection: UpstairsConnection,
-) -> Result<()>
-where
-    RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
-    WT: tokio::io::AsyncWrite
-        + std::marker::Unpin
-        + std::marker::Send
-        + 'static,
-{
-    // Create the log for this task to use.
-    let log = ads.lock().await.log.new(o!("task" => "main".to_string()));
-
-    // We rely on backpressure to limit total jobs in flight, so these channels
-    // can be unbounded.
-    let (resp_channel_tx, resp_channel_rx) = mpsc::unbounded_channel();
-    let mut framed_write_task = tokio::spawn(reply_task(resp_channel_rx, fw));
-
-    /*
-     * Create tasks for:
-     *  Doing the work then sending the ACK
-     *  Pulling work off the socket and putting on the work queue.
-     *  Sending messages back on the MessageWriter
-     *
-     * These tasks and this function must be able to handle the
-     * Upstairs connection going away at any time, as well as a forced
-     * migration where a new Upstairs connects and the old (current from
-     * this threads point of view) work is discarded.
-     * As migration or upstairs failure can happen at any time, this
-     * function must watch for tasks going away and handle that
-     * gracefully.  By exiting the loop here, we allow the calling
-     * function to take over and handle a reconnect or a new upstairs
-     * takeover.
-     *
-     * Tasks are organized as follows, with tasks in `snake_case`
-     *
-     *   ┌──────────┐              ┌───────────┐
-     *   │FramedRead│              │FramedWrite│
-     *   └────┬─────┘              └─────▲─────┘
-     *        │                          │
-     *        │         ┌────────────────┴────────────────────┐
-     *        │         │         framed_write_task           │
-     *        │         └───────▲──────────────────▲──────────┘
-     *        │                 │                  │
-     *        │                 │invalid frame     │
-     *        │                 │errors, pings     │responses
-     *        │                 │                  │
-     *        │                 │                  │
-     *   ┌────▼────┐ message   ┌┴──────────────────┴────────┐
-     *   │resp_loop├──────────►│        pf_task             │
-     *   └─────────┘ channel   └──┬────────────────▲────────┘
-     *                            │                │
-     *                         add│work         new│work
-     *   per-connection           │                │
-     *  ========================= │ ============== │ ===============
-     *   shared state          ┌──▼────────────────┴────────────┐
-     *                         │           Downstairs           │
-     *                         └────────────────────────────────┘
-     */
-    // The Upstairs uses backpressure to limit total outstanding jobs, so these
-    // channels can be unbounded.
-    let (message_channel_tx, mut message_channel_rx) =
-        mpsc::unbounded_channel();
-    let mut pf_task = {
-        let adc = ads.clone();
-        let resp_channel_tx = resp_channel_tx.clone();
-        tokio::spawn(async move {
-            while let Some(m) = message_channel_rx.recv().await {
-                match Downstairs::proc_frame(
-                    &adc,
-                    upstairs_connection,
-                    m,
-                    &resp_channel_tx,
-                )
-                .await
-                {
-                    // If we added work, tell the work task to get busy.
-                    Ok(Some(new_ds_id)) => {
-                        cdt::work__start!(|| new_ds_id.0);
-                        Downstairs::do_work_for(
-                            &adc,
-                            upstairs_connection,
-                            &resp_channel_tx,
-                        )
-                        .await?;
-                    }
-                    // If we handled the job locally, nothing to do here
-                    Ok(None) => (),
-                    Err(e) => {
-                        bail!("Proc frame returns error: {}", e);
-                    }
-                }
-            }
-
-            Ok(())
-        })
-    };
-
-    // How long we wait before logging a message that we have not heard from
-    // the upstairs.
-    const TIMEOUT_SECS: f32 = 15.0;
-    // How many timeouts will tolerate before we disconnect from the upstairs.
-    const TIMEOUT_LIMIT: usize = 3;
     loop {
         tokio::select! {
-            e = &mut pf_task => {
-                bail!("pf task ended: {:?}", e);
-            }
-            e = &mut framed_write_task => {
-                bail!("framed write task ended: {:?}", e);
-            }
-
-            /*
-             * Don't wait more than TIMEOUT_SECS * TIMEOUT_LIMIT seconds to hear
-             * from the other side.
-             * XXX Timeouts, timeouts: always wrong!  Some too short and
-             * some too long.
-             */
-             _ = verbose_timeout(TIMEOUT_SECS, TIMEOUT_LIMIT, log.clone()) => {
-                bail!("inactivity timeout");
-            }
-
             /*
              * This Upstairs' thread will receive this signal when another
              * Upstairs promotes itself to active. The only way this path is
@@ -1261,7 +1198,7 @@ where
                         // running without the ability for another Upstairs to
                         // kick out the previous one during activation.
                         bail!("another_upstairs_active_rx closed during \
-                            resp_loop: {e:?}");
+                               proc: {e:?}");
                     }
 
                     Ok(new_upstairs_connection) => {
@@ -1273,7 +1210,7 @@ where
                             shutting down connection for {:?}",
                             new_upstairs_connection, upstairs_connection);
 
-                        if let Err(e) = resp_channel_tx.send(
+                        if let Err(e) = reply_channel_tx.send(
                             Message::YouAreNoLongerActive {
                                 new_upstairs_id:
                                     new_upstairs_connection.upstairs_id,
@@ -1289,7 +1226,7 @@ where
                     }
                 }
             }
-            new_read = fr.next() => {
+            new_read = msg_channel_rx.recv() => {
                 match new_read {
                     None => {
                         // Upstairs disconnected
@@ -1310,16 +1247,108 @@ where
 
                         return Ok(());
                     }
-                    Some(Ok(msg)) => {
-                        if let Err(e) = message_channel_tx.send(msg) {
-                            bail!("Failed sending message to proc_frame: {}", e);
+                    Some(msg) => {
+                        match Downstairs::proc_frame(
+                            &ads,
+                            upstairs_connection,
+                            msg,
+                            &reply_channel_tx,
+                        )
+                        .await
+                        {
+                            // If we added work, tell the work task to get busy.
+                            Ok(Some(new_ds_id)) => {
+                                cdt::work__start!(|| new_ds_id.0);
+                                Downstairs::do_work_for(
+                                    &ads,
+                                    upstairs_connection,
+                                    &reply_channel_tx,
+                                )
+                                .await?;
+                            }
+                            // If we handled the job locally, nothing to do here
+                            Ok(None) => (),
+                            Err(e) => {
+                                bail!("Proc frame returns error: {}", e);
+                            }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Receives messages from a channel and sends them to a socket
+///
+/// Returns `Ok(())` if the channel closes cleanly, or an error if the socket
+/// write fails in some way.
+async fn reply_task<WT>(
+    mut reply_channel_rx: mpsc::UnboundedReceiver<Message>,
+    mut fw: MessageWriter<WT>,
+) -> Result<()>
+where
+    WT: tokio::io::AsyncWrite
+        + std::marker::Unpin
+        + std::marker::Send
+        + 'static,
+{
+    while let Some(m) = reply_channel_rx.recv().await {
+        fw.send(m).await?;
+    }
+    Ok(())
+}
+
+/// Receives messages from a socket, deserializes them, and passes them along
+///
+/// Returns `Ok(())` if the incoming `FramedRead` is closed, or various errors
+/// under other circumstances (timeout, a `FramedRead` error, or failing to send
+/// to the `mpsc`).
+async fn recv_task<RT>(
+    mut fr: FramedRead<RT, CrucibleDecoder>,
+    msg_channel_tx: mpsc::UnboundedSender<Message>,
+    log: Logger,
+) -> Result<()>
+where
+    RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
+{
+    // How long we wait before logging a message that we have not heard from
+    // the upstairs.
+    const TIMEOUT_SECS: f32 = 15.0;
+    // How many timeouts will tolerate before we disconnect from the upstairs.
+    const TIMEOUT_LIMIT: usize = 3;
+    loop {
+        tokio::select! {
+            /*
+             * Don't wait more than TIMEOUT_SECS * TIMEOUT_LIMIT seconds to hear
+             * from the other side.
+             * XXX Timeouts, timeouts: always wrong!  Some too short and
+             * some too long.
+             */
+             _ = verbose_timeout(TIMEOUT_SECS, TIMEOUT_LIMIT, log.clone()) => {
+                bail!("inactivity timeout");
+            }
+
+            // The listener task will drop its msg_channel_tx sender once it
+            // decides to stop; this will be noticed by the other end (because
+            // its `recv()` will start failing).
+            new_read = fr.next() => {
+                match new_read {
+                    None => {
+                        warn!(
+                            log,
+                            "upstairs disconnected; recv_task stopping"
+                        );
+                        break Ok(());
                     }
                     Some(Err(e)) => {
                         // XXX "unexpected end of file" can occur if upstairs
                         // terminates, we don't yet have a HangUp message
                         bail!("Error reading from Upstairs: {}", e);
                     }
+                    Some(Ok(v)) => if let Err(e) = msg_channel_tx.send(v) {
+                        bail!("Failed sending message on msg_channel: {e}");
+                    },
                 }
             }
         }
@@ -3008,21 +3037,15 @@ impl Downstairs {
         Ok(())
     }
 
-    async fn on_negotiation_step<W>(
+    async fn on_negotiation_step(
         &mut self,
         m: Message,
         state: &mut NegotiationData,
-        fw: &mut crucible_protocol::MessageWriter<W>,
-    ) -> Result<()>
-    where
-        W: tokio::io::AsyncWrite
-            + std::marker::Unpin
-            + std::marker::Send
-            + 'static,
-    {
+        reply_channel_tx: &mut mpsc::UnboundedSender<Message>,
+    ) -> Result<()> {
         match m {
             Message::Ruok => {
-                if let Err(e) = fw.send(Message::Imok).await {
+                if let Err(e) = reply_channel_tx.send(Message::Imok) {
                     bail!("Failed to answer ping: {}", e);
                 }
             }
@@ -3067,7 +3090,7 @@ impl Downstairs {
                         let m = Message::VersionMismatch {
                             version: CRUCIBLE_MESSAGE_VERSION,
                         };
-                        if let Err(e) = fw.send(m).await {
+                        if let Err(e) = reply_channel_tx.send(m) {
                             warn!(
                                 self.log,
                                 "Failed to send VersionMismatch: {}", e
@@ -3087,11 +3110,10 @@ impl Downstairs {
                 // Upstairs will not be able to successfully negotiate.
                 {
                     if self.flags.read_only != read_only {
-                        if let Err(e) = fw
-                            .send(Message::ReadOnlyMismatch {
+                        if let Err(e) =
+                            reply_channel_tx.send(Message::ReadOnlyMismatch {
                                 expected: self.flags.read_only,
                             })
-                            .await
                         {
                             warn!(
                                 self.log,
@@ -3103,11 +3125,10 @@ impl Downstairs {
                     }
 
                     if self.flags.encrypted != encrypted {
-                        if let Err(e) = fw
-                            .send(Message::EncryptedMismatch {
+                        if let Err(e) =
+                            reply_channel_tx.send(Message::EncryptedMismatch {
                                 expected: self.flags.encrypted,
                             })
-                            .await
                         {
                             warn!(
                                 self.log,
@@ -3132,13 +3153,10 @@ impl Downstairs {
                     CRUCIBLE_MESSAGE_VERSION
                 );
 
-                if let Err(e) = fw
-                    .send(Message::YesItsMe {
-                        version: CRUCIBLE_MESSAGE_VERSION,
-                        repair_addr: state.repair_addr,
-                    })
-                    .await
-                {
+                if let Err(e) = reply_channel_tx.send(Message::YesItsMe {
+                    version: CRUCIBLE_MESSAGE_VERSION,
+                    repair_addr: state.repair_addr,
+                }) {
                     bail!("Failed sending YesItsMe: {}", e);
                 }
             }
@@ -3162,11 +3180,10 @@ impl Downstairs {
                     && upstairs_connection.session_id == session_id;
 
                 if !matches_self {
-                    if let Err(e) = fw
-                        .send(Message::UuidMismatch {
+                    if let Err(e) =
+                        reply_channel_tx.send(Message::UuidMismatch {
                             expected_id: upstairs_connection.upstairs_id,
                         })
-                        .await
                     {
                         warn!(self.log, "Failed sending UuidMismatch: {}", e);
                     }
@@ -3202,13 +3219,12 @@ impl Downstairs {
                     .await?;
                     state.negotiated = NegotiationState::PromotedToActive;
 
-                    if let Err(e) = fw
-                        .send(Message::YouAreNowActive {
+                    if let Err(e) =
+                        reply_channel_tx.send(Message::YouAreNowActive {
                             upstairs_id,
                             session_id,
                             gen,
                         })
-                        .await
                     {
                         bail!("Failed sending YouAreNewActive: {}", e);
                     }
@@ -3225,7 +3241,7 @@ impl Downstairs {
                 let region_def = { self.region.def() };
 
                 if let Err(e) =
-                    fw.send(Message::RegionInfo { region_def }).await
+                    reply_channel_tx.send(Message::RegionInfo { region_def })
                 {
                     bail!("Failed sending RegionInfo: {}", e);
                 }
@@ -3243,8 +3259,8 @@ impl Downstairs {
                 work.last_flush = last_flush_number;
                 info!(self.log, "Set last flush {}", last_flush_number);
 
-                if let Err(e) =
-                    fw.send(Message::LastFlushAck { last_flush_number }).await
+                if let Err(e) = reply_channel_tx
+                    .send(Message::LastFlushAck { last_flush_number })
                 {
                     bail!("Failed sending LastFlushAck: {}", e);
                 }
@@ -3283,14 +3299,11 @@ impl Downstairs {
                     );
                 }
 
-                if let Err(e) = fw
-                    .send(Message::ExtentVersions {
-                        gen_numbers,
-                        flush_numbers,
-                        dirty_bits,
-                    })
-                    .await
-                {
+                if let Err(e) = reply_channel_tx.send(Message::ExtentVersions {
+                    gen_numbers,
+                    flush_numbers,
+                    dirty_bits,
+                }) {
                     bail!("Failed sending ExtentVersions: {}", e);
                 }
 
