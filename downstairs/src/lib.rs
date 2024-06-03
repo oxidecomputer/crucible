@@ -1061,7 +1061,9 @@ async fn proc_task(
     let (log, cancel_io) = {
         let mut ds = ads.lock().await;
         (
-            ds.log.new(o!("task" => "proc_task".to_string())),
+            ds.log.new(
+                o!("task" => "proc_task".to_string(), "id" => id.0.to_string()),
+            ),
             ds.new_connection(id, reply_channel_tx),
         )
     };
