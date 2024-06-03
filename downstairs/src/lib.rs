@@ -983,9 +983,9 @@ where
     //        │channel         channel│invalid frame
     //        │                       │errors, pings
     //        │                       │
-    //        │              ┌────────┴───────┐  ┌──────┐
-    //        └──────────────►   proc_task    │  │ proc │
-    //                       └──┬───────────▲─┘  └──────┘
+    //        │              ┌────────┴───────┐  ┌──────┐ monitors other tasks
+    //        └──────────────►   proc_task    │  │ proc │ and aborts them if
+    //                       └──┬───────────▲─┘  └──────┘ any have stopped
     //                          │           │
     //                       add│work    new│work
     //   per-connection         │           │
@@ -994,8 +994,8 @@ where
     //                       │   Downstairs   │
     //                       └────────────────┘
 
-    // We rely on backpressure to limit total jobs in flight, so these channels
-    // can be unbounded.
+    // We rely on backpressure in the upstairs to limit total jobs in flight, so
+    // these channels can be unbounded.
     let (msg_channel_tx, msg_channel_rx) = mpsc::unbounded_channel();
     let mut recv_task = tokio::spawn(recv_task(
         fr,
@@ -3041,11 +3041,11 @@ impl Downstairs {
         &mut self,
         m: Message,
         state: &mut NegotiationData,
-        fw: &mut mpsc::UnboundedSender<Message>,
+        reply_channel_tx: &mut mpsc::UnboundedSender<Message>,
     ) -> Result<()> {
         match m {
             Message::Ruok => {
-                if let Err(e) = fw.send(Message::Imok) {
+                if let Err(e) = reply_channel_tx.send(Message::Imok) {
                     bail!("Failed to answer ping: {}", e);
                 }
             }
@@ -3090,7 +3090,7 @@ impl Downstairs {
                         let m = Message::VersionMismatch {
                             version: CRUCIBLE_MESSAGE_VERSION,
                         };
-                        if let Err(e) = fw.send(m) {
+                        if let Err(e) = reply_channel_tx.send(m) {
                             warn!(
                                 self.log,
                                 "Failed to send VersionMismatch: {}", e
@@ -3110,9 +3110,11 @@ impl Downstairs {
                 // Upstairs will not be able to successfully negotiate.
                 {
                     if self.flags.read_only != read_only {
-                        if let Err(e) = fw.send(Message::ReadOnlyMismatch {
-                            expected: self.flags.read_only,
-                        }) {
+                        if let Err(e) =
+                            reply_channel_tx.send(Message::ReadOnlyMismatch {
+                                expected: self.flags.read_only,
+                            })
+                        {
                             warn!(
                                 self.log,
                                 "Failed to send ReadOnlyMismatch: {}", e
@@ -3123,9 +3125,11 @@ impl Downstairs {
                     }
 
                     if self.flags.encrypted != encrypted {
-                        if let Err(e) = fw.send(Message::EncryptedMismatch {
-                            expected: self.flags.encrypted,
-                        }) {
+                        if let Err(e) =
+                            reply_channel_tx.send(Message::EncryptedMismatch {
+                                expected: self.flags.encrypted,
+                            })
+                        {
                             warn!(
                                 self.log,
                                 "Failed to send EncryptedMismatch: {}", e
@@ -3149,7 +3153,7 @@ impl Downstairs {
                     CRUCIBLE_MESSAGE_VERSION
                 );
 
-                if let Err(e) = fw.send(Message::YesItsMe {
+                if let Err(e) = reply_channel_tx.send(Message::YesItsMe {
                     version: CRUCIBLE_MESSAGE_VERSION,
                     repair_addr: state.repair_addr,
                 }) {
@@ -3176,9 +3180,11 @@ impl Downstairs {
                     && upstairs_connection.session_id == session_id;
 
                 if !matches_self {
-                    if let Err(e) = fw.send(Message::UuidMismatch {
-                        expected_id: upstairs_connection.upstairs_id,
-                    }) {
+                    if let Err(e) =
+                        reply_channel_tx.send(Message::UuidMismatch {
+                            expected_id: upstairs_connection.upstairs_id,
+                        })
+                    {
                         warn!(self.log, "Failed sending UuidMismatch: {}", e);
                     }
                     bail!(
@@ -3213,11 +3219,13 @@ impl Downstairs {
                     .await?;
                     state.negotiated = NegotiationState::PromotedToActive;
 
-                    if let Err(e) = fw.send(Message::YouAreNowActive {
-                        upstairs_id,
-                        session_id,
-                        gen,
-                    }) {
+                    if let Err(e) =
+                        reply_channel_tx.send(Message::YouAreNowActive {
+                            upstairs_id,
+                            session_id,
+                            gen,
+                        })
+                    {
                         bail!("Failed sending YouAreNewActive: {}", e);
                     }
                 }
@@ -3232,7 +3240,9 @@ impl Downstairs {
                 state.negotiated = NegotiationState::SentRegionInfo;
                 let region_def = { self.region.def() };
 
-                if let Err(e) = fw.send(Message::RegionInfo { region_def }) {
+                if let Err(e) =
+                    reply_channel_tx.send(Message::RegionInfo { region_def })
+                {
                     bail!("Failed sending RegionInfo: {}", e);
                 }
             }
@@ -3249,8 +3259,8 @@ impl Downstairs {
                 work.last_flush = last_flush_number;
                 info!(self.log, "Set last flush {}", last_flush_number);
 
-                if let Err(e) =
-                    fw.send(Message::LastFlushAck { last_flush_number })
+                if let Err(e) = reply_channel_tx
+                    .send(Message::LastFlushAck { last_flush_number })
                 {
                     bail!("Failed sending LastFlushAck: {}", e);
                 }
@@ -3289,7 +3299,7 @@ impl Downstairs {
                     );
                 }
 
-                if let Err(e) = fw.send(Message::ExtentVersions {
+                if let Err(e) = reply_channel_tx.send(Message::ExtentVersions {
                     gen_numbers,
                     flush_numbers,
                     dirty_bits,
