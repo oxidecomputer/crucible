@@ -1074,7 +1074,12 @@ async fn proc_task(
 
             new_read = msg_channel_rx.recv() => {
                 let mut ds = ads.lock().await;
+                let empty = new_read.is_none();
                 ds.on_message_for(id, new_read).await;
+                if empty {
+                    info!(log, "proc_loop read `None`; returning now");
+                    break Ok(());
+                }
             }
         }
     }
