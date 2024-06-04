@@ -3155,8 +3155,6 @@ impl Downstairs {
     }
 
     /// Handles a single message (or empty channel condition)
-    ///
-    /// Returns `true` if we should keep going, `false` (or an error) otherwise
     async fn on_message_for(&mut self, id: ConnectionId, msg: Option<Message>) {
         match msg {
             None => {
