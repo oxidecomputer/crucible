@@ -847,10 +847,8 @@ pub mod cdt {
     ) {
     }
     fn submit__el__close__done(_: u64) {}
-    fn submit__el__flush__close__done(_: u64) {}
     fn submit__el__repair__done(_: u64) {}
-    fn submit__el__reopen__done(_: u64) {}
-    fn submit__el__noop__done(_: u64) {}
+    fn submit__el__done(_: u64) {}
     fn work__done(_: u64) {}
 }
 
@@ -1907,20 +1905,14 @@ impl Downstairs {
                 cdt::submit__read__done!(|| ds_id.0);
                 self.dss.add_read();
             }
-            Message::ExtentLiveClose { .. } => {
+            Message::ExtentLiveCloseAck { .. } => {
                 cdt::submit__el__close__done!(|| ds_id.0);
             }
-            Message::ExtentLiveFlushClose { .. } => {
-                cdt::submit__el__flush__close__done!(|| ds_id.0);
-            }
-            Message::ExtentLiveRepair { .. } => {
+            Message::ExtentLiveRepairAckId { .. } => {
                 cdt::submit__el__repair__done!(|| ds_id.0);
             }
-            Message::ExtentLiveReopen { .. } => {
-                cdt::submit__el__reopen__done!(|| ds_id.0);
-            }
-            Message::ExtentLiveNoOp { .. } => {
-                cdt::submit__el__noop__done!(|| ds_id.0);
+            Message::ExtentLiveAckId { .. } => {
+                cdt::submit__el__done!(|| ds_id.0);
             }
             _ => (),
         }
