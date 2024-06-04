@@ -1026,23 +1026,24 @@ where
 
     let log = log.new(o!("task" => "proc"));
 
-    // proc itself waits for any of the three tasks to die and aborts the other
-    // two when that happens.
+    // proc itself waits for any of the three tasks to die and aborts certain
+    // other tasks when that happens.  Only 'upstream' tasks need to be aborted;
+    // downstream tasks will exit on their own when their `mpsc::Receiver` runs
+    // dry (producing `None`) values.  In some cases, we need to wait for that
+    // to happen, e.g. `proc_task` uninstalls the Downstairs when its channel is
+    // empty, so aborting it would skip a critical step.
     let (name, result) = tokio::select! {
         e = &mut recv_task => {
-            reply_task.abort();
-            proc_task.abort();
             ("recv_task", e)
         },
-        e = &mut reply_task => {
-            recv_task.abort();
-            proc_task.abort();
-            ("reply_task", e)
-        },
         e = &mut proc_task => {
-            reply_task.abort();
             recv_task.abort();
             ("proc_task", e)
+        },
+        e = &mut reply_task => {
+            proc_task.abort();
+            recv_task.abort();
+            ("reply_task", e)
         },
     };
 
