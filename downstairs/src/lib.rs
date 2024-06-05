@@ -939,11 +939,6 @@ struct ConnectionState {
     /// Upstairs connection, populated at `HelloItsMe`
     upstairs_connection: Option<UpstairsConnection>,
 
-    // It's important for `cancel` to be above `reply_channel_tx`, to ensure
-    // that `recv_task` knows it has been cancelled by the time `reply_task`
-    // has stopped.  This lets us distinguish between "`reply_task` stopped due
-    // to an error" and "`reply_task` stopped because `reply_channel_tx` was
-    // dropped by the `Downstairs`".
     /// Token used to cancel the IO tasks
     #[allow(unused)]
     cancel: tokio_util::sync::DropGuard,
@@ -1142,7 +1137,7 @@ async fn recv_task<RT>(
                         break;
                     }
                     Some(Err(e)) => {
-                        warn!(log, "upstairs read an error: {e:?}");
+                        warn!(log, "error reading from FramedReader: {e:?}");
                         send_disconnect();
                         break;
                     }
@@ -3124,6 +3119,9 @@ impl Downstairs {
     }
 
     /// Removes the given connection
+    ///
+    /// # Panics
+    /// If the connection is not present in the `connection_state` map
     fn remove_connection(&mut self, id: ConnectionId) {
         let state = self.connection_state.remove(&id).unwrap();
         if let Some(upstairs_connection) = state.upstairs_connection {
