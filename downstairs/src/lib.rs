@@ -876,11 +876,12 @@ fn is_message_valid(
     }
 }
 
+/// Spawns tasks for the given stream
 async fn proc_stream(
     ads: &Arc<Mutex<Downstairs>>,
     id: ConnectionId,
     stream: WrappedStream,
-    log: Logger,
+    log: &Logger,
 ) -> Result<()> {
     match stream {
         WrappedStream::Http(sock) => {
@@ -951,13 +952,13 @@ struct ConnectionState {
     reply_channel_tx: mpsc::UnboundedSender<Message>,
 }
 
-/// Handle all of the work for this Upstairs connection
+/// Spawn tasks for this Upstairs connection, then return
 async fn proc<RT, WT>(
     ads: &Arc<Mutex<Downstairs>>,
     id: ConnectionId,
     fr: FramedRead<RT, CrucibleDecoder>,
     fw: MessageWriter<WT>,
-    log: Logger,
+    log: &Logger,
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send + 'static,
@@ -968,19 +969,10 @@ where
 {
     // Create tasks for:
     //     Reading data from the socket (including deserialization)
-    //     Doing the actual work (proc, this function right here)
     //     Sending data out on the socket (including serialization)
     //
-    // These tasks and this function must be able to handle the
-    // Upstairs connection going away at any time, as well as a forced
-    // migration where a new Upstairs connects and the old (current from
-    // this threads point of view) work is discarded.
-    //
-    // As migration or upstairs failure can happen at any time, this
-    // function must watch for tasks going away and handle that
-    // gracefully.  By exiting the loop here, we allow the calling
-    // function to take over and handle a reconnect or a new upstairs
-    // takeover.
+    // These tasks are relatively dumb; they simply forward data to and from the
+    // `Downstairs::run` loop.
     //
     // Tasks are organized as follows, with tasks in `snake_case`
     //
@@ -996,10 +988,7 @@ where
     //        │handle          channel│invalid frame
     //        │                       │errors, pings
     //        │                       │
-    //        │                       │
     //        └─────────────────┐     │
-    //                          │     │
-    //                          │     │
     //                          │     │
     //   per-connection state   │     │
     //  ======================= │ === │ ===============================
@@ -1026,7 +1015,6 @@ where
     // - `reply_task` stops as above when its `Receiver` reads `None`
     // - The `ConnectionState` owns a `DropGuard` and `recv_task` polls the
     //   corresponding `CancellationToken`; when dropped, `recv_task` exits.
-    //
 
     // We rely on backpressure to limit total jobs in flight, so these channels
     // can be unbounded.
@@ -1140,7 +1128,7 @@ async fn recv_task<RT>(
                 // We don't inform the Downstairs that the task has stopped,
                 // because the Downstairs -- as the holder of the cancel token
                 // guard -- is the one that cancelled us!
-                warn!(log, "got cancelled token; recv_task stopping");
+                info!(log, "got cancelled token; recv_task stopping");
                 break;
             }
 
@@ -1149,7 +1137,7 @@ async fn recv_task<RT>(
             new_read = fr.next() => {
                 match new_read {
                     None => {
-                        warn!(log, "upstairs disconnected");
+                        info!(log, "upstairs disconnected");
                         send_disconnect();
                         break;
                     }
@@ -2753,6 +2741,10 @@ impl Downstairs {
         tokio::spawn(Downstairs::run(d, request_rx, log))
     }
 
+    /// The main Downstairs function!
+    ///
+    /// This function receives and handles requests from various other tasks,
+    /// most notable per-connection IO worker tasks.
     async fn run(
         ds: Arc<Mutex<Downstairs>>,
         mut request_rx: mpsc::UnboundedReceiver<DownstairsRequest>,
@@ -3111,7 +3103,8 @@ impl Downstairs {
         // Prepare for the autonegotiation / IO loop
         //
         // We'll create a cancellation token here, store it in a DropGuard, and
-        // return a child token for the proc loop to listen for.
+        // return a child token for `recv_task` (as the most 'upstream' task)
+        // to listen for.
         let token = tokio_util::sync::CancellationToken::new();
         let cancel_child = token.child_token();
         let cancel_guard = token.drop_guard();
@@ -3762,12 +3755,9 @@ pub async fn start_downstairs(
     let mut ds_runner = Downstairs::spawn_runner(d.clone()).await;
 
     let join_handle = tokio::spawn(async move {
-        /*
-         * We now loop listening for a connection from the Upstairs.
-         * When we get one, we then spawn the proc() function to handle
-         * it and wait for another connection. Downstairs can handle
-         * multiple Upstairs connecting but only one active one.
-         */
+        // We now loop listening for a connection from the Upstairs.
+        // When we get one, we call `proc()` to spawn worker tasks, then wait
+        // for another connection.
         info!(log, "downstairs listening on {}", listen_on);
         let mut id = ConnectionId(0);
         loop {
@@ -3816,18 +3806,14 @@ pub async fn start_downstairs(
 
             let dd = d.clone();
             let task_log = root_log.new(o!("id" => id.0.to_string()));
-            tokio::spawn(async move {
-                if let Err(e) =
-                    proc_stream(&dd, id, stream, task_log.clone()).await
-                {
-                    error!(
-                        task_log,
-                        "connection ({}) Exits with error: {:?}", raddr, e
-                    );
-                } else {
-                    info!(task_log, "connection ({}): all done", raddr);
-                }
-            });
+            if let Err(e) = proc_stream(&dd, id, stream, &task_log).await {
+                error!(
+                    task_log,
+                    "connection ({raddr}) failed to spawn tasks: {e:?}",
+                );
+            } else {
+                info!(task_log, "connection ({raddr}): tasks spawned");
+            }
             id.0 += 1;
         }
     });
