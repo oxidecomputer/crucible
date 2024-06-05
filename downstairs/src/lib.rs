@@ -876,11 +876,12 @@ fn is_message_valid(
     }
 }
 
+/// Spawns tasks for the given stream
 async fn proc_stream(
     ads: &Arc<Mutex<Downstairs>>,
     id: ConnectionId,
     stream: WrappedStream,
-    log: Logger,
+    log: &Logger,
 ) -> Result<()> {
     match stream {
         WrappedStream::Http(sock) => {
@@ -946,13 +947,13 @@ struct ConnectionState {
     reply_channel_tx: mpsc::UnboundedSender<Message>,
 }
 
-/// Handle all of the work for this Upstairs connection
+/// Spawn tasks for this Upstairs connection, then return
 async fn proc<RT, WT>(
     ads: &Arc<Mutex<Downstairs>>,
     id: ConnectionId,
     fr: FramedRead<RT, CrucibleDecoder>,
     fw: MessageWriter<WT>,
-    log: Logger,
+    log: &Logger,
 ) -> Result<()>
 where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send + 'static,
@@ -963,19 +964,10 @@ where
 {
     // Create tasks for:
     //     Reading data from the socket (including deserialization)
-    //     Doing the actual work (proc, this function right here)
     //     Sending data out on the socket (including serialization)
     //
-    // These tasks and this function must be able to handle the
-    // Upstairs connection going away at any time, as well as a forced
-    // migration where a new Upstairs connects and the old (current from
-    // this threads point of view) work is discarded.
-    //
-    // As migration or upstairs failure can happen at any time, this
-    // function must watch for tasks going away and handle that
-    // gracefully.  By exiting the loop here, we allow the calling
-    // function to take over and handle a reconnect or a new upstairs
-    // takeover.
+    // These tasks are relatively dumb; they simply forward data to and from the
+    // `Downstairs::run` loop.
     //
     // Tasks are organized as follows, with tasks in `snake_case`
     //
@@ -987,101 +979,58 @@ where
     //  │ recv_task  │       │   reply_task   │
     //  └─────┬──────┘       └────────▲───────┘
     //        │                       │
-    //        │message          reply │responses,
-    //        │channel         channel│invalid frame
+    //        │downstairs       reply │responses,
+    //        │handle          channel│invalid frame
     //        │                       │errors, pings
     //        │                       │
-    //        │              ┌────────┴───────┐  ┌──────┐ monitors other tasks
-    //        └──────────────►   proc_task    │  │ proc │ and aborts them if
-    //                       └──┬───────────▲─┘  └──────┘ any have stopped
-    //                          │           │
-    //                       add│work    new│work
-    //   per-connection         │           │
-    //  ======================= │ ========= │ =======
-    //   shared state        ┌──▼───────────┴─┐
-    //                       │   Downstairs   │
-    //                       └────────────────┘
+    //        └─────────────────┐     │
+    //                          │     │
+    //   per-connection state   │     │
+    //  ======================= │ === │ ===============================
+    //   common state      ┌────▼─────┴──────┐
+    //                     │ Downstairs::run │
+    //                     └─────────────────┘
+    //
+    // Task lifetimes are handled automatically; there are a variety of possible
+    // orderings.
+    //
+    // ## Error in `recv_task`
+    // - `recv_task` will proactively send `Message::ConnectionClosed` to the
+    //   `Downstairs`, then exit
+    // - The `Downstairs` will drop the `ConnectionState`, causing `reply_task`
+    //   to exit because its `mpsc::Receiver` will read `None`
+    //
+    // ## Error in `reply_task`
+    // - `reply_task` will exit upon error
+    // - `recv_task` will notice that `reply_task` has stopped, and will send
+    //   `Message::ConnectionClosed` to the `Downstairs`, then exit
+    //
+    // ## Intentional disconnection by the `Downstairs`
+    // - The `Downstairs` drops the `ConnectionState
+    // - `reply_task` stops as above when its `Receiver` reads `None`
+    // - The `ConnectionState` owns a `DropGuard` and `recv_task` polls the
+    //   corresponding `CancellationToken`; when dropped, `recv_task` exits.
 
-    // We rely on backpressure in the upstairs to limit total jobs in flight, so
-    // these channels can be unbounded.
-    let (msg_channel_tx, msg_channel_rx) = mpsc::unbounded_channel();
-    let mut recv_task = tokio::spawn(recv_task(
-        fr,
-        msg_channel_tx,
-        log.new(o!("task" => "recv")),
-    ));
-
+    // We rely on backpressure to limit total jobs in flight, so these channels
+    // can be unbounded.
     let (reply_channel_tx, reply_channel_rx) = mpsc::unbounded_channel();
-    let mut reply_task = tokio::spawn(reply_task(reply_channel_rx, fw));
 
-    let mut proc_task = tokio::spawn(proc_task(
-        ads.clone(),
-        id,
-        msg_channel_rx,
-        reply_channel_tx,
-        log.new(o!("task" => "proc_task")),
-    ));
-
-    let log = log.new(o!("task" => "proc"));
-
-    // proc itself waits for any of the three tasks to die and aborts certain
-    // other tasks when that happens.  Only 'upstream' tasks need to be aborted;
-    // downstream tasks will exit on their own when their `mpsc::Receiver` runs
-    // dry (producing `None`) values.  In some cases, we need to wait for that
-    // to happen, e.g. `proc_task` uninstalls the Downstairs when its channel is
-    // empty, so aborting it would skip a critical step.
-    let (name, result) = tokio::select! {
-        e = &mut recv_task => {
-            ("recv_task", e)
-        },
-        e = &mut proc_task => {
-            recv_task.abort();
-            ("proc_task", e)
-        },
-        e = &mut reply_task => {
-            proc_task.abort();
-            recv_task.abort();
-            ("reply_task", e)
-        },
-    };
-
-    match &result {
-        Err(e) => warn!(log, "{name} failed with JoinError: {e:?}"),
-        Ok(Err(e)) => warn!(log, "{name} failed with error: {e:?}"),
-        Ok(Ok(())) => info!(log, "{name} exited cleanly"),
-    }
-    result? // coerce the outer JoinError into anyhow::Error
-}
-
-async fn proc_task(
-    ads: Arc<Mutex<Downstairs>>,
-    id: ConnectionId,
-    mut msg_channel_rx: mpsc::UnboundedReceiver<Message>,
-    reply_channel_tx: mpsc::UnboundedSender<Message>,
-    log: Logger,
-) -> Result<()> {
     // Populate our state in the Downstairs, keyed by our `id`
     let handle = ads.lock().await.handle();
     let cancel_io = handle.new_connection(id, reply_channel_tx).await?;
 
-    loop {
-        tokio::select! {
-            _ = cancel_io.cancelled() => {
-                info!(log, "proc_loop cancelled; returning now");
-                return Ok(());
-            }
+    let reply_task = tokio::spawn(reply_task(reply_channel_rx, fw));
+    tokio::spawn(recv_task(
+        id,
+        fr,
+        cancel_io,
+        reply_task,
+        handle,
+        log.new(o!("task" => "recv")),
+    ));
 
-            new_read = msg_channel_rx.recv() => {
-                let mut ds = ads.lock().await;
-                let empty = new_read.is_none();
-                ds.on_message_for(id, new_read).await;
-                if empty {
-                    info!(log, "proc_loop read `None`; returning now");
-                    break Ok(());
-                }
-            }
-        }
-    }
+    // The tasks are in flight and will exit autonomously per above
+    Ok(())
 }
 
 /// Receives messages from a channel and sends them to a socket
@@ -1106,15 +1055,18 @@ where
 
 /// Receives messages from a socket, deserializes them, and passes them along
 ///
-/// Returns `Ok(())` if the incoming `FramedRead` is closed, or various errors
-/// under other circumstances (timeout, a `FramedRead` error, or failing to send
-/// to the `mpsc`).
+/// This is the most 'upstream' per-connection task, so it also monitors the
+/// cancellation token (owned by the Downstairs) and the reply task (which is a
+/// `JoinHandle`).  If either of these indicate termination, then `recv_task`
+/// exits, sending `ConnectionClosed` to the `Downstairs` if relevant.
 async fn recv_task<RT>(
+    id: ConnectionId,
     mut fr: FramedRead<RT, CrucibleDecoder>,
-    msg_channel_tx: mpsc::UnboundedSender<Message>,
+    cancel_io: tokio_util::sync::CancellationToken,
+    mut reply_task: tokio::task::JoinHandle<Result<()>>,
+    handle: DownstairsHandle,
     log: Logger,
-) -> Result<()>
-where
+) where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
 {
     // How long we wait before logging a message that we have not heard from
@@ -1122,6 +1074,15 @@ where
     const TIMEOUT_SECS: f32 = 15.0;
     // How many timeouts will tolerate before we disconnect from the upstairs.
     const TIMEOUT_LIMIT: usize = 3;
+
+    let send_disconnect = || {
+        warn!(log, "recv_task sending ConnectionClosed");
+        let m = DownstairsRequest::ConnectionClosed { id };
+        if let Err(e) = handle.tx.send(m) {
+            warn!(log, "failed sending ConnectionClosed to handle: {e:?}");
+        }
+    };
+
     loop {
         tokio::select! {
             /*
@@ -1130,29 +1091,65 @@ where
              * XXX Timeouts, timeouts: always wrong!  Some too short and
              * some too long.
              */
-             _ = verbose_timeout(TIMEOUT_SECS, TIMEOUT_LIMIT, log.clone()) => {
-                bail!("inactivity timeout");
+            _ = verbose_timeout(TIMEOUT_SECS, TIMEOUT_LIMIT, log.clone()) => {
+                warn!(log, "inactivity timeout");
+                send_disconnect();
+                break;
             }
 
-            // The listener task will drop its msg_channel_tx sender once it
-            // decides to stop; this will be noticed by the other end (because
-            // its `recv()` will start failing).
+            // Check whether the reply task has stopped of its own accord
+            _ = &mut reply_task => {
+                warn!(log, "reply_task stopped");
+
+                // It may be theoretically possible for `reply_task` to stop
+                // (when `ConnectionState::reply_channel_tx` is dropped) and
+                // then for this `select!` to notice it stops **before**
+                // noticing that `cancel_io.cancelled()` is true.
+                //
+                // If that's the case, it would be bad to tell the `Downstairs`
+                // that we've disconnected, because it already knows!
+                //
+                // However, the cancel token is always dropped _before_
+                // `reply_channel_tx` in `ConnectionState`, so we can check
+                // that case here:
+                if !cancel_io.is_cancelled() {
+                    send_disconnect();
+                }
+                break;
+            }
+
+            // Check whether the Downstairs has cancelled us
+            _ = cancel_io.cancelled() => {
+                // We don't inform the Downstairs that the task has stopped,
+                // because the Downstairs -- as the holder of the cancel token
+                // guard -- is the one that cancelled us!
+                info!(log, "got cancelled token; recv_task stopping");
+                break;
+            }
+
+            // Normal operation: read messages from the socket, deserialize
+            // them, and send them to the Downstairs as a tagged message.
             new_read = fr.next() => {
                 match new_read {
                     None => {
-                        warn!(
-                            log,
-                            "upstairs disconnected; recv_task stopping"
-                        );
-                        break Ok(());
+                        info!(log, "upstairs disconnected");
+                        send_disconnect();
+                        break;
                     }
                     Some(Err(e)) => {
-                        // XXX "unexpected end of file" can occur if upstairs
-                        // terminates, we don't yet have a HangUp message
-                        bail!("Error reading from Upstairs: {}", e);
+                        warn!(log, "error reading from FramedReader: {e:?}");
+                        send_disconnect();
+                        break;
                     }
-                    Some(Ok(v)) => if let Err(e) = msg_channel_tx.send(v) {
-                        bail!("Failed sending message on msg_channel: {e}");
+                    Some(Ok(msg)) => {
+                        let m = DownstairsRequest::Message { id, msg };
+                        if let Err(e) = handle.tx.send(m) {
+                            warn!(
+                                log,
+                                "failed sending message to Downstairs: {e:?}"
+                            );
+                            break;
+                        }
                     },
                 }
             }
@@ -1247,7 +1244,7 @@ impl DownstairsBuilder<'_> {
             region.def().extent_count(),
         );
 
-        let (request_tx, request_rx) = mpsc::channel(256); // TODO size?
+        let (request_tx, request_rx) = mpsc::unbounded_channel();
         Ok(Arc::new(Mutex::new(Downstairs {
             region,
             flags: DownstairsFlags {
@@ -1304,8 +1301,8 @@ pub struct Downstairs {
     /// Per-connection state
     connection_state: HashMap<ConnectionId, ConnectionState>,
 
-    request_tx: mpsc::Sender<DownstairsRequest>,
-    request_rx: Option<mpsc::Receiver<DownstairsRequest>>,
+    request_tx: mpsc::UnboundedSender<DownstairsRequest>,
+    request_rx: Option<mpsc::UnboundedReceiver<DownstairsRequest>>,
 
     // A reqwest client, to be reused when creating progenitor clients
     pub reqwest_client: reqwest::Client,
@@ -2739,9 +2736,13 @@ impl Downstairs {
         tokio::spawn(Downstairs::run(d, request_rx, log))
     }
 
+    /// The main Downstairs function!
+    ///
+    /// This function receives and handles requests from various other tasks,
+    /// most notable per-connection IO worker tasks.
     async fn run(
         ds: Arc<Mutex<Downstairs>>,
-        mut request_rx: mpsc::Receiver<DownstairsRequest>,
+        mut request_rx: mpsc::UnboundedReceiver<DownstairsRequest>,
         log: Logger,
     ) {
         while let Some(v) = request_rx.recv().await {
@@ -2769,6 +2770,24 @@ impl Downstairs {
                     let out = d.new_connection(id, reply_channel_tx);
                     if done.send(out).is_err() {
                         warn!(log, "failed to reply to NewConnection");
+                    }
+                }
+                DownstairsRequest::Message { id, msg } => {
+                    let mut d = ds.lock().await;
+                    d.on_message_for(id, msg).await;
+                }
+                DownstairsRequest::ConnectionClosed { id } => {
+                    let mut d = ds.lock().await;
+                    if d.connection_state.contains_key(&id) {
+                        d.on_connection_closed(id);
+                    } else {
+                        // This may be possible during certain task shutdown
+                        // orders; it's awkward but harmless.
+                        warn!(
+                            d.log,
+                            "got ConnectionClosed for {id:?}, \
+                             which was already closed"
+                        );
                     }
                 }
             }
@@ -3079,7 +3098,8 @@ impl Downstairs {
         // Prepare for the autonegotiation / IO loop
         //
         // We'll create a cancellation token here, store it in a DropGuard, and
-        // return a child token for the proc_task loop to listen for.
+        // return a child token for `recv_task` (as the most 'upstream' task)
+        // to listen for.
         let token = tokio_util::sync::CancellationToken::new();
         let cancel_child = token.child_token();
         let cancel_guard = token.drop_guard();
@@ -3099,6 +3119,9 @@ impl Downstairs {
     }
 
     /// Removes the given connection
+    ///
+    /// # Panics
+    /// If the connection is not present in the `connection_state` map
     fn remove_connection(&mut self, id: ConnectionId) {
         let state = self.connection_state.remove(&id).unwrap();
         if let Some(upstairs_connection) = state.upstairs_connection {
@@ -3143,49 +3166,43 @@ impl Downstairs {
         }
     }
 
-    /// Handles a single message (or empty channel condition)
-    async fn on_message_for(&mut self, id: ConnectionId, msg: Option<Message>) {
-        match msg {
-            None => {
-                // Upstairs disconnected, so discard our local state
-                info!(self.log, "connection closed; disconnection");
-                self.remove_connection(id);
-            }
-            Some(m) => {
-                if self.connection_state[&id].negotiated
-                    == NegotiationState::Ready
-                {
-                    match self.proc_frame(m, id).await {
-                        // If we added work, then do it!
-                        Ok(Some(new_ds_id)) => {
-                            cdt::work__start!(|| new_ds_id.0);
-                            if let Err(e) = self.do_work_for(id).await {
-                                warn!(
-                                    self.log,
-                                    "do_work_for returns error {e:?}; \
-                                     disconnecting"
-                                );
-                                self.remove_connection(id);
-                            }
-                        }
-                        // If we handled the job locally, nothing to do
-                        Ok(None) => (),
-                        Err(e) => {
-                            warn!(
-                                self.log,
-                                "proc_frame returns error {e:?}; disconnecting"
-                            );
-                            self.remove_connection(id);
-                        }
+    fn on_connection_closed(&mut self, id: ConnectionId) {
+        // Upstairs disconnected, so discard our local state
+        info!(self.log, "connection closed; disconnection");
+        self.remove_connection(id);
+    }
+
+    /// Handles a single message, either negotiation or doing IO
+    async fn on_message_for(&mut self, id: ConnectionId, m: Message) {
+        if self.connection_state[&id].negotiated == NegotiationState::Ready {
+            match self.proc_frame(m, id).await {
+                // If we added work, then do it!
+                Ok(Some(new_ds_id)) => {
+                    cdt::work__start!(|| new_ds_id.0);
+                    if let Err(e) = self.do_work_for(id).await {
+                        warn!(
+                            self.log,
+                            "do_work_for returns error {e:?}; disconnecting"
+                        );
+                        self.remove_connection(id);
                     }
-                } else if let Err(e) = self.on_negotiation_step(m, id).await {
+                }
+                // If we handled the job locally, nothing to do
+                Ok(None) => (),
+                Err(e) => {
                     warn!(
                         self.log,
-                        "on_negotiation_step returns error {e:?}, disconnecting"
+                        "proc_frame returns error {e:?}; disconnecting"
                     );
                     self.remove_connection(id);
                 }
             }
+        } else if let Err(e) = self.on_negotiation_step(m, id).await {
+            warn!(
+                self.log,
+                "on_negotiation_step returns error {e:?}, disconnecting"
+            );
+            self.remove_connection(id);
         }
     }
 
@@ -3237,11 +3254,20 @@ enum DownstairsRequest {
     ///
     /// This is fire-and-forget, so there's no oneshot reply channel
     ShowWork,
+
+    /// A message has arrived for the given id
+    ///
+    /// This is fire-and-forget; if the Downstairs doesn't like the message, it
+    /// will kill that IO task through the cancellation handle.
+    Message { id: ConnectionId, msg: Message },
+
+    /// The given id's upstream connection has closed
+    ConnectionClosed { id: ConnectionId },
 }
 
 /// Handle allowing for async calls to the Downstairs task
 pub struct DownstairsHandle {
-    tx: mpsc::Sender<DownstairsRequest>,
+    tx: mpsc::UnboundedSender<DownstairsRequest>,
 }
 
 impl DownstairsHandle {
@@ -3249,14 +3275,12 @@ impl DownstairsHandle {
         let (done, rx) = oneshot::channel();
         self.tx
             .send(DownstairsRequest::IsExtentClosed { eid, done })
-            .await
             .context("could not send message on channel")?;
         rx.await.context("could not receive result")
     }
-    pub async fn show_work(&self) -> Result<()> {
+    pub fn show_work(&self) -> Result<()> {
         self.tx
             .send(DownstairsRequest::ShowWork)
-            .await
             .context("could not send message on channel")
     }
 
@@ -3272,7 +3296,6 @@ impl DownstairsHandle {
                 reply_channel_tx,
                 done,
             })
-            .await
             .context("could not send message on channel")?;
         rx.await.context("could not receive result")
     }
@@ -3730,12 +3753,9 @@ pub async fn start_downstairs(
     let mut ds_runner = Downstairs::spawn_runner(d.clone()).await;
 
     let join_handle = tokio::spawn(async move {
-        /*
-         * We now loop listening for a connection from the Upstairs.
-         * When we get one, we then spawn the proc() function to handle
-         * it and wait for another connection. Downstairs can handle
-         * multiple Upstairs connecting but only one active one.
-         */
+        // We now loop listening for a connection from the Upstairs.
+        // When we get one, we call `proc()` to spawn worker tasks, then wait
+        // for another connection.
         info!(log, "downstairs listening on {}", listen_on);
         let mut id = ConnectionId(0);
         loop {
@@ -3784,18 +3804,14 @@ pub async fn start_downstairs(
 
             let dd = d.clone();
             let task_log = root_log.new(o!("id" => id.0.to_string()));
-            tokio::spawn(async move {
-                if let Err(e) =
-                    proc_stream(&dd, id, stream, task_log.clone()).await
-                {
-                    error!(
-                        task_log,
-                        "connection ({}) Exits with error: {:?}", raddr, e
-                    );
-                } else {
-                    info!(task_log, "connection ({}): all done", raddr);
-                }
-            });
+            if let Err(e) = proc_stream(&dd, id, stream, &task_log).await {
+                error!(
+                    task_log,
+                    "connection ({raddr}) failed to spawn tasks: {e:?}",
+                );
+            } else {
+                info!(task_log, "connection ({raddr}): tasks spawned");
+            }
             id.0 += 1;
         }
     });

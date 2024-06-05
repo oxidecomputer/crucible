@@ -322,7 +322,6 @@ async fn get_work(
     let downstairs = &rqctx.context().downstairs;
     downstairs
         .show_work()
-        .await
         .map(|_| HttpResponseOk(true))
         .map_err(|e| HttpError::for_internal_error(e.to_string()))
 }
