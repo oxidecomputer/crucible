@@ -938,6 +938,11 @@ struct ConnectionState {
     /// Upstairs connection, populated at `HelloItsMe`
     upstairs_connection: Option<UpstairsConnection>,
 
+    // It's important for `cancel` to be above `reply_channel_tx`, to ensure
+    // that `recv_task` knows it has been cancelled by the time `reply_task`
+    // has stopped.  This lets us distinguish between "`reply_task` stopped due
+    // to an error" and "`reply_task` stopped because `reply_channel_tx` was
+    // dropped by the `Downstairs`".
     /// Token used to cancel the IO tasks
     #[allow(unused)]
     cancel: tokio_util::sync::DropGuard,
@@ -1011,17 +1016,17 @@ where
     // - The `Downstairs` will drop the `ConnectionState`, causing `reply_task`
     //   to exit because its `mpsc::Receiver` will read `None`
     //
+    // ## Error in `reply_task`
+    // - `reply_task` will exit upon error
+    // - `recv_task` will notice that `reply_task` has stopped, and will send
+    //   `Message::ConnectionClosed` to the `Downstairs`, then exit
+    //
     // ## Intentional disconnection by the `Downstairs`
     // - The `Downstairs` drops the `ConnectionState
     // - `reply_task` stops as above when its `Receiver` reads `None`
     // - The `ConnectionState` owns a `DropGuard` and `recv_task` polls the
     //   corresponding `CancellationToken`; when dropped, `recv_task` exits.
     //
-    // ## Error in `reply_task`
-    // - `reply_task` will exit upon error
-    // - When the `Downstairs` tries to write to it, the write will fail
-    // - The `Downstairs` will then remove the connection, cancelling
-    //   `recv_task` through the `DropGuard` as above
 
     // We rely on backpressure to limit total jobs in flight, so these channels
     // can be unbounded.
@@ -1031,11 +1036,12 @@ where
     let handle = ads.lock().await.handle();
     let cancel_io = handle.new_connection(id, reply_channel_tx).await?;
 
-    tokio::spawn(reply_task(reply_channel_rx, fw));
+    let reply_task = tokio::spawn(reply_task(reply_channel_rx, fw));
     tokio::spawn(recv_task(
         id,
         fr,
         cancel_io,
+        reply_task,
         handle,
         log.new(o!("task" => "recv")),
     ));
@@ -1066,17 +1072,18 @@ where
 
 /// Receives messages from a socket, deserializes them, and passes them along
 ///
-/// Returns `Ok(())` if the incoming `FramedRead` is closed, or various errors
-/// under other circumstances (timeout, a `FramedRead` error, or failing to send
-/// to the `mpsc`).
+/// This is the most 'upstream' per-connection task, so it also monitors the
+/// cancellation token (owned by the Downstairs) and the reply task (which is a
+/// `JoinHandle`).  If either of these indicate termination, then `recv_task`
+/// exits, sending `ConnectionClosed` to the `Downstairs` if relevant.
 async fn recv_task<RT>(
     id: ConnectionId,
     mut fr: FramedRead<RT, CrucibleDecoder>,
     cancel_io: tokio_util::sync::CancellationToken,
+    mut reply_task: tokio::task::JoinHandle<Result<()>>,
     handle: DownstairsHandle,
     log: Logger,
-) -> Result<()>
-where
+) where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
 {
     // How long we wait before logging a message that we have not heard from
@@ -1084,6 +1091,15 @@ where
     const TIMEOUT_SECS: f32 = 15.0;
     // How many timeouts will tolerate before we disconnect from the upstairs.
     const TIMEOUT_LIMIT: usize = 3;
+
+    let send_disconnect = || {
+        warn!(log, "recv_task sending ConnectionClosed");
+        let m = DownstairsRequest::ConnectionClosed { id };
+        if let Err(e) = handle.tx.send(m) {
+            warn!(log, "failed sending ConnectionClosed to handle: {e:?}");
+        }
+    };
+
     loop {
         tokio::select! {
             /*
@@ -1093,54 +1109,63 @@ where
              * some too long.
              */
             _ = verbose_timeout(TIMEOUT_SECS, TIMEOUT_LIMIT, log.clone()) => {
-                bail!("inactivity timeout");
+                warn!(log, "inactivity timeout");
+                send_disconnect();
+                break;
             }
 
+            // Check whether the reply task has stopped of its own accord
+            _ = &mut reply_task => {
+                warn!(log, "reply_task stopped");
+
+                // It may be theoretically possible for `reply_task` to stop
+                // (when `ConnectionState::reply_channel_tx` is dropped) and
+                // then for this `select!` to notice it stops **before**
+                // noticing that `cancel_io.cancelled()` is true.
+                //
+                // If that's the case, it would be bad to tell the `Downstairs`
+                // that we've disconnected, because it already knows!
+                //
+                // However, the cancel token is always dropped _before_
+                // `reply_channel_tx` in `ConnectionState`, so we can check
+                // that case here:
+                if !cancel_io.is_cancelled() {
+                    send_disconnect();
+                }
+                break;
+            }
+
+            // Check whether the Downstairs has cancelled us
             _ = cancel_io.cancelled() => {
                 // We don't inform the Downstairs that the task has stopped,
                 // because the Downstairs -- as the holder of the cancel token
                 // guard -- is the one that cancelled us!
                 warn!(log, "got cancelled token; recv_task stopping");
-                bail!("cancelled by token");
+                break;
             }
 
-            // The listener task will drop its msg_channel_tx sender once it
-            // decides to stop; this will be noticed by the other end (because
-            // its `recv()` will start failing).
+            // Normal operation: read messages from the socket, deserialize
+            // them, and send them to the Downstairs as a tagged message.
             new_read = fr.next() => {
                 match new_read {
                     None => {
-                        warn!(
-                            log,
-                            "upstairs disconnected; recv_task stopping"
-                        );
-                        let m = DownstairsRequest::ConnectionClosed { id };
-                        if let Err(e) = handle.tx.send(m) {
-                            bail!(
-                                "Failed sending ConnectionClosed to handle:
-                                 {e:?}"
-                            );
-                        }
-                        break Ok(());
+                        warn!(log, "upstairs disconnected");
+                        send_disconnect();
+                        break;
                     }
                     Some(Err(e)) => {
                         warn!(log, "upstairs read an error: {e:?}");
-                        let m = DownstairsRequest::ConnectionClosed { id };
-                        if let Err(e) = handle.tx.send(m) {
-                            bail!(
-                                "Failed sending ConnectionClosed to handle:
-                                 {e:?}"
-                            );
-                        }
-
-                        // XXX "unexpected end of file" can occur if upstairs
-                        // terminates, we don't yet have a HangUp message
-                        bail!("Error reading from Upstairs: {}", e);
+                        send_disconnect();
+                        break;
                     }
                     Some(Ok(msg)) => {
                         let m = DownstairsRequest::Message { id, msg };
                         if let Err(e) = handle.tx.send(m) {
-                            bail!("Failed sending Message to handle: {e:?}");
+                            warn!(
+                                log,
+                                "failed sending message to Downstairs: {e:?}"
+                            );
+                            break;
                         }
                     },
                 }
@@ -2766,7 +2791,17 @@ impl Downstairs {
                 }
                 DownstairsRequest::ConnectionClosed { id } => {
                     let mut d = ds.lock().await;
-                    d.on_connection_closed(id);
+                    if d.connection_state.contains_key(&id) {
+                        d.on_connection_closed(id);
+                    } else {
+                        // This may be possible during certain task shutdown
+                        // orders; it's awkward but harmless.
+                        warn!(
+                            d.log,
+                            "got ConnectionClosed for {id:?}, \
+                             which was already closed"
+                        );
+                    }
                 }
             }
         }
