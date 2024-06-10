@@ -3256,7 +3256,11 @@ impl Downstairs {
 
     /// Handles a single message, either negotiation or doing IO
     async fn on_message_for(&mut self, id: ConnectionId, m: Message) {
-        if matches!(self.connection_state[&id], ConnectionState::Running(..)) {
+        let Some(state) = self.connection_state.get_mut(&id) else {
+            warn!(self.log, "got message for disconnected id {id:?}; ignoring");
+            return;
+        };
+        if matches!(state, ConnectionState::Running(..)) {
             match self.proc_frame(m, id).await {
                 // If we added work, then do it!
                 Ok(Some(new_ds_id)) => {
