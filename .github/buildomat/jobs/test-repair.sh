@@ -4,7 +4,7 @@
 #: variety = "basic"
 #: target = "helios-2.0"
 #: output_rules = [
-#:	"/tmp/*.txt",
+#:	"%/tmp/*.txt",
 #:	"%/tmp/debug/*",
 #:	"/tmp/core.*",
 #: ]
@@ -47,7 +47,7 @@ done
 export BINDIR=/var/tmp/bins
 
 echo "Setup self timeout"
-jobpid=$$; (sleep $(( 3 * 60 )); banner fail-timeout; ps -ef; zfs list;kill $jobpid) &
+jobpid=$$; (sleep $(( 120 * 60 )); banner fail-timeout; ps -ef; zfs list;kill $jobpid) &
 
 echo "Setup debug logging"
 mkdir /tmp/debug
@@ -61,6 +61,6 @@ pfexec dtrace -Z -s $input/scripts/perf-downstairs-tick.d > /tmp/debug/dtrace.tx
 pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/debug/upstairs-info.txt 2>&1 &
 
 banner repair
-ptime -m bash "$input/scripts/test_repair.sh" "-N" > /tmp/debug/test-repair-out.txt 2>&1
+ptime -m bash "$input/scripts/test_repair.sh-TESFAIL" "-N" > /tmp/debug/test-repair-out.txt 2>&1
 
 echo "Test repair finished with $?"
