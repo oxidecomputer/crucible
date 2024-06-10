@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 pub struct ServerContext {
     // Region UUID -> a running Downstairs
-    downstairs: Mutex<HashMap<Uuid, Arc<Mutex<Downstairs>>>>,
+    downstairs: Mutex<HashMap<Uuid, DownstairsHandle>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -74,8 +74,9 @@ pub async fn run_downstairs_for_region(
         .await
         .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
+    let handle = d.handle();
     let _join_handle = start_downstairs(
-        d.clone(),
+        d,
         run_params.address,
         run_params.oximeter,
         run_params.port,
@@ -89,7 +90,7 @@ pub async fn run_downstairs_for_region(
 
     // past here, the downstairs has started successfully
 
-    downstairs.insert(uuid, d);
+    downstairs.insert(uuid, handle);
 
     Ok(HttpResponseCreated(DownstairsRunningResponse { uuid }))
 }
