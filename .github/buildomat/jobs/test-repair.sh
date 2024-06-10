@@ -62,6 +62,6 @@ pfexec dtrace -Z -s $input/scripts/perf-downstairs-tick.d > /tmp/debug/dtrace.tx
 pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/debug/upstairs-info.txt 2>&1 &
 
 banner repair
-ptime -m bash "$input/scripts/test_repair.sh" "-N" > /tmp/debug/test-repair-out.txt 2>&1
+ptime -m bash "$input/scripts/test_repair.sh" "-N" > /tmp/test-repair-out.txt 2>&1
 
 echo "Test repair finished with $?"
