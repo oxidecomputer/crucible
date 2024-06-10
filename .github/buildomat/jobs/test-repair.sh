@@ -5,7 +5,7 @@
 #: target = "helios-2.0"
 #: output_rules = [
 #:	"/tmp/*.txt",
-#:	"%/tmp/dtrace/*",
+#:	"%/tmp/debug/*",
 #:	"/tmp/core.*",
 #: ]
 #: skip_clone = true
@@ -46,10 +46,21 @@ done
 
 export BINDIR=/var/tmp/bins
 
-banner dtrace
-pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/dtrace/upstairs-info.txt 2>&1 &
+echo "Setup self timeout"
+jobpid=$$; (sleep $(( 1 * 60 )); ps -ef; zfs list;kill $jobpid) &
+
+echo "Setup debug logging"
+mkdir /tmp/debug
+psrinfo -v > /tmp/debug/psrinfo.txt
+df -h > /tmp/debug/df.txt || true
+prstat -d d -mLc 1 > /tmp/debug/prstat.txt 2>&1 &
+iostat -T d -xn 1 > /tmp/debug/iostat.txt 2>&1 &
+mpstat -T d 1 > /tmp/debug/mpstat.txt 2>&1 &
+vmstat -T d -p 1 < /dev/null > /tmp/debug/paging.txt 2>&1 &
+pfexec dtrace -Z -s $input/scripts/perf-downstairs-tick.d > /tmp/debug/dtrace.txt 2>&1 &
+pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/debug/upstairs-info.txt 2>&1 &
 
 banner repair
-ptime -m bash "$input/scripts/test_repair.sh" "-N"
+ptime -m bash "$input/scripts/test_repair.sh" "-N" > /tmp/debug/test-repair-out.txt 2>&1
 
-# Save the output files?
+echo "Test repair finished with $?"
