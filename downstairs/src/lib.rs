@@ -3015,6 +3015,16 @@ impl Downstairs {
                             upstairs_connection.gen,
                             gen,
                         );
+
+                        // Reborrow to update `upstairs_connection.gen`
+                        let ConnectionState::Negotiating {
+                            upstairs_connection,
+                            ..
+                        } = state
+                        else {
+                            unreachable!()
+                        };
+                        upstairs_connection.gen = gen;
                     }
 
                     self.promote_to_active(upstairs_connection, id).await?;
