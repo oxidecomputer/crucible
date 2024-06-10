@@ -47,7 +47,7 @@ done
 export BINDIR=/var/tmp/bins
 
 echo "Setup self timeout"
-jobpid=$$; (sleep $(( 1 * 60 )); ps -ef; zfs list;kill $jobpid) &
+jobpid=$$; (sleep $(( 3 * 60 )); banner fail-timeout; ps -ef; zfs list;kill $jobpid) &
 
 echo "Setup debug logging"
 mkdir /tmp/debug
