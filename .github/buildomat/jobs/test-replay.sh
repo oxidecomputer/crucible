@@ -47,7 +47,7 @@ banner setup
 
 echo "Setup self timeout"
 # Three hours should be enough
-jobpid=$$; (sleep 10800; ps -ef; zfs list;kill $jobpid) &
+jobpid=$$; (sleep 10800; banner fail-timeout; ps -ef; zfs list;kill $jobpid) &
 
 echo "Setup debug logging"
 mkdir /tmp/debug

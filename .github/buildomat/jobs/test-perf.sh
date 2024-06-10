@@ -46,8 +46,7 @@ pfexec plimit -n 9123456 $$
 
 
 echo "Setup self timeout"
-# This timeout is from issue 520
-jobpid=$$; (sleep $(( 40 * 60 )); ps -ef; zfs list;kill $jobpid) &
+jobpid=$$; (sleep $(( 40 * 60 )); banner fail-timeout; ps -ef; zfs list;kill $jobpid) &
 
 echo "Setup debug logging"
 mkdir /tmp/debug
@@ -64,5 +63,3 @@ banner start
 bash $input/scripts/test_perf.sh > /tmp/debug/test_perf.txt 2>&1
 echo "$? was our result"
 echo "Test finished"
-sleep 5
-ps -ef
