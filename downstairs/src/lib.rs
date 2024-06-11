@@ -1874,7 +1874,7 @@ impl Downstairs {
 
     /// Adds a new connection, then sets it to `ConnectionState::Running`
     ///
-    /// This skips autonegotiation for ease of unit testing
+    /// This skips negotiation for ease of unit testing
     #[cfg(test)]
     fn add_fake_connection(
         &mut self,
@@ -2960,7 +2960,7 @@ impl Downstairs {
         id: ConnectionId,
         reply_channel_tx: mpsc::UnboundedSender<Message>,
     ) -> tokio_util::sync::CancellationToken {
-        // Prepare for the autonegotiation / IO loop
+        // Prepare for the negotiation / IO loop
         //
         // We'll create a cancellation token here, store it in a DropGuard, and
         // return a child token for `recv_task` (as the most 'upstream' task)
