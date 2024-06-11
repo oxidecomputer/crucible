@@ -859,15 +859,15 @@ fn is_message_valid(
     upstairs_connection: UpstairsConnection,
     upstairs_id: Uuid,
     session_id: Uuid,
-    resp_tx: &mpsc::UnboundedSender<Message>,
+    conn: &ConnectionState,
 ) -> Result<bool> {
     if upstairs_connection.upstairs_id != upstairs_id {
-        resp_tx.send(Message::UuidMismatch {
+        conn.reply(Message::UuidMismatch {
             expected_id: upstairs_connection.upstairs_id,
         })?;
         Ok(false)
     } else if upstairs_connection.session_id != session_id {
-        resp_tx.send(Message::UuidMismatch {
+        conn.reply(Message::UuidMismatch {
             expected_id: upstairs_connection.session_id,
         })?;
         Ok(false)
@@ -921,23 +921,16 @@ struct ConnectionId(u64);
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum NegotiationState {
-    Start,
     ConnectedToUpstairs,
     PromotedToActive,
     SentRegionInfo,
-    Ready,
 }
 
+/// Immutable data shared by every `ConnectionState`
 #[derive(Debug)]
-struct ConnectionState {
-    /// State machine progress
-    negotiated: NegotiationState,
-
+struct ConnectionData {
     /// Repair address, guaranteed to be valid by this point
     repair_addr: SocketAddr,
-
-    /// Upstairs connection, populated at `HelloItsMe`
-    upstairs_connection: Option<UpstairsConnection>,
 
     /// Token used to cancel the IO tasks
     #[allow(unused)]
@@ -945,6 +938,66 @@ struct ConnectionState {
 
     /// IO channel to the reply task
     reply_channel_tx: mpsc::UnboundedSender<Message>,
+}
+
+impl ConnectionData {
+    /// Returns a dummy connection, for use with `std::mem::replace`
+    fn dummy() -> Self {
+        Self {
+            repair_addr: SocketAddr::new(
+                IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+                9001,
+            ),
+            cancel: tokio_util::sync::CancellationToken::new().drop_guard(),
+            reply_channel_tx: mpsc::unbounded_channel().0,
+        }
+    }
+}
+
+/// A single active connection
+#[derive(Debug)]
+struct ActiveConnection {
+    data: ConnectionData,
+    upstairs_connection: UpstairsConnection,
+}
+
+#[derive(Debug)]
+enum ConnectionState {
+    Open(ConnectionData),
+    Negotiating {
+        negotiated: NegotiationState,
+        upstairs_connection: UpstairsConnection,
+        data: ConnectionData,
+    },
+    Running(ActiveConnection),
+}
+
+impl ConnectionState {
+    fn data(&self) -> &ConnectionData {
+        match self {
+            ConnectionState::Open(data) => data,
+            ConnectionState::Negotiating { data, .. } => data,
+            ConnectionState::Running(a) => &a.data,
+        }
+    }
+
+    fn reply(
+        &self,
+        msg: Message,
+    ) -> Result<(), mpsc::error::SendError<Message>> {
+        self.data().reply_channel_tx.send(msg)
+    }
+
+    fn upstairs_connection(&self) -> Option<UpstairsConnection> {
+        match self {
+            ConnectionState::Open(..) => None,
+            ConnectionState::Negotiating {
+                upstairs_connection,
+                ..
+            } => Some(*upstairs_connection),
+            ConnectionState::Running(a) => Some(a.upstairs_connection),
+        }
+    }
 }
 
 /// Spawn tasks for this Upstairs connection, then return
@@ -2184,13 +2237,22 @@ impl Downstairs {
     ///
     /// If the message is an IO, then put the new IO the work hashmap. If the
     /// message is a repair message, then we handle it right here.
+    ///
+    /// # Panics
+    /// If the given `ConnectionId` does not represent a running connection
     async fn proc_frame(
         &mut self,
         m: Message,
         id: ConnectionId,
     ) -> Result<Option<JobId>> {
-        let upstairs_connection =
-            self.connection_state[&id].upstairs_connection.unwrap();
+        let ConnectionState::Running(ActiveConnection {
+            upstairs_connection,
+            ..
+        }) = &self.connection_state[&id]
+        else {
+            panic!("invalid state");
+        };
+        let upstairs_connection = *upstairs_connection;
 
         // Initial check against upstairs and session ID
         match m {
@@ -2251,7 +2313,7 @@ impl Downstairs {
                     upstairs_connection,
                     upstairs_id,
                     session_id,
-                    &self.connection_state[&id].reply_channel_tx,
+                    &self.connection_state[&id],
                 )? {
                     return Ok(None);
                 }
@@ -2443,7 +2505,7 @@ impl Downstairs {
                         },
                     }
                 };
-                self.connection_state[&id].reply_channel_tx.send(msg)?;
+                self.connection_state[&id].reply(msg)?;
                 None
             }
             Message::ExtentClose {
@@ -2464,7 +2526,7 @@ impl Downstairs {
                         },
                     }
                 };
-                self.connection_state[&id].reply_channel_tx.send(msg)?;
+                self.connection_state[&id].reply(msg)?;
                 None
             }
             Message::ExtentRepair {
@@ -2502,7 +2564,7 @@ impl Downstairs {
                         },
                     }
                 };
-                self.connection_state[&id].reply_channel_tx.send(msg)?;
+                self.connection_state[&id].reply(msg)?;
                 None
             }
             Message::ExtentReopen {
@@ -2523,13 +2585,11 @@ impl Downstairs {
                         },
                     }
                 };
-                self.connection_state[&id].reply_channel_tx.send(msg)?;
+                self.connection_state[&id].reply(msg)?;
                 None
             }
             Message::Ruok => {
-                self.connection_state[&id]
-                    .reply_channel_tx
-                    .send(Message::Imok)?;
+                self.connection_state[&id].reply(Message::Imok)?;
                 None
             }
             x => bail!("unexpected frame {:?}", x),
@@ -2538,12 +2598,16 @@ impl Downstairs {
     }
 
     async fn do_work_for(&mut self, id: ConnectionId) -> Result<()> {
-        let upstairs_connection =
-            self.connection_state[&id].upstairs_connection.unwrap();
-        if !self.is_active(upstairs_connection) {
+        let ConnectionState::Running(ActiveConnection {
+            upstairs_connection,
+            ..
+        }) = &self.connection_state[&id]
+        else {
             // We are not an active downstairs, wait until we are
             return Ok(());
-        }
+        };
+        let upstairs_connection = *upstairs_connection;
+        assert!(self.is_active(upstairs_connection)); // checked above
 
         /*
          * Build ourselves a list of all the jobs on the work hashmap that
@@ -2597,14 +2661,12 @@ impl Downstairs {
             };
 
             if let Some(error) = m.err() {
-                self.connection_state[&id].reply_channel_tx.send(
-                    Message::ErrorReport {
-                        upstairs_id: upstairs_connection.upstairs_id,
-                        session_id: upstairs_connection.session_id,
-                        job_id: new_id,
-                        error: error.clone(),
-                    },
-                )?;
+                self.connection_state[&id].reply(Message::ErrorReport {
+                    upstairs_id: upstairs_connection.upstairs_id,
+                    session_id: upstairs_connection.session_id,
+                    job_id: new_id,
+                    error: error.clone(),
+                })?;
 
                 // If the job errored, do not consider it completed.
                 // Retry it.
@@ -2633,7 +2695,7 @@ impl Downstairs {
                 // consumes the message (so we'll check whether it's
                 // a FlushAck beforehand)
                 let is_flush = matches!(m, Message::FlushAck { .. });
-                self.connection_state[&id].reply_channel_tx.send(m)?;
+                self.connection_state[&id].reply(m)?;
 
                 self.complete_work_inner(
                     upstairs_connection,
@@ -2792,7 +2854,7 @@ impl Downstairs {
         let state = self.connection_state.get_mut(&id).unwrap();
         match m {
             Message::Ruok => {
-                if let Err(e) = state.reply_channel_tx.send(Message::Imok) {
+                if let Err(e) = state.reply(Message::Imok) {
                     bail!("Failed to answer ping: {}", e);
                 }
             }
@@ -2805,12 +2867,9 @@ impl Downstairs {
                 encrypted,
                 alternate_versions,
             } => {
-                if state.negotiated != NegotiationState::Start {
-                    bail!(
-                        "Received connect out of order {:?}",
-                        state.negotiated
-                    );
-                }
+                let ConnectionState::Open(data) = state else {
+                    bail!("Received connect out of order",);
+                };
                 info!(
                     self.log,
                     "Connection request from {} with version {}",
@@ -2837,7 +2896,7 @@ impl Downstairs {
                         let m = Message::VersionMismatch {
                             version: CRUCIBLE_MESSAGE_VERSION,
                         };
-                        if let Err(e) = state.reply_channel_tx.send(m) {
+                        if let Err(e) = state.reply(m) {
                             warn!(
                                 self.log,
                                 "Failed to send VersionMismatch: {}", e
@@ -2857,11 +2916,9 @@ impl Downstairs {
                 // Upstairs will not be able to successfully negotiate.
                 {
                     if self.flags.read_only != read_only {
-                        if let Err(e) = state.reply_channel_tx.send(
-                            Message::ReadOnlyMismatch {
-                                expected: self.flags.read_only,
-                            },
-                        ) {
+                        if let Err(e) = state.reply(Message::ReadOnlyMismatch {
+                            expected: self.flags.read_only,
+                        }) {
                             warn!(
                                 self.log,
                                 "Failed to send ReadOnlyMismatch: {}", e
@@ -2872,11 +2929,11 @@ impl Downstairs {
                     }
 
                     if self.flags.encrypted != encrypted {
-                        if let Err(e) = state.reply_channel_tx.send(
-                            Message::EncryptedMismatch {
+                        if let Err(e) =
+                            state.reply(Message::EncryptedMismatch {
                                 expected: self.flags.encrypted,
-                            },
-                        ) {
+                            })
+                        {
                             warn!(
                                 self.log,
                                 "Failed to send EncryptedMismatch: {}", e
@@ -2887,22 +2944,29 @@ impl Downstairs {
                     }
                 }
 
-                state.negotiated = NegotiationState::ConnectedToUpstairs;
-                state.upstairs_connection = Some(UpstairsConnection {
+                let upstairs_connection = UpstairsConnection {
                     upstairs_id,
                     session_id,
                     gen,
-                });
+                };
+
+                // Steal data from the connection state
+                let data = std::mem::replace(data, ConnectionData::dummy());
+                *state = ConnectionState::Negotiating {
+                    negotiated: NegotiationState::ConnectedToUpstairs,
+                    upstairs_connection,
+                    data,
+                };
                 info!(
                     self.log,
                     "upstairs {:?} connected, version {}",
-                    state.upstairs_connection.unwrap(),
+                    upstairs_connection,
                     CRUCIBLE_MESSAGE_VERSION
                 );
 
-                if let Err(e) = state.reply_channel_tx.send(Message::YesItsMe {
+                if let Err(e) = state.reply(Message::YesItsMe {
                     version: CRUCIBLE_MESSAGE_VERSION,
-                    repair_addr: state.repair_addr,
+                    repair_addr: state.data().repair_addr,
                 }) {
                     bail!("Failed sending YesItsMe: {}", e);
                 }
@@ -2912,25 +2976,28 @@ impl Downstairs {
                 session_id,
                 gen,
             } => {
-                if state.negotiated != NegotiationState::ConnectedToUpstairs {
-                    bail!(
-                        "Received activate out of order {:?}",
-                        state.negotiated
-                    );
+                let ConnectionState::Negotiating {
+                    negotiated,
+                    upstairs_connection,
+                    ..
+                } = state
+                else {
+                    bail!("Received activate while not negotiating");
+                };
+                if *negotiated != NegotiationState::ConnectedToUpstairs {
+                    bail!("Received activate out of order {:?}", negotiated);
                 }
 
                 // Only allowed to promote or demote self
-                let upstairs_connection = state.upstairs_connection.unwrap();
+                let upstairs_connection = *upstairs_connection;
                 let matches_self = upstairs_connection.upstairs_id
                     == upstairs_id
                     && upstairs_connection.session_id == session_id;
 
                 if !matches_self {
-                    if let Err(e) =
-                        state.reply_channel_tx.send(Message::UuidMismatch {
-                            expected_id: upstairs_connection.upstairs_id,
-                        })
-                    {
+                    if let Err(e) = state.reply(Message::UuidMismatch {
+                        expected_id: upstairs_connection.upstairs_id,
+                    }) {
                         warn!(self.log, "Failed sending UuidMismatch: {}", e);
                     }
                     bail!(
@@ -2952,61 +3019,85 @@ impl Downstairs {
                             gen,
                         );
 
-                        state.upstairs_connection.as_mut().unwrap().gen = gen;
+                        // Reborrow to update `upstairs_connection.gen`
+                        let ConnectionState::Negotiating {
+                            upstairs_connection,
+                            ..
+                        } = state
+                        else {
+                            unreachable!()
+                        };
+                        upstairs_connection.gen = gen;
                     }
 
                     self.promote_to_active(upstairs_connection, id).await?;
 
                     // reborrow our local state
                     let state = self.connection_state.get_mut(&id).unwrap();
-                    state.negotiated = NegotiationState::PromotedToActive;
 
-                    if let Err(e) =
-                        state.reply_channel_tx.send(Message::YouAreNowActive {
-                            upstairs_id,
-                            session_id,
-                            gen,
-                        })
-                    {
+                    let ConnectionState::Negotiating {
+                        negotiated,
+                        upstairs_connection,
+                        ..
+                    } = state
+                    else {
+                        unreachable!();
+                    };
+                    *negotiated = NegotiationState::PromotedToActive;
+                    upstairs_connection.gen = gen;
+
+                    if let Err(e) = state.reply(Message::YouAreNowActive {
+                        upstairs_id,
+                        session_id,
+                        gen,
+                    }) {
                         bail!("Failed sending YouAreNewActive: {}", e);
                     }
                 }
             }
             Message::RegionInfoPlease => {
-                if state.negotiated != NegotiationState::PromotedToActive {
-                    bail!(
-                        "Received RegionInfo out of order {:?}",
-                        state.negotiated
-                    );
+                let ConnectionState::Negotiating { negotiated, .. } = state
+                else {
+                    bail!("Received RegionInfo while not negotiating");
+                };
+                if *negotiated != NegotiationState::PromotedToActive {
+                    bail!("Received RegionInfo out of order {:?}", negotiated);
                 }
-                state.negotiated = NegotiationState::SentRegionInfo;
-                let region_def = { self.region.def() };
 
-                if let Err(e) = state
-                    .reply_channel_tx
-                    .send(Message::RegionInfo { region_def })
+                *negotiated = NegotiationState::SentRegionInfo;
+                let region_def = self.region.def();
+                if let Err(e) = state.reply(Message::RegionInfo { region_def })
                 {
                     bail!("Failed sending RegionInfo: {}", e);
                 }
             }
             Message::LastFlush { last_flush_number } => {
-                if state.negotiated != NegotiationState::SentRegionInfo {
-                    bail!(
-                        "Received LastFlush out of order {:?}",
-                        state.negotiated
-                    );
+                let ConnectionState::Negotiating {
+                    negotiated,
+                    upstairs_connection,
+                    data,
+                } = state
+                else {
+                    bail!("Received LastFlush while not negotiating");
+                };
+                if *negotiated != NegotiationState::SentRegionInfo {
+                    bail!("Received LastFlush out of order {:?}", negotiated);
                 }
-                state.negotiated = NegotiationState::Ready;
 
-                let upstairs_connection = state.upstairs_connection.unwrap();
+                let data = std::mem::replace(data, ConnectionData::dummy());
+                let upstairs_connection = *upstairs_connection;
+                *state = ConnectionState::Running(ActiveConnection {
+                    data,
+                    upstairs_connection,
+                });
+
                 let work = self.work_mut(upstairs_connection)?;
                 work.last_flush = last_flush_number;
                 info!(self.log, "Set last flush {}", last_flush_number);
 
                 let state = &self.connection_state[&id]; // reborrow
-                if let Err(e) = state
-                    .reply_channel_tx
-                    .send(Message::LastFlushAck { last_flush_number })
+                if let Err(e) =
+                    state.reply(Message::LastFlushAck { last_flush_number })
                 {
                     bail!("Failed sending LastFlushAck: {}", e);
                 }
@@ -3018,13 +3109,28 @@ impl Downstairs {
                 info!(self.log, "Downstairs has completed Negotiation");
             }
             Message::ExtentVersionsPlease => {
-                if state.negotiated != NegotiationState::SentRegionInfo {
+                let ConnectionState::Negotiating {
+                    negotiated,
+                    data,
+                    upstairs_connection,
+                } = state
+                else {
+                    bail!("Received ExtentVersions while not negotiating");
+                };
+                if *negotiated != NegotiationState::SentRegionInfo {
                     bail!(
                         "Received ExtentVersions out of order {:?}",
-                        state.negotiated
+                        negotiated
                     );
                 }
-                state.negotiated = NegotiationState::Ready;
+
+                let data = std::mem::replace(data, ConnectionData::dummy());
+                let upstairs_connection = *upstairs_connection;
+                *state = ConnectionState::Running(ActiveConnection {
+                    data,
+                    upstairs_connection,
+                });
+
                 let meta_info = self.region.meta_info().await?;
 
                 let flush_numbers: Vec<_> =
@@ -3046,13 +3152,11 @@ impl Downstairs {
                     );
                 }
 
-                if let Err(e) =
-                    state.reply_channel_tx.send(Message::ExtentVersions {
-                        gen_numbers,
-                        flush_numbers,
-                        dirty_bits,
-                    })
-                {
+                if let Err(e) = state.reply(Message::ExtentVersions {
+                    gen_numbers,
+                    flush_numbers,
+                    dirty_bits,
+                }) {
                     bail!("Failed sending ExtentVersions: {}", e);
                 }
 
@@ -3088,13 +3192,11 @@ impl Downstairs {
         let cancel_guard = token.drop_guard();
         let prev = self.connection_state.insert(
             id,
-            ConnectionState {
+            ConnectionState::Open(ConnectionData {
                 repair_addr: self.repair_address.unwrap(),
-                upstairs_connection: None,
                 cancel: cancel_guard,
-                negotiated: NegotiationState::Start,
                 reply_channel_tx,
-            },
+            }),
         );
         assert!(prev.is_none());
 
@@ -3107,7 +3209,7 @@ impl Downstairs {
     /// If the connection is not present in the `connection_state` map
     fn remove_connection(&mut self, id: ConnectionId) {
         let state = self.connection_state.remove(&id).unwrap();
-        if let Some(upstairs_connection) = state.upstairs_connection {
+        if let Some(upstairs_connection) = state.upstairs_connection() {
             // If our upstairs never completed activation,
             // or some other upstairs activated, we won't
             // be able to report how many jobs.
@@ -3115,7 +3217,7 @@ impl Downstairs {
                 Ok(jobs) => {
                     info!(
                         self.log,
-                        "upstairs {:?} disconnected, {} jobs left",
+                        "upstairs {:?} ({id:?}) removed, {} jobs left",
                         upstairs_connection,
                         jobs,
                     );
@@ -3123,7 +3225,7 @@ impl Downstairs {
                 Err(e) => {
                     info!(
                         self.log,
-                        "upstairs {:?} disconnected, {}",
+                        "upstairs {:?} ({id:?}) removed, {}",
                         upstairs_connection,
                         e
                     );
@@ -3157,7 +3259,11 @@ impl Downstairs {
 
     /// Handles a single message, either negotiation or doing IO
     async fn on_message_for(&mut self, id: ConnectionId, m: Message) {
-        if self.connection_state[&id].negotiated == NegotiationState::Ready {
+        let Some(state) = self.connection_state.get_mut(&id) else {
+            warn!(self.log, "got message for disconnected id {id:?}; ignoring");
+            return;
+        };
+        if matches!(state, ConnectionState::Running(..)) {
             match self.proc_frame(m, id).await {
                 // If we added work, then do it!
                 Ok(Some(new_ds_id)) => {
@@ -3200,18 +3306,16 @@ impl Downstairs {
         warn!(
             self.log,
             "Another upstairs {:?} promoted to active, \
-                             shutting down connection for {:?}",
+             shutting down connection for {:?}",
             new_upstairs_connection,
-            state.upstairs_connection
+            state.upstairs_connection()
         );
 
-        if let Err(e) =
-            state.reply_channel_tx.send(Message::YouAreNoLongerActive {
-                new_upstairs_id: new_upstairs_connection.upstairs_id,
-                new_session_id: new_upstairs_connection.session_id,
-                new_gen: new_upstairs_connection.gen,
-            })
-        {
+        if let Err(e) = state.reply(Message::YouAreNoLongerActive {
+            new_upstairs_id: new_upstairs_connection.upstairs_id,
+            new_session_id: new_upstairs_connection.session_id,
+            new_gen: new_upstairs_connection.gen,
+        }) {
             warn!(self.log, "Failed sending YouAreNoLongerActive: {e}");
         }
 
