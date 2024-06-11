@@ -2237,6 +2237,9 @@ impl Downstairs {
     ///
     /// If the message is an IO, then put the new IO the work hashmap. If the
     /// message is a repair message, then we handle it right here.
+    ///
+    /// # Panics
+    /// If the given `ConnectionId` does not represent a running connection
     async fn proc_frame(
         &mut self,
         m: Message,
