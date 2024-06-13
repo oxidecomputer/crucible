@@ -44,12 +44,9 @@ export BINDIR=/var/tmp/bins
 banner setup
 pfexec plimit -n 9123456 $$
 
-banner dtrace
-pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/upstairs-info.txt 2>&1 &
 
 echo "Setup self timeout"
-# This timeout is from issue 520
-jobpid=$$; (sleep $(( 40 * 60 )); ps -ef; zfs list;kill $jobpid) &
+jobpid=$$; (sleep $(( 40 * 60 )); banner fail-timeout; ps -ef; zfs list;kill $jobpid) &
 
 echo "Setup debug logging"
 mkdir /tmp/debug
@@ -60,10 +57,9 @@ iostat -T d -xn 1 > /tmp/debug/iostat.txt 2>&1 &
 mpstat -T d 1 > /tmp/debug/mpstat.txt 2>&1 &
 vmstat -T d -p 1 < /dev/null > /tmp/debug/paging.txt 2>&1 &
 pfexec dtrace -Z -s $input/scripts/perf-downstairs-tick.d > /tmp/debug/dtrace.txt 2>&1 &
+pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/debug/upstairs-info.txt 2>&1 &
 
 banner start
 bash $input/scripts/test_perf.sh > /tmp/debug/test_perf.txt 2>&1
 echo "$? was our result"
 echo "Test finished"
-sleep 5
-ps -ef
