@@ -1402,11 +1402,8 @@ impl Volume {
                     read_only_parent_compare: Box::new(
                         match (o_read_only_parent, n_read_only_parent) {
                             (.., None) => {
-                                // The New VCR is none. When comparing a VCR of
-                                // read_only_parents this is okay, but for a
-                                // sub_volume, this is not. Indicate our
-                                // findings with this return status and let the
-                                // caller decide what action to take
+                                // The New VCR is none. When comparing
+                                // read_only_parents this is okay.
                                 CompareResult::NewMissing
                             }
 
