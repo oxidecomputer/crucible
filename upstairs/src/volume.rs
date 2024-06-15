@@ -1541,8 +1541,7 @@ impl Volume {
         }
 
         // The original generation number should always be lower than the new.
-        // This could almost be a panic, as if they are the same, something has
-        // gone wrong. This is only valid for non read-only parent checks.
+        // This is only valid for non read-only parent checks.
         if !read_only && o_sv_gen >= n_sv_gen {
             crucible_bail!(
                 ReplaceRequestInvalid,
