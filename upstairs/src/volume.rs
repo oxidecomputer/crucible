@@ -5035,4 +5035,118 @@ mod test {
             )),
         );
     }
+
+    /// Test that ROP generation number not changing is also accepted
+    #[test]
+    fn volume_replace_rop_changes_same_gen() {
+        let vol_id = Uuid::new_v4();
+        let original = VolumeConstructionRequest::Volume {
+            block_size: 512,
+            id: vol_id,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: 512,
+                blocks_per_extent: 131072,
+                extent_count: 128,
+                gen: 3,
+                opts: CrucibleOpts {
+                    id: vol_id,
+                    target: vec![
+                        "[fd00:1122:3344:102::8]:19004".parse().unwrap(),
+                        "[fd00:1122:3344:101::7]:19003".parse().unwrap(),
+                        "[fd00:1122:3344:104::8]:19000".parse().unwrap(),
+                    ],
+                    ..Default::default()
+                },
+            }],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Volume {
+                    block_size: 512,
+                    id: Uuid::new_v4(),
+                    sub_volumes: vec![VolumeConstructionRequest::Region {
+                        block_size: 512,
+                        blocks_per_extent: 131072,
+                        extent_count: 32,
+                        gen: 2,
+                        opts: CrucibleOpts {
+                            id: Uuid::new_v4(),
+                            target: vec![
+                                "[fd00:1122:3344:103::7]:19002"
+                                    .parse()
+                                    .unwrap(),
+                                "[fd00:1122:3344:101::7]:19002"
+                                    .parse()
+                                    .unwrap(),
+                                "[fd00:1122:3344:102::8]:19002"
+                                    .parse()
+                                    .unwrap(),
+                            ],
+                            ..Default::default()
+                        },
+                    }],
+                    read_only_parent: None,
+                },
+            )),
+        };
+
+        // Replace one of the ROP subvolume targets, and bump the gen of the sub
+        // volume region.
+        let mut replacement = original.clone();
+        match &mut replacement {
+            VolumeConstructionRequest::Volume {
+                sub_volumes,
+                read_only_parent,
+                ..
+            } => {
+                match &mut sub_volumes[0] {
+                    VolumeConstructionRequest::Region { gen, .. } => {
+                        *gen += 1;
+                    }
+
+                    _ => {
+                        panic!("how?!");
+                    }
+                }
+
+                let Some(read_only_parent) = read_only_parent.as_mut() else {
+                    panic!("how?!");
+                };
+
+                match read_only_parent.as_mut() {
+                    VolumeConstructionRequest::Volume {
+                        sub_volumes, ..
+                    } => match &mut sub_volumes[0] {
+                        VolumeConstructionRequest::Region { opts, .. } => {
+                            opts.target[1] = "[fd00:1122:3344:111::a]:20000"
+                                .parse()
+                                .unwrap();
+                        }
+
+                        _ => {
+                            panic!("how?!");
+                        }
+                    },
+
+                    _ => {
+                        panic!("how?!");
+                    }
+                }
+            }
+
+            _ => {
+                panic!("how?!");
+            }
+        }
+
+        let log = csl();
+        let result =
+            Volume::compare_vcr_for_update(original, replacement, &log)
+                .unwrap();
+        assert_eq!(
+            result,
+            Some((
+                "[fd00:1122:3344:101::7]:19002".parse().unwrap(),
+                "[fd00:1122:3344:111::a]:20000".parse().unwrap(),
+            )),
+        );
+    }
 }
