@@ -1666,7 +1666,8 @@ impl Volume {
                 new: n_sv_opts.target[cid],
             })
         } else if read_only {
-            // VCRs are 100% the same
+            // VCRs are 100% the same (ignoring generation number changess if
+            // read_only bool is true)
             Ok(VCRDelta::Same)
         } else {
             // We failed to find any targets different, but all the other
