@@ -1390,14 +1390,12 @@ impl Volume {
                 }
 
                 Ok(CompareResult::Volume {
-                    sub_compares: vec![
-                        Self::compare_vcr_for_replacement(
-                            log,
-                            &o_sub_volumes[0],
-                            &n_sub_volumes[0],
-                            read_only,
-                        )?,
-                    ],
+                    sub_compares: vec![Self::compare_vcr_for_replacement(
+                        log,
+                        &o_sub_volumes[0],
+                        &n_sub_volumes[0],
+                        read_only,
+                    )?],
 
                     read_only_parent_compare: Box::new(
                         match (o_read_only_parent, n_read_only_parent) {
