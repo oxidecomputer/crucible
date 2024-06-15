@@ -1189,11 +1189,14 @@ impl Volume {
     ///
     /// - Ok(Some(old, new)) if there's a single target difference in one of the
     ///   Region variants, and the replacement argument is a valid replacement
-    ///   for the original argument.  This also requires that the generation
-    ///   number of the replacement VCR is higher than the original VCR.
+    ///   for the original argument. This also requires that the generation
+    ///   numbers for the replacement VCR's subvolumes are higher than the
+    ///   original VCR's subvolumes. Read-only parent generation numbers are
+    ///   ignored.
     ///
     /// - Ok(None) if there are no differences between them, but the
-    ///   generation number is higher in the replacement VCR.
+    ///   generation number of the subvolumes is higher in the replacement VCR.
+    ///   Read-only parent generation numbers are ignored.
     ///
     /// - Err(e) if there's a difference that means the replacement argument is
     ///   not a valid replacement for the original argument, or the two VCRs are
