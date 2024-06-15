@@ -1206,7 +1206,7 @@ impl Volume {
         replacement: VolumeConstructionRequest,
         log: &Logger,
     ) -> Result<Option<(SocketAddr, SocketAddr)>, CrucibleError> {
-        let compare_result = Self::compare_vcr_volume_for_replacement(
+        let compare_result = Self::compare_vcr_for_replacement(
             log,
             &original,
             &replacement,
@@ -1328,7 +1328,7 @@ impl Volume {
         }
     }
 
-    fn compare_vcr_volume_for_replacement(
+    fn compare_vcr_for_replacement(
         log: &Logger,
         o_vol: &VolumeConstructionRequest,
         n_vol: &VolumeConstructionRequest,
@@ -1391,7 +1391,7 @@ impl Volume {
 
                 Ok(CompareResult::Volume {
                     sub_compares: vec![
-                        Self::compare_vcr_volume_for_replacement(
+                        Self::compare_vcr_for_replacement(
                             log,
                             &o_sub_volumes[0],
                             &n_sub_volumes[0],
@@ -1421,7 +1421,7 @@ impl Volume {
                             }
 
                             (Some(o_vol), Some(n_vol)) => {
-                                Self::compare_vcr_volume_for_replacement(
+                                Self::compare_vcr_for_replacement(
                                     log, o_vol, n_vol, true,
                                 )?
                             }
