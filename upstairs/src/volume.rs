@@ -5,6 +5,7 @@ use crate::guest::Guest;
 
 use async_recursion::async_recursion;
 use oximeter::types::ProducerRegistry;
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use tokio::time::Instant;
@@ -42,17 +43,70 @@ fn build_region_definition(
     Ok(region_def)
 }
 
-// Result of comparing two [`VolumeConstructionRequest`] values
+// Result of comparing two [`VolumeConstructionRequest::Region`] values
 #[derive(Debug)]
 enum VCRDelta {
-    /// The VCRs are identical.
+    /// The Regions are identical.
     Same,
-    /// The newer VCR only has a higher generation number.
+    /// The newer Region only has a higher generation number.
     Generation,
-    /// The newer VCR has higher generation and just one target different.
+    /// The newer Region has higher generation and just one target different.
     Target { old: SocketAddr, new: SocketAddr },
-    /// The newer VCR was None.
+}
+
+// Result of comparing two [`VolumeConstructionRequest::Volume`] values
+#[derive(Debug)]
+enum CompareResult {
+    Volume {
+        sub_compares: Vec<CompareResult>,
+        read_only_parent_compare: Box<CompareResult>,
+    },
+
+    Region {
+        delta: VCRDelta,
+    },
+
     NewMissing,
+}
+
+impl CompareResult {
+    pub fn all_same(&self) -> bool {
+        let mut parts = VecDeque::new();
+        parts.push_back(self);
+
+        while let Some(part) = parts.pop_front() {
+            match part {
+                CompareResult::Volume {
+                    sub_compares,
+                    read_only_parent_compare,
+                } => {
+                    for sub_compare in sub_compares {
+                        parts.push_back(sub_compare);
+                    }
+
+                    parts.push_back(read_only_parent_compare);
+                }
+
+                CompareResult::Region { delta } => {
+                    match delta {
+                        VCRDelta::Same => {
+                            // no-op
+                        }
+
+                        VCRDelta::Generation | VCRDelta::Target { .. } => {
+                            return false;
+                        }
+                    }
+                }
+
+                CompareResult::NewMissing => {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1135,11 +1189,14 @@ impl Volume {
     ///
     /// - Ok(Some(old, new)) if there's a single target difference in one of the
     ///   Region variants, and the replacement argument is a valid replacement
-    ///   for the original argument.  This also requires that the generation
-    ///   number of the replacement VCR is higher than the original VCR.
+    ///   for the original argument. This also requires that the generation
+    ///   numbers for the replacement VCR's subvolumes are higher than the
+    ///   original VCR's subvolumes. Read-only parent generation numbers are
+    ///   ignored.
     ///
     /// - Ok(None) if there are no differences between them, but the
-    ///   generation number is higher in the replacement VCR.
+    ///   generation number of the subvolumes is higher in the replacement VCR.
+    ///   Read-only parent generation numbers are ignored.
     ///
     /// - Err(e) if there's a difference that means the replacement argument is
     ///   not a valid replacement for the original argument, or the two VCRs are
@@ -1149,182 +1206,236 @@ impl Volume {
         replacement: VolumeConstructionRequest,
         log: &Logger,
     ) -> Result<Option<(SocketAddr, SocketAddr)>, CrucibleError> {
-        let (o_id, o_block_size, o_sub_volumes, o_read_only_parent) =
-            match original {
-                VolumeConstructionRequest::Volume {
-                    id,
-                    block_size,
-                    sub_volumes,
-                    read_only_parent,
-                } => (id, block_size, sub_volumes, read_only_parent),
-                VolumeConstructionRequest::Url { .. } => {
-                    crucible_bail!(
-                        ReplaceRequestInvalid,
-                        "Cannot replace URL VCR"
-                    )
-                }
-
-                VolumeConstructionRequest::Region { .. } => {
-                    crucible_bail!(
-                        ReplaceRequestInvalid,
-                        "Cannot replace Region VCR"
-                    )
-                }
-
-                VolumeConstructionRequest::File { .. } => {
-                    crucible_bail!(
-                        ReplaceRequestInvalid,
-                        "Cannot replace File VCR"
-                    )
-                }
-            };
-
-        let (n_id, n_block_size, n_sub_volumes, n_read_only_parent) =
-            match replacement {
-                VolumeConstructionRequest::Volume {
-                    id,
-                    block_size,
-                    sub_volumes,
-                    read_only_parent,
-                } => (id, block_size, sub_volumes, read_only_parent),
-                VolumeConstructionRequest::Url { .. } => {
-                    crucible_bail!(
-                        ReplaceRequestInvalid,
-                        "Cannot replace URL VCR"
-                    )
-                }
-
-                VolumeConstructionRequest::Region { .. } => {
-                    crucible_bail!(
-                        ReplaceRequestInvalid,
-                        "Cannot replace Region VCR"
-                    )
-                }
-
-                VolumeConstructionRequest::File { .. } => {
-                    crucible_bail!(
-                        ReplaceRequestInvalid,
-                        "Cannot replace File VCR"
-                    )
-                }
-            };
-
-        if o_id != n_id {
-            crucible_bail!(
-                ReplaceRequestInvalid,
-                "ID mismatch {} vs. {}",
-                o_id,
-                n_id
-            );
-        }
-        if o_block_size != n_block_size {
-            crucible_bail!(
-                ReplaceRequestInvalid,
-                "block_size mismatch {} vs. {}",
-                o_block_size,
-                n_block_size
-            )
-        }
-
-        // Sub volume lengths should be the same.
-        if n_sub_volumes.len() != o_sub_volumes.len() {
-            crucible_bail!(
-                ReplaceRequestInvalid,
-                "subvolume len mismatch {} vs. {}",
-                o_sub_volumes.len(),
-                n_sub_volumes.len(),
-            )
-        }
-
-        // Presently, we only support one sub_volume for replacement.
-        // If support for multiple sub_volumes is added, then this following
-        // section will need to be updated to loop over the sub_volume Vec and
-        // find the specific one with a difference, while verifying that all
-        // other sub_volumes are no different.
-        if n_sub_volumes.len() != 1 {
-            crucible_bail!(
-                ReplaceRequestInvalid,
-                "Only a single sub_volume is supported"
-            )
-        }
-
-        // We support replacement for read_only_parent targets with the
-        // same rules as sub_volume targets, however, for any single VCR
-        // update, only one of the sub_volume or read_only_parent targets
-        // can change.
-        let rop_result = match Self::compare_vcr_region_for_replacement(
-            o_read_only_parent.as_deref(),
-            n_read_only_parent.as_deref(),
-        ) {
-            Err(e) => {
-                warn!(log, "read_only_parent error: {}", e);
-                return Err(e);
-            }
-            Ok(rr) => rr,
-        };
-
-        // Determine the sub_volume difference if there is any.
-        let sub_volume_result = match Self::compare_vcr_region_for_replacement(
-            Some(&o_sub_volumes[0]),
-            Some(&n_sub_volumes[0]),
-        ) {
-            Err(e) => {
-                warn!(log, "sub_volume has invalid differences: {}", e);
-                return Err(e);
-            }
-            Ok(svr) => svr,
-        };
-
-        info!(
+        let compare_result = Self::compare_vcr_for_replacement(
             log,
-            "sub_volume_result is: {:?}, ROP:{:?}",
-            sub_volume_result,
-            rop_result
-        );
+            &original,
+            &replacement,
+            false,
+        )?;
 
-        // We use the same function to compare both the region in the
-        // sub_volumes and the region in the read_only_parent.  Only one
-        // can have a different target, so we walk the cases.  As some
-        // deltas are okay for a read only parent that are not for
-        // a sub_volume, we need to look at all the possible permutations.
-        match (sub_volume_result, rop_result) {
-            (VCRDelta::Target { .. }, VCRDelta::Target { .. }) => {
-                // They can't both have changed
+        info!(log, "compare result is {:?}", compare_result);
+
+        // Have multiple Target deltas been reported?
+        let mut targets = Vec::new();
+
+        // Are there differences in the VCRs?
+        let mut all_same = true;
+
+        let mut parts = VecDeque::new();
+        parts.push_back(&compare_result);
+
+        while let Some(part) = parts.pop_front() {
+            match part {
+                CompareResult::Volume {
+                    sub_compares,
+                    read_only_parent_compare,
+                } => {
+                    for sub_compare in sub_compares {
+                        parts.push_back(sub_compare);
+                    }
+
+                    parts.push_back(read_only_parent_compare);
+                }
+
+                CompareResult::Region { delta } => {
+                    match delta {
+                        VCRDelta::Same => {
+                            // no-op
+                        }
+
+                        VCRDelta::Generation => {
+                            all_same = false;
+                        }
+
+                        VCRDelta::Target { .. } => {
+                            targets.push(delta);
+                            all_same = false;
+                        }
+                    }
+                }
+
+                CompareResult::NewMissing => {
+                    // no-op
+                }
+            }
+        }
+
+        if targets.len() > 1 {
+            crucible_bail!(ReplaceRequestInvalid, "Multiple target changes")
+        }
+
+        if all_same {
+            crucible_bail!(ReplaceRequestInvalid, "The VCRs have no difference")
+        }
+
+        // Beyond this point zero or one target changes where found
+
+        match &compare_result {
+            CompareResult::Volume {
+                sub_compares,
+                read_only_parent_compare: _,
+            } => {
+                // Walk the cases. As some deltas are okay for a read only
+                // parent that are not for a sub_volume, we need to look at all
+                // the possible permutations Nexus supports.
+                //
+                // TODO also modify this when multiple subvolumes supported!
+
+                if targets.is_empty() {
+                    // If here, we passed by the `all_same` bail above, meaning
+                    // there's a generation delta somewhere.
+
+                    if sub_compares[0].all_same() {
+                        // ROP shouldn't have a generation bump
+                        crucible_bail!(
+                            ReplaceRequestInvalid,
+                            "ROP has generation bump!"
+                        );
+                    } else {
+                        // Sub volume has generation bump, and ROP is all the
+                        // same
+                        return Ok(None);
+                    }
+                }
+
+                // Past here, one target change found. Return it.
+                let VCRDelta::Target { old, new } = targets[0] else {
+                    panic!("should only have pushed Target");
+                };
+
+                Ok(Some((*old, *new)))
+            }
+
+            CompareResult::Region { delta } => match delta {
+                VCRDelta::Same => {
+                    crucible_bail!(
+                        ReplaceRequestInvalid,
+                        "The VCRs have no difference"
+                    )
+                }
+
+                VCRDelta::Generation => Ok(None),
+
+                VCRDelta::Target { old, new } => Ok(Some((*old, *new))),
+            },
+
+            CompareResult::NewMissing => {
                 crucible_bail!(
                     ReplaceRequestInvalid,
-                    "Both sub_volume and read_only_parent have changes"
-                )
+                    "Replacement missing when comparing to replace",
+                );
             }
-            (VCRDelta::Target { old, new }, _) => Ok(Some((old, new))),
+        }
+    }
 
-            (VCRDelta::Same, VCRDelta::Target { old, new }) => {
-                // Just the ROP has changes, so let's return those.
-                Ok(Some((old, new)))
-            }
-            (VCRDelta::Same, VCRDelta::Same) => {
-                crucible_bail!(
-                    ReplaceRequestInvalid,
-                    "The VCRs have no difference"
-                )
-            }
-            (VCRDelta::Same, VCRDelta::NewMissing) => {
-                crucible_bail!(
-                    ReplaceRequestInvalid,
-                    "The VCRs have no meaningful difference"
-                )
-            }
-            (VCRDelta::Same, VCRDelta::Generation) => Ok(None),
+    fn compare_vcr_for_replacement(
+        log: &Logger,
+        o_vol: &VolumeConstructionRequest,
+        n_vol: &VolumeConstructionRequest,
+        read_only: bool,
+    ) -> Result<CompareResult, CrucibleError> {
+        match (o_vol, n_vol) {
+            (
+                VolumeConstructionRequest::Volume {
+                    id: o_id,
+                    block_size: o_block_size,
+                    sub_volumes: o_sub_volumes,
+                    read_only_parent: o_read_only_parent,
+                },
+                VolumeConstructionRequest::Volume {
+                    id: n_id,
+                    block_size: n_block_size,
+                    sub_volumes: n_sub_volumes,
+                    read_only_parent: n_read_only_parent,
+                },
+            ) => {
+                if o_id != n_id {
+                    crucible_bail!(
+                        ReplaceRequestInvalid,
+                        "ID mismatch {} vs. {}",
+                        o_id,
+                        n_id
+                    );
+                }
 
-            (VCRDelta::Generation, VCRDelta::Target { old, new }) => {
-                // Just the ROP has changes, so let's return those.
-                Ok(Some((old, new)))
-            }
-            (VCRDelta::Generation, _) => Ok(None),
+                if o_block_size != n_block_size {
+                    crucible_bail!(
+                        ReplaceRequestInvalid,
+                        "block_size mismatch {} vs. {}",
+                        o_block_size,
+                        n_block_size
+                    )
+                }
 
-            (VCRDelta::NewMissing, _) => {
-                // This should not be possible for sub volumes as the VCR
-                // is a required argument to this function.
-                panic!("New VCR is missing when comparing regions to replace");
+                // Sub volume lengths should be the same.
+                if n_sub_volumes.len() != o_sub_volumes.len() {
+                    crucible_bail!(
+                        ReplaceRequestInvalid,
+                        "subvolume len mismatch {} vs. {}",
+                        o_sub_volumes.len(),
+                        n_sub_volumes.len(),
+                    )
+                }
+
+                // Presently, we only support one sub_volume for replacement.
+                // If support for multiple sub_volumes is added, then this
+                // following section will need to be updated to loop over the
+                // sub_volume Vec and find the specific one with a difference,
+                // while verifying that all other sub_volumes are no different.
+                if n_sub_volumes.len() != 1 {
+                    crucible_bail!(
+                        ReplaceRequestInvalid,
+                        "Only a single sub_volume is supported"
+                    )
+                }
+
+                Ok(CompareResult::Volume {
+                    sub_compares: vec![Self::compare_vcr_for_replacement(
+                        log,
+                        &o_sub_volumes[0],
+                        &n_sub_volumes[0],
+                        read_only,
+                    )?],
+
+                    read_only_parent_compare: Box::new(
+                        match (o_read_only_parent, n_read_only_parent) {
+                            (.., None) => {
+                                // The New VCR is none. When comparing
+                                // read_only_parents this is okay.
+                                CompareResult::NewMissing
+                            }
+
+                            (None, Some(..)) => {
+                                // It's never valid when comparing VCRs to have
+                                // the original VCR be missing and the new VCR
+                                // is present.
+                                crucible_bail!(
+                                    ReplaceRequestInvalid,
+                                    "VCR added where there should not be one"
+                                );
+                            }
+
+                            (Some(o_vol), Some(n_vol)) => {
+                                Self::compare_vcr_for_replacement(
+                                    log, o_vol, n_vol, true,
+                                )?
+                            }
+                        },
+                    ),
+                })
+            }
+
+            (
+                VolumeConstructionRequest::Region { .. },
+                VolumeConstructionRequest::Region { .. },
+            ) => Ok(CompareResult::Region {
+                delta: Self::compare_vcr_region_for_replacement(
+                    log, o_vol, n_vol, read_only,
+                )?,
+            }),
+
+            _ => {
+                crucible_bail!(ReplaceRequestInvalid, "Cannot replace VCR")
             }
         }
     }
@@ -1351,28 +1462,11 @@ impl Volume {
     // Any other difference is an error, and an error returned here means the
     // VCRs are incompatible in a way that prevents one from replacing another.
     fn compare_vcr_region_for_replacement(
-        opt_o_vol: Option<&VolumeConstructionRequest>,
-        opt_n_vol: Option<&VolumeConstructionRequest>,
+        log: &Logger,
+        o_vol: &VolumeConstructionRequest,
+        n_vol: &VolumeConstructionRequest,
+        read_only: bool,
     ) -> Result<VCRDelta, CrucibleError> {
-        let (o_vol, n_vol) = match (opt_o_vol, opt_n_vol) {
-            (.., None) => {
-                // The New VCR is none. When comparing a VCR of
-                // read_only_parents this is okay, but for a sub_volume, this
-                // is not.  Indicate our findings with this return status and
-                // let the caller decide what action to take
-                return Ok(VCRDelta::NewMissing);
-            }
-            (None, Some(..)) => {
-                // It's never valid when comparing VCRs to have the original
-                // VCR be missing and the new VCR is present.
-                crucible_bail!(
-                    ReplaceRequestInvalid,
-                    "VCR added where there should not be one"
-                )
-            }
-            (Some(o_vol), Some(n_vol)) => (o_vol, n_vol),
-        };
-
         // Volumes to compare must all be VolumeConstructionRequest::Region
         let (
             o_sv_block_size,
@@ -1388,6 +1482,7 @@ impl Volume {
                 ref opts,
                 gen,
             } => (block_size, blocks_per_extent, extent_count, opts, gen),
+
             _ => {
                 crucible_bail!(
                     ReplaceRequestInvalid,
@@ -1410,6 +1505,7 @@ impl Volume {
                 ref opts,
                 gen,
             } => (block_size, blocks_per_extent, extent_count, opts, gen),
+
             _ => {
                 crucible_bail!(
                     ReplaceRequestInvalid,
@@ -1441,14 +1537,23 @@ impl Volume {
                 "sub_volume extent_count mismatch"
             )
         }
-        // The original generation number should always
-        // be lower than the new.  This could almost be
-        // a panic, as if they are the same, something
-        // has gone wrong.
-        if o_sv_gen >= n_sv_gen {
+
+        // The original generation number should always be lower than the new.
+        // This is only valid for non read-only parent checks.
+        if !read_only && o_sv_gen >= n_sv_gen {
             crucible_bail!(
                 ReplaceRequestInvalid,
                 "sub_volume generation invalid {:?} vs. {:?}",
+                o_sv_gen,
+                n_sv_gen,
+            )
+        }
+
+        // Ignore generation number changes when comparing read-only Volumes
+        if read_only && o_sv_gen != n_sv_gen {
+            warn!(
+                log,
+                "read_only sub_volume generation changed: {:?} vs. {:?}",
                 o_sv_gen,
                 n_sv_gen,
             )
@@ -1471,6 +1576,7 @@ impl Volume {
                 n_sv_opts.lossy
             )
         }
+
         if o_sv_opts.flush_timeout != n_sv_opts.flush_timeout {
             crucible_bail!(
                 ReplaceRequestInvalid,
@@ -1479,6 +1585,7 @@ impl Volume {
                 n_sv_opts.flush_timeout
             )
         }
+
         if o_sv_opts.key != n_sv_opts.key {
             crucible_bail!(
                 ReplaceRequestInvalid,
@@ -1487,6 +1594,7 @@ impl Volume {
                 n_sv_opts.key
             )
         }
+
         if o_sv_opts.cert_pem != n_sv_opts.cert_pem {
             crucible_bail!(
                 ReplaceRequestInvalid,
@@ -1495,6 +1603,7 @@ impl Volume {
                 n_sv_opts.cert_pem
             )
         }
+
         if o_sv_opts.key_pem != n_sv_opts.key_pem {
             crucible_bail!(
                 ReplaceRequestInvalid,
@@ -1503,6 +1612,7 @@ impl Volume {
                 n_sv_opts.key_pem
             )
         }
+
         if o_sv_opts.root_cert_pem != n_sv_opts.root_cert_pem {
             crucible_bail!(
                 ReplaceRequestInvalid,
@@ -1511,6 +1621,7 @@ impl Volume {
                 n_sv_opts.root_cert_pem
             )
         }
+
         if o_sv_opts.control != n_sv_opts.control {
             crucible_bail!(
                 ReplaceRequestInvalid,
@@ -1519,6 +1630,7 @@ impl Volume {
                 n_sv_opts.control
             )
         }
+
         if o_sv_opts.read_only != n_sv_opts.read_only {
             crucible_bail!(
                 ReplaceRequestInvalid,
@@ -1551,6 +1663,10 @@ impl Volume {
                 old: o_sv_opts.target[cid],
                 new: n_sv_opts.target[cid],
             })
+        } else if read_only {
+            // VCRs are 100% the same (ignoring generation number changess if
+            // read_only bool is true)
+            Ok(VCRDelta::Same)
         } else {
             // We failed to find any targets different, but all the other
             // checks between the VCRs found the required differences which
@@ -1559,11 +1675,14 @@ impl Volume {
         }
     }
 
-    // Given two VolumeConstructionRequests, compare them to verify they
-    // only have the proper differences and if the VCRs are valid, submit
-    // the targets for replacement. A success here means the upstairs has
-    // accepted the replacement and the process has started, or there's
-    // no work to do because the original and replacement match.
+    /// Given two VolumeConstructionRequests, compare them to verify they only
+    /// have the proper differences and if the VCRs are valid, submit the
+    /// targets for replacement. A success here means the upstairs has accepted
+    /// the replacement and the process has started, or there's no work to do
+    /// because the original and replacement match. This is a &self function
+    /// because Volumes do not store the VCR they were created with, and must
+    /// accept both the original and replacement as arguments: these must be
+    /// properly supplied by the caller.
     pub async fn target_replace(
         &self,
         original: VolumeConstructionRequest,
@@ -3743,30 +3862,30 @@ mod test {
 
         // Make the sub_volume that both VCRs will share.
         let opts = generic_crucible_opts(vol_id);
-        let sub_vol = vec![VolumeConstructionRequest::Region {
-            block_size,
-            blocks_per_extent,
-            extent_count,
-            opts: opts.clone(),
-            gen: 2,
-        }];
 
         // Make the read only parent.
         let mut rop_opts = generic_crucible_opts(rop_id);
-        let rop = VolumeConstructionRequest::Region {
-            block_size,
-            blocks_per_extent,
-            extent_count,
-            opts: rop_opts.clone(),
-            gen: 4,
-        };
 
         // Make the original VCR using what we created above.
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: sub_vol.clone(),
-            read_only_parent: Some(Box::new(rop.clone())),
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size,
+                blocks_per_extent,
+                extent_count,
+                opts: opts.clone(),
+                gen: 2,
+            }],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: rop_opts.clone(),
+                    gen: 4,
+                },
+            )),
         };
 
         // Update the ROP target with a new downstairs
@@ -3774,19 +3893,25 @@ mod test {
         let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
         rop_opts.target[1] = new_target;
 
-        // Make the replacement VCR with the updated target and bump
-        // the generation for the read_only_parent.
+        // Make the replacement VCR with the updated target for the
+        // read_only_parent.
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes: sub_vol.clone(),
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size,
+                blocks_per_extent,
+                extent_count,
+                opts: opts.clone(),
+                gen: 3,
+            }],
             read_only_parent: Some(Box::new(
                 VolumeConstructionRequest::Region {
                     block_size,
                     blocks_per_extent,
                     extent_count,
                     opts: rop_opts.clone(),
-                    gen: 5,
+                    gen: 4,
                 },
             )),
         };
@@ -4309,5 +4434,719 @@ mod test {
             n_opts
         )
         .is_err());
+    }
+
+    #[test]
+    fn volume_replace_with_rop() {
+        let vol_id = Uuid::new_v4();
+        let original = VolumeConstructionRequest::Volume {
+            block_size: 512,
+            id: vol_id,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: 512,
+                blocks_per_extent: 131072,
+                extent_count: 128,
+                gen: 3,
+                opts: CrucibleOpts {
+                    id: vol_id,
+                    target: vec![
+                        "[fd00:1122:3344:102::8]:19004".parse().unwrap(),
+                        "[fd00:1122:3344:101::7]:19003".parse().unwrap(),
+                        "[fd00:1122:3344:104::8]:19000".parse().unwrap(),
+                    ],
+                    ..Default::default()
+                },
+            }],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Volume {
+                    block_size: 512,
+                    id: Uuid::new_v4(),
+                    sub_volumes: vec![VolumeConstructionRequest::Region {
+                        block_size: 512,
+                        blocks_per_extent: 131072,
+                        extent_count: 32,
+                        gen: 2,
+                        opts: CrucibleOpts {
+                            id: Uuid::new_v4(),
+                            target: vec![
+                                "[fd00:1122:3344:103::7]:19002"
+                                    .parse()
+                                    .unwrap(),
+                                "[fd00:1122:3344:101::7]:19002"
+                                    .parse()
+                                    .unwrap(),
+                                "[fd00:1122:3344:102::8]:19002"
+                                    .parse()
+                                    .unwrap(),
+                            ],
+                            ..Default::default()
+                        },
+                    }],
+                    read_only_parent: None,
+                },
+            )),
+        };
+
+        // Replace one of the subvolume targets and bump the gen number
+        let mut replacement = original.clone();
+        match &mut replacement {
+            VolumeConstructionRequest::Volume { sub_volumes, .. } => {
+                match &mut sub_volumes[0] {
+                    VolumeConstructionRequest::Region { opts, gen, .. } => {
+                        opts.target[1] =
+                            "[fd00:1122:3344:111::a]:20000".parse().unwrap();
+                        *gen += 1;
+                    }
+
+                    _ => {
+                        panic!("how?!");
+                    }
+                }
+            }
+
+            _ => {
+                panic!("how?!");
+            }
+        }
+
+        let log = csl();
+        let result =
+            Volume::compare_vcr_for_update(original, replacement, &log)
+                .unwrap();
+        assert_eq!(
+            result,
+            Some((
+                "[fd00:1122:3344:101::7]:19003".parse().unwrap(),
+                "[fd00:1122:3344:111::a]:20000".parse().unwrap(),
+            )),
+        );
+    }
+
+    /// Test that changes under a read-only parent work
+    #[test]
+    fn volume_replace_rop_changes() {
+        let vol_id = Uuid::new_v4();
+        let original = VolumeConstructionRequest::Volume {
+            block_size: 512,
+            id: vol_id,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: 512,
+                blocks_per_extent: 131072,
+                extent_count: 128,
+                gen: 3,
+                opts: CrucibleOpts {
+                    id: vol_id,
+                    target: vec![
+                        "[fd00:1122:3344:102::8]:19004".parse().unwrap(),
+                        "[fd00:1122:3344:101::7]:19003".parse().unwrap(),
+                        "[fd00:1122:3344:104::8]:19000".parse().unwrap(),
+                    ],
+                    ..Default::default()
+                },
+            }],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Volume {
+                    block_size: 512,
+                    id: Uuid::new_v4(),
+                    sub_volumes: vec![VolumeConstructionRequest::Region {
+                        block_size: 512,
+                        blocks_per_extent: 131072,
+                        extent_count: 32,
+                        gen: 2,
+                        opts: CrucibleOpts {
+                            id: Uuid::new_v4(),
+                            target: vec![
+                                "[fd00:1122:3344:103::7]:19002"
+                                    .parse()
+                                    .unwrap(),
+                                "[fd00:1122:3344:101::7]:19002"
+                                    .parse()
+                                    .unwrap(),
+                                "[fd00:1122:3344:102::8]:19002"
+                                    .parse()
+                                    .unwrap(),
+                            ],
+                            ..Default::default()
+                        },
+                    }],
+                    read_only_parent: None,
+                },
+            )),
+        };
+
+        // Replace one of the ROP subvolume targets, and bump the gen of the sub
+        // volume region.
+        let mut replacement = original.clone();
+        match &mut replacement {
+            VolumeConstructionRequest::Volume {
+                sub_volumes,
+                read_only_parent,
+                ..
+            } => {
+                match &mut sub_volumes[0] {
+                    VolumeConstructionRequest::Region { gen, .. } => {
+                        *gen += 1;
+                    }
+
+                    _ => {
+                        panic!("how?!");
+                    }
+                }
+
+                let Some(read_only_parent) = read_only_parent.as_mut() else {
+                    panic!("how?!");
+                };
+
+                match read_only_parent.as_mut() {
+                    VolumeConstructionRequest::Volume {
+                        sub_volumes, ..
+                    } => match &mut sub_volumes[0] {
+                        VolumeConstructionRequest::Region { opts, .. } => {
+                            opts.target[1] = "[fd00:1122:3344:111::a]:20000"
+                                .parse()
+                                .unwrap();
+                        }
+
+                        _ => {
+                            panic!("how?!");
+                        }
+                    },
+
+                    _ => {
+                        panic!("how?!");
+                    }
+                }
+            }
+
+            _ => {
+                panic!("how?!");
+            }
+        }
+
+        let log = csl();
+        let result =
+            Volume::compare_vcr_for_update(original, replacement, &log)
+                .unwrap();
+        assert_eq!(
+            result,
+            Some((
+                "[fd00:1122:3344:101::7]:19002".parse().unwrap(),
+                "[fd00:1122:3344:111::a]:20000".parse().unwrap(),
+            )),
+        );
+    }
+
+    /// Test that changes under a second read-only parent work
+    #[test]
+    fn volume_replace_second_rop_changes() {
+        let vol_id = Uuid::new_v4();
+        let original = VolumeConstructionRequest::Volume {
+            block_size: 512,
+            id: vol_id,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: 512,
+                blocks_per_extent: 131072,
+                extent_count: 128,
+                gen: 3,
+                opts: CrucibleOpts {
+                    id: vol_id,
+                    target: vec![
+                        "[fd00:1122:3344:102::8]:19004".parse().unwrap(),
+                        "[fd00:1122:3344:101::7]:19003".parse().unwrap(),
+                        "[fd00:1122:3344:104::8]:19000".parse().unwrap(),
+                    ],
+                    ..Default::default()
+                },
+            }],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Volume {
+                    block_size: 512,
+                    id: Uuid::new_v4(),
+                    sub_volumes: vec![VolumeConstructionRequest::Region {
+                        block_size: 512,
+                        blocks_per_extent: 131072,
+                        extent_count: 32,
+                        gen: 2,
+                        opts: CrucibleOpts {
+                            id: Uuid::new_v4(),
+                            target: vec![
+                                "[fd00:1122:3344:103::7]:19002"
+                                    .parse()
+                                    .unwrap(),
+                                "[fd00:1122:3344:101::7]:19002"
+                                    .parse()
+                                    .unwrap(),
+                                "[fd00:1122:3344:102::8]:19002"
+                                    .parse()
+                                    .unwrap(),
+                            ],
+                            ..Default::default()
+                        },
+                    }],
+                    read_only_parent: Some(Box::new(
+                        VolumeConstructionRequest::Volume {
+                            block_size: 512,
+                            id: Uuid::new_v4(),
+                            sub_volumes: vec![
+                                VolumeConstructionRequest::Region {
+                                    block_size: 512,
+                                    blocks_per_extent: 131072,
+                                    extent_count: 32,
+                                    gen: 1,
+                                    opts: CrucibleOpts {
+                                        id: Uuid::new_v4(),
+                                        target: vec![
+                                            "[fd00:1122:3344:203::7]:19002"
+                                                .parse()
+                                                .unwrap(),
+                                            "[fd00:1122:3344:201::7]:19002"
+                                                .parse()
+                                                .unwrap(),
+                                            "[fd00:1122:3344:202::8]:19002"
+                                                .parse()
+                                                .unwrap(),
+                                        ],
+                                        ..Default::default()
+                                    },
+                                },
+                            ],
+                            read_only_parent: None,
+                        },
+                    )),
+                },
+            )),
+        };
+
+        // Replace one of the deeper ROP's subvolume targets, and don't bump the
+        // gen
+        let mut replacement = original.clone();
+        match &mut replacement {
+            VolumeConstructionRequest::Volume {
+                sub_volumes,
+                read_only_parent,
+                ..
+            } => {
+                match &mut sub_volumes[0] {
+                    VolumeConstructionRequest::Region { gen, .. } => {
+                        *gen += 1;
+                    }
+
+                    _ => {
+                        panic!("how?!");
+                    }
+                }
+
+                let Some(read_only_parent) = read_only_parent.as_mut() else {
+                    panic!("how?!");
+                };
+
+                match read_only_parent.as_mut() {
+                    VolumeConstructionRequest::Volume {
+                        read_only_parent,
+                        ..
+                    } => {
+                        let Some(read_only_parent) = read_only_parent.as_mut()
+                        else {
+                            panic!("how?!");
+                        };
+
+                        match read_only_parent.as_mut() {
+                            VolumeConstructionRequest::Volume {
+                                sub_volumes,
+                                ..
+                            } => match &mut sub_volumes[0] {
+                                VolumeConstructionRequest::Region {
+                                    opts,
+                                    ..
+                                } => {
+                                    opts.target[2] =
+                                        "[fd00:1122:3344:111::a]:20000"
+                                            .parse()
+                                            .unwrap();
+                                }
+
+                                _ => {
+                                    panic!("how?!");
+                                }
+                            },
+
+                            _ => {
+                                panic!("how?!");
+                            }
+                        }
+                    }
+
+                    _ => {
+                        panic!("how?!");
+                    }
+                }
+            }
+
+            _ => {
+                panic!("how?!");
+            }
+        }
+
+        let log = csl();
+        let result =
+            Volume::compare_vcr_for_update(original, replacement, &log)
+                .unwrap();
+        assert_eq!(
+            result,
+            Some((
+                "[fd00:1122:3344:202::8]:19002".parse().unwrap(),
+                "[fd00:1122:3344:111::a]:20000".parse().unwrap(),
+            )),
+        );
+    }
+
+    /// Test that ROP generation number increasing is accepted
+    #[test]
+    fn volume_replace_rop_changes_increase_gen() {
+        let vol_id = Uuid::new_v4();
+        let original = VolumeConstructionRequest::Volume {
+            block_size: 512,
+            id: vol_id,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: 512,
+                blocks_per_extent: 131072,
+                extent_count: 128,
+                gen: 3,
+                opts: CrucibleOpts {
+                    id: vol_id,
+                    target: vec![
+                        "[fd00:1122:3344:102::8]:19004".parse().unwrap(),
+                        "[fd00:1122:3344:101::7]:19003".parse().unwrap(),
+                        "[fd00:1122:3344:104::8]:19000".parse().unwrap(),
+                    ],
+                    ..Default::default()
+                },
+            }],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Volume {
+                    block_size: 512,
+                    id: Uuid::new_v4(),
+                    sub_volumes: vec![VolumeConstructionRequest::Region {
+                        block_size: 512,
+                        blocks_per_extent: 131072,
+                        extent_count: 32,
+                        gen: 2,
+                        opts: CrucibleOpts {
+                            id: Uuid::new_v4(),
+                            target: vec![
+                                "[fd00:1122:3344:103::7]:19002"
+                                    .parse()
+                                    .unwrap(),
+                                "[fd00:1122:3344:101::7]:19002"
+                                    .parse()
+                                    .unwrap(),
+                                "[fd00:1122:3344:102::8]:19002"
+                                    .parse()
+                                    .unwrap(),
+                            ],
+                            ..Default::default()
+                        },
+                    }],
+                    read_only_parent: None,
+                },
+            )),
+        };
+
+        // Replace one of the ROP subvolume targets, bump the gen of the sub
+        // volume region, and increase the gen of the ROP.
+        let mut replacement = original.clone();
+        match &mut replacement {
+            VolumeConstructionRequest::Volume {
+                sub_volumes,
+                read_only_parent,
+                ..
+            } => {
+                match &mut sub_volumes[0] {
+                    VolumeConstructionRequest::Region { gen, .. } => {
+                        *gen += 1;
+                    }
+
+                    _ => {
+                        panic!("how?!");
+                    }
+                }
+
+                let Some(read_only_parent) = read_only_parent.as_mut() else {
+                    panic!("how?!");
+                };
+
+                match read_only_parent.as_mut() {
+                    VolumeConstructionRequest::Volume {
+                        sub_volumes, ..
+                    } => match &mut sub_volumes[0] {
+                        VolumeConstructionRequest::Region {
+                            opts, gen, ..
+                        } => {
+                            opts.target[1] = "[fd00:1122:3344:111::a]:20000"
+                                .parse()
+                                .unwrap();
+
+                            *gen += 1;
+                        }
+
+                        _ => {
+                            panic!("how?!");
+                        }
+                    },
+
+                    _ => {
+                        panic!("how?!");
+                    }
+                }
+            }
+
+            _ => {
+                panic!("how?!");
+            }
+        }
+
+        let log = csl();
+        let result =
+            Volume::compare_vcr_for_update(original, replacement, &log)
+                .unwrap();
+        assert_eq!(
+            result,
+            Some((
+                "[fd00:1122:3344:101::7]:19002".parse().unwrap(),
+                "[fd00:1122:3344:111::a]:20000".parse().unwrap(),
+            )),
+        );
+    }
+
+    /// Test that ROP generation number decreasing is also accepted
+    #[test]
+    fn volume_replace_rop_changes_decrease_gen() {
+        let vol_id = Uuid::new_v4();
+        let original = VolumeConstructionRequest::Volume {
+            block_size: 512,
+            id: vol_id,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: 512,
+                blocks_per_extent: 131072,
+                extent_count: 128,
+                gen: 3,
+                opts: CrucibleOpts {
+                    id: vol_id,
+                    target: vec![
+                        "[fd00:1122:3344:102::8]:19004".parse().unwrap(),
+                        "[fd00:1122:3344:101::7]:19003".parse().unwrap(),
+                        "[fd00:1122:3344:104::8]:19000".parse().unwrap(),
+                    ],
+                    ..Default::default()
+                },
+            }],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Volume {
+                    block_size: 512,
+                    id: Uuid::new_v4(),
+                    sub_volumes: vec![VolumeConstructionRequest::Region {
+                        block_size: 512,
+                        blocks_per_extent: 131072,
+                        extent_count: 32,
+                        gen: 2,
+                        opts: CrucibleOpts {
+                            id: Uuid::new_v4(),
+                            target: vec![
+                                "[fd00:1122:3344:103::7]:19002"
+                                    .parse()
+                                    .unwrap(),
+                                "[fd00:1122:3344:101::7]:19002"
+                                    .parse()
+                                    .unwrap(),
+                                "[fd00:1122:3344:102::8]:19002"
+                                    .parse()
+                                    .unwrap(),
+                            ],
+                            ..Default::default()
+                        },
+                    }],
+                    read_only_parent: None,
+                },
+            )),
+        };
+
+        // Replace one of the ROP subvolume targets, bump the gen of the sub
+        // volume region, and decrease the gen of the ROP.
+        let mut replacement = original.clone();
+        match &mut replacement {
+            VolumeConstructionRequest::Volume {
+                sub_volumes,
+                read_only_parent,
+                ..
+            } => {
+                match &mut sub_volumes[0] {
+                    VolumeConstructionRequest::Region { gen, .. } => {
+                        *gen += 1;
+                    }
+
+                    _ => {
+                        panic!("how?!");
+                    }
+                }
+
+                let Some(read_only_parent) = read_only_parent.as_mut() else {
+                    panic!("how?!");
+                };
+
+                match read_only_parent.as_mut() {
+                    VolumeConstructionRequest::Volume {
+                        sub_volumes, ..
+                    } => match &mut sub_volumes[0] {
+                        VolumeConstructionRequest::Region {
+                            opts, gen, ..
+                        } => {
+                            opts.target[1] = "[fd00:1122:3344:111::a]:20000"
+                                .parse()
+                                .unwrap();
+
+                            *gen -= 1;
+                        }
+
+                        _ => {
+                            panic!("how?!");
+                        }
+                    },
+
+                    _ => {
+                        panic!("how?!");
+                    }
+                }
+            }
+
+            _ => {
+                panic!("how?!");
+            }
+        }
+
+        let log = csl();
+        let result =
+            Volume::compare_vcr_for_update(original, replacement, &log)
+                .unwrap();
+        assert_eq!(
+            result,
+            Some((
+                "[fd00:1122:3344:101::7]:19002".parse().unwrap(),
+                "[fd00:1122:3344:111::a]:20000".parse().unwrap(),
+            )),
+        );
+    }
+
+    /// Test that ROP generation number not changing is also accepted
+    #[test]
+    fn volume_replace_rop_changes_same_gen() {
+        let vol_id = Uuid::new_v4();
+        let original = VolumeConstructionRequest::Volume {
+            block_size: 512,
+            id: vol_id,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: 512,
+                blocks_per_extent: 131072,
+                extent_count: 128,
+                gen: 3,
+                opts: CrucibleOpts {
+                    id: vol_id,
+                    target: vec![
+                        "[fd00:1122:3344:102::8]:19004".parse().unwrap(),
+                        "[fd00:1122:3344:101::7]:19003".parse().unwrap(),
+                        "[fd00:1122:3344:104::8]:19000".parse().unwrap(),
+                    ],
+                    ..Default::default()
+                },
+            }],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Volume {
+                    block_size: 512,
+                    id: Uuid::new_v4(),
+                    sub_volumes: vec![VolumeConstructionRequest::Region {
+                        block_size: 512,
+                        blocks_per_extent: 131072,
+                        extent_count: 32,
+                        gen: 2,
+                        opts: CrucibleOpts {
+                            id: Uuid::new_v4(),
+                            target: vec![
+                                "[fd00:1122:3344:103::7]:19002"
+                                    .parse()
+                                    .unwrap(),
+                                "[fd00:1122:3344:101::7]:19002"
+                                    .parse()
+                                    .unwrap(),
+                                "[fd00:1122:3344:102::8]:19002"
+                                    .parse()
+                                    .unwrap(),
+                            ],
+                            ..Default::default()
+                        },
+                    }],
+                    read_only_parent: None,
+                },
+            )),
+        };
+
+        // Replace one of the ROP subvolume targets, and bump the gen of the sub
+        // volume region.
+        let mut replacement = original.clone();
+        match &mut replacement {
+            VolumeConstructionRequest::Volume {
+                sub_volumes,
+                read_only_parent,
+                ..
+            } => {
+                match &mut sub_volumes[0] {
+                    VolumeConstructionRequest::Region { gen, .. } => {
+                        *gen += 1;
+                    }
+
+                    _ => {
+                        panic!("how?!");
+                    }
+                }
+
+                let Some(read_only_parent) = read_only_parent.as_mut() else {
+                    panic!("how?!");
+                };
+
+                match read_only_parent.as_mut() {
+                    VolumeConstructionRequest::Volume {
+                        sub_volumes, ..
+                    } => match &mut sub_volumes[0] {
+                        VolumeConstructionRequest::Region { opts, .. } => {
+                            opts.target[1] = "[fd00:1122:3344:111::a]:20000"
+                                .parse()
+                                .unwrap();
+                        }
+
+                        _ => {
+                            panic!("how?!");
+                        }
+                    },
+
+                    _ => {
+                        panic!("how?!");
+                    }
+                }
+            }
+
+            _ => {
+                panic!("how?!");
+            }
+        }
+
+        let log = csl();
+        let result =
+            Volume::compare_vcr_for_update(original, replacement, &log)
+                .unwrap();
+        assert_eq!(
+            result,
+            Some((
+                "[fd00:1122:3344:101::7]:19002".parse().unwrap(),
+                "[fd00:1122:3344:111::a]:20000".parse().unwrap(),
+            )),
+        );
     }
 }
