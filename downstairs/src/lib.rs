@@ -3229,8 +3229,6 @@ impl Work {
     /// `false`.
     ///
     /// If the job already is `InProgress`, return `true` (to be idempotent).
-    ///
-    /// If this job is `Done`, then just return `false`.
     fn in_progress(&mut self, ds_id: JobId) -> bool {
         let Some(job) = self.active.get_mut(&ds_id) else {
             panic!("called in_progress for invalid job");
