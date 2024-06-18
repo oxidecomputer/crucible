@@ -8,7 +8,7 @@ pub enum DynoFlushConfig {
     None,
 }
 
-pub async fn dynamometer(
+pub fn dynamometer(
     mut region: Region,
     num_writes: usize,
     samples: usize,
@@ -89,7 +89,7 @@ pub async fn dynamometer(
                 let rw = RegionWrite(writes);
 
                 let io_operation_time = Instant::now();
-                region.region_write(rw, JobId(1000), false).await?;
+                region.region_write(rw, JobId(1000), false)?;
 
                 total_io_time += io_operation_time.elapsed();
                 io_operations_sent += num_writes;
@@ -141,15 +141,13 @@ pub async fn dynamometer(
                 };
 
                 if needs_flush {
-                    region
-                        .region_flush(
-                            flush_number,
-                            gen_number,
-                            &None, // snapshot_details
-                            JobId(1000),
-                            None, // extent_limit
-                        )
-                        .await?;
+                    region.region_flush(
+                        flush_number,
+                        gen_number,
+                        &None, // snapshot_details
+                        JobId(1000),
+                        None, // extent_limit
+                    )?;
 
                     flush_number += 1;
                     gen_number += 1;

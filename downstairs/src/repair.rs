@@ -47,7 +47,7 @@ fn build_api() -> ApiDescription<Arc<FileServerContext>> {
 }
 
 /// Returns Ok(listen address) if everything launched ok, Err otherwise
-pub async fn repair_main(
+pub fn repair_main(
     ds: &Downstairs,
     addr: SocketAddr,
     log: &Logger,
@@ -326,16 +326,15 @@ mod test {
         build_logger()
     }
 
-    #[tokio::test]
-    async fn extent_expected_files() -> Result<()> {
+    #[test]
+    fn extent_expected_files() -> Result<()> {
         // Verify that the list of files returned for an extent matches
         // what we expect.  This is a hack of sorts as we are hard coding
         // the expected names of files here in that test, rather than
         // determine them through some programmatic means.
         let dir = tempdir()?;
-        let mut region =
-            Region::create(&dir, new_region_options(), csl()).await?;
-        region.extend(3).await?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
+        region.extend(3)?;
 
         // Determine the directory and name for expected extent files.
         let eid = ExtentId(1);
@@ -349,19 +348,18 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn extent_expected_files_with_close() -> Result<()> {
+    #[test]
+    fn extent_expected_files_with_close() -> Result<()> {
         // Verify that the list of files returned for an extent matches
         // what we expect. In this case we expect the extent data file and
         // nothing else. We close the extent here first, and on illumos that
         // behaves a little different than elsewhere.
         let dir = tempdir()?;
-        let mut region =
-            Region::create(&dir, new_region_options(), csl()).await?;
-        region.extend(3).await?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
+        region.extend(3)?;
 
         let eid = ExtentId(1);
-        region.close_extent(eid).await.unwrap();
+        region.close_extent(eid).unwrap();
 
         // Determine the directory and name for expected extent files.
         let extent_dir = extent_dir(&dir, eid);
@@ -375,14 +373,13 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn extent_expected_files_fail() -> Result<()> {
+    #[test]
+    fn extent_expected_files_fail() -> Result<()> {
         // Verify that we get an error if the expected extent file
         // is missing.
         let dir = tempdir()?;
-        let mut region =
-            Region::create(&dir, new_region_options(), csl()).await?;
-        region.extend(3).await?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
+        region.extend(3)?;
 
         // Determine the directory and name for expected extent files.
         let eid = ExtentId(1);
