@@ -55,7 +55,7 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
         iov_max: usize,
     ) -> Result<(), CrucibleError>;
 
-    /// Reads zero or more context slots for each block in the given range
+    /// Reads zero or one context slots for each block in the given range
     ///
     /// # Panics
     /// If an extent implementation cannot get block contexts separately from a
@@ -65,7 +65,7 @@ pub(crate) trait ExtentInner: Send + Sync + Debug {
         &mut self,
         block: u64,
         count: u64,
-    ) -> Result<Vec<Vec<DownstairsBlockContext>>, CrucibleError>;
+    ) -> Result<Vec<Option<DownstairsBlockContext>>, CrucibleError>;
 
     /// Sets the dirty flag and updates a block context
     ///
@@ -478,7 +478,7 @@ impl Extent {
         self.inner.set_dirty_and_block_context(block_context)
     }
 
-    /// Gets zero or more block contexts for each block in the given range
+    /// Gets zero or one block contexts for each block in the given range
     ///
     /// # Panics
     /// If the inner extent implementation does not support getting block
@@ -488,7 +488,7 @@ impl Extent {
         &mut self,
         block: u64,
         count: u64,
-    ) -> Result<Vec<Vec<DownstairsBlockContext>>, CrucibleError> {
+    ) -> Result<Vec<Option<DownstairsBlockContext>>, CrucibleError> {
         self.inner.get_block_contexts(block, count)
     }
 }

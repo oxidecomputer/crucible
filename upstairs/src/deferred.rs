@@ -239,14 +239,14 @@ impl DeferredRead {
             for (i, r) in rs.iter_mut().enumerate() {
                 let v = if let Some(ctx) = &self.cfg.encryption_context {
                     validate_encrypted_read_response(
-                        &mut r.block_contexts,
+                        r.block_context,
                         &mut data[i * block_size..][..block_size],
                         ctx,
                         &self.log,
                     )
                 } else {
                     validate_unencrypted_read_response(
-                        &mut r.block_contexts,
+                        r.block_context,
                         &mut data[i * block_size..][..block_size],
                         &self.log,
                     )

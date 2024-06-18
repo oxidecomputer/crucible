@@ -150,7 +150,7 @@ impl Buffer {
             .blocks
             .iter()
             .enumerate()
-            .group_by(|(_i, b)| b.block_contexts.is_empty())
+            .group_by(|(_i, b)| b.block_context.is_none())
         {
             if empty {
                 continue;
@@ -498,13 +498,13 @@ mod test {
             .map(|i| ReadResponseBlockMetadata {
                 eid: ExtentId(0),
                 offset: Block::new_512(i),
-                block_contexts: if f(i) {
-                    vec![BlockContext {
+                block_context: if f(i) {
+                    Some(BlockContext {
                         hash: 123,
                         encryption_context: None,
-                    }]
+                    })
                 } else {
-                    vec![]
+                    None
                 },
             })
             .collect();
@@ -574,10 +574,10 @@ mod test {
             .map(|i| ReadResponseBlockMetadata {
                 eid: ExtentId(0),
                 offset: Block::new_512(i),
-                block_contexts: vec![BlockContext {
+                block_context: Some(BlockContext {
                     hash: 123,
                     encryption_context: None,
-                }],
+                }),
             })
             .collect();
 

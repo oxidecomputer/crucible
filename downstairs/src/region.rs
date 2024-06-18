@@ -2006,7 +2006,7 @@ pub(crate) mod test {
         // Verify no block context rows exist
         {
             let ext = region.get_opened_extent_mut(ExtentId(0));
-            assert!(ext.get_block_contexts(0, 1).unwrap()[0].is_empty());
+            assert!(ext.get_block_contexts(0, 1).unwrap()[0].is_none());
         }
 
         // Assert write unwritten will write to the first block
@@ -3137,12 +3137,9 @@ pub(crate) mod test {
             };
             let resp = ext.read(JobId(i as u64), req).unwrap();
 
-            // Every block should have at most 1 block context
-            assert_eq!(resp.blocks.iter().map(|b| b.len()).max(), Some(1));
-
             // Now that we've checked that, flatten out for an easier eq
             let actual_ctxts: Vec<_> =
-                resp.blocks.iter().map(|b| b[0]).collect();
+                resp.blocks.iter().map(|b| b.unwrap()).collect();
 
             // What we expect is the hashes for the last write we did
             let expected_ctxts: Vec<_> =
@@ -3216,11 +3213,9 @@ pub(crate) mod test {
         };
         let out = ext.read(JobId(0), req).unwrap();
 
-        // Every block should have at most 1 block
-        assert_eq!(out.blocks.iter().map(|b| b.len()).max(), Some(1));
-
         // Now that we've checked that, flatten out for an easier eq
-        let actual_ctxts: Vec<_> = out.blocks.iter().map(|b| b[0]).collect();
+        let actual_ctxts: Vec<_> =
+            out.blocks.iter().map(|b| b.unwrap()).collect();
 
         // What we expect is the hashes for the last write we did
         // Check that they're right.

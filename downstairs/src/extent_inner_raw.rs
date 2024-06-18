@@ -328,7 +328,7 @@ impl ExtentInner for RawInner {
         // Convert from DownstairsBlockContext -> BlockContext
         let blocks = block_contexts
             .into_iter()
-            .map(|bs| bs.into_iter().map(|b| b.block_context).collect())
+            .map(|b| b.map(|b| b.block_context))
             .collect();
 
         // To avoid a `memset`, we're reading directly into uninitialized
@@ -460,9 +460,8 @@ impl ExtentInner for RawInner {
         &mut self,
         block: u64,
         count: u64,
-    ) -> Result<Vec<Vec<DownstairsBlockContext>>, CrucibleError> {
-        let out = RawInner::get_block_contexts(self, block, count)?;
-        Ok(out.into_iter().map(|v| v.into_iter().collect()).collect())
+    ) -> Result<Vec<Option<DownstairsBlockContext>>, CrucibleError> {
+        RawInner::get_block_contexts(self, block, count)
     }
 }
 
@@ -1540,7 +1539,7 @@ mod test {
             let resp = inner.read(JobId(21), read, IOV_MAX_TEST)?;
 
             // We should not get back our data, because block 0 was written.
-            assert_ne!(resp.blocks, vec![vec![block_context]]);
+            assert_ne!(resp.blocks, vec![Some(block_context)]);
             assert_ne!(resp.data, BytesMut::from(data.as_ref()));
         }
 
@@ -1566,7 +1565,7 @@ mod test {
             let resp = inner.read(JobId(31), read, IOV_MAX_TEST)?;
 
             // We should get back our data! Block 1 was never written.
-            assert_eq!(resp.blocks, vec![vec![block_context]]);
+            assert_eq!(resp.blocks, vec![Some(block_context)]);
             assert_eq!(resp.data, BytesMut::from(data.as_ref()));
         }
 
@@ -1793,7 +1792,7 @@ mod test {
             let resp = inner.read(JobId(31), read, IOV_MAX_TEST)?;
 
             // We should get back our data! Block 1 was never written.
-            assert_eq!(resp.blocks, vec![vec![block_context]]);
+            assert_eq!(resp.blocks, vec![Some(block_context)]);
             assert_eq!(resp.data, BytesMut::from(data.as_ref()));
         }
 

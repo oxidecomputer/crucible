@@ -388,93 +388,17 @@ pub(crate) mod up_test {
         let read_response_hash = integrity_hash(&[&nonce, &tag, &data[..]]);
 
         // Create the read response
-        let mut block_contexts = vec![BlockContext {
+        let block_context = BlockContext {
             hash: read_response_hash,
             encryption_context: Some(crucible_protocol::EncryptionContext {
                 nonce: nonce.into(),
                 tag: tag.into(),
             }),
-        }];
+        };
 
         // Validate it
         let successful_hash = validate_encrypted_read_response(
-            &mut block_contexts,
-            &mut data,
-            &Arc::new(context),
-            &csl(),
-        )?;
-
-        assert_eq!(successful_hash, Some(read_response_hash));
-
-        // `validate_encrypted_read_response` will mutate the read
-        // response's data value, make sure it decrypted
-
-        assert_eq!(original_data, data);
-
-        Ok(())
-    }
-
-    // Validate that an encrypted read response with multiple contexts can be
-    // decrypted (skipping ones that don't match)
-    #[test]
-    pub fn test_upstairs_validate_encrypted_read_response_multiple_contexts(
-    ) -> Result<()> {
-        // Set up the encryption context
-        use rand::{thread_rng, Rng};
-        let mut key = vec![0u8; 32];
-        thread_rng().fill(&mut key[..]);
-        let context = EncryptionContext::new(key.clone(), 512);
-
-        // Encrypt some random data
-        let mut data = BytesMut::with_capacity(512);
-        data.resize(512, 0u8);
-        thread_rng().fill(&mut data[..]);
-
-        let original_data = data.clone();
-
-        let (nonce, tag, _) = context.encrypt_in_place(&mut data[..]);
-
-        assert_ne!(original_data, data);
-
-        let read_response_hash = integrity_hash(&[&nonce, &tag, &data[..]]);
-
-        // Create the read response
-        let mut block_contexts = vec![
-            // The first context here doesn't match
-            BlockContext {
-                hash: thread_rng().gen(),
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: thread_rng().gen::<[u8; 12]>(),
-                        tag: thread_rng().gen::<[u8; 16]>(),
-                    },
-                ),
-            },
-            // This context matches
-            BlockContext {
-                hash: read_response_hash,
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: nonce.into(),
-                        tag: tag.into(),
-                    },
-                ),
-            },
-            // The last context does not
-            BlockContext {
-                hash: thread_rng().gen(),
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: thread_rng().gen::<[u8; 12]>(),
-                        tag: thread_rng().gen::<[u8; 16]>(),
-                    },
-                ),
-            },
-        ];
-
-        // Validate it
-        let successful_hash = validate_encrypted_read_response(
-            &mut block_contexts,
+            Some(block_context),
             &mut data,
             &Arc::new(context),
             &csl(),
@@ -520,7 +444,7 @@ pub(crate) mod up_test {
 
         // Validate the read response
         let successful_hash = validate_encrypted_read_response(
-            &mut vec![],
+            None,
             &mut data,
             &Arc::new(context),
             &csl(),
@@ -545,14 +469,14 @@ pub(crate) mod up_test {
         let original_data = data.clone();
 
         // Create the read response
-        let mut block_contexts = vec![BlockContext {
+        let block_context = BlockContext {
             hash: read_response_hash,
             encryption_context: None,
-        }];
+        };
 
         // Validate it
         let successful_hash = validate_unencrypted_read_response(
-            &mut block_contexts,
+            Some(block_context),
             &mut data,
             &csl(),
         )?;
@@ -573,100 +497,9 @@ pub(crate) mod up_test {
 
         // Validate a read response
         let successful_hash =
-            validate_unencrypted_read_response(&mut vec![], &mut data, &csl())?;
+            validate_unencrypted_read_response(None, &mut data, &csl())?;
 
         assert_eq!(successful_hash, None);
-        assert_eq!(data, original_data);
-
-        Ok(())
-    }
-
-    #[test]
-    pub fn test_upstairs_validate_unencrypted_read_response_multiple_contexts(
-    ) -> Result<()> {
-        use rand::{thread_rng, Rng};
-
-        let mut data = BytesMut::with_capacity(512);
-        data.resize(512, 0u8);
-        thread_rng().fill(&mut data[..]);
-
-        let read_response_hash = integrity_hash(&[&data[..]]);
-        let original_data = data.clone();
-
-        // Create the read response
-        let mut block_contexts = vec![
-            // The context here doesn't match
-            BlockContext {
-                hash: thread_rng().gen(),
-                encryption_context: None,
-            },
-            // The context here doesn't match
-            BlockContext {
-                hash: thread_rng().gen(),
-                encryption_context: None,
-            },
-            // Correct one
-            BlockContext {
-                hash: read_response_hash,
-                encryption_context: None,
-            },
-            // The context here doesn't match
-            BlockContext {
-                hash: thread_rng().gen(),
-                encryption_context: None,
-            },
-        ];
-
-        // Validate it
-        let successful_hash = validate_unencrypted_read_response(
-            &mut block_contexts,
-            &mut data,
-            &csl(),
-        )?;
-
-        assert_eq!(successful_hash, Some(read_response_hash));
-        assert_eq!(data, original_data);
-
-        Ok(())
-    }
-
-    // Validate that an unencrypted read response with multiple contexts that
-    // match the integrity hash works. This can happen if the Upstairs
-    // repeatedly writes the same block data.
-    #[test]
-    pub fn test_upstairs_validate_unencrypted_read_response_multiple_hashes(
-    ) -> Result<()> {
-        use rand::{thread_rng, Rng};
-
-        let mut data = BytesMut::with_capacity(512);
-        data.resize(512, 0u8);
-        thread_rng().fill(&mut data[..]);
-
-        let read_response_hash = integrity_hash(&[&data[..]]);
-        let original_data = data.clone();
-
-        // Create the read response
-        let mut block_contexts = vec![
-            // Correct one
-            BlockContext {
-                hash: read_response_hash,
-                encryption_context: None,
-            },
-            // Correct one
-            BlockContext {
-                hash: read_response_hash,
-                encryption_context: None,
-            },
-        ];
-
-        // Validate it
-        let successful_hash = validate_unencrypted_read_response(
-            &mut block_contexts,
-            &mut data,
-            &csl(),
-        )?;
-
-        assert_eq!(successful_hash, Some(read_response_hash));
         assert_eq!(data, original_data);
 
         Ok(())

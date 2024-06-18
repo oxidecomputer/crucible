@@ -4539,10 +4539,10 @@ pub(crate) mod test {
             blocks: vec![ReadResponseBlockMetadata {
                 eid: request.eid,
                 offset: request.offset,
-                block_contexts: vec![BlockContext {
+                block_context: Some(BlockContext {
                     hash: crucible_common::integrity_hash(&[data]),
                     encryption_context: None,
-                }],
+                }),
             }],
         }
     }
