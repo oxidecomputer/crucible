@@ -1398,9 +1398,7 @@ impl ActiveConnection {
          * Build ourselves a list of all the jobs on the work hashmap that
          * are New or DepWait.
          */
-        let mut new_work: VecDeque<JobId> =
-            self.work.new_work().into_iter().collect();
-        // TODO: return a VecDeque directly?
+        let mut new_work = self.work.new_work();
 
         /*
          * We don't have to do jobs in order, but the dependencies are, at
@@ -3199,20 +3197,18 @@ impl Work {
         self.active.len()
     }
 
-    /**
-     * Return a list of downstairs request IDs that are new or have
-     * been waiting for other dependencies to finish.
-     */
-    fn new_work(&self) -> Vec<JobId> {
-        let mut result = Vec::with_capacity(self.active.len());
-
-        for job in self.active.values() {
-            if job.state == WorkState::New || job.state == WorkState::DepWait {
-                result.push(job.ds_id);
-            }
-        }
-
-        result.sort_unstable();
+    /// Returns a sorted list of downstairs request IDs that are new or have
+    /// been waiting for other dependencies to finish.
+    fn new_work(&self) -> VecDeque<JobId> {
+        let mut result: VecDeque<_> = self
+            .active
+            .values()
+            .filter(|job| {
+                matches!(job.state, WorkState::New | WorkState::DepWait)
+            })
+            .map(|job| job.ds_id)
+            .collect();
+        result.make_contiguous().sort_unstable();
 
         result
     }
@@ -3736,9 +3732,7 @@ mod test {
 
     fn test_push_next_jobs(work: &mut Work) -> Vec<JobId> {
         let mut jobs = vec![];
-        let mut new_work = work.new_work();
-
-        new_work.sort_unstable();
+        let new_work = work.new_work();
 
         for &new_id in new_work.iter() {
             if work.in_progress(new_id) {
