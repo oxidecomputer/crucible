@@ -1489,8 +1489,6 @@ impl ActiveConnection {
                     warn!(self.log, "returning error on read!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else {
-                    // This clone shouldn't be too expensive, since it's only
-                    // 32 bytes per extent (and should usually only be 1 extent)
                     region.region_read(&requests, job_id).await
                 };
                 debug!(
@@ -3236,9 +3234,9 @@ impl Work {
     /// If the dependencies are not met, move the state to `DepWait` and return
     /// `false`.
     ///
-    /// If this job is not new, then just return `false`.
-    ///
     /// If the job already is `InProgress`, return `true` (to be idempotent).
+    ///
+    /// If this job is `Done`, then just return `false`.
     fn in_progress(&mut self, ds_id: JobId) -> bool {
         let Some(job) = self.active.get_mut(&ds_id) else {
             panic!("called in_progress for invalid job");
