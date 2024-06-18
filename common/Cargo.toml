@@ -9,7 +9,6 @@ edition = "2021"
 anyhow.workspace = true
 atty.workspace = true
 nix.workspace = true
-rusqlite.workspace = true
 rustls-pemfile.workspace = true
 schemars.workspace = true
 serde.workspace = true
