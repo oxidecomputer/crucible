@@ -4,7 +4,6 @@
  * - Total time to flush
  *   - Time to flush the OS file handle
  *   - Time to re-read the file from disk to re-hash (may be removed later)
- *   - Time to insert new hashes into sqlite DB
  */
 
 
@@ -33,11 +32,6 @@ crucible_downstairs*:::extent-flush-collect-hashes-start
     extent_flush_collect_hashes_start[pid,arg0,arg1] = timestamp;
 }
 
-crucible_downstairs*:::extent-flush-sqlite-insert-start
-{
-    extent_flush_sqlite_insert_start[pid,arg0,arg1] = timestamp;
-}
-
 
 /* and collections */
 crucible_downstairs*:::extent-flush-done
@@ -61,13 +55,6 @@ crucible_downstairs*:::extent-flush-collect-hashes-done
     extent_flush_collect_hashes_start[pid,arg0,arg1] = 0;
 }
 
-crucible_downstairs*:::extent-flush-sqlite-insert-done
-/extent_flush_sqlite_insert_start[pid,arg0,arg1]/
-{
-    @time["flush_sqlite_insert"] = quantize((timestamp - extent_flush_sqlite_insert_start[pid,arg0,arg1]) / arg2);
-    extent_flush_sqlite_insert_start[pid,arg0,arg1] = 0;
-}
-
 
 /*
  * writes
@@ -85,11 +72,6 @@ crucible_downstairs*:::extent-write-file-start
 crucible_downstairs*:::extent-write-get-hashes-start
 {
     extent_write_get_hashes_start[pid,arg0,arg1] = timestamp;
-}
-
-crucible_downstairs*:::extent-write-sqlite-insert-start
-{
-    extent_write_sqlite_insert_start[pid,arg0,arg1] = timestamp;
 }
 
 
@@ -114,15 +96,6 @@ crucible_downstairs*:::extent-write-get-hashes-done
     @time["write_get_hashes"] = quantize((timestamp - extent_write_get_hashes_start[pid,arg0,arg1]) / arg2);
     extent_write_get_hashes_start[pid,arg0,arg1] = 0;
 }
-
-crucible_downstairs*:::extent-write-sqlite-insert-done
-/extent_write_sqlite_insert_start[pid,arg0,arg1]/
-{
-    @time["write_sqlite_insert"] = quantize((timestamp - extent_write_sqlite_insert_start[pid,arg0,arg1]) / arg2);
-    extent_write_sqlite_insert_start[pid,arg0,arg1] = 0;
-}
-
-
 
 
 /*

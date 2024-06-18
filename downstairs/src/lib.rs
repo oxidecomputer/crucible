@@ -15,10 +15,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crucible_common::{
-    build_logger, crucible_bail, deadline_secs,
-    impacted_blocks::extent_from_offset, integrity_hash, mkdir_for_file,
-    verbose_timeout, Block, CrucibleError, ExtentId, RegionDefinition,
-    MAX_BLOCK_SIZE,
+    build_logger, impacted_blocks::extent_from_offset, integrity_hash,
+    mkdir_for_file, verbose_timeout, Block, CrucibleError, ExtentId,
+    RegionDefinition, MAX_BLOCK_SIZE,
 };
 use crucible_protocol::{
     BlockContext, CrucibleDecoder, JobId, Message, MessageWriter,
@@ -770,18 +769,6 @@ pub mod cdt {
         num_rehashed: u64,
     ) {
     }
-    fn extent__flush__sqlite__insert__start(
-        job_id: u64,
-        extent_id: u32,
-        extent_size: u64,
-    ) {
-    }
-    fn extent__flush__sqlite__insert__done(
-        _job_id: u64,
-        _extent_id: u32,
-        extent_size: u64,
-    ) {
-    }
     fn extent__write__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
     fn extent__write__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
     fn extent__write__get__hashes__start(
@@ -798,18 +785,6 @@ pub mod cdt {
     }
     fn extent__write__file__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
     fn extent__write__file__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
-    fn extent__write__sqlite__insert__start(
-        job_id: u64,
-        extent_id: u32,
-        n_blocks: u64,
-    ) {
-    }
-    fn extent__write__sqlite__insert__done(
-        job_id: u64,
-        extent_id: u32,
-        n_blocks: u64,
-    ) {
-    }
     fn extent__write__raw__context__insert__start(
         job_id: u64,
         extent_id: u32,
@@ -3590,7 +3565,7 @@ pub async fn start_downstairs(
 
     let repair_log = root_log.new(o!("task" => "repair".to_string()));
     let repair_listener =
-        match repair::repair_main(&ds, repair_address, &repair_log).await {
+        match repair::repair_main(&ds, repair_address, &repair_log) {
             Err(e) => {
                 // TODO tear down other things if repair server can't be
                 // started?

@@ -2967,9 +2967,7 @@ pub(crate) fn validate_encrypted_read_response(
                 // data that is returned. Due to the fact that nonces are
                 // random for each write, even if the Guest wrote the
                 // same data block 100 times, only one index will be
-                // valid. The sqlite backend will return any number of block
-                // contexts, where the raw file backend will only return
-                // one (because it knows the active slot).
+                // valid.
                 //
                 // If the computed integrity hash matched but decryption
                 // failed, continue to the next contexts. the current

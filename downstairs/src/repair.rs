@@ -47,7 +47,7 @@ fn build_api() -> ApiDescription<Arc<FileServerContext>> {
 }
 
 /// Returns Ok(listen address) if everything launched ok, Err otherwise
-pub async fn repair_main(
+pub fn repair_main(
     ds: &Downstairs,
     addr: SocketAddr,
     log: &Logger,

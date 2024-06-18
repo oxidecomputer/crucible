@@ -156,11 +156,7 @@ impl Region {
             }
         };
 
-        // The downstairs needs to open (at minimum) the extent file, the sqlite
-        // database, the write-ahead lock, and the sqlite shared memory file for
-        // each extent in the region, plus:
-        //
-        // - the seed database (db + shm + wal)
+        // The downstairs needs to open (at minimum) all the extent files, plus
         // - region.json
         // - stdin, stdout, and stderr
         // - the listen and repair sockets (arbitrarily saying two sockets per
@@ -169,7 +165,7 @@ impl Region {
         // - optionally, a control interface
         //
         // If the downstairs cannot open this many files, error here.
-        let required_number_of_files = def.extent_count() as u64 * 4 + 13;
+        let required_number_of_files = def.extent_count() as u64 + 8;
 
         if number_of_files_limit < required_number_of_files {
             bail!("this downstairs cannot open all required files!");
