@@ -801,7 +801,7 @@ impl Region {
             let extent = self.get_opened_extent_mut(req.extent);
             let req = response.request(req.offset, req.count.get());
 
-            // Run sufficiently large reads on in the blocking pool
+            // Run sufficiently large reads in the blocking pool
             let out = if req.data.capacity() > MIN_BLOCKING_SIZE {
                 run_blocking(|| extent.read(job_id, req))
             } else {
