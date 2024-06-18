@@ -3229,8 +3229,6 @@ impl Work {
     /// `false`.
     ///
     /// If the job already is `InProgress`, return `true` (to be idempotent).
-    ///
-    /// If this job is `Done`, then just return `false`.
     fn in_progress(&mut self, ds_id: JobId) -> bool {
         let Some(job) = self.active.get_mut(&ds_id) else {
             panic!("called in_progress for invalid job");
@@ -3329,12 +3327,6 @@ impl Work {
                 // return idempotently.
                 true
             }
-            WorkState::Done => {
-                /*
-                 * job id is not new, we can't run it.
-                 */
-                false
-            }
         }
     }
 
@@ -3361,17 +3353,12 @@ impl Work {
     }
 }
 
-/*
- * XXX We may not need Done. At the moment all we actually look at is New or
- * InProgress.
- */
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum WorkState {
     New,
     DepWait,
     InProgress,
-    Done,
 }
 
 impl fmt::Display for WorkState {
@@ -3385,9 +3372,6 @@ impl fmt::Display for WorkState {
             }
             WorkState::InProgress => {
                 write!(f, "In P")
-            }
-            WorkState::Done => {
-                write!(f, "Done")
             }
         }
     }
