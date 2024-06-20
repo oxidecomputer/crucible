@@ -2920,7 +2920,6 @@ pub(crate) fn validate_encrypted_read_response(
 
     let Some(block_encryption_ctx) = &context.encryption_context else {
         // this block context is missing an encryption context!
-        // XXX should this be an error instead?
         return Err(CrucibleError::DecryptionError);
     };
 
