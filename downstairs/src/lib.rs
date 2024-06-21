@@ -1462,7 +1462,7 @@ impl ActiveConnection {
         Ok(())
     }
 
-    /// Given a job ID (and its associated connection), do the work for that IO
+    /// Given a `DownstairsWork` job, do the work for that IO
     ///
     /// Take a IOop type and (after some error checking), do the work required
     /// for that IOop, storing the result. On completion, construct the
@@ -3226,9 +3226,9 @@ impl Work {
             // to the last flush have completed, hence this early out.
             //
             // Currently `work.completed` is cleared out when
-            // `Downstairs::complete_work` (or `complete` in mod test)
-            // is called with a FlushAck so this early out cannot be
-            // removed unless that is changed too.
+            // `ActiveConnection::do_ready_work` (or `complete` in mod test) is
+            // called with a `FlushAck`, so this early out cannot be removed
+            // unless that is changed too.
             if dep <= &self.last_flush {
                 continue;
             }
