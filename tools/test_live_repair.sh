@@ -20,8 +20,15 @@ function ctrl_c() {
     ${dsc} cmd shutdown
 }
 
-loop_log=/tmp/test_live_repair_summary.log
-test_log=/tmp/test_live_repair.log
+REGION_ROOT=${REGION_ROOT:-/var/tmp/test_live_repair}
+mkdir -p "$REGION_ROOT"
+
+# Location of logs and working files
+WORK_ROOT=${WORK_ROOT:-/tmp}
+mkdir -p "$WORK_ROOT"
+
+loop_log="$WORK_ROOT"/test_live_repair_summary.log
+test_log="$WORK_ROOT"/test_live_repair.log
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
@@ -52,12 +59,13 @@ while getopts 'l:' opt; do
     esac
 done
 
-echo "" > ${loop_log}
-echo "" > ${test_log}
-echo "starting $(date)" | tee ${loop_log}
+echo "" > "$loop_log"
+echo "" > "$test_log"
+echo "starting $(date)" | tee "$loop_log"
 echo "Tail $test_log for test output"
 
 if ! ${dsc} create --cleanup \
+  --region-dir "$REGION_ROOT" \
   --region-count 4 \
   --ds-bin "$downstairs" \
   --extent-size 4000 \
@@ -66,6 +74,7 @@ if ! ${dsc} create --cleanup \
     exit 1
 fi
 ${dsc} start --ds-bin "$downstairs" \
+  --region-dir "$REGION_ROOT" \
   --region-count 4 >> "$test_log" 2>&1 &
 dsc_pid=$!
 sleep 5
@@ -85,6 +94,7 @@ if ! "$crucible_test" fill "${args[@]}" -q -g "$gen"\
           --verify-out alan --retry-activate >> "$test_log" 2>&1 ; then
     echo Failed on initial verify seed, check "$test_log"
     ${dsc} cmd shutdown
+    exit 1
 fi
 (( gen += 1 ))
 
@@ -106,7 +116,7 @@ while [[ $count -le $loops ]]; do
         (( err += 1 ))
         duration=$SECONDS
         printf "[%03d] Error $result after %d:%02d\n" "$count" \
-                $((duration / 60)) $((duration % 60)) | tee -a ${loop_log}
+                $((duration / 60)) $((duration % 60)) | tee -a "$loop_log"
         mv "$test_log" "$test_log".lastfail
         break
     fi
@@ -121,7 +131,7 @@ last_run_seconds:%d\n" \
   $((duration / 60)) $((duration % 60)) \
   $((ave / 60)) $((ave % 60)) \
   $((total / 60)) $((total % 60)) \
-  "$err" $duration | tee -a ${loop_log}
+  "$err" $duration | tee -a "$loop_log"
     (( count += 1 ))
 
 done
@@ -129,12 +139,12 @@ ${dsc} cmd shutdown
 wait "$dsc_pid"
 
 sleep 4
-echo "Final results:" | tee -a ${loop_log}
+echo "Final results:" | tee -a "$loop_log"
 printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d\n" \
   "$count" \
   $((duration / 60)) $((duration % 60)) \
   $((ave / 60)) $((ave % 60)) \
   $((total / 60)) $((total % 60)) \
-  "$err" $duration | tee -a ${loop_log}
+  "$err" $duration | tee -a "$loop_log"
 echo "$(date) Test ends with $err" >> "$test_log" 2>&1
 exit "$err"

@@ -90,27 +90,28 @@ while getopts 'l:' opt; do
     esac
 done
 
-export loop_log=/tmp/repair_restart.log
-export test_log=/tmp/repair_restart_test.log
-export dsc_log=/tmp/repair_restart_dsc.log
-export region_dir="./var"
+WORK_ROOT=${WORK_ROOT:-/tmp}
+export loop_log="$WORK_ROOT/repair_restart.log"
+export test_log="$WORK_ROOT/repair_restart_test.log"
+export dsc_log="$WORK_ROOT/repair_restart_dsc.log"
+REGION_ROOT=${REGION_ROOT:-/var/tmp/test_restart_repair}
 
-echo "" > ${loop_log}
-echo "starting $(date)" | tee ${loop_log}
-echo "" > ${test_log}
+echo "" > "$loop_log"
+echo "starting $(date)" | tee "$loop_log"
+echo "" > "$test_log"
 echo "Tail $test_log for test output"
 echo "Tail $loop_log for summary output"
 echo "Tail $dsc_log for dsc outout"
 
 echo "Create a new region to test" | tee -a "${loop_log}"
 ulimit -n 65536
-if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 61 --extent-size 5120 --region-dir "$region_dir"; then
-    echo "Failed to create region at $region_dir"
+if ! "$dsc" create --cleanup --ds-bin "$cds" --extent-count 61 --extent-size 5120 --region-dir "$REGION_ROOT"; then
+    echo "Failed to create region at $REGION_ROOT"
     exit 1
 fi
 
 echo "Starting the downstairs" | tee -a "${loop_log}"
-"$dsc" start --ds-bin "$cds" --region-dir "$region_dir" >> ${dsc_log} 2>&1 &
+"$dsc" start --ds-bin "$cds" --region-dir "$REGION_ROOT" >> "$dsc_log" 2>&1 &
 dsc_pid=$!
 # Sleep 5 to give the downstairs time to get going.
 sleep 5
@@ -158,10 +159,10 @@ stop_all_downstairs
 sleep 7
 
 # Create the "old" region files
-rm -rf "$region_dir"/8810.old "$region_dir"/8820.old "$region_dir"/8830.old
-cp -R  "$region_dir"/8810 "$region_dir"/8810.old || ctrl_c
-cp -R  "$region_dir"/8820 "$region_dir"/8820.old || ctrl_c
-cp -R  "$region_dir"/8830 "$region_dir"/8830.old || ctrl_c
+rm -rf "$REGION_ROOT"/8810.old "$REGION_ROOT"/8820.old "$REGION_ROOT"/8830.old
+cp -R  "$REGION_ROOT"/8810 "$REGION_ROOT"/8810.old || ctrl_c
+cp -R  "$REGION_ROOT"/8820 "$REGION_ROOT"/8820.old || ctrl_c
+cp -R  "$REGION_ROOT"/8830 "$REGION_ROOT"/8830.old || ctrl_c
 
 # Bring the downstairs back online.
 echo "$(date) Bring downstairs back online" | tee -a "$loop_log"
@@ -182,7 +183,7 @@ fi
 echo "Fill completed, wait for downstairs to start restarting" >> "$test_log"
 duration=$SECONDS
 printf "Initial fill and verify took: %d:%02d \n" \
-    $((duration / 60)) $((duration % 60)) | tee -a ${loop_log}
+    $((duration / 60)) $((duration % 60)) | tee -a "$loop_log"
 
 # Now run the repair loop
 count=1
@@ -202,19 +203,19 @@ while [[ $count -le $loops ]]; do
     echo "$(date) move regions" >> "$test_log"
     choice=$((RANDOM % 3))
     if [[ $choice -eq 0 ]]; then
-        rm -rf "$region_dir"/8810
-        cp -R  "$region_dir"/8810.old "$region_dir"/8810
+        rm -rf "$REGION_ROOT"/8810
+        cp -R  "$REGION_ROOT"/8810.old "$REGION_ROOT"/8810
     elif [[ $choice -eq 1 ]]; then
-        rm -rf "$region_dir"/8820
-        cp -R  "$region_dir"/8820.old "$region_dir"/8820
+        rm -rf "$REGION_ROOT"/8820
+        cp -R  "$REGION_ROOT"/8820.old "$REGION_ROOT"/8820
     else
-        rm -rf "$region_dir"/8830
-        cp -R  "$region_dir"/8830.old "$region_dir"/8830
+        rm -rf "$REGION_ROOT"/8830
+        cp -R  "$REGION_ROOT"/8830.old "$REGION_ROOT"/8830
     fi
     echo "$(date) regions moved, current dump outputs:" >> "$test_log"
-    $cds dump --no-color -d "$region_dir"/8810 \
-        -d "$region_dir"/8820 \
-        -d "$region_dir"/8830 >> "$test_log" 2>&1
+    $cds dump --no-color -d "$REGION_ROOT"/8810 \
+        -d "$REGION_ROOT"/8820 \
+        -d "$REGION_ROOT"/8830 >> "$test_log" 2>&1
 
     echo "$(date) resume downstairs" >> "$test_log"
     bring_all_downstairs_online
@@ -236,7 +237,7 @@ while [[ $count -le $loops ]]; do
         (( err += 1 ))
         duration=$SECONDS
         printf "[%03d] Error $result in one test after %d:%02d\n" "$count" \
-                $((duration / 60)) $((duration % 60)) | tee -a ${loop_log}
+                $((duration / 60)) $((duration % 60)) | tee -a "$loop_log"
         mv "$test_log" "$test_log".lastfail
         break
     fi
@@ -249,7 +250,7 @@ while [[ $count -le $loops ]]; do
     printf "[%03d/%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d \
 last_run_seconds:%d\n" "$count" "$loops" $((duration / 60)) $((duration % 60)) \
 $((ave / 60)) $((ave % 60))  $((total / 60)) $((total % 60)) \
-"$err" $duration | tee -a ${loop_log}
+"$err" $duration | tee -a "$loop_log"
     (( count += 1 ))
 
 done
@@ -258,11 +259,10 @@ if [[ -n "$dsc_pid" ]]; then
     wait "$dsc_pid"
 fi
 
-echo "Final results $(date):" | tee -a ${loop_log}
+echo "Final results $(date):" | tee -a "$loop_log"
 printf "[%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d last_run_seconds:%d\n" \
   "$count" $((duration / 60)) $((duration % 60)) \
   $((ave / 60)) $((ave % 60)) \
   $((total / 60)) $((total % 60)) \
-  "$err" $duration | tee -a ${loop_log}
+  "$err" $duration | tee -a "$loop_log"
 exit "$err"
-

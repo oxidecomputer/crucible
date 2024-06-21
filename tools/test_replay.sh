@@ -14,7 +14,10 @@ function ctrl_c() {
     ${dsc} cmd shutdown
 }
 
-test_log=/tmp/test_replay.log
+WORK_ROOT=${WORK_ROOT:-/tmp}
+mkdir -p "$WORK_ROOT"
+
+test_log="$WORK_ROOT/test_replay.log"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
@@ -45,8 +48,8 @@ while getopts 'l:' opt; do
     esac
 done
 
-echo "" > ${test_log}
-echo "starting $(date)" | tee ${test_log}
+echo "" > "$test_log"
+echo "starting $(date)" | tee "$test_log"
 echo "Tail $test_log for test output"
 
 echo "Creating downstairs regions" | tee -a "$test_log"
@@ -90,11 +93,11 @@ result=$?
 duration=$SECONDS
 if [[ $result -ne 0 ]]; then
     printf "Error $result after %d:%02d\n" \
-            $((duration / 60)) $((duration % 60)) | tee -a ${test_log}
+            $((duration / 60)) $((duration % 60)) | tee -a "$test_log"
 else
     (( gen += 1 ))
     printf "Replays:%d time: %d:%02d\n" \
-      "$loops" $((duration / 60)) $((duration % 60)) | tee -a ${test_log}
+      "$loops" $((duration / 60)) $((duration % 60)) | tee -a "$test_log"
 
     echo "Do final verify" | tee -a "$test_log"
     if ! "$crucible_test" verify "${args[@]}" -q -g "$gen"\
