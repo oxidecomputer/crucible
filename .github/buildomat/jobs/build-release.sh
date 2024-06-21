@@ -43,12 +43,12 @@
 #: from_output = "/out/crucible-pantry.sha256.txt"
 #:
 #: [[publish]]
-#: series = "dtrace-image"
+#: series = "image"
 #: name = "crucible-dtrace.tar.gz"
 #: from_output = "/out/crucible-dtrace.tar.gz"
 #:
 #: [[publish]]
-#: series = "dtrace-image"
+#: series = "image"
 #: name = "crucible-dtrace.sha256.txt"
 #: from_output = "/out/crucible-dtrace.sha256.txt"
 #:
