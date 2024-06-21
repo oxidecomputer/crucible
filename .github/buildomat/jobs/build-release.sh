@@ -42,6 +42,16 @@
 #: name = "crucible-pantry.sha256.txt"
 #: from_output = "/out/crucible-pantry.sha256.txt"
 #:
+#: [[publish]]
+#: series = "dtrace-image"
+#: name = "crucible-dtrace.tar.gz"
+#: from_output = "/out/crucible-dtrace.tar.gz"
+#:
+#: [[publish]]
+#: series = "dtrace-image"
+#: name = "crucible-dtrace.sha256.txt"
+#: from_output = "/out/crucible-dtrace.sha256.txt"
+#:
 
 set -o errexit
 set -o pipefail
@@ -97,8 +107,17 @@ banner nightly
 banner copy
 mv out/crucible-nightly.tar.gz /out/crucible-nightly.tar.gz
 
+# Build the dtrace archive file which should include all the dtrace scripts.
+# This needs the ./out directory created above
+banner dtrace
+./tools/make-dtrace.sh
+
+banner copy
+mv out/crucible-dtrace.tar.gz /out/crucible-dtrace.tar.gz
+
 banner checksum
 cd /out
 digest -a sha256 crucible.tar.gz > crucible.sha256.txt
 digest -a sha256 crucible-pantry.tar.gz > crucible-pantry.sha256.txt
 digest -a sha256 crucible-nightly.tar.gz > crucible-nightly.sha256.txt
+digest -a sha256 crucible-dtrace.tar.gz > crucible-dtrace.sha256.txt
