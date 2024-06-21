@@ -81,7 +81,7 @@ function show_mem_summary() {
 }
 
 # Location of logs and working files
- WORK_ROOT=${WORK_ROOT:-/tmp}
+WORK_ROOT=${WORK_ROOT:-/tmp}
 mkdir -p "$WORK_ROOT"
 test_mem_log="$WORK_ROOT/test_mem_log.txt"
 # Create a region with the given extent_size ($1) and extent_count ($2)
