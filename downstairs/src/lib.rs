@@ -1420,9 +1420,15 @@ impl ActiveConnection {
     /// Do work for the given IO job
     ///
     /// This function will either complete the work (adding it to the completed
-    /// list), fail to complete the work (re-adding it to the active list and
-    /// returning the `JobId`), or fail to communicate when replying to the
-    /// Upstairs (which returns an error).
+    /// list and returning `None`), fail to complete the work (re-adding it to
+    /// the active list, sending an `ErrorPort`, and returning the `JobId`), or
+    /// fail to communicate when replying to the Upstairs (which returns an
+    /// error).
+    ///
+    /// There's one exception: failure to perform a live-repair task will -- in
+    /// addition to sending an `ErrorReport` to the upstairs -- **also** return
+    /// an error, because the connection is permanently tainted and we should
+    /// restart communication.
     async fn do_work(
         &mut self,
         job: DownstairsWork,
