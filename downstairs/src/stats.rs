@@ -1,14 +1,17 @@
-// Copyright 2023 Oxide Computer Company
+// Copyright 2024 Oxide Computer Company
+
 use super::*;
 
-use dropshot::{ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel};
 use omicron_common::api::internal::nexus::ProducerEndpoint;
 use omicron_common::api::internal::nexus::ProducerKind;
 use oximeter::{
     types::{Cumulative, Sample},
     Metric, MetricsError, Producer, Target,
 };
-use oximeter_producer::{Config, LogConfig, Server};
+use oximeter_producer::{
+    Config, ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel,
+    LogConfig, Server,
+};
 
 // These structs are used to construct the required stats for Oximeter.
 #[derive(Debug, Copy, Clone, Target)]
