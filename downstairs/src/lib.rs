@@ -1246,6 +1246,7 @@ impl ActiveConnection {
                 cdt::submit__el__noop__start!(|| job_id.0);
                 let new_noop = IOop::ExtentLiveNoOp { dependencies };
                 let dsw = DownstairsWork::new(job_id, new_noop);
+                debug!(self.log, "Received NoOP {}", job_id);
                 self.do_work_if_ready(dsw, flags, reqwest_client, dss, region)
                     .await?
             }
