@@ -89,7 +89,7 @@ pub fn dynamometer(
                 let rw = RegionWrite(writes);
 
                 let io_operation_time = Instant::now();
-                region.region_write(rw, JobId(1000), false)?;
+                region.region_write(&rw, JobId(1000), false)?;
 
                 total_io_time += io_operation_time.elapsed();
                 io_operations_sent += num_writes;

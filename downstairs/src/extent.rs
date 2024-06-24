@@ -409,7 +409,7 @@ impl Extent {
     pub fn write(
         &mut self,
         job_id: JobId,
-        write: ExtentWrite,
+        write: &ExtentWrite,
         only_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
         if self.read_only {
@@ -420,7 +420,7 @@ impl Extent {
         cdt::extent__write__start!(|| (job_id.0, self.number.0, num_blocks));
 
         self.inner
-            .write(job_id, &write, only_write_unwritten, self.iov_max)?;
+            .write(job_id, write, only_write_unwritten, self.iov_max)?;
 
         cdt::extent__write__done!(|| (job_id.0, self.number.0, num_blocks));
 

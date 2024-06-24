@@ -55,8 +55,12 @@ pub use dump::dump_region;
 pub use dynamometer::*;
 pub use stats::{DsCountStat, DsStatOuter};
 
+/// Single IO operation
+///
+/// `Clone` is deliberately **not** derived on this type, because cloning the
+/// internal `Vec<..>` objects can be expensive.
 #[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 enum IOop {
     Write {
         dependencies: Vec<JobId>, // Jobs that must finish before this
@@ -635,7 +639,7 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
         let write = RegionWrite::new(&blocks, buffer)?;
 
         // We have no job ID, so it makes no sense for accounting.
-        region.region_write(write, JobId(0), false)?;
+        region.region_write(&write, JobId(0), false)?;
         offset.advance(nblocks);
     }
 
@@ -1401,13 +1405,13 @@ impl ActiveConnection {
             }
 
             // If this job is still new, take it and go to work. The in_progress
-            // method will only return true if all dependencies are met.
-            if !self.work.in_progress(new_id) {
+            // method will only return the work if all dependencies are met.
+            let Some(dw) = self.work.in_progress(new_id) else {
                 continue;
-            }
+            };
 
             cdt::work__process!(|| new_id.0);
-            let m = self.do_work(new_id, flags, reqwest_client, region).await;
+            let m = self.do_work(&dw, flags, reqwest_client, region).await;
 
             if let Some(error) = m.err() {
                 self.reply(Message::ErrorReport {
@@ -1420,6 +1424,7 @@ impl ActiveConnection {
                 // If the job errored, do not consider it completed.
                 // Retry it.
                 new_work.push_back(new_id);
+                self.work.active.insert(dw.ds_id, dw);
 
                 // If this is a repair job, and that repair failed, we
                 // can do no more work on this downstairs and should
@@ -1444,9 +1449,6 @@ impl ActiveConnection {
                 let is_flush = matches!(m, Message::FlushAck { .. });
                 self.reply(m)?;
 
-                let prev = self.work.active.remove(&new_id);
-                assert!(prev.is_some());
-
                 if is_flush {
                     self.work.last_flush = new_id;
                     self.work.completed = Vec::with_capacity(32);
@@ -1460,7 +1462,7 @@ impl ActiveConnection {
         Ok(())
     }
 
-    /// Given a job ID (and its associated connection), do the work for that IO
+    /// Given a `DownstairsWork` job, do the work for that IO
     ///
     /// Take a IOop type and (after some error checking), do the work required
     /// for that IOop, storing the result. On completion, construct the
@@ -1471,16 +1473,15 @@ impl ActiveConnection {
     /// an error field in the returned `Message`.
     async fn do_work(
         &mut self,
-        job_id: JobId,
+        job: &DownstairsWork,
         flags: &DownstairsFlags,
         reqwest_client: &reqwest::Client,
         region: &mut Region,
     ) -> Message {
-        let job = self.work.get_ready_job(job_id);
+        let job_id = job.ds_id;
         let upstairs_connection = self.upstairs_connection;
-        assert_eq!(job.ds_id, job_id);
 
-        match job.work {
+        match &job.work {
             IOop::Read {
                 dependencies,
                 requests,
@@ -1493,7 +1494,7 @@ impl ActiveConnection {
                     warn!(self.log, "returning error on read!");
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else {
-                    region.region_read(&requests, job_id)
+                    region.region_read(requests, job_id)
                 };
                 debug!(
                     self.log,
@@ -1608,11 +1609,11 @@ impl ActiveConnection {
                     Err(CrucibleError::GenericError("test error".to_string()))
                 } else {
                     region.region_flush(
-                        flush_number,
-                        gen_number,
-                        &snapshot_details,
+                        *flush_number,
+                        *gen_number,
+                        snapshot_details,
                         job_id,
-                        extent_limit,
+                        *extent_limit,
                     )
                 };
                 debug!(
@@ -1633,7 +1634,7 @@ impl ActiveConnection {
                 dependencies,
                 extent,
             } => {
-                let result = region.close_extent(extent);
+                let result = region.close_extent(*extent);
                 debug!(
                     self.log,
                     "JustClose :{} extent {} deps:{:?} res:{}",
@@ -1660,13 +1661,13 @@ impl ActiveConnection {
                 // Else, if close fails, return that result.
                 // Else, return the f/g/d from the close.
                 let result = match region.region_flush_extent(
-                    extent,
-                    gen_number,
-                    flush_number,
+                    *extent,
+                    *gen_number,
+                    *flush_number,
                     job_id,
                 ) {
                     Err(f_res) => Err(f_res),
-                    Ok(_) => region.close_extent(extent),
+                    Ok(_) => region.close_extent(*extent),
                 };
 
                 debug!(
@@ -1701,8 +1702,8 @@ impl ActiveConnection {
                 let result = region
                     .repair_extent(
                         reqwest_client.clone(),
-                        extent,
-                        source_repair_address,
+                        *extent,
+                        *source_repair_address,
                         false,
                     )
                     .await;
@@ -1726,7 +1727,7 @@ impl ActiveConnection {
                 dependencies,
                 extent,
             } => {
-                let result = region.reopen_extent(extent);
+                let result = region.reopen_extent(*extent);
                 debug!(
                     self.log,
                     "LiveReopen:{} extent {} deps:{:?} res:{}",
@@ -3152,7 +3153,7 @@ pub struct Work {
     log: Logger,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct DownstairsWork {
     ds_id: JobId,
     work: IOop,
@@ -3195,138 +3196,124 @@ impl Work {
     }
 
     #[cfg(test)]
-    fn get_job(&self, ds_id: JobId) -> DownstairsWork {
-        self.active.get(&ds_id).unwrap().clone()
+    fn get_job(&self, ds_id: JobId) -> &DownstairsWork {
+        self.active.get(&ds_id).unwrap()
+    }
+
+    /// Checks whether the given job is ready
+    ///
+    /// Updates `self.outstanding_deps` and `job.state`
+    fn check_ready(&mut self, job: &mut DownstairsWork) -> bool {
+        /*
+         * Before we can make this in_progress, we have to check the dep
+         * list if there is one and make sure all dependencies are
+         * completed.
+         */
+        let dep_list = job.work.deps();
+
+        /*
+         * See which of our dependencies are met.
+         * XXX Make this better/faster by removing the ones that
+         * are met, so next lap we don't have to check again?  There
+         * may be some debug value to knowing what the dep list was,
+         * so consider that before making this faster.
+         */
+        let mut deps_outstanding: Vec<JobId> =
+            Vec::with_capacity(dep_list.len());
+
+        for dep in dep_list.iter() {
+            // The Downstairs currently assumes that all jobs previous
+            // to the last flush have completed, hence this early out.
+            //
+            // Currently `work.completed` is cleared out when
+            // `ActiveConnection::do_ready_work` (or `complete` in mod test) is
+            // called with a `FlushAck`, so this early out cannot be removed
+            // unless that is changed too.
+            if dep <= &self.last_flush {
+                continue;
+            }
+
+            if !self.completed.contains(dep) {
+                deps_outstanding.push(*dep);
+            }
+        }
+
+        if !deps_outstanding.is_empty() {
+            let print = if let Some(existing_outstanding_deps) =
+                self.outstanding_deps.get(&job.ds_id)
+            {
+                *existing_outstanding_deps != deps_outstanding.len()
+            } else {
+                false
+            };
+
+            if print {
+                warn!(
+                    self.log,
+                    "{} job {} waiting on {} deps",
+                    job.ds_id,
+                    match &job.work {
+                        IOop::Write { .. } => "Write",
+                        IOop::WriteUnwritten { .. } => "WriteUnwritten",
+                        IOop::Flush { .. } => "Flush",
+                        IOop::Read { .. } => "Read",
+                        IOop::ExtentClose { .. } => "ECLose",
+                        IOop::ExtentFlushClose { .. } => "EFlushCLose",
+                        IOop::ExtentLiveRepair { .. } => "ELiveRepair",
+                        IOop::ExtentLiveReopen { .. } => "ELiveReopen",
+                        IOop::ExtentLiveNoOp { .. } => "NoOp",
+                    },
+                    deps_outstanding.len(),
+                );
+            }
+
+            let _ = self
+                .outstanding_deps
+                .insert(job.ds_id, deps_outstanding.len());
+
+            /*
+             * If we got here, then the dep is not met.
+             * Set DepWait if not already set.
+             */
+            if job.state == WorkState::New {
+                job.state = WorkState::DepWait;
+            }
+            false
+        } else {
+            job.state = WorkState::InProgress;
+            true
+        }
     }
 
     /// If the requested job is still new, and the dependencies are all met,
-    /// move the state of the job to `InProgress` and return `true`.
+    /// remove the job from the active map and return it.
     ///
-    /// If the dependencies are not met, move the state to `DepWait` and return
-    /// `false`.
+    /// Otherwise, leave the job in the map and return `None`
     ///
-    /// If the job already is `InProgress`, return `true` (to be idempotent).
-    fn in_progress(&mut self, ds_id: JobId) -> bool {
-        let Some(job) = self.active.get_mut(&ds_id) else {
+    /// # Panics
+    /// If the job is not present in the active map
+    #[must_use]
+    fn in_progress(&mut self, ds_id: JobId) -> Option<DownstairsWork> {
+        let Some(mut job) = self.active.remove(&ds_id) else {
             panic!("called in_progress for invalid job");
         };
 
         match job.state {
             WorkState::New | WorkState::DepWait => {
-                /*
-                 * Before we can make this in_progress, we have to check the dep
-                 * list if there is one and make sure all dependencies are
-                 * completed.
-                 */
-                let dep_list = job.work.deps();
-
-                /*
-                 * See which of our dependencies are met.
-                 * XXX Make this better/faster by removing the ones that
-                 * are met, so next lap we don't have to check again?  There
-                 * may be some debug value to knowing what the dep list was,
-                 * so consider that before making this faster.
-                 */
-                let mut deps_outstanding: Vec<JobId> =
-                    Vec::with_capacity(dep_list.len());
-
-                for dep in dep_list.iter() {
-                    // The Downstairs currently assumes that all jobs previous
-                    // to the last flush have completed, hence this early out.
-                    //
-                    // Currently `work.completed` is cleared out when
-                    // `Downstairs::complete_work` (or `complete` in mod test)
-                    // is called with a FlushAck so this early out cannot be
-                    // removed unless that is changed too.
-                    if dep <= &self.last_flush {
-                        continue;
-                    }
-
-                    if !self.completed.contains(dep) {
-                        deps_outstanding.push(*dep);
-                    }
-                }
-
-                if !deps_outstanding.is_empty() {
-                    let print = if let Some(existing_outstanding_deps) =
-                        self.outstanding_deps.get(&ds_id)
-                    {
-                        *existing_outstanding_deps != deps_outstanding.len()
-                    } else {
-                        false
-                    };
-
-                    if print {
-                        warn!(
-                            self.log,
-                            "{} job {} waiting on {} deps",
-                            ds_id,
-                            match &job.work {
-                                IOop::Write { .. } => "Write",
-                                IOop::WriteUnwritten { .. } => "WriteUnwritten",
-                                IOop::Flush { .. } => "Flush",
-                                IOop::Read { .. } => "Read",
-                                IOop::ExtentClose { .. } => "ECLose",
-                                IOop::ExtentFlushClose { .. } => "EFlushCLose",
-                                IOop::ExtentLiveRepair { .. } => "ELiveRepair",
-                                IOop::ExtentLiveReopen { .. } => "ELiveReopen",
-                                IOop::ExtentLiveNoOp { .. } => "NoOp",
-                            },
-                            deps_outstanding.len(),
-                        );
-                    }
-
-                    let _ = self
-                        .outstanding_deps
-                        .insert(ds_id, deps_outstanding.len());
-
-                    /*
-                     * If we got here, then the dep is not met.
-                     * Set DepWait if not already set.
-                     */
-                    if job.state == WorkState::New {
-                        job.state = WorkState::DepWait;
-                    }
-
-                    false
+                if self.check_ready(&mut job) {
+                    Some(job)
                 } else {
-                    /*
-                     * We had no dependencies, or they are all completed, we
-                     * can go ahead and work on this job.
-                     */
-                    job.state = WorkState::InProgress;
-
-                    true
+                    // Return the job to the map
+                    self.active.insert(ds_id, job);
+                    None
                 }
             }
             WorkState::InProgress => {
                 // A previous call of this function put this job in progress, so
                 // return idempotently.
-                true
+                Some(job)
             }
         }
-    }
-
-    /// Returns a job that's ready to have the work done
-    ///
-    /// # Panics
-    /// If any part of the job's preconditions aren't met (it's not marked as
-    /// `InProgress`, it has unmet dependencies, etc).
-    fn get_ready_job(&self, job_id: JobId) -> DownstairsWork {
-        let job = self.active.get(&job_id).unwrap();
-        assert_eq!(job.state, WorkState::InProgress);
-        assert_eq!(job_id, job.ds_id);
-
-        // validate that deps are done
-        let dep_list = job.work.deps();
-        for dep in dep_list {
-            let last_flush_satisfied = dep <= &self.last_flush;
-            let complete_satisfied = self.completed.contains(dep);
-
-            assert!(last_flush_satisfied || complete_satisfied);
-        }
-
-        job.clone()
     }
 }
 
@@ -3655,10 +3642,8 @@ mod test {
         );
     }
 
-    fn complete(work: &mut Work, ds_id: JobId) {
+    fn complete(work: &mut Work, job: DownstairsWork) {
         let is_flush = {
-            let job = work.active.get(&ds_id).unwrap();
-
             // validate that deps are done
             let dep_list = job.work.deps();
             for dep in dep_list {
@@ -3680,40 +3665,39 @@ mod test {
             )
         };
 
-        let _ = work.active.remove(&ds_id);
-
         if is_flush {
-            work.last_flush = ds_id;
+            work.last_flush = job.ds_id;
             work.completed = Vec::with_capacity(32);
         } else {
-            work.completed.push(ds_id);
+            work.completed.push(job.ds_id);
         }
     }
 
-    fn test_push_next_jobs(work: &mut Work) -> Vec<JobId> {
+    fn test_push_next_jobs(work: &mut Work) -> Vec<DownstairsWork> {
         let mut jobs = vec![];
         let new_work = work.new_work();
 
         for &new_id in new_work.iter() {
-            if work.in_progress(new_id) {
-                jobs.push(new_id);
+            if let Some(job) = work.in_progress(new_id) {
+                jobs.push(job);
             }
         }
 
         for job in &jobs {
-            assert_eq!(
-                work.active.get(job).unwrap().state,
-                WorkState::InProgress
-            );
+            assert_eq!(job.state, WorkState::InProgress);
         }
 
         jobs
     }
 
-    fn test_do_work(work: &mut Work, jobs: Vec<JobId>) {
-        for job_id in jobs {
-            complete(work, job_id);
+    fn test_do_work(work: &mut Work, jobs: Vec<DownstairsWork>) {
+        for job in jobs {
+            complete(work, job);
         }
+    }
+
+    fn to_job_ids(jobs: &[DownstairsWork]) -> Vec<JobId> {
+        jobs.iter().map(|j| j.ds_id).collect()
     }
 
     #[test]
@@ -3724,7 +3708,7 @@ mod test {
         assert_eq!(work.new_work(), vec![JobId(1000)]);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1000)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1000)]);
 
         test_do_work(&mut work, next_jobs);
 
@@ -4554,7 +4538,7 @@ mod test {
         assert_eq!(work.new_work(), vec![JobId(1000)]);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1000)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1000)]);
 
         test_do_work(&mut work, next_jobs);
 
@@ -4578,7 +4562,7 @@ mod test {
         assert_eq!(work.new_work(), vec![ds_id]);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![ds_id]);
+        assert_eq!(to_job_ids(&next_jobs), vec![ds_id]);
 
         test_do_work(&mut work, next_jobs);
 
@@ -4663,7 +4647,7 @@ mod test {
 
         // should push both, they're independent
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1000), JobId(1001)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1000), JobId(1001)]);
 
         // new work returns only jobs in new or dep wait
         assert!(work.new_work().is_empty());
@@ -4689,7 +4673,7 @@ mod test {
 
         // only one is ready to run
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1000)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1000)]);
 
         // new_work returns all new or dep wait jobs
         assert_eq!(work.new_work(), vec![JobId(1001)]);
@@ -4699,7 +4683,7 @@ mod test {
         assert_eq!(work.completed, vec![JobId(1000)]);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1001)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001)]);
     }
 
     #[test]
@@ -4726,21 +4710,21 @@ mod test {
 
         assert!(work.completed.is_empty());
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1000)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1000)]);
         assert_eq!(work.new_work(), vec![JobId(1001), JobId(1002)]);
 
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.completed, vec![JobId(1000)]);
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1001)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001)]);
         assert_eq!(work.new_work(), vec![JobId(1002)]);
 
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.completed, vec![JobId(1000), JobId(1001)]);
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1002)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         assert!(work.new_work().is_empty());
 
         test_do_work(&mut work, next_jobs);
@@ -4772,7 +4756,7 @@ mod test {
 
         assert!(work.completed.is_empty());
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1000)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1000)]);
         assert_eq!(work.new_work(), vec![JobId(1001), JobId(1002)]);
 
         test_do_work(&mut work, next_jobs);
@@ -4780,7 +4764,7 @@ mod test {
         assert_eq!(work.last_flush, JobId(1000));
         assert!(work.completed.is_empty());
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1001)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001)]);
         assert_eq!(work.new_work(), vec![JobId(1002)]);
 
         test_do_work(&mut work, next_jobs);
@@ -4788,7 +4772,7 @@ mod test {
         assert_eq!(work.last_flush, JobId(1000));
         assert_eq!(work.completed, vec![JobId(1001)]);
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1002)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         assert!(work.new_work().is_empty());
 
         test_do_work(&mut work, next_jobs);
@@ -4821,14 +4805,14 @@ mod test {
 
         assert!(work.completed.is_empty());
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1000)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1000)]);
         assert_eq!(work.new_work(), vec![JobId(1001), JobId(1002)]);
 
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.completed, vec![JobId(1000)]);
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1001)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001)]);
         assert_eq!(work.new_work(), vec![JobId(1002)]);
 
         test_do_work(&mut work, next_jobs);
@@ -4836,7 +4820,7 @@ mod test {
         assert_eq!(work.last_flush, JobId(1001));
         assert!(work.completed.is_empty());
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1002)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         assert!(work.new_work().is_empty());
 
         test_do_work(&mut work, next_jobs);
@@ -4856,15 +4840,15 @@ mod test {
 
         // Downstairs is really fast!
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1000)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1000)]);
         test_do_work(&mut work, next_jobs);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1001)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001)]);
         test_do_work(&mut work, next_jobs);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1002)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.last_flush, JobId(1002));
@@ -4886,11 +4870,11 @@ mod test {
         );
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1003)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1003)]);
         test_do_work(&mut work, next_jobs);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1004)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1004)]);
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.last_flush, JobId(1002));
@@ -4910,15 +4894,15 @@ mod test {
         add_work(&mut work, JobId(1003), vec![JobId(2000)], false);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1000)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1000)]);
         test_do_work(&mut work, next_jobs);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1001)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001)]);
         test_do_work(&mut work, next_jobs);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1002)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.last_flush, JobId(1002));
@@ -4952,12 +4936,12 @@ mod test {
 
         // should do each chain in sequence
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1000), JobId(2000)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1000), JobId(2000)]);
         test_do_work(&mut work, next_jobs);
         assert_eq!(work.completed, vec![JobId(1000), JobId(2000)]);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1001), JobId(2001)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001), JobId(2001)]);
         test_do_work(&mut work, next_jobs);
         assert_eq!(
             work.completed,
@@ -4965,7 +4949,7 @@ mod test {
         );
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1002), JobId(2002)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002), JobId(2002)]);
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.last_flush, JobId(2002));
@@ -4990,7 +4974,7 @@ mod test {
         );
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1000)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1000)]);
 
         add_work(
             &mut work,
@@ -5004,15 +4988,15 @@ mod test {
         assert_eq!(work.completed, vec![JobId(1000)]);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1001)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001)]);
         test_do_work(&mut work, next_jobs);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1002)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         test_do_work(&mut work, next_jobs);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1003)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1003)]);
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(
@@ -5039,7 +5023,7 @@ mod test {
         );
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1000)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1000)]);
 
         test_do_work(&mut work, next_jobs);
 
@@ -5053,15 +5037,15 @@ mod test {
         assert_eq!(work.completed, vec![JobId(1000)]);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1001)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001)]);
         test_do_work(&mut work, next_jobs);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1002)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         test_do_work(&mut work, next_jobs);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1003)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1003)]);
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(
@@ -5088,14 +5072,14 @@ mod test {
         );
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1000)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1000)]);
 
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(work.completed, vec![JobId(1000)]);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1001)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001)]);
         test_do_work(&mut work, next_jobs);
 
         // can't run anything, dep not satisfied
@@ -5111,11 +5095,11 @@ mod test {
         );
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1002)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         test_do_work(&mut work, next_jobs);
 
         let next_jobs = test_push_next_jobs(&mut work);
-        assert_eq!(next_jobs, vec![JobId(1003)]);
+        assert_eq!(to_job_ids(&next_jobs), vec![JobId(1003)]);
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(
@@ -5797,7 +5781,7 @@ mod test {
 
         assert_eq!(ds.active_upstairs().len(), 2);
 
-        let read_1 = IOop::Read {
+        let read_1 = || IOop::Read {
             dependencies: Vec::new(),
             requests: RegionReadRequest(vec![RegionReadReq {
                 extent: ExtentId(0),
@@ -5805,9 +5789,9 @@ mod test {
                 count: NonZeroUsize::new(1).unwrap(),
             }]),
         };
-        ds.active_mut(id1).add_work(JobId(1000), read_1.clone());
+        ds.active_mut(id1).add_work(JobId(1000), read_1());
 
-        let read_2 = IOop::Read {
+        let read_2 = || IOop::Read {
             dependencies: Vec::new(),
             requests: RegionReadRequest(vec![RegionReadReq {
                 extent: ExtentId(1),
@@ -5815,7 +5799,7 @@ mod test {
                 count: NonZeroUsize::new(1).unwrap(),
             }]),
         };
-        ds.active_mut(id2).add_work(JobId(1000), read_2.clone());
+        ds.active_mut(id2).add_work(JobId(1000), read_2());
 
         let work_1 = ds.active(id1).work.new_work();
         let work_2 = ds.active(id2).work.new_work();
@@ -5826,11 +5810,11 @@ mod test {
         let job_2 = ds.active(id2).work.get_job(JobId(1000));
 
         assert_eq!(job_1.ds_id, JobId(1000));
-        assert_eq!(job_1.work, read_1);
+        assert_eq!(job_1.work, read_1());
         assert_eq!(job_1.state, WorkState::New);
 
         assert_eq!(job_2.ds_id, JobId(1000));
-        assert_eq!(job_2.work, read_2);
+        assert_eq!(job_2.work, read_2());
         assert_eq!(job_2.state, WorkState::New);
 
         Ok(())
