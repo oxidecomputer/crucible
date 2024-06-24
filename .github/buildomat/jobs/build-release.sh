@@ -120,4 +120,4 @@ cd /out
 digest -a sha256 crucible.tar.gz > crucible.sha256.txt
 digest -a sha256 crucible-pantry.tar.gz > crucible-pantry.sha256.txt
 digest -a sha256 crucible-nightly.tar.gz > crucible-nightly.sha256.txt
-digest -a sha256 crucible-dtrace.tar.gz > crucible-dtrace.sha256.txt
+digest -a sha256 crucible-dtrace.tar > crucible-dtrace.sha256.txt
