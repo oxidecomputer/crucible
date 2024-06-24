@@ -23,6 +23,11 @@ use repair_client::Client;
 /// (i.e. 128 for the Gimlet server sleds).
 const WORKER_POOL_SIZE: usize = 8;
 
+/// Size above which reads and writes should be done in the Tokio blocking pool
+///
+/// This is chosen somewhat arbitrarily.
+const MIN_BLOCKING_SIZE: usize = 64 * 1024; // 64 KiB
+
 use super::*;
 use crate::extent::{
     copy_dir, extent_dir, extent_file_name, move_replacement_extent,
@@ -762,7 +767,13 @@ impl Region {
             self.dirty_extents.insert(req.extent);
 
             let extent = self.get_opened_extent_mut(req.extent);
-            extent.write(job_id, req.write, only_write_unwritten)?;
+            if req.write.data.len() > MIN_BLOCKING_SIZE {
+                run_blocking(|| {
+                    extent.write(job_id, req.write, only_write_unwritten)
+                })
+            } else {
+                extent.write(job_id, req.write, only_write_unwritten)
+            }?;
         }
 
         if only_write_unwritten {
@@ -789,7 +800,13 @@ impl Region {
         for req in req.iter() {
             let extent = self.get_opened_extent_mut(req.extent);
             let req = response.request(req.offset, req.count.get());
-            let out = extent.read(job_id, req)?;
+
+            // Run sufficiently large reads in the blocking pool
+            let out = if req.data.capacity() > MIN_BLOCKING_SIZE {
+                run_blocking(|| extent.read(job_id, req))
+            } else {
+                extent.read(job_id, req)
+            }?;
 
             // Note that we only call `unsplit` here if `Extent::read` returned
             // `Ok(..)` (indicating that the data is fully populated); this
@@ -883,7 +900,7 @@ impl Region {
         //   multiple at the same time.
         let mut results = vec![Ok(()); dirty_extents.len()];
         let log = self.log.clone();
-        let mut f = || {
+        run_blocking(|| {
             let mut slice_start = 0;
             let mut slice = self.extents.as_mut_slice();
             self.pool.scope(|s| {
@@ -903,15 +920,7 @@ impl Region {
                     });
                 }
             })
-        };
-        if matches!(
-            tokio::runtime::Handle::try_current().map(|r| r.runtime_flavor()),
-            Ok(tokio::runtime::RuntimeFlavor::MultiThread)
-        ) {
-            tokio::task::block_in_place(f)
-        } else {
-            f()
-        }
+        });
 
         cdt::os__flush__done!(|| job_id.0);
 
