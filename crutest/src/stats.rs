@@ -1,9 +1,11 @@
-// Copyright 2023 Oxide Computer Company
+// Copyright 2024 Oxide Computer Company
+
 use anyhow::{bail, Result};
-use dropshot::{ConfigLogging, ConfigLoggingLevel};
 use omicron_common::api::internal::nexus::ProducerEndpoint;
 use omicron_common::api::internal::nexus::ProducerKind;
-use oximeter_producer::{Config, LogConfig, Server};
+use oximeter_producer::{
+    Config, ConfigLogging, ConfigLoggingLevel, LogConfig, Server,
+};
 use std::net::SocketAddr;
 use uuid::Uuid;
 
