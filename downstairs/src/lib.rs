@@ -921,6 +921,13 @@ impl ConnectionData {
     }
 }
 
+/// Strongly-typed return value for `proc_frame` and `do_work_if_ready`
+#[derive(Debug)]
+enum WorkResult {
+    Handled,
+    Queued,
+}
+
 /// A single active connection
 #[derive(Debug)]
 struct ActiveConnection {
@@ -1053,17 +1060,19 @@ impl ActiveConnection {
         dss: &mut DsStatOuter,
         region: &mut Region,
     ) -> Result<()> {
-        if self
+        match self
             .proc_frame(m, flags, reqwest_client, dss, region)
             .await
             .context("proc_frame")?
         {
-            // This work may have unblocked future work
-            self.do_ready_work(flags, reqwest_client, dss, region)
-                .await
-                .context("do_work_for")?;
+            WorkResult::Queued => Ok(()),
+            WorkResult::Handled => {
+                // This work may have unblocked future work
+                self.do_ready_work(flags, reqwest_client, dss, region)
+                    .await
+                    .context("do_work_for")
+            }
         }
-        Ok(())
     }
 
     /// Handle a new message from the upstairs
@@ -1077,9 +1086,10 @@ impl ActiveConnection {
         reqwest_client: &reqwest::Client,
         dss: &mut DsStatOuter,
         region: &mut Region,
-    ) -> Result<bool> {
+    ) -> Result<WorkResult> {
         if !self.is_message_valid(&m)? {
-            return Ok(false);
+            // Reply is sent automatically by is_message_valid
+            return Ok(WorkResult::Handled);
         }
 
         // The Upstairs will send Flushes periodically, even in read only mode
@@ -1284,7 +1294,7 @@ impl ActiveConnection {
                     }
                 };
                 self.reply(msg)?;
-                true
+                WorkResult::Handled
             }
             Message::ExtentClose {
                 repair_id,
@@ -1305,7 +1315,7 @@ impl ActiveConnection {
                     }
                 };
                 self.reply(msg)?;
-                true
+                WorkResult::Handled
             }
             Message::ExtentRepair {
                 repair_id,
@@ -1342,7 +1352,7 @@ impl ActiveConnection {
                     }
                 };
                 self.reply(msg)?;
-                true
+                WorkResult::Handled
             }
             Message::ExtentReopen {
                 repair_id,
@@ -1363,11 +1373,11 @@ impl ActiveConnection {
                     }
                 };
                 self.reply(msg)?;
-                true
+                WorkResult::Handled
             }
             Message::Ruok => {
                 self.reply(Message::Imok)?;
-                false
+                WorkResult::Handled
             }
             x => bail!("unexpected frame {:?}", x),
         };
@@ -1426,7 +1436,7 @@ impl ActiveConnection {
         reqwest_client: &reqwest::Client,
         dss: &mut DsStatOuter,
         region: &mut Region,
-    ) -> Result<bool> {
+    ) -> Result<WorkResult> {
         if self.work.check_ready(&mut job) {
             cdt::work__start!(|| job.ds_id.0);
             let mut prev = self
@@ -1438,10 +1448,10 @@ impl ActiveConnection {
                     .do_work(job, flags, reqwest_client, dss, region)
                     .await?;
             }
-            Ok(true)
+            Ok(WorkResult::Handled)
         } else {
             self.work.add_work(job);
-            Ok(false)
+            Ok(WorkResult::Queued)
         }
     }
 
