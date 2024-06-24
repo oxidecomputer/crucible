@@ -23,7 +23,7 @@ use repair_client::Client;
 /// (i.e. 128 for the Gimlet server sleds).
 const WORKER_POOL_SIZE: usize = 8;
 
-/// Size at which reads and writes should be done in the Tokio blocking pool
+/// Size above which reads and writes should be done in the Tokio blocking pool
 ///
 /// This is chosen somewhat arbitrarily.
 const MIN_BLOCKING_SIZE: usize = 64 * 1024; // 64 KiB
