@@ -13,9 +13,8 @@ git status >> dtrace-info.txt
 mv dtrace-info.txt tools/dtrace
 
 pushd tools/dtrace
-tar cvf ../../out/crucible-dtrace.tar \
-  *
+tar cavf ../../out/crucible-dtrace.tar.gz *
 
 rm dtrace-info.txt
 popd
-ls -l out/crucible-dtrace.tar
+ls -l out/crucible-dtrace.tar.gz
