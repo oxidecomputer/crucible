@@ -7,6 +7,7 @@
 # IOs.  This combined with the client program exiting as soon as an IO
 # is acked means that the lossy downstairs will always be missing IOs.
 
+set -x
 trap ctrl_c INT
 function ctrl_c() {
     echo "Stopping at your request"
