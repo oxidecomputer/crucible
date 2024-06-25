@@ -5,7 +5,6 @@
 use futures::lock::Mutex;
 use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
-use std::fmt;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr};
@@ -685,7 +684,7 @@ pub fn show_work(ds: &mut Downstairs) {
     for upstairs_connection in active_upstairs_connections {
         let work = ds.work(upstairs_connection);
 
-        let mut kvec: Vec<JobId> = work.active.keys().cloned().collect();
+        let mut kvec: Vec<JobId> = work.dep_wait.keys().cloned().collect();
 
         if kvec.is_empty() {
             info!(ds.log, "Crucible Downstairs work queue:  Empty");
@@ -697,7 +696,7 @@ pub fn show_work(ds: &mut Downstairs) {
             );
             kvec.sort_unstable();
             for id in kvec.iter() {
-                let dsw = work.active.get(id).unwrap();
+                let dsw = work.dep_wait.get(id).unwrap();
                 let (dsw_type, dep_list) = match &dsw.work {
                     IOop::Read { dependencies, .. } => ("Read", dependencies),
                     IOop::Write { dependencies, .. } => ("Write", dependencies),
@@ -721,10 +720,7 @@ pub fn show_work(ds: &mut Downstairs) {
                         ("NoOp", dependencies)
                     }
                 };
-                info!(
-                    ds.log,
-                    "{:8} {:>7}  {:>5} {:?}", id, dsw_type, dsw.state, dep_list,
-                );
+                info!(ds.log, "{:8} {:>7}  {:?}", id, dsw_type, dep_list,);
             }
         }
 
@@ -956,11 +952,7 @@ impl ActiveConnection {
 
     #[cfg(test)]
     fn add_work(&mut self, ds_id: JobId, work: IOop) {
-        let dsw = DownstairsWork {
-            ds_id,
-            work,
-            state: WorkState::New,
-        };
+        let dsw = DownstairsWork { ds_id, work };
         self.work.add_work(dsw);
     }
 
@@ -1493,7 +1485,7 @@ impl ActiveConnection {
 
             // If the job errored, do not consider it completed.
             // Retry it.
-            self.work.active.insert(new_id, job);
+            self.work.dep_wait.insert(new_id, job);
 
             // If this is a repair job, and that repair failed, we
             // can do no more work on this downstairs and should
@@ -3108,13 +3100,13 @@ impl Downstairs {
             // information, as that will not be valid any longer.
             //
             // TODO: Really work through this error case
-            if state.work.active.keys().len() > 0 {
+            if state.work.dep_wait.keys().len() > 0 {
                 warn!(
                     self.log,
                     "Crucible Downstairs promoting {:?} to active, \
                         discarding {} jobs",
                     state.upstairs_connection,
-                    state.work.active.keys().len()
+                    state.work.dep_wait.keys().len()
                 );
             }
 
@@ -3207,7 +3199,8 @@ impl DownstairsHandle {
  */
 #[derive(Debug)]
 pub struct Work {
-    active: HashMap<JobId, DownstairsWork>,
+    /// Jobs whose dependencies are not yet complete
+    dep_wait: HashMap<JobId, DownstairsWork>,
     outstanding_deps: HashMap<JobId, usize>,
 
     /*
@@ -3226,23 +3219,18 @@ pub struct Work {
 struct DownstairsWork {
     ds_id: JobId,
     work: IOop,
-    state: WorkState,
 }
 
 impl DownstairsWork {
     fn new(ds_id: JobId, work: IOop) -> Self {
-        DownstairsWork {
-            ds_id,
-            work,
-            state: WorkState::New,
-        }
+        DownstairsWork { ds_id, work }
     }
 }
 
 impl Work {
     fn new(log: Logger) -> Self {
         Work {
-            active: HashMap::new(),
+            dep_wait: HashMap::new(),
             outstanding_deps: HashMap::new(),
             last_flush: JobId(0), // TODO(matt) make this an Option?
             completed: Vec::with_capacity(32),
@@ -3251,37 +3239,31 @@ impl Work {
     }
 
     fn jobs(&self) -> usize {
-        self.active.len()
+        self.dep_wait.len()
     }
 
     /// Returns a sorted list of downstairs request IDs that are new or have
     /// been waiting for other dependencies to finish.
     fn new_work(&self) -> VecDeque<JobId> {
-        let mut result: VecDeque<_> = self
-            .active
-            .values()
-            .filter(|job| {
-                matches!(job.state, WorkState::New | WorkState::DepWait)
-            })
-            .map(|job| job.ds_id)
-            .collect();
+        let mut result: VecDeque<_> = self.dep_wait.keys().cloned().collect();
         result.make_contiguous().sort_unstable();
 
         result
     }
 
     fn add_work(&mut self, dsw: DownstairsWork) {
-        self.active.insert(dsw.ds_id, dsw);
+        self.dep_wait.insert(dsw.ds_id, dsw);
     }
 
     #[cfg(test)]
     fn get_job(&self, ds_id: JobId) -> &DownstairsWork {
-        self.active.get(&ds_id).unwrap()
+        self.dep_wait.get(&ds_id).unwrap()
     }
 
     /// Checks whether the given job is ready
     ///
-    /// Updates `self.outstanding_deps` and `job.state`
+    /// Updates `self.outstanding_deps` and prints a warning message the first
+    /// time a job with unmet dependencies is checked.
     fn check_ready(&mut self, job: &mut DownstairsWork) -> bool {
         /*
          * Before we can make this in_progress, we have to check the dep
@@ -3349,23 +3331,13 @@ impl Work {
             let _ = self
                 .outstanding_deps
                 .insert(job.ds_id, deps_outstanding.len());
-
-            /*
-             * If we got here, then the dep is not met.
-             * Set DepWait if not already set.
-             */
-            if job.state == WorkState::New {
-                job.state = WorkState::DepWait;
-            }
             false
         } else {
-            job.state = WorkState::InProgress;
             true
         }
     }
 
-    /// If the requested job is still new, and the dependencies are all met,
-    /// remove the job from the active map and return it.
+    /// If the job is ready, remove it from the active map and return it
     ///
     /// Otherwise, leave the job in the map and return `None`
     ///
@@ -3373,49 +3345,16 @@ impl Work {
     /// If the job is not present in the active map
     #[must_use]
     fn in_progress(&mut self, ds_id: JobId) -> Option<DownstairsWork> {
-        let Some(mut job) = self.active.remove(&ds_id) else {
+        let Some(mut job) = self.dep_wait.remove(&ds_id) else {
             panic!("called in_progress for invalid job");
         };
 
-        match job.state {
-            WorkState::New | WorkState::DepWait => {
-                if self.check_ready(&mut job) {
-                    Some(job)
-                } else {
-                    // Return the job to the map
-                    self.active.insert(ds_id, job);
-                    None
-                }
-            }
-            WorkState::InProgress => {
-                // A previous call of this function put this job in progress, so
-                // return idempotently.
-                Some(job)
-            }
-        }
-    }
-}
-
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, Clone, PartialEq)]
-pub enum WorkState {
-    New,
-    DepWait,
-    InProgress,
-}
-
-impl fmt::Display for WorkState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            WorkState::New => {
-                write!(f, " New")
-            }
-            WorkState::DepWait => {
-                write!(f, "DepW")
-            }
-            WorkState::InProgress => {
-                write!(f, "In P")
-            }
+        if self.check_ready(&mut job) {
+            Some(job)
+        } else {
+            // Return the job to the map
+            self.dep_wait.insert(ds_id, job);
+            None
         }
     }
 }
@@ -3700,7 +3639,6 @@ mod test {
                     }]),
                 }
             },
-            state: WorkState::New,
         });
     }
 
@@ -3711,7 +3649,6 @@ mod test {
                 dependencies: deps,
                 writes: RegionWrite(vec![]),
             },
-            state: WorkState::New,
         });
     }
 
@@ -3754,10 +3691,6 @@ mod test {
             if let Some(job) = work.in_progress(new_id) {
                 jobs.push(job);
             }
-        }
-
-        for job in &jobs {
-            assert_eq!(job.state, WorkState::InProgress);
         }
 
         jobs
@@ -4623,11 +4556,7 @@ mod test {
     fn test_misc_work_through_work_queue(ds_id: JobId, ioop: IOop) {
         // Verify that a IOop work request will move through the work queue.
         let mut work = Work::new(csl());
-        work.add_work(DownstairsWork {
-            ds_id,
-            work: ioop,
-            state: WorkState::New,
-        });
+        work.add_work(DownstairsWork { ds_id, work: ioop });
 
         assert_eq!(work.new_work(), vec![ds_id]);
 
@@ -4979,10 +4908,6 @@ mod test {
         assert!(work.completed.is_empty());
 
         assert_eq!(work.new_work(), vec![JobId(1003)]);
-        assert_eq!(
-            work.active.get(&JobId(1003)).unwrap().state,
-            WorkState::DepWait
-        );
     }
 
     #[test]
@@ -5881,11 +5806,9 @@ mod test {
 
         assert_eq!(job_1.ds_id, JobId(1000));
         assert_eq!(job_1.work, read_1());
-        assert_eq!(job_1.state, WorkState::New);
 
         assert_eq!(job_2.ds_id, JobId(1000));
         assert_eq!(job_2.work, read_2());
-        assert_eq!(job_2.state, WorkState::New);
 
         Ok(())
     }
