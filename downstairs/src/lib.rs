@@ -3312,22 +3312,21 @@ impl Work {
     /// Updates `self.outstanding_deps` and prints a warning message the first
     /// time a job with unmet dependencies is checked.
     fn check_ready(&mut self, ds_id: JobId, work: &mut IOop) -> bool {
-        // Before we can make this in_progress, we have to check the dep
-        // list if there is one and make sure all dependencies are
-        // completed.
+        // Before we can do work for this job, we have to check the dep list if
+        // there is one and make sure all dependencies are completed.
         //
-        // The Downstairs currently assumes that all jobs previous
-        // to the last flush have completed, hence this early out.
+        // The Downstairs currently assumes that all jobs previous to the last
+        // flush have completed, hence this early out.
         //
         // Currently `work.completed` is cleared out when
         // `ActiveConnection::do_ready_work` (or `complete` in mod test) is
         // called with a `FlushAck`, so this early out cannot be removed unless
         // that is changed too.
         //
-        // XXX Make this better/faster by removing the ones that
-        // are met, so next lap we don't have to check again?  There
-        // may be some debug value to knowing what the dep list was,
-        // so consider that before making this faster.
+        // XXX Make this better/faster by removing the ones that are met, so
+        // next lap we don't have to check again?  There may be some debug value
+        // to knowing what the dep list was, so consider that before making this
+        // faster.
         let num_deps_outstanding = work
             .deps()
             .iter()
@@ -3372,12 +3371,12 @@ impl Work {
         }
     }
 
-    /// If the job is ready, remove it from the active map and return it
+    /// If the job is ready, remove it from the `dep_wait` map and return it
     ///
     /// Otherwise, leave the job in the map and return `None`
     ///
     /// # Panics
-    /// If the job is not present in the active map
+    /// If the job is not present in the `dep_wait` map
     #[must_use]
     fn in_progress(&mut self, ds_id: JobId) -> Option<IOop> {
         let Some(mut work) = self.dep_wait.remove(&ds_id) else {
@@ -3385,6 +3384,8 @@ impl Work {
         };
 
         if self.check_ready(ds_id, &mut work) {
+            // If we previously logged that this job had outstanding deps, then
+            // remove the entry from the map (to avoid space leaks).
             let _ = self.outstanding_deps.remove(&ds_id);
             Some(work)
         } else {
