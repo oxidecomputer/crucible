@@ -684,7 +684,7 @@ pub fn show_work(ds: &mut Downstairs) {
     for upstairs_connection in active_upstairs_connections {
         let work = ds.work(upstairs_connection);
 
-        let mut kvec: Vec<JobId> = work.active.keys().cloned().collect();
+        let mut kvec: Vec<JobId> = work.dep_wait.keys().cloned().collect();
 
         if kvec.is_empty() {
             info!(ds.log, "Crucible Downstairs work queue:  Empty");
@@ -696,7 +696,7 @@ pub fn show_work(ds: &mut Downstairs) {
             );
             kvec.sort_unstable();
             for id in kvec.iter() {
-                let dsw = work.active.get(id).unwrap();
+                let dsw = work.dep_wait.get(id).unwrap();
                 let (dsw_type, dep_list) = match &dsw.work {
                     IOop::Read { dependencies, .. } => ("Read", dependencies),
                     IOop::Write { dependencies, .. } => ("Write", dependencies),
@@ -1485,7 +1485,7 @@ impl ActiveConnection {
 
             // If the job errored, do not consider it completed.
             // Retry it.
-            self.work.active.insert(new_id, job);
+            self.work.dep_wait.insert(new_id, job);
 
             // If this is a repair job, and that repair failed, we
             // can do no more work on this downstairs and should
@@ -3100,13 +3100,13 @@ impl Downstairs {
             // information, as that will not be valid any longer.
             //
             // TODO: Really work through this error case
-            if state.work.active.keys().len() > 0 {
+            if state.work.dep_wait.keys().len() > 0 {
                 warn!(
                     self.log,
                     "Crucible Downstairs promoting {:?} to active, \
                         discarding {} jobs",
                     state.upstairs_connection,
-                    state.work.active.keys().len()
+                    state.work.dep_wait.keys().len()
                 );
             }
 
@@ -3199,7 +3199,8 @@ impl DownstairsHandle {
  */
 #[derive(Debug)]
 pub struct Work {
-    active: HashMap<JobId, DownstairsWork>,
+    /// Jobs whose dependencies are not yet complete
+    dep_wait: HashMap<JobId, DownstairsWork>,
     outstanding_deps: HashMap<JobId, usize>,
 
     /*
@@ -3229,7 +3230,7 @@ impl DownstairsWork {
 impl Work {
     fn new(log: Logger) -> Self {
         Work {
-            active: HashMap::new(),
+            dep_wait: HashMap::new(),
             outstanding_deps: HashMap::new(),
             last_flush: JobId(0), // TODO(matt) make this an Option?
             completed: Vec::with_capacity(32),
@@ -3238,25 +3239,25 @@ impl Work {
     }
 
     fn jobs(&self) -> usize {
-        self.active.len()
+        self.dep_wait.len()
     }
 
     /// Returns a sorted list of downstairs request IDs that are new or have
     /// been waiting for other dependencies to finish.
     fn new_work(&self) -> VecDeque<JobId> {
-        let mut result: VecDeque<_> = self.active.keys().cloned().collect();
+        let mut result: VecDeque<_> = self.dep_wait.keys().cloned().collect();
         result.make_contiguous().sort_unstable();
 
         result
     }
 
     fn add_work(&mut self, dsw: DownstairsWork) {
-        self.active.insert(dsw.ds_id, dsw);
+        self.dep_wait.insert(dsw.ds_id, dsw);
     }
 
     #[cfg(test)]
     fn get_job(&self, ds_id: JobId) -> &DownstairsWork {
-        self.active.get(&ds_id).unwrap()
+        self.dep_wait.get(&ds_id).unwrap()
     }
 
     /// Checks whether the given job is ready
@@ -3344,7 +3345,7 @@ impl Work {
     /// If the job is not present in the active map
     #[must_use]
     fn in_progress(&mut self, ds_id: JobId) -> Option<DownstairsWork> {
-        let Some(mut job) = self.active.remove(&ds_id) else {
+        let Some(mut job) = self.dep_wait.remove(&ds_id) else {
             panic!("called in_progress for invalid job");
         };
 
@@ -3352,7 +3353,7 @@ impl Work {
             Some(job)
         } else {
             // Return the job to the map
-            self.active.insert(ds_id, job);
+            self.dep_wait.insert(ds_id, job);
             None
         }
     }
