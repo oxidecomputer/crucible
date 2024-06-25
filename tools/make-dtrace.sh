@@ -1,12 +1,12 @@
 #!/bin/bash
 #
-# Build a tar.gz archive with selected DTrace scripts.
+# Build a tar archive with selected DTrace scripts.
 # This archive is used to install DTrace scripts on the global zone of each
 # sled.  As such, the scripts here should match the probes that exist for
 # any consumer of the upstairs, like propolis, the pantry, or crucible agent.
 set -eux
 
-rm -f out/crucible-dtrace.tar.gz 2> /dev/null
+rm -f out/crucible-dtrace.tar 2> /dev/null
 
 mkdir -p out
 
@@ -18,7 +18,7 @@ git status >> dtrace-info.txt
 mv dtrace-info.txt tools/dtrace
 
 pushd tools/dtrace
-tar cavf ../../out/crucible-dtrace.tar.gz \
+tar cvf ../../out/crucible-dtrace.tar \
     dtrace-info.txt \
     README.md \
     all_downstairs.d \
@@ -48,4 +48,4 @@ tar cavf ../../out/crucible-dtrace.tar.gz \
 
 rm dtrace-info.txt
 popd
-ls -l out/crucible-dtrace.tar.gz
+ls -l out/crucible-dtrace.tar

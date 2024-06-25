@@ -44,8 +44,8 @@
 #:
 #: [[publish]]
 #: series = "image"
-#: name = "crucible-dtrace.tar.gz"
-#: from_output = "/out/crucible-dtrace.tar.gz"
+#: name = "crucible-dtrace.tar"
+#: from_output = "/out/crucible-dtrace.tar"
 #:
 #: [[publish]]
 #: series = "image"
@@ -113,11 +113,11 @@ banner dtrace
 ./tools/make-dtrace.sh
 
 banner copy
-mv out/crucible-dtrace.tar.gz /out/crucible-dtrace.tar.gz
+mv out/crucible-dtrace.tar /out/crucible-dtrace.tar
 
 banner checksum
 cd /out
 digest -a sha256 crucible.tar.gz > crucible.sha256.txt
 digest -a sha256 crucible-pantry.tar.gz > crucible-pantry.sha256.txt
 digest -a sha256 crucible-nightly.tar.gz > crucible-nightly.sha256.txt
-digest -a sha256 crucible-dtrace.tar.gz > crucible-dtrace.sha256.txt
+digest -a sha256 crucible-dtrace.tar > crucible-dtrace.sha256.txt
