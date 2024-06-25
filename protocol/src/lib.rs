@@ -169,6 +169,11 @@ pub struct SnapshotDetails {
 #[repr(u32)]
 #[derive(IntoPrimitive)]
 pub enum MessageVersion {
+    /// Updated `ReadResponseBlockMetadata` to store an `Option<BlockContext>`
+    /// instead of a `Vec<BlockContext>`, because our extent files can only
+    /// store a single context.
+    V8 = 8,
+
     /// Switched to using `ExtentId(pub u32)` everywhere, instead of a mix of
     /// `u32` / `u64` / `usize`.
     V7 = 7,
@@ -200,7 +205,7 @@ pub enum MessageVersion {
 }
 impl MessageVersion {
     pub const fn current() -> Self {
-        Self::V7
+        Self::V8
     }
 }
 
@@ -209,7 +214,7 @@ impl MessageVersion {
  * This, along with the MessageVersion enum above should be updated whenever
  * changes are made to the Message enum below.
  */
-pub const CRUCIBLE_MESSAGE_VERSION: u32 = 7;
+pub const CRUCIBLE_MESSAGE_VERSION: u32 = 8;
 
 /*
  * If you add or change the Message enum, you must also increment the
@@ -569,20 +574,22 @@ pub struct ReadResponseHeader {
 pub struct ReadResponseBlockMetadata {
     pub eid: ExtentId,
     pub offset: Block,
-    pub block_contexts: Vec<BlockContext>,
+    pub block_context: Option<BlockContext>,
 }
 
 impl ReadResponseBlockMetadata {
+    // TODO this is dumb
     pub fn hashes(&self) -> Vec<u64> {
-        self.block_contexts.iter().map(|x| x.hash).collect()
+        self.block_context.iter().map(|x| x.hash).collect()
     }
 
     pub fn first_hash(&self) -> Option<u64> {
-        self.block_contexts.first().map(|ctx| ctx.hash)
+        self.block_context.map(|ctx| ctx.hash)
     }
 
+    // TODO this is dumb
     pub fn encryption_contexts(&self) -> Vec<Option<&EncryptionContext>> {
-        self.block_contexts
+        self.block_context
             .iter()
             .map(|x| x.encryption_context.as_ref())
             .collect()

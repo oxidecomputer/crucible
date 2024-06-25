@@ -4,7 +4,7 @@ use crate::{
     upstairs::UpstairsState, ClientIOStateCount, ClientId, CrucibleDecoder,
     CrucibleError, DownstairsIO, DsState, EncryptionContext, IOState, IOop,
     JobId, Message, RawReadResponse, ReconcileIO, RegionDefinitionStatus,
-    RegionMetadata,
+    RegionMetadata, Validation,
 };
 use crucible_common::{
     deadline_secs, verbose_timeout, x509::TLSContext, ExtentId,
@@ -1212,13 +1212,13 @@ impl DownstairsClient {
     /// Returns `true` if the job is now ackable, `false` otherwise
     ///
     /// If this is a read response, then the values in `responses` must
-    /// _already_ be decrypted (with corresponding hashes stored in
-    /// `read_response_hashes`).
+    /// _already_ be decrypted (with corresponding validation results stored in
+    /// `read_validations`).
     pub(crate) fn process_io_completion(
         &mut self,
         job: &mut DownstairsIO,
         responses: Result<RawReadResponse, CrucibleError>,
-        read_response_hashes: Vec<Option<u64>>,
+        read_validations: Vec<Validation>,
         deactivate: bool,
         extent_info: Option<ExtentInfo>,
     ) -> bool {
@@ -1357,7 +1357,7 @@ impl DownstairsClient {
                      */
                     let read_data = responses.unwrap();
                     assert!(!read_data.blocks.is_empty());
-                    if job.read_response_hashes != read_response_hashes {
+                    if job.read_validations != read_validations {
                         // XXX This error needs to go to Nexus
                         // XXX This will become the "force all downstairs
                         // to stop and refuse to restart" mode.
@@ -1369,8 +1369,8 @@ impl DownstairsClient {
                             job state:{:?}",
                             self.client_id,
                             ds_id,
-                            job.read_response_hashes,
-                            read_response_hashes,
+                            job.read_validations,
+                            read_validations,
                             job.guest_id,
                             requests,
                             job.state,
@@ -1415,9 +1415,9 @@ impl DownstairsClient {
                     assert!(extent_info.is_none());
                     if jobs_completed_ok == 1 {
                         assert!(job.data.is_none());
-                        assert!(job.read_response_hashes.is_empty());
+                        assert!(job.read_validations.is_empty());
                         job.data = Some(read_data);
-                        job.read_response_hashes = read_response_hashes;
+                        job.read_validations = read_validations;
                         assert!(!job.acked);
                         ackable = true;
                         debug!(self.log, "Read AckReady {}", job.ds_id.0);
@@ -1429,7 +1429,7 @@ impl DownstairsClient {
                          * that and verify they are the same.
                          */
                         debug!(self.log, "Read already AckReady {ds_id}");
-                        if job.read_response_hashes != read_response_hashes {
+                        if job.read_validations != read_validations {
                             // XXX This error needs to go to Nexus
                             // XXX This will become the "force all downstairs
                             // to stop and refuse to restart" mode.
@@ -1440,8 +1440,8 @@ impl DownstairsClient {
                                 job: {:?}",
                                 self.client_id,
                                 ds_id,
-                                job.read_response_hashes,
-                                read_response_hashes,
+                                job.read_validations,
+                                read_validations,
                                 job,
                             );
                         }
@@ -2878,18 +2878,18 @@ fn update_net_done_probes(m: &Message, cid: ClientId) {
 }
 
 /// Returns:
-/// - Ok(Some(valid_hash)) for successfully decrypted data
-/// - Ok(None) if there were no block contexts and block was all 0
-/// - Err otherwise
+/// - `Ok(Some(ctx))` for successfully decrypted data
+/// - `Ok(None)` if there is no block context and the block is all 0
+/// - `Err(..)` otherwise
 ///
 /// The return value of this will be stored with the job, and compared
 /// between each read.
 pub(crate) fn validate_encrypted_read_response(
-    block_contexts: &mut Vec<BlockContext>,
+    block_context: Option<BlockContext>,
     data: &mut [u8],
     encryption_context: &EncryptionContext,
     log: &Logger,
-) -> Result<Option<u64>, CrucibleError> {
+) -> Result<Validation, CrucibleError> {
     // XXX because we don't have block generation numbers, an attacker
     // downstairs could:
     //
@@ -2897,9 +2897,9 @@ pub(crate) fn validate_encrypted_read_response(
     // 2) roll back a block by writing an old data and encryption context
     //
     // check that this read response contains block contexts that contain
-    // (at least one) encryption context.
+    // a matching encryption context.
 
-    if block_contexts.is_empty() {
+    let Some(context) = block_context else {
         // No block context(s) in the response!
         //
         // Either this is a read of an unwritten block, or an attacker
@@ -2911,31 +2911,33 @@ pub(crate) fn validate_encrypted_read_response(
         //
         // XXX if it's not a blank block, we may be under attack?
         if data.iter().all(|&x| x == 0) {
-            return Ok(None);
+            return Ok(Validation::Empty);
         } else {
             error!(log, "got empty block context with non-blank block");
             return Err(CrucibleError::MissingBlockContext);
         }
-    }
+    };
 
-    let mut valid_hash = None;
-    let mut successful_decryption = false;
+    let Some(block_encryption_ctx) = &context.encryption_context else {
+        // this block context is missing an encryption context!
+        return Err(CrucibleError::DecryptionError);
+    };
 
-    // Attempt decryption with each encryption context, and fail if all
-    // do not work. The most recent encryption context will most likely
-    // be the correct one so start there.
-    for ctx in block_contexts.iter().rev() {
-        let block_encryption_ctx =
-            if let Some(block_encryption_ctx) = &ctx.encryption_context {
-                block_encryption_ctx
-            } else {
-                // this block context is missing an encryption context!
-                // continue to see if another block context has a valid one.
-                //
-                // XXX should this be an error instead?
-                continue;
-            };
-
+    // We'll start with decryption, ignoring the hash; we're using authenticated
+    // encryption, so the check is just as strong as the hash check.
+    //
+    // Note: decrypt_in_place does not overwrite the buffer if
+    // it fails, otherwise we would need to copy here. There's a
+    // unit test to validate this behaviour.
+    use aes_gcm_siv::{Nonce, Tag};
+    let decryption_result = encryption_context.decrypt_in_place(
+        data,
+        Nonce::from_slice(&block_encryption_ctx.nonce[..]),
+        Tag::from_slice(&block_encryption_ctx.tag[..]),
+    );
+    if decryption_result.is_ok() {
+        Ok(Validation::Encrypted(*block_encryption_ctx))
+    } else {
         // Validate integrity hash before decryption
         let computed_hash = integrity_hash(&[
             &block_encryption_ctx.nonce[..],
@@ -2943,82 +2945,22 @@ pub(crate) fn validate_encrypted_read_response(
             data,
         ]);
 
-        if computed_hash == ctx.hash {
-            valid_hash = Some(ctx.hash);
-
-            // Now that the integrity hash was verified, attempt
-            // decryption.
-            //
-            // Note: decrypt_in_place does not overwrite the buffer if
-            // it fails, otherwise we would need to copy here. There's a
-            // unit test to validate this behaviour.
-            use aes_gcm_siv::{Nonce, Tag};
-            let decryption_result = encryption_context.decrypt_in_place(
-                data,
-                Nonce::from_slice(&block_encryption_ctx.nonce[..]),
-                Tag::from_slice(&block_encryption_ctx.tag[..]),
-            );
-
-            if decryption_result.is_ok() {
-                successful_decryption = true;
-                break;
-            } else {
-                // Only one hash + nonce + tag combination will match the
-                // data that is returned. Due to the fact that nonces are
-                // random for each write, even if the Guest wrote the
-                // same data block 100 times, only one index will be
-                // valid.
-                //
-                // If the computed integrity hash matched but decryption
-                // failed, continue to the next contexts. the current
-                // hashing algorithm (xxHash) is not a cryptographic hash
-                // and is only u64, so collisions are not impossible.
-                warn!(
-                    log,
-                    "Decryption failed even though integrity hash matched!"
-                );
-            }
-        }
-    }
-
-    if let Some(valid_hash) = valid_hash {
-        if !successful_decryption {
+        if computed_hash == context.hash {
             // No encryption context combination decrypted this block, but
             // one valid hash was found. This can occur if the decryption
             // key doesn't match the key that the data was encrypted with.
             error!(log, "Decryption failed with correct hash");
             Err(CrucibleError::DecryptionError)
         } else {
-            // Filter out contexts that don't match, and return the successful
-            // hash.
-            block_contexts.retain(|context| context.hash == valid_hash);
-
-            Ok(Some(valid_hash))
-        }
-    } else {
-        error!(log, "No match for integrity hash");
-        for ctx in block_contexts.iter() {
-            let block_encryption_ctx =
-                if let Some(block_encryption_ctx) = &ctx.encryption_context {
-                    block_encryption_ctx
-                } else {
-                    error!(log, "missing encryption context!");
-                    continue;
-                };
-
-            let computed_hash = integrity_hash(&[
-                &block_encryption_ctx.nonce[..],
-                &block_encryption_ctx.tag[..],
-                data,
-            ]);
             error!(
                 log,
-                "Expected: 0x{:x} != Computed: 0x{:x}", ctx.hash, computed_hash
+                "No match for integrity hash\n\
+             Expected: 0x{:x} != Computed: 0x{:x}",
+                context.hash,
+                computed_hash
             );
+            Err(CrucibleError::HashMismatch)
         }
-
-        // no hash was correct
-        Err(CrucibleError::HashMismatch)
     }
 }
 
@@ -3028,35 +2970,20 @@ pub(crate) fn validate_encrypted_read_response(
 ///   block is all 0
 /// - Err otherwise
 pub(crate) fn validate_unencrypted_read_response(
-    block_contexts: &mut Vec<BlockContext>,
+    block_context: Option<BlockContext>,
     data: &mut [u8],
     log: &Logger,
-) -> Result<Option<u64>, CrucibleError> {
-    if !block_contexts.is_empty() {
-        // check integrity hashes - make sure at least one is correct.
-        let mut successful_hash = false;
+) -> Result<Validation, CrucibleError> {
+    if let Some(context) = block_context {
+        // check integrity hashes - make sure it is correct
         let computed_hash = integrity_hash(&[data]);
 
-        // The most recent hash is probably going to be the right one.
-        for context in block_contexts.iter().rev() {
-            if computed_hash == context.hash {
-                successful_hash = true;
-                break;
-            }
-        }
-
-        if successful_hash {
-            // Filter out contexts that don't match, and return the
-            // successful hash.
-            block_contexts.retain(|context| context.hash == computed_hash);
-
-            Ok(Some(computed_hash))
+        if computed_hash == context.hash {
+            Ok(Validation::Unencrypted(computed_hash))
         } else {
             // No integrity hash was correct for this response
             error!(log, "No match computed hash:0x{:x}", computed_hash,);
-            for context in block_contexts.iter().rev() {
-                error!(log, "No match          hash:0x{:x}", context.hash);
-            }
+            error!(log, "No match          hash:0x{:x}", context.hash);
             error!(log, "Data from hash:");
             for (i, d) in data[..6].iter().enumerate() {
                 error!(log, "[{i}]:{d}");
@@ -3076,7 +3003,7 @@ pub(crate) fn validate_unencrypted_read_response(
         //
         // XXX if it's not a blank block, we may be under attack?
         if data[..].iter().all(|&x| x == 0) {
-            Ok(None)
+            Ok(Validation::Empty)
         } else {
             error!(log, "got empty block context with non-blank block");
             Err(CrucibleError::MissingBlockContext)

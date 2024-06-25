@@ -617,10 +617,10 @@ fn make_blank_read_response() -> (ReadResponseBlockMetadata, BytesMut) {
         ReadResponseBlockMetadata {
             eid: ExtentId(0),
             offset: Block::new_512(0),
-            block_contexts: vec![BlockContext {
+            block_context: Some(BlockContext {
                 hash,
                 encryption_context: None,
-            }],
+            }),
         },
         BytesMut::from(&data[..]),
     )

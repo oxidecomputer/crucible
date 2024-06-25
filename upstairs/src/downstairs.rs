@@ -18,7 +18,7 @@ use crate::{
     ExtentFix, ExtentRepairIDs, GuestWorkId, IOState, IOStateCount, IOop,
     ImpactedBlocks, JobId, Message, RawReadResponse, RawWrite, ReadRequest,
     ReconcileIO, ReconciliationId, RegionDefinition, ReplaceResult,
-    SnapshotDetails, WorkSummary,
+    SnapshotDetails, Validation, WorkSummary,
 };
 use crucible_common::ExtentId;
 use crucible_protocol::WriteHeader;
@@ -1502,7 +1502,7 @@ impl Downstairs {
             acked: false,
             replay: false,
             data: None,
-            read_response_hashes: Vec::new(),
+            read_validations: Vec::new(),
             backpressure_bytes: None,
         }
     }
@@ -1626,7 +1626,7 @@ impl Downstairs {
             acked: false,
             replay: false,
             data: None,
-            read_response_hashes: Vec::new(),
+            read_validations: Vec::new(),
             backpressure_bytes: None,
         }
     }
@@ -1767,7 +1767,7 @@ impl Downstairs {
             acked: false,
             replay: false,
             data: None,
-            read_response_hashes: Vec::new(),
+            read_validations: Vec::new(),
             backpressure_bytes: None,
         }
     }
@@ -1841,7 +1841,7 @@ impl Downstairs {
             acked: false,
             replay: false,
             data: None,
-            read_response_hashes: Vec::new(),
+            read_validations: Vec::new(),
             backpressure_bytes: None,
         };
         self.enqueue(io);
@@ -1922,7 +1922,7 @@ impl Downstairs {
             acked: false,
             replay: false,
             data: None,
-            read_response_hashes: Vec::new(),
+            read_validations: Vec::new(),
             backpressure_bytes: None,
         };
         self.enqueue(io);
@@ -1953,7 +1953,7 @@ impl Downstairs {
             acked: false,
             replay: false,
             data: None,
-            read_response_hashes: Vec::new(),
+            read_validations: Vec::new(),
             backpressure_bytes: None,
         }
     }
@@ -2357,7 +2357,7 @@ impl Downstairs {
             acked: false,
             replay: false,
             data: None,
-            read_response_hashes: Vec::new(),
+            read_validations: Vec::new(),
             backpressure_bytes: None,
         };
 
@@ -2487,7 +2487,7 @@ impl Downstairs {
             acked: false,
             replay: false,
             data: None,
-            read_response_hashes: Vec::new(),
+            read_validations: Vec::new(),
             backpressure_bytes: None,
         };
 
@@ -3107,7 +3107,7 @@ impl Downstairs {
         &mut self,
         client_id: ClientId,
         m: Message,
-        read_response_hashes: Vec<Option<u64>>,
+        read_validations: Vec<Validation>,
         up_state: &UpstairsState,
     ) -> Result<(), CrucibleError> {
         let (upstairs_id, session_id, ds_id, read_data, extent_info) = match m {
@@ -3343,7 +3343,7 @@ impl Downstairs {
             ds_id,
             client_id,
             read_data,
-            read_response_hashes,
+            read_validations,
             up_state,
             extent_info,
         );
@@ -3396,7 +3396,7 @@ impl Downstairs {
         // Make up dummy values for hashes, since they're not actually checked
         // here (besides confirming that we have the correct number).
         let hashes = match &responses {
-            Ok(r) => vec![Some(0); r.blocks.len()],
+            Ok(r) => vec![Validation::Unencrypted(0); r.blocks.len()],
             Err(..) => vec![],
         };
         self.process_io_completion_inner(
@@ -3417,7 +3417,7 @@ impl Downstairs {
         ds_id: JobId,
         client_id: ClientId,
         responses: Result<RawReadResponse, CrucibleError>,
-        read_response_hashes: Vec<Option<u64>>,
+        read_validations: Vec<Validation>,
         up_state: &UpstairsState,
         extent_info: Option<ExtentInfo>,
     ) {
@@ -3450,13 +3450,13 @@ impl Downstairs {
         // If we didn't get one hash per read block, then `responses` must
         // have been converted into `Err(..)`.
         if let Ok(reads) = &responses {
-            assert_eq!(reads.blocks.len(), read_response_hashes.len());
+            assert_eq!(reads.blocks.len(), read_validations.len());
         }
 
         if self.clients[client_id].process_io_completion(
             job,
             responses,
-            read_response_hashes,
+            read_validations,
             deactivate,
             extent_info,
         ) {
@@ -4539,10 +4539,10 @@ pub(crate) mod test {
             blocks: vec![ReadResponseBlockMetadata {
                 eid: request.eid,
                 offset: request.offset,
-                block_contexts: vec![BlockContext {
+                block_context: Some(BlockContext {
                     hash: crucible_common::integrity_hash(&[data]),
                     encryption_context: None,
-                }],
+                }),
             }],
         }
     }

@@ -3658,7 +3658,7 @@ pub(crate) mod test {
         let blocks = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
             offset,
-            block_contexts: vec![BlockContext {
+            block_context: Some(BlockContext {
                 encryption_context: Some(
                     crucible_protocol::EncryptionContext {
                         nonce: nonce.into(),
@@ -3666,7 +3666,7 @@ pub(crate) mod test {
                     },
                 ),
                 hash,
-            }],
+            }),
         }]);
         let data = BytesMut::from(&data[..]);
 
@@ -3721,12 +3721,12 @@ pub(crate) mod test {
             responses.push(ReadResponseBlockMetadata {
                 eid: ExtentId(0),
                 offset: Block::new_512(offset.value + i as u64),
-                block_contexts: vec![BlockContext {
+                block_context: Some(BlockContext {
                     encryption_context: Some(
                         crucible_protocol::EncryptionContext { nonce, tag },
                     ),
                     hash,
-                }],
+                }),
             });
 
             buf.extend(&data);
@@ -3799,12 +3799,12 @@ pub(crate) mod test {
             responses.push(ReadResponseBlockMetadata {
                 eid: ExtentId(0),
                 offset: Block::new_512(offset.value + i as u64),
-                block_contexts: vec![BlockContext {
+                block_context: Some(BlockContext {
                     encryption_context: Some(
                         crucible_protocol::EncryptionContext { nonce, tag },
                     ),
                     hash,
-                }],
+                }),
             });
 
             buf.extend(&data[..]);
@@ -3882,12 +3882,12 @@ pub(crate) mod test {
         let responses = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
             offset,
-            block_contexts: vec![BlockContext {
+            block_context: Some(BlockContext {
                 encryption_context: Some(
                     crucible_protocol::EncryptionContext { nonce, tag },
                 ),
                 hash,
-            }],
+            }),
         }]);
 
         // Prepare to receive the message with an invalid tag
@@ -3919,72 +3919,6 @@ pub(crate) mod test {
         );
     }
 
-    /// Confirms that the encrypted read hash checksum works
-    #[test]
-    fn bad_hash_on_encrypted_read_panic() {
-        let mut up = make_encrypted_upstairs();
-        up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
-
-        let data = Buffer::new(1, 512);
-        let offset = Block::new_512(7);
-        let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
-
-        // fake read response from downstairs that will fail integrity hash
-        // check
-        let mut data = Vec::from([1u8; 512]);
-
-        let (nonce, tag, _) = up
-            .cfg
-            .encryption_context
-            .as_ref()
-            .unwrap()
-            .encrypt_in_place(&mut data);
-
-        let nonce: [u8; 12] = nonce.into();
-        let tag: [u8; 16] = tag.into();
-
-        let responses = Ok(vec![ReadResponseBlockMetadata {
-            eid: ExtentId(0),
-            offset,
-            block_contexts: vec![BlockContext {
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext { nonce, tag },
-                ),
-                hash: 10000, // junk hash
-            }],
-        }]);
-
-        // Prepare to receive the message with a junk hash
-        let thread = std::thread::spawn(move || {
-            up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
-                client_id: ClientId::new(0),
-                action: ClientAction::Response(Message::ReadResponse {
-                    header: ReadResponseHeader {
-                        upstairs_id: up.cfg.upstairs_id,
-                        session_id: up.cfg.session_id,
-                        job_id: JobId(1000),
-                        blocks: responses,
-                    },
-                    data: data.as_slice().into(),
-                }),
-            }))
-        });
-
-        // Don't use `should_panic`, as the `unwrap` above could cause this test
-        // to pass for the wrong reason.
-        let result = thread.join();
-
-        assert!(result.is_err());
-        let r = result
-            .as_ref()
-            .unwrap_err()
-            .downcast_ref::<String>()
-            .unwrap();
-        assert!(r.contains("HashMismatch"));
-    }
-
     #[test]
     fn bad_read_hash_makes_panic() {
         let mut up = make_upstairs();
@@ -4001,10 +3935,10 @@ pub(crate) mod test {
         let responses = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
             offset,
-            block_contexts: vec![BlockContext {
+            block_context: Some(BlockContext {
                 encryption_context: None,
                 hash: 10000, // junk hash
-            }],
+            }),
         }]);
 
         // Prepare to handle the response with a junk hash
@@ -4052,10 +3986,10 @@ pub(crate) mod test {
         let r1 = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
             offset,
-            block_contexts: vec![BlockContext {
+            block_context: Some(BlockContext {
                 encryption_context: None,
                 hash,
-            }],
+            }),
         }]);
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
             client_id: ClientId::new(1),
@@ -4080,10 +4014,10 @@ pub(crate) mod test {
         let r2 = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
             offset,
-            block_contexts: vec![BlockContext {
+            block_context: Some(BlockContext {
                 encryption_context: None,
                 hash,
-            }],
+            }),
         }]);
         let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
@@ -4129,10 +4063,10 @@ pub(crate) mod test {
             let r = Ok(vec![ReadResponseBlockMetadata {
                 eid: ExtentId(0),
                 offset,
-                block_contexts: vec![BlockContext {
+                block_context: Some(BlockContext {
                     encryption_context: None,
                     hash,
-                }],
+                }),
             }]);
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id,
@@ -4158,10 +4092,10 @@ pub(crate) mod test {
         let r = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
             offset,
-            block_contexts: vec![BlockContext {
+            block_context: Some(BlockContext {
                 encryption_context: None,
                 hash,
-            }],
+            }),
         }]);
         let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
@@ -4206,10 +4140,10 @@ pub(crate) mod test {
         let r1 = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
             offset,
-            block_contexts: vec![BlockContext {
+            block_context: Some(BlockContext {
                 encryption_context: None,
                 hash,
-            }],
+            }),
         }]);
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
             client_id: ClientId::new(1),
@@ -4231,10 +4165,10 @@ pub(crate) mod test {
         let response = ReadResponseBlockMetadata {
             eid: ExtentId(0),
             offset,
-            block_contexts: vec![BlockContext {
+            block_context: Some(BlockContext {
                 encryption_context: None,
                 hash,
-            }],
+            }),
         };
         let r2 = Ok(vec![response.clone(), response.clone()]);
         let thread = std::thread::spawn(move || {
@@ -4281,7 +4215,7 @@ pub(crate) mod test {
         let r1 = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
             offset,
-            block_contexts: vec![],
+            block_context: None,
         }]);
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
             client_id: ClientId::new(1),
@@ -4301,10 +4235,10 @@ pub(crate) mod test {
         let r2 = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
             offset,
-            block_contexts: vec![BlockContext {
+            block_context: Some(BlockContext {
                 encryption_context: None,
                 hash,
-            }],
+            }),
         }]);
         let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
@@ -4350,10 +4284,10 @@ pub(crate) mod test {
         let r1 = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
             offset,
-            block_contexts: vec![BlockContext {
+            block_context: Some(BlockContext {
                 encryption_context: None,
                 hash,
-            }],
+            }),
         }]);
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
             client_id: ClientId::new(1),
@@ -4372,9 +4306,7 @@ pub(crate) mod test {
         let r2 = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
             offset,
-            block_contexts: vec![
-                // No block contexts!
-            ],
+            block_context: None,
         }]);
         let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {

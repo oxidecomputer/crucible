@@ -202,7 +202,7 @@ impl IntoIterator for RegionReadRequest {
 /// Do not derive `Clone` on this type; it will be expensive and tempting to
 /// call by accident!
 pub(crate) struct RegionReadResponse {
-    blocks: Vec<Vec<BlockContext>>,
+    blocks: Vec<Option<BlockContext>>,
     data: BytesMut,
     uninit: BytesMut,
 }
@@ -304,7 +304,7 @@ impl RegionReadResponse {
 /// Do not derive `Clone` on this type; it will be expensive and tempting to
 /// call by accident!
 pub(crate) struct ExtentReadResponse {
-    blocks: Vec<Vec<BlockContext>>,
+    blocks: Vec<Option<BlockContext>>,
     /// At this point, the buffer must be fully initialized
     data: BytesMut,
 }
@@ -1644,11 +1644,11 @@ impl ActiveConnection {
                                 })
                             })
                             .zip(r.blocks)
-                            .map(|((eid, offset), block_contexts)| {
+                            .map(|((eid, offset), block_context)| {
                                 crucible_protocol::ReadResponseBlockMetadata {
                                     eid,
                                     offset,
-                                    block_contexts,
+                                    block_context,
                                 }
                             })
                             .collect()),
