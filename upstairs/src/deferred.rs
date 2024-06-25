@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::{
     client::ConnectionId, upstairs::UpstairsConfig, BlockContext, BlockOp,
-    BlockRes, ClientId, ImpactedBlocks, Message, RawWrite,
+    BlockRes, ClientId, ImpactedBlocks, Message, RawWrite, Validation,
 };
 use bytes::BytesMut;
 use crucible_common::{integrity_hash, RegionDefinition};
@@ -191,8 +191,8 @@ impl DeferredWrite {
 pub(crate) struct DeferredMessage {
     pub message: Message,
 
-    /// If this was a `ReadResponse`, then the hashes are stored here
-    pub hashes: Vec<Option<u64>>,
+    /// If this was a `ReadResponse`, then the validation result is stored here
+    pub hashes: Vec<Validation>,
 
     pub client_id: ClientId,
 

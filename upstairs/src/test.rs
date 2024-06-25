@@ -404,7 +404,10 @@ pub(crate) mod up_test {
             &csl(),
         )?;
 
-        assert_eq!(successful_hash, Some(read_response_hash));
+        assert_eq!(
+            successful_hash,
+            Validation::Encrypted(block_context.encryption_context.unwrap())
+        );
 
         // `validate_encrypted_read_response` will mutate the read
         // response's data value, make sure it decrypted
@@ -451,7 +454,7 @@ pub(crate) mod up_test {
         )?;
 
         // The above function will return None for a blank block
-        assert_eq!(successful_hash, None);
+        assert_eq!(successful_hash, Validation::Empty);
         assert_eq!(data, vec![0u8; 512]);
 
         Ok(())
@@ -481,7 +484,10 @@ pub(crate) mod up_test {
             &csl(),
         )?;
 
-        assert_eq!(successful_hash, Some(read_response_hash));
+        assert_eq!(
+            successful_hash,
+            Validation::Unencrypted(read_response_hash)
+        );
         assert_eq!(data, original_data);
 
         Ok(())
@@ -499,7 +505,7 @@ pub(crate) mod up_test {
         let successful_hash =
             validate_unencrypted_read_response(None, &mut data, &csl())?;
 
-        assert_eq!(successful_hash, None);
+        assert_eq!(successful_hash, Validation::Empty);
         assert_eq!(data, original_data);
 
         Ok(())

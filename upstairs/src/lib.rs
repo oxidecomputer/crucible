@@ -902,6 +902,17 @@ impl std::fmt::Display for DsState {
     }
 }
 
+/// Results of validating a single block
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub(crate) enum Validation {
+    /// The block has no hash / context and is empty
+    Empty,
+    /// For an unencrypted block, the result is the hash
+    Unencrypted(u64),
+    /// For an encrypted block, the result is the tag + nonce
+    Encrypted(crucible_protocol::EncryptionContext),
+}
+
 /*
  * A unit of work for downstairs that is put into the hashmap.
  */
@@ -929,10 +940,10 @@ struct DownstairsIO {
 
     /*
      * If the operation is a Read, this holds the resulting buffer
-     * The hashes vec holds the valid hash(es) for the read.
+     * The validation vec holds the validation results for the read
      */
     data: Option<RawReadResponse>,
-    read_response_hashes: Vec<Option<u64>>,
+    read_validations: Vec<Validation>,
 
     /// Number of bytes that this job has contributed to guest backpressure
     backpressure_bytes: Option<u64>,
