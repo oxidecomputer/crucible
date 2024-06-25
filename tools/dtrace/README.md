@@ -1,5 +1,10 @@
 # Oxide DTrace Crucible scripts
 
+Select DTrace scripts are packaged up (by ../make-dtrace.sh) and added to
+the global zone on each sled.  If you add a script here and wish to make it
+part of the scripts added to the global zone, include it in that make-dtrace
+script.
+
 ## all_downstairs.d
 A DTrace script to show IOs coming and going on all downstairs as well as the
 work task geting new work, performing the work and completing the work. Stats
