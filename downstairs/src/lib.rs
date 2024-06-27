@@ -14,9 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crucible_common::{
-    build_logger, impacted_blocks::extent_from_offset, integrity_hash,
-    mkdir_for_file, verbose_timeout, Block, BlockIndex, BlockOffset,
-    CrucibleError, ExtentId, RegionDefinition, MAX_BLOCK_SIZE,
+    build_logger, integrity_hash, mkdir_for_file, verbose_timeout, Block,
+    BlockIndex, BlockOffset, CrucibleError, ExtentId, RegionDefinition,
+    MAX_BLOCK_SIZE,
 };
 use crucible_protocol::{
     BlockContext, CrucibleDecoder, JobId, Message, MessageWriter,
@@ -25,7 +25,7 @@ use crucible_protocol::{
 use repair_client::Client;
 
 use anyhow::{bail, Context, Result};
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use futures::StreamExt;
 use rand::prelude::*;
 use slog::{debug, error, info, o, warn, Logger};
@@ -143,6 +143,8 @@ pub(crate) struct ExtentReadRequest {
 pub(crate) struct RegionReadRequest(Vec<RegionReadReq>);
 
 /// Inner type for a single read request
+///
+/// This read request is bounded to a single `extent`
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct RegionReadReq {
     extent: ExtentId,
@@ -151,31 +153,30 @@ pub(crate) struct RegionReadReq {
 }
 
 impl RegionReadRequest {
-    fn new(reqs: &[crucible_protocol::ReadRequest]) -> Self {
-        let mut out = Self(vec![]);
-        for req in reqs {
-            match out.0.last_mut() {
-                // Check whether this read request is contiguous and in the same
-                // extent as the previous read request
-                Some(prev)
-                    if prev.extent == req.eid
-                        && prev.offset.0 + prev.count.get() as u64
-                            == req.offset.0 =>
-                {
-                    // If so, enlarge it by one block
-                    prev.count = prev.count.saturating_add(1);
-                }
-                _ => {
-                    // Otherwise, begin a new request
-                    out.0.push(RegionReadReq {
-                        extent: req.eid,
-                        offset: req.offset,
-                        count: NonZeroUsize::new(1).unwrap(),
-                    });
-                }
-            }
+    fn new(start: BlockIndex, mut count: u64, def: &RegionDefinition) -> Self {
+        let blocks_per_extent = def.extent_size().value;
+        let mut out = vec![];
+        let mut extent = ExtentId((start.0 / blocks_per_extent) as u32);
+        let mut offset = start.0 % blocks_per_extent;
+        while count > 0 {
+            // Calculate the number of blocks to read from the current extent
+            let n = if offset + count > blocks_per_extent {
+                // We're going to spill into the next extent
+                blocks_per_extent - offset
+            } else {
+                // We can finish the read with this extent
+                count
+            };
+            out.push(RegionReadReq {
+                extent,
+                offset: BlockOffset(offset),
+                count: NonZeroUsize::new(n as usize).unwrap(),
+            });
+            count -= n;
+            extent += 1;
+            offset = 0;
         }
-        out
+        Self(out)
     }
 
     fn iter(&self) -> impl Iterator<Item = &RegionReadReq> {
@@ -352,78 +353,73 @@ impl RegionWrite {
     /// Returns an error if `buf.len()` is not an even multiple of
     /// `header.blocks.len()`.
     pub fn new(
-        blocks: &[crucible_protocol::WriteBlockMetadata],
+        start: BlockIndex,
+        contexts: &[crucible_protocol::BlockContext],
         mut buf: bytes::Bytes,
         ddef: &RegionDefinition,
     ) -> Result<Self, CrucibleError> {
+        let blocks_per_extent = ddef.extent_size().value;
         let block_size = ddef.block_size() as usize;
         if buf.len() % block_size != 0 {
             return Err(CrucibleError::DataLenUnaligned);
-        } else if buf.len() / block_size != blocks.len() {
+        } else if buf.len() / block_size != contexts.len() {
             return Err(CrucibleError::InvalidNumberOfBlocks(format!(
                 "got {} contexts but {} blocks",
-                blocks.len(),
+                contexts.len(),
                 buf.len() / block_size
             )));
         }
-        let mut out = Self(vec![]);
-        for b in blocks {
-            if out.can_append(b) {
-                out.append_block_context(b.block_context);
+        let mut count = contexts.len() as u64;
+        let mut extent = ExtentId((start.0 / blocks_per_extent) as u32);
+        let mut offset = start.0 % blocks_per_extent;
+
+        // Special case (which will probably be the most common): if all of the
+        // writes are contained within a single extent, then we don't need to do
+        // any cloning.
+        if offset + count <= blocks_per_extent {
+            return Ok(Self(vec![RegionWriteReq {
+                extent,
+                write: ExtentWrite {
+                    offset: BlockOffset(offset),
+                    block_contexts: contexts.to_owned(),
+                    data: buf,
+                },
+            }]));
+        }
+
+        // Otherwise, we'll split up our contexts and data into per-extent write
+        // operations.  We can split the data buffer in O(1), because it's
+        // reference-counted under the hood; contexts have to be cloned.
+        let mut contexts = contexts;
+        let mut out = vec![];
+        while count > 0 {
+            // Calculate the number of blocks to write to the current extent
+            let n = if offset + count > blocks_per_extent {
+                // We're going to spill into the next extent
+                blocks_per_extent - offset
             } else {
-                out.set_last_data(block_size, &mut buf);
-                out.begin_write(*b);
-            }
+                // We can finish the read with this extent
+                count
+            };
+
+            let (ctxs, next) = contexts.split_at(n as usize);
+            let data = buf.split_to(n as usize * block_size);
+            out.push(RegionWriteReq {
+                extent,
+                write: ExtentWrite {
+                    offset: BlockOffset(offset),
+                    block_contexts: ctxs.to_owned(),
+                    data,
+                },
+            });
+            contexts = next;
+
+            count -= n;
+            extent += 1;
+            offset = 0;
         }
-        out.set_last_data(block_size, &mut buf);
-        assert!(buf.is_empty());
-        Ok(out)
-    }
-
-    /// Checks whether the next write can be appended to our existing write
-    fn can_append(&self, b: &crucible_protocol::WriteBlockMetadata) -> bool {
-        match self.0.last() {
-            None => false,
-            Some(prev) => {
-                prev.extent == b.eid
-                    && prev.write.offset.0
-                        + prev.write.block_contexts.len() as u64
-                        == b.offset.0
-            }
-        }
-    }
-
-    /// Sets the data member of the last write as part of construction
-    ///
-    /// # Panics
-    /// If the last write already has data
-    fn set_last_data(&mut self, block_size: usize, buf: &mut Bytes) {
-        if let Some(prev) = self.0.last_mut() {
-            assert!(prev.write.data.is_empty());
-            let data =
-                buf.split_to(prev.write.block_contexts.len() * block_size);
-            prev.write.data = data;
-        }
-    }
-
-    /// Appends the given block context to an existing write
-    ///
-    /// # Panics
-    /// If there is no write
-    fn append_block_context(&mut self, ctx: BlockContext) {
-        self.0.last_mut().unwrap().write.block_contexts.push(ctx);
-    }
-
-    /// Begins a new write, guided by the given metadata
-    fn begin_write(&mut self, b: crucible_protocol::WriteBlockMetadata) {
-        self.0.push(RegionWriteReq {
-            extent: b.eid,
-            write: ExtentWrite {
-                offset: b.offset,
-                block_contexts: vec![b.block_context],
-                data: bytes::Bytes::default(),
-            },
-        });
+        assert!(contexts.is_empty());
+        Ok(Self(out))
     }
 
     fn iter(&self) -> impl Iterator<Item = &RegionWriteReq> {
@@ -612,26 +608,16 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
          */
         let nblocks = rm.bytes_to_blocks(total);
         let block_size = region.def().block_size() as usize;
-        let blocks: Vec<_> = extent_from_offset(&rm, offset, nblocks)
-            .blocks(&rm)
-            .zip(
-                buffer
-                    .chunks(block_size)
-                    .map(|chunk| integrity_hash(&[chunk])),
-            )
-            .map(|((eid, offset), hash)| {
-                crucible_protocol::WriteBlockMetadata {
-                    eid,
-                    offset,
-                    block_context: BlockContext {
-                        hash,
-                        encryption_context: None,
-                    },
-                }
+        let contexts: Vec<_> = buffer
+            .chunks(block_size)
+            .map(|chunk| integrity_hash(&[chunk]))
+            .map(|hash| BlockContext {
+                hash,
+                encryption_context: None,
             })
             .collect();
 
-        let write = RegionWrite::new(&blocks, buffer, &region.def())?;
+        let write = RegionWrite::new(offset, &contexts, buffer, &rm)?;
 
         // We have no job ID, so it makes no sense for accounting.
         region.region_write(&write, JobId(0), false)?;
@@ -646,7 +632,7 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
     println!(
         "Populated {} extents by copying {} bytes ({} blocks)",
         extents_needed,
-        offset.0 * region.def().block_size(),
+        rm.block_size() * offset.0,
         offset.0,
     );
 
@@ -1126,8 +1112,12 @@ impl ActiveConnection {
         let r = match m {
             Message::Write { header, data } => {
                 cdt::submit__write__start!(|| header.job_id.0);
-                let writes =
-                    RegionWrite::new(&header.blocks, data, &region.def())?;
+                let writes = RegionWrite::new(
+                    header.start,
+                    &header.contexts,
+                    data,
+                    &region.def(),
+                )?;
 
                 let new_write = IOop::Write {
                     dependencies: header.dependencies,
@@ -1174,8 +1164,12 @@ impl ActiveConnection {
             }
             Message::WriteUnwritten { header, data } => {
                 cdt::submit__writeunwritten__start!(|| header.job_id.0);
-                let writes =
-                    RegionWrite::new(&header.blocks, data, &region.def())?;
+                let writes = RegionWrite::new(
+                    header.start,
+                    &header.contexts,
+                    data,
+                    &region.def(),
+                )?;
 
                 let new_write = IOop::WriteUnwritten {
                     dependencies: header.dependencies,
@@ -1194,14 +1188,19 @@ impl ActiveConnection {
             Message::ReadRequest {
                 job_id,
                 dependencies,
-                requests,
+                start,
+                count,
                 ..
             } => {
                 cdt::submit__read__start!(|| job_id.0);
 
                 let new_read = IOop::Read {
                     dependencies,
-                    requests: RegionReadRequest::new(&requests),
+                    requests: RegionReadRequest::new(
+                        start,
+                        count,
+                        &region.def(),
+                    ),
                 };
                 self.do_work_if_ready(
                     job_id,
@@ -1648,31 +1647,7 @@ impl ActiveConnection {
                 // offset); we inject that extra information in this terrible
                 // match statement.
                 let (blocks, data) = match response {
-                    Ok(r) => (
-                        Ok(requests
-                            .iter()
-                            .flat_map(|req| {
-                                // Iterate over blocks within this extent.  By
-                                // construction, each `ReadRequest` will never
-                                // overstep the bounds of the extent.
-                                (0..req.count.get()).map(|i| {
-                                    (
-                                        req.extent,
-                                        BlockOffset(req.offset.0 + i as u64),
-                                    )
-                                })
-                            })
-                            .zip(r.blocks)
-                            .map(|((eid, offset), block_context)| {
-                                crucible_protocol::ReadResponseBlockMetadata {
-                                    eid,
-                                    offset,
-                                    block_context,
-                                }
-                            })
-                            .collect()),
-                        r.data,
-                    ),
+                    Ok(r) => (Ok(r.blocks.clone()), r.data),
                     Err(e) => (Err(e), Default::default()),
                 };
 
@@ -3672,6 +3647,7 @@ pub async fn start_downstairs(
 #[cfg(test)]
 mod test {
     use super::*;
+    use bytes::Bytes;
     use rand_chacha::ChaCha20Rng;
     use std::net::Ipv4Addr;
     use tempfile::{tempdir, TempDir};
@@ -6117,118 +6093,43 @@ mod test {
         def.set_block_size(512);
         def.set_extent_size(Block::new_512(10));
 
-        use crucible_protocol::WriteBlockMetadata;
-        let blocks = vec![WriteBlockMetadata {
-            eid: ExtentId(0),
-            offset: BlockOffset(0),
-            block_context: BlockContext {
-                hash: 123,
-                encryption_context: None,
-            },
+        let contexts = vec![BlockContext {
+            hash: 123,
+            encryption_context: None,
         }];
         let data = Bytes::from(vec![1u8; 512]);
-        let w = RegionWrite::new(&blocks, data, &def).unwrap();
+        let w = RegionWrite::new(BlockIndex(0), &contexts, data, &def).unwrap();
         assert_eq!(w.0.len(), 1);
 
         // Two contiguous blocks
-        let blocks = vec![
-            WriteBlockMetadata {
-                eid: ExtentId(0),
-                offset: BlockOffset(0),
-                block_context: BlockContext {
-                    hash: 123,
-                    encryption_context: None,
-                },
+        let contexts = vec![
+            BlockContext {
+                hash: 123,
+                encryption_context: None,
             },
-            WriteBlockMetadata {
-                eid: ExtentId(0),
-                offset: BlockOffset(1),
-                block_context: BlockContext {
-                    hash: 123,
-                    encryption_context: None,
-                },
+            BlockContext {
+                hash: 123,
+                encryption_context: None,
             },
         ];
         let data = Bytes::from(vec![1u8; 512 * 2]);
-        let w = RegionWrite::new(&blocks, data, &def).unwrap();
+        let w = RegionWrite::new(BlockIndex(0), &contexts, data, &def).unwrap();
         assert_eq!(w.0.len(), 1);
         assert_eq!(w.0[0].extent, ExtentId(0));
         assert_eq!(w.0[0].write.offset, BlockOffset(0));
         assert_eq!(w.0[0].write.data.len(), 512 * 2);
 
-        // Two non-contiguous blocks
-        let blocks = vec![
-            WriteBlockMetadata {
-                eid: ExtentId(1),
-                offset: BlockOffset(0),
-                block_context: BlockContext {
-                    hash: 123,
-                    encryption_context: None,
-                },
-            },
-            WriteBlockMetadata {
-                eid: ExtentId(2),
-                offset: BlockOffset(1),
-                block_context: BlockContext {
-                    hash: 123,
-                    encryption_context: None,
-                },
-            },
-        ];
-        let data = Bytes::from(vec![1u8; 512 * 2]);
-        let w = RegionWrite::new(&blocks, data, &def).unwrap();
-        assert_eq!(w.0.len(), 2);
-        assert_eq!(w.0[0].extent, ExtentId(1));
-        assert_eq!(w.0[0].write.offset, BlockOffset(0));
-        assert_eq!(w.0[0].write.data.len(), 512);
-        assert_eq!(w.0[1].extent, ExtentId(2));
-        assert_eq!(w.0[1].write.offset, BlockOffset(1));
-        assert_eq!(w.0[1].write.data.len(), 512);
-
-        // Overlapping writes to the same block
-        let blocks = vec![
-            WriteBlockMetadata {
-                eid: ExtentId(1),
-                offset: BlockOffset(3),
-                block_context: BlockContext {
-                    hash: 123,
-                    encryption_context: None,
-                },
-            },
-            WriteBlockMetadata {
-                eid: ExtentId(1),
-                offset: BlockOffset(3),
-                block_context: BlockContext {
-                    hash: 123,
-                    encryption_context: None,
-                },
-            },
-        ];
-        let data = Bytes::from(vec![1u8; 512 * 2]);
-        let w = RegionWrite::new(&blocks, data, &def).unwrap();
-        assert_eq!(w.0.len(), 2);
-        assert_eq!(w.0[0].extent, ExtentId(1));
-        assert_eq!(w.0[0].write.offset, BlockOffset(3));
-        assert_eq!(w.0[0].write.data.len(), 512);
-        assert_eq!(w.0[1].extent, ExtentId(1));
-        assert_eq!(w.0[1].write.offset, BlockOffset(3));
-        assert_eq!(w.0[1].write.data.len(), 512);
-
         // Mismatched block / data sizes
-        let blocks = vec![WriteBlockMetadata {
-            eid: ExtentId(1),
-            offset: BlockOffset(3),
-            block_context: BlockContext {
-                hash: 123,
-                encryption_context: None,
-            },
+        let contexts = vec![BlockContext {
+            hash: 123,
+            encryption_context: None,
         }];
         let data = Bytes::from(vec![1u8; 512 * 2]);
-        let r = RegionWrite::new(&blocks, data, &def);
+        let r = RegionWrite::new(BlockIndex(0), &contexts, data, &def);
         assert!(r.is_err());
 
         let data = Bytes::from(vec![1u8; 513]);
-        let r = RegionWrite::new(&blocks, data, &def);
+        let r = RegionWrite::new(BlockIndex(0), &contexts, data, &def);
         assert!(r.is_err());
     }
 }

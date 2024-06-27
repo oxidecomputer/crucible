@@ -630,7 +630,8 @@ impl Upstairs {
         // after `continue_live_repair`, which may enqueue jobs.
         for i in ClientId::iter() {
             if self.downstairs.clients[i].should_do_more_work() {
-                self.downstairs.io_send(i);
+                let ddef = self.ddef.get_def().unwrap();
+                self.downstairs.io_send(i, &ddef);
             }
         }
 
@@ -2096,8 +2097,8 @@ pub(crate) mod test {
         Block, BlockContext, BlockOp, BlockOpWaiter, DsState, JobId,
     };
     use bytes::BytesMut;
-    use crucible_common::{integrity_hash, BlockOffset, ExtentId};
-    use crucible_protocol::{ReadResponseBlockMetadata, ReadResponseHeader};
+    use crucible_common::integrity_hash;
+    use crucible_protocol::ReadResponseHeader;
     use futures::FutureExt;
 
     // Test function to create just enough of an Upstairs for our needs.
@@ -3656,19 +3657,13 @@ pub(crate) mod test {
             .unwrap()
             .encrypt_in_place(&mut data);
 
-        let blocks = Ok(vec![ReadResponseBlockMetadata {
-            eid: ExtentId(0),
-            offset: BlockOffset(offset.0),
-            block_context: Some(BlockContext {
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: nonce.into(),
-                        tag: tag.into(),
-                    },
-                ),
-                hash,
+        let blocks = Ok(vec![Some(BlockContext {
+            encryption_context: Some(crucible_protocol::EncryptionContext {
+                nonce: nonce.into(),
+                tag: tag.into(),
             }),
-        }]);
+            hash,
+        })]);
         let data = BytesMut::from(&data[..]);
 
         // Because this read is small, it happens right away
@@ -3718,17 +3713,13 @@ pub(crate) mod test {
         // trigger the deferred read path.
         let mut responses = vec![];
         let mut buf = BytesMut::new();
-        for i in 0..blocks {
-            responses.push(ReadResponseBlockMetadata {
-                eid: ExtentId(0),
-                offset: BlockOffset(offset.0 + i as u64),
-                block_context: Some(BlockContext {
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext { nonce, tag },
-                    ),
-                    hash,
-                }),
-            });
+        for _ in 0..blocks {
+            responses.push(Some(BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext { nonce, tag },
+                ),
+                hash,
+            }));
 
             buf.extend(&data);
         }
@@ -3796,17 +3787,13 @@ pub(crate) mod test {
         // trigger the deferred read path.
         let mut responses = vec![];
         let mut buf = BytesMut::new();
-        for i in 0..blocks {
-            responses.push(ReadResponseBlockMetadata {
-                eid: ExtentId(0),
-                offset: BlockOffset(offset.0 + i as u64),
-                block_context: Some(BlockContext {
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext { nonce, tag },
-                    ),
-                    hash,
-                }),
-            });
+        for _ in 0..blocks {
+            responses.push(Some(BlockContext {
+                encryption_context: Some(
+                    crucible_protocol::EncryptionContext { nonce, tag },
+                ),
+                hash,
+            }));
 
             buf.extend(&data[..]);
         }
@@ -3880,16 +3867,13 @@ pub(crate) mod test {
         // validate
         let hash = integrity_hash(&[&nonce, &tag, &data]);
 
-        let responses = Ok(vec![ReadResponseBlockMetadata {
-            eid: ExtentId(0),
-            offset: BlockOffset(offset.0),
-            block_context: Some(BlockContext {
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext { nonce, tag },
-                ),
-                hash,
+        let responses = Ok(vec![Some(BlockContext {
+            encryption_context: Some(crucible_protocol::EncryptionContext {
+                nonce,
+                tag,
             }),
-        }]);
+            hash,
+        })]);
 
         // Prepare to receive the message with an invalid tag
         let thread = std::thread::spawn(move || {
@@ -3933,14 +3917,10 @@ pub(crate) mod test {
 
         // fake read response from downstairs that will fail integrity hash
         // check
-        let responses = Ok(vec![ReadResponseBlockMetadata {
-            eid: ExtentId(0),
-            offset: BlockOffset(offset.0),
-            block_context: Some(BlockContext {
-                encryption_context: None,
-                hash: 10000, // junk hash
-            }),
-        }]);
+        let responses = Ok(vec![Some(BlockContext {
+            encryption_context: None,
+            hash: 10000, // junk hash
+        })]);
 
         // Prepare to handle the response with a junk hash
         let thread = std::thread::spawn(move || {
@@ -3984,14 +3964,10 @@ pub(crate) mod test {
 
         let data = BytesMut::from([1u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
-        let r1 = Ok(vec![ReadResponseBlockMetadata {
-            eid: ExtentId(0),
-            offset: BlockOffset(offset.0),
-            block_context: Some(BlockContext {
-                encryption_context: None,
-                hash,
-            }),
-        }]);
+        let r1 = Ok(vec![Some(BlockContext {
+            encryption_context: None,
+            hash,
+        })]);
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
             client_id: ClientId::new(1),
             action: ClientAction::Response(Message::ReadResponse {
@@ -4012,14 +3988,10 @@ pub(crate) mod test {
         // between multiple ReadResponse
         let data = BytesMut::from([2u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
-        let r2 = Ok(vec![ReadResponseBlockMetadata {
-            eid: ExtentId(0),
-            offset: BlockOffset(offset.0),
-            block_context: Some(BlockContext {
-                encryption_context: None,
-                hash,
-            }),
-        }]);
+        let r2 = Ok(vec![Some(BlockContext {
+            encryption_context: None,
+            hash,
+        })]);
         let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id: ClientId::new(2),
@@ -4061,14 +4033,10 @@ pub(crate) mod test {
         for client_id in [ClientId::new(0), ClientId::new(1)] {
             let data = BytesMut::from([1u8; 512].as_slice());
             let hash = integrity_hash(&[&data]);
-            let r = Ok(vec![ReadResponseBlockMetadata {
-                eid: ExtentId(0),
-                offset: BlockOffset(offset.0),
-                block_context: Some(BlockContext {
-                    encryption_context: None,
-                    hash,
-                }),
-            }]);
+            let r = Ok(vec![Some(BlockContext {
+                encryption_context: None,
+                hash,
+            })]);
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id,
                 action: ClientAction::Response(Message::ReadResponse {
@@ -4090,14 +4058,10 @@ pub(crate) mod test {
         // between multiple ReadResponse
         let data = BytesMut::from([2u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
-        let r = Ok(vec![ReadResponseBlockMetadata {
-            eid: ExtentId(0),
-            offset: BlockOffset(offset.0),
-            block_context: Some(BlockContext {
-                encryption_context: None,
-                hash,
-            }),
-        }]);
+        let r = Ok(vec![Some(BlockContext {
+            encryption_context: None,
+            hash,
+        })]);
         let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id: ClientId::new(2),
@@ -4138,14 +4102,10 @@ pub(crate) mod test {
 
         let data = BytesMut::from([1u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
-        let r1 = Ok(vec![ReadResponseBlockMetadata {
-            eid: ExtentId(0),
-            offset: BlockOffset(offset.0),
-            block_context: Some(BlockContext {
-                encryption_context: None,
-                hash,
-            }),
-        }]);
+        let r1 = Ok(vec![Some(BlockContext {
+            encryption_context: None,
+            hash,
+        })]);
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
             client_id: ClientId::new(1),
             action: ClientAction::Response(Message::ReadResponse {
@@ -4163,15 +4123,11 @@ pub(crate) mod test {
         // the first block matches.
         let data = BytesMut::from([1u8; 512 * 2].as_slice());
         let hash = integrity_hash(&[&data[0..512]]);
-        let response = ReadResponseBlockMetadata {
-            eid: ExtentId(0),
-            offset: BlockOffset(offset.0),
-            block_context: Some(BlockContext {
-                encryption_context: None,
-                hash,
-            }),
-        };
-        let r2 = Ok(vec![response.clone(), response.clone()]);
+        let response = Some(BlockContext {
+            encryption_context: None,
+            hash,
+        });
+        let r2 = Ok(vec![response, response]);
         let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id: ClientId::new(2),
@@ -4213,11 +4169,7 @@ pub(crate) mod test {
 
         // The first read has no block contexts, because it was unwritten
         let data = BytesMut::from([0u8; 512].as_slice());
-        let r1 = Ok(vec![ReadResponseBlockMetadata {
-            eid: ExtentId(0),
-            offset: BlockOffset(offset.0),
-            block_context: None,
-        }]);
+        let r1 = Ok(vec![None]);
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
             client_id: ClientId::new(1),
             action: ClientAction::Response(Message::ReadResponse {
@@ -4233,14 +4185,10 @@ pub(crate) mod test {
 
         // Send back a second response with actual block contexts (oh no!)
         let hash = integrity_hash(&[&data]);
-        let r2 = Ok(vec![ReadResponseBlockMetadata {
-            eid: ExtentId(0),
-            offset: BlockOffset(offset.0),
-            block_context: Some(BlockContext {
-                encryption_context: None,
-                hash,
-            }),
-        }]);
+        let r2 = Ok(vec![Some(BlockContext {
+            encryption_context: None,
+            hash,
+        })]);
         let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id: ClientId::new(2),
@@ -4282,14 +4230,10 @@ pub(crate) mod test {
         // The first read has no block contexts, because it was unwritten
         let data = BytesMut::from([0u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
-        let r1 = Ok(vec![ReadResponseBlockMetadata {
-            eid: ExtentId(0),
-            offset: BlockOffset(offset.0),
-            block_context: Some(BlockContext {
-                encryption_context: None,
-                hash,
-            }),
-        }]);
+        let r1 = Ok(vec![Some(BlockContext {
+            encryption_context: None,
+            hash,
+        })]);
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
             client_id: ClientId::new(1),
             action: ClientAction::Response(Message::ReadResponse {
@@ -4304,11 +4248,7 @@ pub(crate) mod test {
         }));
 
         // Send back a second response with no actual data (oh no!)
-        let r2 = Ok(vec![ReadResponseBlockMetadata {
-            eid: ExtentId(0),
-            offset: BlockOffset(offset.0),
-            block_context: None,
-        }]);
+        let r2 = Ok(vec![None]);
         let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id: ClientId::new(2),

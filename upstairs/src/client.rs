@@ -1350,7 +1350,11 @@ impl DownstairsClient {
                 IOop::Flush { .. } => {
                     self.last_flush = ds_id;
                 }
-                IOop::Read { requests, .. } => {
+                IOop::Read {
+                    start_eid,
+                    start_offset,
+                    ..
+                } => {
                     /*
                      * For a read, make sure the data from a previous read
                      * has the same hash
@@ -1365,14 +1369,15 @@ impl DownstairsClient {
                             "[{}] read hash mismatch on id {}\n\
                             Expected {:x?}\n\
                             Computed {:x?}\n\
-                            guest_id:{} request:{:?}\n\
+                            guest_id:{} start eid:{:?} start offset:{:?}\n\
                             job state:{:?}",
                             self.client_id,
                             ds_id,
                             job.read_validations,
                             read_validations,
                             job.guest_id,
-                            requests,
+                            start_eid,
+                            start_offset,
                             job.state,
                         );
                         if job.replay {

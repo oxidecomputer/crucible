@@ -2126,8 +2126,7 @@ pub(crate) mod test {
         region.extend(3, backend).unwrap();
 
         let ddef = region.def();
-        let num_blocks: usize =
-            ddef.extent_size().value as usize * ddef.extent_count() as usize;
+        let num_blocks = ddef.extent_size().value * ddef.extent_count() as u64;
 
         // use region_write_all to fill the entire region
         let buffer = region_write_all(&mut region, &ddef, false);
@@ -2139,18 +2138,7 @@ pub(crate) mod test {
         assert_eq!(buffer, read_from_files);
 
         // read all using region_read
-
-        let mut requests: Vec<crucible_protocol::ReadRequest> =
-            Vec::with_capacity(num_blocks);
-
-        for i in 0..num_blocks {
-            let eid = ExtentId((i as u64 / ddef.extent_size().value) as u32);
-            let offset = BlockOffset((i as u64) % ddef.extent_size().value);
-
-            requests.push(crucible_protocol::ReadRequest { eid, offset });
-        }
-
-        let req = RegionReadRequest::new(&requests);
+        let req = RegionReadRequest::new(BlockIndex(0), num_blocks, &ddef);
         let responses = region.region_read(&req, JobId(0)).unwrap();
 
         assert_eq!(buffer.len(), responses.data.len());
@@ -2193,17 +2181,8 @@ pub(crate) mod test {
         }
 
         // read all using region_read
-        let mut requests: Vec<crucible_protocol::ReadRequest> =
-            Vec::with_capacity(num_blocks);
-
-        for i in 0..num_blocks {
-            let eid = ExtentId((i as u64 / ddef.extent_size().value) as u32);
-            let offset = BlockOffset((i as u64) % ddef.extent_size().value);
-
-            requests.push(crucible_protocol::ReadRequest { eid, offset });
-        }
-
-        let req = RegionReadRequest::new(&requests);
+        let req =
+            RegionReadRequest::new(BlockIndex(0), num_blocks as u64, &ddef);
         let read_from_region = region.region_read(&req, JobId(0))?.data;
 
         assert_eq!(buffer.len(), read_from_region.len());
@@ -2604,8 +2583,7 @@ pub(crate) mod test {
         region.extend(3, backend).unwrap();
 
         let ddef = region.def();
-        let num_blocks: usize =
-            ddef.extent_size().value as usize * ddef.extent_count() as usize;
+        let num_blocks = ddef.extent_size().value * ddef.extent_count() as u64;
 
         // use region_write_all to fill region with write_unwritten = true
         let buffer = region_write_all(&mut region, &ddef, true);
@@ -2617,17 +2595,7 @@ pub(crate) mod test {
         assert_eq!(buffer, read_from_files);
 
         // read all using region_read
-        let mut requests: Vec<crucible_protocol::ReadRequest> =
-            Vec::with_capacity(num_blocks);
-
-        for i in 0..num_blocks {
-            let eid = ExtentId((i as u64 / ddef.extent_size().value) as u32);
-            let offset = BlockOffset((i as u64) % ddef.extent_size().value);
-
-            requests.push(crucible_protocol::ReadRequest { eid, offset });
-        }
-
-        let req = RegionReadRequest::new(&requests);
+        let req = RegionReadRequest::new(BlockIndex(0), num_blocks, &ddef);
         let responses = region.region_read(&req, JobId(0)).unwrap();
 
         assert_eq!(buffer, responses.data);
@@ -2645,8 +2613,7 @@ pub(crate) mod test {
         let ddef = region.def();
         let total_size: usize = ddef.total_size() as usize;
         println!("Total size: {}", total_size);
-        let num_blocks: usize =
-            ddef.extent_size().value as usize * ddef.extent_count() as usize;
+        let num_blocks = ddef.extent_size().value * ddef.extent_count() as u64;
 
         // Fill a buffer with "9"'s
         let data = Bytes::from(vec![9u8; 512]);
@@ -2697,17 +2664,7 @@ pub(crate) mod test {
         assert_eq!(buffer, read_from_files);
 
         // read all using region_read
-        let mut requests: Vec<crucible_protocol::ReadRequest> =
-            Vec::with_capacity(num_blocks);
-
-        for i in 0..num_blocks {
-            let eid = ExtentId((i as u64 / ddef.extent_size().value) as u32);
-            let offset = BlockOffset((i as u64) % ddef.extent_size().value);
-
-            requests.push(crucible_protocol::ReadRequest { eid, offset });
-        }
-
-        let req = RegionReadRequest::new(&requests);
+        let req = RegionReadRequest::new(BlockIndex(0), num_blocks, &ddef);
         let responses = region.region_read(&req, JobId(0)).unwrap();
 
         assert_eq!(buffer, responses.data);
@@ -2724,8 +2681,7 @@ pub(crate) mod test {
         region.extend(3, backend).unwrap();
 
         let ddef = region.def();
-        let num_blocks: usize =
-            ddef.extent_size().value as usize * ddef.extent_count() as usize;
+        let num_blocks = ddef.extent_size().value * ddef.extent_count() as u64;
 
         // Fill a buffer with "9"'s
         let data = Bytes::from(vec![9u8; 512]);
@@ -2776,17 +2732,7 @@ pub(crate) mod test {
         assert_eq!(buffer, read_from_files);
 
         // read all using region_read
-        let mut requests: Vec<crucible_protocol::ReadRequest> =
-            Vec::with_capacity(num_blocks);
-
-        for i in 0..num_blocks {
-            let eid = ExtentId((i as u64 / ddef.extent_size().value) as u32);
-            let offset = BlockOffset((i as u64) % ddef.extent_size().value);
-
-            requests.push(crucible_protocol::ReadRequest { eid, offset });
-        }
-
-        let req = RegionReadRequest::new(&requests);
+        let req = RegionReadRequest::new(BlockIndex(0), num_blocks, &ddef);
         let responses = region.region_read(&req, JobId(0)).unwrap();
 
         assert_eq!(buffer, responses.data);
@@ -2807,8 +2753,8 @@ pub(crate) mod test {
         let ddef = region.def();
         // A bunch of things expect a 512, so let's make it explicit.
         assert_eq!(ddef.block_size(), 512);
-        let num_blocks: usize = 4;
-        let total_size: usize = ddef.block_size() as usize * num_blocks;
+        let num_blocks = 4;
+        let total_size = ddef.block_size() as usize * num_blocks as usize;
 
         // Fill a buffer with "9"'s
         let data = Bytes::from(vec![9u8; 512]);
@@ -2850,23 +2796,24 @@ pub(crate) mod test {
         println!("buffer size:{}", buffer.len());
         rng.fill_bytes(&mut buffer);
 
-        let block_contexts = buffer
+        let block_contexts: Vec<_> = buffer
             .chunks(512)
             .map(|chunk| BlockContext {
                 hash: integrity_hash(&[chunk]),
                 encryption_context: None,
             })
             .collect();
-        let write = ExtentWrite {
-            offset: BlockOffset(0),
-            data: Bytes::from(buffer.as_slice().to_vec()),
-            block_contexts,
-        };
 
         // send only_write_unwritten command.
         region
             .region_write(
-                &RegionWrite(vec![RegionWriteReq { extent: eid, write }]),
+                &RegionWrite::new(
+                    BlockIndex(0),
+                    &block_contexts,
+                    Bytes::from(buffer.as_slice().to_vec()),
+                    &ddef,
+                )
+                .unwrap(),
                 JobId(0),
                 true,
             )
@@ -2880,18 +2827,7 @@ pub(crate) mod test {
         }
 
         // read all using region_read
-        let mut requests: Vec<crucible_protocol::ReadRequest> =
-            Vec::with_capacity(num_blocks);
-
-        for i in 0..num_blocks {
-            let eid = ExtentId((i as u64 / ddef.extent_size().value) as u32);
-            let offset = BlockOffset((i as u64) % ddef.extent_size().value);
-
-            println!("Read eid: {}, {} offset: {:?}", eid, i, offset);
-            requests.push(crucible_protocol::ReadRequest { eid, offset });
-        }
-
-        let req = RegionReadRequest::new(&requests);
+        let req = RegionReadRequest::new(BlockIndex(0), num_blocks, &ddef);
         let responses = region.region_read(&req, JobId(0)).unwrap();
 
         assert_eq!(buffer, responses.data);
@@ -2908,8 +2844,7 @@ pub(crate) mod test {
         let ddef = region.def();
         let total_size: usize = ddef.total_size() as usize;
         println!("Total size: {}", total_size);
-        let num_blocks: usize =
-            ddef.extent_size().value as usize * ddef.extent_count() as usize;
+        let num_blocks = ddef.extent_size().value * ddef.extent_count() as u64;
 
         // Fill a buffer with "9"s
         let blocks_to_write = [1, 3, 7, 8, 11, 12, 13];
@@ -2961,17 +2896,7 @@ pub(crate) mod test {
         }
 
         // read all using region_read
-        let mut requests: Vec<crucible_protocol::ReadRequest> =
-            Vec::with_capacity(num_blocks);
-
-        for i in 0..num_blocks {
-            let eid = ExtentId((i as u64 / ddef.extent_size().value) as u32);
-            let offset = BlockOffset((i as u64) % ddef.extent_size().value);
-
-            requests.push(crucible_protocol::ReadRequest { eid, offset });
-        }
-
-        let req = RegionReadRequest::new(&requests);
+        let req = RegionReadRequest::new(BlockIndex(0), num_blocks, &ddef);
         let responses = region.region_read(&req, JobId(0)).unwrap();
 
         assert_eq!(buffer, responses.data);
@@ -3527,14 +3452,7 @@ pub(crate) mod test {
         let (_dir, mut region, data) = prepare_random_region(backend);
 
         // Call region_read with a single large contiguous range
-        let requests: Vec<crucible_protocol::ReadRequest> = (1..8)
-            .map(|i| crucible_protocol::ReadRequest {
-                eid: ExtentId(0),
-                offset: BlockOffset(i),
-            })
-            .collect();
-
-        let req = RegionReadRequest::new(&requests);
+        let req = RegionReadRequest::new(BlockIndex(1), 7, &region.def());
         let responses = region.region_read(&req, JobId(0)).unwrap();
 
         // Validate returned data
@@ -3546,100 +3464,11 @@ pub(crate) mod test {
 
         // Call region_read with a single large contiguous range that spans
         // multiple extents
-        let requests: Vec<crucible_protocol::ReadRequest> = (9..28)
-            .map(|i| crucible_protocol::ReadRequest {
-                eid: ExtentId(i / 10),
-                offset: BlockOffset(i as u64 % 10),
-            })
-            .collect();
-
-        let req = RegionReadRequest::new(&requests);
+        let req = RegionReadRequest::new(BlockIndex(9), 19, &region.def());
         let responses = region.region_read(&req, JobId(0)).unwrap();
 
         // Validate returned data
         assert_eq!(&responses.data, &data[(9 * 512)..(28 * 512)],);
-    }
-
-    fn test_read_multiple_disjoint_large_contiguous(backend: Backend) {
-        let (_dir, mut region, data) = prepare_random_region(backend);
-
-        // Call region_read with a multiple disjoint large contiguous ranges
-        let requests: Vec<crucible_protocol::ReadRequest> = vec![
-            (1..4)
-                .map(|i| crucible_protocol::ReadRequest {
-                    eid: ExtentId(i / 10),
-                    offset: BlockOffset(i as u64 % 10),
-                })
-                .collect::<Vec<crucible_protocol::ReadRequest>>(),
-            (15..24)
-                .map(|i| crucible_protocol::ReadRequest {
-                    eid: ExtentId(i / 10),
-                    offset: BlockOffset(i as u64 % 10),
-                })
-                .collect::<Vec<crucible_protocol::ReadRequest>>(),
-            (27..28)
-                .map(|i| crucible_protocol::ReadRequest {
-                    eid: ExtentId(i / 10),
-                    offset: BlockOffset(i as u64 % 10),
-                })
-                .collect::<Vec<crucible_protocol::ReadRequest>>(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-
-        let req = RegionReadRequest::new(&requests);
-        let responses = region.region_read(&req, JobId(0)).unwrap();
-
-        // Validate returned data
-        assert_eq!(
-            &responses.data,
-            &[
-                &data[512..(4 * 512)],
-                &data[(15 * 512)..(24 * 512)],
-                &data[(27 * 512)..(28 * 512)],
-            ]
-            .concat(),
-        );
-    }
-
-    fn test_read_multiple_disjoint_none_contiguous(backend: Backend) {
-        let (_dir, mut region, data) = prepare_random_region(backend);
-
-        // Call region_read with a multiple disjoint non-contiguous ranges
-        let requests: Vec<crucible_protocol::ReadRequest> = vec![
-            crucible_protocol::ReadRequest {
-                eid: ExtentId(0),
-                offset: BlockOffset(0),
-            },
-            crucible_protocol::ReadRequest {
-                eid: ExtentId(1),
-                offset: BlockOffset(4),
-            },
-            crucible_protocol::ReadRequest {
-                eid: ExtentId(1),
-                offset: BlockOffset(9),
-            },
-            crucible_protocol::ReadRequest {
-                eid: ExtentId(2),
-                offset: BlockOffset(4),
-            },
-        ];
-
-        let req = RegionReadRequest::new(&requests);
-        let responses = region.region_read(&req, JobId(0)).unwrap();
-
-        // Validate returned data
-        assert_eq!(
-            &responses.data,
-            &[
-                &data[0..512],
-                &data[(14 * 512)..(15 * 512)],
-                &data[(19 * 512)..(20 * 512)],
-                &data[(24 * 512)..(25 * 512)],
-            ]
-            .concat(),
-        );
     }
 
     fn prepare_writes(
@@ -3689,14 +3518,8 @@ pub(crate) mod test {
         let num_blocks = region.def().extent_size().value
             * region.def().extent_count() as u64;
 
-        let requests: Vec<crucible_protocol::ReadRequest> = (0..num_blocks)
-            .map(|i| crucible_protocol::ReadRequest {
-                eid: ExtentId((i / 10) as u32),
-                offset: BlockOffset(i % 10),
-            })
-            .collect();
-
-        let req = RegionReadRequest::new(&requests);
+        let req =
+            RegionReadRequest::new(BlockIndex(0), num_blocks, &region.def());
         let responses = region.region_read(&req, JobId(1)).unwrap();
 
         assert_eq!(&responses.data, &data,);
@@ -3721,47 +3544,6 @@ pub(crate) mod test {
         // Call region_write with a single large contiguous range that spans
         // multiple extents
         let writes = RegionWrite(prepare_writes(9..28, &mut data));
-
-        region.region_write(&writes, JobId(0), false).unwrap();
-
-        // Validate written data by reading everything back and comparing with
-        // data buffer
-        validate_whole_region(&mut region, &data);
-    }
-
-    fn test_write_multiple_disjoint_large_contiguous(backend: Backend) {
-        let (_dir, mut region, mut data) = prepare_random_region(backend);
-
-        // Call region_write with a multiple disjoint large contiguous ranges
-        let writes = RegionWrite(
-            [
-                prepare_writes(1..4, &mut data),
-                prepare_writes(15..24, &mut data),
-                prepare_writes(27..28, &mut data),
-            ]
-            .concat(),
-        );
-
-        region.region_write(&writes, JobId(0), false).unwrap();
-
-        // Validate written data by reading everything back and comparing with
-        // data buffer
-        validate_whole_region(&mut region, &data);
-    }
-
-    fn test_write_multiple_disjoint_none_contiguous(backend: Backend) {
-        let (_dir, mut region, mut data) = prepare_random_region(backend);
-
-        // Call region_write with a multiple disjoint non-contiguous ranges
-        let writes = RegionWrite(
-            [
-                prepare_writes(0..1, &mut data),
-                prepare_writes(14..15, &mut data),
-                prepare_writes(19..20, &mut data),
-                prepare_writes(24..25, &mut data),
-            ]
-            .concat(),
-        );
 
         region.region_write(&writes, JobId(0), false).unwrap();
 
@@ -3819,71 +3601,6 @@ pub(crate) mod test {
         validate_whole_region(&mut region, &data);
     }
 
-    fn test_write_unwritten_multiple_disjoint_large_contiguous(
-        backend: Backend,
-    ) {
-        // Create a blank region
-        let dir = tempdir().unwrap();
-        let mut region =
-            Region::create(&dir, new_region_options(), csl()).unwrap();
-
-        // Create 3 extents, each size 10 blocks
-        assert_eq!(region.def().extent_size().value, 10);
-        region.extend(3, backend).unwrap();
-
-        let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
-
-        // Call region_write with a multiple disjoint large contiguous ranges
-        let writes = RegionWrite(
-            [
-                prepare_writes(1..4, &mut data),
-                prepare_writes(15..24, &mut data),
-                prepare_writes(27..28, &mut data),
-            ]
-            .concat(),
-        );
-
-        // write_unwritten = true
-        region.region_write(&writes, JobId(0), true).unwrap();
-
-        // Validate written data by reading everything back and comparing with
-        // data buffer
-        validate_whole_region(&mut region, &data);
-    }
-
-    fn test_write_unwritten_multiple_disjoint_none_contiguous(
-        backend: Backend,
-    ) {
-        // Create a blank region
-        let dir = tempdir().unwrap();
-        let mut region =
-            Region::create(&dir, new_region_options(), csl()).unwrap();
-
-        // Create 3 extents, each size 10 blocks
-        assert_eq!(region.def().extent_size().value, 10);
-        region.extend(3, backend).unwrap();
-
-        let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
-
-        // Call region_write with a multiple disjoint non-contiguous ranges
-        let writes = RegionWrite(
-            [
-                prepare_writes(0..1, &mut data),
-                prepare_writes(14..15, &mut data),
-                prepare_writes(19..20, &mut data),
-                prepare_writes(24..25, &mut data),
-            ]
-            .concat(),
-        );
-
-        // write_unwritten = true
-        region.region_write(&writes, JobId(0), true).unwrap();
-
-        // Validate written data by reading everything back and comparing with
-        // data buffer
-        validate_whole_region(&mut region, &data);
-    }
-
     /// Macro defining the full region test suite
     ///
     /// Functions in the test suite should take a `b: Backend` parameter and
@@ -3931,17 +3648,11 @@ pub(crate) mod test {
                 test_bad_hash_bad,
                 test_blank_block_read_ok,
                 test_read_single_large_contiguous,
-                test_read_multiple_disjoint_large_contiguous,
-                test_read_multiple_disjoint_none_contiguous,
                 test_write_single_large_contiguous,
                 test_write_single_large_contiguous_span_extents,
-                test_write_multiple_disjoint_large_contiguous,
-                test_write_multiple_disjoint_none_contiguous,
                 test_write_unwritten_single_large_contiguous,
                 test_write_unwritten_single_large_contiguous_span_extents,
-                test_write_unwritten_multiple_disjoint_large_contiguous,
-                test_read_single_large_contiguous_span_extents,
-                test_write_unwritten_multiple_disjoint_none_contiguous
+                test_read_single_large_contiguous_span_extents
             );
         };
 
