@@ -7,7 +7,7 @@ use std::{iter::FusedIterator, ops::RangeInclusive};
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ImpactedAddr {
     pub extent_id: ExtentId,
-    pub block: u64,
+    pub block: BlockOffset,
 }
 
 /// Store a list of impacted blocks for later job dependency calculation
@@ -28,32 +28,28 @@ pub enum ImpactedBlocks {
 /// An iteration over the blocks in an ImpactedBlocks range
 pub struct ImpactedBlockIter {
     extent_size: u64,
-    block_shift: u32,
     active_range: Option<(ImpactedAddr, ImpactedAddr)>,
 }
 
 impl Iterator for ImpactedBlockIter {
-    type Item = (ExtentId, Block);
+    type Item = (ExtentId, BlockOffset);
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         match &mut self.active_range {
             None => None,
             Some((first, last)) => {
-                let result = (
-                    first.extent_id,
-                    Block::new(first.block, self.block_shift),
-                );
+                let result = (first.extent_id, first.block);
 
                 // If next == last, then the iterator is now done. Otherwise,
                 // increment next.
                 if first == last {
                     self.active_range = None
-                } else if first.block == self.extent_size - 1 {
-                    first.block = 0;
+                } else if first.block.0 == self.extent_size - 1 {
+                    first.block.0 = 0;
                     first.extent_id += 1;
                 } else {
-                    first.block += 1;
+                    first.block.0 += 1;
                 }
 
                 Some(result)
@@ -73,9 +69,8 @@ impl Iterator for ImpactedBlockIter {
     where
         Self: Sized,
     {
-        self.active_range.map(|(_, last)| {
-            (last.extent_id, Block::new(last.block, self.block_shift))
-        })
+        self.active_range
+            .map(|(_, last)| (last.extent_id, last.block))
     }
 }
 
@@ -85,7 +80,7 @@ impl ExactSizeIterator for ImpactedBlockIter {
             None => 0,
             Some((fst, lst)) => {
                 let extents = (lst.extent_id - fst.extent_id) as u64;
-                (extents * self.extent_size + lst.block - fst.block + 1)
+                (extents * self.extent_size + lst.block.0 - fst.block.0 + 1)
                     as usize
             }
         }
@@ -98,18 +93,17 @@ impl DoubleEndedIterator for ImpactedBlockIter {
         match &mut self.active_range {
             None => None,
             Some((first, last)) => {
-                let result =
-                    (last.extent_id, Block::new(last.block, self.block_shift));
+                let result = (last.extent_id, last.block);
 
                 // If first == last, then the iterator is now done. Otherwise,
                 // increment first.
                 if first == last {
                     self.active_range = None
-                } else if last.block == 0 {
-                    last.block = self.extent_size - 1;
+                } else if last.block.0 == 0 {
+                    last.block.0 = self.extent_size - 1;
                     last.extent_id -= 1;
                 } else {
-                    last.block -= 1;
+                    last.block.0 -= 1;
                 }
 
                 Some(result)
@@ -152,12 +146,12 @@ impl ImpactedBlocks {
         // So because we're inclusive, if we have 1 block then the first
         // impacted should be the same as the last impacted. If we have
         // 2 blocks, it's +1. etc.
-        let ending_block = n_blocks + first_impacted.block - 1;
+        let ending_block = n_blocks + first_impacted.block.0 - 1;
 
         let last_impacted = ImpactedAddr {
             extent_id: first_impacted.extent_id
                 + (ending_block / extent_size) as u32,
-            block: ending_block % extent_size,
+            block: BlockOffset(ending_block % extent_size),
         };
 
         ImpactedBlocks::InclusiveRange(first_impacted, last_impacted)
@@ -221,7 +215,6 @@ impl ImpactedBlocks {
 
     pub fn blocks(&self, ddef: &RegionDefinition) -> ImpactedBlockIter {
         let extent_size = ddef.extent_size().value;
-        let block_shift = ddef.block_size().trailing_zeros();
         let active_range = match self {
             ImpactedBlocks::Empty => None,
             ImpactedBlocks::InclusiveRange(fst, lst) => Some((*fst, *lst)),
@@ -229,7 +222,6 @@ impl ImpactedBlocks {
 
         ImpactedBlockIter {
             extent_size,
-            block_shift,
             active_range,
         }
     }
@@ -240,7 +232,7 @@ impl ImpactedBlocks {
     }
 }
 
-/// Given an offset and number of blocks, compute a list of individually
+/// Given an global offset and number of blocks, compute a list of individually
 /// impacted blocks:
 ///
 ///  |eid0                   |eid1
@@ -265,7 +257,7 @@ impl ImpactedBlocks {
 ///  }
 pub fn extent_from_offset(
     ddef: &RegionDefinition,
-    offset: Block,
+    offset: BlockIndex,
     num_blocks: Block,
 ) -> ImpactedBlocks {
     let extent_size = ddef.extent_size().value;
@@ -274,22 +266,21 @@ pub fn extent_from_offset(
     // If we get invalid data at this point, something has gone terribly
     // wrong further up the stack. So here's the assumptions we're making:
     // First, our blocks are actually the same size as this region's blocks
-    assert_eq!(offset.shift, shift);
     assert_eq!(num_blocks.shift, shift);
 
     // Second, the offset is actually within the region
-    assert!(offset.value < ddef.extent_count() as u64 * extent_size);
+    assert!(offset.0 < ddef.extent_count() as u64 * extent_size);
 
     // Third, the last block is also within the region. These are widened to
     // u128 in order to catch the case where first_block + n_blocks == u64::MAX.
     assert!(
-        offset.value as u128 + num_blocks.value as u128
+        offset.0 as u128 + num_blocks.value as u128
             <= ddef.extent_count() as u128 * extent_size as u128
     );
 
     let fst = ImpactedAddr {
-        extent_id: ExtentId((offset.value / extent_size) as u32),
-        block: offset.value % extent_size,
+        extent_id: ExtentId((offset.0 / extent_size) as u32),
+        block: BlockOffset(offset.0 % extent_size),
     };
 
     ImpactedBlocks::from_offset(extent_size, fst, num_blocks.value)
@@ -302,11 +293,11 @@ pub fn extent_to_impacted_blocks(
     assert!(eid.0 < ddef.extent_count());
     let one = ImpactedAddr {
         extent_id: eid,
-        block: 0,
+        block: BlockOffset(0),
     };
     let two = ImpactedAddr {
         extent_id: eid,
-        block: ddef.extent_size().value - 1,
+        block: BlockOffset(ddef.extent_size().value - 1),
     };
     ImpactedBlocks::InclusiveRange(one, two)
 }
@@ -319,8 +310,8 @@ mod test {
     use std::panic::UnwindSafe;
     use test_strategy::{proptest, Arbitrary};
 
-    fn extent_tuple(eid: u32, offset: u64) -> (ExtentId, Block) {
-        (ExtentId(eid), Block::new_512(offset))
+    fn extent_tuple(eid: u32, offset: u64) -> (ExtentId, BlockOffset) {
+        (ExtentId(eid), BlockOffset(offset))
     }
 
     fn basic_region_definition(
@@ -344,21 +335,21 @@ mod test {
         assert_eq!(
             extent_to_impacted_blocks(ddef, ExtentId(0))
                 .blocks(ddef)
-                .collect::<Vec<(ExtentId, Block)>>(),
+                .collect::<Vec<_>>(),
             vec![extent_tuple(0, 0), extent_tuple(0, 1)],
         );
         // Somewhere in the middle
         assert_eq!(
             extent_to_impacted_blocks(ddef, ExtentId(3))
                 .blocks(ddef)
-                .collect::<Vec<(ExtentId, Block)>>(),
+                .collect::<Vec<_>>(),
             vec![extent_tuple(3, 0), extent_tuple(3, 1)],
         );
         // Last
         assert_eq!(
             extent_to_impacted_blocks(ddef, ExtentId(9))
                 .blocks(ddef)
-                .collect::<Vec<(ExtentId, Block)>>(),
+                .collect::<Vec<_>>(),
             vec![extent_tuple(9, 0), extent_tuple(9, 1)],
         );
     }
@@ -372,7 +363,7 @@ mod test {
         assert_eq!(
             extent_to_impacted_blocks(ddef, ExtentId(0))
                 .blocks(ddef)
-                .collect::<Vec<(ExtentId, Block)>>(),
+                .collect::<Vec<_>>(),
             vec![
                 extent_tuple(0, 0),
                 extent_tuple(0, 1),
@@ -389,7 +380,7 @@ mod test {
         assert_eq!(
             extent_to_impacted_blocks(ddef, ExtentId(2))
                 .blocks(ddef)
-                .collect::<Vec<(ExtentId, Block)>>(),
+                .collect::<Vec<_>>(),
             vec![
                 extent_tuple(2, 0),
                 extent_tuple(2, 1),
@@ -406,7 +397,7 @@ mod test {
         assert_eq!(
             extent_to_impacted_blocks(ddef, ExtentId(4))
                 .blocks(ddef)
-                .collect::<Vec<(ExtentId, Block)>>(),
+                .collect::<Vec<_>>(),
             vec![
                 extent_tuple(4, 0),
                 extent_tuple(4, 1),
@@ -429,25 +420,25 @@ mod test {
 
         // Test block size, less than extent size
         assert_eq!(
-            extent_from_offset(ddef, Block::new_512(0), Block::new_512(1))
+            extent_from_offset(ddef, BlockIndex(0), Block::new_512(1))
                 .blocks(ddef)
-                .collect::<Vec<(ExtentId, Block)>>(),
+                .collect::<Vec<_>>(),
             vec![extent_tuple(0, 0)],
         );
 
         // Test greater than block size, less than extent size
         assert_eq!(
-            extent_from_offset(ddef, Block::new_512(0), Block::new_512(2))
+            extent_from_offset(ddef, BlockIndex(0), Block::new_512(2))
                 .blocks(ddef)
-                .collect::<Vec<(ExtentId, Block)>>(),
+                .collect::<Vec<_>>(),
             vec![extent_tuple(0, 0), extent_tuple(0, 1)],
         );
 
         // Test greater than extent size
         assert_eq!(
-            extent_from_offset(ddef, Block::new_512(0), Block::new_512(4))
+            extent_from_offset(ddef, BlockIndex(0), Block::new_512(4))
                 .blocks(ddef)
-                .collect::<Vec<(ExtentId, Block)>>(),
+                .collect::<Vec<_>>(),
             vec![
                 extent_tuple(0, 0),
                 extent_tuple(0, 1),
@@ -458,9 +449,9 @@ mod test {
 
         // Test offsets
         assert_eq!(
-            extent_from_offset(ddef, Block::new_512(1), Block::new_512(4))
+            extent_from_offset(ddef, BlockIndex(1), Block::new_512(4))
                 .blocks(ddef)
-                .collect::<Vec<(ExtentId, Block)>>(),
+                .collect::<Vec<_>>(),
             vec![
                 extent_tuple(0, 1),
                 extent_tuple(1, 0),
@@ -470,9 +461,9 @@ mod test {
         );
 
         assert_eq!(
-            extent_from_offset(ddef, Block::new_512(2), Block::new_512(4))
+            extent_from_offset(ddef, BlockIndex(2), Block::new_512(4))
                 .blocks(ddef)
-                .collect::<Vec<(ExtentId, Block)>>(),
+                .collect::<Vec<_>>(),
             vec![
                 extent_tuple(1, 0),
                 extent_tuple(1, 1),
@@ -482,9 +473,9 @@ mod test {
         );
 
         assert_eq!(
-            extent_from_offset(ddef, Block::new_512(2), Block::new_512(16))
+            extent_from_offset(ddef, BlockIndex(2), Block::new_512(16))
                 .blocks(ddef)
-                .collect::<Vec<(ExtentId, Block)>>(),
+                .collect::<Vec<_>>(),
             vec![
                 extent_tuple(1, 0),
                 extent_tuple(1, 1),
@@ -513,33 +504,33 @@ mod test {
         assert_eq!(
             extent_from_offset(
                 ddef,
-                Block::new_512(2), // offset
+                BlockIndex(2),     // offset
                 Block::new_512(1), // num_blocks
             )
             .blocks(ddef)
-            .collect::<Vec<(ExtentId, Block)>>(),
+            .collect::<Vec<_>>(),
             vec![extent_tuple(1, 0)]
         );
 
         assert_eq!(
             extent_from_offset(
                 ddef,
-                Block::new_512(2), // offset
+                BlockIndex(2),     // offset
                 Block::new_512(2), // num_blocks
             )
             .blocks(ddef)
-            .collect::<Vec<(ExtentId, Block)>>(),
+            .collect::<Vec<_>>(),
             vec![extent_tuple(1, 0), extent_tuple(1, 1)]
         );
 
         assert_eq!(
             extent_from_offset(
                 ddef,
-                Block::new_512(2), // offset
+                BlockIndex(2),     // offset
                 Block::new_512(3), // num_blocks
             )
             .blocks(ddef)
-            .collect::<Vec<(ExtentId, Block)>>(),
+            .collect::<Vec<_>>(),
             vec![extent_tuple(1, 0), extent_tuple(1, 1), extent_tuple(2, 0)]
         );
     }
@@ -553,11 +544,11 @@ mod test {
         let _ = ImpactedBlocks::new(
             ImpactedAddr {
                 extent_id: ExtentId(1),
-                block: 0,
+                block: BlockOffset(0),
             },
             ImpactedAddr {
                 extent_id: ExtentId(0),
-                block: 0,
+                block: BlockOffset(0),
             },
         );
     }
@@ -571,11 +562,11 @@ mod test {
         let _ = ImpactedBlocks::new(
             ImpactedAddr {
                 extent_id: ExtentId(0),
-                block: 1,
+                block: BlockOffset(1),
             },
             ImpactedAddr {
                 extent_id: ExtentId(0),
-                block: 0,
+                block: BlockOffset(0),
             },
         );
     }
@@ -590,13 +581,13 @@ mod test {
         // Test that extent-aligned creation works
         let fst = ImpactedAddr {
             extent_id: ExtentId(2),
-            block: 20,
+            block: BlockOffset(20),
         };
         let control = ImpactedBlocks::new(
             fst,
             ImpactedAddr {
                 extent_id: ExtentId(4),
-                block: 19,
+                block: BlockOffset(19),
             },
         );
         assert_eq!(
@@ -607,13 +598,13 @@ mod test {
         // Single block within a single extent
         let fst = ImpactedAddr {
             extent_id: ExtentId(2),
-            block: 20,
+            block: BlockOffset(20),
         };
         let control = ImpactedBlocks::new(
             fst,
             ImpactedAddr {
                 extent_id: ExtentId(2),
-                block: 20,
+                block: BlockOffset(20),
             },
         );
         assert_eq!(control, ImpactedBlocks::from_offset(EXTENT_SIZE, fst, 1));
@@ -621,13 +612,13 @@ mod test {
         // Ending on the end of an extent should work
         let fst = ImpactedAddr {
             extent_id: ExtentId(2),
-            block: 20,
+            block: BlockOffset(20),
         };
         let control = ImpactedBlocks::new(
             fst,
             ImpactedAddr {
                 extent_id: ExtentId(2),
-                block: EXTENT_SIZE - 1,
+                block: BlockOffset(EXTENT_SIZE - 1),
             },
         );
         assert_eq!(
@@ -635,20 +626,20 @@ mod test {
             ImpactedBlocks::from_offset(
                 EXTENT_SIZE,
                 fst,
-                EXTENT_SIZE - fst.block,
+                EXTENT_SIZE - fst.block.0,
             )
         );
 
         // Ending on the start of an extent should work
         let fst = ImpactedAddr {
             extent_id: ExtentId(2),
-            block: 20,
+            block: BlockOffset(20),
         };
         let control = ImpactedBlocks::new(
             fst,
             ImpactedAddr {
                 extent_id: ExtentId(3),
-                block: 0,
+                block: BlockOffset(0),
             },
         );
         assert_eq!(
@@ -656,7 +647,7 @@ mod test {
             ImpactedBlocks::from_offset(
                 EXTENT_SIZE,
                 fst,
-                EXTENT_SIZE - fst.block + 1,
+                EXTENT_SIZE - fst.block.0 + 1,
             )
         );
 
@@ -746,7 +737,7 @@ mod test {
                             .try_into()
                             .unwrap(),
                     ),
-                    block: left_block.index(extent_size) as u64,
+                    block: BlockOffset(left_block.index(extent_size) as u64),
                 };
 
                 let extent_offset: u32 = right_eid_offset
@@ -757,10 +748,12 @@ mod test {
                     .unwrap();
                 let right_addr = ImpactedAddr {
                     extent_id: left_addr.extent_id + extent_offset,
-                    block: right_block_offset
-                        .index(extent_size - left_addr.block as usize)
-                        as u64
-                        + left_addr.block,
+                    block: BlockOffset(
+                        right_block_offset
+                            .index(extent_size - left_addr.block.0 as usize)
+                            as u64
+                            + left_addr.block.0,
+                    ),
                 };
 
                 ImpactedBlocks::InclusiveRange(left_addr, right_addr)
@@ -956,7 +949,7 @@ mod test {
                 extent_size,
                 ImpactedAddr {
                     extent_id: ExtentId(start_eid),
-                    block: start_block
+                    block: BlockOffset(start_block),
                 },
                 0
             ),
@@ -975,7 +968,7 @@ mod test {
                 0,
                 ImpactedAddr {
                     extent_id: ExtentId(start_eid),
-                    block: start_block,
+                    block: BlockOffset(start_block),
                 },
                 n_blocks,
             )
@@ -994,12 +987,12 @@ mod test {
     ) {
         let start_addr = ImpactedAddr {
             extent_id: ExtentId(start_eid),
-            block: start_block,
+            block: BlockOffset(start_block),
         };
 
         let end_addr = ImpactedAddr {
             extent_id: ExtentId(end_eid),
-            block: end_block,
+            block: BlockOffset(end_block),
         };
 
         prop_should_panic(|| ImpactedBlocks::new(end_addr, start_addr))?;
@@ -1024,11 +1017,11 @@ mod test {
         let iblocks = ImpactedBlocks::new(
             ImpactedAddr {
                 extent_id: start_eid,
-                block: start_block,
+                block: BlockOffset(start_block),
             },
             ImpactedAddr {
                 extent_id: end_eid,
-                block: end_block,
+                block: BlockOffset(end_block),
             },
         );
 
@@ -1042,7 +1035,7 @@ mod test {
         let mut cur_eid = start_eid;
         let mut cur_block = start_block;
         loop {
-            expected_addresses.push((cur_eid, Block::new_512(cur_block)));
+            expected_addresses.push((cur_eid, BlockOffset(cur_block)));
             if cur_eid == end_eid && cur_block == end_block {
                 break;
             }
@@ -1055,7 +1048,7 @@ mod test {
         }
 
         prop_assert_eq!(
-            iblocks.blocks(&ddef).collect::<Vec<(ExtentId, Block)>>(),
+            iblocks.blocks(&ddef).collect::<Vec<_>>(),
             expected_addresses
         );
     }
@@ -1100,22 +1093,22 @@ mod test {
         let iblocks_a = ImpactedBlocks::new(
             ImpactedAddr {
                 extent_id: ExtentId(eid_a),
-                block: block_a,
+                block: BlockOffset(block_a),
             },
             ImpactedAddr {
                 extent_id: ExtentId(eid_c),
-                block: block_c,
+                block: BlockOffset(block_c),
             },
         );
 
         let iblocks_b = ImpactedBlocks::new(
             ImpactedAddr {
                 extent_id: ExtentId(eid_b),
-                block: block_b,
+                block: BlockOffset(block_b),
             },
             ImpactedAddr {
                 extent_id: ExtentId(eid_d),
-                block: block_d,
+                block: BlockOffset(block_d),
             },
         );
 
@@ -1164,22 +1157,22 @@ mod test {
         let outer_iblocks = ImpactedBlocks::new(
             ImpactedAddr {
                 extent_id: ExtentId(outer_eid_a),
-                block: outer_block_a,
+                block: BlockOffset(outer_block_a),
             },
             ImpactedAddr {
                 extent_id: ExtentId(outer_eid_b),
-                block: outer_block_b,
+                block: BlockOffset(outer_block_b),
             },
         );
 
         let inner_iblocks = ImpactedBlocks::new(
             ImpactedAddr {
                 extent_id: ExtentId(inner_eid_a),
-                block: inner_block_a,
+                block: BlockOffset(inner_block_a),
             },
             ImpactedAddr {
                 extent_id: ExtentId(inner_eid_b),
-                block: inner_block_b,
+                block: BlockOffset(inner_block_b),
             },
         );
 
@@ -1202,9 +1195,8 @@ mod test {
 
         let shift = ddef.block_size().trailing_zeros();
         let (first_eid, first_block) = iblocks.blocks(&ddef).next().unwrap();
-        let first = Block::new(
-            first_block.value + first_eid.0 as u64 * ddef.extent_size().value,
-            shift,
+        let first = BlockIndex(
+            first_block.0 + first_eid.0 as u64 * ddef.extent_size().value,
         );
         let num_blocks = Block::new(iblocks.len(&ddef) as u64, shift);
 
@@ -1224,7 +1216,7 @@ mod test {
         #[strategy(region_def_strategy())] ddef: RegionDefinition,
     ) {
         let shift = ddef.block_size().trailing_zeros();
-        let first = Block::new(first_block, shift);
+        let first = BlockIndex(first_block);
         let num_blocks = Block::new(n_blocks, shift);
 
         prop_should_panic(|| extent_from_offset(&ddef, first, num_blocks))?;
@@ -1242,7 +1234,7 @@ mod test {
         #[strategy(region_def_strategy())] ddef: RegionDefinition,
     ) {
         let shift = ddef.block_size().trailing_zeros();
-        let first = Block::new(first_block, shift);
+        let first = BlockIndex(first_block);
         let num_blocks = Block::new(n_blocks, shift);
 
         prop_should_panic(|| extent_from_offset(&ddef, first, num_blocks))?;
@@ -1258,11 +1250,11 @@ mod test {
     ) {
         let addr_a = ImpactedAddr {
             extent_id: ExtentId(eid_a),
-            block: block_a,
+            block: BlockOffset(block_a),
         };
         let addr_b = ImpactedAddr {
             extent_id: ExtentId(eid_b),
-            block: block_b,
+            block: BlockOffset(block_b),
         };
         let iblocks = ImpactedBlocks::new(addr_a, addr_b);
         prop_assert_eq!(iblocks.extents(), Some(eid_a..=eid_b));

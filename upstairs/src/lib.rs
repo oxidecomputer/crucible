@@ -972,22 +972,7 @@ impl DownstairsIO {
      * We don't consider repair IOs in the size calculation.
      */
     pub fn io_size(&self) -> usize {
-        match &self.work {
-            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
-                data.len()
-            }
-            IOop::Read { requests, .. } => {
-                let Some(r) = requests.first() else {
-                    return 0;
-                };
-                r.offset.block_size_in_bytes() as usize * requests.len()
-            }
-            IOop::Flush { .. }
-            | IOop::ExtentFlushClose { .. }
-            | IOop::ExtentLiveRepair { .. }
-            | IOop::ExtentLiveReopen { .. }
-            | IOop::ExtentLiveNoOp { .. } => 0,
-        }
+        self.work.job_bytes() as usize
     }
 
     /*
@@ -1119,6 +1104,7 @@ enum IOop {
     },
     Read {
         dependencies: Vec<JobId>, // Jobs that must finish before this
+        block_size: u64,
         requests: Vec<ReadRequest>,
     },
     Flush {
@@ -1193,6 +1179,7 @@ impl IOop {
             IOop::Read {
                 dependencies,
                 requests,
+                ..
             } => {
                 let job_type = "Read".to_string();
                 let num_blocks = requests.len();
@@ -1304,13 +1291,11 @@ impl IOop {
             IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
                 data.len() as u64
             }
-            IOop::Read { requests, .. } => {
-                requests
-                    .first()
-                    .map(|r| r.offset.block_size_in_bytes())
-                    .unwrap_or(0) as u64
-                    * requests.len() as u64
-            }
+            IOop::Read {
+                requests,
+                block_size,
+                ..
+            } => requests.len() as u64 * block_size,
             _ => 0,
         }
     }
@@ -1493,17 +1478,17 @@ impl fmt::Display for AckStatus {
 #[derive(Debug)]
 pub(crate) enum BlockOp {
     Read {
-        offset: Block,
+        offset: BlockIndex,
         data: Buffer,
         done: BlockRes<Buffer, (Buffer, CrucibleError)>,
     },
     Write {
-        offset: Block,
+        offset: BlockIndex,
         data: BytesMut,
         done: BlockRes,
     },
     WriteUnwritten {
-        offset: Block,
+        offset: BlockIndex,
         data: BytesMut,
         done: BlockRes,
     },
@@ -1616,28 +1601,28 @@ async fn test_return_iops() {
     const IOP_SZ: usize = 16000;
 
     let op = BlockOp::Read {
-        offset: Block::new_512(1),
+        offset: BlockIndex(1),
         data: Buffer::new(1, 512),
         done: BlockOpWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
-        offset: Block::new_512(1),
+        offset: BlockIndex(1),
         data: Buffer::new(8, 512), // 4096 bytes
         done: BlockOpWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
-        offset: Block::new_512(1),
+        offset: BlockIndex(1),
         data: Buffer::new(31, 512), // 15872 bytes < 16000
         done: BlockOpWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
-        offset: Block::new_512(1),
+        offset: BlockIndex(1),
         data: Buffer::new(32, 512), // 16384 bytes > 16000
         done: BlockOpWaiter::pair().1,
     };

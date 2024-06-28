@@ -18,6 +18,7 @@ use crate::DsState;
 use crate::{IO_OUTSTANDING_MAX_BYTES, IO_OUTSTANDING_MAX_JOBS};
 use crucible_client_types::CrucibleOpts;
 use crucible_common::Block;
+use crucible_common::BlockOffset;
 use crucible_common::ExtentId;
 use crucible_common::RegionDefinition;
 use crucible_common::RegionOptions;
@@ -616,7 +617,7 @@ fn make_blank_read_response() -> (ReadResponseBlockMetadata, BytesMut) {
     (
         ReadResponseBlockMetadata {
             eid: ExtentId(0),
-            offset: Block::new_512(0),
+            offset: BlockOffset(0),
             block_context: Some(BlockContext {
                 hash,
                 encryption_context: None,

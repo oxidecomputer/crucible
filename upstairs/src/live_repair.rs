@@ -1148,16 +1148,16 @@ pub mod repair_test {
         finish_live_repair(&mut up, 1000);
 
         up.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from(vec![0xff; 512].as_slice()),
             false,
         );
 
-        up.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
+        up.submit_dummy_read(BlockIndex(0), Buffer::new(1, 512));
 
         // WriteUnwritten
         up.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from(vec![0xff; 512].as_slice()),
             true,
         );
@@ -1183,16 +1183,16 @@ pub mod repair_test {
         let mut up = start_up_and_repair(ClientId::new(1));
 
         up.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from(vec![0xff; 512].as_slice()),
             false,
         );
 
-        up.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
+        up.submit_dummy_read(BlockIndex(0), Buffer::new(1, 512));
 
         // WriteUnwritten
         up.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from(vec![0xff; 512].as_slice()),
             true,
         );
@@ -1214,16 +1214,16 @@ pub mod repair_test {
         let mut up = start_up_and_repair(ClientId::new(1));
 
         up.submit_dummy_write(
-            Block::new_512(3),
+            BlockIndex(3),
             BytesMut::from(vec![0xff; 512].as_slice()),
             false,
         );
 
-        up.submit_dummy_read(Block::new_512(3), Buffer::new(1, 512));
+        up.submit_dummy_read(BlockIndex(3), Buffer::new(1, 512));
 
         // WriteUnwritten
         up.submit_dummy_write(
-            Block::new_512(3),
+            BlockIndex(3),
             BytesMut::from(vec![0xff; 512].as_slice()),
             true,
         );
@@ -1296,16 +1296,16 @@ pub mod repair_test {
 
         // Our default extent size is 3, so 9 blocks will span 3 extents
         up.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from(vec![0xff; 512 * 9].as_slice()),
             false,
         );
 
-        up.submit_dummy_read(Block::new_512(0), Buffer::new(9, 512));
+        up.submit_dummy_read(BlockIndex(0), Buffer::new(9, 512));
 
         // WriteUnwritten
         up.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from(vec![0xff; 512 * 9].as_slice()),
             true,
         );
@@ -1362,7 +1362,7 @@ pub mod repair_test {
         finish_live_repair(&mut up, 1000);
 
         // Our default extent size is 3, so 9 blocks will span 3 extents
-        up.submit_dummy_read(Block::new_512(0), Buffer::new(9, 512));
+        up.submit_dummy_read(BlockIndex(0), Buffer::new(9, 512));
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         up.show_all_work();
@@ -1423,7 +1423,7 @@ pub mod repair_test {
 
         // Our default extent size is 3, so 9 blocks will span 3 extents
         up.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from(vec![0xff; 512 * 9].as_slice()),
             false,
         );
@@ -1487,7 +1487,7 @@ pub mod repair_test {
 
         // Our default extent size is 3, so block 3 will be on extent 1
         up.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from(vec![0xff; 512 * 9].as_slice()),
             false,
         );

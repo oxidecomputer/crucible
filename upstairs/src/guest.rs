@@ -14,7 +14,9 @@ use crate::{
     ReplaceResult, UpstairsAction, IO_OUTSTANDING_MAX_BYTES,
     IO_OUTSTANDING_MAX_JOBS,
 };
-use crucible_common::{build_logger, crucible_bail, Block, CrucibleError};
+use crucible_common::{
+    build_logger, crucible_bail, Block, BlockIndex, CrucibleError,
+};
 use crucible_protocol::SnapshotDetails;
 
 use async_trait::async_trait;
@@ -611,7 +613,7 @@ impl BlockIO for Guest {
             let offset_change = chunk.len() as u64 / bs;
             let (rx, done) = BlockOpWaiter::pair();
             let rio = BlockOp::Read {
-                offset,
+                offset: BlockIndex(offset.value),
                 data: chunk,
                 done,
             };
@@ -679,7 +681,7 @@ impl BlockIO for Guest {
 
             let reply = self
                 .send_and_wait(|done| BlockOp::Write {
-                    offset,
+                    offset: BlockIndex(offset.value),
                     data: buf,
                     done,
                 })
@@ -708,7 +710,7 @@ impl BlockIO for Guest {
 
         self.backpressure_sleep().await;
         self.send_and_wait(|done| BlockOp::WriteUnwritten {
-            offset,
+            offset: BlockIndex(offset.value),
             data,
             done,
         })
@@ -1059,21 +1061,21 @@ mod test {
         // never be answered.
         let _ = guest
             .send(BlockOp::Read {
-                offset: Block::new_512(0),
+                offset: BlockIndex(0),
                 data: Buffer::new(1, 512),
                 done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
-                offset: Block::new_512(0),
+                offset: BlockIndex(0),
                 data: Buffer::new(8, 512),
                 done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
-                offset: Block::new_512(0),
+                offset: BlockIndex(0),
                 data: Buffer::new(32, 512),
                 done: BlockOpWaiter::pair().1,
             })
@@ -1103,21 +1105,21 @@ mod test {
         // never be answered.
         let _ = guest
             .send(BlockOp::Read {
-                offset: Block::new_512(0),
+                offset: BlockIndex(0),
                 data: Buffer::new(1, 512),
                 done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
-                offset: Block::new_512(0),
+                offset: BlockIndex(0),
                 data: Buffer::new(8, 512),
                 done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
-                offset: Block::new_512(0),
+                offset: BlockIndex(0),
                 data: Buffer::new(31, 512),
                 done: BlockOpWaiter::pair().1,
             })
@@ -1200,21 +1202,21 @@ mod test {
         // never be answered.
         let _ = guest
             .send(BlockOp::Read {
-                offset: Block::new_512(0),
+                offset: BlockIndex(0),
                 data: Buffer::new(1024, 512), // 512 KiB
                 done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
-                offset: Block::new_512(0),
+                offset: BlockIndex(0),
                 data: Buffer::new(1024, 512),
                 done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
-                offset: Block::new_512(0),
+                offset: BlockIndex(0),
                 data: Buffer::new(1024, 512),
                 done: BlockOpWaiter::pair().1,
             })
@@ -1301,14 +1303,14 @@ mod test {
 
         let _ = guest
             .send(BlockOp::Read {
-                offset: Block::new_512(0),
+                offset: BlockIndex(0),
                 data: Buffer::new(14000, 512), // 7000 KiB
                 done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
-                offset: Block::new_512(0),
+                offset: BlockIndex(0),
                 data: Buffer::new(14000, 512), // 7000 KiB
                 done: BlockOpWaiter::pair().1,
             })
@@ -1341,7 +1343,7 @@ mod test {
         for _ in 0..500 {
             let _ = guest
                 .send(BlockOp::Read {
-                    offset: Block::new_512(0),
+                    offset: BlockIndex(0),
                     data: Buffer::new(2, 512),
                     done: BlockOpWaiter::pair().1,
                 })
@@ -1351,7 +1353,7 @@ mod test {
 
         let _ = guest
             .send(BlockOp::Read {
-                offset: Block::new_512(0),
+                offset: BlockIndex(0),
                 data: Buffer::new(2, 512),
                 done: BlockOpWaiter::pair().1,
             })
@@ -1395,7 +1397,7 @@ mod test {
 
             let _ = guest
                 .send(BlockOp::Read {
-                    offset: Block::new_512(0),
+                    offset: BlockIndex(0),
                     data: Buffer::new(optimal_io_size / 512, 512),
                     done: BlockOpWaiter::pair().1,
                 })
@@ -1423,14 +1425,14 @@ mod test {
         // represents 20 IOPs, larger than the IOP limit.
         let _ = guest
             .send(BlockOp::Read {
-                offset: Block::new_512(0),
+                offset: BlockIndex(0),
                 data: Buffer::new(20480, 512), // 10 MiB
                 done: BlockOpWaiter::pair().1,
             })
             .await;
         let _ = guest
             .send(BlockOp::Read {
-                offset: Block::new_512(0),
+                offset: BlockIndex(0),
                 data: Buffer::new(0, 512),
                 done: BlockOpWaiter::pair().1,
             })

@@ -297,7 +297,7 @@ impl SqliteMoreInner {
             (job_id.0, self.extent_number.0, num_blocks)
         });
         let block_contexts =
-            self.get_block_contexts(req.offset.value, num_blocks)?;
+            self.get_block_contexts(req.offset.0, num_blocks)?;
         cdt::extent__read__get__contexts__done!(|| {
             (job_id.0, self.extent_number.0, num_blocks)
         });
@@ -325,7 +325,7 @@ impl SqliteMoreInner {
                 self.file.as_raw_fd(),
                 buf.spare_capacity_mut().as_mut_ptr() as *mut libc::c_void,
                 expected_bytes as libc::size_t,
-                req.offset.value as i64 * block_size as i64,
+                req.offset.0 as i64 * block_size as i64,
             )
         };
         // Check against the expected number of bytes.  We could do more
@@ -423,7 +423,7 @@ impl SqliteMoreInner {
             // TODO we should consider adding a query that doesnt actually
             // give us back the data, just checks for its presence.
             let block_contexts =
-                self.get_block_contexts(write.offset.value, num_blocks)?;
+                self.get_block_contexts(write.offset.0, num_blocks)?;
 
             for (i, block_contexts) in block_contexts.iter().enumerate() {
                 if block_contexts.is_some() {
@@ -470,7 +470,7 @@ impl SqliteMoreInner {
             let on_disk_hash =
                 integrity_hash(&[&write.data[i * block_size as usize..]
                     [..block_size as usize]]);
-            let offset = i as u64 + write.offset.value;
+            let offset = i as u64 + write.offset.0;
 
             self.set_block_context(&DownstairsBlockContext {
                 block_context: *ctx,
@@ -530,7 +530,7 @@ impl SqliteMoreInner {
 
             let data = &write.data[start * block_size as usize..]
                 [..count * block_size as usize];
-            let start_block = write.offset.value + start as u64;
+            let start_block = write.offset.0 + start as u64;
 
             pwrite_all(
                 self.file.as_fd(),
@@ -549,7 +549,7 @@ impl SqliteMoreInner {
         // SQLite).  We can therefore store pre-computed hash values for these
         // dirty blocks, allowing us to skip rehashing during a flush operation.
         for (i, hash) in (0..num_blocks).zip(&hashes_to_write) {
-            let offset = i + write.offset.value;
+            let offset = i + write.offset.0;
             if let Some(h) = hash {
                 // This overwrites the `None` value written above!
                 let prev = self.dirty_blocks.insert(offset as usize, Some(*h));
@@ -1207,6 +1207,7 @@ fn open_sqlite_connection<P: AsRef<Path>>(path: &P) -> Result<Connection> {
 mod test {
     use super::*;
     use bytes::{Bytes, BytesMut};
+    use crucible_common::BlockOffset;
     use rand::Rng;
     use rand::RngCore;
     use tempfile::tempdir;
@@ -1530,7 +1531,7 @@ mod test {
         let data = Bytes::from(vec![0x55; 512]);
         let hash = integrity_hash(&[&data[..]]);
         let write = ExtentWrite {
-            offset: Block::new_512(0),
+            offset: BlockOffset(0),
             data,
             block_contexts: vec![BlockContext {
                 encryption_context: None,
@@ -1552,14 +1553,14 @@ mod test {
                 hash,
             };
             let write = ExtentWrite {
-                offset: Block::new_512(0),
+                offset: BlockOffset(0),
                 data: data.clone(),
                 block_contexts: vec![block_context],
             };
             inner.write(JobId(20), &write, true, IOV_MAX_TEST)?;
 
             let read = ExtentReadRequest {
-                offset: Block::new_512(0),
+                offset: BlockOffset(0),
                 data: BytesMut::with_capacity(512),
             };
             let resp = inner.read(JobId(21), read, IOV_MAX_TEST)?;
@@ -1578,14 +1579,14 @@ mod test {
                 hash,
             };
             let write = ExtentWrite {
-                offset: Block::new_512(1),
+                offset: BlockOffset(1),
                 data: data.clone(),
                 block_contexts: vec![block_context],
             };
             inner.write(JobId(30), &write, true, IOV_MAX_TEST)?;
 
             let read = ExtentReadRequest {
-                offset: Block::new_512(1),
+                offset: BlockOffset(1),
                 data: BytesMut::with_capacity(512),
             };
             let resp = inner.read(JobId(31), read, IOV_MAX_TEST)?;
@@ -1639,14 +1640,14 @@ mod test {
                 hash,
             };
             let write = ExtentWrite {
-                offset: Block::new_512(0),
+                offset: BlockOffset(0),
                 data: data.clone(),
                 block_contexts: vec![block_context],
             };
             inner.write(JobId(30), &write, true, IOV_MAX_TEST)?;
 
             let read = ExtentReadRequest {
-                offset: Block::new_512(0),
+                offset: BlockOffset(0),
                 data: BytesMut::with_capacity(512),
             };
             let resp = inner.read(JobId(31), read, IOV_MAX_TEST)?;
@@ -1682,14 +1683,14 @@ mod test {
             })
             .collect();
         let write = ExtentWrite {
-            offset: Block::new_512(0),
+            offset: BlockOffset(0),
             data: data.clone(),
             block_contexts: block_contexts.clone(),
         };
         inner.write(JobId(30), &write, true, IOV_MAX_TEST)?;
 
         let read = || ExtentReadRequest {
-            offset: Block::new_512(0),
+            offset: BlockOffset(0),
             data: BytesMut::with_capacity(512 * 2),
         };
         let resp = inner.read(JobId(31), read(), IOV_MAX_TEST)?;
@@ -1728,7 +1729,7 @@ mod test {
         let resp = inner.read(
             JobId(31),
             ExtentReadRequest {
-                offset: Block::new_512(1),
+                offset: BlockOffset(1),
                 data: BytesMut::with_capacity(512),
             },
             IOV_MAX_TEST,

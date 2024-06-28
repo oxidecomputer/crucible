@@ -374,7 +374,7 @@ impl UninitializedBuffer {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{Block, BlockContext, ReadResponseBlockMetadata};
+    use crate::{BlockContext, BlockOffset, ReadResponseBlockMetadata};
     use crucible_common::ExtentId;
     use rand::RngCore;
 
@@ -497,7 +497,7 @@ mod test {
         let blocks = (0..10)
             .map(|i| ReadResponseBlockMetadata {
                 eid: ExtentId(0),
-                offset: Block::new_512(i),
+                offset: BlockOffset(i),
                 block_context: if f(i) {
                     Some(BlockContext {
                         hash: 123,
@@ -573,7 +573,7 @@ mod test {
         let blocks = (0..10)
             .map(|i| ReadResponseBlockMetadata {
                 eid: ExtentId(0),
-                offset: Block::new_512(i),
+                offset: BlockOffset(i),
                 block_context: Some(BlockContext {
                     hash: 123,
                     encryption_context: None,

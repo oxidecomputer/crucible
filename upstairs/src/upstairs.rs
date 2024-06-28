@@ -17,7 +17,7 @@ use crate::{
     DsState, EncryptionContext, GuestIoHandle, Message, RegionDefinition,
     RegionDefinitionStatus, SnapshotDetails, WQCounts,
 };
-use crucible_common::CrucibleError;
+use crucible_common::{BlockIndex, CrucibleError};
 use serde::{Deserialize, Serialize};
 
 use std::sync::{
@@ -1269,7 +1269,7 @@ impl Upstairs {
     /// Submits a read job to the downstairs
     fn submit_read(
         &mut self,
-        offset: Block,
+        offset: BlockIndex,
         data: Buffer,
         res: BlockRes<Buffer, (Buffer, CrucibleError)>,
     ) {
@@ -1278,7 +1278,11 @@ impl Upstairs {
 
     /// Submits a dummy read (without associated `BlockOp`)
     #[cfg(test)]
-    pub(crate) fn submit_dummy_read(&mut self, offset: Block, data: Buffer) {
+    pub(crate) fn submit_dummy_read(
+        &mut self,
+        offset: BlockIndex,
+        data: Buffer,
+    ) {
         self.submit_read_inner(offset, data, None)
     }
 
@@ -1288,7 +1292,7 @@ impl Upstairs {
     /// If `res` is `None` and this isn't the test suite
     fn submit_read_inner(
         &mut self,
-        offset: Block,
+        offset: BlockIndex,
         data: Buffer,
         res: Option<BlockRes<Buffer, (Buffer, CrucibleError)>>,
     ) {
@@ -1312,7 +1316,7 @@ impl Upstairs {
         /*
          * Verify IO is in range for our region
          */
-        if let Err(e) = ddef.validate_io(offset, data.len()) {
+        if let Err(e) = ddef.validate_io(offset, data.len(), &ddef) {
             if let Some(res) = res {
                 res.send_err((data, e));
             }
@@ -1354,7 +1358,7 @@ impl Upstairs {
     /// quickly as possible.
     fn submit_deferred_write(
         &mut self,
-        offset: Block,
+        offset: BlockIndex,
         data: BytesMut,
         res: BlockRes,
         is_write_unwritten: bool,
@@ -1373,7 +1377,7 @@ impl Upstairs {
     #[cfg(test)]
     pub(crate) fn submit_dummy_write(
         &mut self,
-        offset: Block,
+        offset: BlockIndex,
         data: BytesMut,
         is_write_unwritten: bool,
     ) {
@@ -1390,7 +1394,7 @@ impl Upstairs {
     /// If `res` is `None` and this isn't running in the test suite
     fn submit_deferred_write_inner(
         &mut self,
-        offset: Block,
+        offset: BlockIndex,
         data: BytesMut,
         res: Option<BlockRes>,
         is_write_unwritten: bool,
@@ -1419,7 +1423,7 @@ impl Upstairs {
 
     fn compute_deferred_write(
         &mut self,
-        offset: Block,
+        offset: BlockIndex,
         data: BytesMut,
         res: Option<BlockRes>,
         is_write_unwritten: bool,
@@ -1444,7 +1448,7 @@ impl Upstairs {
          * Verify IO is in range for our region
          */
         let ddef = self.ddef.get_def().unwrap();
-        if let Err(e) = ddef.validate_io(offset, data.len()) {
+        if let Err(e) = ddef.validate_io(offset, data.len(), &ddef) {
             if let Some(res) = res {
                 res.send_err(e);
             }
@@ -2095,7 +2099,7 @@ pub(crate) mod test {
         BlockContext, BlockOp, BlockOpWaiter, DsState, JobId,
     };
     use bytes::BytesMut;
-    use crucible_common::{integrity_hash, ExtentId};
+    use crucible_common::{integrity_hash, BlockOffset, ExtentId};
     use crucible_protocol::{ReadResponseBlockMetadata, ReadResponseHeader};
     use futures::FutureExt;
 
@@ -2296,14 +2300,14 @@ pub(crate) mod test {
 
         // op 0
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0xff; 512].as_slice()),
             false,
         );
 
         // op 1
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0x00; 512].as_slice()),
             false,
         );
@@ -2331,21 +2335,21 @@ pub(crate) mod test {
 
         // op 0
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0xff; 512].as_slice()),
             false,
         );
 
         // op 1
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0x00; 512].as_slice()),
             false,
         );
 
         // op 2
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0x55; 512].as_slice()),
             false,
         );
@@ -2374,7 +2378,7 @@ pub(crate) mod test {
 
         // op 0
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0xff; 512].as_slice()),
             false,
         );
@@ -2384,7 +2388,7 @@ pub(crate) mod test {
 
         // op 2
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0x55; 512].as_slice()),
             false,
         );
@@ -2418,7 +2422,7 @@ pub(crate) mod test {
         // ops 0 to 2
         for i in 0..3 {
             upstairs.submit_dummy_write(
-                Block::new_512(i),
+                BlockIndex(i),
                 BytesMut::from([0xff; 512].as_slice()),
                 false,
             );
@@ -2430,7 +2434,7 @@ pub(crate) mod test {
         // ops 4 to 6
         for i in 3..6 {
             upstairs.submit_dummy_write(
-                Block::new_512(i),
+                BlockIndex(i),
                 BytesMut::from([0xff; 512].as_slice()),
                 false,
             );
@@ -2470,7 +2474,7 @@ pub(crate) mod test {
 
         // op 0
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0xff; 512 * 3].as_slice()),
             false,
         );
@@ -2478,7 +2482,7 @@ pub(crate) mod test {
         // ops 1 to 3
         for i in 0..3 {
             upstairs.submit_dummy_write(
-                Block::new_512(i),
+                BlockIndex(i),
                 BytesMut::from([0xff; 512].as_slice()),
                 false,
             );
@@ -2514,7 +2518,7 @@ pub(crate) mod test {
 
         // op 0
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0xff; 512 * 3].as_slice()),
             false,
         );
@@ -2522,7 +2526,7 @@ pub(crate) mod test {
         // ops 1 to 3
         for i in 0..3 {
             upstairs.submit_dummy_write(
-                Block::new_512(i),
+                BlockIndex(i),
                 BytesMut::from([0xff; 512].as_slice()),
                 false,
             );
@@ -2531,7 +2535,7 @@ pub(crate) mod test {
         // ops 4 to 6
         for i in 0..3 {
             upstairs.submit_dummy_write(
-                Block::new_512(i),
+                BlockIndex(i),
                 BytesMut::from([0xff; 512].as_slice()),
                 false,
             );
@@ -2578,7 +2582,7 @@ pub(crate) mod test {
         // ops 0 to 2
         for i in 0..3 {
             upstairs.submit_dummy_write(
-                Block::new_512(i),
+                BlockIndex(i),
                 BytesMut::from([0xff; 512].as_slice()),
                 false,
             );
@@ -2586,7 +2590,7 @@ pub(crate) mod test {
 
         // op 3
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0xff; 512 * 3].as_slice()),
             false,
         );
@@ -2619,13 +2623,13 @@ pub(crate) mod test {
 
         // op 0
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0xff; 512].as_slice()),
             false,
         );
 
         // op 1
-        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
+        upstairs.submit_dummy_read(BlockIndex(0), Buffer::new(1, 512));
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 2);
@@ -2652,14 +2656,14 @@ pub(crate) mod test {
         // ops 0 to 2
         for i in 0..3 {
             upstairs.submit_dummy_write(
-                Block::new_512(i),
+                BlockIndex(i),
                 BytesMut::from([0xff; 512].as_slice()),
                 false,
             );
         }
 
         // op 3
-        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(2, 512));
+        upstairs.submit_dummy_read(BlockIndex(0), Buffer::new(2, 512));
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 4);
@@ -2690,10 +2694,10 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
+        upstairs.submit_dummy_read(BlockIndex(0), Buffer::new(1, 512));
 
         // op 1
-        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
+        upstairs.submit_dummy_read(BlockIndex(0), Buffer::new(1, 512));
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 2);
@@ -2718,16 +2722,16 @@ pub(crate) mod test {
 
         // op 0
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0xff; 512].as_slice()),
             false,
         );
 
         // op 1
-        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
+        upstairs.submit_dummy_read(BlockIndex(0), Buffer::new(1, 512));
 
         // op 2
-        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
+        upstairs.submit_dummy_read(BlockIndex(0), Buffer::new(1, 512));
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
@@ -2753,7 +2757,7 @@ pub(crate) mod test {
 
         // op 0
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0xff; 512].as_slice()),
             false,
         );
@@ -2762,7 +2766,7 @@ pub(crate) mod test {
         upstairs.submit_flush(None, None);
 
         // op 2
-        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(2, 512));
+        upstairs.submit_dummy_read(BlockIndex(0), Buffer::new(2, 512));
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
@@ -2825,7 +2829,7 @@ pub(crate) mod test {
         // ops 1 to 2
         for i in 0..2 {
             upstairs.submit_dummy_write(
-                Block::new_512(i),
+                BlockIndex(i),
                 BytesMut::from([0xff; 512].as_slice()),
                 false,
             );
@@ -2837,7 +2841,7 @@ pub(crate) mod test {
         // ops 4 to 6
         for i in 0..3 {
             upstairs.submit_dummy_write(
-                Block::new_512(i),
+                BlockIndex(i),
                 BytesMut::from([0xff; 512].as_slice()),
                 false,
             );
@@ -2883,11 +2887,11 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
+        upstairs.submit_dummy_read(BlockIndex(0), Buffer::new(1, 512));
 
         // op 1
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0xff; 512].as_slice()),
             false,
         );
@@ -2914,17 +2918,17 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
+        upstairs.submit_dummy_read(BlockIndex(0), Buffer::new(1, 512));
 
         // op 1
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0xff; 512].as_slice()),
             true,
         );
 
         // op 2
-        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
+        upstairs.submit_dummy_read(BlockIndex(0), Buffer::new(1, 512));
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
@@ -2952,31 +2956,31 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs.submit_dummy_read(Block::new_512(0), Buffer::new(1, 512));
+        upstairs.submit_dummy_read(BlockIndex(0), Buffer::new(1, 512));
 
         // op 1
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0xff; 512].as_slice()),
             true,
         );
 
         // op 2
-        upstairs.submit_dummy_read(Block::new_512(1), Buffer::new(2, 512));
+        upstairs.submit_dummy_read(BlockIndex(1), Buffer::new(2, 512));
 
         // op 3
         upstairs.submit_dummy_write(
-            Block::new_512(1),
+            BlockIndex(1),
             BytesMut::from([0xff; 512 * 2].as_slice()),
             false,
         );
 
         // op 4
-        upstairs.submit_dummy_read(Block::new_512(3), Buffer::new(2, 512));
+        upstairs.submit_dummy_read(BlockIndex(3), Buffer::new(2, 512));
 
         // op 5
         upstairs.submit_dummy_write(
-            Block::new_512(3),
+            BlockIndex(3),
             BytesMut::from([0xff; 512 * 2].as_slice()),
             true,
         );
@@ -3013,7 +3017,7 @@ pub(crate) mod test {
         // ops 0 to 4
         for i in 0..5 {
             upstairs.submit_dummy_write(
-                Block::new_512(i),
+                BlockIndex(i),
                 BytesMut::from([0xff; 512 * 2].as_slice()),
                 true,
             );
@@ -3048,7 +3052,7 @@ pub(crate) mod test {
         // ops 0 to 4
         for i in (0..5).rev() {
             upstairs.submit_dummy_write(
-                Block::new_512(i),
+                BlockIndex(i),
                 BytesMut::from([0xff; 512 * 2].as_slice()),
                 false,
             );
@@ -3082,21 +3086,21 @@ pub(crate) mod test {
 
         // op 0
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0xff; 512 * 2].as_slice()),
             false,
         );
 
         // op 1
         upstairs.submit_dummy_write(
-            Block::new_512(4),
+            BlockIndex(4),
             BytesMut::from([0xff; 512 * 2].as_slice()),
             false,
         );
 
         // op 2
         upstairs.submit_dummy_write(
-            Block::new_512(1),
+            BlockIndex(1),
             BytesMut::from([0xff; 512 * 4].as_slice()),
             false,
         );
@@ -3125,21 +3129,21 @@ pub(crate) mod test {
 
         // op 0
         upstairs.submit_dummy_write(
-            Block::new_512(95),
+            BlockIndex(95),
             BytesMut::from([0xff; 512 * 2].as_slice()),
             false,
         );
 
         // op 1
         upstairs.submit_dummy_write(
-            Block::new_512(96),
+            BlockIndex(96),
             BytesMut::from([0xff; 512 * 7].as_slice()),
             false,
         );
 
         // op 2
         upstairs.submit_dummy_write(
-            Block::new_512(102),
+            BlockIndex(102),
             BytesMut::from([0xff; 512 * 2].as_slice()),
             false,
         );
@@ -3178,34 +3182,34 @@ pub(crate) mod test {
 
         // op 0
         upstairs.submit_dummy_write(
-            Block::new_512(95),
+            BlockIndex(95),
             BytesMut::from([0xff; 512 * 2].as_slice()),
             false,
         );
 
         // op 1
         upstairs.submit_dummy_write(
-            Block::new_512(96),
+            BlockIndex(96),
             BytesMut::from([0xff; 512 * 7].as_slice()),
             false,
         );
 
         // op 2
         upstairs.submit_dummy_write(
-            Block::new_512(101),
+            BlockIndex(101),
             BytesMut::from([0xff; 512].as_slice()),
             false,
         );
 
         // op 3
         upstairs.submit_dummy_write(
-            Block::new_512(99),
+            BlockIndex(99),
             BytesMut::from([0xff; 512 * 3].as_slice()),
             true,
         );
 
         // op 4
-        upstairs.submit_dummy_read(Block::new_512(99), Buffer::new(1, 512));
+        upstairs.submit_dummy_read(BlockIndex(99), Buffer::new(1, 512));
 
         let ds = &upstairs.downstairs;
         let jobs = ds.get_all_jobs();
@@ -3244,21 +3248,21 @@ pub(crate) mod test {
 
         // op 0
         upstairs.submit_dummy_write(
-            Block::new_512(95),
+            BlockIndex(95),
             BytesMut::from([0xff; 512 * 2].as_slice()),
             false,
         );
 
         // op 1
         upstairs.submit_dummy_write(
-            Block::new_512(102),
+            BlockIndex(102),
             BytesMut::from([0xff; 512].as_slice()),
             false,
         );
 
         // op 2
         upstairs.submit_dummy_write(
-            Block::new_512(96),
+            BlockIndex(96),
             BytesMut::from([0xff; 512 * 7].as_slice()),
             true,
         );
@@ -3294,14 +3298,14 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs.submit_dummy_read(Block::new_512(95), Buffer::new(2, 512));
+        upstairs.submit_dummy_read(BlockIndex(95), Buffer::new(2, 512));
 
         // op 1
         upstairs.submit_flush(None, None);
 
         // op 2
         upstairs.submit_dummy_write(
-            Block::new_512(96),
+            BlockIndex(96),
             BytesMut::from([0xff; 512 * 2].as_slice()),
             false,
         );
@@ -3331,7 +3335,7 @@ pub(crate) mod test {
         // submit a write, complete, then ack it
 
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0xff; 512].as_slice()),
             false,
         );
@@ -3349,7 +3353,7 @@ pub(crate) mod test {
         // submit an overlapping write
 
         upstairs.submit_dummy_write(
-            Block::new_512(0),
+            BlockIndex(0),
             BytesMut::from([0xff; 512].as_slice()),
             false,
         );
@@ -3523,7 +3527,7 @@ pub(crate) mod test {
         set_all_active(&mut up.downstairs);
 
         // Build a write, put it on the work queue.
-        let offset = Block::new_512(7);
+        let offset = BlockIndex(7);
         let data = BytesMut::from([1; 512].as_slice());
         let (_write_res, done) = BlockOpWaiter::pair();
         let op = if is_write_unwritten {
@@ -3641,7 +3645,7 @@ pub(crate) mod test {
         set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
-        let offset = Block::new_512(7);
+        let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
@@ -3657,7 +3661,7 @@ pub(crate) mod test {
 
         let blocks = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
-            offset,
+            offset: BlockOffset(offset.0),
             block_context: Some(BlockContext {
                 encryption_context: Some(
                     crucible_protocol::EncryptionContext {
@@ -3697,7 +3701,7 @@ pub(crate) mod test {
 
         let blocks = 16384 / 512;
         let data = Buffer::new(blocks, 512);
-        let offset = Block::new_512(7);
+        let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
@@ -3720,7 +3724,7 @@ pub(crate) mod test {
         for i in 0..blocks {
             responses.push(ReadResponseBlockMetadata {
                 eid: ExtentId(0),
-                offset: Block::new_512(offset.value + i as u64),
+                offset: BlockOffset(offset.0 + i as u64),
                 block_context: Some(BlockContext {
                     encryption_context: Some(
                         crucible_protocol::EncryptionContext { nonce, tag },
@@ -3763,7 +3767,7 @@ pub(crate) mod test {
 
         let blocks = 16384 / 512;
         let data = Buffer::new(blocks, 512);
-        let offset = Block::new_512(7);
+        let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
@@ -3798,7 +3802,7 @@ pub(crate) mod test {
         for i in 0..blocks {
             responses.push(ReadResponseBlockMetadata {
                 eid: ExtentId(0),
-                offset: Block::new_512(offset.value + i as u64),
+                offset: BlockOffset(offset.0 + i as u64),
                 block_context: Some(BlockContext {
                     encryption_context: Some(
                         crucible_protocol::EncryptionContext { nonce, tag },
@@ -3851,7 +3855,7 @@ pub(crate) mod test {
         set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
-        let offset = Block::new_512(7);
+        let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
@@ -3881,7 +3885,7 @@ pub(crate) mod test {
 
         let responses = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
-            offset,
+            offset: BlockOffset(offset.0),
             block_context: Some(BlockContext {
                 encryption_context: Some(
                     crucible_protocol::EncryptionContext { nonce, tag },
@@ -3926,7 +3930,7 @@ pub(crate) mod test {
         set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
-        let offset = Block::new_512(7);
+        let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
@@ -3934,7 +3938,7 @@ pub(crate) mod test {
         // check
         let responses = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
-            offset,
+            offset: BlockOffset(offset.0),
             block_context: Some(BlockContext {
                 encryption_context: None,
                 hash: 10000, // junk hash
@@ -3977,7 +3981,7 @@ pub(crate) mod test {
         set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
-        let offset = Block::new_512(7);
+        let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
@@ -3985,7 +3989,7 @@ pub(crate) mod test {
         let hash = integrity_hash(&[&data]);
         let r1 = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
-            offset,
+            offset: BlockOffset(offset.0),
             block_context: Some(BlockContext {
                 encryption_context: None,
                 hash,
@@ -4013,7 +4017,7 @@ pub(crate) mod test {
         let hash = integrity_hash(&[&data]);
         let r2 = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
-            offset,
+            offset: BlockOffset(offset.0),
             block_context: Some(BlockContext {
                 encryption_context: None,
                 hash,
@@ -4053,7 +4057,7 @@ pub(crate) mod test {
         set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
-        let offset = Block::new_512(7);
+        let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
@@ -4062,7 +4066,7 @@ pub(crate) mod test {
             let hash = integrity_hash(&[&data]);
             let r = Ok(vec![ReadResponseBlockMetadata {
                 eid: ExtentId(0),
-                offset,
+                offset: BlockOffset(offset.0),
                 block_context: Some(BlockContext {
                     encryption_context: None,
                     hash,
@@ -4091,7 +4095,7 @@ pub(crate) mod test {
         let hash = integrity_hash(&[&data]);
         let r = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
-            offset,
+            offset: BlockOffset(offset.0),
             block_context: Some(BlockContext {
                 encryption_context: None,
                 hash,
@@ -4131,7 +4135,7 @@ pub(crate) mod test {
         set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
-        let offset = Block::new_512(7);
+        let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
@@ -4139,7 +4143,7 @@ pub(crate) mod test {
         let hash = integrity_hash(&[&data]);
         let r1 = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
-            offset,
+            offset: BlockOffset(offset.0),
             block_context: Some(BlockContext {
                 encryption_context: None,
                 hash,
@@ -4164,7 +4168,7 @@ pub(crate) mod test {
         let hash = integrity_hash(&[&data[0..512]]);
         let response = ReadResponseBlockMetadata {
             eid: ExtentId(0),
-            offset,
+            offset: BlockOffset(offset.0),
             block_context: Some(BlockContext {
                 encryption_context: None,
                 hash,
@@ -4206,7 +4210,7 @@ pub(crate) mod test {
         set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
-        let offset = Block::new_512(7);
+        let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
@@ -4214,7 +4218,7 @@ pub(crate) mod test {
         let data = BytesMut::from([0u8; 512].as_slice());
         let r1 = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
-            offset,
+            offset: BlockOffset(offset.0),
             block_context: None,
         }]);
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
@@ -4234,7 +4238,7 @@ pub(crate) mod test {
         let hash = integrity_hash(&[&data]);
         let r2 = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
-            offset,
+            offset: BlockOffset(offset.0),
             block_context: Some(BlockContext {
                 encryption_context: None,
                 hash,
@@ -4274,7 +4278,7 @@ pub(crate) mod test {
         set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
-        let offset = Block::new_512(7);
+        let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
 
@@ -4283,7 +4287,7 @@ pub(crate) mod test {
         let hash = integrity_hash(&[&data]);
         let r1 = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
-            offset,
+            offset: BlockOffset(offset.0),
             block_context: Some(BlockContext {
                 encryption_context: None,
                 hash,
@@ -4305,7 +4309,7 @@ pub(crate) mod test {
         // Send back a second response with no actual data (oh no!)
         let r2 = Ok(vec![ReadResponseBlockMetadata {
             eid: ExtentId(0),
-            offset,
+            offset: BlockOffset(offset.0),
             block_context: None,
         }]);
         let thread = std::thread::spawn(move || {
