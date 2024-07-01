@@ -53,7 +53,7 @@ mod test {
                 .rand_bytes(8)
                 .tempdir()?;
 
-            let _region = create_region_with_backend(
+            let region = create_region_with_backend(
                 tempdir.path().to_path_buf(),
                 Block {
                     value: blocks_per_extent,
@@ -66,12 +66,21 @@ mod test {
                 csl(),
             )?;
 
-            let mut downstairs =
+            // If this is a read-write extent, then reuse the existing region;
+            // this skips automatic migration of SQLite -> raw extents and lets
+            // us keep writing to a SQLite region.
+            let builder = if read_only {
                 Downstairs::new_builder(tempdir.path(), read_only)
-                    .set_lossy(problematic)
-                    .set_logger(csl())
-                    .set_test_errors(problematic, problematic, problematic)
-                    .build()?;
+            } else {
+                assert!(!region.read_only());
+                DownstairsBuilder::from_region(region)
+            };
+
+            let mut downstairs = builder
+                .set_lossy(problematic)
+                .set_logger(csl())
+                .set_test_errors(problematic, problematic, problematic)
+                .build()?;
 
             if let Some(ref clone_source) = clone_source {
                 downstairs.clone_region(*clone_source).await?

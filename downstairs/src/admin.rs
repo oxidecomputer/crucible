@@ -62,8 +62,7 @@ pub async fn run_downstairs_for_region(
         ));
     }
 
-    let mut d = Downstairs::new_builder(&run_params.data, run_params.read_only);
-    let d = d
+    let d = Downstairs::new_builder(&run_params.data, run_params.read_only)
         .set_lossy(run_params.lossy)
         .set_test_errors(
             run_params.read_errors,

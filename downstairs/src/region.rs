@@ -1100,6 +1100,10 @@ impl Region {
             .open(&copy_path)?;
         Ok(file)
     }
+
+    pub fn read_only(&self) -> bool {
+        self.read_only
+    }
 }
 
 /**

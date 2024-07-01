@@ -2156,9 +2156,16 @@ async fn recv_task<RT>(
 }
 
 #[derive(Debug)]
-pub struct DownstairsBuilder<'a> {
-    data: &'a Path,
-    read_only: bool,
+enum RegionSource {
+    /// Build a Downstairs from a path and read-only flag
+    Path { data: PathBuf, read_only: bool },
+    /// Build a Downstairs from an existing region
+    Region(Region),
+}
+
+#[derive(Debug)]
+pub struct DownstairsBuilder {
+    source: RegionSource,
     lossy: Option<bool>,
     read_errors: Option<bool>,  // Test flag
     write_errors: Option<bool>, // Test flag
@@ -2166,28 +2173,39 @@ pub struct DownstairsBuilder<'a> {
     log: Option<Logger>,
 }
 
-impl DownstairsBuilder<'_> {
-    pub fn set_lossy(&mut self, lossy: bool) -> &mut Self {
+impl DownstairsBuilder {
+    pub fn from_region(region: Region) -> Self {
+        DownstairsBuilder {
+            source: RegionSource::Region(region),
+            lossy: Some(false),
+            read_errors: Some(false),
+            write_errors: Some(false),
+            flush_errors: Some(false),
+            log: None,
+        }
+    }
+
+    pub fn set_lossy(mut self, lossy: bool) -> Self {
         self.lossy = Some(lossy);
         self
     }
     pub fn set_test_errors(
-        &mut self,
+        mut self,
         read_errors: bool,
         write_errors: bool,
         flush_errors: bool,
-    ) -> &mut Self {
+    ) -> Self {
         self.read_errors = Some(read_errors);
         self.write_errors = Some(write_errors);
         self.flush_errors = Some(flush_errors);
         self
     }
-    pub fn set_logger(&mut self, log: Logger) -> &mut Self {
+    pub fn set_logger(mut self, log: Logger) -> Self {
         self.log = Some(log);
         self
     }
 
-    pub fn build(&mut self) -> Result<Downstairs> {
+    pub fn build(self) -> Result<Downstairs> {
         let lossy = self.lossy.unwrap_or(false);
         let read_errors = self.read_errors.unwrap_or(false);
         let write_errors = self.write_errors.unwrap_or(false);
@@ -2199,7 +2217,12 @@ impl DownstairsBuilder<'_> {
         };
 
         // Open the region at the provided location.
-        let region = Region::open(self.data, true, self.read_only, &log)?;
+        let region = match self.source {
+            RegionSource::Region(r) => r,
+            RegionSource::Path { data, read_only } => {
+                Region::open(data, true, read_only, &log)?
+            }
+        };
 
         let encrypted = region.encrypted();
 
@@ -2218,6 +2241,7 @@ impl DownstairsBuilder<'_> {
         );
 
         let (request_tx, request_rx) = mpsc::unbounded_channel();
+        let read_only = region.read_only();
         Ok(Downstairs {
             region,
             flags: DownstairsFlags {
@@ -2225,7 +2249,7 @@ impl DownstairsBuilder<'_> {
                 read_errors,
                 write_errors,
                 flush_errors,
-                read_only: self.read_only,
+                read_only,
                 encrypted,
             },
             active_upstairs: HashMap::new(),
@@ -2290,8 +2314,10 @@ pub struct Downstairs {
 impl Downstairs {
     pub fn new_builder(data: &Path, read_only: bool) -> DownstairsBuilder {
         DownstairsBuilder {
-            data,
-            read_only,
+            source: RegionSource::Path {
+                data: data.to_owned(),
+                read_only,
+            },
             lossy: Some(false),
             read_errors: Some(false),
             write_errors: Some(false),
