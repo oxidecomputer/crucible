@@ -1,0 +1,129 @@
+
+running 1 test
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 123, encryption_context: Some(EncryptionContext { nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], tag: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19] }) }, block: 0, on_disk_hash: 456 }
+    prev None
+    known hash: None
+1:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 9999, encryption_context: Some(EncryptionContext { nonce: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], tag: [8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13] }) }, block: 1, on_disk_hash: 1234567890 }
+    prev None
+    known hash: None
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 123, encryption_context: Some(EncryptionContext { nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], tag: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19] }) }, block: 0, on_disk_hash: 456 }
+    prev None
+    known hash: None
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 9999, encryption_context: Some(EncryptionContext { nonce: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], tag: [8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13] }) }, block: 1, on_disk_hash: 1234567890 }
+    prev None
+    known hash: None
+getting block contexts
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 3567461517473438326, encryption_context: Some(EncryptionContext { nonce: [65, 61, 248, 252, 112, 92, 118, 174, 7, 214, 172, 192], tag: [39, 42, 195, 46, 172, 97, 176, 217, 145, 36, 227, 99, 57, 18, 222, 210] }) }, block: 0, on_disk_hash: 0 }
+    prev None
+    known hash: None
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 18108670660895414513, encryption_context: Some(EncryptionContext { nonce: [161, 111, 155, 206, 177, 69, 57, 82, 35, 92, 32, 168], tag: [162, 2, 56, 4, 76, 110, 101, 59, 110, 162, 208, 181, 231, 35, 132, 160] }) }, block: 0, on_disk_hash: 1 }
+    prev Some(DownstairsBlockContext { block_context: BlockContext { hash: 3567461517473438326, encryption_context: Some(EncryptionContext { nonce: [65, 61, 248, 252, 112, 92, 118, 174, 7, 214, 172, 192], tag: [39, 42, 195, 46, 172, 97, 176, 217, 145, 36, 227, 99, 57, 18, 222, 210] }) }, block: 0, on_disk_hash: 0 })
+    known hash: None
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 10848336861969620137, encryption_context: Some(EncryptionContext { nonce: [116, 206, 22, 146, 122, 223, 109, 77, 5, 152, 119, 33], tag: [65, 236, 198, 189, 9, 124, 104, 182, 16, 233, 198, 179, 69, 62, 140, 55] }) }, block: 0, on_disk_hash: 2 }
+    prev None
+    known hash: Some(10069907380382185596)
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 17886863252930891465, encryption_context: Some(EncryptionContext { nonce: [23, 77, 214, 245, 55, 229, 32, 145, 29, 161, 166, 32], tag: [16, 150, 90, 18, 63, 146, 238, 143, 124, 208, 2, 7, 216, 144, 111, 114] }) }, block: 0, on_disk_hash: 3 }
+    prev None
+    known hash: Some(10069907380382185596)
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 2897975012783784524, encryption_context: Some(EncryptionContext { nonce: [213, 253, 14, 90, 105, 121, 62, 93, 245, 84, 240, 170], tag: [204, 62, 206, 192, 125, 43, 116, 23, 220, 26, 27, 191, 247, 101, 164, 243] }) }, block: 0, on_disk_hash: 4 }
+    prev None
+    known hash: Some(10069907380382185596)
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 17447035830593159346, encryption_context: Some(EncryptionContext { nonce: [13, 224, 139, 82, 67, 176, 161, 97, 171, 227, 185, 63], tag: [185, 135, 76, 144, 106, 177, 217, 180, 173, 217, 30, 221, 108, 228, 203, 198] }) }, block: 0, on_disk_hash: 5 }
+    prev None
+    known hash: Some(10069907380382185596)
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 17601781830143401961, encryption_context: Some(EncryptionContext { nonce: [3, 157, 24, 179, 249, 78, 3, 114, 232, 127, 207, 8], tag: [215, 123, 0, 154, 153, 201, 110, 228, 225, 207, 18, 21, 199, 34, 202, 77] }) }, block: 0, on_disk_hash: 6 }
+    prev None
+    known hash: Some(10069907380382185596)
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 9950418715168379854, encryption_context: Some(EncryptionContext { nonce: [252, 77, 253, 89, 202, 200, 100, 201, 63, 140, 76, 237], tag: [212, 46, 224, 197, 1, 75, 141, 101, 180, 68, 174, 92, 213, 129, 189, 51] }) }, block: 0, on_disk_hash: 7 }
+    prev None
+    known hash: Some(10069907380382185596)
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 8550700732723593478, encryption_context: Some(EncryptionContext { nonce: [106, 155, 120, 125, 217, 108, 30, 151, 49, 103, 36, 156], tag: [86, 174, 69, 37, 247, 123, 51, 86, 151, 139, 58, 10, 198, 24, 39, 9] }) }, block: 0, on_disk_hash: 8 }
+    prev None
+    known hash: Some(10069907380382185596)
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 7562338819943369309, encryption_context: Some(EncryptionContext { nonce: [36, 246, 157, 89, 164, 255, 231, 36, 167, 48, 113, 172], tag: [250, 67, 223, 35, 64, 214, 195, 82, 112, 54, 126, 97, 190, 177, 53, 228] }) }, block: 0, on_disk_hash: 9 }
+    prev None
+    known hash: Some(10069907380382185596)
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 123, encryption_context: Some(EncryptionContext { nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], tag: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19] }) }, block: 0, on_disk_hash: 456 }
+    prev None
+    known hash: Some(10069907380382185596)
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 8095829576175703043, encryption_context: Some(EncryptionContext { nonce: [208, 126, 140, 244, 135, 112, 164, 228, 21, 46, 239, 105], tag: [2, 51, 214, 95, 140, 144, 116, 51, 20, 99, 89, 8, 187, 214, 180, 130] }) }, block: 1, on_disk_hash: 0 }
+    prev None
+    known hash: None
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 6981344134932734063, encryption_context: Some(EncryptionContext { nonce: [32, 249, 171, 229, 43, 184, 66, 127, 41, 82, 43, 145], tag: [198, 81, 157, 160, 115, 33, 80, 140, 134, 87, 168, 95, 20, 115, 221, 207] }) }, block: 1, on_disk_hash: 1 }
+    prev Some(DownstairsBlockContext { block_context: BlockContext { hash: 8095829576175703043, encryption_context: Some(EncryptionContext { nonce: [208, 126, 140, 244, 135, 112, 164, 228, 21, 46, 239, 105], tag: [2, 51, 214, 95, 140, 144, 116, 51, 20, 99, 89, 8, 187, 214, 180, 130] }) }, block: 1, on_disk_hash: 0 })
+    known hash: None
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 680801039644390418, encryption_context: Some(EncryptionContext { nonce: [23, 17, 254, 20, 18, 140, 95, 44, 234, 46, 59, 77], tag: [120, 207, 196, 226, 144, 101, 129, 62, 187, 87, 253, 142, 50, 96, 95, 124] }) }, block: 1, on_disk_hash: 2 }
+    prev None
+    known hash: Some(10069907380382185596)
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 12158236828506436333, encryption_context: Some(EncryptionContext { nonce: [140, 72, 254, 228, 222, 225, 55, 173, 3, 217, 227, 125], tag: [183, 16, 227, 40, 90, 244, 126, 10, 122, 8, 8, 114, 201, 191, 114, 93] }) }, block: 1, on_disk_hash: 3 }
+    prev None
+    known hash: Some(10069907380382185596)
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 6260999395930088460, encryption_context: Some(EncryptionContext { nonce: [63, 112, 241, 138, 212, 198, 226, 128, 202, 55, 19, 132], tag: [191, 167, 15, 149, 120, 179, 219, 236, 232, 12, 124, 80, 18, 249, 226, 149] }) }, block: 1, on_disk_hash: 4 }
+    prev None
+    known hash: Some(10069907380382185596)
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 8743884392587350720, encryption_context: Some(EncryptionContext { nonce: [93, 68, 165, 132, 104, 30, 46, 226, 66, 150, 240, 3], tag: [237, 123, 225, 21, 151, 240, 207, 175, 151, 177, 204, 179, 141, 11, 129, 55] }) }, block: 1, on_disk_hash: 5 }
+    prev None
+    known hash: Some(10069907380382185596)
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 14541939165223456174, encryption_context: Some(EncryptionContext { nonce: [20, 2, 90, 210, 11, 158, 214, 140, 184, 165, 39, 0], tag: [139, 104, 223, 137, 71, 174, 240, 237, 233, 129, 93, 252, 36, 246, 98, 77] }) }, block: 1, on_disk_hash: 6 }
+    prev None
+    known hash: Some(10069907380382185596)
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 15112069398812969512, encryption_context: Some(EncryptionContext { nonce: [37, 20, 173, 68, 121, 56, 128, 143, 124, 178, 201, 42], tag: [214, 14, 26, 78, 62, 156, 103, 247, 174, 6, 242, 244, 224, 133, 174, 204] }) }, block: 1, on_disk_hash: 7 }
+    prev None
+    known hash: Some(10069907380382185596)
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 9578259050632596517, encryption_context: Some(EncryptionContext { nonce: [137, 222, 59, 16, 254, 236, 98, 226, 241, 97, 230, 25], tag: [233, 197, 147, 179, 78, 198, 110, 217, 85, 38, 43, 237, 158, 139, 47, 44] }) }, block: 1, on_disk_hash: 8 }
+    prev None
+    known hash: Some(10069907380382185596)
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 5201193073209847170, encryption_context: Some(EncryptionContext { nonce: [155, 29, 135, 167, 173, 96, 202, 39, 66, 82, 213, 16], tag: [48, 220, 9, 136, 219, 221, 200, 78, 91, 44, 21, 87, 223, 0, 178, 219] }) }, block: 1, on_disk_hash: 9 }
+    prev None
+    known hash: Some(10069907380382185596)
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 9999, encryption_context: Some(EncryptionContext { nonce: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], tag: [8, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13] }) }, block: 1, on_disk_hash: 1234567890 }
+    prev None
+    known hash: Some(10069907380382185596)
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 17601781830143401961, encryption_context: Some(EncryptionContext { nonce: [3, 157, 24, 179, 249, 78, 3, 114, 232, 127, 207, 8], tag: [215, 123, 0, 154, 153, 201, 110, 228, 225, 207, 18, 21, 199, 34, 202, 77] }) }, block: 0, on_disk_hash: 6 }
+    prev None
+    known hash: None
+0:
+    got ctx DownstairsBlockContext { block_context: BlockContext { hash: 15112069398812969512, encryption_context: Some(EncryptionContext { nonce: [37, 20, 173, 68, 121, 56, 128, 143, 124, 178, 201, 42], tag: [214, 14, 26, 78, 62, 156, 103, 247, 174, 6, 242, 244, 224, 133, 174, 204] }) }, block: 1, on_disk_hash: 7 }
+    prev None
+    known hash: None
+test extent_inner_sqlite::test::multiple_context ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 218 filtered out; finished in 0.02s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
