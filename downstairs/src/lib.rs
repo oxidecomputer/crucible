@@ -2199,13 +2199,7 @@ impl DownstairsBuilder<'_> {
         };
 
         // Open the region at the provided location.
-        let region = Region::open(
-            self.data,
-            Default::default(),
-            true,
-            self.read_only,
-            &log,
-        )?;
+        let region = Region::open(self.data, true, self.read_only, &log)?;
 
         let encrypted = region.encrypted();
 

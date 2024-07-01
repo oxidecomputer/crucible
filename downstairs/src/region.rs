@@ -252,13 +252,10 @@ impl Region {
      */
     pub fn open<P: AsRef<Path>>(
         dir: P,
-        options: RegionOptions,
         verbose: bool,
         read_only: bool,
         log: &Logger,
     ) -> Result<Region> {
-        options.validate()?;
-
         let cp = config_path(&dir);
 
         /*
@@ -1200,9 +1197,7 @@ pub(crate) mod test {
 
         drop(region);
 
-        let _region =
-            Region::open(&dir, new_region_options(), true, false, &log)
-                .unwrap();
+        let _region = Region::open(&dir, true, false, &log).unwrap();
     }
 
     #[test]
@@ -1217,8 +1212,7 @@ pub(crate) mod test {
         write_json(&cp, &def, false)?;
 
         // Verify that the open returns an error
-        Region::open(&dir, new_region_options(), true, false, &csl())
-            .unwrap_err();
+        Region::open(&dir, true, false, &csl()).unwrap_err();
 
         Ok(())
     }
@@ -1236,8 +1230,7 @@ pub(crate) mod test {
         write_json(&cp, &def, false)?;
 
         // Verify that the open returns an error
-        Region::open(&dir, new_region_options(), true, false, &csl())
-            .unwrap_err();
+        Region::open(&dir, true, false, &csl()).unwrap_err();
 
         Ok(())
     }
@@ -1257,8 +1250,7 @@ pub(crate) mod test {
         write_json(&cp, &def, false)?;
 
         // Verify that the open returns an error
-        Region::open(&dir, new_region_options(), true, false, &csl())
-            .unwrap_err();
+        Region::open(&dir, true, false, &csl()).unwrap_err();
 
         Ok(())
     }
@@ -1279,8 +1271,7 @@ pub(crate) mod test {
         write_json(&cp, &def, false)?;
 
         // Verify that the open returns an error
-        Region::open(&dir, new_region_options(), true, false, &csl())
-            .unwrap_err();
+        Region::open(&dir, true, false, &csl()).unwrap_err();
 
         Ok(())
     }
@@ -1586,9 +1577,7 @@ pub(crate) mod test {
         drop(region);
 
         // Open up the region read_only now.
-        let region =
-            Region::open(&dir, new_region_options(), false, true, &csl())
-                .unwrap();
+        let region = Region::open(&dir, false, true, &csl()).unwrap();
 
         // Verify extent 1 has opened again.
         let _ext_one = region.get_opened_extent(ExtentId(1));
@@ -1669,8 +1658,7 @@ pub(crate) mod test {
         // deleted the `.db` on disk.  As such, migration should restart when
         // the extent is reopened.
 
-        let mut region =
-            Region::open(&dir, new_region_options(), true, false, &log)?;
+        let mut region = Region::open(&dir, true, false, &log)?;
         let out = region.region_read(
             &RegionReadRequest(vec![
                 RegionReadReq {
@@ -1766,8 +1754,7 @@ pub(crate) mod test {
         // deleted the `.db` on disk.  As such, migration should restart when
         // the extent is reopened, and we should recover from corruption.
 
-        let mut region =
-            Region::open(&dir, new_region_options(), true, false, &log)?;
+        let mut region = Region::open(&dir, true, false, &log)?;
         let out = region.region_read(
             &RegionReadRequest(vec![
                 RegionReadReq {
@@ -1954,7 +1941,7 @@ pub(crate) mod test {
         let dir = tempdir().unwrap();
         let mut r = Region::create(&dir, new_region_options(), csl()).unwrap();
         r.extend(10, backend).unwrap();
-        let _ = Region::open(&dir, new_region_options(), false, false, &csl());
+        let _ = Region::open(&dir, false, false, &csl());
     }
 
     #[test]
@@ -1962,7 +1949,6 @@ pub(crate) mod test {
     fn bad_import_region() {
         let _ = Region::open(
             "/tmp/12345678-1111-2222-3333-123456789999/notadir",
-            new_region_options(),
             false,
             false,
             &csl(),
@@ -2190,8 +2176,7 @@ pub(crate) mod test {
         drop(region);
 
         // Open the region as read-only, which doesn't trigger a migration
-        let mut region =
-            Region::open(&dir, new_region_options(), true, true, &log)?;
+        let mut region = Region::open(&dir, true, true, &log)?;
         let meta = region.get_opened_extent(ExtentId(0)).get_meta_info();
         assert_eq!(meta.gen_number, 10);
         assert_eq!(meta.flush_number, 15);
@@ -2223,8 +2208,7 @@ pub(crate) mod test {
         drop(region);
 
         // Open the region as read-write, which **does** trigger a migration
-        let mut region =
-            Region::open(&dir, new_region_options(), true, false, &log)?;
+        let mut region = Region::open(&dir, true, false, &log)?;
         let meta = region.get_opened_extent(ExtentId(0)).get_meta_info();
         assert_eq!(meta.gen_number, 10);
         assert_eq!(meta.flush_number, 15);

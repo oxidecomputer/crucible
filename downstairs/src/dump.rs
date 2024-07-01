@@ -45,7 +45,7 @@ pub fn dump_region(
     assert!(!region_dir.is_empty());
     for (index, dir) in region_dir.iter().enumerate() {
         // Open Region read only
-        let region = Region::open(dir, Default::default(), false, true, &log)?;
+        let region = Region::open(dir, false, true, &log)?;
 
         blocks_per_extent = region.def().extent_size().value;
         total_extents = region.def().extent_count();
@@ -530,8 +530,7 @@ fn show_extent(
          */
         for (index, dir) in region_dir.iter().enumerate() {
             // Open Region read only
-            let mut region =
-                Region::open(dir, Default::default(), false, true, &log)?;
+            let mut region = Region::open(dir, false, true, &log)?;
 
             let response = region.region_read(
                 &RegionReadRequest(vec![RegionReadReq {
@@ -643,8 +642,7 @@ fn show_extent_block(
      */
     for (index, dir) in region_dir.iter().enumerate() {
         // Open Region read only
-        let mut region =
-            Region::open(dir, Default::default(), false, true, &log)?;
+        let mut region = Region::open(dir, false, true, &log)?;
 
         let response = region.region_read(
             &RegionReadRequest(vec![RegionReadReq {
