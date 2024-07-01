@@ -179,6 +179,12 @@ impl From<anyhow::Error> for CrucibleError {
     }
 }
 
+impl From<rusqlite::Error> for CrucibleError {
+    fn from(e: rusqlite::Error) -> Self {
+        CrucibleError::GenericError(format!("{:?}", e))
+    }
+}
+
 impl<T> From<std::sync::mpsc::SendError<T>> for CrucibleError {
     fn from(e: std::sync::mpsc::SendError<T>) -> Self {
         CrucibleError::GenericError(format!("{:?}", e))

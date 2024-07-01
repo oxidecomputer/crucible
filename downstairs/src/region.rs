@@ -161,7 +161,11 @@ impl Region {
             }
         };
 
-        // The downstairs needs to open (at minimum) all the extent files, plus
+        // The downstairs needs to open (at minimum) all the extent files --
+        // which is one file per extent for raw extents and up to 4 for
+        // SQLite-backed extents -- along with
+        //
+        // - the seed database (for SQLite, db + shm + wal)
         // - region.json
         // - stdin, stdout, and stderr
         // - the listen and repair sockets (arbitrarily saying two sockets per
@@ -170,7 +174,7 @@ impl Region {
         // - optionally, a control interface
         //
         // If the downstairs cannot open this many files, error here.
-        let required_number_of_files = def.extent_count() as u64 + 8;
+        let required_number_of_files = def.extent_count() as u64 * 4 + 13;
 
         if number_of_files_limit < required_number_of_files {
             bail!("this downstairs cannot open all required files!");

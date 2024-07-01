@@ -35,6 +35,7 @@
           - build-essential
           - libssl-dev
           - pkg-config
+          - libsqlite3-dev
         state: present
       when: os == "ubuntu"
 

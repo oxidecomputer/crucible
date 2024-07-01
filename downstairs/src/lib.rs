@@ -781,6 +781,18 @@ pub mod cdt {
         num_rehashed: u64,
     ) {
     }
+    fn extent__flush__sqlite__insert__start(
+        job_id: u64,
+        extent_id: u32,
+        extent_size: u64,
+    ) {
+    }
+    fn extent__flush__sqlite__insert__done(
+        _job_id: u64,
+        _extent_id: u32,
+        extent_size: u64,
+    ) {
+    }
     fn extent__write__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
     fn extent__write__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
     fn extent__write__get__hashes__start(
@@ -797,6 +809,18 @@ pub mod cdt {
     }
     fn extent__write__file__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
     fn extent__write__file__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__write__sqlite__insert__start(
+        job_id: u64,
+        extent_id: u32,
+        n_blocks: u64,
+    ) {
+    }
+    fn extent__write__sqlite__insert__done(
+        job_id: u64,
+        extent_id: u32,
+        n_blocks: u64,
+    ) {
+    }
     fn extent__write__raw__context__insert__start(
         job_id: u64,
         extent_id: u32,
