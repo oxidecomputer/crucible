@@ -1669,10 +1669,6 @@ mod test {
         )
         .unwrap();
 
-        // Run a full rehash, which should clear out that partial write.
-        inner.fully_rehash_and_clean_all_stale_contexts(false)?;
-
-        // Writing to block 0 should succeed with only_write_unwritten
         let mut data = BytesMut::from(&vec![0u8; 512 * 2] as &[u8]);
         let mut rng = rand::thread_rng();
         rng.fill_bytes(&mut data);
@@ -1706,6 +1702,39 @@ mod test {
         let resp = inner.read(JobId(31), read(), IOV_MAX_TEST)?;
         assert_eq!(resp.blocks, expected_blocks);
         assert_eq!(resp.data, BytesMut::from(data.as_ref()));
+
+        // Write a new hash, then confirm that we're reading the original
+        for block in 0..2 {
+            inner.set_dirty_and_block_context(&DownstairsBlockContext {
+                block_context: BlockContext {
+                    encryption_context: Some(EncryptionContext {
+                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+                        tag: [
+                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
+                            18, 19,
+                        ],
+                    }),
+                    hash: 123,
+                },
+                block,
+                on_disk_hash: 456, // this is wrong!
+            })?;
+            let resp = inner.read(JobId(31), read(), IOV_MAX_TEST)?;
+            assert_eq!(resp.blocks, expected_blocks);
+            assert_eq!(resp.data, BytesMut::from(data.as_ref()));
+        }
+
+        // Read block 1 and make sure it works as well
+        let resp = inner.read(
+            JobId(31),
+            ExtentReadRequest {
+                offset: Block::new_512(1),
+                data: BytesMut::with_capacity(512),
+            },
+            IOV_MAX_TEST,
+        )?;
+        assert_eq!(resp.blocks, &expected_blocks[1..]);
+        assert_eq!(resp.data, &data.as_ref()[512..]);
 
         Ok(())
     }
