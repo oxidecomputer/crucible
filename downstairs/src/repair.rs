@@ -108,6 +108,12 @@ pub struct Eid {
 pub enum FileType {
     #[serde(rename = "data")]
     Data,
+    #[serde(rename = "db")]
+    Database,
+    #[serde(rename = "db_shm")]
+    DatabaseSharedMemory,
+    #[serde(rename = "db_wal")]
+    DatabaseLog,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -127,8 +133,17 @@ async fn get_extent_file(
     let fs = path.into_inner();
     let eid = ExtentId(fs.eid);
 
-    let extent_path = extent_path(rqctx.context().region_dir.clone(), eid);
+    let mut extent_path = extent_path(rqctx.context().region_dir.clone(), eid);
     match fs.file_type {
+        FileType::Database => {
+            extent_path.set_extension("db");
+        }
+        FileType::DatabaseSharedMemory => {
+            extent_path.set_extension("db-shm");
+        }
+        FileType::DatabaseLog => {
+            extent_path.set_extension("db-wal");
+        }
         // No file extension
         FileType::Data => (),
     };
@@ -249,7 +264,12 @@ fn extent_file_list(
     eid: ExtentId,
 ) -> Result<Vec<String>, HttpError> {
     let mut files = Vec::new();
-    let possible_files = [(ExtentType::Data, true)];
+    let possible_files = [
+        (ExtentType::Data, true),
+        (ExtentType::Db, false),
+        (ExtentType::DbShm, false),
+        (ExtentType::DbWal, false),
+    ];
 
     for (file, required) in possible_files.into_iter() {
         let mut fullname = extent_dir.clone();
@@ -334,7 +354,7 @@ mod test {
         // determine them through some programmatic means.
         let dir = tempdir()?;
         let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        region.extend(3, Backend::default())?;
 
         // Determine the directory and name for expected extent files.
         let eid = ExtentId(1);
@@ -356,7 +376,7 @@ mod test {
         // behaves a little different than elsewhere.
         let dir = tempdir()?;
         let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        region.extend(3, Backend::default())?;
 
         let eid = ExtentId(1);
         region.close_extent(eid).unwrap();
@@ -379,7 +399,7 @@ mod test {
         // is missing.
         let dir = tempdir()?;
         let mut region = Region::create(&dir, new_region_options(), csl())?;
-        region.extend(3)?;
+        region.extend(3, Backend::default())?;
 
         // Determine the directory and name for expected extent files.
         let eid = ExtentId(1);

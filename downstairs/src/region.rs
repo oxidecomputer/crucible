@@ -42,6 +42,26 @@ pub fn validate_repair_files(eid: ExtentId, files: &[String]) -> bool {
     files == [extent_file_name(eid, ExtentType::Data)]
 }
 
+/// Validate the possible files during a clone.
+///
+/// During a clone of a downstairs region, we have one, two or four
+/// possible files we expect to see.
+pub fn validate_clone_files(eid: ExtentId, files: &[String]) -> bool {
+    let one = vec![extent_file_name(eid, ExtentType::Data)];
+
+    let mut some = one.clone();
+    some.extend(vec![extent_file_name(eid, ExtentType::Db)]);
+
+    let mut all = some.clone();
+    all.extend(vec![
+        extent_file_name(eid, ExtentType::DbShm),
+        extent_file_name(eid, ExtentType::DbWal),
+    ]);
+
+    // For replacement, we require one, some, or all
+    files == one || files == some || files == all
+}
+
 /// Wrapper type for either a job or reconciliation ID
 ///
 /// This is useful for debug logging / DTrace probes, and not much else
@@ -161,7 +181,11 @@ impl Region {
             }
         };
 
-        // The downstairs needs to open (at minimum) all the extent files, plus
+        // The downstairs needs to open (at minimum) all the extent files --
+        // which is one file per extent for raw extents and up to 4 for
+        // SQLite-backed extents -- along with
+        //
+        // - the seed database (for SQLite, db + shm + wal)
         // - region.json
         // - stdin, stdout, and stderr
         // - the listen and repair sockets (arbitrarily saying two sockets per
@@ -170,7 +194,7 @@ impl Region {
         // - optionally, a control interface
         //
         // If the downstairs cannot open this many files, error here.
-        let required_number_of_files = def.extent_count() as u64 + 8;
+        let required_number_of_files = def.extent_count() as u64 * 4 + 13;
 
         if number_of_files_limit < required_number_of_files {
             bail!("this downstairs cannot open all required files!");
@@ -185,15 +209,6 @@ impl Region {
     pub fn create<P: AsRef<Path>>(
         dir: P,
         options: RegionOptions,
-        log: Logger,
-    ) -> Result<Region> {
-        Self::create_with_backend(dir, options, Backend::default(), log)
-    }
-
-    pub fn create_with_backend<P: AsRef<Path>>(
-        dir: P,
-        options: RegionOptions,
-        backend: Backend,
         log: Logger,
     ) -> Result<Region> {
         options.validate()?;
@@ -219,7 +234,7 @@ impl Region {
             .num_threads(WORKER_POOL_SIZE)
             .build()?;
 
-        let mut region = Region {
+        let region = Region {
             dir: dir.as_ref().to_path_buf(),
             def,
             extents: Vec::new(),
@@ -228,7 +243,7 @@ impl Region {
             log,
             pool,
         };
-        region.open_extents(Some(backend))?;
+        assert_eq!(region.def.extent_count(), 0);
         Ok(region)
     }
 
@@ -237,13 +252,10 @@ impl Region {
      */
     pub fn open<P: AsRef<Path>>(
         dir: P,
-        options: RegionOptions,
         verbose: bool,
         read_only: bool,
         log: &Logger,
     ) -> Result<Region> {
-        options.validate()?;
-
         let cp = config_path(&dir);
 
         /*
@@ -307,7 +319,7 @@ impl Region {
             pool,
         };
 
-        region.open_extents(None)?;
+        region.open_extents()?;
 
         Ok(region)
     }
@@ -334,54 +346,59 @@ impl Region {
         }
     }
 
-    /**
-     * If our extent_count is higher than the number of populated entries
-     * we have in our extents Vec, then open all the new extent files and
-     * load their content into the extent Vec.
-     *
-     * If `create` is `None`, we expect the extent files to exist at the
-     * expected location and will return error if they are not found.
-     *
-     * If `create` is `Some(backend)`, we expect to create new extent files
-     * using the given backend, and will return error if the file is already
-     * present.
-     */
-    fn open_extents(&mut self, create: Option<Backend>) -> Result<()> {
+    /// If our `extent_count` is higher than the number of populated entries
+    /// we have in our extents Vec, then open all the new extent files and
+    /// load their content into the extent Vec.
+    ///
+    /// Returns an error if extent files are missing.
+    fn open_extents(&mut self) -> Result<()> {
         let next_eid = self.extents.len() as u32;
 
         let eid_range = next_eid..self.def.extent_count();
-        let mut these_extents = Vec::with_capacity(eid_range.len());
+        for eid in eid_range.map(ExtentId) {
+            let extent = Extent::open(
+                &self.dir,
+                &self.def,
+                eid,
+                self.read_only,
+                &self.log,
+            )?;
+
+            if extent.dirty() {
+                self.dirty_extents.insert(eid);
+            }
+            self.extents.push(ExtentState::Opened(extent));
+        }
+        self.check_extents();
+
+        Ok(())
+    }
+
+    /// Creates `self.extent_count` extent files and opens them
+    fn create_extents(&mut self, backend: Backend) -> Result<()> {
+        let next_eid = self.extents.len() as u32;
+
+        let eid_range = next_eid..self.def.extent_count();
 
         for eid in eid_range.map(ExtentId) {
-            let extent = if let Some(backend) = create {
-                Extent::create(&self.dir, &self.def, eid, backend)?
-            } else {
-                let extent = Extent::open(
-                    &self.dir,
-                    &self.def,
-                    eid,
-                    self.read_only,
-                    &self.log,
-                )?;
-
-                if extent.dirty() {
-                    self.dirty_extents.insert(eid);
-                }
-
-                extent
-            };
-
-            these_extents.push(ExtentState::Opened(extent));
+            let extent = Extent::create(&self.dir, &self.def, eid, backend)?;
+            self.extents.push(ExtentState::Opened(extent));
         }
+        self.check_extents();
 
-        self.extents.extend(these_extents);
+        Ok(())
+    }
 
-        for eid in (next_eid..self.def.extent_count()).map(ExtentId) {
+    /// Checks that all extents are open and have the correct `number`
+    ///
+    /// # Panics
+    /// If any extent is not open, has an incorrect `number`, or we haven't
+    /// opened `self.def.extent_count()` extents.
+    fn check_extents(&self) {
+        for eid in (0..self.def.extent_count()).map(ExtentId) {
             assert_eq!(self.get_opened_extent(eid).number, eid);
         }
         assert_eq!(self.def.extent_count() as usize, self.extents.len());
-
-        Ok(())
     }
 
     /// Walk the list of extents and close each one.
@@ -480,12 +497,17 @@ impl Region {
      *  5. fsync extent directory ( 00/000/ where the extent files live)
      *  6. Replace current extent 012 files with copied files of same name
      *     from 012.replace dir
-     *  7. fsync files after copying them (new location).
-     *  8. fsync containing extent dir
-     *  9. Rename 012.replace dir to 012.completed dir.
-     * 10. fsync extent dir again (so dir rename is persisted)
-     * 11. Delete completed dir.
-     * 12. fsync extent dir again (so dir rename is persisted)
+     *  7. Remove any files in extent dir that don't exist in replacing dir
+     *     For example, if the replacement extent has 012 and 012.db, but
+     *     the current (bad) extent has 012 012.db 012.db-shm
+     *     and 012.db-wal, we want to remove the 012.db-shm and 012.db-wal
+     *     files when we replace 012 and 012.db with the new versions.
+     *  8. fsync files after copying them (new location).
+     *  9. fsync containing extent dir
+     * 10. Rename 012.replace dir to 012.completed dir.
+     * 11. fsync extent dir again (so dir rename is persisted)
+     * 12. Delete completed dir.
+     * 13. fsync extent dir again (so dir rename is persisted)
      *
      *  This also requires the following behavior on every extent open:
      *   A. If xxx.copy directory found, delete it.
@@ -515,12 +537,13 @@ impl Region {
             assert!(!self.read_only);
         }
 
-        self.get_extent_copy(client, eid, repair_addr).await?;
+        self.get_extent_copy(client, eid, repair_addr, clone)
+            .await?;
 
         // Returning from get_extent_copy means we have copied all our
         // files and moved the copy directory to replace directory.
         // Now, replace the current extent files with the replacement ones.
-        move_replacement_extent(&self.dir, eid, &self.log)?;
+        move_replacement_extent(&self.dir, eid, clone, &self.log)?;
 
         Ok(())
     }
@@ -537,6 +560,7 @@ impl Region {
         client: reqwest::Client,
         eid: ExtentId,
         repair_addr: SocketAddr,
+        clone: bool,
     ) -> Result<(), CrucibleError> {
         // An extent must be closed before we replace its files.
         assert!(matches!(self.extents[eid.0 as usize], ExtentState::Closed));
@@ -578,7 +602,17 @@ impl Region {
             "eid:{} Found repair files: {:?}", eid, repair_files
         );
 
-        if !validate_repair_files(eid, &repair_files) {
+        // Depending on if this is a clone or not, we have a different
+        // set of files we expect to find.
+        if clone {
+            if !validate_clone_files(eid, &repair_files) {
+                crucible_bail!(
+                    RepairFilesInvalid,
+                    "Invalid clone file list: {:?}",
+                    repair_files,
+                );
+            }
+        } else if !validate_repair_files(eid, &repair_files) {
             crucible_bail!(
                 RepairFilesInvalid,
                 "Invalid repair file list: {:?}",
@@ -587,14 +621,24 @@ impl Region {
         }
 
         // Replace local files with their remote copies.
+        //
+        // If we are replacing our region with one from an older version
+        // that contained SQLite files, then we need to copy those files
+        // over as well.
         let mut count = 0;
-        for opt_file in &[ExtentType::Data] {
+        for opt_file in &[
+            ExtentType::Data,
+            ExtentType::Db,
+            ExtentType::DbShm,
+            ExtentType::DbWal,
+        ] {
             let filename = extent_file_name(eid, *opt_file);
 
             if !repair_files.contains(&filename) {
                 continue;
             }
-            let local_file = Self::create_copy_file(copy_dir.clone(), eid)?;
+            let local_file =
+                Self::create_copy_file(copy_dir.clone(), eid, *opt_file)?;
             let repair_stream = match repair_server
                 .get_extent_file(eid.0, opt_file.to_file_type())
                 .await
@@ -603,8 +647,9 @@ impl Region {
                 Err(e) => {
                     crucible_bail!(
                         RepairRequestError,
-                        "Failed to get extent {} file: {:?}",
+                        "Failed to get extent {} {} file: {:?}",
                         eid,
+                        opt_file,
                         e,
                     );
                 }
@@ -658,7 +703,7 @@ impl Region {
      * if there is a difference between what our actual extent_count is
      * and what is requested, go out and create the new extent files.
      */
-    pub fn extend(&mut self, newsize: u32) -> Result<()> {
+    pub fn extend(&mut self, newsize: u32, backend: Backend) -> Result<()> {
         if self.read_only {
             // XXX return CrucibleError instead of anyhow?
             bail!(CrucibleError::ModifyingReadOnlyRegion.to_string());
@@ -675,7 +720,7 @@ impl Region {
         if newsize > self.def.extent_count() {
             self.def.set_extent_count(newsize);
             write_json(config_path(&self.dir), &self.def, true)?;
-            self.open_extents(Some(Backend::default()))?;
+            self.create_extents(backend)?;
         }
         Ok(())
     }
@@ -1034,10 +1079,14 @@ impl Region {
     pub fn create_copy_file(
         mut copy_dir: PathBuf,
         eid: ExtentId,
+        extent_type: ExtentType,
     ) -> Result<File> {
         // Get the base extent name before we consider the actual Type
         let name = extent_file_name(eid, ExtentType::Data);
         copy_dir.push(name);
+
+        let ext = format!("{}", extent_type);
+        copy_dir.set_extension(ext);
         let copy_path = copy_dir;
 
         if Path::new(&copy_path).exists() {
@@ -1050,6 +1099,10 @@ impl Region {
             .create(true)
             .open(&copy_path)?;
         Ok(file)
+    }
+
+    pub fn read_only(&self) -> bool {
+        self.read_only
     }
 }
 
@@ -1142,20 +1195,13 @@ pub(crate) mod test {
         // Drop the region, then open it.
         let dir = tempdir().unwrap();
         let log = csl();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            log.clone(),
-        )
-        .unwrap();
-        region.extend(3).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), log.clone()).unwrap();
+        region.extend(3, backend).unwrap();
 
         drop(region);
 
-        let _region =
-            Region::open(&dir, new_region_options(), true, false, &log)
-                .unwrap();
+        let _region = Region::open(&dir, true, false, &log).unwrap();
     }
 
     #[test]
@@ -1170,8 +1216,7 @@ pub(crate) mod test {
         write_json(&cp, &def, false)?;
 
         // Verify that the open returns an error
-        Region::open(&dir, new_region_options(), true, false, &csl())
-            .unwrap_err();
+        Region::open(&dir, true, false, &csl()).unwrap_err();
 
         Ok(())
     }
@@ -1189,8 +1234,7 @@ pub(crate) mod test {
         write_json(&cp, &def, false)?;
 
         // Verify that the open returns an error
-        Region::open(&dir, new_region_options(), true, false, &csl())
-            .unwrap_err();
+        Region::open(&dir, true, false, &csl()).unwrap_err();
 
         Ok(())
     }
@@ -1210,8 +1254,7 @@ pub(crate) mod test {
         write_json(&cp, &def, false)?;
 
         // Verify that the open returns an error
-        Region::open(&dir, new_region_options(), true, false, &csl())
-            .unwrap_err();
+        Region::open(&dir, true, false, &csl()).unwrap_err();
 
         Ok(())
     }
@@ -1232,8 +1275,7 @@ pub(crate) mod test {
         write_json(&cp, &def, false)?;
 
         // Verify that the open returns an error
-        Region::open(&dir, new_region_options(), true, false, &csl())
-            .unwrap_err();
+        Region::open(&dir, true, false, &csl()).unwrap_err();
 
         Ok(())
     }
@@ -1243,14 +1285,9 @@ pub(crate) mod test {
         // Create the copy directory, make sure it exists.
         // Remove the copy directory, make sure it goes away.
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(3).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(3, backend).unwrap();
 
         let cp = copy_dir(&dir, ExtentId(1));
 
@@ -1265,14 +1302,9 @@ pub(crate) mod test {
         // Create the copy directory, make sure it exists.
         // Verify a second create will fail.
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(3).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(3, backend).unwrap();
 
         Region::create_copy_dir(&dir, ExtentId(1)).unwrap();
         let res = Region::create_copy_dir(&dir, ExtentId(1));
@@ -1282,14 +1314,9 @@ pub(crate) mod test {
     fn close_extent(backend: Backend) {
         // Create the region, make three extents
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(3).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(3, backend).unwrap();
 
         // Close extent 1
         let (gen, flush, dirty) = region.close_extent(ExtentId(1)).unwrap();
@@ -1321,14 +1348,9 @@ pub(crate) mod test {
         // opened with that directory present.
         // Create the region, make three extents
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(3).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(3, backend).unwrap();
 
         // Close extent 1
         region.close_extent(ExtentId(1)).unwrap();
@@ -1355,14 +1377,9 @@ pub(crate) mod test {
         // when an extent is re-opened.
         // Create the region, make three extents
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(3).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(3, backend).unwrap();
 
         // Close extent 1
         region.close_extent(ExtentId(1)).unwrap();
@@ -1397,14 +1414,9 @@ pub(crate) mod test {
         // metadata files.
         // Create the region, make three extents
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(3).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(3, backend).unwrap();
 
         // Close extent 1
         region.close_extent(ExtentId(1)).unwrap();
@@ -1417,10 +1429,24 @@ pub(crate) mod test {
         // extent by copying the files from extent zero into the copy
         // directory.
         let dest_name = extent_file_name(ExtentId(1), ExtentType::Data);
-        let source_path = extent_path(&dir, ExtentId(0));
+        let mut source_path = extent_path(&dir, ExtentId(0));
         let mut dest_path = cp.clone();
         dest_path.push(dest_name);
         std::fs::copy(source_path.clone(), dest_path.clone()).unwrap();
+
+        if backend == Backend::SQLite {
+            source_path.set_extension("db");
+            dest_path.set_extension("db");
+            std::fs::copy(source_path.clone(), dest_path.clone()).unwrap();
+
+            source_path.set_extension("db-shm");
+            dest_path.set_extension("db-shm");
+            std::fs::copy(source_path.clone(), dest_path.clone()).unwrap();
+
+            source_path.set_extension("db-wal");
+            dest_path.set_extension("db-wal");
+            std::fs::copy(source_path.clone(), dest_path.clone()).unwrap();
+        }
 
         let rd = replace_dir(&dir, ExtentId(1));
         rename(cp.clone(), rd.clone()).unwrap();
@@ -1450,14 +1476,9 @@ pub(crate) mod test {
 
         // Create the region, make three extents
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(3).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(3, backend).unwrap();
 
         // Close extent 1
         region.close_extent(ExtentId(1)).unwrap();
@@ -1470,15 +1491,38 @@ pub(crate) mod test {
         // extent by copying the files from extent zero into the copy
         // directory.
         let dest_name = extent_file_name(ExtentId(1), ExtentType::Data);
-        let source_path = extent_path(&dir, ExtentId(0));
+        let mut source_path = extent_path(&dir, ExtentId(0));
 
         let mut dest_path = cp.clone();
         dest_path.push(dest_name);
         println!("cp {:?} to {:?}", source_path, dest_path);
         std::fs::copy(source_path.clone(), dest_path.clone()).unwrap();
 
+        if backend == Backend::SQLite {
+            source_path.set_extension("db");
+            dest_path.set_extension("db");
+            std::fs::copy(source_path.clone(), dest_path.clone()).unwrap();
+        }
+
         let rd = replace_dir(&dir, ExtentId(1));
         rename(cp.clone(), rd.clone()).unwrap();
+
+        if backend == Backend::SQLite {
+            // The close may remove the db-shm and db-wal files, manually
+            // create them here, just to verify they are removed after the
+            // reopen as they are not included in the files to be recovered
+            // and this test exists to verify they will be deleted.
+            let mut invalid_db = extent_path(&dir, ExtentId(1));
+            invalid_db.set_extension("db-shm");
+            println!("Recreate {:?}", invalid_db);
+            std::fs::copy(source_path.clone(), invalid_db.clone()).unwrap();
+            assert!(Path::new(&invalid_db).exists());
+
+            invalid_db.set_extension("db-wal");
+            println!("Recreate {:?}", invalid_db);
+            std::fs::copy(source_path.clone(), invalid_db.clone()).unwrap();
+            assert!(Path::new(&invalid_db).exists());
+        }
 
         // Now we have a replace directory populated and our files to
         // delete are ready.  We verify that special action is taken
@@ -1507,14 +1551,9 @@ pub(crate) mod test {
 
         // Create the region, make three extents
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(3).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(3, backend).unwrap();
 
         // Make copy directory for this extent
         let _ext_one = region.get_opened_extent(ExtentId(1));
@@ -1524,11 +1563,17 @@ pub(crate) mod test {
         // extent by copying the files from extent zero into the copy
         // directory.
         let dest_name = extent_file_name(ExtentId(1), ExtentType::Data);
-        let source_path = extent_path(&dir, ExtentId(0));
+        let mut source_path = extent_path(&dir, ExtentId(0));
 
         let mut dest_path = cp.clone();
         dest_path.push(dest_name);
         std::fs::copy(source_path.clone(), dest_path.clone()).unwrap();
+
+        if backend == Backend::SQLite {
+            source_path.set_extension("db");
+            dest_path.set_extension("db");
+            std::fs::copy(source_path.clone(), dest_path.clone()).unwrap();
+        }
 
         let rd = replace_dir(&dir, ExtentId(1));
         rename(cp, rd.clone()).unwrap();
@@ -1536,9 +1581,7 @@ pub(crate) mod test {
         drop(region);
 
         // Open up the region read_only now.
-        let region =
-            Region::open(&dir, new_region_options(), false, true, &csl())
-                .unwrap();
+        let region = Region::open(&dir, false, true, &csl()).unwrap();
 
         // Verify extent 1 has opened again.
         let _ext_one = region.get_opened_extent(ExtentId(1));
@@ -1547,11 +1590,202 @@ pub(crate) mod test {
         assert!(Path::new(&rd).exists());
     }
 
+    #[tokio::test]
+    async fn reopen_extent_partial_migration() -> Result<()> {
+        let log = csl();
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
+        region.extend(3, Backend::SQLite)?;
+        let ddef = region.def();
+
+        region.region_write(
+            &RegionWrite(vec![
+                RegionWriteReq {
+                    extent: ExtentId(1),
+                    write: ExtentWrite {
+                        offset: Block::new_512(0),
+                        data: Bytes::from(vec![1u8; 512]),
+                        block_contexts: vec![BlockContext {
+                            encryption_context: None,
+                            hash: 8717892996238908351, // hash for all 1s
+                        }],
+                    },
+                },
+                RegionWriteReq {
+                    extent: ExtentId(2),
+                    write: ExtentWrite {
+                        offset: Block::new_512(0),
+                        data: Bytes::from(vec![2u8; 512]),
+                        block_contexts: vec![BlockContext {
+                            encryption_context: None,
+                            hash: 2192425179333611943, // hash for all 2s
+                        }],
+                    },
+                },
+            ]),
+            JobId(0),
+            false,
+        )?;
+        drop(region);
+
+        // Manually calculate the migration from extent 1
+        let extent_file = extent_path(&dir, ExtentId(1));
+        let mut inner = extent_inner_sqlite::SqliteInner::open(
+            dir.path(),
+            &ddef,
+            ExtentId(1),
+            false,
+            &log,
+        )?;
+        use crate::extent::ExtentInner;
+        let ctxs = inner.export_contexts()?;
+        let dirty = inner.dirty()?;
+        let flush_number = inner.flush_number()?;
+        let gen_number = inner.gen_number()?;
+        drop(inner);
+
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&extent_file)?;
+        println!("about to call `import` on {:?}", extent_file);
+        extent_inner_raw::RawInner::import(
+            &mut file,
+            &ddef,
+            ctxs,
+            dirty,
+            flush_number,
+            gen_number,
+        )?;
+        println!("dooone");
+        // At this point, we have manually written the file, but have not
+        // deleted the `.db` on disk.  As such, migration should restart when
+        // the extent is reopened.
+
+        let mut region = Region::open(&dir, true, false, &log)?;
+        let out = region.region_read(
+            &RegionReadRequest(vec![
+                RegionReadReq {
+                    extent: ExtentId(1),
+                    offset: Block::new_512(0),
+                    count: NonZeroUsize::new(1).unwrap(),
+                },
+                RegionReadReq {
+                    extent: ExtentId(2),
+                    offset: Block::new_512(0),
+                    count: NonZeroUsize::new(1).unwrap(),
+                },
+            ]),
+            JobId(0),
+        )?;
+        assert_eq!(&out.data[..512], [1; 512]);
+        assert_eq!(&out.data[512..], [2; 512]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn reopen_extent_partial_migration_corrupt() -> Result<()> {
+        let log = csl();
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
+        region.extend(3, Backend::SQLite)?;
+        let ddef = region.def();
+
+        // Make some writes, which we'll check after migration
+        region.region_write(
+            &RegionWrite(vec![
+                RegionWriteReq {
+                    extent: ExtentId(1),
+                    write: ExtentWrite {
+                        offset: Block::new_512(0),
+                        data: Bytes::from(vec![1u8; 512]),
+                        block_contexts: vec![BlockContext {
+                            encryption_context: None,
+                            hash: 8717892996238908351, // hash for all 1s
+                        }],
+                    },
+                },
+                RegionWriteReq {
+                    extent: ExtentId(2),
+                    write: ExtentWrite {
+                        offset: Block::new_512(0),
+                        data: Bytes::from(vec![2u8; 512]),
+                        block_contexts: vec![BlockContext {
+                            encryption_context: None,
+                            hash: 2192425179333611943, // hash for all 2s
+                        }],
+                    },
+                },
+            ]),
+            JobId(0),
+            false,
+        )?;
+        drop(region);
+
+        // Manually calculate the migration from extent 1, but deliberately mess
+        // with the context values (simulating a migration that didn't manage to
+        // write everything to disk).
+        let extent_file = extent_path(&dir, ExtentId(1));
+        let mut inner = extent_inner_sqlite::SqliteInner::open(
+            dir.path(),
+            &ddef,
+            ExtentId(1),
+            false,
+            &log,
+        )?;
+        use crate::extent::ExtentInner;
+        let ctxs = inner.export_contexts()?.into_iter().map(|_| None).collect();
+        let dirty = inner.dirty()?;
+        let flush_number = inner.flush_number()?;
+        let gen_number = inner.gen_number()?;
+        drop(inner);
+
+        // Stage the corrupted migration
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(extent_file)?;
+        extent_inner_raw::RawInner::import(
+            &mut file,
+            &ddef,
+            ctxs,
+            dirty,
+            flush_number,
+            gen_number,
+        )?;
+        // At this point, we have manually written the file, but have not
+        // deleted the `.db` on disk.  As such, migration should restart when
+        // the extent is reopened, and we should recover from corruption.
+
+        let mut region = Region::open(&dir, true, false, &log)?;
+        let out = region.region_read(
+            &RegionReadRequest(vec![
+                RegionReadReq {
+                    extent: ExtentId(1),
+                    offset: Block::new_512(0),
+                    count: NonZeroUsize::new(1).unwrap(),
+                },
+                RegionReadReq {
+                    extent: ExtentId(2),
+                    offset: Block::new_512(0),
+                    count: NonZeroUsize::new(1).unwrap(),
+                },
+            ]),
+            JobId(0),
+        )?;
+        assert_eq!(&out.data[..512], [1; 512]);
+        assert_eq!(&out.data[512..], [2; 512]);
+
+        Ok(())
+    }
+
     // wrapper to send to sub-tests for true/false here
     #[test]
     fn validate_repair_files_empty() {
         // No repair files is a failure
         assert!(!validate_repair_files(ExtentId(1), &Vec::new()));
+        assert!(!validate_clone_files(ExtentId(1), &Vec::new()));
     }
 
     #[test]
@@ -1560,6 +1794,7 @@ pub(crate) mod test {
         let good_files: Vec<String> = vec!["001".to_string()];
 
         assert!(validate_repair_files(ExtentId(1), &good_files));
+        assert!(validate_clone_files(ExtentId(1), &good_files));
     }
 
     #[test]
@@ -1568,6 +1803,7 @@ pub(crate) mod test {
         let good_files: Vec<String> =
             vec!["002".to_string(), "002".to_string()];
         assert!(!validate_repair_files(ExtentId(2), &good_files));
+        assert!(!validate_clone_files(ExtentId(2), &good_files));
     }
 
     #[test]
@@ -1575,6 +1811,7 @@ pub(crate) mod test {
         // Incorrect file names for extent 2
         let good_files: Vec<String> = vec!["001".to_string()];
         assert!(!validate_repair_files(ExtentId(2), &good_files));
+        assert!(!validate_clone_files(ExtentId(2), &good_files));
     }
 
     #[test]
@@ -1584,6 +1821,8 @@ pub(crate) mod test {
             vec!["001".to_string(), "001.db".to_string()];
 
         assert!(!validate_repair_files(ExtentId(1), &good_files));
+        // Valid for replacement
+        assert!(validate_clone_files(ExtentId(1), &good_files));
     }
 
     #[test]
@@ -1597,6 +1836,7 @@ pub(crate) mod test {
         ];
 
         assert!(!validate_repair_files(ExtentId(1), &many_files));
+        assert!(validate_clone_files(ExtentId(1), &many_files));
     }
 
     #[test]
@@ -1609,6 +1849,7 @@ pub(crate) mod test {
             "002.db".to_string(),
         ];
         assert!(!validate_repair_files(ExtentId(2), &good_files));
+        assert!(!validate_clone_files(ExtentId(2), &good_files));
     }
 
     #[test]
@@ -1621,6 +1862,7 @@ pub(crate) mod test {
             "001.db-shm".to_string(),
         ];
         assert!(!validate_repair_files(ExtentId(1), &good_files));
+        assert!(!validate_clone_files(ExtentId(1), &good_files));
     }
 
     #[test]
@@ -1633,6 +1875,7 @@ pub(crate) mod test {
             "001.db-wal".to_string(),
         ];
         assert!(!validate_repair_files(ExtentId(2), &good_files));
+        assert!(!validate_clone_files(ExtentId(2), &good_files));
     }
 
     #[test]
@@ -1646,6 +1889,7 @@ pub(crate) mod test {
             "001.db-wal".to_string(),
         ];
         assert!(!validate_repair_files(ExtentId(1), &good_files));
+        assert!(!validate_clone_files(ExtentId(1), &good_files));
     }
 
     #[test]
@@ -1657,19 +1901,15 @@ pub(crate) mod test {
             "001.db-wal".to_string(),
         ];
         assert!(!validate_repair_files(ExtentId(1), &good_files));
+        assert!(!validate_clone_files(ExtentId(1), &good_files));
     }
 
     fn reopen_all_extents(backend: Backend) {
         // Create the region, make three extents
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(5).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(5, backend).unwrap();
 
         // Close extent 1
         region.close_extent(ExtentId(1)).unwrap();
@@ -1697,23 +1937,15 @@ pub(crate) mod test {
 
     fn new_region(backend: Backend) {
         let dir = tempdir().unwrap();
-        let _ = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        );
+        let mut r = Region::create(&dir, new_region_options(), csl()).unwrap();
+        r.extend(10, backend).unwrap();
     }
 
     fn new_existing_region(backend: Backend) {
         let dir = tempdir().unwrap();
-        let _ = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        );
-        let _ = Region::open(&dir, new_region_options(), false, false, &csl());
+        let mut r = Region::create(&dir, new_region_options(), csl()).unwrap();
+        r.extend(10, backend).unwrap();
+        let _ = Region::open(&dir, false, false, &csl());
     }
 
     #[test]
@@ -1721,7 +1953,6 @@ pub(crate) mod test {
     fn bad_import_region() {
         let _ = Region::open(
             "/tmp/12345678-1111-2222-3333-123456789999/notadir",
-            new_region_options(),
             false,
             false,
             &csl(),
@@ -1742,14 +1973,8 @@ pub(crate) mod test {
          * Create a region, give it actual size
          */
         let dir = tempdir().unwrap();
-        let mut r1 = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        r1.extend(2).unwrap();
+        let mut r1 = Region::create(&dir, new_region_options(), csl()).unwrap();
+        r1.extend(2, backend).unwrap();
 
         /*
          * Build the Vec for our region dir
@@ -1771,22 +1996,11 @@ pub(crate) mod test {
         /*
          * Create the regions, give them some actual size
          */
-        let mut r1 = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        let mut r2 = Region::create_with_backend(
-            &dir2,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        r1.extend(2).unwrap();
-        r2.extend(2).unwrap();
+        let mut r1 = Region::create(&dir, new_region_options(), csl()).unwrap();
+        let mut r2 =
+            Region::create(&dir2, new_region_options(), csl()).unwrap();
+        r1.extend(2, backend).unwrap();
+        r2.extend(2, backend).unwrap();
 
         /*
          * Build the Vec for our region dirs
@@ -1813,22 +2027,11 @@ pub(crate) mod test {
         /*
          * Create the regions, give them some actual size
          */
-        let mut r1 = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        r1.extend(3).unwrap();
-        let mut r2 = Region::create_with_backend(
-            &dir2,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        r2.extend(3).unwrap();
+        let mut r1 = Region::create(&dir, new_region_options(), csl()).unwrap();
+        r1.extend(3, backend).unwrap();
+        let mut r2 =
+            Region::create(&dir2, new_region_options(), csl()).unwrap();
+        r2.extend(3, backend).unwrap();
 
         /*
          * Build the Vec for our region dirs
@@ -1857,7 +2060,7 @@ pub(crate) mod test {
             (ddef.extent_size().value * ddef.block_size()) as usize;
         for i in (0..ddef.extent_count()).map(ExtentId) {
             match backend {
-                Backend::RawFile => {
+                Backend::RawFile | Backend::SQLite => {
                     let path = extent_path(dir, i);
                     let data =
                         std::fs::read(path).expect("Unable to read file");
@@ -1917,14 +2120,9 @@ pub(crate) mod test {
 
     fn test_big_write(backend: Backend) {
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(3).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(3, backend).unwrap();
 
         let ddef = region.def();
         let num_blocks: usize =
@@ -1959,6 +2157,81 @@ pub(crate) mod test {
         assert_eq!(buffer, responses.data);
     }
 
+    #[test]
+    fn test_big_write_migrate() -> Result<()> {
+        let log = csl();
+        let dir = tempdir()?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
+        region.extend(3, Backend::SQLite)?;
+
+        let ddef = region.def();
+        let num_blocks: usize =
+            ddef.extent_size().value as usize * ddef.extent_count() as usize;
+
+        // use region_write to fill region
+        let buffer = region_write_all(&mut region, &ddef, false);
+
+        for i in (0..3).map(ExtentId) {
+            region.region_flush_extent(i, 10, 15, JobId(21))?;
+        }
+        let meta = region.get_opened_extent(ExtentId(0)).get_meta_info();
+        assert_eq!(meta.gen_number, 10);
+        assert_eq!(meta.flush_number, 15);
+        drop(region);
+
+        // Open the region as read-only, which doesn't trigger a migration
+        let mut region = Region::open(&dir, true, true, &log)?;
+        let meta = region.get_opened_extent(ExtentId(0)).get_meta_info();
+        assert_eq!(meta.gen_number, 10);
+        assert_eq!(meta.flush_number, 15);
+
+        // Assert that the .db files still exist
+        for i in (0..3).map(ExtentId) {
+            assert!(extent_dir(&dir, i)
+                .join(extent_file_name(i, ExtentType::Db))
+                .exists());
+        }
+
+        // read all using region_read
+        let mut requests: Vec<crucible_protocol::ReadRequest> =
+            Vec::with_capacity(num_blocks);
+
+        for i in 0..num_blocks {
+            let eid = ExtentId((i as u64 / ddef.extent_size().value) as u32);
+            let offset: Block =
+                Block::new_512((i as u64) % ddef.extent_size().value);
+
+            requests.push(crucible_protocol::ReadRequest { eid, offset });
+        }
+
+        let req = RegionReadRequest::new(&requests);
+        let read_from_region = region.region_read(&req, JobId(0))?.data;
+
+        assert_eq!(buffer.len(), read_from_region.len());
+        assert_eq!(buffer, read_from_region);
+        drop(region);
+
+        // Open the region as read-write, which **does** trigger a migration
+        let mut region = Region::open(&dir, true, false, &log)?;
+        let meta = region.get_opened_extent(ExtentId(0)).get_meta_info();
+        assert_eq!(meta.gen_number, 10);
+        assert_eq!(meta.flush_number, 15);
+
+        // Assert that the .db files have been deleted during the migration
+        for i in (0..3).map(ExtentId) {
+            assert!(!extent_dir(&dir, i)
+                .join(extent_file_name(i, ExtentType::Db))
+                .exists());
+        }
+        let read_from_region = region.region_read(&req, JobId(0))?.data;
+
+        assert_eq!(buffer.len(), read_from_region.len());
+        assert_eq!(buffer, read_from_region);
+        drop(region);
+
+        Ok(())
+    }
+
     fn test_region_open_removes_partial_writes(backend: Backend) {
         // Opening a dirty extent should fully rehash the extent to remove any
         // contexts that don't correlate with data on disk. This is necessary
@@ -1973,14 +2246,9 @@ pub(crate) mod test {
         // context row.
 
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(1).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(1, backend).unwrap();
 
         // A write of some sort only wrote a block context row and dirty flag
         {
@@ -2048,14 +2316,9 @@ pub(crate) mod test {
 
     fn test_ok_hash_ok(backend: Backend) {
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(1).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(1, backend).unwrap();
 
         let data = Bytes::from(vec![1u8; 512]);
 
@@ -2092,14 +2355,9 @@ pub(crate) mod test {
         // Verify that a read fill does write to a block when there is
         // no data written yet.
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(1).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(1, backend).unwrap();
 
         // Fill a buffer with "9"'s (random)
         let data = Bytes::from(vec![9u8; 512]);
@@ -2156,14 +2414,9 @@ pub(crate) mod test {
         // Verify that a read fill does not write to the block when
         // there is data written already.
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(1).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(1, backend).unwrap();
 
         // Fill a buffer with "9"'s (random)
         let data = Bytes::from(vec![9u8; 512]);
@@ -2248,14 +2501,9 @@ pub(crate) mod test {
         // there is data written already.  This time run a flush after the
         // first write.  Verify correct state of dirty bit as well.
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(1).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(1, backend).unwrap();
 
         // Fill a buffer with "9"'s
         let data = Bytes::from(vec![9u8; 512]);
@@ -2352,14 +2600,9 @@ pub(crate) mod test {
         // Do a multi block write where all blocks start new (unwritten)
         // Verify only empty blocks have data.
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(3).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(3, backend).unwrap();
 
         let ddef = region.def();
         let num_blocks: usize =
@@ -2397,14 +2640,9 @@ pub(crate) mod test {
         // only_write_unwritten set. Verify block zero is the first write, and
         // the remaining blocks have the contents from the multi block fill.
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(3).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(3, backend).unwrap();
 
         let ddef = region.def();
         let total_size: usize = ddef.total_size() as usize;
@@ -2484,14 +2722,9 @@ pub(crate) mod test {
         // the other blocks have the data from the multi block fill.
 
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(3).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(3, backend).unwrap();
 
         let ddef = region.def();
         let num_blocks: usize =
@@ -2571,14 +2804,9 @@ pub(crate) mod test {
         // three blocks have the data from the multi block read fill.
 
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(5).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(5, backend).unwrap();
 
         let ddef = region.def();
         // A bunch of things expect a 512, so let's make it explicit.
@@ -2678,14 +2906,9 @@ pub(crate) mod test {
         // Do a multi block write_unwritten where a few different blocks have
         // data. Verify only unwritten blocks get the data.
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(4).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(4, backend).unwrap();
 
         let ddef = region.def();
         let total_size: usize = ddef.total_size() as usize;
@@ -2792,14 +3015,9 @@ pub(crate) mod test {
     fn test_flush_extent_limit_base(backend: Backend) {
         // Check that the extent_limit value in region_flush is honored
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(2).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(2, backend).unwrap();
 
         // Write to extent 0 block 0 first
         let writes = create_generic_write(ExtentId(0), Block::new_512(0));
@@ -2829,14 +3047,9 @@ pub(crate) mod test {
         // Check that the extent_limit value in region_flush is honored
         // Write to the last block in the extents.
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(3).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(3, backend).unwrap();
 
         // Write to extent 1 block 9 first
         let writes = create_generic_write(ExtentId(1), Block::new_512(9));
@@ -2871,14 +3084,9 @@ pub(crate) mod test {
         // Check that the extent_limit value in region_flush is honored
         // Write to all the extents, then flush them one at a time.
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(10).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(10, backend).unwrap();
 
         // Write to extents 0 to 9
         let mut job_id = 1;
@@ -2917,14 +3125,9 @@ pub(crate) mod test {
         // Check that the extent_limit value in region_flush will return
         // an error if the extent_limit is too large.
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(1).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(1, backend).unwrap();
 
         // Call flush with an invalid extent
         assert!(region
@@ -2936,14 +3139,9 @@ pub(crate) mod test {
         // Verify that a write then close of an extent will return the
         // expected gen flush and dirty bits for that extent.
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(1).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(1, backend).unwrap();
 
         // Fill a buffer with "9"'s
         let data = Bytes::from(vec![9u8; 512]);
@@ -2993,14 +3191,9 @@ pub(crate) mod test {
         // Do several extent open close operations, verifying that the
         // gen/flush/dirty return values are as expected.
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(1).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(1, backend).unwrap();
 
         // Fill a buffer with "9"'s
         let data = Bytes::from(vec![9u8; 512]);
@@ -3074,10 +3267,8 @@ pub(crate) mod test {
         let dir = tempdir().unwrap();
         let mut region_opts = new_region_options();
         region_opts.set_extent_size(Block::new_512(1024));
-        let mut region =
-            Region::create_with_backend(&dir, region_opts, backend, csl())
-                .unwrap();
-        region.extend(1).unwrap();
+        let mut region = Region::create(&dir, region_opts, csl()).unwrap();
+        region.extend(1, backend).unwrap();
 
         // Write some data to 3 different areas
         let ranges = [(0..120), (243..244), (487..903)];
@@ -3158,10 +3349,8 @@ pub(crate) mod test {
         const EXTENT_SIZE: u64 = 4096;
         let mut region_opts = new_region_options();
         region_opts.set_extent_size(Block::new_512(EXTENT_SIZE));
-        let mut region =
-            Region::create_with_backend(&dir, region_opts, backend, csl())
-                .unwrap();
-        region.extend(1).unwrap();
+        let mut region = Region::create(&dir, region_opts, csl()).unwrap();
+        region.extend(1, backend).unwrap();
         eprintln!("created region");
 
         // writing the entire region a few times over before the flush.
@@ -3224,14 +3413,9 @@ pub(crate) mod test {
 
     fn test_bad_hash_bad(backend: Backend) {
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(1).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(1, backend).unwrap();
 
         let data = Bytes::from(vec![1u8; 512]);
 
@@ -3275,14 +3459,9 @@ pub(crate) mod test {
 
     fn test_blank_block_read_ok(backend: Backend) {
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
-        region.extend(1).unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
+        region.extend(1, backend).unwrap();
 
         let responses = region
             .region_read(
@@ -3304,18 +3483,13 @@ pub(crate) mod test {
         backend: Backend,
     ) -> (tempfile::TempDir, Region, Vec<u8>) {
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
 
         // Create 3 extents, each size 10 blocks
         const EXTENT_COUNT: u32 = 3;
         assert_eq!(region.def().extent_size().value, 10);
-        region.extend(EXTENT_COUNT).unwrap();
+        region.extend(EXTENT_COUNT, backend).unwrap();
 
         let ddef = region.def();
         let total_size = ddef.total_size() as usize;
@@ -3611,17 +3785,12 @@ pub(crate) mod test {
     fn test_write_unwritten_single_large_contiguous(backend: Backend) {
         // Create a blank region
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
 
         // Create 3 extents, each size 10 blocks
         assert_eq!(region.def().extent_size().value, 10);
-        region.extend(3).unwrap();
+        region.extend(3, backend).unwrap();
 
         let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
 
@@ -3641,17 +3810,12 @@ pub(crate) mod test {
     ) {
         // Create a blank region
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
 
         // Create 3 extents, each size 10 blocks
         assert_eq!(region.def().extent_size().value, 10);
-        region.extend(3).unwrap();
+        region.extend(3, backend).unwrap();
 
         let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
 
@@ -3672,17 +3836,12 @@ pub(crate) mod test {
     ) {
         // Create a blank region
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
 
         // Create 3 extents, each size 10 blocks
         assert_eq!(region.def().extent_size().value, 10);
-        region.extend(3).unwrap();
+        region.extend(3, backend).unwrap();
 
         let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
 
@@ -3709,17 +3868,12 @@ pub(crate) mod test {
     ) {
         // Create a blank region
         let dir = tempdir().unwrap();
-        let mut region = Region::create_with_backend(
-            &dir,
-            new_region_options(),
-            backend,
-            csl(),
-        )
-        .unwrap();
+        let mut region =
+            Region::create(&dir, new_region_options(), csl()).unwrap();
 
         // Create 3 extents, each size 10 blocks
         assert_eq!(region.def().extent_size().value, 10);
-        region.extend(3).unwrap();
+        region.extend(3, backend).unwrap();
 
         let mut data: Vec<u8> = vec![0; region.def().total_size() as usize];
 
@@ -3815,5 +3969,9 @@ pub(crate) mod test {
     mod raw_file {
         use super::*;
         region_test_suite!(RawFile);
+    }
+    mod sqlite {
+        use super::*;
+        region_test_suite!(SQLite);
     }
 }

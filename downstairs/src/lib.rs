@@ -45,6 +45,7 @@ mod stats;
 
 mod extent_inner_raw;
 pub(crate) mod extent_inner_raw_common;
+mod extent_inner_sqlite;
 
 use extent::ExtentState;
 use region::Region;
@@ -546,7 +547,7 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
          * Extend the region to fit the file.
          */
         println!("Extending region to fit image");
-        region.extend(extents_needed as u32)?;
+        region.extend(extents_needed as u32, Backend::default())?;
     } else {
         println!("Region already large enough for image");
     }
@@ -781,6 +782,18 @@ pub mod cdt {
         num_rehashed: u64,
     ) {
     }
+    fn extent__flush__sqlite__insert__start(
+        job_id: u64,
+        extent_id: u32,
+        extent_size: u64,
+    ) {
+    }
+    fn extent__flush__sqlite__insert__done(
+        _job_id: u64,
+        _extent_id: u32,
+        extent_size: u64,
+    ) {
+    }
     fn extent__write__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
     fn extent__write__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
     fn extent__write__get__hashes__start(
@@ -797,6 +810,18 @@ pub mod cdt {
     }
     fn extent__write__file__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
     fn extent__write__file__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
+    fn extent__write__sqlite__insert__start(
+        job_id: u64,
+        extent_id: u32,
+        n_blocks: u64,
+    ) {
+    }
+    fn extent__write__sqlite__insert__done(
+        job_id: u64,
+        extent_id: u32,
+        n_blocks: u64,
+    ) {
+    }
     fn extent__write__raw__context__insert__start(
         job_id: u64,
         extent_id: u32,
@@ -2131,43 +2156,56 @@ async fn recv_task<RT>(
 }
 
 #[derive(Debug)]
-pub struct DownstairsBuilder<'a> {
-    data: &'a Path,
-    read_only: bool,
+enum RegionSource {
+    /// Build a Downstairs from a path and read-only flag
+    Path { data: PathBuf, read_only: bool },
+    /// Build a Downstairs from an existing region
+    Region(Region),
+}
+
+#[derive(Debug)]
+pub struct DownstairsBuilder {
+    source: RegionSource,
     lossy: Option<bool>,
     read_errors: Option<bool>,  // Test flag
     write_errors: Option<bool>, // Test flag
     flush_errors: Option<bool>, // Test flag
-    backend: Option<Backend>,
     log: Option<Logger>,
 }
 
-impl DownstairsBuilder<'_> {
-    pub fn set_lossy(&mut self, lossy: bool) -> &mut Self {
+impl DownstairsBuilder {
+    pub fn from_region(region: Region) -> Self {
+        DownstairsBuilder {
+            source: RegionSource::Region(region),
+            lossy: Some(false),
+            read_errors: Some(false),
+            write_errors: Some(false),
+            flush_errors: Some(false),
+            log: None,
+        }
+    }
+
+    pub fn set_lossy(mut self, lossy: bool) -> Self {
         self.lossy = Some(lossy);
         self
     }
     pub fn set_test_errors(
-        &mut self,
+        mut self,
         read_errors: bool,
         write_errors: bool,
         flush_errors: bool,
-    ) -> &mut Self {
+    ) -> Self {
         self.read_errors = Some(read_errors);
         self.write_errors = Some(write_errors);
         self.flush_errors = Some(flush_errors);
         self
     }
-    pub fn set_backend(&mut self, backend: Backend) -> &mut Self {
-        self.backend = Some(backend);
-        self
-    }
-    pub fn set_logger(&mut self, log: Logger) -> &mut Self {
+    pub fn set_logger(mut self, log: Logger) -> Self {
         self.log = Some(log);
         self
     }
 
-    pub fn build(&mut self) -> Result<Downstairs> {
+    pub fn build(self) -> Result<Downstairs> {
         let lossy = self.lossy.unwrap_or(false);
         let read_errors = self.read_errors.unwrap_or(false);
         let write_errors = self.write_errors.unwrap_or(false);
@@ -2179,13 +2217,12 @@ impl DownstairsBuilder<'_> {
         };
 
         // Open the region at the provided location.
-        let region = Region::open(
-            self.data,
-            Default::default(),
-            true,
-            self.read_only,
-            &log,
-        )?;
+        let region = match self.source {
+            RegionSource::Region(r) => r,
+            RegionSource::Path { data, read_only } => {
+                Region::open(data, true, read_only, &log)?
+            }
+        };
 
         let encrypted = region.encrypted();
 
@@ -2204,6 +2241,7 @@ impl DownstairsBuilder<'_> {
         );
 
         let (request_tx, request_rx) = mpsc::unbounded_channel();
+        let read_only = region.read_only();
         Ok(Downstairs {
             region,
             flags: DownstairsFlags {
@@ -2211,7 +2249,7 @@ impl DownstairsBuilder<'_> {
                 read_errors,
                 write_errors,
                 flush_errors,
-                read_only: self.read_only,
+                read_only,
                 encrypted,
             },
             active_upstairs: HashMap::new(),
@@ -2276,13 +2314,14 @@ pub struct Downstairs {
 impl Downstairs {
     pub fn new_builder(data: &Path, read_only: bool) -> DownstairsBuilder {
         DownstairsBuilder {
-            data,
-            read_only,
+            source: RegionSource::Path {
+                data: data.to_owned(),
+                read_only,
+            },
             lossy: Some(false),
             read_errors: Some(false),
             write_errors: Some(false),
             flush_errors: Some(false),
-            backend: Some(Backend::default()),
             log: None,
         }
     }
@@ -3410,6 +3449,9 @@ enum WrappedStream {
 pub enum Backend {
     #[default]
     RawFile,
+
+    #[cfg(any(test, feature = "integration-tests"))]
+    SQLite,
 }
 
 pub fn create_region(
@@ -3453,9 +3495,8 @@ pub fn create_region_with_backend(
     region_options.set_uuid(uuid);
     region_options.set_encrypted(encrypted);
 
-    let mut region =
-        Region::create_with_backend(data, region_options, backend, log)?;
-    region.extend(extent_count)?;
+    let mut region = Region::create(data, region_options, log)?;
+    region.extend(extent_count, backend)?;
 
     Ok(region)
 }
@@ -3780,7 +3821,7 @@ mod test {
         mkdir_for_file(dir.path())?;
 
         let mut region = Region::create(&dir, region_options, csl())?;
-        region.extend(2)?;
+        region.extend(2, Backend::default())?;
 
         let path_dir = dir.as_ref().to_path_buf();
         let mut ds = Downstairs::new_builder(&path_dir, false)
@@ -3857,7 +3898,7 @@ mod test {
 
         mkdir_for_file(dir.path())?;
         let mut region = Region::create(dir, region_options, csl())?;
-        region.extend(extent_count)?;
+        region.extend(extent_count, Backend::default())?;
 
         let path_dir = dir.as_ref().to_path_buf();
         let mut ds = Downstairs::new_builder(&path_dir, false)
@@ -5164,7 +5205,7 @@ mod test {
         mkdir_for_file(dir.path())?;
 
         let mut region = Region::create(&dir, region_options, csl())?;
-        region.extend(10)?;
+        region.extend(10, Backend::default())?;
 
         // create random file
 
@@ -5232,7 +5273,7 @@ mod test {
         mkdir_for_file(dir.path())?;
 
         let mut region = Region::create(&dir, region_options, csl())?;
-        region.extend(10)?;
+        region.extend(10, Backend::default())?;
 
         // create random file (100 fewer bytes than region size)
 
@@ -5314,7 +5355,7 @@ mod test {
         mkdir_for_file(dir.path())?;
 
         let mut region = Region::create(&dir, region_options, csl())?;
-        region.extend(10)?;
+        region.extend(10, Backend::default())?;
 
         // create random file (100 more bytes than region size)
 
@@ -5397,7 +5438,7 @@ mod test {
         mkdir_for_file(dir.path())?;
 
         let mut region = Region::create(&dir, region_options, csl())?;
-        region.extend(10)?;
+        region.extend(10, Backend::default())?;
 
         // create random file
 
@@ -5467,7 +5508,7 @@ mod test {
         mkdir_for_file(dir.path())?;
 
         let mut region = Region::create(&dir, region_options, csl())?;
-        region.extend(2)?;
+        region.extend(2, Backend::default())?;
 
         let path_dir = dir.as_ref().to_path_buf();
 

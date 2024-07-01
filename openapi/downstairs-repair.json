@@ -291,7 +291,10 @@
       "FileType": {
         "type": "string",
         "enum": [
-          "data"
+          "data",
+          "db",
+          "db_shm",
+          "db_wal"
         ]
       }
     },
