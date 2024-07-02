@@ -373,13 +373,7 @@ async fn main() -> Result<()> {
             skip,
         } => {
             // Open Region read only
-            let mut region = region::Region::open(
-                data,
-                Default::default(),
-                true,
-                true,
-                &log,
-            )?;
+            let mut region = region::Region::open(data, true, true, &log)?;
 
             downstairs_export(&mut region, export_path, skip, count)
         }

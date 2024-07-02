@@ -53,7 +53,7 @@ mod test {
                 .rand_bytes(8)
                 .tempdir()?;
 
-            let _region = create_region_with_backend(
+            let region = create_region_with_backend(
                 tempdir.path().to_path_buf(),
                 Block {
                     value: blocks_per_extent,
@@ -66,13 +66,21 @@ mod test {
                 csl(),
             )?;
 
-            let mut downstairs =
+            // If this is a read-write extent, then reuse the existing region;
+            // this skips automatic migration of SQLite -> raw extents and lets
+            // us keep writing to a SQLite region.
+            let builder = if read_only {
                 Downstairs::new_builder(tempdir.path(), read_only)
-                    .set_lossy(problematic)
-                    .set_logger(csl())
-                    .set_test_errors(problematic, problematic, problematic)
-                    .set_backend(backend)
-                    .build()?;
+            } else {
+                assert!(!region.read_only());
+                DownstairsBuilder::from_region(region)
+            };
+
+            let mut downstairs = builder
+                .set_lossy(problematic)
+                .set_logger(csl())
+                .set_test_errors(problematic, problematic, problematic)
+                .build()?;
 
             if let Some(ref clone_source) = clone_source {
                 downstairs.clone_region(*clone_source).await?
@@ -99,6 +107,29 @@ mod test {
             let downstairs = Downstairs::new_builder(self.tempdir.path(), true)
                 .set_logger(csl())
                 .build()?;
+
+            self.downstairs = Some(
+                start_downstairs(
+                    downstairs,
+                    self.address,
+                    None, /* oximeter */
+                    0,    /* any port */
+                    0,    /* any rport */
+                    None, /* cert_pem */
+                    None, /* key_pem */
+                    None, /* root_cert_pem */
+                )
+                .await?,
+            );
+
+            Ok(())
+        }
+
+        pub async fn reboot_read_write(&mut self) -> Result<()> {
+            let downstairs =
+                Downstairs::new_builder(self.tempdir.path(), false)
+                    .set_logger(csl())
+                    .build()?;
 
             self.downstairs = Some(
                 start_downstairs(
@@ -166,6 +197,23 @@ mod test {
                 extent_count,
                 false,
                 Backend::RawFile,
+            )
+            .await
+        }
+
+        /// Spin off three SQLite downstairs, with a 5120b region
+        pub async fn small_sqlite(
+            read_only: bool,
+        ) -> Result<TestDownstairsSet> {
+            // 5 * 2 * 512 = 5120b
+            let blocks_per_extent = 5;
+            let extent_count = 2;
+            TestDownstairsSet::new_with_flag(
+                read_only,
+                blocks_per_extent,
+                extent_count,
+                false,
+                Backend::SQLite,
             )
             .await
         }
@@ -294,6 +342,21 @@ mod test {
             self.downstairs3.reboot_read_only().await?;
 
             self.crucible_opts.read_only = true;
+            self.crucible_opts.target = vec![
+                self.downstairs1.address(),
+                self.downstairs2.address(),
+                self.downstairs3.address(),
+            ];
+
+            Ok(())
+        }
+
+        pub async fn reboot_read_write(&mut self) -> Result<()> {
+            assert!(!self.crucible_opts.read_only);
+            self.downstairs1.reboot_read_write().await?;
+            self.downstairs2.reboot_read_write().await?;
+            self.downstairs3.reboot_read_write().await?;
+
             self.crucible_opts.target = vec![
                 self.downstairs1.address(),
                 self.downstairs2.address(),
@@ -2310,6 +2373,288 @@ mod test {
     }
 
     #[tokio::test]
+    async fn integration_test_sqlite_backed_vol() -> Result<()> {
+        // Test using an old SQLite backend as a read-only parent.
+
+        const BLOCK_SIZE: usize = 512;
+
+        // boot three downstairs, write some data to them, then change to
+        // read-only.
+        let mut test_downstairs_set =
+            TestDownstairsSet::small_sqlite(false).await?;
+
+        // This must be a SQLite extent!
+        assert!(test_downstairs_set
+            .downstairs1
+            .tempdir
+            .path()
+            .join("00/000/000.db")
+            .exists());
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        let random_buffer = {
+            let mut random_buffer =
+                vec![0u8; volume.total_size().await? as usize];
+            rand::thread_rng().fill(&mut random_buffer[..]);
+            random_buffer
+        };
+
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                BytesMut::from(random_buffer.as_slice()),
+            )
+            .await?;
+
+        volume.deactivate().await?;
+
+        drop(volume);
+
+        test_downstairs_set.reboot_read_only().await?;
+
+        // This must still be a SQLite backend!
+        assert!(test_downstairs_set
+            .downstairs1
+            .tempdir
+            .path()
+            .join("00/000/000.db")
+            .exists());
+
+        // Validate that this now accepts reads and flushes, but rejects writes
+        {
+            let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+            volume
+                .add_subvolume_create_guest(
+                    test_downstairs_set.opts(),
+                    volume::RegionExtentInfo {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: test_downstairs_set
+                            .blocks_per_extent(),
+                        extent_count: test_downstairs_set.extent_count(),
+                    },
+                    2,
+                    None,
+                )
+                .await?;
+
+            volume.activate().await?;
+
+            let volume_size = volume.total_size().await? as usize;
+            assert_eq!(volume_size % BLOCK_SIZE, 0);
+            let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
+            volume
+                .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+                .await?;
+
+            assert_eq!(&buffer[..], random_buffer);
+
+            assert!(volume
+                .write(
+                    Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                    BytesMut::from(vec![0u8; BLOCK_SIZE].as_slice()),
+                )
+                .await
+                .is_err());
+
+            volume.flush(None).await?;
+        }
+
+        // create a new volume, layering a new set of downstairs on top of the
+        // read-only one we just (re)booted
+        let top_layer_tds = TestDownstairsSet::small(false).await?;
+        let top_layer_opts = top_layer_tds.opts();
+        let bottom_layer_opts = test_downstairs_set.opts();
+
+        // The new volume is **not** using the SQLite backend!
+        assert!(!top_layer_tds
+            .downstairs1
+            .tempdir
+            .path()
+            .join("00/000/000.db")
+            .exists());
+
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: BLOCK_SIZE as u64,
+                blocks_per_extent: top_layer_tds.blocks_per_extent(),
+                extent_count: top_layer_tds.extent_count(),
+                opts: top_layer_opts,
+                gen: 3,
+            }],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Volume {
+                    id: Uuid::new_v4(),
+                    block_size: BLOCK_SIZE as u64,
+                    sub_volumes: vec![VolumeConstructionRequest::Region {
+                        block_size: BLOCK_SIZE as u64,
+                        blocks_per_extent: test_downstairs_set
+                            .blocks_per_extent(),
+                        extent_count: test_downstairs_set.extent_count(),
+                        opts: bottom_layer_opts,
+                        gen: 3,
+                    }],
+                    read_only_parent: None,
+                },
+            )),
+        };
+
+        let volume = Volume::construct(vcr, None, csl()).await?;
+        volume.activate().await?;
+
+        // Validate that source blocks originally come from the read-only parent
+        {
+            let volume_size = volume.total_size().await? as usize;
+            assert_eq!(volume_size % BLOCK_SIZE, 0);
+            let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
+            volume
+                .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+                .await?;
+
+            assert_eq!(&buffer[..], random_buffer);
+        }
+
+        // Validate a flush works
+        volume.flush(None).await?;
+
+        // Write one block of 0x00 in, validate with a read
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                BytesMut::from(vec![0u8; BLOCK_SIZE].as_slice()),
+            )
+            .await?;
+
+        {
+            let volume_size = volume.total_size().await? as usize;
+            assert_eq!(volume_size % BLOCK_SIZE, 0);
+            let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
+            volume
+                .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+                .await?;
+
+            assert_eq!(&buffer[..BLOCK_SIZE], vec![0u8; BLOCK_SIZE]);
+            assert_eq!(&buffer[BLOCK_SIZE..], &random_buffer[BLOCK_SIZE..]);
+        }
+
+        // Validate a flush still works
+        volume.flush(None).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_sqlite_migration() -> Result<()> {
+        const BLOCK_SIZE: usize = 512;
+
+        // boot three downstairs, write some data to them, then reopen as
+        // read-write (which will automatically migrate the extent)
+        let mut test_downstairs_set =
+            TestDownstairsSet::small_sqlite(false).await?;
+        // This must be a SQLite extent!
+        assert!(test_downstairs_set
+            .downstairs1
+            .tempdir
+            .path()
+            .join("00/000/000.db")
+            .exists());
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        let random_buffer = {
+            let mut random_buffer =
+                vec![0u8; volume.total_size().await? as usize];
+            rand::thread_rng().fill(&mut random_buffer[..]);
+            random_buffer
+        };
+
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                BytesMut::from(random_buffer.as_slice()),
+            )
+            .await?;
+
+        volume.deactivate().await?;
+
+        drop(volume);
+
+        // This must still be a SQLite extent!
+        assert!(test_downstairs_set
+            .downstairs1
+            .tempdir
+            .path()
+            .join("00/000/000.db")
+            .exists());
+
+        test_downstairs_set.reboot_read_write().await?;
+        // This should now be migrated, and the DB file should be deleted
+        assert!(!test_downstairs_set
+            .downstairs1
+            .tempdir
+            .path()
+            .join("00/000/000.db")
+            .exists());
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                2,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+        // Validate that source blocks are the same
+        let volume_size = volume.total_size().await? as usize;
+        assert_eq!(volume_size % BLOCK_SIZE, 0);
+        let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+            .await?;
+
+        assert_eq!(&buffer[..], random_buffer);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn integration_test_clone_raw() -> Result<()> {
         // Test downstairs region clone.
         // Create three downstairs with raw backend, write some data to them.
@@ -2436,6 +2781,122 @@ mod test {
 
         // Take our original opts, and replace a target with the downstairs
         // we just cloned.
+        let mut new_opts = test_downstairs_set.opts();
+        new_opts.target[0] = new_target;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                new_opts,
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                3,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        // Verify our volume still has the random data we wrote.
+        let volume_size = volume.total_size().await? as usize;
+        let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+            .await?;
+
+        assert_eq!(&buffer[BLOCK_SIZE..], &random_buffer[BLOCK_SIZE..]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_clone_sql() -> Result<()> {
+        // Test downstairs region clone.
+        // Create three downstairs with sql backend, write some data to them.
+        // Restart them all read only.
+        // Create a new downstairs.
+        // Clone a read only downstairs to the new downstairs
+        // Make a new volume with two old and the one new downstairs and verify
+        // the original data we wrote.
+        const BLOCK_SIZE: usize = 512;
+
+        // boot three downstairs, write some data to them, then change to
+        // read-only.
+        let mut test_downstairs_set =
+            TestDownstairsSet::small_sqlite(false).await?;
+
+        // This must be a SQLite extent!
+        assert!(test_downstairs_set
+            .downstairs1
+            .tempdir
+            .path()
+            .join("00/000/000.db")
+            .exists());
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        let random_buffer = {
+            let mut random_buffer =
+                vec![0u8; volume.total_size().await? as usize];
+            rand::thread_rng().fill(&mut random_buffer[..]);
+            random_buffer
+        };
+
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                BytesMut::from(random_buffer.as_slice()),
+            )
+            .await?;
+
+        volume.deactivate().await.unwrap();
+        drop(volume);
+
+        // Restart the original downstairs read only.
+        test_downstairs_set.reboot_read_only().await?;
+
+        // Make the new downstairs
+        let mut new_ds = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            5,
+            2,
+            false,
+            Backend::RawFile,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Clone a read only downstairs to our new downstairs.
+        let clone_source = test_downstairs_set.downstairs1.repair_address();
+        new_ds.reboot_clone(clone_source).await.unwrap();
+
+        new_ds.reboot_read_only().await.unwrap();
+        let new_target = new_ds.address();
+
+        // The cloned region should have the .db file
+        assert!(new_ds.tempdir.path().join("00/000/000.db").exists());
+
+        // Replace one of the targets in our original with the new downstairs.
         let mut new_opts = test_downstairs_set.opts();
         new_opts.target[0] = new_target;
 
