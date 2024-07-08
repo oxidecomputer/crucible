@@ -89,54 +89,12 @@ impl Block {
         Block::new(value, 12)
     }
 
-    pub fn new_with_ddef(value: u64, ddef: &RegionDefinition) -> Block {
-        Block {
-            value,
-            shift: ddef.block_size().trailing_zeros(),
-        }
-    }
-
-    /**
-     * Create a block number from a byte length using the region definition
-     * to determine the block size.  This routine will panic if the byte
-     * length is not a whole number of blocks.
-     */
-    pub fn from_bytes(bytelen: usize, ddef: &RegionDefinition) -> Block {
-        assert!(Self::is_valid_byte_size(bytelen, ddef));
-        Block {
-            value: (bytelen as u64) / ddef.block_size(),
-            shift: ddef.block_size().trailing_zeros(),
-        }
-    }
-
-    pub fn is_valid_byte_size(bytelen: usize, ddef: &RegionDefinition) -> bool {
-        bytelen % (ddef.block_size() as usize) == 0
-    }
-
     pub fn block_size_in_bytes(&self) -> u32 {
         1 << self.shift
     }
 
     pub fn byte_value(&self) -> u64 {
         self.value * self.block_size_in_bytes() as u64
-    }
-
-    /**
-     * The size of this block value in bytes, for use in indexing into
-     * buffers.
-     */
-    pub fn bytes(&self) -> usize {
-        (self.value as usize) * (self.block_size_in_bytes() as usize)
-    }
-
-    /**
-     * If this block value is an offset, advance that offset by another
-     * block value representing a length.  Both block values must have
-     * the same block size or this routine will panic.
-     */
-    pub fn advance(&mut self, offset: Block) {
-        assert_eq!(offset.shift, self.shift);
-        self.value = self.value.checked_add(offset.value).unwrap();
     }
 }
 
@@ -304,6 +262,24 @@ impl RegionDefinition {
             return Err(CrucibleError::OffsetInvalid);
         }
         Ok(())
+    }
+
+    /// Converts from bytes to blocks
+    ///
+    /// # Panics
+    /// If the byte length is not an even multiple of block size
+    pub fn bytes_to_blocks(&self, bytes: usize) -> u64 {
+        assert_eq!(
+            bytes as u64 % self.block_size,
+            0,
+            "bytes must be a multiple of block size"
+        );
+        bytes as u64 / self.block_size
+    }
+
+    /// Checks whether the byte length is valid
+    pub fn is_valid_byte_size(&self, bytelen: usize) -> bool {
+        bytelen % (self.block_size as usize) == 0
     }
 }
 

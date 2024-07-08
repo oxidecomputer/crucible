@@ -13,8 +13,8 @@ use crate::{
     extent_from_offset,
     guest::GuestBlockRes,
     stats::UpStatOuter,
-    Block, BlockOp, BlockRes, Buffer, ClientId, ClientMap, CrucibleOpts,
-    DsState, EncryptionContext, GuestIoHandle, Message, RegionDefinition,
+    BlockOp, BlockRes, Buffer, ClientId, ClientMap, CrucibleOpts, DsState,
+    EncryptionContext, GuestIoHandle, Message, RegionDefinition,
     RegionDefinitionStatus, SnapshotDetails, WQCounts,
 };
 use crucible_common::{BlockIndex, CrucibleError};
@@ -1333,7 +1333,7 @@ impl Upstairs {
         let impacted_blocks = crate::extent_from_offset(
             &ddef,
             offset,
-            Block::from_bytes(data.len(), &ddef),
+            ddef.bytes_to_blocks(data.len()),
         );
 
         /*
@@ -1460,11 +1460,8 @@ impl Upstairs {
          * byte offset that translates into. Keep in mind that an offset
          * and length may span two extents.
          */
-        let impacted_blocks = extent_from_offset(
-            &ddef,
-            offset,
-            Block::from_bytes(data.len(), &ddef),
-        );
+        let impacted_blocks =
+            extent_from_offset(&ddef, offset, ddef.bytes_to_blocks(data.len()));
 
         Some(DeferredWrite {
             ddef,
@@ -2096,7 +2093,7 @@ pub(crate) mod test {
         client::ClientStopReason,
         downstairs::test::set_all_active,
         test::{make_encrypted_upstairs, make_upstairs},
-        BlockContext, BlockOp, BlockOpWaiter, DsState, JobId,
+        Block, BlockContext, BlockOp, BlockOpWaiter, DsState, JobId,
     };
     use bytes::BytesMut;
     use crucible_common::{integrity_hash, BlockOffset, ExtentId};

@@ -258,23 +258,20 @@ impl ImpactedBlocks {
 pub fn extent_from_offset(
     ddef: &RegionDefinition,
     offset: BlockIndex,
-    num_blocks: Block,
+    num_blocks: u64,
 ) -> ImpactedBlocks {
     let extent_size = ddef.extent_size().value;
-    let shift = ddef.block_size().trailing_zeros();
 
     // If we get invalid data at this point, something has gone terribly
     // wrong further up the stack. So here's the assumptions we're making:
-    // First, our blocks are actually the same size as this region's blocks
-    assert_eq!(num_blocks.shift, shift);
 
-    // Second, the offset is actually within the region
+    // First, the offset is actually within the region
     assert!(offset.0 < ddef.extent_count() as u64 * extent_size);
 
-    // Third, the last block is also within the region. These are widened to
+    // Second, the last block is also within the region. These are widened to
     // u128 in order to catch the case where first_block + n_blocks == u64::MAX.
     assert!(
-        offset.0 as u128 + num_blocks.value as u128
+        offset.0 as u128 + num_blocks as u128
             <= ddef.extent_count() as u128 * extent_size as u128
     );
 
@@ -283,7 +280,7 @@ pub fn extent_from_offset(
         block: BlockOffset(offset.0 % extent_size),
     };
 
-    ImpactedBlocks::from_offset(extent_size, fst, num_blocks.value)
+    ImpactedBlocks::from_offset(extent_size, fst, num_blocks)
 }
 
 pub fn extent_to_impacted_blocks(
@@ -420,7 +417,7 @@ mod test {
 
         // Test block size, less than extent size
         assert_eq!(
-            extent_from_offset(ddef, BlockIndex(0), Block::new_512(1))
+            extent_from_offset(ddef, BlockIndex(0), 1)
                 .blocks(ddef)
                 .collect::<Vec<_>>(),
             vec![extent_tuple(0, 0)],
@@ -428,7 +425,7 @@ mod test {
 
         // Test greater than block size, less than extent size
         assert_eq!(
-            extent_from_offset(ddef, BlockIndex(0), Block::new_512(2))
+            extent_from_offset(ddef, BlockIndex(0), 2)
                 .blocks(ddef)
                 .collect::<Vec<_>>(),
             vec![extent_tuple(0, 0), extent_tuple(0, 1)],
@@ -436,7 +433,7 @@ mod test {
 
         // Test greater than extent size
         assert_eq!(
-            extent_from_offset(ddef, BlockIndex(0), Block::new_512(4))
+            extent_from_offset(ddef, BlockIndex(0), 4)
                 .blocks(ddef)
                 .collect::<Vec<_>>(),
             vec![
@@ -449,7 +446,7 @@ mod test {
 
         // Test offsets
         assert_eq!(
-            extent_from_offset(ddef, BlockIndex(1), Block::new_512(4))
+            extent_from_offset(ddef, BlockIndex(1), 4)
                 .blocks(ddef)
                 .collect::<Vec<_>>(),
             vec![
@@ -461,7 +458,7 @@ mod test {
         );
 
         assert_eq!(
-            extent_from_offset(ddef, BlockIndex(2), Block::new_512(4))
+            extent_from_offset(ddef, BlockIndex(2), 4)
                 .blocks(ddef)
                 .collect::<Vec<_>>(),
             vec![
@@ -473,7 +470,7 @@ mod test {
         );
 
         assert_eq!(
-            extent_from_offset(ddef, BlockIndex(2), Block::new_512(16))
+            extent_from_offset(ddef, BlockIndex(2), 16)
                 .blocks(ddef)
                 .collect::<Vec<_>>(),
             vec![
@@ -504,8 +501,8 @@ mod test {
         assert_eq!(
             extent_from_offset(
                 ddef,
-                BlockIndex(2),     // offset
-                Block::new_512(1), // num_blocks
+                BlockIndex(2), // offset
+                1,             // num_blocks
             )
             .blocks(ddef)
             .collect::<Vec<_>>(),
@@ -515,8 +512,8 @@ mod test {
         assert_eq!(
             extent_from_offset(
                 ddef,
-                BlockIndex(2),     // offset
-                Block::new_512(2), // num_blocks
+                BlockIndex(2), // offset
+                2,             // num_blocks
             )
             .blocks(ddef)
             .collect::<Vec<_>>(),
@@ -526,8 +523,8 @@ mod test {
         assert_eq!(
             extent_from_offset(
                 ddef,
-                BlockIndex(2),     // offset
-                Block::new_512(3), // num_blocks
+                BlockIndex(2), // offset
+                3,             // num_blocks
             )
             .blocks(ddef)
             .collect::<Vec<_>>(),
@@ -1193,12 +1190,11 @@ mod test {
     ) {
         let (ddef, iblocks) = region_and_iblocks;
 
-        let shift = ddef.block_size().trailing_zeros();
         let (first_eid, first_block) = iblocks.blocks(&ddef).next().unwrap();
         let first = BlockIndex(
             first_block.0 + first_eid.0 as u64 * ddef.extent_size().value,
         );
-        let num_blocks = Block::new(iblocks.len(&ddef) as u64, shift);
+        let num_blocks = iblocks.len(&ddef) as u64;
 
         prop_assert_eq!(extent_from_offset(&ddef, first, num_blocks), iblocks);
     }
@@ -1215,9 +1211,8 @@ mod test {
 
         #[strategy(region_def_strategy())] ddef: RegionDefinition,
     ) {
-        let shift = ddef.block_size().trailing_zeros();
         let first = BlockIndex(first_block);
-        let num_blocks = Block::new(n_blocks, shift);
+        let num_blocks = n_blocks;
 
         prop_should_panic(|| extent_from_offset(&ddef, first, num_blocks))?;
     }
@@ -1233,9 +1228,8 @@ mod test {
 
         #[strategy(region_def_strategy())] ddef: RegionDefinition,
     ) {
-        let shift = ddef.block_size().trailing_zeros();
         let first = BlockIndex(first_block);
-        let num_blocks = Block::new(n_blocks, shift);
+        let num_blocks = n_blocks;
 
         prop_should_panic(|| extent_from_offset(&ddef, first, num_blocks))?;
     }

@@ -585,7 +585,7 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
                  * We have hit EOF.  Extend the read buffer with zeroes until
                  * it is a multiple of the block size.
                  */
-                while !Block::is_valid_byte_size(total, &rm) {
+                while !rm.is_valid_byte_size(total) {
                     buffer[total] = 0;
                     total += 1;
                 }
@@ -610,7 +610,7 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
          * Use the same function upstairs uses to decide where to put the
          * data based on the LBA offset.
          */
-        let nblocks = Block::from_bytes(total, &rm);
+        let nblocks = rm.bytes_to_blocks(total);
         let block_size = region.def().block_size() as usize;
         let blocks: Vec<_> = extent_from_offset(&rm, offset, nblocks)
             .blocks(&rm)
@@ -635,7 +635,7 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
 
         // We have no job ID, so it makes no sense for accounting.
         region.region_write(&write, JobId(0), false)?;
-        offset.0 += nblocks.value;
+        offset.0 += nblocks;
     }
 
     /*

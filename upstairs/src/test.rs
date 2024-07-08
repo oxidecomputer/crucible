@@ -133,7 +133,6 @@ pub(crate) mod up_test {
         num_blocks: u64,
     ) -> Vec<(ExtentId, BlockOffset)> {
         let ddef = up.get_region_definition();
-        let num_blocks = Block::new_with_ddef(num_blocks, &ddef);
         extent_from_offset(&ddef, offset, num_blocks)
             .blocks(&ddef)
             .collect()
