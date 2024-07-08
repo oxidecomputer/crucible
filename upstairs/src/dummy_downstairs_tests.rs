@@ -1626,6 +1626,152 @@ async fn test_byte_fault_condition_offline() {
     run_live_repair(harness).await;
 }
 
+#[tokio::test]
+async fn test_offline_can_deactivate() {
+    // Verify that we can deactivate with a downstairs Offline when no IOs are
+    // outstanding.
+    let mut harness = TestHarness::new().await;
+    harness.ds1().cfg.reply_to_ping = false;
+
+    // We're not replying to pings, so DS1 will eventually transition from
+    // Active -> Offline (after CLIENT_TIMEOUT_SECS seconds).
+    const MARGIN_SECS: f32 = 5.0;
+
+    // Sleep until we're confident that the Downstairs is kicked out.  We do
+    // a loop here so the other downstairs will have a chance to respond to
+    // pings.
+    let sleep_time = 5.0;
+    let loop_stop_time = CLIENT_TIMEOUT_SECS + MARGIN_SECS;
+    let mut loop_time = 0.0;
+
+    // Sleep until we're confident that the Downstairs is kicked out
+    while loop_time < loop_stop_time {
+        tokio::time::sleep(Duration::from_secs_f32(sleep_time)).await;
+        // Respond to pings, but drop anything else (we should not get
+        // anything else)
+        let _ = harness.ds2.try_recv();
+        let _ = harness.ds3.try_recv();
+
+        loop_time += sleep_time;
+    }
+
+    // Check to make sure downstairs 1 is now offline.
+    let ds = harness.guest.downstairs_state().await.unwrap();
+    assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+    assert_eq!(ds[ClientId::new(1)], DsState::Active);
+    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+
+    // Send a deactivate request.  Since we have no IO, this should happen
+    // right away.
+    harness.guest.deactivate().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_offline_with_io_can_deactivate() {
+    // Verify that we can deactivate with a downstairs Offline when there are
+    // IOs are outstanding.
+    let mut harness = TestHarness::new().await;
+    harness.ds1().cfg.reply_to_ping = false;
+
+    // We're not replying to pings, so DS1 will eventually transition from
+    // Active -> Offline (after CLIENT_TIMEOUT_SECS seconds).
+    const MARGIN_SECS: f32 = 5.0;
+
+    // Sleep until we're confident that the Downstairs is kicked out.  We do
+    // a loop here so the other downstairs will have a chance to respond to
+    // pings.
+    let sleep_time = 5.0;
+    let loop_stop_time = CLIENT_TIMEOUT_SECS + MARGIN_SECS;
+    let mut loop_time = 0.0;
+
+    // Sleep until we're confident that the Downstairs is kicked out
+    while loop_time < loop_stop_time {
+        tokio::time::sleep(Duration::from_secs_f32(sleep_time)).await;
+        // Respond to pings, but drop anything else (we should not get
+        // anything else)
+        let _ = harness.ds2.try_recv();
+        let _ = harness.ds3.try_recv();
+
+        loop_time += sleep_time;
+    }
+
+    // Check to make sure downstairs 1 is now offline.
+    let ds = harness.guest.downstairs_state().await.unwrap();
+    assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+    assert_eq!(ds[ClientId::new(1)], DsState::Active);
+    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+
+    // We must `spawn` here because `read` will wait for the response to
+    // come back before returning
+    let h = harness.spawn(|guest| async move {
+        let mut buffer = Buffer::new(1, 512);
+        guest.read(Block::new_512(0), &mut buffer).await.unwrap();
+    });
+
+    // DS1 should not be receiving messages
+    // Respond with read responses for downstairs 2 and 3
+    harness.ds2.ack_read().await;
+    harness.ds3.ack_read().await;
+
+    // With 1x responses, we can now await the read job (which ensures that
+    // the Upstairs has finished updating its state).
+    h.await.unwrap();
+
+    // Send a deactivate request.  This sends a final flush, and should push
+    // the Offline downstairs to Faulted, which will clean up outstanding jobs.
+    let deactivate_handle =
+        harness.spawn(|guest| async move { guest.deactivate().await });
+
+    // Ack the final flush on the two remaining downstairs.
+    harness.ds2.ack_flush().await;
+    harness.ds3.ack_flush().await;
+
+    // At this point the remaining downstairs should have ack'd the final flush
+    // and the deactivation should move forward so we can wait on the
+    // deactivation completion.
+    deactivate_handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_all_offline_with_io_can_deactivate() {
+    // Verify that we can deactivate with all downstairs Offline when there
+    // are IOs are outstanding.
+    let harness = TestHarness::new().await;
+
+    // We're not replying to pings, so DS1 will eventually transition from
+    // Active -> Offline (after CLIENT_TIMEOUT_SECS seconds).
+    const MARGIN_SECS: f32 = 5.0;
+
+    // Sleep until we're confident that all Downstairs are kicked out.
+    let wait_time = CLIENT_TIMEOUT_SECS + MARGIN_SECS;
+    tokio::time::sleep(Duration::from_secs_f32(wait_time)).await;
+
+    // Check to make sure all downstairs are offline.
+    let ds = harness.guest.downstairs_state().await.unwrap();
+    assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+    assert_eq!(ds[ClientId::new(1)], DsState::Offline);
+    assert_eq!(ds[ClientId::new(2)], DsState::Offline);
+
+    // We must `spawn` here because `read` will wait for the response to
+    // come back before returning
+    let h = harness.spawn(|guest| async move {
+        let mut buffer = Buffer::new(1, 512);
+        guest.read(Block::new_512(0), &mut buffer).await
+    });
+
+    // Send a deactivate request.  This sends a final flush, and should push
+    // all the downstairs to Faulted, which will clean up outstanding jobs.
+    let deactivate_handle =
+        harness.spawn(|guest| async move { guest.deactivate().await });
+
+    // Now that we sent the deactivate, the read should complete with error.
+    assert!(h.await.unwrap().is_err());
+
+    // The deactivate request should also finish, as all downstairs are
+    // offline and can do no work.
+    deactivate_handle.await.unwrap().unwrap();
+}
+
 /// Test that we will mark a Downstairs as failed if we hit the job limit
 #[tokio::test]
 async fn test_job_fault_condition() {

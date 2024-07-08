@@ -812,7 +812,7 @@ impl Downstairs {
          * TODO: Handle deactivation when a downstairs is offline.
          */
         if !offline_ds.is_empty() {
-            panic!("Can't deactivate with downstairs offline (yet)");
+            warn!(self.log, "Deactivate called with downstairs offline");
         }
 
         // If there are no jobs, then we're immediately done!
@@ -842,6 +842,18 @@ impl Downstairs {
             info!(self.log, "[{}] deactivate, no work so YES", client_id);
             self.clients[client_id].deactivate(up_state);
             return true;
+        }
+        // If this client is offline, then move it to faulted after skipping
+        // all the outstanding jobs.  Eventually moving the client to faulted
+        // will allows the deactivation to proceed, though we return false
+        // here and let the faulting framework take care of clearing out all
+        // the outstanding jobs which then allows the deactivation to finish.
+        if self.clients[client_id].state() == DsState::Offline {
+            info!(self.log, "[{}] Offline client moved to Faulted", client_id);
+            self.skip_all_jobs(client_id);
+            self.clients[client_id]
+                .fault(up_state, ClientStopReason::OfflineDeactivated);
+            return false;
         }
         // If there are jobs in the queue, then we have to check them!
         let last_id = self.ds_active.keys().next_back().unwrap();
