@@ -173,7 +173,7 @@ async fn cmd_read<T: BlockIO + std::marker::Send + 'static>(
         // Read the full block
         let mut buffer = Buffer::new(1, native_block_size as usize);
         let block_idx = opt.byte_offset / native_block_size;
-        let offset = Block::new(block_idx, native_block_size.trailing_zeros());
+        let offset = BlockIndex(block_idx);
         crucible.read(offset, &mut buffer).await?;
 
         // write only (block size - misalignment) bytes
@@ -221,8 +221,7 @@ async fn cmd_read<T: BlockIO + std::marker::Send + 'static>(
         for i in cmd_range {
             // which blocks in the underlying store are we accessing?
             let block_idx = block_offset + (i as u64 * opt.iocmd_block_count);
-            let offset =
-                Block::new(block_idx, native_block_size.trailing_zeros());
+            let offset = BlockIndex(block_idx);
 
             // Send the read command with whichever buffer is at the back of the
             // queue. We re-use the buffers to avoid lots of allocations
@@ -262,7 +261,7 @@ async fn cmd_read<T: BlockIO + std::marker::Send + 'static>(
         let mut buffer =
             Buffer::new(blocks as usize, native_block_size as usize);
         let block_idx = (cmd_count * opt.iocmd_block_count) + block_offset;
-        let offset = Block::new(block_idx, native_block_size.trailing_zeros());
+        let offset = BlockIndex(block_idx);
         crucible.read(offset, &mut buffer).await?;
         total_bytes_read += remainder as usize;
         output.write_all(&buffer[0..remainder as usize])?;
@@ -281,7 +280,7 @@ async fn cmd_read<T: BlockIO + std::marker::Send + 'static>(
 async fn write_remainder_and_finalize<'a, T: BlockIO>(
     crucible: &Arc<T>,
     mut w_buf: BytesMut,
-    offset: Block,
+    offset: BlockIndex,
     n_read: usize,
     native_block_size: u64,
     mut futures: VecDeque<CrucibleBlockIOFuture<'a>>,
@@ -310,10 +309,7 @@ async fn write_remainder_and_finalize<'a, T: BlockIO>(
         let uflow_backfill = (native_block_size - uflow_remainder) as usize;
 
         // First, read the final partial-block
-        let uflow_offset = Block::new(
-            offset.value + uflow_blocks,
-            native_block_size.trailing_zeros(),
-        );
+        let uflow_offset = BlockIndex(offset.0 + uflow_blocks);
         let mut uflow_r_buf = Buffer::new(1, native_block_size as usize);
         crucible.read(uflow_offset, &mut uflow_r_buf).await?;
 
@@ -401,7 +397,7 @@ async fn cmd_write<T: BlockIO>(
         // Read the full block
         let mut buffer = Buffer::new(1, native_block_size as usize);
         let block_idx = opt.byte_offset / native_block_size;
-        let offset = Block::new(block_idx, native_block_size.trailing_zeros());
+        let offset = BlockIndex(block_idx);
         crucible.read(offset, &mut buffer).await?;
 
         let mut w_vec = buffer.into_bytes_mut();
@@ -443,7 +439,7 @@ async fn cmd_write<T: BlockIO>(
     for i in 0..cmd_count {
         // which blocks in the underlying store are we accessing?
         let block_idx = block_offset + (i * opt.iocmd_block_count);
-        let offset = Block::new(block_idx, native_block_size.trailing_zeros());
+        let offset = BlockIndex(block_idx);
 
         // I don't think we can re-use Bytes so I'm just living with it.
         let mut w_buf = BytesMut::with_capacity(
@@ -499,7 +495,7 @@ async fn cmd_write<T: BlockIO>(
     if remainder > 0 {
         eprintln!("remainder is {}, finalizing", remainder);
         let block_idx = block_offset + (cmd_count * opt.iocmd_block_count);
-        let offset = Block::new(block_idx, native_block_size.trailing_zeros());
+        let offset = BlockIndex(block_idx);
         let mut w_buf = BytesMut::with_capacity(
             (opt.iocmd_block_count * native_block_size) as usize,
         );

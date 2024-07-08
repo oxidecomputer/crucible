@@ -18,6 +18,7 @@ use crate::DsState;
 use crate::{IO_OUTSTANDING_MAX_BYTES, IO_OUTSTANDING_MAX_JOBS};
 use crucible_client_types::CrucibleOpts;
 use crucible_common::Block;
+use crucible_common::BlockIndex;
 use crucible_common::BlockOffset;
 use crucible_common::ExtentId;
 use crucible_common::RegionDefinition;
@@ -644,7 +645,7 @@ async fn test_replay_occurs() {
     // Send a read
     harness.spawn(|guest| async move {
         let mut buffer = Buffer::new(1, 512);
-        guest.read(Block::new_512(0), &mut buffer).await.unwrap();
+        guest.read(BlockIndex(0), &mut buffer).await.unwrap();
     });
 
     // Confirm all downstairs receive said read
@@ -702,7 +703,7 @@ async fn test_successful_live_repair() {
         // response to come back before returning
         let h = harness.spawn(|guest| async move {
             let mut buffer = Buffer::new(1, 512);
-            guest.read(Block::new_512(0), &mut buffer).await.unwrap();
+            guest.read(BlockIndex(0), &mut buffer).await.unwrap();
         });
 
         // Assert we're seeing the read requests (without replying on DS1)
@@ -876,7 +877,7 @@ async fn run_live_repair(mut harness: TestHarness) {
             harness.spawn(move |guest| async move {
                 let mut buffer = Buffer::new(1, 512);
                 guest
-                    .read(Block::new_512(io_eid.0 as u64 * 10), &mut buffer)
+                    .read(BlockIndex(io_eid.0 as u64 * 10), &mut buffer)
                     .await
                     .unwrap();
             });
@@ -990,7 +991,7 @@ async fn run_live_repair(mut harness: TestHarness) {
             harness.spawn(move |guest| async move {
                 let bytes = BytesMut::from(vec![1u8; 512].as_slice());
                 guest
-                    .write(Block::new_512(io_eid.0 as u64 * 10), bytes)
+                    .write(BlockIndex(io_eid.0 as u64 * 10), bytes)
                     .await
                     .unwrap();
             });
@@ -1434,7 +1435,7 @@ async fn run_live_repair(mut harness: TestHarness) {
     // Try another read
     harness.spawn(|guest| async move {
         let mut buffer = Buffer::new(1, 512);
-        guest.read(Block::new_512(0), &mut buffer).await.unwrap();
+        guest.read(BlockIndex(0), &mut buffer).await.unwrap();
     });
 
     // All downstairs should see it
@@ -1468,7 +1469,7 @@ async fn test_byte_fault_condition() {
         // to come back before returning
         let write_buf = write_buf.clone();
         let h = harness.spawn(move |guest| async move {
-            guest.write(Block::new_512(0), write_buf).await.unwrap();
+            guest.write(BlockIndex(0), write_buf).await.unwrap();
         });
 
         // Before we're kicked out, assert we're seeing the read requests
@@ -1557,7 +1558,7 @@ async fn test_byte_fault_condition_offline() {
         // to come back before returning
         let write_buf = write_buf.clone();
         let h = harness.spawn(move |guest| async move {
-            guest.write(Block::new_512(0), write_buf).await.unwrap();
+            guest.write(BlockIndex(0), write_buf).await.unwrap();
         });
 
         // Before we're kicked out, assert we're seeing the read requests
@@ -1594,7 +1595,7 @@ async fn test_byte_fault_condition_offline() {
     for i in (num_jobs / 2)..num_jobs {
         let write_buf = write_buf.clone();
         let h = harness.spawn(move |guest| async move {
-            guest.write(Block::new_512(0), write_buf).await.unwrap();
+            guest.write(BlockIndex(0), write_buf).await.unwrap();
         });
 
         // After ds1 is kicked out, we shouldn't see any more messages
@@ -1706,7 +1707,7 @@ async fn test_offline_with_io_can_deactivate() {
     // come back before returning
     let h = harness.spawn(|guest| async move {
         let mut buffer = Buffer::new(1, 512);
-        guest.read(Block::new_512(0), &mut buffer).await.unwrap();
+        guest.read(BlockIndex(0), &mut buffer).await.unwrap();
     });
 
     // DS1 should not be receiving messages
@@ -1757,7 +1758,7 @@ async fn test_all_offline_with_io_can_deactivate() {
     // come back before returning
     let h = harness.spawn(|guest| async move {
         let mut buffer = Buffer::new(1, 512);
-        guest.read(Block::new_512(0), &mut buffer).await
+        guest.read(BlockIndex(0), &mut buffer).await
     });
 
     // Send a deactivate request.  This sends a final flush, and should push
@@ -1787,7 +1788,7 @@ async fn test_job_fault_condition() {
         // come back before returning
         let h = harness.spawn(|guest| async move {
             let mut buffer = Buffer::new(1, 512);
-            guest.read(Block::new_512(0), &mut buffer).await.unwrap();
+            guest.read(BlockIndex(0), &mut buffer).await.unwrap();
         });
 
         // DS1 should be receiving messages
@@ -1876,7 +1877,7 @@ async fn test_job_fault_condition_offline() {
         // come back before returning
         let h = harness.spawn(|guest| async move {
             let mut buffer = Buffer::new(1, 512);
-            guest.read(Block::new_512(0), &mut buffer).await.unwrap();
+            guest.read(BlockIndex(0), &mut buffer).await.unwrap();
         });
 
         // DS1 should be receiving messages
@@ -1916,7 +1917,7 @@ async fn test_job_fault_condition_offline() {
     for i in num_jobs..IO_OUTSTANDING_MAX_JOBS + 200 {
         let h = harness.spawn(|guest| async move {
             let mut buffer = Buffer::new(1, 512);
-            guest.read(Block::new_512(0), &mut buffer).await.unwrap();
+            guest.read(BlockIndex(0), &mut buffer).await.unwrap();
         });
 
         // DS1 should never receive messages, because it's offline
@@ -1967,7 +1968,7 @@ async fn test_error_during_live_repair_no_halt() {
         // come back before returning
         let h = harness.spawn(|guest| async move {
             let mut buffer = Buffer::new(1, 512);
-            guest.read(Block::new_512(0), &mut buffer).await.unwrap();
+            guest.read(BlockIndex(0), &mut buffer).await.unwrap();
         });
 
         // Assert we're seeing the read requests (without replying on DS1)
@@ -2410,7 +2411,7 @@ async fn test_no_read_only_live_repair() {
         // come back before returning
         let h = harness.spawn(|guest| async move {
             let mut buffer = Buffer::new(1, 512);
-            guest.read(Block::new_512(0), &mut buffer).await.unwrap();
+            guest.read(BlockIndex(0), &mut buffer).await.unwrap();
         });
 
         // Assert we're seeing the read requests (without replying on DS1)
@@ -2514,7 +2515,7 @@ async fn test_no_read_only_live_repair() {
     // The read should be served as normal
     harness.spawn(|guest| async move {
         let mut buffer = Buffer::new(1, 512);
-        guest.read(Block::new_512(0), &mut buffer).await.unwrap();
+        guest.read(BlockIndex(0), &mut buffer).await.unwrap();
     });
 
     // All downstairs should see it
@@ -2533,7 +2534,7 @@ async fn test_deactivate_slow() {
     // response to come back before returning
     harness.spawn(|guest| async move {
         let mut buffer = Buffer::new(1, 512);
-        guest.read(Block::new_512(0), &mut buffer).await.unwrap();
+        guest.read(BlockIndex(0), &mut buffer).await.unwrap();
     });
 
     // Ensure that all three clients got the read request
@@ -2619,7 +2620,7 @@ async fn test_write_replay() {
     let write_handle = harness.spawn(|guest| async move {
         let mut data = BytesMut::new();
         data.resize(512, 1u8);
-        guest.write(Block::new_512(0), data).await.unwrap();
+        guest.write(BlockIndex(0), data).await.unwrap();
     });
 
     // Ensure that all three clients got the write request

@@ -62,18 +62,18 @@ impl BlockIO for InMemoryBlockIO {
     /// Read from `self` into `data`, setting ownership accordingly
     async fn read(
         &self,
-        offset: Block,
+        offset: BlockIndex,
         data: &mut Buffer,
     ) -> Result<(), CrucibleError> {
         let bs = self.check_data_size(data.len()).await? as usize;
         let inner = self.inner.lock().await;
 
-        let start = offset.value as usize * bs;
+        let start = offset.0 as usize * bs;
 
         data.write_if_owned(
             0,
             &inner.bytes[start..][..data.len()],
-            &inner.owned[offset.value as usize..][..data.len() / bs],
+            &inner.owned[offset.0 as usize..][..data.len() / bs],
         );
 
         Ok(())
@@ -82,13 +82,13 @@ impl BlockIO for InMemoryBlockIO {
     /// Write from `data` into `self`, setting all owned bits to `true`
     async fn write(
         &self,
-        offset: Block,
+        offset: BlockIndex,
         data: BytesMut,
     ) -> Result<(), CrucibleError> {
         let bs = self.check_data_size(data.len()).await? as usize;
         let mut inner = self.inner.lock().await;
 
-        let start_block = offset.value as usize;
+        let start_block = offset.0 as usize;
         for (b, chunk) in data.chunks(bs).enumerate() {
             let block = start_block + b;
             inner.owned[block] = true;
@@ -100,13 +100,13 @@ impl BlockIO for InMemoryBlockIO {
 
     async fn write_unwritten(
         &self,
-        offset: Block,
+        offset: BlockIndex,
         data: BytesMut,
     ) -> Result<(), CrucibleError> {
         let bs = self.check_data_size(data.len()).await? as usize;
         let mut inner = self.inner.lock().await;
 
-        let start_block = offset.value as usize;
+        let start_block = offset.0 as usize;
         for (b, chunk) in data.chunks(bs).enumerate() {
             let block = start_block + b;
             if !inner.owned[block] {

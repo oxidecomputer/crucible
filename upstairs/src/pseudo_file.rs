@@ -73,13 +73,7 @@ impl IOSpan {
         block_io: &T,
     ) -> Result<(), CrucibleError> {
         block_io
-            .read(
-                Block::new(
-                    self.affected_block_numbers[0],
-                    self.block_size.trailing_zeros(),
-                ),
-                &mut self.buffer,
-            )
+            .read(BlockIndex(self.affected_block_numbers[0]), &mut self.buffer)
             .await?;
 
         Ok(())
@@ -92,10 +86,7 @@ impl IOSpan {
     ) -> Result<(), CrucibleError> {
         block_io
             .write(
-                Block::new(
-                    self.affected_block_numbers[0],
-                    self.block_size.trailing_zeros(),
-                ),
+                BlockIndex(self.affected_block_numbers[0]),
                 self.buffer.into_bytes_mut(),
             )
             .await
@@ -371,10 +362,7 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
         } else {
             let _guard = self.rmw_lock.read().await;
 
-            let offset = Block::new(
-                self.offset / self.block_size,
-                self.block_size.trailing_zeros(),
-            );
+            let offset = BlockIndex(self.offset / self.block_size);
             let bytes = BytesMut::from(buf);
             self.block_io.write(offset, bytes).await?;
         }

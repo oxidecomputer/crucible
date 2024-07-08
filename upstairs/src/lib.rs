@@ -123,19 +123,19 @@ pub trait BlockIO: Sync {
 
     async fn read(
         &self,
-        offset: Block,
+        offset: BlockIndex,
         data: &mut Buffer,
     ) -> Result<(), CrucibleError>;
 
     async fn write(
         &self,
-        offset: Block,
+        offset: BlockIndex,
         data: BytesMut,
     ) -> Result<(), CrucibleError>;
 
     async fn write_unwritten(
         &self,
-        offset: Block,
+        offset: BlockIndex,
         data: BytesMut,
     ) -> Result<(), CrucibleError>;
 
@@ -166,14 +166,14 @@ pub trait BlockIO: Sync {
     async fn byte_offset_to_block(
         &self,
         offset: u64,
-    ) -> Result<Block, CrucibleError> {
+    ) -> Result<BlockIndex, CrucibleError> {
         let bs = self.get_block_size().await?;
 
         if (offset % bs) != 0 {
             crucible_bail!(OffsetUnaligned);
         }
 
-        Ok(Block::new(offset / bs, bs.trailing_zeros()))
+        Ok(BlockIndex(offset / bs))
     }
 
     /*

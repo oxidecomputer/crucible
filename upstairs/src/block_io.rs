@@ -62,11 +62,11 @@ impl BlockIO for FileBlockIO {
 
     async fn read(
         &self,
-        offset: Block,
+        offset: BlockIndex,
         data: &mut Buffer,
     ) -> Result<(), CrucibleError> {
         self.check_data_size(data.len()).await?;
-        let start: usize = (offset.value * self.block_size) as usize;
+        let start: usize = (offset.0 * self.block_size) as usize;
 
         let mut file = self.file.lock().await;
         file.seek(SeekFrom::Start(start as u64))?;
@@ -80,11 +80,11 @@ impl BlockIO for FileBlockIO {
 
     async fn write(
         &self,
-        offset: Block,
+        offset: BlockIndex,
         data: BytesMut,
     ) -> Result<(), CrucibleError> {
         self.check_data_size(data.len()).await?;
-        let start = offset.value * self.block_size;
+        let start = offset.0 * self.block_size;
 
         let mut file = self.file.lock().await;
         file.seek(SeekFrom::Start(start))?;
@@ -95,7 +95,7 @@ impl BlockIO for FileBlockIO {
 
     async fn write_unwritten(
         &self,
-        _offset: Block,
+        _offset: BlockIndex,
         _data: BytesMut,
     ) -> Result<(), CrucibleError> {
         crucible_bail!(
@@ -206,14 +206,14 @@ impl BlockIO for ReqwestBlockIO {
 
     async fn read(
         &self,
-        offset: Block,
+        offset: BlockIndex,
         data: &mut Buffer,
     ) -> Result<(), CrucibleError> {
         self.check_data_size(data.len()).await?;
         let cc = self.next_count();
         cdt::reqwest__read__start!(|| (cc, self.uuid));
 
-        let start = offset.value * self.block_size;
+        let start = offset.0 * self.block_size;
 
         let response = self
             .client
@@ -261,7 +261,7 @@ impl BlockIO for ReqwestBlockIO {
 
     async fn write(
         &self,
-        _offset: Block,
+        _offset: BlockIndex,
         _data: BytesMut,
     ) -> Result<(), CrucibleError> {
         crucible_bail!(Unsupported, "write unsupported for ReqwestBlockIO")
@@ -269,7 +269,7 @@ impl BlockIO for ReqwestBlockIO {
 
     async fn write_unwritten(
         &self,
-        _offset: Block,
+        _offset: BlockIndex,
         _data: BytesMut,
     ) -> Result<(), CrucibleError> {
         crucible_bail!(
