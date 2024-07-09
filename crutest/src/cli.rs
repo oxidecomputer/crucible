@@ -742,10 +742,20 @@ async fn process_cli_command(
     verify_output: Option<PathBuf>,
 ) -> Result<()> {
     match cmd {
-        CliMessage::Activate(gen) => match guest.activate_with_gen(gen).await {
-            Ok(_) => fw.send(CliMessage::DoneOk).await,
-            Err(e) => fw.send(CliMessage::Error(e)).await,
-        },
+        CliMessage::Activate(gen) => {
+            let gc = guest.clone();
+            let _handle = tokio::spawn(async move {
+                match gc.activate_with_gen(gen).await {
+                    Ok(_) => {
+                        println!("Activate Successful");
+                    }
+                    Err(e) => {
+                        println!("Activate failed: {:?}", e);
+                    }
+                }
+            });
+            fw.send(CliMessage::DoneOk).await
+        }
         CliMessage::Deactivate => match guest.deactivate().await {
             Ok(_) => fw.send(CliMessage::DoneOk).await,
             Err(e) => fw.send(CliMessage::Error(e)).await,
@@ -1076,14 +1086,14 @@ pub async fn start_cli_server(
                         },
                         Some(cmd) => {
                             process_cli_command(
-                                guest,
-                                &mut fw,
-                                cmd,
-                                &mut ri,
-                                &mut wc_filled,
-                                verify_input.clone(),
-                                verify_output.clone()
-                            ).await?;
+                                    guest,
+                                    &mut fw,
+                                    cmd,
+                                    &mut ri,
+                                    &mut wc_filled,
+                                    verify_input.clone(),
+                                    verify_output.clone()
+                                ).await?;
                         }
                     }
                 }

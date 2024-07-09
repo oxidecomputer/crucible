@@ -3977,6 +3977,56 @@ mod test {
     }
 
     #[tokio::test]
+    async fn integration_test_guest_replace_ds_before_active() -> Result<()> {
+        // Test using the guest layer to verify we can replace a downstairs
+        // before the upstairs is active.
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let tds = TestDownstairsSet::small(false).await?;
+        let opts = tds.opts();
+
+        let log = csl();
+        let (guest, io) = Guest::new(Some(log.clone()));
+        let _jh = up_main(opts, 1, None, io, None)?;
+
+        // Create new downstairs
+        let new_downstairs = tds.new_downstairs().await?;
+
+        // Replace a downstairs.
+        let res = guest
+            .replace_downstairs(
+                tds.opts().id,
+                tds.downstairs1_address(),
+                new_downstairs.address(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res, ReplaceResult::Started);
+
+        guest.activate().await?;
+
+        // Write data in
+        guest
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
+            )
+            .await?;
+
+        // Read back our block post replacement, verify contents
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
+        guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+            .await?;
+
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn integration_test_upstairs_read_only_rejects_write() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 

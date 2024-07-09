@@ -57,6 +57,10 @@ region size of ~100G).
 A test to break, then repair a downstairs region that is out of sync with
 the other regions, in a loop
 
+## test_replace_special.sh
+A test to verify that we can replace a downstairs while reconciliation is
+underway.
+
 ## test_replay.sh
 A test that checks the replay code path, if a downstairs disconnects and
 then reconnects, we replay jobs to it.  This is a thin wrapper around the

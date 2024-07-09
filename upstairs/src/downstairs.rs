@@ -819,12 +819,12 @@ impl Downstairs {
             return true;
         }
         // If this client is offline, then move it to faulted after skipping
-        // all the outstanding jobs.  This will shut the door on this client till
-        // the deactivation has finished on all downstairs and the upstairs has
-        // completed deactivation.  After skipping jobs and setting faulted,
-        // we return false here and let the faulting framework take care of
-        // clearing out the skipped jobs.  This then allows the requested
-        // deactivation to finish.
+        // all the outstanding jobs.  This will shut the door on this client
+        // till the deactivation has finished on all downstairs and the
+        // upstairs has completed deactivation.  After skipping jobs and
+        // setting faulted, we return false here and let the faulting framework
+        // take care of clearing out the skipped jobs.  This then allows the
+        // requested deactivation to finish.
         if self.clients[client_id].state() == DsState::Offline {
             info!(self.log, "[{}] Offline client moved to Faulted", client_id);
             self.skip_all_jobs(client_id);
@@ -856,7 +856,7 @@ impl Downstairs {
             if state == &IOState::New || state == &IOState::InProgress {
                 info!(
                     self.log,
-                    "[{}] deactivate job {} not {:?} flush, NO",
+                    "[{}] cannot deactivate, job {} in state {:?}",
                     client_id,
                     id,
                     state
@@ -2242,20 +2242,25 @@ impl Downstairs {
         self.reconcile_task_list = VecDeque::new();
         self.reconcile_current_work = None;
 
-        assert!(self.reconcile.is_some());
+        if self.reconcile.is_some() {
+            #[cfg(feature = "notify-nexus")]
+            {
+                let reconcile = self.reconcile.as_ref().unwrap();
+                self.notify_nexus_of_reconcile_finished(
+                    reconcile, true, /* aborted */
+                );
+            }
+            self.reconcile = None;
+            self.reconcile_repair_needed = 0;
+            self.reconcile_repaired = 0;
 
-        #[cfg(feature = "notify-nexus")]
-        {
-            let reconcile = self.reconcile.as_ref().unwrap();
-            self.notify_nexus_of_reconcile_finished(
-                reconcile, true, /* aborted */
-            );
+            self.reconcile_repair_aborted += 1;
+        } else {
+            // If reconcile is None, then these should also be cleared
+            assert_eq!(self.reconcile_repair_needed, 0);
+            assert_eq!(self.reconcile_repaired, 0);
+            self.reconcile_repair_aborted += 1;
         }
-
-        self.reconcile = None;
-        self.reconcile_repair_needed = 0;
-        self.reconcile_repaired = 0;
-        self.reconcile_repair_aborted += 1;
     }
 
     /// Asserts that initial reconciliation is done, and sets clients as Active

@@ -571,9 +571,6 @@ impl DownstairsClient {
                 );
                 true
             }
-            DsState::Offline => {
-                panic!("can't deactivate while a downstairs is offline")
-            }
             s => {
                 info!(self.log, "not ready to deactivate due to state {s:?}");
                 false
@@ -796,6 +793,13 @@ impl DownstairsClient {
                 );
                 self.promote_state = Some(PromoteState::Waiting);
             }
+            DsState::Replaced => {
+                info!(
+                    self.log,
+                    "client set_active_request while Replaced; waiting..."
+                );
+                self.promote_state = Some(PromoteState::Waiting);
+            }
             DsState::WaitActive => {
                 info!(
                     self.log,
@@ -1013,6 +1017,7 @@ impl DownstairsClient {
                 } else if old_state != DsState::New
                     && old_state != DsState::Faulted
                     && old_state != DsState::Disconnected
+                    && old_state != DsState::Replaced
                 {
                     panic!(
                         "[{}] {} Negotiation failed, {:?} -> {:?}",
@@ -1164,7 +1169,7 @@ impl DownstairsClient {
 
     /// Remove all jobs from `self.new_jobs`
     ///
-    /// This is only useful when marking the downstair as faulted or similar
+    /// This is only useful when marking the downstairs as faulted or similar
     pub(crate) fn clear_new_jobs(&mut self) {
         self.new_jobs.clear()
     }
@@ -1727,10 +1732,21 @@ impl DownstairsClient {
                         // TODO This is an unfortunate corner of the state
                         // machine, where we have to be in WaitActive despite
                         // _already_ having gone active.
-                        if self.state == DsState::New {
+                        // If we are Replaced and we have not yet gone active
+                        // then it is valid for us to transition to WA.
+                        if self.state == DsState::New
+                            || (self.state == DsState::Replaced
+                                && !matches!(up_state, UpstairsState::Active))
+                        {
                             self.checked_state_transition(
                                 up_state,
                                 DsState::WaitActive,
+                            );
+                        } else {
+                            warn!(
+                                self.log,
+                                "version negotiation from state {:?}",
+                                self.state
                             );
                         }
                     }
@@ -1908,19 +1924,37 @@ impl DownstairsClient {
                         if self.state == DsState::Replaced {
                             warn!(
                                 self.log,
-                                "[{}] replace downstairs uuid:{} with {}",
-                                self.client_id,
+                                "Replace downstairs uuid:{} with {}",
                                 uuid,
                                 region_def.uuid(),
                             );
                         } else {
-                            panic!(
-                                "New client:{} uuid:{} does not match \
-                                 existing {}",
-                                self.client_id,
-                                region_def.uuid(),
-                                uuid,
-                            );
+                            // If we are not yet active (and, as such, we have
+                            // not finished reconciliation), we can replace a
+                            // downstairs here.
+                            match up_state {
+                                UpstairsState::Initializing
+                                | UpstairsState::GoActive(_) => {
+                                    warn!(
+                                        self.log,
+                                        "Replace {} with {} before active",
+                                        uuid,
+                                        region_def.uuid(),
+                                    );
+                                }
+                                _ => {
+                                    panic!(
+                                        "New client:{} uuid:{} does not match \
+                                         existing {} ds_state:{:?} \
+                                         up_state:{:?}",
+                                        self.client_id,
+                                        region_def.uuid(),
+                                        uuid,
+                                        self.state,
+                                        up_state,
+                                    );
+                                }
+                            }
                         }
                     } else {
                         info!(self.log, "Returning UUID:{} matches", uuid);
@@ -1930,8 +1964,9 @@ impl DownstairsClient {
                 /*
                  * If this is a new downstairs connection, insert the UUID.
                  * If this is a replacement downstairs, insert the UUID.
-                 * If it is an existing UUID, we already compared and it is good,
-                 * so the insert is unnecessary, but will result in the same UUID.
+                 * If it is an existing UUID, we already compared and it is
+                 * good, so the insert is unnecessary, but will result in the
+                 * same UUID.
                  */
                 self.region_uuid = Some(region_def.uuid());
 

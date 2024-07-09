@@ -23,6 +23,7 @@ use rand_chacha::rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 use signal_hook::consts::signal::*;
 use signal_hook_tokio::Signals;
+use slog::{info, o, Logger};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -122,6 +123,26 @@ enum Workload {
         /// the replace will have to copy the entire region..
         #[clap(long, action)]
         fast_fill: bool,
+
+        /// The address:port of a running downstairs for replacement
+        #[clap(long, action)]
+        replacement: SocketAddr,
+    },
+    /// Test that we can replace a downstairs when the upstairs is not active.
+    ReplaceBeforeActive {
+        /// URL location of the running dsc server
+        #[clap(long, default_value = "http://127.0.0.1:9998", action)]
+        dsc: String,
+
+        /// The address:port of a running downstairs for replacement
+        #[clap(long, action)]
+        replacement: SocketAddr,
+    },
+    /// Test replacement of a downstairs while doing the initial reconciliation.
+    ReplaceReconcile {
+        /// URL location of the running dsc server
+        #[clap(long, default_value = "http://127.0.0.1:9998", action)]
+        dsc: String,
 
         /// The address:port of a running downstairs for replacement
         #[clap(long, action)]
@@ -738,6 +759,7 @@ async fn main() -> Result<()> {
     };
     let guest_logger = crucible_common::build_logger_with_level(log_level);
 
+    let test_log = guest_logger.new(o!("task" => "crutest".to_string()));
     /*
      * The structure we use to send work from outside crucible into the
      * Upstairs main task.
@@ -1096,6 +1118,62 @@ async fn main() -> Result<()> {
                 &mut region_info,
                 targets,
                 fast_fill,
+            )
+            .await?;
+        }
+        Workload::ReplaceBeforeActive { dsc, replacement } => {
+            let dsc_client = Client::new(&dsc);
+            // Either we have a count, or we run until we get a signal.
+            let mut wtq = {
+                if opt.continuous {
+                    WhenToQuit::Signal { shutdown_rx }
+                } else {
+                    let count = opt.count.unwrap_or(5);
+                    WhenToQuit::Count { count }
+                }
+            };
+
+            // Build the list of targets we use during the replace test.
+            // The first three are provided in the crucible opts, and the
+            // final one (the replacement) is a test specific arg.
+            let mut targets = opt.target.clone();
+            targets.push(replacement);
+            replace_before_active(
+                &guest,
+                &mut wtq,
+                &mut region_info,
+                targets,
+                dsc_client,
+                opt.gen,
+                test_log,
+            )
+            .await?;
+        }
+        Workload::ReplaceReconcile { dsc, replacement } => {
+            let dsc_client = Client::new(&dsc);
+            // Either we have a count, or we run until we get a signal.
+            let mut wtq = {
+                if opt.continuous {
+                    WhenToQuit::Signal { shutdown_rx }
+                } else {
+                    let count = opt.count.unwrap_or(5);
+                    WhenToQuit::Count { count }
+                }
+            };
+
+            // Build the list of targets we use during the replace test.
+            // The first three are provided in the crucible opts, and the
+            // final one (the replacement) is a test specific arg.
+            let mut targets = opt.target.clone();
+            targets.push(replacement);
+            replace_while_reconcile(
+                &guest,
+                &mut wtq,
+                &mut region_info,
+                targets,
+                dsc_client,
+                opt.gen,
+                test_log,
             )
             .await?;
         }
@@ -1965,6 +2043,337 @@ async fn replay_workload(
     }
 
     println!("Test replay has completed");
+    Ok(())
+}
+
+// Test that a downstairs can be replaced while the initial reconciliation
+// is underway.
+//
+// This test makes use of the dsc client to stop and start downstairs that
+// will allow us to create a mismatch between downstairs which will then
+// trigger a reconcile.
+async fn replace_while_reconcile(
+    guest: &Arc<Guest>,
+    wtq: &mut WhenToQuit,
+    ri: &mut RegionInfo,
+    targets: Vec<SocketAddr>,
+    dsc_client: Client,
+    mut gen: u64,
+    log: Logger,
+) -> Result<()> {
+    assert!(targets.len() == 4);
+
+    let mut old_ds = 0;
+    let mut new_ds = 3;
+
+    info!(log, "Begin replacement while reconciliation test");
+    for c in 1.. {
+        info!(log, "[{c}] Touch every extent part 1");
+        fill_sparse_workload(guest, ri).await?;
+
+        info!(log, "[{c}] Stop a downstairs");
+        // Stop a downstairs, wait for dsc to confirm it is stopped.
+        dsc_client.dsc_stop(old_ds).await.unwrap();
+        loop {
+            let res = dsc_client.dsc_get_ds_state(old_ds).await.unwrap();
+            let state = res.into_inner();
+            if state == DownstairsState::Exit {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        }
+        info!(log, "[{c}] Touch every extent part 2");
+        fill_sparse_workload(guest, ri).await?;
+
+        info!(log, "[{c}] Deactivate");
+        guest.deactivate().await.unwrap();
+        loop {
+            let is_active = guest.query_is_active().await.unwrap();
+            if !is_active {
+                break;
+            }
+            info!(log, "[{c}] Waiting for deactivation");
+            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        }
+
+        // We now have touched every extent with one downstairs missing,
+        // so on restart of that downstairs we will require reconciliation.
+
+        // Start a downstairs, wait for dsc to confirm it is started.
+        info!(log, "[{c}] Deactivate complete, now Start a downstairs");
+        dsc_client.dsc_start(old_ds).await.unwrap();
+        loop {
+            let res = dsc_client.dsc_get_ds_state(old_ds).await.unwrap();
+            let state = res.into_inner();
+            if state == DownstairsState::Running {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        }
+
+        info!(log, "[{c}] Request the upstairs activate");
+        // Spawn a task to re-activate, this will not finish till all three
+        // downstairs have reconciled.
+        gen += 1;
+        let gc = guest.clone();
+        let handle =
+            tokio::spawn(async move { gc.activate_with_gen(gen).await });
+
+        info!(log, "[{c}] here, we want to replace as reconcile starts");
+        tokio::time::sleep(tokio::time::Duration::from_secs(6)).await;
+
+        //  Give the activation request time to percolate in the upstairs.
+        let is_active = guest.query_is_active().await.unwrap();
+        info!(log, "[{c}] activate should now be waiting {:?}", is_active);
+        // If this assertions fails, then the reconciliation has finished
+        // before we had a chance to replace our downstairs.  Either make
+        // a larger region size, or reduce the sleep time above.
+        assert!(!is_active);
+
+        info!(
+            log,
+            "[{c}] Replacing DS {old_ds}:{} with {new_ds}:{}",
+            targets[old_ds as usize],
+            targets[new_ds],
+        );
+        match guest
+            .replace_downstairs(
+                Uuid::new_v4(),
+                targets[old_ds as usize],
+                targets[new_ds],
+            )
+            .await
+        {
+            Ok(ReplaceResult::Started) => {}
+            x => {
+                bail!("Failed replace: {:?}", x);
+            }
+        }
+
+        info!(log, "[{c}] Wait for activation after replacement");
+        loop {
+            let is_active = guest.query_is_active().await.unwrap();
+            if is_active {
+                break;
+            }
+            info!(
+                log,
+                "[{c}] Upstairs query_is_active reports: {:?}", is_active
+            );
+            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        }
+
+        // Our activate request task should have ended.
+        if let Err(e) = handle.await.unwrap() {
+            bail!("Failure reported in activate task {:?}", e);
+        }
+
+        info!(log, "[{c}] Verify volume after replacement");
+        if let Err(e) = verify_volume(guest, ri, false).await {
+            bail!("Requested volume verify failed: {:?}", e)
+        }
+
+        // Start up the old downstairs so it is ready for the next loop.
+        let res = dsc_client.dsc_start(old_ds).await;
+        info!(log, "[{c}] Replay: started {old_ds}, returned:{:?}", res);
+
+        // Wait for all IO to finish before we continue
+        loop {
+            let wc = guest.show_work().await?;
+            info!(
+                log,
+                "[{c}] Jobs Up:{} Ds:{}  DS active:{}",
+                wc.up_count,
+                wc.ds_count,
+                wc.active_count
+            );
+            if wc.up_count + wc.ds_count == 0 && wc.active_count == 3 {
+                info!(log, "[{c}] Replay: All jobs finished, all DS active.");
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        }
+
+        old_ds = (old_ds + 1) % 4;
+        new_ds = (new_ds + 1) % 4;
+
+        match wtq {
+            WhenToQuit::Count { count } => {
+                if c > *count {
+                    break;
+                }
+            }
+            WhenToQuit::Signal { shutdown_rx } => {
+                match shutdown_rx.try_recv() {
+                    Ok(SignalAction::Shutdown) => {
+                        println!("shutting down in response to SIGUSR1");
+                        break;
+                    }
+                    Ok(SignalAction::Verify) => {
+                        println!("Verify Volume");
+                        if let Err(e) = verify_volume(guest, ri, false).await {
+                            bail!("Requested volume verify failed: {:?}", e)
+                        }
+                    }
+                    _ => {} // Ignore everything else
+                }
+            }
+        }
+    }
+
+    info!(log, "Test replace_special has completed");
+    Ok(())
+}
+
+// Test that a downstairs can be replaced before activation when the original
+// downstairs is offline.
+// Make use of dsc to stop our downstairs before activation.
+// Do a fill on each loop so every extent will need to be repaired.
+async fn replace_before_active(
+    guest: &Arc<Guest>,
+    wtq: &mut WhenToQuit,
+    ri: &mut RegionInfo,
+    targets: Vec<SocketAddr>,
+    dsc_client: Client,
+    mut gen: u64,
+    log: Logger,
+) -> Result<()> {
+    assert!(targets.len() == 4);
+
+    info!(log, "Begin replacement before activation test");
+    let mut old_ds = 0;
+    let mut new_ds = 3;
+    for c in 1.. {
+        info!(log, "[{c}] Touch every extent");
+        fill_sparse_workload(guest, ri).await?;
+
+        guest.deactivate().await.unwrap();
+        loop {
+            let is_active = guest.query_is_active().await.unwrap();
+            if !is_active {
+                break;
+            }
+            info!(log, "[{c}] Waiting for deactivation");
+            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        }
+
+        // Stop a downstairs, wait for dsc to confirm it is stopped.
+        dsc_client.dsc_stop(old_ds).await.unwrap();
+        loop {
+            let res = dsc_client.dsc_get_ds_state(old_ds).await.unwrap();
+            let state = res.into_inner();
+            if state == DownstairsState::Exit {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        }
+
+        info!(log, "[{c}] Request the upstairs activate");
+        // Spawn a task to re-activate, this will not finish till all three
+        // downstairs respond.
+        gen += 1;
+        let gc = guest.clone();
+        let handle =
+            tokio::spawn(async move { gc.activate_with_gen(gen).await });
+
+        //  Give the activation request time to percolate in the upstairs.
+        tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        let is_active = guest.query_is_active().await.unwrap();
+        info!(log, "[{c}] activate should now be waiting {:?}", is_active);
+        assert!(!is_active);
+
+        info!(
+            log,
+            "[{c}] Replacing DS {old_ds}:{} with {new_ds}:{}",
+            targets[old_ds as usize],
+            targets[new_ds],
+        );
+        match guest
+            .replace_downstairs(
+                Uuid::new_v4(),
+                targets[old_ds as usize],
+                targets[new_ds],
+            )
+            .await
+        {
+            Ok(ReplaceResult::Started) => {}
+            x => {
+                bail!("Failed replace: {:?}", x);
+            }
+        }
+
+        info!(log, "[{c}] Wait for activation after replacement");
+        loop {
+            let is_active = guest.query_is_active().await.unwrap();
+            if is_active {
+                break;
+            }
+            info!(
+                log,
+                "[{c}] Upstairs query_is_active reports: {:?}", is_active
+            );
+            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        }
+
+        // Our activate request task should have ended.
+        if let Err(e) = handle.await.unwrap() {
+            bail!("Failure reported in activate task {:?}", e);
+        }
+
+        info!(log, "[{c}] Verify volume after replacement");
+        if let Err(e) = verify_volume(guest, ri, false).await {
+            bail!("Requested volume verify failed: {:?}", e)
+        }
+
+        // Start up the old downstairs so it is ready for the next loop.
+        let res = dsc_client.dsc_start(old_ds).await;
+        info!(log, "[{c}] Replay: started {old_ds}, returned:{:?}", res);
+
+        // Wait for all IO to finish before we continue
+        loop {
+            let wc = guest.show_work().await?;
+            info!(
+                log,
+                "[{c}] Jobs Up:{} Ds:{}  DS active:{}",
+                wc.up_count,
+                wc.ds_count,
+                wc.active_count
+            );
+            if wc.up_count + wc.ds_count == 0 && wc.active_count == 3 {
+                info!(log, "[{c}] Replay: All jobs finished, all DS active.");
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+        }
+
+        old_ds = (old_ds + 1) % 4;
+        new_ds = (new_ds + 1) % 4;
+
+        match wtq {
+            WhenToQuit::Count { count } => {
+                if c > *count {
+                    break;
+                }
+            }
+            WhenToQuit::Signal { shutdown_rx } => {
+                match shutdown_rx.try_recv() {
+                    Ok(SignalAction::Shutdown) => {
+                        println!("shutting down in response to SIGUSR1");
+                        break;
+                    }
+                    Ok(SignalAction::Verify) => {
+                        println!("Verify Volume");
+                        if let Err(e) = verify_volume(guest, ri, false).await {
+                            bail!("Requested volume verify failed: {:?}", e)
+                        }
+                    }
+                    _ => {} // Ignore everything else
+                }
+            }
+        }
+    }
+
+    info!(log, "Test replace_before_active has completed");
     Ok(())
 }
 
