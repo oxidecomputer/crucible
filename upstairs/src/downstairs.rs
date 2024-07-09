@@ -789,32 +789,7 @@ impl Downstairs {
     /// Returns true if we can deactivate immediately
     ///
     /// This is the case if there are no pending jobs in the queue.
-    ///
-    /// # Panics
-    /// If  any downstairs is offline
     pub(crate) fn can_deactivate_immediately(&self) -> bool {
-        /*
-         * If any downstairs are currently offline, then we are going
-         * to lock the door behind them and not let them back in until
-         * all non-offline downstairs have deactivated themselves.
-         *
-         * However: TODO: This is not done yet.
-         */
-        let offline_ds: Vec<ClientId> = self
-            .clients
-            .iter()
-            .enumerate()
-            .filter(|(_i, c)| c.state() == DsState::Offline)
-            .map(|(i, _c)| ClientId::new(i as u8))
-            .collect();
-
-        /*
-         * TODO: Handle deactivation when a downstairs is offline.
-         */
-        if !offline_ds.is_empty() {
-            warn!(self.log, "Deactivate called with downstairs offline");
-        }
-
         // If there are no jobs, then we're immediately done!
         self.ds_active.is_empty()
     }
@@ -844,10 +819,12 @@ impl Downstairs {
             return true;
         }
         // If this client is offline, then move it to faulted after skipping
-        // all the outstanding jobs.  Eventually moving the client to faulted
-        // will allows the deactivation to proceed, though we return false
-        // here and let the faulting framework take care of clearing out all
-        // the outstanding jobs which then allows the deactivation to finish.
+        // all the outstanding jobs.  This will shut the door on this client till
+        // the deactivation has finished on all downstairs and the upstairs has
+        // completed deactivation.  After skipping jobs and setting faulted,
+        // we return false here and let the faulting framework take care of
+        // clearing out the skipped jobs.  This then allows the requested
+        // deactivation to finish.
         if self.clients[client_id].state() == DsState::Offline {
             info!(self.log, "[{}] Offline client moved to Faulted", client_id);
             self.skip_all_jobs(client_id);
