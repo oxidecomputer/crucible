@@ -56,7 +56,7 @@ httptest = "0.15.5"
 human_bytes = "0.4.3"
 humantime = "2.1.0"
 hyper = { version = "0.14", features = [ "full" ] }
-hyper-staticfile = "0.9"
+hyper-staticfile = "0.9.6"
 indicatif = { version = "0.17.8", features = ["rayon"] }
 itertools = "0.12.1"
 libc = "0.2"
