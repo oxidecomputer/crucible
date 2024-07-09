@@ -1,10 +1,10 @@
 // Copyright 2022 Oxide Computer Company
 
 use anyhow::Result;
+use camino::Utf8Path;
 use omicron_zone_package::config;
 use omicron_zone_package::target::Target;
 use std::fs::create_dir_all;
-use camino::Utf8Path;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,10 +19,9 @@ async fn main() -> Result<()> {
     for batch in package_iter {
         for (name, package) in &batch {
             println!("Building '{name}'");
-			let build_config = omicron_zone_package::package::BuildConfig::default();
-            package
-                .create(name, output_dir, &build_config)
-                .await?;
+            let build_config =
+                omicron_zone_package::package::BuildConfig::default();
+            package.create(name, output_dir, &build_config).await?;
         }
     }
 
