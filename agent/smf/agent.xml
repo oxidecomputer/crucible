@@ -13,8 +13,13 @@
     <service_fmri value='svc:/milestone/multi-user' />
   </dependency>
 
+  <dependency name='zone_network_setup' grouping='require_all' restart_on='none'
+    type='service'>
+    <service_fmri value='svc:/oxide/zone-network-setup:default' />
+  </dependency>
+
   <exec_method type='method' name='start'
-    exec='/opt/oxide/lib/svc/manifest/crucible/agent.sh'
+    exec='/opt/oxide/crucible/bin/crucible-agent run -D /opt/oxide/crucible/bin/crucible-downstairs --dataset %{config/dataset} -l [%{config/listen_addr}]:%{config/listen_port} -P %{config/portbase} -p %{config/downstairs_prefix} -s %{config/snapshot_prefix}'
     timeout_seconds='30'
     />
 
@@ -25,11 +30,10 @@
   </property_group>
 
   <property_group name='config' type='application'>
-    <propval name='datalink' type='astring' value='unknown' />
-    <propval name='gateway' type='astring' value='unknown' />
     <propval name='dataset' type='astring' value='' />
     <propval name='listen_addr' type='astring' value='127.0.0.1' />
     <propval name='listen_port' type='astring' value='17000' />
+    <!-- TODO: Are 'uuid' and 'nexus' being used? -->
     <propval name='uuid' type='astring' value='' />
     <propval name='nexus' type='astring' value='127.0.0.1:12221' />
     <propval name='portbase' type='astring' value='19000' />

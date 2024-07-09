@@ -12,6 +12,10 @@ that you already have downstairs running on port 88[1-3]0.
 The test will check for panic or assert in the output and stop if it
 detects them or a test exits with an error.
 
+## make-dtrace.sh
+Build and package the DTrace scripts for use in the global zone of each sled.
+The output of this script is published as an artifact by buildomat.
+
 ## make-nightly.sh
 A simple script to build and package all that is required to run the
 test_nightly.sh script.  Use this when you want to manually create and
@@ -35,6 +39,8 @@ downstairs UUID and is intended to provide a sample to build off of.
 
 ## test_ds.sh
 Test import then export for crucible downstairs.
+Then, test the clone subcommand and verify that the cloned downstairs
+exports the same file as the original downstairs.
 
 ## test_nightly.sh
 This runs a selection of tests from this directory and reports their

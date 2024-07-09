@@ -319,7 +319,7 @@
           },
           "extent_count": {
             "type": "integer",
-            "format": "uint64",
+            "format": "uint32",
             "minimum": 0
           },
           "extent_size": {
@@ -336,6 +336,11 @@
           },
           "root_pem": {
             "nullable": true,
+            "type": "string"
+          },
+          "source": {
+            "nullable": true,
+            "description": "If requested, copy the extent contents from the provided IP:Port\n\nRegions created from a source will be started read_only",
             "type": "string"
           }
         },
@@ -404,7 +409,7 @@
           },
           "extent_count": {
             "type": "integer",
-            "format": "uint64",
+            "format": "uint32",
             "minimum": 0
           },
           "extent_size": {
@@ -424,8 +429,17 @@
             "format": "uint16",
             "minimum": 0
           },
+          "read_only": {
+            "default": false,
+            "type": "boolean"
+          },
           "root_pem": {
             "nullable": true,
+            "type": "string"
+          },
+          "source": {
+            "nullable": true,
+            "default": null,
             "type": "string"
           },
           "state": {

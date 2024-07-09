@@ -13,7 +13,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
 
-use crucible_common::build_logger;
+use crucible_common::{build_logger, ExtentId};
 use crucible_downstairs::admin::*;
 use crucible_downstairs::*;
 use crucible_protocol::{JobId, CRUCIBLE_MESSAGE_VERSION};
@@ -41,27 +41,67 @@ impl std::str::FromStr for Mode {
 #[derive(Debug, Parser)]
 #[clap(about = "disk-side storage component")]
 enum Args {
+    /// Clone the extents from another region into this region.
+    ///
+    /// The other downstairs should be running read-only.  All data in
+    /// the region here will be replaced.
+    Clone {
+        /// Directory where the region is located.
+        #[clap(short, long, value_name = "DIRECTORY", action)]
+        data: PathBuf,
+
+        /// Source IP:Port where the extent files will come from.
+        #[clap(short, long, action)]
+        source: SocketAddr,
+
+        #[clap(short, long, action)]
+        trace_endpoint: Option<String>,
+    },
     Create {
+        /// Block size.
         #[clap(long, default_value = "512", action)]
         block_size: u64,
 
-        #[clap(short, long, name = "DIRECTORY", action)]
+        /// Directory where the region files we be located.
+        #[clap(short, long, value_name = "DIRECTORY", action)]
         data: PathBuf,
 
+        /// Number of blocks per extent file.
         #[clap(long, default_value = "100", action)]
         extent_size: u64,
 
+        /// Number of extent files.
         #[clap(long, default_value = "15", action)]
-        extent_count: u64,
+        extent_count: u32,
 
-        #[clap(short, long, name = "FILE", action)]
+        /// Import data for the extent from this file.
+        #[clap(
+            short,
+            long,
+            value_name = "FILE",
+            action,
+            conflicts_with = "clone_source"
+        )]
         import_path: Option<PathBuf>,
 
-        #[clap(short, long, name = "UUID", action)]
+        /// UUID for the region.
+        #[clap(short, long, value_name = "UUID", action)]
         uuid: Uuid,
 
+        /// Will the region be encrypted.
         #[clap(long, action)]
         encrypted: bool,
+
+        /// Clone another downstairs after creating.
+        ///
+        /// IP:Port where the extent files will come from.
+        #[clap(
+            long,
+            value_name = "SOURCE",
+            action,
+            conflicts_with = "import_path"
+        )]
+        clone_source: Option<SocketAddr>,
     },
     /*
      * Dump region information.
@@ -74,7 +114,7 @@ enum Args {
         /*
          * Directories containing a region.
          */
-        #[clap(short, long, name = "DIRECTORY", action)]
+        #[clap(short, long, value_name = "DIRECTORY", action)]
         data: Vec<PathBuf>,
 
         /*
@@ -103,16 +143,16 @@ enum Args {
         /*
          * Number of blocks to export.
          */
-        #[clap(long, default_value = "0", name = "COUNT", action)]
+        #[clap(long, default_value = "0", value_name = "COUNT", action)]
         count: u64,
 
-        #[clap(short, long, name = "DIRECTORY", action)]
+        #[clap(short, long, value_name = "DIRECTORY", action)]
         data: PathBuf,
 
-        #[clap(short, long, name = "OUT_FILE", action)]
+        #[clap(short, long, value_name = "OUT_FILE", action)]
         export_path: PathBuf,
 
-        #[clap(short, long, default_value = "0", name = "SKIP", action)]
+        #[clap(short, long, default_value = "0", value_name = "SKIP", action)]
         skip: u64,
     },
     Run {
@@ -121,13 +161,13 @@ enum Args {
             short,
             long,
             default_value = "0.0.0.0",
-            name = "ADDRESS",
+            value_name = "ADDRESS",
             action
         )]
         address: IpAddr,
 
         /// Directory where the region is located.
-        #[clap(short, long, name = "DIRECTORY", action)]
+        #[clap(short, long, value_name = "DIRECTORY", action)]
         data: PathBuf,
 
         /// Test option, makes the search for new work sleep and sometimes
@@ -140,7 +180,7 @@ enum Args {
          * oximeter server, the downstairs will publish stats.
          */
         /// Use this address:port to send stats to an Oximeter server.
-        #[clap(long, name = "OXIMETER_ADDRESS:PORT", action)]
+        #[clap(long, value_name = "OXIMETER_ADDRESS:PORT", action)]
         oximeter: Option<SocketAddr>,
 
         /// Listen on this port for the upstairs to connect to us.
@@ -188,14 +228,14 @@ enum Args {
         #[clap(long, default_value_t = 512)]
         block_size: u64,
 
-        #[clap(short, long, name = "DIRECTORY")]
+        #[clap(short, long, value_name = "DIRECTORY")]
         data: PathBuf,
 
         #[clap(long, default_value_t = 100)]
         extent_size: u64,
 
         #[clap(long, default_value_t = 15)]
-        extent_count: u64,
+        extent_count: u32,
 
         #[clap(long)]
         encrypted: bool,
@@ -227,18 +267,41 @@ fn parse_duration(arg: &str) -> Result<Duration, std::num::ParseIntError> {
     Ok(Duration::from_millis(ms))
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 16)]
 async fn main() -> Result<()> {
     let args = Args::try_parse()?;
-
-    /*
-     * Everyone needs a region
-     */
-    let mut region;
 
     let log = build_logger();
 
     match args {
+        Args::Clone {
+            data,
+            source,
+            trace_endpoint,
+        } => {
+            // Instrumentation is shared.
+            if let Some(endpoint) = trace_endpoint {
+                let tracer = opentelemetry_jaeger::new_agent_pipeline()
+                    .with_endpoint(endpoint) // usually port 6831
+                    .with_service_name("downstairs")
+                    .install_simple()
+                    .expect("Error initializing Jaeger exporter");
+
+                let telemetry =
+                    tracing_opentelemetry::layer().with_tracer(tracer);
+
+                tracing_subscriber::registry()
+                    .with(telemetry)
+                    .try_init()
+                    .expect("Error init tracing subscriber");
+            }
+
+            let mut ds = Downstairs::new_builder(&data, true)
+                .set_logger(log)
+                .build()?;
+            ds.clone_region(source).await?;
+            Ok(())
+        }
         Args::Create {
             block_size,
             data,
@@ -247,25 +310,31 @@ async fn main() -> Result<()> {
             import_path,
             uuid,
             encrypted,
+            clone_source,
         } => {
             let mut region = create_region(
                 block_size,
-                data,
+                data.clone(),
                 extent_size,
                 extent_count,
                 uuid,
                 encrypted,
                 log.clone(),
-            )
-            .await?;
+            )?;
 
             if let Some(ref ip) = import_path {
-                downstairs_import(&mut region, ip).await.unwrap();
+                downstairs_import(&mut region, ip).unwrap();
                 /*
                  * The region we just created should now have a flush so the
                  * new data and inital flush number is written to disk.
                  */
-                region.region_flush(1, 0, &None, JobId(0), None).await?;
+                region.region_flush(1, 0, &None, JobId(0), None)?;
+            } else if let Some(ref clone_source) = clone_source {
+                info!(log, "Cloning from: {:?}", clone_source);
+                let mut ds = Downstairs::new_builder(&data, false)
+                    .set_logger(log.clone())
+                    .build()?;
+                ds.clone_region(*clone_source).await?;
             }
 
             info!(log, "UUID: {:?}", region.def().uuid());
@@ -275,6 +344,7 @@ async fn main() -> Result<()> {
                 region.def().extent_size().value,
                 region.def().extent_count(),
             );
+            // Now, clone it!
             Ok(())
         }
         Args::Dump {
@@ -289,14 +359,12 @@ async fn main() -> Result<()> {
             }
             dump_region(
                 data,
-                extent,
+                extent.map(ExtentId),
                 block,
                 only_show_differences,
                 no_color,
                 log,
             )
-            .await?;
-            Ok(())
         }
         Args::Export {
             count,
@@ -305,17 +373,9 @@ async fn main() -> Result<()> {
             skip,
         } => {
             // Open Region read only
-            region = region::Region::open(
-                data,
-                Default::default(),
-                true,
-                true,
-                &log,
-            )
-            .await?;
+            let mut region = region::Region::open(data, true, true, &log)?;
 
-            downstairs_export(&mut region, export_path, skip, count).await?;
-            Ok(())
+            downstairs_export(&mut region, export_path, skip, count)
         }
         Args::Run {
             address,
@@ -332,16 +392,6 @@ async fn main() -> Result<()> {
             root_cert_pem,
             mode,
         } => {
-            /*
-             * If any of our async tasks in our runtime panic, then we should
-             * exit the program right away.
-             */
-            let default_panic = std::panic::take_hook();
-            std::panic::set_hook(Box::new(move |info| {
-                default_panic(info);
-                std::process::exit(1);
-            }));
-
             // Instrumentation is shared.
             if let Some(endpoint) = trace_endpoint {
                 let tracer = opentelemetry_jaeger::new_agent_pipeline()
@@ -360,18 +410,14 @@ async fn main() -> Result<()> {
             }
 
             let read_only = mode == Mode::Ro;
-            let d = build_downstairs_for_region(
-                &data,
-                lossy,
-                read_errors,
-                write_errors,
-                flush_errors,
-                read_only,
-                Some(log),
-            )
-            .await?;
 
-            let downstairs_join_handle = start_downstairs(
+            let d = Downstairs::new_builder(&data, read_only)
+                .set_lossy(lossy)
+                .set_logger(log)
+                .set_test_errors(read_errors, write_errors, flush_errors)
+                .build()?;
+
+            let downstairs = start_downstairs(
                 d,
                 address,
                 oximeter,
@@ -384,23 +430,13 @@ async fn main() -> Result<()> {
             )
             .await?;
 
-            downstairs_join_handle.await?
+            downstairs.join_handle.await?
         }
         Args::RepairAPI => repair::write_openapi(&mut std::io::stdout()),
         Args::Serve {
             trace_endpoint,
             bind_addr,
         } => {
-            /*
-             * If any of our async tasks in our runtime panic, then we should
-             * exit the program right away.
-             */
-            let default_panic = std::panic::take_hook();
-            std::panic::set_hook(Box::new(move |info| {
-                default_panic(info);
-                std::process::exit(1);
-            }));
-
             // Instrumentation is shared.
             if let Some(endpoint) = trace_endpoint {
                 let tracer = opentelemetry_jaeger::new_agent_pipeline()
@@ -451,8 +487,7 @@ async fn main() -> Result<()> {
                 uuid,
                 encrypted,
                 log.clone(),
-            )
-            .await?;
+            )?;
 
             let flush_config = if let Some(flush_per_iops) = flush_per_iops {
                 DynoFlushConfig::FlushPerIops(flush_per_iops)
@@ -464,9 +499,7 @@ async fn main() -> Result<()> {
                 DynoFlushConfig::None
             };
 
-            dynamometer(region, num_writes, samples, flush_config).await?;
-
-            Ok(())
+            dynamometer(region, num_writes, samples, flush_config)
         }
     }
 }

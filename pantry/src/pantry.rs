@@ -1,12 +1,14 @@
 // Copyright 2022 Oxide Computer Company
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use anyhow::anyhow;
 use anyhow::Result;
+use bytes::{Bytes, BytesMut};
 use dropshot::HttpError;
 use sha2::Digest;
 use sha2::Sha256;
@@ -19,6 +21,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crucible::BlockIO;
+use crucible::ReplaceResult;
 use crucible::SnapshotDetails;
 use crucible::Volume;
 use crucible::VolumeConstructionRequest;
@@ -26,11 +29,27 @@ use crucible_common::crucible_bail;
 use crucible_common::CrucibleError;
 
 use crate::server::ExpectedDigest;
+use crate::server::PantryStatus;
+use crate::server::VolumeStatus;
+
+pub enum ActiveObservation {
+    /// This Pantry has never seen this Volume active
+    NeverSawActive,
+
+    /// At one point, this Pantry saw this Volume active
+    SawActive,
+}
+
+pub struct PantryEntryInner {
+    volume_construction_request: VolumeConstructionRequest,
+    active_observation: ActiveObservation,
+    activation_job_id: Option<String>,
+}
 
 pub struct PantryEntry {
     log: Logger,
     volume: Volume,
-    volume_construction_request: VolumeConstructionRequest,
+    inner: Mutex<PantryEntryInner>,
 }
 
 /// Retry a request in the face of network weather
@@ -230,6 +249,7 @@ impl PantryEntry {
                 .bytes()
                 .await
                 .map_err(|e| CrucibleError::GenericError(e.to_string()))?;
+            let bytes = BytesMut::from(bytes.as_ref());
 
             if let Some(ref mut hasher) = hasher {
                 hasher.update(&bytes);
@@ -287,14 +307,15 @@ impl PantryEntry {
             );
         }
 
-        self.volume.write_to_byte_offset(offset, data.into()).await
+        let bytes = BytesMut::from(data.as_slice());
+        self.volume.write_to_byte_offset(offset, bytes).await
     }
 
     pub async fn bulk_read(
         &self,
         offset: u64,
         size: usize,
-    ) -> Result<Vec<u8>, CrucibleError> {
+    ) -> Result<Bytes, CrucibleError> {
         if size > Self::MAX_CHUNK_SIZE {
             crucible_bail!(
                 InvalidNumberOfBlocks,
@@ -307,16 +328,14 @@ impl PantryEntry {
         let volume_block_size =
             self.volume.check_data_size(size).await? as usize;
 
-        let mut buffer = crucible::Buffer::new(
-            size / volume_block_size as usize,
-            volume_block_size,
-        );
+        let mut buffer =
+            crucible::Buffer::new(size / volume_block_size, volume_block_size);
 
         self.volume
             .read_from_byte_offset(offset, &mut buffer)
             .await?;
 
-        Ok(buffer.into_vec())
+        Ok(buffer.into_bytes())
     }
 
     pub async fn scrub(&self) -> Result<(), CrucibleError> {
@@ -391,9 +410,153 @@ impl PantryEntry {
     }
 
     pub async fn detach(&self) -> Result<(), CrucibleError> {
-        self.volume.flush(None).await?;
         self.volume.deactivate().await?;
         Ok(())
+    }
+
+    pub async fn volume_is_active(&self) -> Result<bool, CrucibleError> {
+        if self.volume.query_is_active().await? {
+            let mut inner = self.inner.lock().await;
+            inner.active_observation = ActiveObservation::SawActive;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    pub async fn activate(&self) -> Result<(), CrucibleError> {
+        if self.volume.query_is_active().await? {
+            let mut inner = self.inner.lock().await;
+            inner.active_observation = ActiveObservation::SawActive;
+        } else {
+            let inner = self.inner.lock().await;
+
+            match inner.active_observation {
+                ActiveObservation::NeverSawActive => {
+                    drop(inner);
+
+                    self.volume.activate().await?;
+                }
+
+                ActiveObservation::SawActive => {
+                    // We're in the else branch, meaning this volume is no
+                    // longer active.
+                    crucible_bail!(
+                        Unsupported,
+                        "pantry saw this volume active but cannot reactivate volume",
+                    );
+                }
+            }
+
+            let mut inner = self.inner.lock().await;
+            inner.active_observation = ActiveObservation::SawActive;
+            drop(inner);
+        }
+
+        Ok(())
+    }
+
+    pub async fn replace(
+        &self,
+        new_vcr: VolumeConstructionRequest,
+    ) -> Result<ReplaceResult, CrucibleError> {
+        let mut inner = self.inner.lock().await;
+
+        let current_vcr = inner.volume_construction_request.clone();
+
+        let result = self
+            .volume
+            .target_replace(current_vcr, new_vcr.clone())
+            .await?;
+
+        // If target_replace returned Ok, then replace this entry's vcr with the
+        // new one.
+        inner.volume_construction_request = new_vcr;
+
+        Ok(result)
+    }
+}
+
+#[derive(Default)]
+pub struct PantryJobs {
+    job_handles: BTreeMap<String, JoinHandle<Result<(), CrucibleError>>>,
+    volume_id_to_job_ids: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl PantryJobs {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn total_job_handles(&self) -> usize {
+        self.job_handles.len()
+    }
+
+    pub fn num_job_handles_for_volume(&self, volume_id: &str) -> usize {
+        match self.volume_id_to_job_ids.get(volume_id) {
+            Some(job_ids) => job_ids.len(),
+            None => 0,
+        }
+    }
+
+    pub fn get(
+        &self,
+        job_id: &str,
+    ) -> Option<&JoinHandle<Result<(), CrucibleError>>> {
+        self.job_handles.get(job_id)
+    }
+
+    pub fn contains_job(&self, job_id: &str) -> bool {
+        self.job_handles.contains_key(job_id)
+    }
+
+    pub fn insert(
+        &mut self,
+        volume_id: String,
+        job_id: String,
+        handle: JoinHandle<Result<(), CrucibleError>>,
+    ) -> Option<JoinHandle<Result<(), CrucibleError>>> {
+        let inserted = self
+            .volume_id_to_job_ids
+            .entry(volume_id)
+            .or_default()
+            .insert(job_id.clone());
+
+        assert!(inserted);
+
+        self.job_handles.insert(job_id, handle)
+    }
+
+    pub fn remove(
+        &mut self,
+        job_id: &str,
+    ) -> Option<JoinHandle<Result<(), CrucibleError>>> {
+        // Does this job exist?
+        let job = self.job_handles.remove(job_id);
+
+        if job.is_some() {
+            // Each job id should map to one volume id
+            let mut job_volume_id: Vec<String> = self
+                .volume_id_to_job_ids
+                .iter()
+                .filter(|(_, job_ids)| job_ids.contains(job_id))
+                .map(|(volume_id, _)| volume_id.clone())
+                .collect();
+
+            assert_eq!(job_volume_id.len(), 1);
+
+            let volume_id = job_volume_id.pop().unwrap();
+
+            let existing = self
+                .volume_id_to_job_ids
+                .entry(volume_id)
+                .or_default()
+                .remove(job_id);
+
+            assert!(existing);
+        }
+
+        job
     }
 }
 
@@ -408,7 +571,7 @@ pub struct Pantry {
 
     /// Pantry can run background jobs on Volumes, and currently running jobs
     /// are stored here.
-    jobs: Mutex<BTreeMap<String, JoinHandle<Result<(), CrucibleError>>>>,
+    jobs: Mutex<PantryJobs>,
 }
 
 impl Pantry {
@@ -416,7 +579,24 @@ impl Pantry {
         Ok(Pantry {
             log,
             entries: Mutex::new(BTreeMap::default()),
-            jobs: Mutex::new(BTreeMap::default()),
+            jobs: Mutex::new(PantryJobs::new()),
+        })
+    }
+
+    pub async fn status(&self) -> Result<PantryStatus, HttpError> {
+        let volumes = self
+            .entries
+            .lock()
+            .await
+            .iter()
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        let num_job_handles = self.jobs.lock().await.total_job_handles();
+
+        Ok(PantryStatus {
+            volumes,
+            num_job_handles,
         })
     }
 
@@ -430,7 +610,19 @@ impl Pantry {
             // This function must be idempotent for the same inputs. If an entry
             // at this ID exists already, compare the existing volume
             // construction request, and return either Ok or conflict
-            if entry.volume_construction_request == volume_construction_request
+
+            let inner = entry.inner.lock().await;
+
+            if let Some(job_id) = &inner.activation_job_id {
+                crucible_bail!(
+                    Unsupported,
+                    "existing entry for {} with activation job id {}",
+                    volume_id,
+                    job_id,
+                );
+            }
+
+            if inner.volume_construction_request == volume_construction_request
             {
                 info!(
                     self.log,
@@ -481,7 +673,11 @@ impl Pantry {
             Arc::new(PantryEntry {
                 log: self.log.new(o!("volume" => volume_id.clone())),
                 volume,
-                volume_construction_request,
+                inner: Mutex::new(PantryEntryInner {
+                    volume_construction_request,
+                    active_observation: ActiveObservation::SawActive,
+                    activation_job_id: None,
+                }),
             }),
         );
 
@@ -490,7 +686,121 @@ impl Pantry {
         Ok(())
     }
 
-    pub async fn entry(
+    /// Perform attach, with activation done in a job.
+    pub async fn attach_activate_background(
+        &self,
+        volume_id: String,
+        job_id: String,
+        volume_construction_request: VolumeConstructionRequest,
+    ) -> Result<(), CrucibleError> {
+        let mut entries = self.entries.lock().await;
+        if let Some(entry) = entries.get(&volume_id) {
+            // This function must be idempotent for the same inputs. If an entry
+            // at this ID exists already, compare the existing volume
+            // construction request, and return either Ok or conflict
+
+            let inner = entry.inner.lock().await;
+
+            match &inner.activation_job_id {
+                Some(entry_job_id) => {
+                    if *entry_job_id != job_id {
+                        crucible_bail!(
+                            Unsupported,
+                            "existing entry for {} with different activation job id {}",
+                            volume_id,
+                            job_id,
+                        );
+                    }
+                }
+
+                None => {
+                    // volume was attached with `attach`, not with this
+                    // function. return an error!
+
+                    crucible_bail!(
+                        Unsupported,
+                        "existing entry for {} with no activation job id",
+                        volume_id,
+                    );
+                }
+            }
+
+            if inner.volume_construction_request == volume_construction_request
+            {
+                error!(
+                    self.log,
+                    "volume {} already an entry, and has same volume \
+                    construction request, returning OK",
+                    volume_id,
+                );
+
+                return Ok(());
+            } else {
+                error!(
+                    self.log,
+                    "volume {} already an entry, but has different volume \
+                    construction request, bailing!",
+                    volume_id,
+                );
+
+                crucible_bail!(
+                    Unsupported,
+                    "Existing entry for {} with different volume construction \
+                    request!",
+                    volume_id,
+                );
+            }
+        }
+
+        // To make this function idempotent, the user must supply the job id. If
+        // that job id already exists, then bail out.
+        let mut jobs = self.jobs.lock().await;
+
+        if jobs.contains_job(&job_id) {
+            crucible_bail!(Unsupported, "Existing job id {}", job_id,);
+        }
+
+        // If no entry exists, then add one
+        info!(
+            self.log,
+            "no entry exists for volume {}, constructing...", volume_id
+        );
+
+        let volume = Volume::construct(
+            volume_construction_request.clone(),
+            None,
+            self.log.clone(),
+        )
+        .await?;
+
+        info!(self.log, "volume {} constructed ok", volume_id);
+
+        let entry = Arc::new(PantryEntry {
+            log: self.log.new(o!("volume" => volume_id.clone())),
+            volume,
+            inner: Mutex::new(PantryEntryInner {
+                volume_construction_request,
+                active_observation: ActiveObservation::NeverSawActive,
+                activation_job_id: Some(job_id.clone()),
+            }),
+        });
+
+        entries.insert(volume_id.clone(), entry.clone());
+
+        info!(self.log, "volume {} constructed and inserted ok", volume_id);
+
+        let join_handle = tokio::spawn(async move { entry.activate().await });
+
+        info!(self.log, "volume {} activating in background", volume_id);
+
+        jobs.insert(volume_id, job_id.clone(), join_handle);
+        drop(jobs);
+
+        Ok(())
+    }
+
+    /// Return a PantryEntry if it's in the map, or a 404.
+    pub(crate) async fn entry_get(
         &self,
         volume_id: String,
     ) -> Result<Arc<PantryEntry>, HttpError> {
@@ -504,10 +814,86 @@ impl Pantry {
 
             None => {
                 error!(self.log, "volume {} not in pantry", volume_id);
-
                 Err(HttpError::for_not_found(None, volume_id))
             }
         }
+    }
+
+    /// Return a PantryEntry if it's in the map and still active, 410 if the
+    /// PantryEntry's Volume _was_ active but is no longer active, or a 404.
+    pub async fn entry(
+        &self,
+        volume_id: String,
+    ) -> Result<Arc<PantryEntry>, HttpError> {
+        let entry = self.entry_get(volume_id.clone()).await?;
+
+        let inner = entry.inner.lock().await;
+        match &inner.active_observation {
+            ActiveObservation::NeverSawActive => {
+                // Return the entry so that it can receive commands before it is
+                // active.
+                drop(inner);
+                Ok(entry)
+            }
+
+            ActiveObservation::SawActive => {
+                // Before returning the entry, check if something else activated
+                // the volume.
+                if !entry.volume.query_is_active().await? {
+                    // If it's not active, then return "410 Gone". If this
+                    // volume is no longer active then it's likely a Propolis
+                    // has activated and taken over from the Pantry. Do not
+                    // return 503 in this case, no operation will be retryable
+                    // if inactive.
+
+                    Err(HttpError::for_client_error(
+                        Some(format!(
+                            "volume {} is no longer active!",
+                            volume_id
+                        )),
+                        http::StatusCode::GONE,
+                        format!("volume {} is no longer active!", volume_id),
+                    ))
+                } else {
+                    drop(inner);
+                    Ok(entry)
+                }
+            }
+        }
+    }
+
+    pub async fn volume_status(
+        &self,
+        volume_id: String,
+    ) -> Result<VolumeStatus, HttpError> {
+        // Use entry_get here to bypass returning 410 Gone, to provide status
+        // even if the PantryEntry's Volume's activation was taken over.
+
+        let entry = self.entry_get(volume_id.clone()).await?;
+
+        let active = entry.volume_is_active().await?;
+        let seen_active = matches!(
+            entry.inner.lock().await.active_observation,
+            ActiveObservation::SawActive,
+        );
+
+        let jobs = self.jobs.lock().await;
+
+        Ok(VolumeStatus {
+            active,
+            seen_active,
+            num_job_handles: jobs.num_job_handles_for_volume(&volume_id),
+        })
+    }
+
+    pub async fn replace(
+        &self,
+        volume_id: String,
+        new_vcr: VolumeConstructionRequest,
+    ) -> Result<ReplaceResult, HttpError> {
+        let entry = self.entry(volume_id.clone()).await?;
+        let result = entry.replace(new_vcr).await?;
+        Ok(result)
     }
 
     pub async fn is_job_finished(
@@ -565,7 +951,7 @@ impl Pantry {
         url: String,
         expected_digest: Option<ExpectedDigest>,
     ) -> Result<String, HttpError> {
-        let entry = self.entry(volume_id).await?;
+        let entry = self.entry(volume_id.clone()).await?;
         let entry = entry.clone();
 
         let join_handle = tokio::spawn(async move {
@@ -574,7 +960,7 @@ impl Pantry {
 
         let mut jobs = self.jobs.lock().await;
         let job_id = Uuid::new_v4().to_string();
-        jobs.insert(job_id.clone(), join_handle);
+        jobs.insert(volume_id, job_id.clone(), join_handle);
 
         Ok(job_id)
     }
@@ -603,20 +989,20 @@ impl Pantry {
         volume_id: String,
         offset: u64,
         size: usize,
-    ) -> Result<Vec<u8>, HttpError> {
+    ) -> Result<Bytes, HttpError> {
         let entry = self.entry(volume_id).await?;
         entry.bulk_read(offset, size).await.map_err(|e| e.into())
     }
 
     pub async fn scrub(&self, volume_id: String) -> Result<String, HttpError> {
-        let entry = self.entry(volume_id).await?;
+        let entry = self.entry(volume_id.clone()).await?;
         let entry = entry.clone();
 
         let join_handle = tokio::spawn(async move { entry.scrub().await });
 
         let mut jobs = self.jobs.lock().await;
         let job_id = Uuid::new_v4().to_string();
-        jobs.insert(job_id.clone(), join_handle);
+        jobs.insert(volume_id, job_id.clone(), join_handle);
 
         Ok(job_id)
     }
@@ -627,7 +1013,7 @@ impl Pantry {
         expected_digest: ExpectedDigest,
         size_to_verify: Option<u64>,
     ) -> Result<String, HttpError> {
-        let entry = self.entry(volume_id).await?;
+        let entry = self.entry(volume_id.clone()).await?;
         let entry = entry.clone();
 
         let join_handle = tokio::spawn(async move {
@@ -636,7 +1022,7 @@ impl Pantry {
 
         let mut jobs = self.jobs.lock().await;
         let job_id = Uuid::new_v4().to_string();
-        jobs.insert(job_id.clone(), join_handle);
+        jobs.insert(volume_id, job_id.clone(), join_handle);
 
         Ok(job_id)
     }

@@ -41,7 +41,7 @@ pub enum CliMessage {
     Perf(usize, usize, usize, usize, usize),
     Read(usize, usize),
     RandRead,
-    ReadResponse(usize, Result<Vec<u8>, CrucibleError>),
+    ReadResponse(usize, Result<Bytes, CrucibleError>),
     RandWrite,
     Replace(SocketAddr, SocketAddr),
     ReplaceResult(Result<ReplaceResult, CrucibleError>),

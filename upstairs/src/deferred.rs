@@ -3,11 +3,12 @@
 use std::sync::Arc;
 
 use crate::{
-    upstairs::UpstairsConfig, BlockContext, BlockReq, BlockRes, ClientId,
-    ImpactedBlocks, Message,
+    client::ConnectionId, upstairs::UpstairsConfig, BlockContext, BlockOp,
+    BlockRes, ClientId, ImpactedBlocks, Message, RawWrite, Validation,
 };
-use bytes::Bytes;
-use crucible_common::{integrity_hash, CrucibleError, RegionDefinition};
+use bytes::BytesMut;
+use crucible_common::{integrity_hash, RegionDefinition};
+use crucible_protocol::WriteBlockMetadata;
 use futures::{
     future::{ready, Either, Ready},
     stream::FuturesOrdered,
@@ -103,66 +104,50 @@ impl<T> DeferredQueue<T> {
 pub(crate) struct DeferredWrite {
     pub ddef: RegionDefinition,
     pub impacted_blocks: ImpactedBlocks,
-    pub data: Bytes,
+    pub data: BytesMut,
     pub res: Option<BlockRes>,
     pub is_write_unwritten: bool,
     pub cfg: Arc<UpstairsConfig>,
 }
 
-/// Result of a deferred `BlockReq`
+/// Result of a deferred `BlockOp`
 ///
-/// In most cases, this is simply the original `BlockReq` (stored in
-/// `DeferredBlockReq::Other`).  The exception is `BlockReq::Write` and
-/// `BlockReq::WriteUnwritten`, which require encryption; in these cases,
-/// encryption is done off-thread and the result is a `DeferredBlockReq::Write`.
+/// In most cases, this is simply the original `BlockOp` (stored in
+/// `DeferredBlockOp::Other`).  The exception is `BlockOp::Write` and
+/// `BlockOp::WriteUnwritten`, which require encryption; in these cases,
+/// encryption is done off-thread and the result is a `DeferredBlockOp::Write`.
 #[derive(Debug)]
-pub(crate) enum DeferredBlockReq {
+pub(crate) enum DeferredBlockOp {
     Write(EncryptedWrite),
-    Other(BlockReq),
+    Other(BlockOp),
 }
 
 #[derive(Debug)]
 pub(crate) struct EncryptedWrite {
-    pub writes: Vec<crucible_protocol::Write>,
+    /// An `RawWrite` containing our encrypted data
+    pub data: RawWrite,
     pub impacted_blocks: ImpactedBlocks,
     pub res: Option<BlockRes>,
     pub is_write_unwritten: bool,
 }
 
 impl DeferredWrite {
-    pub fn run(self) -> Option<EncryptedWrite> {
-        // Build up all of the Write operations, encrypting data here
-        let mut writes: Vec<crucible_protocol::Write> =
-            Vec::with_capacity(self.impacted_blocks.len(&self.ddef));
+    pub fn run(mut self) -> EncryptedWrite {
+        let num_blocks = self.impacted_blocks.blocks(&self.ddef).len();
+        let mut blocks = Vec::with_capacity(num_blocks);
+        let block_size = self.ddef.block_size() as usize;
 
-        let mut cur_offset: usize = 0;
-        let byte_len: usize = self.ddef.block_size() as usize;
+        // In-place encryption into `self.data`
+        let mut pos: usize = 0;
         for (eid, offset) in self.impacted_blocks.blocks(&self.ddef) {
-            let (sub_data, encryption_context, hash) = if let Some(context) =
+            let (encryption_context, hash) = if let Some(ctx) =
                 &self.cfg.encryption_context
             {
                 // Encrypt here
-                let mut mut_data = self
-                    .data
-                    .slice(cur_offset..(cur_offset + byte_len))
-                    .to_vec();
-
-                let (nonce, tag, hash) =
-                    match context.encrypt_in_place(&mut mut_data[..]) {
-                        Err(e) => {
-                            if let Some(res) = self.res {
-                                res.send_err(CrucibleError::EncryptionError(
-                                    e.to_string(),
-                                ));
-                            }
-                            return None;
-                        }
-
-                        Ok(v) => v,
-                    };
+                let mut_data = &mut self.data[pos..][..block_size];
+                let (nonce, tag, hash) = ctx.encrypt_in_place(mut_data);
 
                 (
-                    Bytes::copy_from_slice(&mut_data),
                     Some(crucible_protocol::EncryptionContext {
                         nonce: nonce.into(),
                         tag: tag.into(),
@@ -171,31 +156,32 @@ impl DeferredWrite {
                 )
             } else {
                 // Unencrypted
-                let sub_data =
-                    self.data.slice(cur_offset..(cur_offset + byte_len));
-                let hash = integrity_hash(&[&sub_data[..]]);
+                let hash = integrity_hash(&[&self.data[pos..][..block_size]]);
 
-                (sub_data, None, hash)
+                (None, hash)
             };
-
-            writes.push(crucible_protocol::Write {
+            blocks.push(WriteBlockMetadata {
                 eid,
                 offset,
-                data: sub_data,
                 block_context: BlockContext {
                     hash,
                     encryption_context,
                 },
             });
-
-            cur_offset += byte_len;
+            pos += block_size;
         }
-        Some(EncryptedWrite {
-            writes,
+
+        let data = RawWrite {
+            blocks,
+            data: self.data,
+        };
+
+        EncryptedWrite {
+            data,
             impacted_blocks: self.impacted_blocks,
             res: self.res,
             is_write_unwritten: self.is_write_unwritten,
-        })
+        }
     }
 }
 
@@ -205,16 +191,27 @@ impl DeferredWrite {
 pub(crate) struct DeferredMessage {
     pub message: Message,
 
-    /// If this was a `ReadResponse`, then the hashes are stored here
-    pub hashes: Vec<Option<u64>>,
+    /// If this was a `ReadResponse`, then the validation result is stored here
+    pub hashes: Vec<Validation>,
 
     pub client_id: ClientId,
+
+    /// See `DeferredRead::connection_id`
+    pub connection_id: ConnectionId,
 }
 
 /// Standalone data structure which can perform decryption
 pub(crate) struct DeferredRead {
     /// Message, which must be a `ReadResponse`
     pub message: Message,
+
+    /// Unique ID for this particular connection to the downstairs
+    ///
+    /// This is needed because -- if read decryption is deferred -- it may
+    /// complete after we have disconnected from the client, which would make
+    /// handling the decrypted value incorrect (because it may have been skipped
+    /// or re-sent).
+    pub connection_id: ConnectionId,
 
     pub client_id: ClientId,
     pub cfg: Arc<UpstairsConfig>,
@@ -231,23 +228,34 @@ impl DeferredRead {
             validate_encrypted_read_response,
             validate_unencrypted_read_response,
         };
-        let Message::ReadResponse { responses, .. } = &mut self.message else {
+        let Message::ReadResponse { header, data } = &mut self.message else {
             panic!("invalid DeferredRead");
         };
         let mut hashes = vec![];
 
-        if let Ok(rs) = responses {
-            for r in rs.iter_mut() {
+        if let Ok(rs) = header.blocks.as_mut() {
+            assert_eq!(data.len() % rs.len(), 0);
+            let block_size = data.len() / rs.len();
+            for (i, r) in rs.iter_mut().enumerate() {
                 let v = if let Some(ctx) = &self.cfg.encryption_context {
-                    validate_encrypted_read_response(r, ctx, &self.log)
+                    validate_encrypted_read_response(
+                        r.block_context,
+                        &mut data[i * block_size..][..block_size],
+                        ctx,
+                        &self.log,
+                    )
                 } else {
-                    validate_unencrypted_read_response(r, &self.log)
+                    validate_unencrypted_read_response(
+                        r.block_context,
+                        &mut data[i * block_size..][..block_size],
+                        &self.log,
+                    )
                 };
                 match v {
                     Ok(hash) => hashes.push(hash),
                     Err(e) => {
                         error!(self.log, "decryption failure: {e:?}");
-                        *responses = Err(e);
+                        header.blocks = Err(e);
                         hashes.clear();
                         break;
                     }
@@ -258,6 +266,7 @@ impl DeferredRead {
         DeferredMessage {
             client_id: self.client_id,
             message: self.message,
+            connection_id: self.connection_id,
             hashes,
         }
     }

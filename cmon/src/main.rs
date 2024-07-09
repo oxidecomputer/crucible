@@ -4,9 +4,11 @@ use crucible_control_client::Client;
 use crucible_protocol::ClientId;
 use std::fmt;
 use std::io::{self, BufRead};
+use strum::IntoEnumIterator;
+use strum_macros::EnumIter;
 use tokio::time::{sleep, Duration};
 
-use crucible::Arg;
+use crucible::{Arg, DsState};
 
 /// Connect to crucible control server
 #[derive(Parser, Debug)]
@@ -26,18 +28,23 @@ struct Args {
 }
 
 // The possible fields we will display when receiving DTrace output.
-#[derive(Debug, Copy, Clone, ValueEnum)]
+#[derive(Debug, Copy, Clone, ValueEnum, EnumIter)]
 enum DtraceDisplay {
     State,
     IoCount,
+    IoSummary,
     UpCount,
     DsCount,
     Reconcile,
     LiveRepair,
     Connected,
     Replaced,
-    FlowControl,
-    ExtentRepair,
+    ExtentLiveRepair,
+    ExtentLimit,
+    Backpressure,
+    NextJobId,
+    JobDelta,
+    DsDelay,
 }
 
 impl fmt::Display for DtraceDisplay {
@@ -45,14 +52,19 @@ impl fmt::Display for DtraceDisplay {
         match self {
             DtraceDisplay::State => write!(f, "state"),
             DtraceDisplay::IoCount => write!(f, "io_count"),
+            DtraceDisplay::IoSummary => write!(f, "io_summary"),
             DtraceDisplay::UpCount => write!(f, "up_count"),
             DtraceDisplay::DsCount => write!(f, "ds_count"),
             DtraceDisplay::Reconcile => write!(f, "reconcile"),
             DtraceDisplay::LiveRepair => write!(f, "live_repair"),
             DtraceDisplay::Connected => write!(f, "connected"),
             DtraceDisplay::Replaced => write!(f, "replaced"),
-            DtraceDisplay::FlowControl => write!(f, "flow_control"),
-            DtraceDisplay::ExtentRepair => write!(f, "extent_repair"),
+            DtraceDisplay::ExtentLiveRepair => write!(f, "extent_live_repair"),
+            DtraceDisplay::ExtentLimit => write!(f, "extent_under_repair"),
+            DtraceDisplay::Backpressure => write!(f, "backpressure"),
+            DtraceDisplay::NextJobId => write!(f, "next_job_id"),
+            DtraceDisplay::JobDelta => write!(f, "job_delta"),
+            DtraceDisplay::DsDelay => write!(f, "ds_delay"),
         }
     }
 }
@@ -66,10 +78,37 @@ enum Action {
         #[arg(value_enum)]
         output: Vec<DtraceDisplay>,
     },
+    /// Decode what options will display what headers.
+    DtraceDecode,
     /// Show the current downstairs job queue
     Jobs,
     /// Show the status of various LiveRepair stats
     Repair,
+}
+
+// Translate a DsState into a three letter string for printing.
+fn short_state(dss: DsState) -> String {
+    match dss {
+        DsState::New => "NEW".to_string(),
+        DsState::BadVersion => "BVR".to_string(),
+        DsState::WaitActive => "WAC".to_string(),
+        DsState::WaitQuorum => "WAQ".to_string(),
+        DsState::BadRegion => "BRE".to_string(),
+        DsState::Disconnected => "DIS".to_string(),
+        DsState::Reconcile => "REC".to_string(),
+        DsState::FailedReconcile => "FRE".to_string(),
+        DsState::Active => "ACT".to_string(),
+        DsState::Faulted => "FLT".to_string(),
+        DsState::LiveRepairReady => "LRR".to_string(),
+        DsState::LiveRepair => "LR".to_string(),
+        DsState::Migrating => "MIG".to_string(),
+        DsState::Offline => "OFF".to_string(),
+        DsState::Replay => "REP".to_string(),
+        DsState::Deactivated => "DAV".to_string(),
+        DsState::Disabled => "DIS".to_string(),
+        DsState::Replacing => "RPC".to_string(),
+        DsState::Replaced => "RPD".to_string(),
+    }
 }
 
 // Show the downstairs work queue
@@ -159,26 +198,26 @@ fn print_dtrace_header(dd: &[DtraceDisplay]) {
     for display_item in dd.iter() {
         match display_item {
             DtraceDisplay::State => {
-                print!(
-                    " {:>16} {:>16} {:>16}",
-                    "DS_0_STATE", "DS_1_STATE", "DS_2_STATE",
-                );
+                print!(" {:>3} {:>3} {:>3}", "DS0", "DS1", "DS2",);
             }
             DtraceDisplay::UpCount => {
-                print!(" {:>4}", "UPW");
+                print!(" {:>3}", "UPW");
             }
             DtraceDisplay::DsCount => {
-                print!(" {:>4}", "DSW");
+                print!(" {:>5}", "DSW");
             }
-            DtraceDisplay::IoCount => {
-                print!(" {:4} {:4} {:4}", "NEW0", "NEW1", "NEW2");
-                print!(" {:>4} {:>4} {:>4}", "IP0", "IP1", "IP2");
-                print!(" {:>4} {:>4} {:>4}", "D0", "D1", "D2");
-                print!(" {:>4} {:>4} {:>4}", "S0", "S1", "S2");
-                print!(" {:>4} {:>4} {:>4}", "E0", "E1", "E2");
+            DtraceDisplay::IoCount | DtraceDisplay::IoSummary => {
+                print!(" {:>5} {:>5} {:>5}", "NEW0", "NEW1", "NEW2");
+                print!(" {:>5} {:>5} {:>5}", "IP0", "IP1", "IP2");
+                print!(" {:>5} {:>5} {:>5}", "D0", "D1", "D2");
+                print!(" {:>5} {:>5} {:>5}", "S0", "S1", "S2");
+
+                if matches!(display_item, DtraceDisplay::IoCount) {
+                    print!(" {:>4} {:>4} {:>4}", "E0", "E1", "E2");
+                }
             }
             DtraceDisplay::Reconcile => {
-                print!(" {:>4} {:>4}", "REC", "NEED");
+                print!(" {:>4} {:>4} {:>4}", "REC", "NREC", "AREC");
             }
             DtraceDisplay::LiveRepair => {
                 print!(" {:>4} {:>4} {:>4}", "LRC0", "LRC1", "LRC0");
@@ -190,12 +229,24 @@ fn print_dtrace_header(dd: &[DtraceDisplay]) {
             DtraceDisplay::Replaced => {
                 print!(" {:>4} {:>4} {:>4}", "RPL0", "RPL1", "RPL2");
             }
-            DtraceDisplay::FlowControl => {
-                print!(" {:>4} {:>4} {:>4}", "FC0", "FC1", "FC2");
-            }
-            DtraceDisplay::ExtentRepair => {
+            DtraceDisplay::ExtentLiveRepair => {
                 print!(" {:>4} {:>4} {:>4}", "EXR0", "EXR1", "EXR2");
                 print!(" {:>4} {:>4} {:>4}", "EXC0", "EXC1", "EXC2");
+            }
+            DtraceDisplay::ExtentLimit => {
+                print!(" {:>4}", "EXTL");
+            }
+            DtraceDisplay::Backpressure => {
+                print!(" {:>5}", "BAKPR");
+            }
+            DtraceDisplay::NextJobId => {
+                print!(" {:>7}", "NEXTJOB");
+            }
+            DtraceDisplay::JobDelta => {
+                print!(" {:>5}", "DELTA");
+            }
+            DtraceDisplay::DsDelay => {
+                print!(" {:>5}", "DELAY");
             }
         }
     }
@@ -204,59 +255,63 @@ fn print_dtrace_header(dd: &[DtraceDisplay]) {
 
 // Print out the values in the dtrace output based on what the DtraceDisplay
 // enums are set in the given Vec.
-fn print_dtrace_row(d_out: Arg, dd: &[DtraceDisplay]) {
+fn print_dtrace_row(d_out: Arg, dd: &[DtraceDisplay], last_job_id: &mut u64) {
     for display_item in dd.iter() {
         match display_item {
             DtraceDisplay::State => {
                 print!(
-                    " {:>16} {:>16} {:>16}",
-                    d_out.ds_state[0].to_string(),
-                    d_out.ds_state[1].to_string(),
-                    d_out.ds_state[2].to_string(),
+                    " {:>3} {:>3} {:>3}",
+                    short_state(d_out.ds_state[0]),
+                    short_state(d_out.ds_state[1]),
+                    short_state(d_out.ds_state[2]),
                 );
             }
             DtraceDisplay::UpCount => {
-                print!(" {:4}", d_out.up_count);
+                print!(" {:3}", d_out.up_count);
             }
             DtraceDisplay::DsCount => {
-                print!(" {:4}", d_out.ds_count);
+                print!(" {:5}", d_out.ds_count);
             }
-            DtraceDisplay::IoCount => {
+            DtraceDisplay::IoCount | DtraceDisplay::IoSummary => {
                 print!(
-                    " {:4} {:4} {:4}",
+                    " {:5} {:5} {:5}",
                     d_out.ds_io_count.new[ClientId::new(0)],
                     d_out.ds_io_count.new[ClientId::new(1)],
                     d_out.ds_io_count.new[ClientId::new(2)],
                 );
                 print!(
-                    " {:4} {:4} {:4}",
+                    " {:5} {:5} {:5}",
                     d_out.ds_io_count.in_progress[ClientId::new(0)],
                     d_out.ds_io_count.in_progress[ClientId::new(1)],
                     d_out.ds_io_count.in_progress[ClientId::new(2)],
                 );
                 print!(
-                    " {:4} {:4} {:4}",
+                    " {:5} {:5} {:5}",
                     d_out.ds_io_count.done[ClientId::new(0)],
                     d_out.ds_io_count.done[ClientId::new(1)],
                     d_out.ds_io_count.done[ClientId::new(2)],
                 );
                 print!(
-                    " {:4} {:4} {:4}",
+                    " {:5} {:5} {:5}",
                     d_out.ds_io_count.skipped[ClientId::new(0)],
                     d_out.ds_io_count.skipped[ClientId::new(1)],
                     d_out.ds_io_count.skipped[ClientId::new(2)],
                 );
-                print!(
-                    " {:4} {:4} {:4}",
-                    d_out.ds_io_count.error[ClientId::new(0)],
-                    d_out.ds_io_count.error[ClientId::new(1)],
-                    d_out.ds_io_count.error[ClientId::new(2)],
-                );
+                if matches!(display_item, DtraceDisplay::IoCount) {
+                    print!(
+                        " {:4} {:4} {:4}",
+                        d_out.ds_io_count.error[ClientId::new(0)],
+                        d_out.ds_io_count.error[ClientId::new(1)],
+                        d_out.ds_io_count.error[ClientId::new(2)],
+                    );
+                }
             }
             DtraceDisplay::Reconcile => {
                 print!(
-                    " {:4} {:4}",
-                    d_out.ds_reconciled, d_out.ds_reconcile_needed
+                    " {:4} {:4} {:4}",
+                    d_out.ds_reconciled,
+                    d_out.ds_reconcile_needed,
+                    d_out.ds_reconcile_aborted,
                 );
             }
             DtraceDisplay::LiveRepair => {
@@ -289,15 +344,7 @@ fn print_dtrace_row(d_out: Arg, dd: &[DtraceDisplay]) {
                     d_out.ds_replaced[2],
                 );
             }
-            DtraceDisplay::FlowControl => {
-                print!(
-                    " {:4} {:4} {:4}",
-                    d_out.ds_flow_control[0],
-                    d_out.ds_flow_control[1],
-                    d_out.ds_flow_control[2],
-                );
-            }
-            DtraceDisplay::ExtentRepair => {
+            DtraceDisplay::ExtentLiveRepair => {
                 print!(
                     " {:4} {:4} {:4}",
                     d_out.ds_extents_repaired[0],
@@ -311,6 +358,32 @@ fn print_dtrace_row(d_out: Arg, dd: &[DtraceDisplay]) {
                     d_out.ds_extents_confirmed[2],
                 );
             }
+            DtraceDisplay::ExtentLimit => {
+                print!(" {:4}", d_out.ds_extent_limit);
+            }
+            DtraceDisplay::Backpressure => {
+                print!(" {:>5}", d_out.up_backpressure);
+            }
+            DtraceDisplay::NextJobId => {
+                print!(" {:>7}", d_out.next_job_id);
+            }
+            DtraceDisplay::JobDelta => {
+                let delta = if *last_job_id == 0 {
+                    d_out.next_job_id.0
+                } else {
+                    d_out.next_job_id.0 - *last_job_id
+                };
+                print!(" {:5}", delta);
+                *last_job_id = d_out.next_job_id.0;
+            }
+            DtraceDisplay::DsDelay => {
+                print!(
+                    " {:5} {:5} {:5}",
+                    d_out.ds_delay_us[0],
+                    d_out.ds_delay_us[1],
+                    d_out.ds_delay_us[2],
+                );
+            }
         }
     }
     println!();
@@ -322,6 +395,7 @@ fn dtrace_loop(output: Vec<DtraceDisplay>) {
     let stdin = io::stdin();
     let mut handle = stdin.lock();
     let mut count = 0;
+    let mut last_job_id: u64 = 0;
     loop {
         let mut dtrace_out = String::new();
         match handle.read_line(&mut dtrace_out) {
@@ -337,7 +411,7 @@ fn dtrace_loop(output: Vec<DtraceDisplay>) {
                         continue;
                     }
                 };
-                print_dtrace_row(d_out, &output);
+                print_dtrace_row(d_out, &output, &mut last_job_id);
             }
             Err(e) => {
                 println!("Error: {:?}", e);
@@ -357,6 +431,12 @@ async fn main() {
     match args.action {
         Action::Dtrace { output } => {
             dtrace_loop(output);
+        }
+        Action::DtraceDecode => {
+            for dd in DtraceDisplay::iter() {
+                print!("{dd}: ");
+                print_dtrace_header(&[dd]);
+            }
         }
         Action::Jobs => {
             show_work_queue(args).await;

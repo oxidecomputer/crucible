@@ -1,29 +1,47 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
-    cdt, deadline_secs, integrity_hash, live_repair::ExtentInfo,
-    upstairs::UpstairsConfig, upstairs::UpstairsState, ClientIOStateCount,
-    ClientId, CrucibleDecoder, CrucibleEncoder, CrucibleError, DownstairsIO,
-    DsState, EncryptionContext, IOState, IOop, JobId, Message, ReadResponse,
-    ReconcileIO, RegionDefinitionStatus, RegionMetadata, WrappedStream,
-    MAX_ACTIVE_COUNT,
+    cdt, integrity_hash, live_repair::ExtentInfo, upstairs::UpstairsConfig,
+    upstairs::UpstairsState, ClientIOStateCount, ClientId, CrucibleDecoder,
+    CrucibleError, DownstairsIO, DsState, EncryptionContext, IOState, IOop,
+    JobId, Message, RawReadResponse, ReconcileIO, RegionDefinitionStatus,
+    RegionMetadata, Validation,
 };
-use crucible_common::x509::TLSContext;
-use crucible_protocol::{ReconciliationId, CRUCIBLE_MESSAGE_VERSION};
+use crucible_common::{
+    deadline_secs, verbose_timeout, x509::TLSContext, ExtentId,
+};
+use crucible_protocol::{
+    BlockContext, MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
+};
 
-use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::{
     net::{TcpSocket, TcpStream},
     sync::{mpsc, oneshot},
-    time::sleep_until,
+    time::{sleep_until, Duration},
 };
-use tokio_util::codec::{FramedRead, FramedWrite};
+use tokio_util::codec::FramedRead;
 use uuid::Uuid;
 
-const TIMEOUT_SECS: f32 = 50.0;
+// How long we wait before logging a message that we have not heard from
+// the downstairs.
+const TIMEOUT_SECS: f32 = 15.0;
+// How many timeouts will we tolerate before we disconnect from a downstairs.
+const TIMEOUT_LIMIT: usize = 3;
 const PING_INTERVAL_SECS: f32 = 5.0;
+
+/// Total time before a client is timed out
+#[cfg(test)]
+pub const CLIENT_TIMEOUT_SECS: f32 = TIMEOUT_SECS * TIMEOUT_LIMIT as f32;
 
 /// Handle to a running I/O task
 ///
@@ -36,13 +54,13 @@ struct ClientTaskHandle {
     ///
     /// The only thing that we send to the client is [`Message`], which is then
     /// sent out over the network.
-    client_request_tx: mpsc::Sender<Message>,
+    client_request_tx: mpsc::UnboundedSender<Message>,
 
     /// Handle to receive data from the I/O task
     ///
     /// The client has a variety of responses, which include [`Message`]
     /// replies, but also things like "the I/O task has stopped"
-    client_response_rx: mpsc::Receiver<ClientResponse>,
+    client_response_rx: mpsc::UnboundedReceiver<ClientResponse>,
 
     /// One-shot sender to ask the client to open its connection
     ///
@@ -58,6 +76,24 @@ struct ClientTaskHandle {
     /// It is `None` if we have already requested that the client stop, but have
     /// not yet seen the task finished.
     client_stop_tx: Option<oneshot::Sender<ClientStopReason>>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct ConnectionId(pub u64);
+
+impl std::fmt::Display for ConnectionId {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> Result<(), std::fmt::Error> {
+        self.0.fmt(f)
+    }
+}
+
+impl ConnectionId {
+    fn update(&mut self) {
+        self.0 += 1;
+    }
 }
 
 /// Per-client data
@@ -83,6 +119,12 @@ pub(crate) struct DownstairsClient {
 
     /// IO state counters
     pub(crate) io_state_count: ClientIOStateCount,
+
+    /// Bytes in queues for this client
+    ///
+    /// This includes read, write, and write-unwritten jobs, and is used to
+    /// estimate per-client backpressure to keep the 3x downstairs in sync.
+    pub(crate) bytes_outstanding: u64,
 
     /// UUID for this downstairs region
     ///
@@ -143,6 +185,12 @@ pub(crate) struct DownstairsClient {
 
     /// State for startup negotiation
     negotiation_state: NegotiationState,
+
+    /// Session ID for a clients connection to a downstairs.
+    connection_id: ConnectionId,
+
+    /// Per-client delay, shared with the [`DownstairsClient`]
+    client_delay_us: Arc<AtomicU64>,
 }
 
 impl DownstairsClient {
@@ -153,6 +201,7 @@ impl DownstairsClient {
         log: Logger,
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     ) -> Self {
+        let client_delay_us = Arc::new(AtomicU64::new(0));
         Self {
             cfg,
             client_task: Self::new_io_task(
@@ -161,6 +210,7 @@ impl DownstairsClient {
                 false, // do not start the task until GoActive
                 client_id,
                 tls_context.clone(),
+                client_delay_us.clone(),
                 &log,
             ),
             client_id,
@@ -179,6 +229,9 @@ impl DownstairsClient {
             region_metadata: None,
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
+            bytes_outstanding: 0,
+            connection_id: ConnectionId(0),
+            client_delay_us,
         }
     }
 
@@ -188,6 +241,7 @@ impl DownstairsClient {
     /// client will disappear into the void.
     #[cfg(test)]
     fn test_default() -> Self {
+        let client_delay_us = Arc::new(AtomicU64::new(0));
         let cfg = Arc::new(UpstairsConfig {
             encryption_context: None,
             upstairs_id: Uuid::new_v4(),
@@ -215,6 +269,9 @@ impl DownstairsClient {
             region_metadata: None,
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
+            bytes_outstanding: 0,
+            connection_id: ConnectionId(0),
+            client_delay_us,
         }
     }
 
@@ -222,9 +279,6 @@ impl DownstairsClient {
     pub(crate) fn should_do_more_work(&self) -> bool {
         !self.new_jobs.is_empty()
             && matches!(self.state, DsState::Active | DsState::LiveRepair)
-            && (crate::MAX_ACTIVE_COUNT
-                - self.io_state_count.in_progress as usize)
-                > 0
     }
 
     /// Choose which `ClientAction` to apply
@@ -233,19 +287,27 @@ impl DownstairsClient {
     /// must the select expressions be cancel safe, but the **bodies** must also
     /// be cancel-safe.  This is why we simply return a single value in the body
     /// of each statement.
+    ///
+    /// This function will wait forever if we have asked for the client task to
+    /// stop, so it should only be called in a higher-level `select!`.
     pub(crate) async fn select(&mut self) -> ClientAction {
-        tokio::select! {
-            d = self.client_task.client_response_rx.recv() => {
-                match d {
-                    Some(c) => c.into(),
-                    None => ClientAction::ChannelClosed,
-                }
+        loop {
+            let out = match self.client_task.client_response_rx.recv().await {
+                Some(c) => c.into(),
+                None => break ClientAction::ChannelClosed,
+            };
+            // Ignore client responses if we have told the client to exit (we
+            // still propagate other ClientAction variants, e.g. TaskStopped).
+            if self.client_task.client_stop_tx.is_some()
+                || !matches!(out, ClientAction::Response(..))
+            {
+                break out;
             }
         }
     }
 
     /// Send a `Message::HereIAm` via the client IO task
-    pub(crate) async fn send_here_i_am(&mut self) {
+    pub(crate) fn send_here_i_am(&mut self) {
         self.send(Message::HereIAm {
             version: CRUCIBLE_MESSAGE_VERSION,
             upstairs_id: self.cfg.upstairs_id,
@@ -254,11 +316,10 @@ impl DownstairsClient {
             read_only: self.cfg.read_only,
             encrypted: self.cfg.encrypted(),
             alternate_versions: vec![],
-        })
-        .await;
+        });
     }
 
-    pub(crate) fn halt_io_task(&mut self, r: ClientStopReason) {
+    fn halt_io_task(&mut self, r: ClientStopReason) {
         if let Some(t) = self.client_task.client_stop_tx.take() {
             if let Err(_e) = t.send(r) {
                 warn!(self.log, "failed to send stop request")
@@ -270,24 +331,8 @@ impl DownstairsClient {
 
     /// Return a list of downstairs request IDs that represent unissued
     /// requests for this client.
-    ///
-    /// Returns a tuple of `(jobs, flow control)` where flow control is true if
-    /// the jobs list has been clamped to `max_count`.
-    pub(crate) fn new_work(
-        &mut self,
-        max_count: usize,
-    ) -> (BTreeSet<JobId>, bool) {
-        if max_count >= self.new_jobs.len() {
-            // Happy path: we can grab everything
-            (std::mem::take(&mut self.new_jobs), false)
-        } else {
-            // Otherwise, pop elements from the queue
-            let mut out = BTreeSet::new();
-            for _ in 0..max_count {
-                out.insert(self.new_jobs.pop_first().unwrap());
-            }
-            (out, true)
-        }
+    pub(crate) fn new_work(&mut self) -> BTreeSet<JobId> {
+        std::mem::take(&mut self.new_jobs)
     }
 
     /// Requeues a single job
@@ -298,14 +343,14 @@ impl DownstairsClient {
         self.new_jobs.insert(work);
     }
 
-    pub(crate) async fn send(&mut self, m: Message) {
+    pub(crate) fn send(&mut self, m: Message) {
         // Normally, the client task continues running until
         // `self.client_task.client_request_tx` is dropped; as such, we should
         // always be able to send it a message.
         //
         // However, during Tokio shutdown, tasks may stop in arbitrary order.
         // We log an error but don't panic, because panicking is uncouth.
-        if let Err(e) = self.client_task.client_request_tx.send(m).await {
+        if let Err(e) = self.client_task.client_request_tx.send(m) {
             error!(
                 self.log,
                 "failed to send message: {e};
@@ -320,9 +365,26 @@ impl DownstairsClient {
         job: &mut DownstairsIO,
         new_state: IOState,
     ) -> IOState {
+        let is_running =
+            matches!(new_state, IOState::New | IOState::InProgress);
         self.io_state_count.incr(&new_state);
         let old_state = job.state.insert(self.client_id, new_state);
+        let was_running =
+            matches!(old_state, IOState::New | IOState::InProgress);
         self.io_state_count.decr(&old_state);
+
+        // Update our bytes-in-flight counter
+        if was_running && !is_running {
+            self.bytes_outstanding = self
+                .bytes_outstanding
+                .checked_sub(job.work.job_bytes())
+                .unwrap();
+        } else if is_running && !was_running {
+            // This should only happen if a job is replayed, but that still
+            // counts!
+            self.bytes_outstanding += job.work.job_bytes();
+        }
+
         old_state
     }
 
@@ -344,7 +406,6 @@ impl DownstairsClient {
                 | IOop::WriteUnwritten { dependencies, .. }
                 | IOop::Flush { dependencies, .. }
                 | IOop::Read { dependencies, .. }
-                | IOop::ExtentClose { dependencies, .. }
                 | IOop::ExtentFlushClose { dependencies, .. }
                 | IOop::ExtentLiveRepair { dependencies, .. }
                 | IOop::ExtentLiveReopen { dependencies, .. }
@@ -367,26 +428,37 @@ impl DownstairsClient {
         out
     }
 
-    pub(crate) fn replay_job(&mut self, job: &mut DownstairsIO) {
+    /// Ensures that the given job is in the job queue and in `IOState::New`
+    ///
+    /// Returns `true` if the job was requeued, or `false` if it was already `New`
+    pub(crate) fn replay_job(&mut self, job: &mut DownstairsIO) -> bool {
         /*
          * If the job is InProgress or New, then we can just go back
          * to New and no extra work is required.
-         * If it's Done, then by definition it has been acked; assert that here
+         * If it's Done, then by definition it has been acked; test that here
          * to double-check.
          */
-        if IOState::Done == job.state[self.client_id] {
-            assert!(job.acked);
+        if IOState::Done == job.state[self.client_id] && !job.acked {
+            panic!("[{}] This job was not acked: {:?}", self.client_id, job);
         }
+
         let old_state = self.set_job_state(job, IOState::New);
         job.replay = true;
         if old_state != IOState::New {
             self.requeue_one(job.ds_id);
+            true
+        } else {
+            false
         }
     }
 
     /// Sets this job as skipped and moves it to `skipped_jobs`
+    ///
+    /// # Panics
+    /// If the job is not new or in-progress
     pub(crate) fn skip_job(&mut self, job: &mut DownstairsIO) {
-        self.set_job_state(job, IOState::Skipped);
+        let prev_state = self.set_job_state(job, IOState::Skipped);
+        assert!(matches!(prev_state, IOState::New | IOState::InProgress));
         self.skipped_jobs.insert(job.ds_id);
     }
 
@@ -479,8 +551,6 @@ impl DownstairsClient {
                 self.log,
                 "Gone missing, transition from {current:?} to {new_state:?}"
             );
-        } else {
-            info!(self.log, "Still missing, state is {current:?}");
         }
 
         // Jobs are skipped and replayed in `Downstairs::reinitialize`, which is
@@ -541,6 +611,8 @@ impl DownstairsClient {
             self.state = DsState::New;
         }
 
+        self.connection_id.update();
+
         // Restart with a short delay
         self.start_task(true, auto_promote);
     }
@@ -565,6 +637,7 @@ impl DownstairsClient {
             connect,
             self.client_id,
             self.tls_context.clone(),
+            self.client_delay_us.clone(),
             &self.log,
         );
     }
@@ -575,6 +648,7 @@ impl DownstairsClient {
         connect: bool,
         client_id: ClientId,
         tls_context: Option<Arc<TLSContext>>,
+        client_delay_us: Arc<AtomicU64>,
         log: &Logger,
     ) -> ClientTaskHandle {
         #[cfg(test)]
@@ -585,6 +659,7 @@ impl DownstairsClient {
                 connect,
                 client_id,
                 tls_context,
+                client_delay_us,
                 log,
             )
         } else {
@@ -598,6 +673,7 @@ impl DownstairsClient {
             connect,
             client_id,
             tls_context,
+            client_delay_us,
             log,
         )
     }
@@ -608,16 +684,14 @@ impl DownstairsClient {
         connect: bool,
         client_id: ClientId,
         tls_context: Option<Arc<TLSContext>>,
+        client_delay_us: Arc<AtomicU64>,
         log: &Logger,
     ) -> ClientTaskHandle {
-        // These channels must support at least MAX_ACTIVE_COUNT messages;
-        // otherwise, we risk a deadlock if the IO task and main task
-        // simultaneously try sending each other data when the channels are
-        // full.
-        let (client_request_tx, client_request_rx) =
-            mpsc::channel(MAX_ACTIVE_COUNT * 2);
+        // Messages in flight are limited by backpressure, so we can use
+        // unbounded channels here without fear of runaway.
+        let (client_request_tx, client_request_rx) = mpsc::unbounded_channel();
         let (client_response_tx, client_response_rx) =
-            mpsc::channel(MAX_ACTIVE_COUNT * 2);
+            mpsc::unbounded_channel();
         let (client_stop_tx, client_stop_rx) = oneshot::channel();
         let (client_connect_tx, client_connect_rx) = oneshot::channel();
 
@@ -630,18 +704,23 @@ impl DownstairsClient {
 
         let log = log.new(o!("" => "io task"));
         tokio::spawn(async move {
-            client_run(
+            let mut c = ClientIoTask {
                 client_id,
                 tls_context,
                 target,
-                client_request_rx,
-                client_connect_rx,
-                client_stop_rx,
-                client_response_tx,
+                request_rx: client_request_rx,
+                response_tx: client_response_tx,
+                start: client_connect_rx,
+                stop: client_stop_rx,
+                recv_task: ClientRxTask {
+                    handle: None,
+                    log: log.clone(),
+                },
                 delay,
+                client_delay_us,
                 log,
-            )
-            .await
+            };
+            c.run().await
         });
         ClientTaskHandle {
             client_request_tx,
@@ -654,10 +733,9 @@ impl DownstairsClient {
     /// Starts a dummy IO task, returning its IO handle
     #[cfg(test)]
     fn new_dummy_task(connect: bool) -> ClientTaskHandle {
-        let (client_request_tx, client_request_rx) =
-            mpsc::channel(MAX_ACTIVE_COUNT * 2);
+        let (client_request_tx, client_request_rx) = mpsc::unbounded_channel();
         let (_client_response_tx, client_response_rx) =
-            mpsc::channel(MAX_ACTIVE_COUNT * 2);
+            mpsc::unbounded_channel();
         let (client_stop_tx, client_stop_rx) = oneshot::channel();
         let (client_connect_tx, client_connect_rx) = oneshot::channel();
 
@@ -687,7 +765,7 @@ impl DownstairsClient {
     /// # Panics
     /// If we already called this function (without `reinitialize` in between),
     /// or `self.state` is invalid for promotion.
-    pub(crate) async fn set_active_request(&mut self) {
+    pub(crate) fn set_active_request(&mut self) {
         if let Some(t) = self.client_task.client_connect_tx.take() {
             info!(self.log, "sending connect oneshot to client");
             if let Err(e) = t.send(()) {
@@ -731,8 +809,7 @@ impl DownstairsClient {
                     upstairs_id: self.cfg.upstairs_id,
                     session_id: self.cfg.session_id,
                     gen: self.cfg.generation(),
-                })
-                .await;
+                });
 
                 self.promote_state = Some(PromoteState::Sent);
                 // TODO: negotiation / promotion state is spread across
@@ -811,7 +888,7 @@ impl DownstairsClient {
     pub(crate) fn enqueue(
         &mut self,
         io: &mut DownstairsIO,
-        last_repair_extent: Option<u64>,
+        last_repair_extent: Option<ExtentId>,
     ) -> IOState {
         assert_eq!(io.state[self.client_id], IOState::New);
 
@@ -854,6 +931,9 @@ impl DownstairsClient {
                 IOState::New
             }
         };
+        if r == IOState::New {
+            self.bytes_outstanding += io.work.job_bytes();
+        }
         self.io_state_count.incr(&r);
         r
     }
@@ -1002,7 +1082,14 @@ impl DownstairsClient {
                     | DsState::Replay
                     | DsState::LiveRepair
                     | DsState::LiveRepairReady
+                    | DsState::Offline
                     | DsState::Reconcile => {} // Okay
+                    DsState::Faulted => {
+                        if matches!(up_state, UpstairsState::Active) {
+                            // Can't transition like this when active
+                            panic_invalid();
+                        }
+                    }
                     _ => {
                         panic_invalid();
                     }
@@ -1132,13 +1219,13 @@ impl DownstairsClient {
     /// Returns `true` if the job is now ackable, `false` otherwise
     ///
     /// If this is a read response, then the values in `responses` must
-    /// _already_ be decrypted (with corresponding hashes stored in
-    /// `read_response_hashes`).
+    /// _already_ be decrypted (with corresponding validation results stored in
+    /// `read_validations`).
     pub(crate) fn process_io_completion(
         &mut self,
         job: &mut DownstairsIO,
-        responses: Result<Vec<ReadResponse>, CrucibleError>,
-        read_response_hashes: Vec<Option<u64>>,
+        responses: Result<RawReadResponse, CrucibleError>,
+        read_validations: Vec<Validation>,
         deactivate: bool,
         extent_info: Option<ExtentInfo>,
     ) -> bool {
@@ -1170,9 +1257,8 @@ impl DownstairsClient {
             }
         };
 
-        let old_state = job.state.insert(self.client_id, new_state.clone());
-        self.io_state_count.decr(&old_state);
-        self.io_state_count.incr(&new_state);
+        // Update the state, maintaining various counters
+        let old_state = self.set_job_state(job, new_state.clone());
 
         /*
          * Verify the job was InProgress
@@ -1180,8 +1266,8 @@ impl DownstairsClient {
         if old_state != IOState::InProgress {
             // This job is in an unexpected state.
             panic!(
-                "[{}] Job {} completed while not InProgress: {:?}",
-                self.client_id, ds_id, old_state
+                "[{}] Job {} completed while not InProgress: {:?} {:?}",
+                self.client_id, ds_id, old_state, job
             );
         }
 
@@ -1207,8 +1293,7 @@ impl DownstairsClient {
                         }
 
                         // If a repair job errors, mark that downstairs as bad
-                        IOop::ExtentClose { .. }
-                        | IOop::ExtentFlushClose { .. }
+                        IOop::ExtentFlushClose { .. }
                         | IOop::ExtentLiveRepair { .. }
                         | IOop::ExtentLiveReopen { .. }
                         | IOop::ExtentLiveNoOp { .. } => {
@@ -1277,9 +1362,9 @@ impl DownstairsClient {
                      * For a read, make sure the data from a previous read
                      * has the same hash
                      */
-                    let read_data: Vec<ReadResponse> = responses.unwrap();
-                    assert!(!read_data.is_empty());
-                    if job.read_response_hashes != read_response_hashes {
+                    let read_data = responses.unwrap();
+                    assert!(!read_data.blocks.is_empty());
+                    if job.read_validations != read_validations {
                         // XXX This error needs to go to Nexus
                         // XXX This will become the "force all downstairs
                         // to stop and refuse to restart" mode.
@@ -1291,8 +1376,8 @@ impl DownstairsClient {
                             job state:{:?}",
                             self.client_id,
                             ds_id,
-                            job.read_response_hashes,
-                            read_response_hashes,
+                            job.read_validations,
+                            read_validations,
                             job.guest_id,
                             requests,
                             job.state,
@@ -1311,8 +1396,7 @@ impl DownstairsClient {
                  * are done.
                  */
                 IOop::Write { .. } | IOop::WriteUnwritten { .. } => {}
-                IOop::ExtentClose { .. }
-                | IOop::ExtentFlushClose { .. }
+                IOop::ExtentFlushClose { .. }
                 | IOop::ExtentLiveRepair { .. }
                 | IOop::ExtentLiveReopen { .. }
                 | IOop::ExtentLiveNoOp { .. } => {
@@ -1326,7 +1410,7 @@ impl DownstairsClient {
             assert_eq!(new_state, IOState::Done);
             assert!(!job.acked);
 
-            let read_data: Vec<ReadResponse> = responses.unwrap();
+            let read_data = responses.unwrap();
 
             /*
              * Transition this job from Done to AckReady if enough have
@@ -1334,13 +1418,13 @@ impl DownstairsClient {
              */
             match &job.work {
                 IOop::Read { .. } => {
-                    assert!(!read_data.is_empty());
+                    assert!(!read_data.blocks.is_empty());
                     assert!(extent_info.is_none());
                     if jobs_completed_ok == 1 {
                         assert!(job.data.is_none());
-                        assert!(job.read_response_hashes.is_empty());
+                        assert!(job.read_validations.is_empty());
                         job.data = Some(read_data);
-                        job.read_response_hashes = read_response_hashes;
+                        job.read_validations = read_validations;
                         assert!(!job.acked);
                         ackable = true;
                         debug!(self.log, "Read AckReady {}", job.ds_id.0);
@@ -1352,7 +1436,7 @@ impl DownstairsClient {
                          * that and verify they are the same.
                          */
                         debug!(self.log, "Read already AckReady {ds_id}");
-                        if job.read_response_hashes != read_response_hashes {
+                        if job.read_validations != read_validations {
                             // XXX This error needs to go to Nexus
                             // XXX This will become the "force all downstairs
                             // to stop and refuse to restart" mode.
@@ -1363,15 +1447,16 @@ impl DownstairsClient {
                                 job: {:?}",
                                 self.client_id,
                                 ds_id,
-                                job.read_response_hashes,
-                                read_response_hashes,
+                                job.read_validations,
+                                read_validations,
                                 job,
                             );
                         }
                     }
                 }
                 IOop::Write { .. } => {
-                    assert!(read_data.is_empty());
+                    assert!(read_data.blocks.is_empty());
+                    assert!(read_data.data.is_empty());
                     assert!(extent_info.is_none());
                     if jobs_completed_ok == 2 {
                         ackable = true;
@@ -1379,7 +1464,8 @@ impl DownstairsClient {
                     }
                 }
                 IOop::WriteUnwritten { .. } => {
-                    assert!(read_data.is_empty());
+                    assert!(read_data.blocks.is_empty());
+                    assert!(read_data.data.is_empty());
                     assert!(extent_info.is_none());
                     if jobs_completed_ok == 2 {
                         ackable = true;
@@ -1391,7 +1477,8 @@ impl DownstairsClient {
                 IOop::Flush {
                     snapshot_details, ..
                 } => {
-                    assert!(read_data.is_empty());
+                    assert!(read_data.blocks.is_empty());
+                    assert!(read_data.data.is_empty());
                     assert!(extent_info.is_none());
                     /*
                      * If we are deactivating or have requested a
@@ -1417,14 +1504,9 @@ impl DownstairsClient {
                     }
                     self.last_flush = ds_id;
                 }
-                IOop::ExtentClose { extent, .. } => {
-                    panic!(
-                        "[{}] job: {:?} Received illegal IOop::ExtentClose {}",
-                        self.client_id, job, extent,
-                    );
-                }
                 IOop::ExtentFlushClose { .. } => {
-                    assert!(read_data.is_empty());
+                    assert!(read_data.blocks.is_empty());
+                    assert!(read_data.data.is_empty());
 
                     let ci = self.repair_info.replace(extent_info.unwrap());
                     if ci.is_some() {
@@ -1440,21 +1522,24 @@ impl DownstairsClient {
                     }
                 }
                 IOop::ExtentLiveRepair { .. } => {
-                    assert!(read_data.is_empty());
+                    assert!(read_data.blocks.is_empty());
+                    assert!(read_data.data.is_empty());
                     if jobs_completed_ok == 3 {
                         debug!(self.log, "ExtentLiveRepair AckReady {ds_id}");
                         ackable = true;
                     }
                 }
                 IOop::ExtentLiveReopen { .. } => {
-                    assert!(read_data.is_empty());
+                    assert!(read_data.blocks.is_empty());
+                    assert!(read_data.data.is_empty());
                     if jobs_completed_ok == 3 {
                         debug!(self.log, "ExtentLiveReopen AckReady {ds_id}");
                         ackable = true;
                     }
                 }
                 IOop::ExtentLiveNoOp { .. } => {
-                    assert!(read_data.is_empty());
+                    assert!(read_data.blocks.is_empty());
+                    assert!(read_data.data.is_empty());
                     if jobs_completed_ok == 3 {
                         debug!(self.log, "ExtentLiveNoOp AckReady {ds_id}");
                         ackable = true;
@@ -1500,7 +1585,7 @@ impl DownstairsClient {
     /// error is at or after `Message::YouAreNowActive`.
     ///
     /// Returns `true` if negotiation for this downstairs is complete
-    pub(crate) async fn continue_negotiation(
+    pub(crate) fn continue_negotiation(
         &mut self,
         m: Message,
         up_state: &UpstairsState,
@@ -1635,8 +1720,7 @@ impl DownstairsClient {
                             upstairs_id: self.cfg.upstairs_id,
                             session_id: self.cfg.session_id,
                             gen: self.cfg.generation(),
-                        })
-                        .await;
+                        });
                         self.promote_state = Some(PromoteState::Sent);
                         self.negotiation_state =
                             NegotiationState::WaitForPromote;
@@ -1770,7 +1854,7 @@ impl DownstairsClient {
                 }
 
                 self.negotiation_state = NegotiationState::WaitForRegionInfo;
-                self.send(Message::RegionInfoPlease).await;
+                self.send(Message::RegionInfoPlease);
             }
             Message::RegionInfo { region_def } => {
                 if self.negotiation_state != NegotiationState::WaitForRegionInfo
@@ -1903,8 +1987,7 @@ impl DownstairsClient {
 
                         self.send(Message::LastFlush {
                             last_flush_number: lf,
-                        })
-                        .await;
+                        });
                     }
                     DsState::WaitActive
                     | DsState::Faulted
@@ -1914,7 +1997,7 @@ impl DownstairsClient {
                          */
                         self.negotiation_state =
                             NegotiationState::GetExtentVersions;
-                        self.send(Message::ExtentVersionsPlease).await;
+                        self.send(Message::ExtentVersionsPlease);
                     }
                     DsState::Replacing => {
                         warn!(
@@ -2048,13 +2131,13 @@ impl DownstairsClient {
     ///
     /// The `job` argument should be a reference to
     /// `Downstairs::reconcile_current_work`, and its state is updated.
-    pub(crate) async fn send_next_reconciliation_req(
+    pub(crate) fn send_next_reconciliation_req(
         &mut self,
         job: &mut ReconcileIO,
     ) {
         // If someone has moved us out of reconcile, this is a logic error
         if self.state != DsState::Reconcile {
-            panic!("should still be in reconcile");
+            panic!("[{}] should still be in reconcile", self.client_id);
         }
         let prev_state = job.state.insert(self.client_id, IOState::InProgress);
         assert_eq!(prev_state, IOState::New);
@@ -2071,14 +2154,14 @@ impl DownstairsClient {
                 assert!(!dest_clients.is_empty());
                 if dest_clients.iter().any(|d| *d == self.client_id) {
                     info!(self.log, "sending reconcile request {repair_id:?}");
-                    self.send(job.op.clone()).await;
+                    self.send(job.op.clone());
                 } else {
                     // Skip this job for this Downstairs, since only the target
                     // clients need to do the reconcile.
                     let prev_state =
                         job.state.insert(self.client_id, IOState::Skipped);
                     assert_eq!(prev_state, IOState::InProgress);
-                    info!(self.log, "no action needed request {repair_id:?}");
+                    debug!(self.log, "no action needed request {repair_id:?}");
                 }
             }
             Message::ExtentFlush {
@@ -2087,10 +2170,10 @@ impl DownstairsClient {
                 ..
             } => {
                 if *client_id == self.client_id {
-                    info!(self.log, "sending flush request {repair_id:?}");
-                    self.send(job.op.clone()).await;
+                    debug!(self.log, "sending flush request {repair_id:?}");
+                    self.send(job.op.clone());
                 } else {
-                    info!(self.log, "skipping flush request {repair_id:?}");
+                    debug!(self.log, "skipping flush request {repair_id:?}");
                     // Skip this job for this Downstairs, since it's narrowly
                     // aimed at a different client.
                     let prev_state =
@@ -2100,7 +2183,7 @@ impl DownstairsClient {
             }
             Message::ExtentReopen { .. } | Message::ExtentClose { .. } => {
                 // All other reconcile ops are sent as-is
-                self.send(job.op.clone()).await;
+                self.send(job.op.clone());
             }
             m => panic!("invalid reconciliation request {m:?}"),
         }
@@ -2124,6 +2207,37 @@ impl DownstairsClient {
 
     pub(crate) fn total_live_work(&self) -> usize {
         (self.io_state_count.new + self.io_state_count.in_progress) as usize
+    }
+
+    pub(crate) fn total_bytes_outstanding(&self) -> usize {
+        self.bytes_outstanding as usize
+    }
+
+    /// Returns a unique ID for the current connection, or `None`
+    ///
+    /// This can be used to disambiguate between messages returned from
+    /// different connections to the same Downstairs.
+    pub(crate) fn get_connection_id(&self) -> Option<ConnectionId> {
+        if self.client_task.client_stop_tx.is_some() {
+            Some(self.connection_id)
+        } else {
+            None
+        }
+    }
+
+    /// Sets the per-client delay
+    pub(crate) fn set_delay_us(&self, delay: u64) {
+        self.client_delay_us.store(delay, Ordering::Relaxed);
+    }
+
+    /// Looks up the per-client delay
+    pub(crate) fn get_delay_us(&self) -> u64 {
+        self.client_delay_us.load(Ordering::Relaxed)
+    }
+
+    #[cfg(feature = "notify-nexus")]
+    pub(crate) fn id(&self) -> Option<Uuid> {
+        self.region_uuid
     }
 }
 
@@ -2202,9 +2316,6 @@ pub(crate) struct DownstairsStats {
 
     /// Count of downstairs replacements
     pub replaced: usize,
-
-    /// Count of times a downstairs has had flow control turned on
-    pub flow_control: usize,
 }
 
 /// When the upstairs halts the IO client task, it must provide a reason
@@ -2236,8 +2347,18 @@ pub(crate) enum ClientStopReason {
     /// Too many jobs in the queue
     TooManyOutstandingJobs,
 
+    /// Too many bytes in the queue
+    TooManyOutstandingBytes,
+
     /// The upstairs has requested that we deactivate
     Deactivated,
+
+    /// The test suite has requested a fault
+    #[cfg(test)]
+    RequestedFault,
+
+    /// The upstairs has requested that we deactivate when we were offline
+    OfflineDeactivated,
 }
 
 /// Response received from the I/O task
@@ -2283,191 +2404,424 @@ pub(crate) enum ClientRunResult {
     /// This should only occur during program exit, when tasks are destroyed in
     /// arbitrary order.
     QueueClosed,
+    /// The receive task has been cancelled
+    ///
+    /// This should only occur during program exit, when tasks are cancelled in
+    /// arbitrary order (so the main client task may be awaiting the rx task
+    /// when the latter is cancelled)
+    ReceiveTaskCancelled,
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn client_run(
+/// Data structure to hold context for the client IO task
+///
+/// Client IO is managed by two tasks:
+/// - The tx task, which calls `ClientIoTask::run`, sends messages from the main
+///   task to the downstairs via a socket
+/// - The rx task, which is spawned within `ClientIoTask::run` (and is not
+///   publicly visible) receives messages from the socket and sends them
+///   directly to the main task.
+///
+/// Splitting tx and rx is important, because it means that one or the other
+/// should always be able to make progress.
+struct ClientIoTask {
     client_id: ClientId,
     tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     target: SocketAddr,
-    mut rx: mpsc::Receiver<Message>,
-    mut start: oneshot::Receiver<()>,
-    mut stop: oneshot::Receiver<ClientStopReason>,
-    tx: mpsc::Sender<ClientResponse>,
+
+    /// Request channel from the main task
+    request_rx: mpsc::UnboundedReceiver<Message>,
+
+    /// Reply channel to the main task
+    response_tx: mpsc::UnboundedSender<ClientResponse>,
+
+    /// Oneshot used to start the task
+    start: oneshot::Receiver<()>,
+
+    /// Oneshot used to stop the task
+    stop: oneshot::Receiver<ClientStopReason>,
+
+    /// Delay on startup, to avoid a busy-loop if connections always fail
     delay: bool,
+
+    /// Handle for the rx task
+    recv_task: ClientRxTask,
+
+    /// Shared handle to receive per-client backpressure delay
+    client_delay_us: Arc<AtomicU64>,
+
     log: Logger,
-) {
-    let r = client_run_inner(
-        client_id,
-        tls_context,
-        target,
-        &mut rx,
-        &mut start,
-        &mut stop,
-        &tx,
-        delay,
-        &log,
-    )
-    .await;
-
-    warn!(log, "client task is sending Done({r:?})");
-    if tx.send(ClientResponse::Done(r)).await.is_err() {
-        warn!(
-            log,
-            "client task could not reply to main task; shutting down?"
-        );
-    }
-    while let Some(v) = rx.recv().await {
-        warn!(log, "exiting client task is ignoring message {v:?}");
-    }
-    info!(log, "client task is exiting");
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn client_run_inner(
-    client_id: ClientId,
-    tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
-    target: SocketAddr,
-    rx: &mut mpsc::Receiver<Message>,
-    mut start: &mut oneshot::Receiver<()>,
-    mut stop: &mut oneshot::Receiver<ClientStopReason>,
-    tx: &mpsc::Sender<ClientResponse>,
-    delay: bool,
-    log: &Logger,
-) -> ClientRunResult {
-    // If we're reconnecting, then add a short delay to avoid constantly
-    // spinning (e.g. if something is fundamentally wrong with the Downstairs)
-    if delay {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+/// Handle for the rx side of client IO
+///
+/// This is a convenient wrapper so that we can join the task exactly once,
+/// aborting if the wrapper is dropped without being joined.
+struct ClientRxTask {
+    handle: Option<tokio::task::JoinHandle<ClientRunResult>>,
+    log: Logger,
+}
+
+impl ClientRxTask {
+    /// Waits for the client IO task to end
+    ///
+    /// # Panics
+    /// If the `JoinHandle` returns a `JoinError`, or this is called without an
+    /// IO handle (i.e. before the task is started or after it has been joined).
+    async fn join(&mut self) -> ClientRunResult {
+        let Some(t) = self.handle.as_mut() else {
+            panic!("cannot join client rx task twice")
+        };
+        let out = match t.await {
+            Ok(r) => r,
+            Err(e) if e.is_cancelled() => {
+                warn!(
+                    self.log,
+                    "client task was cancelled without us; \
+                     hopefully the program is exiting"
+                );
+                ClientRunResult::ReceiveTaskCancelled
+            }
+            Err(e) => {
+                panic!("join error on recv_task: {e:?}");
+            }
+        };
+        // The IO task has finished, one way or another
+        self.handle.take();
+        out
+    }
+}
+
+impl Drop for ClientRxTask {
+    fn drop(&mut self) {
+        if let Some(t) = self.handle.take() {
+            t.abort();
+        }
+    }
+}
+
+impl ClientIoTask {
+    async fn run(&mut self) {
+        let r = self.run_inner().await;
+
+        warn!(self.log, "client task is sending Done({r:?})");
+        if self.response_tx.send(ClientResponse::Done(r)).is_err() {
+            warn!(
+                self.log,
+                "client task could not reply to main task; shutting down?"
+            );
+        }
+        while let Some(v) = self.request_rx.recv().await {
+            warn!(self.log, "exiting client task is ignoring message {v}");
+        }
+        info!(self.log, "client task is exiting");
     }
 
-    // Wait for the start oneshot to fire.  This may happen immediately, but not
-    // necessarily (for example, if the client was deactivated).  We also wait
-    // for the stop oneshot here, in case someone decides to stop the IO task
-    // before it tries to connect.
-    tokio::select! {
-        s = &mut start => {
-            if let Err(e) = s {
-                warn!(log, "failed to await start oneshot: {e}");
-                return ClientRunResult::QueueClosed;
+    async fn run_inner(&mut self) -> ClientRunResult {
+        // If we're reconnecting, then add a short delay to avoid constantly
+        // spinning (e.g. if something is fundamentally wrong with the
+        // Downstairs)
+        //
+        // The upstairs can still stop us here, e.g. if we need to transition
+        // from Offline -> Faulted because we hit a job limit, that bounces the
+        // IO task (whether it *should* is debatable).
+        if self.delay {
+            tokio::select! {
+                s = &mut self.stop => {
+                    warn!(self.log, "client IO task stopped during sleep");
+                    return match s {
+                        Ok(s) =>
+                            ClientRunResult::RequestedStop(s),
+                        Err(e) => {
+                            warn!(
+                                self.log,
+                               "client_stop_rx closed unexpectedly: {e:?}"
+                            );
+                            ClientRunResult::QueueClosed
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                    // this is fine
+                },
             }
-            // Otherwise, continue as usual
         }
-        s = &mut stop => {
-            warn!(log, "client IO task stopped before connecting");
-            return match s {
-                Ok(s) =>
-                    ClientRunResult::RequestedStop(s),
-                Err(e) => {
-                    warn!(log, "client_stop_rx closed unexpectedly: {e:?}");
-                    ClientRunResult::QueueClosed
+
+        // Wait for the start oneshot to fire.  This may happen immediately, but
+        // not necessarily (for example, if the client was deactivated).  We
+        // also wait for the stop oneshot here, in case someone decides to stop
+        // the IO task before it tries to connect.
+        tokio::select! {
+            s = &mut self.start => {
+                if let Err(e) = s {
+                    warn!(self.log, "failed to await start oneshot: {e}");
+                    return ClientRunResult::QueueClosed;
+                }
+                // Otherwise, continue as usual
+            }
+            s = &mut self.stop => {
+                warn!(self.log, "client IO task stopped before connecting");
+                return match s {
+                    Ok(s) =>
+                        ClientRunResult::RequestedStop(s),
+                    Err(e) => {
+                        warn!(
+                            self.log,
+                           "client_stop_rx closed unexpectedly: {e:?}"
+                        );
+                        ClientRunResult::QueueClosed
+                    }
                 }
             }
         }
-    }
 
-    // Make connection to this downstairs.
-    let sock = if target.is_ipv4() {
-        TcpSocket::new_v4().unwrap()
-    } else {
-        TcpSocket::new_v6().unwrap()
-    };
+        // Make connection to this downstairs.
+        let sock = if self.target.is_ipv4() {
+            TcpSocket::new_v4().unwrap()
+        } else {
+            TcpSocket::new_v6().unwrap()
+        };
 
-    // Set a connect timeout, and connect to the target:
-    info!(log, "connecting to {target}");
-    let tcp: TcpStream = tokio::select! {
-        _ = sleep_until(deadline_secs(10.0))=> {
-            warn!(log, "connect timeout");
-            return ClientRunResult::ConnectionTimeout;
-        }
-        tcp = sock.connect(target) => {
-            match tcp {
-                Ok(tcp) => {
-                    info!(log, "ds_connection connected");
-                    tcp
-                }
-                Err(e) => {
-                    warn!(
-                        log, "ds_connection connect to {target} failure: {e:?}",
-                    );
-                    return ClientRunResult::ConnectionFailed(e);
+        // Set a connect timeout, and connect to the target:
+        info!(self.log, "connecting to {}", self.target);
+        let tcp: TcpStream = tokio::select! {
+            _ = sleep_until(deadline_secs(10.0))=> {
+                warn!(self.log, "connect timeout");
+                return ClientRunResult::ConnectionTimeout;
+            }
+            tcp = sock.connect(self.target) => {
+                match tcp {
+                    Ok(tcp) => {
+                        info!(
+                            self.log,
+                            "ds_connection connected from {:?}",
+                            tcp.local_addr()
+                        );
+                        tcp
+                    }
+                    Err(e) => {
+                        warn!(
+                            self.log,
+                            "ds_connection connect to {} failure: {e:?}",
+                            self.target,
+                        );
+                        return ClientRunResult::ConnectionFailed(e);
+                    }
                 }
             }
-        }
-    };
+            s = &mut self.stop => {
+                warn!(self.log, "client IO task stopped during connection");
+                return match s {
+                    Ok(s) =>
+                        ClientRunResult::RequestedStop(s),
+                    Err(e) => {
+                        warn!(
+                            self.log,
+                           "client_stop_rx closed unexpectedly: {e:?}"
+                        );
+                        ClientRunResult::QueueClosed
+                    }
+                }
+            }
+        };
 
-    // We're connected; before we wrap it, set TCP_NODELAY to assure
-    // that we don't get Nagle'd.
-    tcp.set_nodelay(true).expect("could not set TCP_NODELAY");
+        // We're connected; before we wrap it, set TCP_NODELAY to assure
+        // that we don't get Nagle'd.
+        tcp.set_nodelay(true).expect("could not set TCP_NODELAY");
 
-    let tcp = {
-        if let Some(tls_context) = &tls_context {
+        if let Some(tls_context) = &self.tls_context {
             // XXX these unwraps are bad!
             let config = tls_context.get_client_config().unwrap();
 
             let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
 
             let server_name = tokio_rustls::rustls::ServerName::try_from(
-                format!("downstairs{}", client_id).as_str(),
+                format!("downstairs{}", self.client_id).as_str(),
             )
             .unwrap();
 
-            WrappedStream::Https(
-                connector.connect(server_name, tcp).await.unwrap(),
-            )
+            let sock = connector.connect(server_name, tcp).await.unwrap();
+            let (read, write) = tokio::io::split(sock);
+            let fr = FramedRead::new(read, CrucibleDecoder::new());
+            let fw = MessageWriter::new(write);
+            self.cmd_loop(fr, fw).await
         } else {
-            WrappedStream::Http(tcp)
-        }
-    };
-    proc_stream(client_id, tcp, rx, stop, tx, log).await
-}
-
-async fn proc_stream(
-    client_id: ClientId,
-    stream: WrappedStream,
-    rx: &mut mpsc::Receiver<Message>,
-    stop: &mut oneshot::Receiver<ClientStopReason>,
-    tx: &mpsc::Sender<ClientResponse>,
-    log: &Logger,
-) -> ClientRunResult {
-    match stream {
-        WrappedStream::Http(sock) => {
-            let (read, write) = sock.into_split();
-
+            let (read, write) = tcp.into_split();
             let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = FramedWrite::new(write, CrucibleEncoder::new());
-
-            cmd_loop(client_id, rx, stop, tx, fr, fw, log).await
+            let fw = MessageWriter::new(write);
+            self.cmd_loop(fr, fw).await
         }
-        WrappedStream::Https(stream) => {
-            let (read, write) = tokio::io::split(stream);
+    }
 
-            let fr = FramedRead::new(read, CrucibleDecoder::new());
-            let fw = FramedWrite::new(write, CrucibleEncoder::new());
+    async fn cmd_loop<R, W>(
+        &mut self,
+        fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
+        mut fw: MessageWriter<W>,
+    ) -> ClientRunResult
+    where
+        R: tokio::io::AsyncRead
+            + std::marker::Unpin
+            + std::marker::Send
+            + 'static,
+        W: tokio::io::AsyncWrite
+            + std::marker::Unpin
+            + std::marker::Send
+            + 'static,
+    {
+        self.response_tx
+            .send(ClientResponse::Connected)
+            .expect("client_response_tx closed unexpectedly");
 
-            cmd_loop(client_id, rx, stop, tx, fr, fw, log).await
+        // Spawn a separate task to receive data over the network, so that we
+        // can always make progress and keep the socket buffer from filling up.
+        self.recv_task.handle = Some(tokio::spawn(rx_loop(
+            self.response_tx.clone(),
+            fr,
+            self.log.clone(),
+            self.client_id,
+        )));
+
+        let mut ping_interval = deadline_secs(PING_INTERVAL_SECS);
+        let mut ping_count = 0u64;
+        loop {
+            tokio::select! {
+                join_result = self.recv_task.join() => {
+                    break join_result
+                }
+
+                m = self.request_rx.recv() => {
+                    let Some(m) = m else {
+                        warn!(
+                            self.log,
+                            "client request queue closed unexpectedly; \
+                             is the program exiting?"
+                         );
+                        break ClientRunResult::QueueClosed;
+                    };
+
+                    if let Err(e) = self.write(&mut fw, m).await {
+                        break e;
+                    }
+                }
+
+                _ = sleep_until(ping_interval) => {
+                    ping_interval = deadline_secs(PING_INTERVAL_SECS);
+                    ping_count += 1;
+                    cdt::ds__ping__sent!(|| (ping_count, self.client_id.get()));
+
+                    let m = Message::Ruok;
+                    if let Err(e) = self.write(&mut fw, m).await {
+                        break e;
+                    }
+                }
+
+                s = &mut self.stop => {
+                    match s {
+                        Ok(s) => {
+                            break ClientRunResult::RequestedStop(s);
+                        }
+
+                        Err(e) => {
+                            warn!(
+                                self.log,
+                                "client_stop_rx closed unexpectedly: {e:?}"
+                            );
+                            break ClientRunResult::QueueClosed;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Writes a message to the given `AsyncWrite` stream, with cancel detection
+    ///
+    /// We wait for three possible outcomes:
+    ///
+    /// - The write completes (this is the normal outcome), with or without an
+    ///   error.  Any error is returned.
+    /// - The client rx task times out or exits for some other reason.  This is
+    ///   definitionally a termination condition, so it is returned as an
+    ///   `Err(..)` variant.
+    /// - The main task requests that the IO task stop through the oneshot
+    ///   channel.  This is returned as `ClientRunResult::RequestedStop`
+    ///
+    /// Any error returned here is an indication that the client task should
+    /// stop immediately.
+    async fn write<W>(
+        &mut self,
+        fw: &mut MessageWriter<W>,
+        m: Message,
+    ) -> Result<(), ClientRunResult>
+    where
+        W: tokio::io::AsyncWrite
+            + std::marker::Unpin
+            + std::marker::Send
+            + 'static,
+    {
+        // Delay communication with this client based on backpressure, to keep
+        // the three clients relatively in sync with each other.
+        //
+        // We don't need to delay writes, because they're already constrained by
+        // the global backpressure system and cannot build up an unbounded
+        // queue.  This is admittedly quite subtle; see crucible#1167 for
+        // discussions and graphs.
+        if !matches!(m, Message::Write { .. }) {
+            let d = self.client_delay_us.load(Ordering::Relaxed);
+            if d > 0 {
+                tokio::time::sleep(Duration::from_micros(d)).await;
+            }
+        }
+
+        update_net_start_probes(&m, self.client_id);
+        // There's some duplication between this function and `cmd_loop` above,
+        // but it's not obvious whether there's a cleaner way to organize stuff.
+        tokio::select! {
+            r = fw.send(m) => {
+                if let Err(e) = r {
+                    Err(ClientRunResult::WriteFailed(e.into()))
+                } else {
+                    Ok(())
+                }
+            }
+            s = &mut self.stop => {
+                match s {
+                    Ok(s) => {
+                        Err(ClientRunResult::RequestedStop(s))
+                    }
+
+                    Err(e) => {
+                        warn!(
+                            self.log,
+                            "client_stop_rx closed unexpectedly: {e:?}"
+                        );
+                        Err(ClientRunResult::QueueClosed)
+                    }
+                }
+            }
+            join_result = self.recv_task.join() => {
+                Err(join_result)
+            }
         }
     }
 }
 
 async fn rx_loop<R>(
-    tx: mpsc::Sender<ClientResponse>,
+    response_tx: mpsc::UnboundedSender<ClientResponse>,
     mut fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
     log: Logger,
+    cid: ClientId,
 ) -> ClientRunResult
 where
     R: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send + 'static,
 {
-    let mut timeout = deadline_secs(TIMEOUT_SECS);
     loop {
         tokio::select! {
             f = fr.next() => {
                 match f {
                     Some(Ok(m)) => {
-                        // reset the timeout, since we've received a message
-                        timeout = deadline_secs(TIMEOUT_SECS);
+                        update_net_done_probes(&m, cid);
                         if let Err(e) =
-                            tx.send(ClientResponse::Message(m)).await
+                            response_tx.send(ClientResponse::Message(m))
                         {
                             warn!(
                                 log,
@@ -2487,97 +2841,65 @@ where
                     }
                 }
             }
-            _ = sleep_until(timeout) => {
-                warn!(log, "downstairs timed out");
+            _ = verbose_timeout(TIMEOUT_SECS, TIMEOUT_LIMIT, log.clone()) => {
+                warn!(log, "inactivity timeout");
                 break ClientRunResult::Timeout;
             }
         }
     }
 }
 
-async fn cmd_loop<R, W>(
-    client_id: ClientId,
-    rx: &mut mpsc::Receiver<Message>,
-    stop: &mut oneshot::Receiver<ClientStopReason>,
-    tx: &mpsc::Sender<ClientResponse>,
-    fr: FramedRead<R, crucible_protocol::CrucibleDecoder>,
-    mut fw: FramedWrite<W, crucible_protocol::CrucibleEncoder>,
-    log: &Logger,
-) -> ClientRunResult
-where
-    R: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send + 'static,
-    W: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
-{
-    tx.send(ClientResponse::Connected)
-        .await
-        .expect("client_response_tx closed unexpectedly");
-
-    // Spawn a separate task to receive data over the network, so that we can
-    // always make progress and keep the socket buffer from filling up.
-    let mut recv_task = tokio::spawn(rx_loop(tx.clone(), fr, log.clone()));
-
-    let mut ping_interval = deadline_secs(PING_INTERVAL_SECS);
-    let mut ping_count = 0u64;
-    loop {
-        tokio::select! {
-            join_result = &mut recv_task => {
-                break join_result.expect("join error on recv_task!");
-            }
-
-            m = rx.recv() => {
-                let Some(m) = m else {
-                    warn!(
-                        log,
-                        "client request queue closed unexpectedly; \
-                         is the program exiting?"
-                     );
-                    break ClientRunResult::QueueClosed;
-                };
-
-                if let Err(e) = fw.send(m).await {
-                    break ClientRunResult::WriteFailed(e);
-                }
-            }
-
-            _ = sleep_until(ping_interval) => {
-                ping_interval = deadline_secs(PING_INTERVAL_SECS);
-                ping_count += 1;
-                cdt::ds__ping__sent!(|| (ping_count, client_id.get()));
-
-                if let Err(e) = fw.send(Message::Ruok).await {
-                    break ClientRunResult::WriteFailed(e);
-                }
-            }
-
-            s = &mut *stop => {
-                match s {
-                    Ok(s) => {
-                        recv_task.abort();
-                        break ClientRunResult::RequestedStop(s);
-                    }
-
-                    Err(e) => {
-                        warn!(log, "client_stop_rx closed unexpectedly: {e:?}");
-                        break ClientRunResult::QueueClosed;
-                    }
-                }
-            }
+fn update_net_start_probes(m: &Message, cid: ClientId) {
+    match m {
+        Message::ReadRequest { job_id, .. } => {
+            cdt::ds__read__net__start!(|| (job_id.0, cid.get()));
         }
+        Message::Write { ref header, .. } => {
+            cdt::ds__write__net__start!(|| (header.job_id.0, cid.get()));
+        }
+        Message::WriteUnwritten { ref header, .. } => {
+            cdt::ds__write__unwritten__net__start!(|| (
+                header.job_id.0,
+                cid.get()
+            ));
+        }
+        Message::Flush { job_id, .. } => {
+            cdt::ds__flush__net__start!(|| (job_id.0, cid.get()));
+        }
+        _ => {}
+    }
+}
+fn update_net_done_probes(m: &Message, cid: ClientId) {
+    match m {
+        Message::ReadResponse { ref header, .. } => {
+            cdt::ds__read__net__done!(|| (header.job_id.0, cid.get()));
+        }
+        Message::WriteAck { job_id, .. } => {
+            cdt::ds__write__net__done!(|| (job_id.0, cid.get()));
+        }
+        Message::WriteUnwrittenAck { job_id, .. } => {
+            cdt::ds__write__unwritten__net__done!(|| (job_id.0, cid.get()));
+        }
+        Message::FlushAck { job_id, .. } => {
+            cdt::ds__flush__net__done!(|| (job_id.0, cid.get()));
+        }
+        _ => {}
     }
 }
 
 /// Returns:
-/// - Ok(Some(valid_hash)) for successfully decrypted data
-/// - Ok(None) if there were no block contexts and block was all 0
-/// - Err otherwise
+/// - `Ok(Some(ctx))` for successfully decrypted data
+/// - `Ok(None)` if there is no block context and the block is all 0
+/// - `Err(..)` otherwise
 ///
 /// The return value of this will be stored with the job, and compared
 /// between each read.
 pub(crate) fn validate_encrypted_read_response(
-    response: &mut ReadResponse,
+    block_context: Option<BlockContext>,
+    data: &mut [u8],
     encryption_context: &EncryptionContext,
     log: &Logger,
-) -> Result<Option<u64>, CrucibleError> {
+) -> Result<Validation, CrucibleError> {
     // XXX because we don't have block generation numbers, an attacker
     // downstairs could:
     //
@@ -2585,9 +2907,9 @@ pub(crate) fn validate_encrypted_read_response(
     // 2) roll back a block by writing an old data and encryption context
     //
     // check that this read response contains block contexts that contain
-    // (at least one) encryption context.
+    // a matching encryption context.
 
-    if response.block_contexts.is_empty() {
+    let Some(context) = block_context else {
         // No block context(s) in the response!
         //
         // Either this is a read of an unwritten block, or an attacker
@@ -2598,119 +2920,57 @@ pub(crate) fn validate_encrypted_read_response(
         // expect to see this case unless this is a blank block.
         //
         // XXX if it's not a blank block, we may be under attack?
-        if response.data[..].iter().all(|&x| x == 0) {
-            return Ok(None);
+        if data.iter().all(|&x| x == 0) {
+            return Ok(Validation::Empty);
         } else {
             error!(log, "got empty block context with non-blank block");
             return Err(CrucibleError::MissingBlockContext);
         }
-    }
+    };
 
-    let mut valid_hash = None;
-    let mut successful_decryption = false;
+    let Some(block_encryption_ctx) = &context.encryption_context else {
+        // this block context is missing an encryption context!
+        return Err(CrucibleError::DecryptionError);
+    };
 
-    // Attempt decryption with each encryption context, and fail if all
-    // do not work. The most recent encryption context will most likely
-    // be the correct one so start there.
-    for ctx in response.block_contexts.iter().rev() {
-        let block_encryption_ctx =
-            if let Some(block_encryption_ctx) = &ctx.encryption_context {
-                block_encryption_ctx
-            } else {
-                // this block context is missing an encryption context!
-                // continue to see if another block context has a valid one.
-                //
-                // XXX should this be an error instead?
-                continue;
-            };
-
+    // We'll start with decryption, ignoring the hash; we're using authenticated
+    // encryption, so the check is just as strong as the hash check.
+    //
+    // Note: decrypt_in_place does not overwrite the buffer if
+    // it fails, otherwise we would need to copy here. There's a
+    // unit test to validate this behaviour.
+    use aes_gcm_siv::{Nonce, Tag};
+    let decryption_result = encryption_context.decrypt_in_place(
+        data,
+        Nonce::from_slice(&block_encryption_ctx.nonce[..]),
+        Tag::from_slice(&block_encryption_ctx.tag[..]),
+    );
+    if decryption_result.is_ok() {
+        Ok(Validation::Encrypted(*block_encryption_ctx))
+    } else {
         // Validate integrity hash before decryption
         let computed_hash = integrity_hash(&[
             &block_encryption_ctx.nonce[..],
             &block_encryption_ctx.tag[..],
-            &response.data[..],
+            data,
         ]);
 
-        if computed_hash == ctx.hash {
-            valid_hash = Some(ctx.hash);
-
-            // Now that the integrity hash was verified, attempt
-            // decryption.
-            //
-            // Note: decrypt_in_place does not overwrite the buffer if
-            // it fails, otherwise we would need to copy here. There's a
-            // unit test to validate this behaviour.
-            use aes_gcm_siv::{Nonce, Tag};
-            let decryption_result = encryption_context.decrypt_in_place(
-                &mut response.data[..],
-                Nonce::from_slice(&block_encryption_ctx.nonce[..]),
-                Tag::from_slice(&block_encryption_ctx.tag[..]),
-            );
-
-            if decryption_result.is_ok() {
-                successful_decryption = true;
-                break;
-            } else {
-                // Only one hash + nonce + tag combination will match the
-                // data that is returned. Due to the fact that nonces are
-                // random for each write, even if the Guest wrote the
-                // same data block 100 times, only one index will be
-                // valid. The sqlite backend will return any number of block
-                // contexts, where the raw file backend will only return
-                // one (because it knows the active slot).
-                //
-                // If the computed integrity hash matched but decryption
-                // failed, continue to the next contexts. the current
-                // hashing algorithm (xxHash) is not a cryptographic hash
-                // and is only u64, so collisions are not impossible.
-                warn!(
-                    log,
-                    "Decryption failed even though integrity hash matched!"
-                );
-            }
-        }
-    }
-
-    if let Some(valid_hash) = valid_hash {
-        if !successful_decryption {
+        if computed_hash == context.hash {
             // No encryption context combination decrypted this block, but
             // one valid hash was found. This can occur if the decryption
             // key doesn't match the key that the data was encrypted with.
             error!(log, "Decryption failed with correct hash");
             Err(CrucibleError::DecryptionError)
         } else {
-            // Filter out contexts that don't match, and return the successful
-            // hash.
-            response
-                .block_contexts
-                .retain(|context| context.hash == valid_hash);
-
-            Ok(Some(valid_hash))
-        }
-    } else {
-        error!(log, "No match for integrity hash");
-        for ctx in response.block_contexts.iter() {
-            let block_encryption_ctx =
-                if let Some(block_encryption_ctx) = &ctx.encryption_context {
-                    block_encryption_ctx
-                } else {
-                    error!(log, "missing encryption context!");
-                    continue;
-                };
-
-            let computed_hash = integrity_hash(&[
-                &block_encryption_ctx.nonce[..],
-                &block_encryption_ctx.tag[..],
-                &response.data[..],
-            ]);
             error!(
                 log,
-                "Expected: 0x{:x} != Computed: 0x{:x}", ctx.hash, computed_hash
+                "No match for integrity hash\n\
+             Expected: 0x{:x} != Computed: 0x{:x}",
+                context.hash,
+                computed_hash
             );
+            Err(CrucibleError::HashMismatch)
         }
-
-        // no hash was correct
-        Err(CrucibleError::HashMismatch)
     }
 }
 
@@ -2720,39 +2980,23 @@ pub(crate) fn validate_encrypted_read_response(
 ///   block is all 0
 /// - Err otherwise
 pub(crate) fn validate_unencrypted_read_response(
-    response: &mut ReadResponse,
+    block_context: Option<BlockContext>,
+    data: &mut [u8],
     log: &Logger,
-) -> Result<Option<u64>, CrucibleError> {
-    if !response.block_contexts.is_empty() {
-        // check integrity hashes - make sure at least one is correct.
-        let mut successful_hash = false;
-        let computed_hash = integrity_hash(&[&response.data[..]]);
+) -> Result<Validation, CrucibleError> {
+    if let Some(context) = block_context {
+        // check integrity hashes - make sure it is correct
+        let computed_hash = integrity_hash(&[data]);
 
-        // The most recent hash is probably going to be the right one.
-        for context in response.block_contexts.iter().rev() {
-            if computed_hash == context.hash {
-                successful_hash = true;
-                break;
-            }
-        }
-
-        if successful_hash {
-            // Filter out contexts that don't match, and return the
-            // successful hash.
-            response
-                .block_contexts
-                .retain(|context| context.hash == computed_hash);
-
-            Ok(Some(computed_hash))
+        if computed_hash == context.hash {
+            Ok(Validation::Unencrypted(computed_hash))
         } else {
             // No integrity hash was correct for this response
             error!(log, "No match computed hash:0x{:x}", computed_hash,);
-            for context in response.block_contexts.iter().rev() {
-                error!(log, "No match          hash:0x{:x}", context.hash);
-            }
+            error!(log, "No match          hash:0x{:x}", context.hash);
             error!(log, "Data from hash:");
-            for i in 0..6 {
-                error!(log, "[{}]:{}", i, response.data[i]);
+            for (i, d) in data[..6].iter().enumerate() {
+                error!(log, "[{i}]:{d}");
             }
 
             Err(CrucibleError::HashMismatch)
@@ -2768,8 +3012,8 @@ pub(crate) fn validate_unencrypted_read_response(
         // this case unless this is a blank block.
         //
         // XXX if it's not a blank block, we may be under attack?
-        if response.data[..].iter().all(|&x| x == 0) {
-            Ok(None)
+        if data[..].iter().all(|&x| x == 0) {
+            Ok(Validation::Empty)
         } else {
             error!(log, "got empty block context with non-blank block");
             Err(CrucibleError::MissingBlockContext)

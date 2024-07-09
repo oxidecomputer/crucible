@@ -1,5 +1,6 @@
 // Copyright 2023 Oxide Computer Company
 
+use crate::guest::Guest;
 use crate::*;
 
 /*
@@ -58,8 +59,8 @@ pub(crate) mod up_test {
         build_logger()
     }
 
-    fn extent_tuple(eid: u64, offset: u64) -> (u64, Block) {
-        (eid, Block::new_512(offset))
+    fn extent_tuple(eid: u32, offset: u64) -> (ExtentId, Block) {
+        (ExtentId(eid), Block::new_512(offset))
     }
 
     #[test]
@@ -95,8 +96,8 @@ pub(crate) mod up_test {
         assert_eq!(span.affected_block_numbers(), &vec![268, 269, 270, 271]);
     }
 
-    #[tokio::test]
-    async fn test_iospan_buffer_read_write() {
+    #[test]
+    fn test_iospan_buffer_read_write() {
         let mut span = IOSpan::new(500, 64, 512);
         assert_eq!(span.affected_block_count(), 2);
         assert_eq!(span.affected_block_numbers(), &vec![0, 1]);
@@ -116,12 +117,10 @@ pub(crate) mod up_test {
             assert_eq!(span.buffer()[i], 0);
         }
 
-        let mut data = vec![0u8; 64];
+        let mut data = [0u8; 64];
         span.read_from_blocks_into_buffer(&mut data[..]);
 
-        for i in 0..64 {
-            assert_eq!(data[i], 1);
-        }
+        assert_eq!(data, [1; 64]);
     }
 
     /*
@@ -132,7 +131,7 @@ pub(crate) mod up_test {
         up: &Upstairs,
         offset: Block,
         num_blocks: u64,
-    ) -> Vec<(u64, Block)> {
+    ) -> Vec<(ExtentId, Block)> {
         let ddef = up.get_region_definition();
         let num_blocks = Block::new_with_ddef(num_blocks, &ddef);
         extent_from_offset(&ddef, offset, num_blocks)
@@ -140,8 +139,8 @@ pub(crate) mod up_test {
             .collect()
     }
 
-    #[tokio::test]
-    async fn off_to_extent_one_block() {
+    #[test]
+    fn off_to_extent_one_block() {
         let up = make_upstairs();
 
         for i in 0..100 {
@@ -161,8 +160,8 @@ pub(crate) mod up_test {
         assert_eq!(up_efo(&up, Block::new_512(999), 1), exv);
     }
 
-    #[tokio::test]
-    async fn off_to_extent_two_blocks() {
+    #[test]
+    fn off_to_extent_two_blocks() {
         let up = make_upstairs();
 
         for i in 0..99 {
@@ -188,8 +187,8 @@ pub(crate) mod up_test {
         assert_eq!(up_efo(&up, Block::new_512(998), 2), exv);
     }
 
-    #[tokio::test]
-    async fn off_to_extent_bridge() {
+    #[test]
+    fn off_to_extent_bridge() {
         /*
          * Testing when our buffer crosses extents.
          */
@@ -216,51 +215,59 @@ pub(crate) mod up_test {
          * Largest buffer at different offsets
          */
         for offset in 0..100 {
-            let expected: Vec<(u64, Block)> = (0..100)
-                .map(|i| extent_tuple((offset + i) / 100, (offset + i) % 100))
+            let expected: Vec<_> = (0..100)
+                .map(|i| {
+                    extent_tuple(
+                        (offset + i) / 100,
+                        u64::from((offset + i) % 100),
+                    )
+                })
                 .collect();
-            assert_eq!(up_efo(&up, Block::new_512(offset), 100), expected);
+            assert_eq!(
+                up_efo(&up, Block::new_512(u64::from(offset)), 100),
+                expected
+            );
         }
     }
 
     /*
      * Testing various invalid inputs
      */
-    #[tokio::test]
-    async fn off_to_extent_length_zero() {
+    #[test]
+    fn off_to_extent_length_zero() {
         let up = make_upstairs();
         assert_eq!(up_efo(&up, Block::new_512(0), 0), vec![]);
     }
 
-    #[tokio::test]
-    async fn off_to_extent_length_almost_too_big() {
+    #[test]
+    fn off_to_extent_length_almost_too_big() {
         let up = make_upstairs();
         up_efo(&up, Block::new_512(0), 1000);
     }
 
-    #[tokio::test]
+    #[test]
     #[should_panic]
-    async fn off_to_extent_length_too_big() {
+    fn off_to_extent_length_too_big() {
         let up = make_upstairs();
         up_efo(&up, Block::new_512(0), 1001);
     }
 
-    #[tokio::test]
-    async fn off_to_extent_length_and_offset_almost_too_big() {
+    #[test]
+    fn off_to_extent_length_and_offset_almost_too_big() {
         let up = make_upstairs();
         up_efo(&up, Block::new_512(900), 100);
     }
 
-    #[tokio::test]
+    #[test]
     #[should_panic]
-    async fn off_to_extent_length_and_offset_too_big() {
+    fn off_to_extent_length_and_offset_too_big() {
         let up = make_upstairs();
         up_efo(&up, Block::new_512(1000), 1);
     }
 
-    #[tokio::test]
+    #[test]
     #[should_panic]
-    async fn not_right_block_size() {
+    fn not_right_block_size() {
         let up = make_upstairs();
         up_efo(&up, Block::new_4096(900), 1);
     }
@@ -280,7 +287,7 @@ pub(crate) mod up_test {
 
         let orig_block = block;
 
-        let (nonce, tag, _) = context.encrypt_in_place(&mut block[..])?;
+        let (nonce, tag, _) = context.encrypt_in_place(&mut block[..]);
         assert_ne!(block, orig_block);
 
         context.decrypt_in_place(&mut block[..], &nonce, &tag)?;
@@ -303,7 +310,7 @@ pub(crate) mod up_test {
 
         let orig_block = block;
 
-        let (_, tag, _) = context.encrypt_in_place(&mut block[..])?;
+        let (_, tag, _) = context.encrypt_in_place(&mut block[..]);
         assert_ne!(block, orig_block);
 
         let nonce = context.get_random_nonce();
@@ -337,7 +344,7 @@ pub(crate) mod up_test {
 
         let orig_block = block;
 
-        let (nonce, mut tag, _) = context.encrypt_in_place(&mut block[..])?;
+        let (nonce, mut tag, _) = context.encrypt_in_place(&mut block[..]);
         assert_ne!(block, orig_block);
 
         tag[2] = tag[2].wrapping_add(1);
@@ -374,121 +381,38 @@ pub(crate) mod up_test {
 
         let original_data = data.clone();
 
-        let (nonce, tag, _) = context.encrypt_in_place(&mut data[..])?;
+        let (nonce, tag, _) = context.encrypt_in_place(&mut data[..]);
 
         assert_ne!(original_data, data);
 
         let read_response_hash = integrity_hash(&[&nonce, &tag, &data[..]]);
 
         // Create the read response
-        let mut read_response = ReadResponse {
-            eid: 0,
-            offset: Block::new_512(0),
-            data,
-            block_contexts: vec![BlockContext {
-                hash: read_response_hash,
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: nonce.into(),
-                        tag: tag.into(),
-                    },
-                ),
-            }],
+        let block_context = BlockContext {
+            hash: read_response_hash,
+            encryption_context: Some(crucible_protocol::EncryptionContext {
+                nonce: nonce.into(),
+                tag: tag.into(),
+            }),
         };
 
         // Validate it
         let successful_hash = validate_encrypted_read_response(
-            &mut read_response,
+            Some(block_context),
+            &mut data,
             &Arc::new(context),
             &csl(),
         )?;
 
-        assert_eq!(successful_hash, Some(read_response_hash));
+        assert_eq!(
+            successful_hash,
+            Validation::Encrypted(block_context.encryption_context.unwrap())
+        );
 
         // `validate_encrypted_read_response` will mutate the read
         // response's data value, make sure it decrypted
 
-        assert_eq!(original_data, read_response.data);
-
-        Ok(())
-    }
-
-    // Validate that an encrypted read response with multiple contexts can be
-    // decrypted (skipping ones that don't match)
-    #[test]
-    pub fn test_upstairs_validate_encrypted_read_response_multiple_contexts(
-    ) -> Result<()> {
-        // Set up the encryption context
-        use rand::{thread_rng, Rng};
-        let mut key = vec![0u8; 32];
-        thread_rng().fill(&mut key[..]);
-        let context = EncryptionContext::new(key.clone(), 512);
-
-        // Encrypt some random data
-        let mut data = BytesMut::with_capacity(512);
-        data.resize(512, 0u8);
-        thread_rng().fill(&mut data[..]);
-
-        let original_data = data.clone();
-
-        let (nonce, tag, _) = context.encrypt_in_place(&mut data[..])?;
-
-        assert_ne!(original_data, data);
-
-        let read_response_hash = integrity_hash(&[&nonce, &tag, &data[..]]);
-
-        // Create the read response
-        let mut read_response = ReadResponse {
-            eid: 0,
-            offset: Block::new_512(0),
-            data,
-            block_contexts: vec![
-                // The first context here doesn't match
-                BlockContext {
-                    hash: thread_rng().gen(),
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext {
-                            nonce: thread_rng().gen::<[u8; 12]>(),
-                            tag: thread_rng().gen::<[u8; 16]>(),
-                        },
-                    ),
-                },
-                // This context matches
-                BlockContext {
-                    hash: read_response_hash,
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext {
-                            nonce: nonce.into(),
-                            tag: tag.into(),
-                        },
-                    ),
-                },
-                // The last context does not
-                BlockContext {
-                    hash: thread_rng().gen(),
-                    encryption_context: Some(
-                        crucible_protocol::EncryptionContext {
-                            nonce: thread_rng().gen::<[u8; 12]>(),
-                            tag: thread_rng().gen::<[u8; 16]>(),
-                        },
-                    ),
-                },
-            ],
-        };
-
-        // Validate it
-        let successful_hash = validate_encrypted_read_response(
-            &mut read_response,
-            &Arc::new(context),
-            &csl(),
-        )?;
-
-        assert_eq!(successful_hash, Some(read_response_hash));
-
-        // `validate_encrypted_read_response` will mutate the read
-        // response's data value, make sure it decrypted
-
-        assert_eq!(original_data, read_response.data);
+        assert_eq!(original_data, data);
 
         Ok(())
     }
@@ -521,23 +445,16 @@ pub(crate) mod up_test {
         let mut data = BytesMut::with_capacity(512);
         data.resize(512, 0u8);
 
-        // Create the read response
-        let mut read_response = ReadResponse {
-            eid: 0,
-            offset: Block::new_512(0),
-            data: data.clone(),
-            block_contexts: vec![],
-        };
-
-        // Validate it
+        // Validate the read response
         let successful_hash = validate_encrypted_read_response(
-            &mut read_response,
+            None,
+            &mut data,
             &Arc::new(context),
             &csl(),
         )?;
 
         // The above function will return None for a blank block
-        assert_eq!(successful_hash, None);
+        assert_eq!(successful_hash, Validation::Empty);
         assert_eq!(data, vec![0u8; 512]);
 
         Ok(())
@@ -555,22 +472,23 @@ pub(crate) mod up_test {
         let original_data = data.clone();
 
         // Create the read response
-        let mut read_response = ReadResponse {
-            eid: 0,
-            offset: Block::new_512(0),
-            data,
-            block_contexts: vec![BlockContext {
-                hash: read_response_hash,
-                encryption_context: None,
-            }],
+        let block_context = BlockContext {
+            hash: read_response_hash,
+            encryption_context: None,
         };
 
         // Validate it
-        let successful_hash =
-            validate_unencrypted_read_response(&mut read_response, &csl())?;
+        let successful_hash = validate_unencrypted_read_response(
+            Some(block_context),
+            &mut data,
+            &csl(),
+        )?;
 
-        assert_eq!(successful_hash, Some(read_response_hash));
-        assert_eq!(read_response.data, original_data);
+        assert_eq!(
+            successful_hash,
+            Validation::Unencrypted(read_response_hash)
+        );
+        assert_eq!(data, original_data);
 
         Ok(())
     }
@@ -583,571 +501,45 @@ pub(crate) mod up_test {
 
         let original_data = data.clone();
 
-        // Create the read response
-        let mut read_response = ReadResponse {
-            eid: 0,
-            offset: Block::new_512(0),
-            data,
-            block_contexts: vec![],
-        };
-
-        // Validate it
+        // Validate a read response
         let successful_hash =
-            validate_unencrypted_read_response(&mut read_response, &csl())?;
+            validate_unencrypted_read_response(None, &mut data, &csl())?;
 
-        assert_eq!(successful_hash, None);
-        assert_eq!(read_response.data, original_data);
+        assert_eq!(successful_hash, Validation::Empty);
+        assert_eq!(data, original_data);
 
         Ok(())
     }
 
     #[test]
-    pub fn test_upstairs_validate_unencrypted_read_response_multiple_contexts(
-    ) -> Result<()> {
-        use rand::{thread_rng, Rng};
-
-        let mut data = BytesMut::with_capacity(512);
-        data.resize(512, 0u8);
-        thread_rng().fill(&mut data[..]);
-
-        let read_response_hash = integrity_hash(&[&data[..]]);
-        let original_data = data.clone();
-
-        // Create the read response
-        let mut read_response = ReadResponse {
-            eid: 0,
-            offset: Block::new_512(0),
-            data,
-            block_contexts: vec![
-                // The context here doesn't match
-                BlockContext {
-                    hash: thread_rng().gen(),
-                    encryption_context: None,
-                },
-                // The context here doesn't match
-                BlockContext {
-                    hash: thread_rng().gen(),
-                    encryption_context: None,
-                },
-                // Correct one
-                BlockContext {
-                    hash: read_response_hash,
-                    encryption_context: None,
-                },
-                // The context here doesn't match
-                BlockContext {
-                    hash: thread_rng().gen(),
-                    encryption_context: None,
-                },
-            ],
-        };
-
-        // Validate it
-        let successful_hash =
-            validate_unencrypted_read_response(&mut read_response, &csl())?;
-
-        assert_eq!(successful_hash, Some(read_response_hash));
-        assert_eq!(read_response.data, original_data);
-
-        Ok(())
-    }
-
-    // Validate that an unencrypted read response with multiple contexts that
-    // match the integrity hash works. This can happen if the Upstairs
-    // repeatedly writes the same block data.
-    #[test]
-    pub fn test_upstairs_validate_unencrypted_read_response_multiple_hashes(
-    ) -> Result<()> {
-        use rand::{thread_rng, Rng};
-
-        let mut data = BytesMut::with_capacity(512);
-        data.resize(512, 0u8);
-        thread_rng().fill(&mut data[..]);
-
-        let read_response_hash = integrity_hash(&[&data[..]]);
-        let original_data = data.clone();
-
-        // Create the read response
-        let mut read_response = ReadResponse {
-            eid: 0,
-            offset: Block::new_512(0),
-            data,
-            block_contexts: vec![
-                // Correct one
-                BlockContext {
-                    hash: read_response_hash,
-                    encryption_context: None,
-                },
-                // Correct one
-                BlockContext {
-                    hash: read_response_hash,
-                    encryption_context: None,
-                },
-            ],
-        };
-
-        // Validate it
-        let successful_hash =
-            validate_unencrypted_read_response(&mut read_response, &csl())?;
-
-        assert_eq!(successful_hash, Some(read_response_hash));
-        assert_eq!(read_response.data, original_data);
-
-        Ok(())
-    }
-
-    async fn assert_consumed(io: &mut GuestIoHandle) {
-        tokio::select! {
-            _ = io.recv() => {
-                // correct!
-            },
-            _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {
-                panic!("timed out while waiting for message");
-            }
-        }
-    }
-
-    async fn assert_none_consumed(io: &mut GuestIoHandle) {
-        tokio::select! {
-            _ = io.recv() => {
-                panic!("got message when expecting nothing")
-            },
-            _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {
-                // nothing to do here
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_no_iop_limit() -> Result<()> {
-        let (guest, mut io) = Guest::new(None);
-        assert_none_consumed(&mut io).await;
-
-        // Don't use guest.read, that will send a block size query that will
-        // never be answered.
-        let _ = guest
-            .send(BlockOp::Read {
-                offset: Block::new_512(0),
-                data: Buffer::new(1, 512),
-            })
-            .await;
-        let _ = guest
-            .send(BlockOp::Read {
-                offset: Block::new_512(0),
-                data: Buffer::new(8, 512),
-            })
-            .await;
-        let _ = guest
-            .send(BlockOp::Read {
-                offset: Block::new_512(0),
-                data: Buffer::new(32, 512),
-            })
-            .await;
-
-        // With no IOP limit, all requests are consumed immediately
-        assert_consumed(&mut io).await;
-        assert_consumed(&mut io).await;
-        assert_consumed(&mut io).await;
-
-        assert_none_consumed(&mut io).await;
-
-        // If no IOP limit set, don't track it
-        assert_eq!(io.iop_tokens, 0);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_iop_limit() -> Result<()> {
-        let (guest, mut io) = Guest::new(None);
-        io.set_iop_limit(16000, 2);
-
-        assert_none_consumed(&mut io).await;
-
-        // Don't use guest.read, that will send a block size query that will
-        // never be answered.
-        let _ = guest
-            .send(BlockOp::Read {
-                offset: Block::new_512(0),
-                data: Buffer::new(1, 512),
-            })
-            .await;
-        let _ = guest
-            .send(BlockOp::Read {
-                offset: Block::new_512(0),
-                data: Buffer::new(8, 512),
-            })
-            .await;
-        let _ = guest
-            .send(BlockOp::Read {
-                offset: Block::new_512(0),
-                data: Buffer::new(31, 512),
-            })
-            .await;
-
-        // First two reads succeed
-        assert_consumed(&mut io).await;
-        assert_consumed(&mut io).await;
-
-        // Next cannot be consumed until there's available IOP tokens so it
-        // remains in the queue.  Strictly speaking, it's been popped to the
-        // `req_head` position.
-        assert_none_consumed(&mut io).await;
-        assert!(io.req_rx.try_recv().is_err());
-        assert_eq!(io.iop_tokens, 2);
-        assert!(io.req_head.is_some());
-
-        // Replenish one token, meaning next read can be consumed
-        io.leak_iop_tokens(1);
-        assert_eq!(io.iop_tokens, 1);
-
-        assert_consumed(&mut io).await;
-        assert!(io.req_rx.try_recv().is_err());
-        assert!(io.req_head.is_none());
-        assert_eq!(io.iop_tokens, 2);
-
-        io.leak_iop_tokens(2);
-        assert_eq!(io.iop_tokens, 0);
-
-        io.leak_iop_tokens(16000);
-        assert_eq!(io.iop_tokens, 0);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_flush_does_not_consume_iops() -> Result<()> {
-        let (guest, mut io) = Guest::new(None);
-
-        // Set 0 as IOP limit
-        io.set_iop_limit(16000, 0);
-        assert_none_consumed(&mut io).await;
-
-        let _ = guest
-            .send(BlockOp::Flush {
-                snapshot_details: None,
-            })
-            .await;
-        let _ = guest
-            .send(BlockOp::Flush {
-                snapshot_details: None,
-            })
-            .await;
-        let _ = guest
-            .send(BlockOp::Flush {
-                snapshot_details: None,
-            })
-            .await;
-
-        assert_consumed(&mut io).await;
-        assert_consumed(&mut io).await;
-        assert_consumed(&mut io).await;
-
-        assert_none_consumed(&mut io).await;
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_set_bw_limit() -> Result<()> {
-        let (guest, mut io) = Guest::new(None);
-        io.set_bw_limit(1024 * 1024); // 1 KiB
-
-        assert_none_consumed(&mut io).await;
-
-        // Don't use guest.read, that will send a block size query that will
-        // never be answered.
-        let _ = guest
-            .send(BlockOp::Read {
-                offset: Block::new_512(0),
-                data: Buffer::new(1024, 512), // 512 KiB
-            })
-            .await;
-        let _ = guest
-            .send(BlockOp::Read {
-                offset: Block::new_512(0),
-                data: Buffer::new(1024, 512),
-            })
-            .await;
-        let _ = guest
-            .send(BlockOp::Read {
-                offset: Block::new_512(0),
-                data: Buffer::new(1024, 512),
-            })
-            .await;
-
-        // First two reads succeed
-        assert_consumed(&mut io).await;
-        assert_consumed(&mut io).await;
-
-        // Next cannot be consumed until there's available BW tokens so it
-        // remains in the queue.
-        assert_none_consumed(&mut io).await;
-        assert!(io.req_rx.try_recv().is_err());
-        assert!(io.req_head.is_some());
-        assert_eq!(io.bw_tokens, 1024 * 1024);
-
-        // Replenish enough tokens, meaning next read can be consumed
-        io.leak_bw_tokens(1024 * 1024 / 2);
-        assert_eq!(io.bw_tokens, 1024 * 1024 / 2);
-
-        assert_consumed(&mut io).await;
-        assert!(io.req_rx.try_recv().is_err());
-        assert!(io.req_head.is_none());
-        assert_eq!(io.bw_tokens, 1024 * 1024);
-
-        io.leak_bw_tokens(1024 * 1024);
-        assert_eq!(io.bw_tokens, 0);
-
-        io.leak_bw_tokens(1024 * 1024 * 1024);
-        assert_eq!(io.bw_tokens, 0);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_flush_does_not_consume_bw() -> Result<()> {
-        let (guest, mut io) = Guest::new(None);
-
-        // Set 0 as bandwidth limit
-        io.set_bw_limit(0);
-        assert_none_consumed(&mut io).await;
-
-        let _ = guest
-            .send(BlockOp::Flush {
-                snapshot_details: None,
-            })
-            .await;
-        let _ = guest
-            .send(BlockOp::Flush {
-                snapshot_details: None,
-            })
-            .await;
-        let _ = guest
-            .send(BlockOp::Flush {
-                snapshot_details: None,
-            })
-            .await;
-
-        assert_consumed(&mut io).await;
-        assert_consumed(&mut io).await;
-        assert_consumed(&mut io).await;
-
-        assert_none_consumed(&mut io).await;
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_iop_and_bw_limit() -> Result<()> {
-        let (guest, mut io) = Guest::new(None);
-
-        io.set_iop_limit(16384, 500); // 1 IOP is 16 KiB
-        io.set_bw_limit(6400 * 1024); // 16384 B * 400 = 6400 KiB/s
-        assert_none_consumed(&mut io).await;
-
-        // Don't use guest.read, that will send a block size query that will
-        // never be answered.
-
-        // Validate that BW limit activates by sending two 7000 KiB IOs. 7000
-        // KiB is only 437.5 IOPs
-
-        let _ = guest
-            .send(BlockOp::Read {
-                offset: Block::new_512(0),
-                data: Buffer::new(14000, 512), // 7000 KiB
-            })
-            .await;
-        let _ = guest
-            .send(BlockOp::Read {
-                offset: Block::new_512(0),
-                data: Buffer::new(14000, 512), // 7000 KiB
-            })
-            .await;
-
-        assert_consumed(&mut io).await;
-        assert_none_consumed(&mut io).await;
-
-        // Assert we've hit the BW limit before IOPS
-        assert_eq!(io.iop_tokens, 438); // 437.5 rounded up
-        assert_eq!(io.bw_tokens, 7000 * 1024);
-
-        io.leak_iop_tokens(438);
-        io.leak_bw_tokens(7000 * 1024);
-
-        assert_consumed(&mut io).await;
-
-        // Everything should be empty now
-        assert!(io.req_rx.try_recv().is_err());
-        assert!(io.req_head.is_none());
-
-        // Back to zero
-        io.leak_iop_tokens(438);
-        io.leak_bw_tokens(7000 * 1024);
-
-        assert_eq!(io.iop_tokens, 0);
-        assert_eq!(io.bw_tokens, 0);
-
-        // Validate that IOP limit activates by sending 501 1024b IOs
-        for _ in 0..500 {
-            let _ = guest
-                .send(BlockOp::Read {
-                    offset: Block::new_512(0),
-                    data: Buffer::new(2, 512),
-                })
-                .await;
-            assert_consumed(&mut io).await;
-        }
-
-        let _ = guest
-            .send(BlockOp::Read {
-                offset: Block::new_512(0),
-                data: Buffer::new(2, 512),
-            })
-            .await;
-        assert_none_consumed(&mut io).await;
-
-        // Assert we've hit the IOPS limit
-        assert_eq!(io.iop_tokens, 500);
-        assert_eq!(io.bw_tokens, 500 * 1024);
-
-        // Back to zero
-        io.leak_iop_tokens(500);
-        io.leak_bw_tokens(500 * 1024);
-
-        // Remove the 501st request
-        assert!(io.req_head.take().is_some());
-        assert!(io.req_rx.try_recv().is_err());
-        assert_eq!(io.iop_tokens, 0);
-        assert_eq!(io.bw_tokens, 0);
-
-        // From
-        // https://aws.amazon.com/premiumsupport/knowledge-center/ebs-calculate-optimal-io-size/:
-        //
-        // Amazon EBS calculates the optimal I/O size using the following
-        // equation: throughput / number of IOPS = optimal I/O size.
-
-        let optimal_io_size: usize = 6400 * 1024 / 500;
-
-        // Round down to the nearest size in blocks
-        let optimal_io_size = (optimal_io_size / 512) * 512;
-
-        // Make sure this is <= an IOP size
-        assert!(optimal_io_size <= 16384);
-
-        // I mean, it makes sense: now we submit 500 of those to reach both
-        // limits at the same time.
-        for i in 0..500 {
-            assert_eq!(io.iop_tokens, i);
-            assert_eq!(io.bw_tokens, i * optimal_io_size);
-            assert_eq!(optimal_io_size % 512, 0);
-
-            let _ = guest
-                .send(BlockOp::Read {
-                    offset: Block::new_512(0),
-                    data: Buffer::new(optimal_io_size / 512, 512),
-                })
-                .await;
-
-            assert_consumed(&mut io).await;
-        }
-
-        assert_eq!(io.iop_tokens, 500);
-        assert_eq!(io.bw_tokens, 500 * optimal_io_size);
-
-        Ok(())
-    }
-
-    // Is it possible to submit an IO that will never be sent? It shouldn't be!
-    #[tokio::test]
-    async fn test_impossible_io() -> Result<()> {
-        let (guest, mut io) = Guest::new(None);
-
-        io.set_iop_limit(1024 * 1024 / 2, 10); // 1 IOP is half a KiB
-        io.set_bw_limit(1024 * 1024); // 1 KiB
-        assert_none_consumed(&mut io).await;
-
-        // Sending an IO of 10 MiB is larger than the bandwidth limit and
-        // represents 20 IOPs, larger than the IOP limit.
-        let _ = guest
-            .send(BlockOp::Read {
-                offset: Block::new_512(0),
-                data: Buffer::new(20480, 512), // 10 MiB
-            })
-            .await;
-        let _ = guest
-            .send(BlockOp::Read {
-                offset: Block::new_512(0),
-                data: Buffer::new(0, 512),
-            })
-            .await;
-
-        assert_eq!(io.iop_tokens, 0);
-        assert_eq!(io.bw_tokens, 0);
-
-        // Even though the first IO is larger than the bandwidth and IOP limit,
-        // it should still succeed. The next IO should not, even if it consumes
-        // nothing, because the iops and bw tokens will be larger than the limit
-        // for a while (until they leak enough).
-
-        assert_consumed(&mut io).await;
-        assert_none_consumed(&mut io).await;
-
-        assert_eq!(io.iop_tokens, 20);
-        assert_eq!(io.bw_tokens, 10 * 1024 * 1024);
-
-        // Bandwidth trigger is going to be larger and need more leaking to get
-        // down to a point where the zero sized IO can fire.
-        for _ in 0..9 {
-            io.leak_iop_tokens(10);
-            io.leak_bw_tokens(1024 * 1024);
-
-            assert_none_consumed(&mut io).await;
-        }
-
-        assert_eq!(io.iop_tokens, 0);
-        assert_eq!(io.bw_tokens, 1024 * 1024);
-
-        assert_none_consumed(&mut io).await;
-
-        io.leak_iop_tokens(10);
-        io.leak_bw_tokens(1024 * 1024);
-
-        // We've leaked 10 KiB worth, it should fire now!
-        assert_consumed(&mut io).await;
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn send_io_live_repair_read() {
+    fn send_io_live_repair_read() {
         // Check the send_io_live_repair for a read below extent limit,
         // at extent limit, and above extent limit.
 
         // Below limit
         let request = ReadRequest {
-            eid: 0,
+            eid: ExtentId(0),
             offset: Block::new_512(7),
         };
         let op = IOop::Read {
             dependencies: vec![],
             requests: vec![request],
         };
-        assert!(op.send_io_live_repair(Some(2)));
+        assert!(op.send_io_live_repair(Some(ExtentId(2))));
 
         // At limit
         let request = ReadRequest {
-            eid: 2,
+            eid: ExtentId(2),
             offset: Block::new_512(7),
         };
         let op = IOop::Read {
             dependencies: vec![],
             requests: vec![request],
         };
-        assert!(op.send_io_live_repair(Some(2)));
+        assert!(op.send_io_live_repair(Some(ExtentId(2))));
 
         let request = ReadRequest {
-            eid: 3,
+            eid: ExtentId(3),
             offset: Block::new_512(7),
         };
         let op = IOop::Read {
@@ -1155,78 +547,79 @@ pub(crate) mod up_test {
             requests: vec![request],
         };
         // We are past the extent limit, so this should return false
-        assert!(!op.send_io_live_repair(Some(2)));
+        assert!(!op.send_io_live_repair(Some(ExtentId(2))));
 
         // If we change the extent limit, it should become true
-        assert!(op.send_io_live_repair(Some(3)));
+        assert!(op.send_io_live_repair(Some(ExtentId(3))));
     }
 
     // Construct an IOop::Write or IOop::WriteUnwritten at the given extent
-    fn write_at_extent(eid: u64, wu: bool) -> IOop {
-        let request = crucible_protocol::Write {
+    fn write_at_extent(eid: ExtentId, wu: bool) -> IOop {
+        let request = crucible_protocol::WriteBlockMetadata {
             eid,
             offset: Block::new_512(7),
-            data: Bytes::from(vec![1]),
             block_context: BlockContext {
                 encryption_context: None,
                 hash: 0,
             },
         };
-
-        let writes = vec![request];
+        let data = BytesMut::from(vec![1].as_slice());
+        let blocks = vec![request];
 
         if wu {
             IOop::WriteUnwritten {
                 dependencies: vec![],
-                writes,
+                blocks,
+                data: data.freeze(),
             }
         } else {
             IOop::Write {
                 dependencies: vec![],
-                writes,
+                blocks,
+                data: data.freeze(),
             }
         }
     }
 
-    #[tokio::test]
-    async fn send_io_live_repair_write() {
+    #[test]
+    fn send_io_live_repair_write() {
         // Check the send_io_live_repair for a write below extent limit,
         // at extent limit, and above extent limit.
 
         // Below limit
-        let wr = write_at_extent(0, false);
-        assert!(wr.send_io_live_repair(Some(2)));
+        let wr = write_at_extent(ExtentId(0), false);
+        assert!(wr.send_io_live_repair(Some(ExtentId(2))));
 
         // At the limit
-        let wr = write_at_extent(2, false);
-        assert!(wr.send_io_live_repair(Some(2)));
+        let wr = write_at_extent(ExtentId(2), false);
+        assert!(wr.send_io_live_repair(Some(ExtentId(2))));
 
         // Above the limit
-        let wr = write_at_extent(3, false);
-        assert!(!wr.send_io_live_repair(Some(2)));
+        let wr = write_at_extent(ExtentId(3), false);
+        assert!(!wr.send_io_live_repair(Some(ExtentId(2))));
 
         // Back to being below the limit
-        assert!(wr.send_io_live_repair(Some(3)));
+        assert!(wr.send_io_live_repair(Some(ExtentId(3))));
     }
 
-    #[tokio::test]
-    async fn send_io_live_repair_unwritten_write() {
+    #[test]
+    fn send_io_live_repair_unwritten_write() {
         // Check the send_io_live_repair for a write unwritten below extent
         // at extent limit, and above extent limit.
 
         // Below limit
-        let wr = write_at_extent(0, true);
-        assert!(wr.send_io_live_repair(Some(2)));
+        let wr = write_at_extent(ExtentId(0), true);
+        assert!(wr.send_io_live_repair(Some(ExtentId(2))));
 
         // At the limit
-        let wr = write_at_extent(2, true);
-        assert!(wr.send_io_live_repair(Some(2)));
+        let wr = write_at_extent(ExtentId(2), true);
+        assert!(wr.send_io_live_repair(Some(ExtentId(2))));
 
         // Above the limit
-        let wr = write_at_extent(3, true);
-        assert!(!wr.send_io_live_repair(Some(2)));
+        let wr = write_at_extent(ExtentId(3), true);
+        assert!(!wr.send_io_live_repair(Some(ExtentId(2))));
 
         // Back to being below the limit
-        assert!(wr.send_io_live_repair(Some(3)));
+        assert!(wr.send_io_live_repair(Some(ExtentId(3))));
     }
 }

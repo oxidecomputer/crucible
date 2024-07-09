@@ -18,9 +18,9 @@ struct ExtInfo {
  *
  * If you don't want color, then set nc to true.
  */
-pub async fn dump_region(
+pub fn dump_region(
     region_dir: Vec<PathBuf>,
-    mut cmp_extent: Option<u32>,
+    mut cmp_extent: Option<ExtentId>,
     block: Option<u64>,
     only_show_differences: bool,
     nc: bool,
@@ -37,7 +37,7 @@ pub async fn dump_region(
      * We build this first because it makes it easier to print it all out
      * at the end.
      */
-    let mut all_extents: HashMap<u32, ExtInfo> = HashMap::new();
+    let mut all_extents: HashMap<ExtentId, ExtInfo> = HashMap::new();
     let dir_count = region_dir.len();
     let mut blocks_per_extent = 0;
     let mut total_extents = 0;
@@ -45,8 +45,7 @@ pub async fn dump_region(
     assert!(!region_dir.is_empty());
     for (index, dir) in region_dir.iter().enumerate() {
         // Open Region read only
-        let region =
-            Region::open(dir, Default::default(), false, true, &log).await?;
+        let region = Region::open(dir, false, true, &log)?;
 
         blocks_per_extent = region.def().extent_size().value;
         total_extents = region.def().extent_count();
@@ -59,8 +58,7 @@ pub async fn dump_region(
          * directory index and the value is the ExtentMeta for that region.
          */
         for e in &region.extents {
-            let e = e.lock().await;
-            let e = match &*e {
+            let e = match e {
                 extent::ExtentState::Opened(extent) => extent,
                 extent::ExtentState::Closed => panic!("dump on closed extent!"),
             };
@@ -82,7 +80,7 @@ pub async fn dump_region(
                             max_block - 1,
                         );
                     }
-                    cmp_extent = Some(ce);
+                    cmp_extent = Some(ExtentId(ce));
                 }
             }
 
@@ -96,7 +94,7 @@ pub async fn dump_region(
                 }
             }
 
-            let extent_info = e.get_meta_info().await;
+            let extent_info = e.get_meta_info();
 
             /*
              * If we have an entry already, then add this at our directory
@@ -115,7 +113,7 @@ pub async fn dump_region(
      *       compare every time.
      */
     if let Some(ce) = cmp_extent {
-        if ce >= total_extents {
+        if ce.0 >= total_extents {
             bail!(
                 "Requested extent {} is a higher index than valid ({})",
                 ce,
@@ -141,8 +139,7 @@ pub async fn dump_region(
                 only_show_differences,
                 nc,
                 log,
-            )
-            .await;
+            );
         }
 
         show_extent(
@@ -153,8 +150,7 @@ pub async fn dump_region(
             only_show_differences,
             nc,
             log,
-        )
-        .await?;
+        )?;
 
         return Ok(());
     };
@@ -162,7 +158,7 @@ pub async fn dump_region(
     /*
      * Print out the extent info one extent at a time, in order
      */
-    let mut ext_num = all_extents.keys().collect::<Vec<&u32>>();
+    let mut ext_num = all_extents.keys().collect::<Vec<_>>();
     ext_num.sort_unstable();
 
     // Width for EXT column.
@@ -274,8 +270,8 @@ pub async fn dump_region(
             // Blocks
             print!(
                 "{:0width$}-{:0width$}",
-                blocks_per_extent * (**en as u64),
-                blocks_per_extent * (**en as u64) + blocks_per_extent - 1,
+                blocks_per_extent * (en.0 as u64),
+                blocks_per_extent * (en.0 as u64) + blocks_per_extent - 1,
                 width = block_width,
             );
 
@@ -393,9 +389,9 @@ fn color_vec(compare: &[u64]) -> Vec<u8> {
     colors
 }
 
-fn return_status_letters<'a, T, U: std::cmp::PartialEq>(
-    items: &'a [T],
-    accessor: fn(&'a T) -> U,
+fn return_status_letters<'a, U: std::cmp::PartialEq>(
+    items: &'a [RegionReadResponse],
+    accessor: fn(&'a RegionReadResponse) -> U,
     nc: bool,
 ) -> ([String; 3], bool) {
     let mut status_letters = vec![String::new(); 3];
@@ -438,10 +434,10 @@ fn return_status_letters<'a, T, U: std::cmp::PartialEq>(
  * Show the metadata and a block by block diff of a single extent
  * We need at least two directories to compare, and no more than three.
  */
-async fn show_extent(
+fn show_extent(
     region_dir: Vec<PathBuf>,
     ei_hm: &HashMap<u32, ExtentMeta>,
-    cmp_extent: u32,
+    cmp_extent: ExtentId,
     blocks_per_extent: u64,
     only_show_differences: bool,
     nc: bool,
@@ -493,7 +489,7 @@ async fn show_extent(
     println!();
     // Width for BLOCKS column
     let max_block =
-        blocks_per_extent * cmp_extent as u64 + blocks_per_extent - 1;
+        blocks_per_extent * cmp_extent.0 as u64 + blocks_per_extent - 1;
     // Get the max possible width for a single block
     let block_width = std::cmp::max(3, max_block.to_string().len());
 
@@ -526,7 +522,7 @@ async fn show_extent(
          * Build a Vector to hold our responses, one for each
          * region we are comparing.
          */
-        let mut dvec: Vec<ReadResponse> = Vec::with_capacity(dir_count);
+        let mut dvec = Vec::with_capacity(dir_count);
 
         /*
          * Read the requested block in from the extent.  Store it
@@ -534,21 +530,17 @@ async fn show_extent(
          */
         for (index, dir) in region_dir.iter().enumerate() {
             // Open Region read only
-            let region =
-                Region::open(dir, Default::default(), false, true, &log)
-                    .await?;
+            let mut region = Region::open(dir, false, true, &log)?;
 
-            let mut responses = region
-                .region_read(
-                    &[ReadRequest {
-                        eid: cmp_extent as u64,
-                        offset: Block::new_with_ddef(block, &region.def()),
-                    }],
-                    JobId(0),
-                )
-                .await?;
-            let response = responses.pop().unwrap();
-
+            let response = region.region_read(
+                &RegionReadRequest(vec![RegionReadReq {
+                    extent: cmp_extent,
+                    offset: Block::new_with_ddef(block, &region.def()),
+                    count: NonZeroUsize::new(1).unwrap(),
+                }]),
+                JobId(0),
+            )?;
+            assert_eq!(response.blocks.len(), 1);
             dvec.insert(index, response);
         }
 
@@ -564,7 +556,7 @@ async fn show_extent(
 
         // first compare data
         let (status_letters, data_different) =
-            return_status_letters(&dvec, |x| &x.data, nc);
+            return_status_letters(&dvec, |r| &r.data, nc);
 
         // Print the data status letters
         for dir_index in 0..dir_count {
@@ -573,7 +565,7 @@ async fn show_extent(
 
         // then, compare block_context_columns
         let (status_letters, bc_different) =
-            return_status_letters(&dvec, |x| &x.block_contexts, nc);
+            return_status_letters(&dvec, |r| &r.blocks[0], nc);
 
         // Print block context status letters
         for dir_index in 0..dir_count {
@@ -584,7 +576,7 @@ async fn show_extent(
         let different = data_different || bc_different;
 
         // Now that we have collected all the results, print them
-        let real_block = (blocks_per_extent * cmp_extent as u64) + block;
+        let real_block = (blocks_per_extent * cmp_extent.0 as u64) + block;
         if !only_show_differences || different {
             print!("{:0width$} ", real_block, width = block_width);
 
@@ -620,9 +612,9 @@ fn is_all_same<T: PartialEq>(slice: &[T]) -> bool {
 /*
  * Show detailed comparison of different region's blocks
  */
-async fn show_extent_block(
+fn show_extent_block(
     region_dir: Vec<PathBuf>,
-    cmp_extent: u32,
+    cmp_extent: ExtentId,
     block: u64,
     blocks_per_extent: u64,
     only_show_differences: bool,
@@ -642,7 +634,7 @@ async fn show_extent_block(
      * Build a Vector to hold our responses, one for each
      * region we are comparing.
      */
-    let mut dvec: Vec<ReadResponse> = Vec::with_capacity(dir_count);
+    let mut dvec = Vec::with_capacity(dir_count);
 
     /*
      * Read the requested block in from the extent.  Store it
@@ -650,23 +642,17 @@ async fn show_extent_block(
      */
     for (index, dir) in region_dir.iter().enumerate() {
         // Open Region read only
-        let region =
-            Region::open(dir, Default::default(), false, true, &log).await?;
+        let mut region = Region::open(dir, false, true, &log)?;
 
-        let mut responses = region
-            .region_read(
-                &[ReadRequest {
-                    eid: cmp_extent as u64,
-                    offset: Block::new_with_ddef(
-                        block_in_extent,
-                        &region.def(),
-                    ),
-                }],
-                JobId(0),
-            )
-            .await?;
-        let response = responses.pop().unwrap();
-
+        let response = region.region_read(
+            &RegionReadRequest(vec![RegionReadReq {
+                extent: cmp_extent,
+                offset: Block::new_with_ddef(block_in_extent, &region.def()),
+                count: NonZeroUsize::new(1).unwrap(),
+            }]),
+            JobId(0),
+        )?;
+        assert_eq!(response.blocks.len(), 1);
         dvec.insert(index, response);
     }
 
@@ -674,7 +660,7 @@ async fn show_extent_block(
      * Compare data
      */
     let (status_letters, different) =
-        return_status_letters(&dvec, |x| &x.data, nc);
+        return_status_letters(&dvec, |r| &r.data, nc);
 
     if !only_show_differences || different {
         println!("{:>6}  {:<64}  {:3}", "DATA", "SHA256", "VER");
@@ -700,8 +686,7 @@ async fn show_extent_block(
     /*
      * Compare block contexts
      */
-    let (_, different) =
-        return_status_letters(&dvec, |x| &x.block_contexts, nc);
+    let (_, different) = return_status_letters(&dvec, |r| &r.blocks[0], nc);
 
     if !only_show_differences || different {
         /*
@@ -711,13 +696,11 @@ async fn show_extent_block(
 
         let mut max_nonce_depth = 0;
 
-        for (dir_index, response) in dvec.iter().enumerate() {
+        for (dir_index, r) in dvec.iter().enumerate() {
             print!("{:^24} ", dir_index);
 
-            max_nonce_depth = std::cmp::max(
-                max_nonce_depth,
-                response.encryption_contexts().len(),
-            );
+            max_nonce_depth =
+                std::cmp::max(max_nonce_depth, r.encryption_contexts(0).len());
         }
         if !only_show_differences {
             print!(" {:<5}", "DIFF");
@@ -725,7 +708,7 @@ async fn show_extent_block(
         println!();
 
         print!("{}  ", String::from_utf8(vec![b'-'; 6])?);
-        for (_, _) in dvec.iter().enumerate() {
+        for _ in &dvec {
             print!("{} ", String::from_utf8(vec![b'-'; 24])?);
         }
         if !only_show_differences {
@@ -738,8 +721,8 @@ async fn show_extent_block(
 
             let mut all_same_len = true;
             let mut nonces = Vec::with_capacity(dir_count);
-            for response in dvec.iter() {
-                let ctxs = response.encryption_contexts();
+            for r in dvec.iter() {
+                let ctxs = r.encryption_contexts(0);
                 print!(
                     "{:^24} ",
                     if depth < ctxs.len() {
@@ -770,13 +753,11 @@ async fn show_extent_block(
 
         let mut max_tag_depth = 0;
 
-        for (dir_index, response) in dvec.iter().enumerate() {
+        for (dir_index, r) in dvec.iter().enumerate() {
             print!("{:^32} ", dir_index);
 
-            max_tag_depth = std::cmp::max(
-                max_tag_depth,
-                response.encryption_contexts().len(),
-            );
+            max_tag_depth =
+                std::cmp::max(max_tag_depth, r.encryption_contexts(0).len());
         }
         if !only_show_differences {
             print!(" {:<5}", "DIFF");
@@ -784,7 +765,7 @@ async fn show_extent_block(
         println!();
 
         print!("{}  ", String::from_utf8(vec![b'-'; 6])?);
-        for (_, _) in dvec.iter().enumerate() {
+        for _ in &dvec {
             print!("{} ", String::from_utf8(vec![b'-'; 32])?);
         }
         if !only_show_differences {
@@ -797,8 +778,8 @@ async fn show_extent_block(
 
             let mut all_same_len = true;
             let mut tags = Vec::with_capacity(dir_count);
-            for response in dvec.iter() {
-                let ctxs = response.encryption_contexts();
+            for r in dvec.iter() {
+                let ctxs = r.encryption_contexts(0);
                 print!(
                     "{:^32} ",
                     if depth < ctxs.len() {
@@ -826,7 +807,7 @@ async fn show_extent_block(
     /*
      * Compare integrity hashes
      */
-    let (_, different) = return_status_letters(&dvec, |x| x.hashes(), nc);
+    let (_, different) = return_status_letters(&dvec, |r| r.hashes(0), nc);
 
     if !only_show_differences || different {
         /*
@@ -836,11 +817,10 @@ async fn show_extent_block(
 
         let mut max_hash_depth = 0;
 
-        for (dir_index, response) in dvec.iter().enumerate() {
+        for (dir_index, r) in dvec.iter().enumerate() {
             print!("{:^16} ", dir_index);
 
-            max_hash_depth =
-                std::cmp::max(max_hash_depth, response.hashes().len());
+            max_hash_depth = std::cmp::max(max_hash_depth, r.hashes(0).len());
         }
         if !only_show_differences {
             print!(" {:<5}", "DIFF");
@@ -848,7 +828,7 @@ async fn show_extent_block(
         println!();
 
         print!("{}  ", String::from_utf8(vec![b'-'; 6])?);
-        for (_, _) in dvec.iter().enumerate() {
+        for _ in &dvec {
             print!("{} ", String::from_utf8(vec![b'-'; 16])?);
         }
         if !only_show_differences {
@@ -861,12 +841,13 @@ async fn show_extent_block(
 
             let mut all_same_len = true;
             let mut hashes = Vec::with_capacity(dir_count);
-            for response in dvec.iter() {
+            for r in dvec.iter() {
+                let block_hashes = r.hashes(0);
                 print!(
                     "{:^16} ",
-                    if depth < response.hashes().len() {
-                        hashes.push(response.hashes()[depth]);
-                        hex::encode(response.hashes()[depth].to_le_bytes())
+                    if depth < block_hashes.len() {
+                        hashes.push(block_hashes[depth]);
+                        hex::encode(block_hashes[depth].to_le_bytes())
                     } else {
                         all_same_len = false;
                         "".to_string()

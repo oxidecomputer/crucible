@@ -96,7 +96,7 @@ impl IOSpan {
                     self.affected_block_numbers[0],
                     self.block_size.trailing_zeros(),
                 ),
-                self.buffer.into_bytes(),
+                self.buffer.into_bytes_mut(),
             )
             .await
     }
@@ -376,7 +376,7 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
                 self.block_size.trailing_zeros(),
             );
             let bytes = BytesMut::from(buf);
-            self.block_io.write(offset, bytes.freeze()).await?;
+            self.block_io.write(offset, bytes).await?;
         }
 
         // TODO: can't increment offset past the device size

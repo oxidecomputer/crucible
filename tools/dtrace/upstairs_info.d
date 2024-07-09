@@ -9,6 +9,7 @@
 dtrace:::BEGIN
 {
     show = 21;
+    last[pid] = 0;
 }
 
 /*
@@ -18,13 +19,14 @@ dtrace:::BEGIN
 tick-1s
 /show > 20/
 {
+    printf("%6s ", "PID");
     printf("%17s %17s %17s", "DS STATE 0", "DS STATE 1", "DS STATE 2");
-    printf("  %5s %5s %5s", "UPW", "DSW", "BAKPR");
+    printf("  %5s %5s %9s %5s", "UPW", "DSW", "JOBID", "BAKPR");
+    printf(" %10s", "WRITE_BO");
     printf("  %5s %5s %5s", "NEW0", "NEW1", "NEW2");
     printf("  %5s %5s %5s", "IP0", "IP1", "IP2");
     printf("  %5s %5s %5s", "D0", "D1", "D2");
     printf("  %5s %5s %5s", "S0", "S1", "S2");
-    printf("  %2s %2s %2s", "E0", "E1", "E2");
     printf("\n");
     show = 0;
 }
@@ -32,6 +34,7 @@ tick-1s
 crucible_upstairs*:::up-status
 {
     show = show + 1;
+    printf("%6d ", pid);
     /*
      * State for the three downstairs
      */
@@ -45,7 +48,13 @@ crucible_upstairs*:::up-status
     printf(" ");
     printf(" %5s", json(copyinstr(arg1), "ok.up_count"));
     printf(" %5s", json(copyinstr(arg1), "ok.ds_count"));
+
+    /*
+     * Job ID and backpressure
+     */
+    printf(" %9s", json(copyinstr(arg1), "ok.next_job_id"));
     printf(" %5s", json(copyinstr(arg1), "ok.up_backpressure"));
+    printf(" %10s", json(copyinstr(arg1), "ok.write_bytes_out"));
 
     /*
      * New jobs on the work list for each downstairs
@@ -78,14 +87,6 @@ crucible_upstairs*:::up-status
     printf(" %5s", json(copyinstr(arg1), "ok.ds_io_count.skipped[0]"));
     printf(" %5s", json(copyinstr(arg1), "ok.ds_io_count.skipped[1]"));
     printf(" %5s", json(copyinstr(arg1), "ok.ds_io_count.skipped[2]"));
-
-    /*
-     * Jobs that are done with errors on the work list for each downstairs
-     */
-    printf(" ");
-    printf(" %2s", json(copyinstr(arg1), "ok.ds_io_count.error[0]"));
-    printf(" %2s", json(copyinstr(arg1), "ok.ds_io_count.error[1]"));
-    printf(" %2s", json(copyinstr(arg1), "ok.ds_io_count.error[2]"));
 
     printf("\n");
 }

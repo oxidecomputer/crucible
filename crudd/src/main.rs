@@ -180,7 +180,7 @@ async fn cmd_read<T: BlockIO + std::marker::Send + 'static>(
         // So say we have an offset of 5. we're misaligned by 5 bytes, so we
         // read 5 bytes we don't need. we skip those 5 bytes then write
         // the rest to the output
-        let bytes = buffer.into_vec();
+        let bytes = buffer.into_bytes_mut();
         output.write_all(
             &bytes[offset_misalignment as usize
                 ..(offset_misalignment + alignment_bytes) as usize],
@@ -298,7 +298,7 @@ async fn write_remainder_and_finalize<'a, T: BlockIO>(
     if uflow_remainder == 0 {
         // no need to RMW, just write
         w_buf.resize(n_read, 0);
-        let w_future = crucible.write(offset, w_buf.freeze());
+        let w_future = crucible.write(offset, w_buf);
         futures.push_back(w_future);
     } else {
         // RMW oof
@@ -318,12 +318,12 @@ async fn write_remainder_and_finalize<'a, T: BlockIO>(
         crucible.read(uflow_offset, &mut uflow_r_buf).await?;
 
         // Copy it into w_buf
-        let r_bytes = uflow_r_buf.into_vec();
+        let r_bytes = uflow_r_buf.into_bytes();
         w_buf[n_read..n_read + uflow_backfill]
             .copy_from_slice(&r_bytes[uflow_remainder as usize..]);
 
         // Issue the write
-        let w_future = crucible.write(offset, w_buf.freeze());
+        let w_future = crucible.write(offset, w_buf);
         futures.push_back(w_future);
     }
 
@@ -404,7 +404,7 @@ async fn cmd_write<T: BlockIO>(
         let offset = Block::new(block_idx, native_block_size.trailing_zeros());
         crucible.read(offset, &mut buffer).await?;
 
-        let mut w_vec = buffer.into_vec();
+        let mut w_vec = buffer.into_bytes_mut();
         // Write our data into the buffer
         let bytes_read = input.read(
             &mut w_vec[offset_misalignment as usize
@@ -412,9 +412,7 @@ async fn cmd_write<T: BlockIO>(
         )?;
         total_bytes_written += bytes_read;
 
-        let w_bytes = Bytes::from(w_vec);
-
-        crucible.write(offset, w_bytes).await?;
+        crucible.write(offset, w_vec).await?;
 
         if bytes_read != alignment_bytes as usize {
             // underrun, exit early
@@ -478,7 +476,7 @@ async fn cmd_write<T: BlockIO>(
             return Ok(total_bytes_written);
         } else {
             // good to go for a write
-            let w_future = crucible.write(offset, w_buf.freeze());
+            let w_future = crucible.write(offset, w_buf);
             futures.push_back(w_future);
         }
 
@@ -544,14 +542,10 @@ async fn handle_signals(
     mut signals: Signals,
     early_shutdown: oneshot::Sender<()>,
 ) {
-    while let Some(signal) = signals.next().await {
-        match signal {
-            SIGUSR1 => {
-                early_shutdown.send(()).unwrap();
-                break;
-            }
-            _ => unreachable!(),
-        }
+    match signals.next().await {
+        Some(SIGUSR1) => early_shutdown.send(()).unwrap(),
+        Some(_) => unreachable!(),
+        None => (), // signal sender is dropped
     }
 }
 

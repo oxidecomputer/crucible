@@ -20,11 +20,66 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use slog::{info, o, Logger};
 
+use crucible::ReplaceResult;
 use crucible::VolumeConstructionRequest;
+
+#[derive(Serialize, JsonSchema)]
+pub struct PantryStatus {
+    /// Which volumes does this Pantry know about? Note this may include volumes
+    /// that are no longer active, and haven't been garbage collected yet.
+    pub volumes: Vec<String>,
+
+    /// How many job handles?
+    pub num_job_handles: usize,
+}
+
+/// Get the Pantry's status
+#[endpoint {
+    method = GET,
+    path = "/crucible/pantry/0",
+}]
+async fn pantry_status(
+    rc: RequestContext<Arc<Pantry>>,
+) -> Result<HttpResponseOk<PantryStatus>, HttpError> {
+    let pantry = rc.context();
+
+    let status = pantry.status().await?;
+
+    Ok(HttpResponseOk(status))
+}
 
 #[derive(Deserialize, JsonSchema)]
 struct VolumePath {
     pub id: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct VolumeStatus {
+    /// Is the Volume currently active?
+    pub active: bool,
+
+    /// Has the Pantry ever seen this Volume active?
+    pub seen_active: bool,
+
+    /// How many job handles are there for this Volume?
+    pub num_job_handles: usize,
+}
+
+/// Get a current Volume's status
+#[endpoint {
+    method = GET,
+    path = "/crucible/pantry/0/volume/{id}",
+}]
+async fn volume_status(
+    rc: RequestContext<Arc<Pantry>>,
+    path: TypedPath<VolumePath>,
+) -> Result<HttpResponseOk<VolumeStatus>, HttpError> {
+    let path = path.into_inner();
+    let pantry = rc.context();
+
+    let status = pantry.volume_status(path.id.clone()).await?;
+
+    Ok(HttpResponseOk(status))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -57,6 +112,64 @@ async fn attach(
         .await?;
 
     Ok(HttpResponseOk(AttachResult { id: path.id }))
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct AttachBackgroundRequest {
+    pub volume_construction_request: VolumeConstructionRequest,
+    pub job_id: String,
+}
+
+/// Construct a volume from a VolumeConstructionRequest, storing the result in
+/// the Pantry. Activate in a separate job so as not to block the request.
+#[endpoint {
+    method = POST,
+    path = "/crucible/pantry/0/volume/{id}/background",
+}]
+async fn attach_activate_background(
+    rc: RequestContext<Arc<Pantry>>,
+    path: TypedPath<VolumePath>,
+    body: TypedBody<AttachBackgroundRequest>,
+) -> Result<HttpResponseUpdatedNoContent, HttpError> {
+    let path = path.into_inner();
+    let body = body.into_inner();
+    let pantry = rc.context();
+
+    pantry
+        .attach_activate_background(
+            path.id.clone(),
+            body.job_id,
+            body.volume_construction_request,
+        )
+        .await?;
+
+    Ok(HttpResponseUpdatedNoContent())
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct ReplaceRequest {
+    pub volume_construction_request: VolumeConstructionRequest,
+}
+
+/// Call a volume's target_replace function
+#[endpoint {
+    method = POST,
+    path = "/crucible/pantry/0/volume/{id}/replace",
+}]
+async fn replace(
+    rc: RequestContext<Arc<Pantry>>,
+    path: TypedPath<VolumePath>,
+    body: TypedBody<ReplaceRequest>,
+) -> Result<HttpResponseOk<ReplaceResult>, HttpError> {
+    let path = path.into_inner();
+    let body = body.into_inner();
+    let pantry = rc.context();
+
+    let result = pantry
+        .replace(path.id.clone(), body.volume_construction_request)
+        .await?;
+
+    Ok(HttpResponseOk(result))
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -302,7 +415,7 @@ async fn validate(
     Ok(HttpResponseOk(ValidateResponse { job_id }))
 }
 
-/// Flush and close a volume, removing it from the Pantry
+/// Deactivate a volume, removing it from the Pantry
 #[endpoint {
     method = DELETE,
     path = "/crucible/pantry/0/volume/{id}",
@@ -322,7 +435,11 @@ async fn detach(
 pub fn make_api() -> Result<dropshot::ApiDescription<Arc<Pantry>>, String> {
     let mut api = dropshot::ApiDescription::new();
 
+    api.register(pantry_status)?;
+    api.register(volume_status)?;
     api.register(attach)?;
+    api.register(attach_activate_background)?;
+    api.register(replace)?;
     api.register(is_job_finished)?;
     api.register(job_result_ok)?;
     api.register(import_from_url)?;

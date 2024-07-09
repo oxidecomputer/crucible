@@ -3,15 +3,16 @@ use std::cmp::Ordering;
 use std::net::SocketAddr;
 
 use anyhow::bail;
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 use num_enum::IntoPrimitive;
 use serde::{Deserialize, Serialize};
+use strum_macros::EnumDiscriminants;
 use tokio_util::codec::{Decoder, Encoder};
 use uuid::Uuid;
 
 const MAX_FRM_LEN: usize = 100 * 1024 * 1024; // 100M
 
-use crucible_common::{Block, CrucibleError, RegionDefinition};
+use crucible_common::{Block, CrucibleError, ExtentId, RegionDefinition};
 
 /// Wrapper type for a job ID
 ///
@@ -116,52 +117,12 @@ impl std::fmt::Display for ClientId {
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-pub struct Write {
-    pub eid: u64,
-    pub offset: Block,
-    pub data: bytes::Bytes,
-
-    pub block_context: BlockContext,
-}
-
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReadRequest {
-    pub eid: u64,
+    pub eid: ExtentId,
     pub offset: Block,
 }
 
-// Note: if you change this, you may have to add to the dump commands that show
-// block specific data.
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-pub struct ReadResponse {
-    pub eid: u64,
-    pub offset: Block,
-
-    pub data: bytes::BytesMut,
-    pub block_contexts: Vec<BlockContext>,
-}
-
-impl ReadResponse {
-    pub fn hashes(&self) -> Vec<u64> {
-        self.block_contexts.iter().map(|x| x.hash).collect()
-    }
-
-    pub fn first_hash(&self) -> Option<u64> {
-        self.block_contexts.get(0).map(|ctx| ctx.hash)
-    }
-
-    pub fn encryption_contexts(&self) -> Vec<Option<&EncryptionContext>> {
-        self.block_contexts
-            .iter()
-            .map(|x| x.encryption_context.as_ref())
-            .collect()
-    }
-}
-
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BlockContext {
     /// If this is a non-encrypted write, then the integrity hasher has the
     /// data as an input:
@@ -186,47 +147,10 @@ pub struct BlockContext {
     pub encryption_context: Option<EncryptionContext>,
 }
 
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EncryptionContext {
     pub nonce: [u8; 12],
     pub tag: [u8; 16],
-}
-
-impl ReadResponse {
-    pub fn from_request(request: &ReadRequest, bs: usize) -> ReadResponse {
-        /*
-         * XXX Some thought will need to be given to where the read
-         * data buffer is created, both on this side and the remote.
-         * Also, we (I) need to figure out how to read data into an
-         * uninitialized buffer. Until then, we have this workaround.
-         */
-        let sz = bs;
-        let mut data = BytesMut::with_capacity(sz);
-        data.resize(sz, 1);
-
-        ReadResponse {
-            eid: request.eid,
-            offset: request.offset,
-            data,
-            block_contexts: vec![],
-        }
-    }
-
-    pub fn from_request_with_data(
-        request: &ReadRequest,
-        data: &[u8],
-    ) -> ReadResponse {
-        ReadResponse {
-            eid: request.eid,
-            offset: request.offset,
-            data: BytesMut::from(data),
-            block_contexts: vec![BlockContext {
-                hash: crucible_common::integrity_hash(&[data]),
-                encryption_context: None,
-            }],
-        }
-    }
 }
 
 /**
@@ -245,6 +169,22 @@ pub struct SnapshotDetails {
 #[repr(u32)]
 #[derive(IntoPrimitive)]
 pub enum MessageVersion {
+    /// Updated `ReadResponseBlockMetadata` to store an `Option<BlockContext>`
+    /// instead of a `Vec<BlockContext>`, because our extent files can only
+    /// store a single context.
+    V8 = 8,
+
+    /// Switched to using `ExtentId(pub u32)` everywhere, instead of a mix of
+    /// `u32` / `u64` / `usize`.
+    V7 = 7,
+
+    /// Changed `Write`, `WriteUnwritten`, and `ReadResponse` variants to have a
+    /// clean split between header and bulk data, to reduce `memcpy`
+    ///
+    /// Removed `#[repr(u16)]` and explicit variant numbering from `Message`,
+    /// because those are misleading; they're ignored during serialization.
+    V6 = 6,
+
     /// Switched to raw file extents
     ///
     /// The message format remains the same, but live repair between SQLite and
@@ -265,7 +205,7 @@ pub enum MessageVersion {
 }
 impl MessageVersion {
     pub const fn current() -> Self {
-        Self::V5
+        Self::V8
     }
 }
 
@@ -274,7 +214,7 @@ impl MessageVersion {
  * This, along with the MessageVersion enum above should be updated whenever
  * changes are made to the Message enum below.
  */
-pub const CRUCIBLE_MESSAGE_VERSION: u32 = 5;
+pub const CRUCIBLE_MESSAGE_VERSION: u32 = 8;
 
 /*
  * If you add or change the Message enum, you must also increment the
@@ -282,8 +222,10 @@ pub const CRUCIBLE_MESSAGE_VERSION: u32 = 5;
  * go do that right now before you forget.
  */
 #[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-#[repr(u16)]
+#[derive(
+    Debug, PartialEq, Clone, Serialize, Deserialize, EnumDiscriminants,
+)]
+#[strum_discriminants(derive(Serialize, Deserialize))]
 pub enum Message {
     /**
      * Initial negotiation messages
@@ -305,7 +247,7 @@ pub enum Message {
         encrypted: bool,
         // Additional Message versions this upstairs supports.
         alternate_versions: Vec<u32>,
-    } = 0,
+    },
     /**
      * This is the first message (when things are good) that the downstairs
      * will reply to the upstairs with.
@@ -315,7 +257,7 @@ pub enum Message {
         version: u32,
         // The IP:Port that repair commands will use to communicate.
         repair_addr: SocketAddr,
-    } = 1,
+    },
 
     /*
      * These messages indicate that there is an incompatibility between the
@@ -324,13 +266,13 @@ pub enum Message {
     VersionMismatch {
         // Version of Message this downstairs wanted.
         version: u32,
-    } = 2,
+    },
     ReadOnlyMismatch {
         expected: bool,
-    } = 3,
+    },
     EncryptedMismatch {
         expected: bool,
-    } = 4,
+    },
 
     /**
      * Forcefully tell this downstairs to promote us (an Upstairs) to
@@ -381,19 +323,19 @@ pub enum Message {
     /// Send a close the given extent ID on the downstairs.
     ExtentClose {
         repair_id: ReconciliationId,
-        extent_id: usize,
+        extent_id: ExtentId,
     },
 
     /// Send a request to reopen the given extent.
     ExtentReopen {
         repair_id: ReconciliationId,
-        extent_id: usize,
+        extent_id: ExtentId,
     },
 
     /// Flush just this extent on just this downstairs client.
     ExtentFlush {
         repair_id: ReconciliationId,
-        extent_id: usize,
+        extent_id: ExtentId,
         client_id: ClientId,
         flush_number: u64,
         gen_number: u64,
@@ -402,7 +344,7 @@ pub enum Message {
     /// Replace an extent with data from the given downstairs.
     ExtentRepair {
         repair_id: ReconciliationId,
-        extent_id: usize,
+        extent_id: ExtentId,
         source_client_id: ClientId,
         source_repair_address: SocketAddr,
         dest_clients: Vec<ClientId>,
@@ -416,7 +358,7 @@ pub enum Message {
     /// A problem with the given extent
     ExtentError {
         repair_id: ReconciliationId,
-        extent_id: usize,
+        extent_id: ExtentId,
         error: CrucibleError,
     },
 
@@ -432,7 +374,7 @@ pub enum Message {
         session_id: Uuid,
         job_id: JobId,
         dependencies: Vec<JobId>,
-        extent_id: usize,
+        extent_id: ExtentId,
     },
     /// Flush and then close an extent.
     ExtentLiveFlushClose {
@@ -440,7 +382,7 @@ pub enum Message {
         session_id: Uuid,
         job_id: JobId,
         dependencies: Vec<JobId>,
-        extent_id: usize,
+        extent_id: ExtentId,
         flush_number: u64,
         gen_number: u64,
     },
@@ -450,7 +392,7 @@ pub enum Message {
         session_id: Uuid,
         job_id: JobId,
         dependencies: Vec<JobId>,
-        extent_id: usize,
+        extent_id: ExtentId,
         source_client_id: ClientId,
         source_repair_address: SocketAddr,
     },
@@ -460,7 +402,7 @@ pub enum Message {
         session_id: Uuid,
         job_id: JobId,
         dependencies: Vec<JobId>,
-        extent_id: usize,
+        extent_id: ExtentId,
     },
     /// There is no real work to do, but we need to complete this job id
     ExtentLiveNoOp {
@@ -532,11 +474,8 @@ pub enum Message {
      * IO related
      */
     Write {
-        upstairs_id: Uuid,
-        session_id: Uuid,
-        job_id: JobId,
-        dependencies: Vec<JobId>,
-        writes: Vec<Write>,
+        header: WriteHeader,
+        data: bytes::Bytes,
     },
     WriteAck {
         upstairs_id: Uuid,
@@ -557,7 +496,7 @@ pub enum Message {
          * The ending extent where a flush should stop.
          * This value is unique per downstairs.
          */
-        extent_limit: Option<usize>,
+        extent_limit: Option<ExtentId>,
     },
     FlushAck {
         upstairs_id: Uuid,
@@ -574,18 +513,13 @@ pub enum Message {
         requests: Vec<ReadRequest>,
     },
     ReadResponse {
-        upstairs_id: Uuid,
-        session_id: Uuid,
-        job_id: JobId,
-        responses: Result<Vec<ReadResponse>, CrucibleError>,
+        header: ReadResponseHeader,
+        data: bytes::BytesMut,
     },
 
     WriteUnwritten {
-        upstairs_id: Uuid,
-        session_id: Uuid,
-        job_id: JobId,
-        dependencies: Vec<JobId>,
-        writes: Vec<Write>,
+        header: WriteHeader,
+        data: bytes::Bytes,
     },
     WriteUnwrittenAck {
         upstairs_id: Uuid,
@@ -606,12 +540,61 @@ pub enum Message {
      */
     Unknown(u32, BytesMut),
 }
-
 /*
  * If you just added or changed the Message enum above, you must also
  * increment the CRUCIBLE_MESSAGE_VERSION.  Go do that right now before you
  * forget.
  */
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct WriteHeader {
+    pub upstairs_id: Uuid,
+    pub session_id: Uuid,
+    pub job_id: JobId,
+    pub dependencies: Vec<JobId>,
+    pub blocks: Vec<WriteBlockMetadata>,
+}
+
+#[derive(Debug, PartialEq, Copy, Clone, Serialize, Deserialize)]
+pub struct WriteBlockMetadata {
+    pub eid: ExtentId,
+    pub offset: Block,
+    pub block_context: BlockContext,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct ReadResponseHeader {
+    pub upstairs_id: Uuid,
+    pub session_id: Uuid,
+    pub job_id: JobId,
+    pub blocks: Result<Vec<ReadResponseBlockMetadata>, CrucibleError>,
+}
+
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
+pub struct ReadResponseBlockMetadata {
+    pub eid: ExtentId,
+    pub offset: Block,
+    pub block_context: Option<BlockContext>,
+}
+
+impl ReadResponseBlockMetadata {
+    // TODO this is dumb
+    pub fn hashes(&self) -> Vec<u64> {
+        self.block_context.iter().map(|x| x.hash).collect()
+    }
+
+    pub fn first_hash(&self) -> Option<u64> {
+        self.block_context.map(|ctx| ctx.hash)
+    }
+
+    // TODO this is dumb
+    pub fn encryption_contexts(&self) -> Vec<Option<&EncryptionContext>> {
+        self.block_context
+            .iter()
+            .map(|x| x.encryption_context.as_ref())
+            .collect()
+    }
+}
 
 impl Message {
     /// Return true if this message contains an Error result
@@ -660,8 +643,170 @@ impl Message {
             Message::ExtentLiveAckId { result, .. } => result.as_ref().err(),
             Message::WriteAck { result, .. } => result.as_ref().err(),
             Message::FlushAck { result, .. } => result.as_ref().err(),
-            Message::ReadResponse { responses, .. } => responses.as_ref().err(),
+            Message::ReadResponse { header, .. } => {
+                header.blocks.as_ref().err()
+            }
             Message::WriteUnwrittenAck { result, .. } => result.as_ref().err(),
+        }
+    }
+}
+
+// In our `Display` implementation, we skip printing large chunks of data but
+// otherwise delegate to the `Debug` formatter.
+impl std::fmt::Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        match self {
+            Message::Write {
+                header:
+                    WriteHeader {
+                        upstairs_id,
+                        session_id,
+                        job_id,
+                        dependencies,
+                        blocks,
+                    },
+                data: _,
+            } => f
+                .debug_struct("Message::Write")
+                .field("upstairs_id", &upstairs_id)
+                .field("session_id", &session_id)
+                .field("job_id", &job_id)
+                .field("dependencies", &dependencies)
+                .field("blocks", &blocks)
+                .field("writes", &"..")
+                .finish(),
+            Message::WriteUnwritten {
+                header:
+                    WriteHeader {
+                        upstairs_id,
+                        session_id,
+                        job_id,
+                        dependencies,
+                        blocks,
+                    },
+                data: _,
+            } => f
+                .debug_struct("Message::WriteUnwritten")
+                .field("upstairs_id", &upstairs_id)
+                .field("session_id", &session_id)
+                .field("job_id", &job_id)
+                .field("dependencies", &dependencies)
+                .field("blocks", &blocks)
+                .field("writes", &"..")
+                .finish(),
+            Message::ReadResponse {
+                header:
+                    ReadResponseHeader {
+                        upstairs_id,
+                        session_id,
+                        job_id,
+                        blocks,
+                    },
+                data: _,
+            } => f
+                .debug_struct("Message::ReadResponse")
+                .field("upstairs_id", &upstairs_id)
+                .field("session_id", &session_id)
+                .field("job_id", &job_id)
+                .field("blocks", &blocks)
+                .field("responses", &"..")
+                .finish(),
+            m => std::fmt::Debug::fmt(m, f),
+        }
+    }
+}
+
+/// Writer to efficiently encode and send a `Message`
+///
+/// In contrast with `CrucibleEncoder`, this writer will send bulk data in a
+/// separate syscall (rather than copying it into an intermediate buffer).
+pub struct MessageWriter<W> {
+    writer: W,
+
+    /// Scratch space for full `Message` encoding
+    scratch: BytesMut,
+
+    /// Scratch space for the raw header
+    header: Vec<u8>,
+}
+
+impl<W> MessageWriter<W>
+where
+    W: tokio::io::AsyncWrite + std::marker::Unpin + std::marker::Send + 'static,
+{
+    /// Builds a new `MessageWriter`
+    #[inline]
+    pub fn new(writer: W) -> Self {
+        Self {
+            writer,
+            scratch: BytesMut::new(),
+            header: vec![],
+        }
+    }
+
+    /// Removes the inner type
+    #[inline]
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+
+    async fn send_raw<H: Serialize, B: AsRef<[u8]>>(
+        &mut self,
+        discriminant: MessageDiscriminants,
+        header: H,
+        data: B,
+    ) -> Result<(), CrucibleError> {
+        let data = data.as_ref();
+        use tokio::io::AsyncWriteExt;
+
+        self.header.clear();
+        let mut cursor = std::io::Cursor::new(&mut self.header);
+        bincode::serialize_into(
+            &mut cursor,
+            &(
+                0u32, // dummy length, to be patched later
+                discriminant,
+                header,
+                data.len(),
+            ),
+        )
+        .unwrap();
+
+        // Patch the length
+        let len: u32 = (self.header.len() + data.len()).try_into().unwrap();
+        self.header[0..4].copy_from_slice(&len.to_le_bytes());
+
+        // write_all_vectored would save a syscall, but is nightly-only
+        self.writer.write_all(&self.header).await?;
+        self.writer.write_all(data).await?;
+
+        Ok(())
+    }
+
+    /// Sends the given message down the wire
+    #[inline]
+    pub async fn send(&mut self, m: Message) -> Result<(), CrucibleError> {
+        use tokio::io::AsyncWriteExt;
+
+        let discriminant = MessageDiscriminants::from(&m);
+        match m {
+            Message::Write { header, data } => {
+                self.send_raw(discriminant, header, data).await
+            }
+            Message::WriteUnwritten { header, data } => {
+                self.send_raw(discriminant, header, data).await
+            }
+            Message::ReadResponse { header, data } => {
+                self.send_raw(discriminant, header, data).await
+            }
+            m => {
+                // Serialize into our local BytesMut, to avoid allocation churn
+                self.scratch.clear();
+                let mut e = CrucibleEncoder::new();
+                e.encode(m, &mut self.scratch)?;
+                self.writer.write_all(&self.scratch).await?;
+                Ok(())
+            }
         }
     }
 }
@@ -683,16 +828,10 @@ impl CrucibleEncoder {
         Ok(len)
     }
 
-    fn a_write(bs: usize) -> Write {
-        Write {
-            eid: 1,
+    fn a_write(bs: usize) -> WriteBlockMetadata {
+        WriteBlockMetadata {
+            eid: ExtentId(1),
             offset: Block::new(1, bs.trailing_zeros()),
-            data: {
-                let sz = bs;
-                let mut data = Vec::with_capacity(sz);
-                data.resize(sz, 1);
-                bytes::Bytes::from(data)
-            },
             block_context: BlockContext {
                 hash: 0,
                 encryption_context: Some(EncryptionContext {
@@ -712,19 +851,23 @@ impl CrucibleEncoder {
      * given our constant MAX_FRM_LEN.
      */
     pub fn max_io_blocks(bs: usize) -> Result<usize, anyhow::Error> {
+        let block_meta = CrucibleEncoder::a_write(bs);
         let size_of_write_message =
-            CrucibleEncoder::serialized_size(CrucibleEncoder::a_write(bs))?;
+            CrucibleEncoder::serialized_size(CrucibleEncoder::a_write(bs))?
+                + bs;
 
         // Maximum frame length divided by a write of one block is the lower
         // bound.
+        let n = MAX_FRM_LEN / size_of_write_message;
         let lower_size_write_message = Message::Write {
-            upstairs_id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
-            job_id: JobId(1),
-            dependencies: vec![JobId(1)],
-            writes: (0..(MAX_FRM_LEN / size_of_write_message))
-                .map(|_| CrucibleEncoder::a_write(bs))
-                .collect(),
+            header: WriteHeader {
+                upstairs_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                job_id: JobId(1),
+                dependencies: vec![JobId(1)],
+                blocks: vec![block_meta; n],
+            },
+            data: vec![0; n * bs].into(),
         };
 
         assert!(
@@ -734,14 +877,16 @@ impl CrucibleEncoder {
 
         // The upper bound is the maximum frame length divided by the block
         // size.
+        let n = MAX_FRM_LEN / bs;
         let upper_size_write_message = Message::Write {
-            upstairs_id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
-            job_id: JobId(1),
-            dependencies: vec![JobId(1)],
-            writes: (0..(MAX_FRM_LEN / bs))
-                .map(|_| CrucibleEncoder::a_write(bs))
-                .collect(),
+            header: WriteHeader {
+                upstairs_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                job_id: JobId(1),
+                dependencies: vec![JobId(1)],
+                blocks: vec![block_meta; n],
+            },
+            data: vec![0; n * bs].into(),
         };
 
         assert!(
@@ -753,26 +898,14 @@ impl CrucibleEncoder {
         // given MAX_FRM_LEN.
 
         let mut lower = match lower_size_write_message {
-            Message::Write {
-                upstairs_id: _,
-                session_id: _,
-                job_id: _,
-                dependencies: _,
-                writes,
-            } => writes.len(),
+            Message::Write { header, .. } => header.blocks.len(),
             _ => {
                 bail!("wat");
             }
         };
 
         let mut upper = match upper_size_write_message {
-            Message::Write {
-                upstairs_id: _,
-                session_id: _,
-                job_id: _,
-                dependencies: _,
-                writes,
-            } => writes.len(),
+            Message::Write { header, .. } => header.blocks.len(),
             _ => {
                 bail!("wat");
             }
@@ -786,13 +919,14 @@ impl CrucibleEncoder {
             }
 
             let mid_size_write_message = Message::Write {
-                upstairs_id: Uuid::new_v4(),
-                session_id: Uuid::new_v4(),
-                job_id: JobId(1),
-                dependencies: vec![JobId(1)],
-                writes: (0..mid)
-                    .map(|_| CrucibleEncoder::a_write(bs))
-                    .collect(),
+                header: WriteHeader {
+                    upstairs_id: Uuid::new_v4(),
+                    session_id: Uuid::new_v4(),
+                    job_id: JobId(1),
+                    dependencies: vec![JobId(1)],
+                    blocks: vec![block_meta; mid],
+                },
+                data: vec![0; mid * bs].into(),
             };
 
             let mid_size =
@@ -881,6 +1015,21 @@ impl CrucibleDecoder {
     pub fn new() -> Self {
         CrucibleDecoder {}
     }
+
+    fn decode_raw<H: for<'a> Deserialize<'a>, F: Fn(H, BytesMut) -> Message>(
+        mut bytes: BytesMut,
+        f: F,
+    ) -> Result<Message, bincode::Error> {
+        // Deserialize header and data length, skipping the tag
+        let (header, data_len): (H, usize) = bincode::deserialize(&bytes[4..])?;
+
+        // Slice out the bulk data
+        let data_start = bytes.len() - data_len;
+        let data = bytes.split_off(data_start);
+
+        // Build our message from header + bulk data
+        Ok(f(header, data))
+    }
 }
 
 impl Default for CrucibleDecoder {
@@ -923,14 +1072,43 @@ impl Decoder for CrucibleDecoder {
             return Ok(None);
         }
 
-        let message = bincode::deserialize_from(&src[4..len]);
-        if len == src.len() {
-            src.clear();
-        } else {
-            src.advance(len);
-        }
+        // Slice the buffer so that it contains only our bincode-serialized
+        // `Message` (without any trailing data or the leading 4-byte length).
+        //
+        // This leaves `src` pointing to the beginning of the next packet (which
+        // may not exist yet), and `buf` pointing to just our bincode-serialized
+        // `Message`.
+        let buf = src.split_to(len).split_off(4);
 
-        Ok(Some(message?))
+        // Deserialize just the discriminant.  This will let us decide whether
+        // to use a specialized strategy for deserializing Messages that contain
+        // bulk data.
+        let discriminant: MessageDiscriminants =
+            bincode::deserialize_from(&buf[..])?;
+
+        let message = match discriminant {
+            MessageDiscriminants::Write => {
+                Self::decode_raw(buf, |header, data| Message::Write {
+                    header,
+                    data: data.freeze(),
+                })
+            }
+            MessageDiscriminants::WriteUnwritten => {
+                Self::decode_raw(buf, |header, data| Message::WriteUnwritten {
+                    header,
+                    data: data.freeze(),
+                })
+            }
+            MessageDiscriminants::ReadResponse => {
+                Self::decode_raw(buf, |header, data| Message::ReadResponse {
+                    header,
+                    data,
+                })
+            }
+            _ => bincode::deserialize_from(&buf[..]),
+        }?;
+
+        Ok(Some(message))
     }
 }
 
@@ -1072,22 +1250,86 @@ mod tests {
         let hash = crucible_common::integrity_hash(&[&data]);
 
         let input = Message::Write {
-            upstairs_id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
-            job_id: JobId(1),
-            dependencies: vec![],
-            writes: vec![Write {
-                eid: 0,
-                offset: Block::new_512(0),
-                data,
-                block_context: BlockContext {
-                    hash,
-                    encryption_context: None,
-                },
-            }],
+            header: WriteHeader {
+                upstairs_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
+                job_id: JobId(1),
+                dependencies: vec![],
+                blocks: vec![WriteBlockMetadata {
+                    eid: ExtentId(0),
+                    offset: Block::new_512(0),
+                    block_context: BlockContext {
+                        hash,
+                        encryption_context: None,
+                    },
+                }],
+            },
+            data,
         };
 
         let mut buffer = BytesMut::new();
         assert!(encoder.encode(input, &mut buffer).is_err());
+    }
+
+    /// Test that the `Message::HereIAm { version, .. }` encoding is stable
+    ///
+    /// This encoding is used to check for compatibility, so it cannot change
+    /// even upon protocol version bumps.
+    #[test]
+    fn here_i_am_version() {
+        let upstairs_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let m = Message::HereIAm {
+            version: 123,
+            upstairs_id,
+            session_id,
+            gen: 567,
+            read_only: true,
+            encrypted: false,
+            alternate_versions: vec![8, 9],
+        };
+        let encoded = bincode::serialize(&m).unwrap();
+        assert_eq!(
+            &encoded[0..16],
+            [
+                0, 0, 0, 0, // tag
+                123, 0, 0, 0, // version
+                16, 0, 0, 0, 0, 0, 0, 0, // UUID length
+            ]
+        );
+        assert_eq!(&encoded[16..32], upstairs_id.into_bytes());
+        assert_eq!(&encoded[32..40], [16, 0, 0, 0, 0, 0, 0, 0]); // UUID length
+        assert_eq!(&encoded[40..56], session_id.into_bytes());
+        assert_eq!(
+            &encoded[56..],
+            [
+                55, 2, 0, 0, 0, 0, 0, 0, // gen
+                1, // read_only
+                0, // encrypted
+                2, 0, 0, 0, 0, 0, 0, 0, // alternate_versions.len()
+                8, 0, 0, 0, // alternate_versions[0]
+                9, 0, 0, 0, // alternate_versions[1]
+            ]
+        );
+    }
+
+    /// Test that the `Message::YesItsMe { version, .. }` encoding is stable
+    ///
+    /// This encoding is used to check for compatibility, so it cannot change
+    /// even upon protocol version bumps.
+    #[test]
+    fn yes_its_me_version() {
+        let m = Message::YesItsMe {
+            version: 123,
+            repair_addr: "127.0.0.1:123".parse().unwrap(),
+        };
+        let encoded = bincode::serialize(&m).unwrap();
+        assert_eq!(
+            &encoded[0..8],
+            [
+                1, 0, 0, 0, // tag
+                123, 0, 0, 0 // version
+            ]
+        );
     }
 }

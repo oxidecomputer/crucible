@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 pub struct ServerContext {
     // Region UUID -> a running Downstairs
-    downstairs: Mutex<HashMap<Uuid, Arc<Mutex<Downstairs>>>>,
+    downstairs: Mutex<HashMap<Uuid, DownstairsHandle>>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -62,20 +62,19 @@ pub async fn run_downstairs_for_region(
         ));
     }
 
-    let d = build_downstairs_for_region(
-        &run_params.data,
-        run_params.lossy,
-        run_params.read_errors,
-        run_params.write_errors,
-        run_params.flush_errors,
-        run_params.read_only,
-        None,
-    )
-    .await
-    .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
+    let d = Downstairs::new_builder(&run_params.data, run_params.read_only)
+        .set_lossy(run_params.lossy)
+        .set_test_errors(
+            run_params.read_errors,
+            run_params.write_errors,
+            run_params.flush_errors,
+        )
+        .build()
+        .map_err(|e| HttpError::for_internal_error(e.to_string()))?;
 
+    let handle = d.handle();
     let _join_handle = start_downstairs(
-        d.clone(),
+        d,
         run_params.address,
         run_params.oximeter,
         run_params.port,
@@ -89,7 +88,7 @@ pub async fn run_downstairs_for_region(
 
     // past here, the downstairs has started successfully
 
-    downstairs.insert(uuid, d);
+    downstairs.insert(uuid, handle);
 
     Ok(HttpResponseCreated(DownstairsRunningResponse { uuid }))
 }

@@ -23,6 +23,9 @@ use crate::extent::{extent_dir, extent_file_name, extent_path, ExtentType};
  */
 pub struct FileServerContext {
     region_dir: PathBuf,
+    read_only: bool,
+    region_definition: RegionDefinition,
+    downstairs: DownstairsHandle,
 }
 
 pub fn write_openapi<W: Write>(f: &mut W) -> Result<()> {
@@ -35,13 +38,17 @@ fn build_api() -> ApiDescription<Arc<FileServerContext>> {
     let mut api = ApiDescription::new();
     api.register(get_extent_file).unwrap();
     api.register(get_files_for_extent).unwrap();
+    api.register(get_region_info).unwrap();
+    api.register(get_region_mode).unwrap();
+    api.register(extent_repair_ready).unwrap();
+    api.register(get_work).unwrap();
 
     api
 }
 
 /// Returns Ok(listen address) if everything launched ok, Err otherwise
-pub async fn repair_main(
-    ds: &Mutex<Downstairs>,
+pub fn repair_main(
+    ds: &Downstairs,
     addr: SocketAddr,
     log: &Logger,
 ) -> Result<SocketAddr, String> {
@@ -63,13 +70,19 @@ pub async fn repair_main(
      * Record the region directory where all the extents and metadata
      * files live.
      */
-    let ds = ds.lock().await;
     let region_dir = ds.region.dir.clone();
-    drop(ds);
+    let read_only = ds.flags.read_only;
+    let region_definition = ds.region.def();
+    let handle = ds.handle();
 
-    let context = FileServerContext { region_dir };
+    info!(log, "Repair listens on {} for path:{:?}", addr, region_dir);
+    let context = FileServerContext {
+        region_dir,
+        read_only,
+        region_definition,
+        downstairs: handle,
+    };
 
-    info!(log, "Repair listens on {}", addr);
     /*
      * Set up the server.
      */
@@ -118,7 +131,7 @@ async fn get_extent_file(
     path: Path<FileSpec>,
 ) -> Result<Response<Body>, HttpError> {
     let fs = path.into_inner();
-    let eid = fs.eid;
+    let eid = ExtentId(fs.eid);
 
     let mut extent_path = extent_path(rqctx.context().region_dir.clone(), eid);
     match fs.file_type {
@@ -126,11 +139,12 @@ async fn get_extent_file(
             extent_path.set_extension("db");
         }
         FileType::DatabaseSharedMemory => {
-            extent_path.set_extension("db-wal");
-        }
-        FileType::DatabaseLog => {
             extent_path.set_extension("db-shm");
         }
+        FileType::DatabaseLog => {
+            extent_path.set_extension("db-wal");
+        }
+        // No file extension
         FileType::Data => (),
     };
 
@@ -176,6 +190,30 @@ async fn get_a_file(path: PathBuf) -> Result<Response<Body>, HttpError> {
     }
 }
 
+/// Return true if the provided extent is closed or the region is read only
+#[endpoint {
+    method = GET,
+    path = "/extent/{eid}/repair-ready",
+}]
+async fn extent_repair_ready(
+    rqctx: RequestContext<Arc<FileServerContext>>,
+    path: Path<Eid>,
+) -> Result<HttpResponseOk<bool>, HttpError> {
+    let eid: usize = path.into_inner().eid as usize;
+    let downstairs = &rqctx.context().downstairs;
+
+    // If the region is read only, the extent is always ready.
+    if rqctx.context().read_only {
+        return Ok(HttpResponseOk(true));
+    }
+
+    downstairs
+        .is_extent_closed(ExtentId(eid as u32))
+        .await
+        .map(HttpResponseOk)
+        .map_err(|e| HttpError::for_internal_error(e.to_string()))
+}
+
 /**
  * Get the list of files related to an extent.
  *
@@ -190,7 +228,7 @@ async fn get_files_for_extent(
     rqctx: RequestContext<Arc<FileServerContext>>,
     path: Path<Eid>,
 ) -> Result<HttpResponseOk<Vec<String>>, HttpError> {
-    let eid = path.into_inner().eid;
+    let eid = ExtentId(path.into_inner().eid);
     let extent_dir = extent_dir(rqctx.context().region_dir.clone(), eid);
 
     // Some sanity checking on the extent path
@@ -223,22 +261,68 @@ async fn get_files_for_extent(
  */
 fn extent_file_list(
     extent_dir: PathBuf,
-    eid: u32,
+    eid: ExtentId,
 ) -> Result<Vec<String>, HttpError> {
     let mut files = Vec::new();
-    let possible_files = vec![(extent_file_name(eid, ExtentType::Data), true)];
+    let possible_files = [
+        (ExtentType::Data, true),
+        (ExtentType::Db, false),
+        (ExtentType::DbShm, false),
+        (ExtentType::DbWal, false),
+    ];
 
     for (file, required) in possible_files.into_iter() {
         let mut fullname = extent_dir.clone();
-        fullname.push(file.clone());
+        let file_name = extent_file_name(eid, file);
+        fullname.push(file_name.clone());
         if fullname.exists() {
-            files.push(file);
+            files.push(file_name);
         } else if required {
             return Err(HttpError::for_bad_request(None, "EBADF".to_string()));
         }
     }
 
     Ok(files)
+}
+/// Return the RegionDefinition describing our region.
+#[endpoint {
+    method = GET,
+    path = "/region-info",
+}]
+async fn get_region_info(
+    rqctx: RequestContext<Arc<FileServerContext>>,
+) -> Result<HttpResponseOk<crucible_common::RegionDefinition>, HttpError> {
+    let region_definition = rqctx.context().region_definition;
+
+    Ok(HttpResponseOk(region_definition))
+}
+
+/// Return the region-mode describing our region.
+#[endpoint {
+    method = GET,
+    path = "/region-mode",
+}]
+async fn get_region_mode(
+    rqctx: RequestContext<Arc<FileServerContext>>,
+) -> Result<HttpResponseOk<bool>, HttpError> {
+    let read_only = rqctx.context().read_only;
+
+    Ok(HttpResponseOk(read_only))
+}
+
+/// Work queue
+#[endpoint {
+    method = GET,
+    path = "/work",
+}]
+async fn get_work(
+    rqctx: RequestContext<Arc<FileServerContext>>,
+) -> Result<HttpResponseOk<bool>, HttpError> {
+    let downstairs = &rqctx.context().downstairs;
+    downstairs
+        .show_work()
+        .map(|_| HttpResponseOk(true))
+        .map_err(|e| HttpError::for_internal_error(e.to_string()))
 }
 
 #[cfg(test)]
@@ -262,20 +346,20 @@ mod test {
         build_logger()
     }
 
-    #[tokio::test]
-    async fn extent_expected_files() -> Result<()> {
+    #[test]
+    fn extent_expected_files() -> Result<()> {
         // Verify that the list of files returned for an extent matches
         // what we expect.  This is a hack of sorts as we are hard coding
         // the expected names of files here in that test, rather than
         // determine them through some programmatic means.
         let dir = tempdir()?;
-        let mut region =
-            Region::create(&dir, new_region_options(), csl()).await?;
-        region.extend(3).await?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
+        region.extend(3, Backend::default())?;
 
         // Determine the directory and name for expected extent files.
-        let ed = extent_dir(&dir, 1);
-        let mut ex_files = extent_file_list(ed, 1).unwrap();
+        let eid = ExtentId(1);
+        let ed = extent_dir(&dir, eid);
+        let mut ex_files = extent_file_list(ed, eid).unwrap();
         ex_files.sort();
         let expected = vec!["001"];
         println!("files: {:?}", ex_files);
@@ -284,23 +368,23 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn extent_expected_files_with_close() -> Result<()> {
+    #[test]
+    fn extent_expected_files_with_close() -> Result<()> {
         // Verify that the list of files returned for an extent matches
         // what we expect. In this case we expect the extent data file and
         // nothing else. We close the extent here first, and on illumos that
         // behaves a little different than elsewhere.
         let dir = tempdir()?;
-        let mut region =
-            Region::create(&dir, new_region_options(), csl()).await?;
-        region.extend(3).await?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
+        region.extend(3, Backend::default())?;
 
-        region.close_extent(1).await.unwrap();
+        let eid = ExtentId(1);
+        region.close_extent(eid).unwrap();
 
         // Determine the directory and name for expected extent files.
-        let extent_dir = extent_dir(&dir, 1);
+        let extent_dir = extent_dir(&dir, eid);
 
-        let mut ex_files = extent_file_list(extent_dir, 1).unwrap();
+        let mut ex_files = extent_file_list(extent_dir, eid).unwrap();
         ex_files.sort();
         let expected = vec!["001"];
         println!("files: {:?}", ex_files);
@@ -309,24 +393,24 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn extent_expected_files_fail() -> Result<()> {
+    #[test]
+    fn extent_expected_files_fail() -> Result<()> {
         // Verify that we get an error if the expected extent file
         // is missing.
         let dir = tempdir()?;
-        let mut region =
-            Region::create(&dir, new_region_options(), csl()).await?;
-        region.extend(3).await?;
+        let mut region = Region::create(&dir, new_region_options(), csl())?;
+        region.extend(3, Backend::default())?;
 
         // Determine the directory and name for expected extent files.
-        let extent_dir = extent_dir(&dir, 1);
+        let eid = ExtentId(1);
+        let extent_dir = extent_dir(&dir, eid);
 
         // Delete the extent file
         let mut rm_file = extent_dir.clone();
-        rm_file.push(extent_file_name(1, ExtentType::Data));
+        rm_file.push(extent_file_name(eid, ExtentType::Data));
         std::fs::remove_file(&rm_file).unwrap();
 
-        assert!(extent_file_list(extent_dir, 1).is_err());
+        assert!(extent_file_list(extent_dir, eid).is_err());
 
         Ok(())
     }

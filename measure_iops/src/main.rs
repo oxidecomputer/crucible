@@ -91,16 +91,6 @@ async fn main() -> Result<()> {
         read_only: false,
     };
 
-    /*
-     * If any of our async tasks in our runtime panic, then we should
-     * exit the program right away.
-     */
-    let default_panic = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        default_panic(info);
-        std::process::exit(1);
-    }));
-
     let (guest, mut io) = Guest::new(None);
     let guest = Arc::new(guest);
 
@@ -151,7 +141,7 @@ async fn main() -> Result<()> {
     'outer: loop {
         enum RandomOp {
             Read(u64, Buffer),
-            Write(u64, Bytes),
+            Write(u64, BytesMut),
         }
 
         let mut ops = Vec::with_capacity(io_depth);
@@ -165,13 +155,14 @@ async fn main() -> Result<()> {
                     Buffer::new(io_size / bsz as usize, bsz as usize),
                 ));
             } else {
-                let bytes = Bytes::from(if opt.all_zeroes {
-                    vec![0u8; io_size]
+                let mut bytes = BytesMut::with_capacity(io_size);
+                if opt.all_zeroes {
+                    bytes.resize(io_size, 0);
                 } else {
-                    (0..io_size)
-                        .map(|_| rng.sample(rand::distributions::Standard))
-                        .collect::<Vec<u8>>()
-                });
+                    bytes.extend((0..io_size).map(|_| -> u8 {
+                        rng.sample(rand::distributions::Standard)
+                    }));
+                }
                 ops.push(RandomOp::Write(offset, bytes));
             }
         }

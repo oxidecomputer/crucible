@@ -26,6 +26,7 @@ futures.workspace = true
 hex.workspace = true
 httptest.workspace = true
 rand.workspace = true
+repair-client.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,11 +1,9 @@
 // Copyright 2023 Oxide Computer Company
 use std::convert::TryInto;
-use std::fmt;
 use std::fmt::Debug;
-use std::fs::{File, OpenOptions};
-use tokio::sync::Mutex;
+use std::fs::File;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use nix::unistd::{sysconf, SysconfVar};
 
 use serde::{Deserialize, Serialize};
@@ -19,7 +17,7 @@ use super::*;
 
 #[derive(Debug)]
 pub struct Extent {
-    pub number: u32,
+    pub number: ExtentId,
     read_only: bool,
     iov_max: usize,
 
@@ -27,10 +25,10 @@ pub struct Extent {
     /// data, the metadata about that extent, and the set of dirty blocks that
     /// have been written to since last flush.  We use dynamic dispatch here to
     /// support multiple extent implementations.
-    inner: Mutex<Box<dyn ExtentInner>>,
+    inner: Box<dyn ExtentInner + Send + Sync>,
 }
 
-pub(crate) trait ExtentInner: Send + Debug {
+pub(crate) trait ExtentInner: Send + Sync + Debug {
     fn gen_number(&self) -> Result<u64, CrucibleError>;
     fn flush_number(&self) -> Result<u64, CrucibleError>;
     fn dirty(&self) -> Result<bool, CrucibleError>;
@@ -45,30 +43,38 @@ pub(crate) trait ExtentInner: Send + Debug {
     fn read(
         &mut self,
         job_id: JobId,
-        requests: &[&crucible_protocol::ReadRequest],
-        responses: &mut Vec<crucible_protocol::ReadResponse>,
+        req: ExtentReadRequest,
         iov_max: usize,
-    ) -> Result<(), CrucibleError>;
+    ) -> Result<ExtentReadResponse, CrucibleError>;
 
     fn write(
         &mut self,
         job_id: JobId,
-        writes: &[&crucible_protocol::Write],
+        write: &ExtentWrite,
         only_write_unwritten: bool,
         iov_max: usize,
     ) -> Result<(), CrucibleError>;
 
+    /// Reads zero or one context slots for each block in the given range
+    ///
+    /// # Panics
+    /// If an extent implementation cannot get block contexts separately from a
+    /// read, this is allowed to panic.
     #[cfg(test)]
     fn get_block_contexts(
         &mut self,
         block: u64,
         count: u64,
-    ) -> Result<Vec<Vec<DownstairsBlockContext>>, CrucibleError>;
+    ) -> Result<Vec<Option<DownstairsBlockContext>>, CrucibleError>;
 
     /// Sets the dirty flag and updates a block context
     ///
     /// This should only be called from test functions, where we want to
     /// manually modify block contexts and test associated behavior
+    ///
+    /// # Panics
+    /// If an extent implementation cannot set block contexts separately from a
+    /// write, this is allowed to panic.
     #[cfg(test)]
     fn set_dirty_and_block_context(
         &mut self,
@@ -77,7 +83,7 @@ pub(crate) trait ExtentInner: Send + Debug {
 }
 
 /// BlockContext, with the addition of block index and on_disk_hash
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct DownstairsBlockContext {
     pub block_context: BlockContext,
 
@@ -89,7 +95,7 @@ pub struct DownstairsBlockContext {
 /// out of band. If Opened, then this extent is accepting operations.
 #[derive(Debug)]
 pub enum ExtentState {
-    Opened(Arc<Extent>),
+    Opened(Extent),
     Closed,
 }
 
@@ -144,7 +150,7 @@ impl ExtentMeta {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 #[allow(clippy::enum_variant_names)]
 pub enum ExtentType {
     Data,
@@ -153,8 +159,8 @@ pub enum ExtentType {
     DbWal,
 }
 
-impl fmt::Display for ExtentType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+impl std::fmt::Display for ExtentType {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             ExtentType::Data => Ok(()),
             ExtentType::Db => write!(f, "db"),
@@ -169,7 +175,7 @@ impl fmt::Display for ExtentType {
  * FileType from the repair client.
  */
 impl ExtentType {
-    pub fn to_file_type(&self) -> FileType {
+    pub fn to_file_type(self) -> FileType {
         match self {
             ExtentType::Data => FileType::Data,
             ExtentType::Db => FileType::Db,
@@ -182,13 +188,13 @@ impl ExtentType {
 /**
  * Produce the string name of the data file for a given extent number
  */
-pub fn extent_file_name(number: u32, extent_type: ExtentType) -> String {
+pub fn extent_file_name(number: ExtentId, extent_type: ExtentType) -> String {
     match extent_type {
         ExtentType::Data => {
-            format!("{:03X}", number & 0xFFF)
+            format!("{:03X}", number.0 & 0xFFF)
         }
         ExtentType::Db | ExtentType::DbShm | ExtentType::DbWal => {
-            format!("{:03X}.{}", number & 0xFFF, extent_type)
+            format!("{:03X}.{}", number.0 & 0xFFF, extent_type)
         }
     }
 }
@@ -197,10 +203,10 @@ pub fn extent_file_name(number: u32, extent_type: ExtentType) -> String {
  * Produce a PathBuf that refers to the containing directory for extent
  * "number", anchored under "dir".
  */
-pub fn extent_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
+pub fn extent_dir<P: AsRef<Path>>(dir: P, number: ExtentId) -> PathBuf {
     let mut out = dir.as_ref().to_path_buf();
-    out.push(format!("{:02X}", (number >> 24) & 0xFF));
-    out.push(format!("{:03X}", (number >> 12) & 0xFFF));
+    out.push(format!("{:02X}", (number.0 >> 24) & 0xFF));
+    out.push(format!("{:03X}", (number.0 >> 12) & 0xFFF));
     out
 }
 
@@ -208,7 +214,7 @@ pub fn extent_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
  * Produce a PathBuf that refers to the backing file for extent "number",
  * anchored under "dir".
  */
-pub fn extent_path<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
+pub fn extent_path<P: AsRef<Path>>(dir: P, number: ExtentId) -> PathBuf {
     extent_dir(dir, number).join(extent_file_name(number, ExtentType::Data))
 }
 
@@ -218,7 +224,7 @@ pub fn extent_path<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
  * transfer from the source downstairs.
  * anchored under "dir".
  */
-pub fn copy_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
+pub fn copy_dir<P: AsRef<Path>>(dir: P, number: ExtentId) -> PathBuf {
     extent_dir(dir, number)
         .join(extent_file_name(number, ExtentType::Data))
         .with_extension("copy")
@@ -232,7 +238,7 @@ pub fn copy_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
  * anchored under "dir".  The actual generation of this directory will
  * be done by renaming the copy directory.
  */
-pub fn replace_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
+pub fn replace_dir<P: AsRef<Path>>(dir: P, number: ExtentId) -> PathBuf {
     extent_dir(dir, number)
         .join(extent_file_name(number, ExtentType::Data))
         .with_extension("replace")
@@ -246,7 +252,7 @@ pub fn replace_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
  * The actual generation of this directory will be done by renaming the
  * replace directory.
  */
-pub fn completed_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
+pub fn completed_dir<P: AsRef<Path>>(dir: P, number: ExtentId) -> PathBuf {
     extent_dir(dir, number)
         .join(extent_file_name(number, ExtentType::Data))
         .with_extension("completed")
@@ -256,7 +262,10 @@ pub fn completed_dir<P: AsRef<Path>>(dir: P, number: u32) -> PathBuf {
  * Remove directories associated with repair except for the replace
  * directory. Replace is handled specifically during extent open.
  */
-pub fn remove_copy_cleanup_dir<P: AsRef<Path>>(dir: P, eid: u32) -> Result<()> {
+pub fn remove_copy_cleanup_dir<P: AsRef<Path>>(
+    dir: P,
+    eid: ExtentId,
+) -> Result<()> {
     for f in [copy_dir, completed_dir] {
         let d = f(&dir, eid);
         if Path::new(&d).exists() {
@@ -273,15 +282,15 @@ impl Extent {
         Ok(i.try_into()?)
     }
 
-    /**
-     * Open an existing extent file at the location requested.
-     */
+    /// Open an existing extent file at the location requested.
+    ///
+    /// SQLite-backed extents will automatically be migrated into raw files if
+    /// the extent is read-write.
     pub fn open(
         dir: &Path,
         def: &RegionDefinition,
-        number: u32,
+        number: ExtentId,
         read_only: bool,
-        backend: Backend,
         log: &Logger,
     ) -> Result<Extent> {
         /*
@@ -308,7 +317,7 @@ impl Extent {
                 "Extent {} found replacement dir, finishing replacement",
                 number
             );
-            move_replacement_extent(dir, number as usize, log)?;
+            move_replacement_extent(dir, number, false, log)?;
         }
 
         // We will migrate every read-write extent with a SQLite file present.
@@ -349,18 +358,15 @@ impl Extent {
         //  `Extent::open` is called, we will restart the migration (if we
         //  haven't gotten to deleting the `.db` file).
         let mut has_sqlite = path.with_extension("db").exists();
-        let force_sqlite_backend = match backend {
-            Backend::RawFile => false,
-            #[cfg(any(test, feature = "integration-tests"))]
-            Backend::SQLite => true,
-        };
-        let should_migrate = has_sqlite && !read_only && !force_sqlite_backend;
+        let should_migrate = has_sqlite && !read_only;
         if should_migrate {
             info!(log, "Migrating extent {number}");
             // Truncate the file to the length of the extent data
             {
-                let f =
-                    OpenOptions::new().read(true).write(true).open(&path)?;
+                let f = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)?;
                 f.set_len(def.extent_size().value * def.block_size())?;
             }
 
@@ -376,8 +382,10 @@ impl Extent {
 
             // Reopen the file and import those changes
             {
-                let mut f =
-                    OpenOptions::new().read(true).write(true).open(&path)?;
+                let mut f = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)?;
                 extent_inner_raw::RawInner::import(
                     &mut f,
                     def,
@@ -418,18 +426,29 @@ impl Extent {
         // using the raw extent format, but for older read-only snapshots that
         // were constructed using the SQLite backend, we have to keep them
         // as-is.
-        let inner: Box<dyn ExtentInner> = {
+        let inner: Box<dyn ExtentInner + Send + Sync> = {
             if has_sqlite {
-                assert!(read_only || force_sqlite_backend);
+                assert!(read_only);
                 let inner = extent_inner_sqlite::SqliteInner::open(
                     dir, def, number, read_only, log,
                 )?;
                 Box::new(inner)
             } else {
-                let inner = extent_inner_raw::RawInner::open(
-                    dir, def, number, read_only, log,
-                )?;
-                Box::new(inner)
+                match extent_inner_raw_common::OnDiskMeta::get_version_tag(
+                    dir, number,
+                )? {
+                    EXTENT_META_RAW => {
+                        Box::new(extent_inner_raw::RawInner::open(
+                            dir, def, number, read_only, log,
+                        )?)
+                    }
+                    i => {
+                        return Err(CrucibleError::IoError(format!(
+                            "raw extent {number} has unknown tag {i}"
+                        ))
+                        .into())
+                    }
+                }
             }
         };
 
@@ -437,25 +456,21 @@ impl Extent {
             number,
             read_only,
             iov_max: Extent::get_iov_max()?,
-            inner: Mutex::new(inner),
+            inner,
         };
 
         Ok(extent)
     }
 
-    pub async fn dirty(&self) -> bool {
-        self.inner.lock().await.dirty().unwrap()
+    pub fn dirty(&self) -> bool {
+        self.inner.dirty().unwrap()
     }
 
-    /**
-     * Close an extent and the metadata db files for it.
-     */
-    pub async fn close(self) -> Result<(u64, u64, bool), CrucibleError> {
-        let inner = self.inner.lock().await;
-
-        let gen = inner.gen_number().unwrap();
-        let flush = inner.flush_number().unwrap();
-        let dirty = inner.dirty().unwrap();
+    /// Close an extent, returning a tuple of `(gen, flush, dirty)`
+    pub fn close(self) -> Result<(u64, u64, bool), CrucibleError> {
+        let gen = self.inner.gen_number().unwrap();
+        let flush = self.inner.flush_number().unwrap();
+        let dirty = self.inner.dirty().unwrap();
 
         Ok((gen, flush, dirty))
     }
@@ -468,7 +483,7 @@ impl Extent {
     pub fn create(
         dir: &Path,
         def: &RegionDefinition,
-        number: u32,
+        number: ExtentId,
         backend: Backend,
     ) -> Result<Extent> {
         /*
@@ -487,7 +502,7 @@ impl Extent {
         }
         remove_copy_cleanup_dir(dir, number)?;
 
-        let inner: Box<dyn ExtentInner> = match backend {
+        let inner: Box<dyn ExtentInner + Send + Sync> = match backend {
             Backend::RawFile => {
                 Box::new(extent_inner_raw::RawInner::create(dir, def, number)?)
             }
@@ -504,76 +519,71 @@ impl Extent {
             number,
             read_only: false,
             iov_max: Extent::get_iov_max()?,
-            inner: Mutex::new(inner),
+            inner,
         })
     }
 
-    pub fn number(&self) -> u32 {
+    pub fn number(&self) -> ExtentId {
         self.number
     }
 
-    /// Read the real data off underlying storage, and get block metadata. If
-    /// an error occurs while processing any of the requests, the state of
-    /// `responses` is undefined.
+    /// Read the data and metadata off underlying storage
+    ///
+    /// The size of the read is determined by the `capacity` of the (allocated
+    /// but uninitialized) buffer in `req`.
+    ///
+    /// If an error occurs while processing any of the requests, an error is
+    /// returned.  Otherwise, the value in `ExtentReadResponse::data` is
+    /// guaranteed to be fully initialized and of the requested length.
     #[instrument]
-    pub async fn read(
-        &self,
+    pub fn read(
+        &mut self,
         job_id: JobId,
-        requests: &[&crucible_protocol::ReadRequest],
-        responses: &mut Vec<crucible_protocol::ReadResponse>,
-    ) -> Result<(), CrucibleError> {
-        cdt::extent__read__start!(|| {
-            (job_id.0, self.number, requests.len() as u64)
-        });
+        req: ExtentReadRequest,
+    ) -> Result<ExtentReadResponse, CrucibleError> {
+        let num_blocks =
+            (req.data.len() / req.offset.block_size_in_bytes() as usize) as u64;
+        cdt::extent__read__start!(|| (job_id.0, self.number.0, num_blocks));
 
-        let mut inner = self.inner.lock().await;
+        let out = self.inner.read(job_id, req, self.iov_max)?;
+        cdt::extent__read__done!(|| (job_id.0, self.number.0, num_blocks));
 
-        inner.read(job_id, requests, responses, self.iov_max)?;
-
-        cdt::extent__read__done!(|| {
-            (job_id.0, self.number, requests.len() as u64)
-        });
-
-        Ok(())
+        Ok(out)
     }
 
     #[instrument]
-    pub async fn write(
-        &self,
+    pub fn write(
+        &mut self,
         job_id: JobId,
-        writes: &[&crucible_protocol::Write],
+        write: &ExtentWrite,
         only_write_unwritten: bool,
     ) -> Result<(), CrucibleError> {
         if self.read_only {
             crucible_bail!(ModifyingReadOnlyRegion);
         }
 
-        cdt::extent__write__start!(|| {
-            (job_id.0, self.number, writes.len() as u64)
-        });
+        let num_blocks = write.block_contexts.len() as u64;
+        cdt::extent__write__start!(|| (job_id.0, self.number.0, num_blocks));
 
-        let mut inner = self.inner.lock().await;
-        inner.write(job_id, writes, only_write_unwritten, self.iov_max)?;
+        self.inner
+            .write(job_id, write, only_write_unwritten, self.iov_max)?;
 
-        cdt::extent__write__done!(|| {
-            (job_id.0, self.number, writes.len() as u64)
-        });
+        cdt::extent__write__done!(|| (job_id.0, self.number.0, num_blocks));
 
         Ok(())
     }
 
     #[instrument]
-    pub(crate) async fn flush<I: Into<JobOrReconciliationId> + Debug>(
-        &self,
+    pub(crate) fn flush<I: Into<JobOrReconciliationId> + Debug>(
+        &mut self,
         new_flush: u64,
         new_gen: u64,
         id: I, // only used for logging
         log: &Logger,
     ) -> Result<(), CrucibleError> {
         let job_id: JobOrReconciliationId = id.into();
-        let mut inner = self.inner.lock().await;
 
-        if !inner.dirty()? {
+        if !self.inner.dirty()? {
             /*
              * If we have made no writes to this extent since the last flush,
              * we do not need to update the extent on disk
@@ -589,24 +599,43 @@ impl Extent {
             crucible_bail!(ModifyingReadOnlyRegion);
         }
 
-        inner.flush(new_flush, new_gen, job_id)
+        self.inner.flush(new_flush, new_gen, job_id)
     }
 
-    pub async fn get_meta_info(&self) -> ExtentMeta {
-        let inner = self.inner.lock().await;
+    pub fn get_meta_info(&self) -> ExtentMeta {
         ExtentMeta {
             ext_version: 0,
-            gen_number: inner.gen_number().unwrap(),
-            flush_number: inner.flush_number().unwrap(),
-            dirty: inner.dirty().unwrap(),
+            gen_number: self.inner.gen_number().unwrap(),
+            flush_number: self.inner.flush_number().unwrap(),
+            dirty: self.inner.dirty().unwrap(),
         }
     }
 
+    /// Sets the dirty flag and a single block context
+    ///
+    /// # Panics
+    /// If the inner extent implementation does not support setting block
+    /// contexts separately from a write operation
     #[cfg(test)]
-    pub(crate) async fn lock(
-        &self,
-    ) -> tokio::sync::MutexGuard<Box<dyn ExtentInner>> {
-        self.inner.lock().await
+    pub fn set_dirty_and_block_context(
+        &mut self,
+        block_context: &DownstairsBlockContext,
+    ) -> Result<(), CrucibleError> {
+        self.inner.set_dirty_and_block_context(block_context)
+    }
+
+    /// Gets zero or one block contexts for each block in the given range
+    ///
+    /// # Panics
+    /// If the inner extent implementation does not support getting block
+    /// contexts separately from a read operation
+    #[cfg(test)]
+    pub fn get_block_contexts(
+        &mut self,
+        block: u64,
+        count: u64,
+    ) -> Result<Vec<Option<DownstairsBlockContext>>, CrucibleError> {
+        self.inner.get_block_contexts(block, count)
     }
 }
 
@@ -616,13 +645,14 @@ impl Extent {
  */
 pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
     region_dir: P,
-    eid: usize,
+    eid: ExtentId,
+    clone: bool,
     log: &Logger,
 ) -> Result<(), CrucibleError> {
-    let destination_dir = extent_dir(&region_dir, eid as u32);
-    let extent_file_name = extent_file_name(eid as u32, ExtentType::Data);
-    let replace_dir = replace_dir(&region_dir, eid as u32);
-    let completed_dir = completed_dir(&region_dir, eid as u32);
+    let destination_dir = extent_dir(&region_dir, eid);
+    let extent_file_name = extent_file_name(eid, ExtentType::Data);
+    let replace_dir = replace_dir(&region_dir, eid);
+    let completed_dir = completed_dir(&region_dir, eid);
 
     assert!(Path::new(&replace_dir).exists());
     assert!(!Path::new(&completed_dir).exists());
@@ -653,13 +683,31 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
     sync_path(&original_file, log)?;
 
     // We distinguish between SQLite-backend and raw-file extents based on the
-    // presence of the `.db` file.  We should never do live migration across
-    // different extent formats; in fact, we should never live-migrate
-    // SQLite-backed extents at all, but must still handle the case of
-    // unfinished migrations.
+    // presence of the `.db` file.  We should never do extent repair across
+    // different extent formats; it must be SQLite-to-SQLite or raw-to-raw.
+    //
+    // It is uncommon to perform extent repair on SQLite-backed extents at all,
+    // because they are automatically migrated into raw file extents or
+    // read-only.  However, it must be supported for two cases:
+    //
+    // - If there was an unfinished replacement, we must finish that replacement
+    //   before migrating from SQLite -> raw file backend, which happens
+    //   automatically later in startup.
+    // - We use this same code path to perform clones of read-only regions,
+    //   which may be SQLite-backed (and will never migrate to raw files,
+    //   because they are read only).  This is only the case when the `clone`
+    //   argument is `true`.
+    //
+    // In the first case, we know that we are repairing an SQLite-based extent
+    // because the target (original) extent includes a `.db` file.
+    //
+    // In the second case, the target (original) extent is not present, so we
+    // check whether the new files include a `.db` file.
+
     new_file.set_extension("db");
     original_file.set_extension("db");
-    if original_file.exists() {
+
+    if original_file.exists() || (new_file.exists() && clone) {
         if let Err(e) = std::fs::copy(new_file.clone(), original_file.clone()) {
             crucible_bail!(
                 IoError,
@@ -690,6 +738,10 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
             }
             sync_path(&original_file, log)?;
         } else if original_file.exists() {
+            // If we are cloning, then our new region will have been
+            // created with Backend::RawFile, and we should have no SQLite
+            // files.
+            assert!(!clone);
             info!(
                 log,
                 "Remove old file {:?} as there is no replacement",
@@ -714,6 +766,10 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
             }
             sync_path(&original_file, log)?;
         } else if original_file.exists() {
+            // If we are cloning, then our new region will have been
+            // created with Backend::RawFile, and we should have no SQLite
+            // files.
+            assert!(!clone);
             info!(
                 log,
                 "Remove old file {:?} as there is no replacement",
@@ -722,6 +778,7 @@ pub(crate) fn move_replacement_extent<P: AsRef<Path>>(
             std::fs::remove_file(&original_file)?;
         }
     }
+
     sync_path(&destination_dir, log)?;
 
     // After we have all files: move the copy dir.
@@ -766,13 +823,13 @@ pub fn sync_path<P: AsRef<Path> + std::fmt::Debug>(
 pub(crate) fn check_input(
     extent_size: Block,
     offset: Block,
-    data: &[u8],
+    data_len: usize,
 ) -> Result<(), CrucibleError> {
     let block_size = extent_size.block_size_in_bytes() as u64;
     /*
-     * Only accept block sized operations
+     * Only accept block-aligned operations
      */
-    if data.len() != block_size as usize {
+    if data_len % block_size as usize != 0 {
         crucible_bail!(DataLenUnaligned);
     }
 
@@ -787,7 +844,7 @@ pub(crate) fn check_input(
     let total_size = block_size * extent_size.value;
     let byte_offset = offset.value * block_size;
 
-    if (byte_offset + data.len() as u64) > total_size {
+    if (byte_offset + data_len as u64) > total_size {
         crucible_bail!(OffsetInvalid);
     }
 
@@ -805,8 +862,8 @@ mod test {
         let mut data = BytesMut::with_capacity(512);
         data.put(&[1; 512][..]);
 
-        check_input(extent_size, Block::new_512(0), &data).unwrap();
-        check_input(extent_size, Block::new_512(99), &data).unwrap();
+        check_input(extent_size, Block::new_512(0), data.len()).unwrap();
+        check_input(extent_size, Block::new_512(99), data.len()).unwrap();
     }
 
     #[test]
@@ -816,7 +873,7 @@ mod test {
         let mut data = BytesMut::with_capacity(513);
         data.put(&[1; 513][..]);
 
-        check_input(extent_size, Block::new_512(0), &data).unwrap();
+        check_input(extent_size, Block::new_512(0), data.len()).unwrap();
     }
 
     #[test]
@@ -826,7 +883,7 @@ mod test {
         let mut data = BytesMut::with_capacity(511);
         data.put(&[1; 511][..]);
 
-        check_input(extent_size, Block::new_512(0), &data).unwrap();
+        check_input(extent_size, Block::new_512(0), data.len()).unwrap();
     }
 
     #[test]
@@ -836,7 +893,7 @@ mod test {
         let mut data = BytesMut::with_capacity(512);
         data.put(&[1; 512][..]);
 
-        check_input(extent_size, Block::new_512(100), &data).unwrap();
+        check_input(extent_size, Block::new_512(100), data.len()).unwrap();
     }
 
     #[test]
@@ -846,7 +903,7 @@ mod test {
         let mut data = BytesMut::with_capacity(1024);
         data.put(&[1; 1024][..]);
 
-        check_input(extent_size, Block::new_512(99), &data).unwrap();
+        check_input(extent_size, Block::new_512(99), data.len()).unwrap();
     }
 
     #[test]
@@ -856,53 +913,65 @@ mod test {
         let mut data = BytesMut::with_capacity(512 * 100);
         data.put(&[1; 512 * 100][..]);
 
-        check_input(extent_size, Block::new_512(1), &data).unwrap();
+        check_input(extent_size, Block::new_512(1), data.len()).unwrap();
     }
 
     #[test]
     fn extent_name_basic() {
-        assert_eq!(extent_file_name(4, ExtentType::Data), "004");
+        assert_eq!(extent_file_name(ExtentId(4), ExtentType::Data), "004");
     }
 
     #[test]
     fn extent_name_basic_ext() {
-        assert_eq!(extent_file_name(4, ExtentType::Db), "004.db");
+        assert_eq!(extent_file_name(ExtentId(4), ExtentType::Db), "004.db");
     }
 
     #[test]
     fn extent_name_basic_ext_shm() {
-        assert_eq!(extent_file_name(4, ExtentType::DbShm), "004.db-shm");
+        assert_eq!(
+            extent_file_name(ExtentId(4), ExtentType::DbShm),
+            "004.db-shm"
+        );
     }
 
     #[test]
     fn extent_name_basic_ext_wal() {
-        assert_eq!(extent_file_name(4, ExtentType::DbWal), "004.db-wal");
+        assert_eq!(
+            extent_file_name(ExtentId(4), ExtentType::DbWal),
+            "004.db-wal"
+        );
     }
 
     #[test]
     fn extent_name_basic_two() {
-        assert_eq!(extent_file_name(10, ExtentType::Data), "00A");
+        assert_eq!(extent_file_name(ExtentId(10), ExtentType::Data), "00A");
     }
 
     #[test]
     fn extent_name_basic_three() {
-        assert_eq!(extent_file_name(59, ExtentType::Data), "03B");
+        assert_eq!(extent_file_name(ExtentId(59), ExtentType::Data), "03B");
     }
 
     #[test]
     fn extent_name_max() {
-        assert_eq!(extent_file_name(u32::MAX, ExtentType::Data), "FFF");
+        assert_eq!(
+            extent_file_name(ExtentId(u32::MAX), ExtentType::Data),
+            "FFF"
+        );
     }
 
     #[test]
     fn extent_name_min() {
-        assert_eq!(extent_file_name(u32::MIN, ExtentType::Data), "000");
+        assert_eq!(
+            extent_file_name(ExtentId(u32::MIN), ExtentType::Data),
+            "000"
+        );
     }
 
     #[test]
     fn extent_dir_basic() {
         assert_eq!(
-            extent_dir("/var/region", 4),
+            extent_dir("/var/region", ExtentId(4)),
             PathBuf::from("/var/region/00/000/")
         );
     }
@@ -910,7 +979,7 @@ mod test {
     #[test]
     fn extent_dir_max() {
         assert_eq!(
-            extent_dir("/var/region", u32::MAX),
+            extent_dir("/var/region", ExtentId(u32::MAX)),
             PathBuf::from("/var/region/FF/FFF")
         );
     }
@@ -918,7 +987,7 @@ mod test {
     #[test]
     fn extent_dir_min() {
         assert_eq!(
-            extent_dir("/var/region", u32::MIN),
+            extent_dir("/var/region", ExtentId(u32::MIN)),
             PathBuf::from("/var/region/00/000/")
         );
     }
@@ -926,7 +995,7 @@ mod test {
     #[test]
     fn extent_path_min() {
         assert_eq!(
-            extent_path("/var/region", u32::MIN),
+            extent_path("/var/region", ExtentId(u32::MIN)),
             PathBuf::from("/var/region/00/000/000")
         );
     }
@@ -934,7 +1003,7 @@ mod test {
     #[test]
     fn extent_path_three() {
         assert_eq!(
-            extent_path("/var/region", 3),
+            extent_path("/var/region", ExtentId(3)),
             PathBuf::from("/var/region/00/000/003")
         );
     }
@@ -942,7 +1011,7 @@ mod test {
     #[test]
     fn extent_path_mid_hi() {
         assert_eq!(
-            extent_path("/var/region", 65536),
+            extent_path("/var/region", ExtentId(65536)),
             PathBuf::from("/var/region/00/010/000")
         );
     }
@@ -950,7 +1019,7 @@ mod test {
     #[test]
     fn extent_path_mid_lo() {
         assert_eq!(
-            extent_path("/var/region", 65535),
+            extent_path("/var/region", ExtentId::from(65535)),
             PathBuf::from("/var/region/00/00F/FFF")
         );
     }
@@ -958,7 +1027,7 @@ mod test {
     #[test]
     fn extent_path_max() {
         assert_eq!(
-            extent_path("/var/region", u32::MAX),
+            extent_path("/var/region", ExtentId::from(u32::MAX)),
             PathBuf::from("/var/region/FF/FFF/FFF")
         );
     }

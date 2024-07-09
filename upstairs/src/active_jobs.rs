@@ -1,5 +1,6 @@
 // Copyright 2023 Oxide Computer Company
 
+use crucible_common::ExtentId;
 use crucible_protocol::JobId;
 
 use crate::{
@@ -128,11 +129,11 @@ impl ActiveJobs {
     pub fn deps_for_flush(&mut self, flush_id: JobId) -> Vec<JobId> {
         let blocks = ImpactedBlocks::InclusiveRange(
             ImpactedAddr {
-                extent_id: 0,
+                extent_id: ExtentId(0),
                 block: 0,
             },
             ImpactedAddr {
-                extent_id: u64::MAX,
+                extent_id: ExtentId(u32::MAX),
                 block: u64::MAX,
             },
         );
@@ -179,7 +180,7 @@ impl ActiveJobs {
     pub fn deps_for_repair(
         &mut self,
         repair_ids: ExtentRepairIDs,
-        extent: u64,
+        extent: ExtentId,
     ) -> Vec<JobId> {
         let blocks = ImpactedBlocks::InclusiveRange(
             ImpactedAddr {
@@ -468,7 +469,7 @@ impl BlockMap {
                 .next()
                 .map(|(start, _)| *start)
                 .unwrap_or(ImpactedAddr {
-                    extent_id: u64::MAX,
+                    extent_id: ExtentId(u32::MAX),
                     block: u64::MAX,
                 });
             if next_start == pos {
@@ -700,11 +701,13 @@ mod test {
             } else {
                 ImpactedBlocks::InclusiveRange(
                     ImpactedAddr {
-                        extent_id: start / BLOCKS_PER_EXTENT,
+                        extent_id: ExtentId((start / BLOCKS_PER_EXTENT) as u32),
                         block: start % BLOCKS_PER_EXTENT,
                     },
                     ImpactedAddr {
-                        extent_id: (start + len - 1) / BLOCKS_PER_EXTENT,
+                        extent_id: ExtentId(
+                            ((start + len - 1) / BLOCKS_PER_EXTENT) as u32,
+                        ),
                         block: (start + len - 1) % BLOCKS_PER_EXTENT,
                     },
                 )
@@ -865,11 +868,11 @@ mod test {
         ) {
             let flush_range = ImpactedBlocks::InclusiveRange(
                 ImpactedAddr {
-                    extent_id: 0,
+                    extent_id: ExtentId(0),
                     block: 0,
                 },
                 ImpactedAddr {
-                    extent_id: u64::MAX,
+                    extent_id: ExtentId(u32::MAX),
                     block: u64::MAX,
                 },
             );

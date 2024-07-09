@@ -4,6 +4,7 @@ use base64::{engine, Engine};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::fmt::Debug;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
@@ -93,4 +94,48 @@ impl std::fmt::Display for CrucibleOpts {
         write!(f, " read_only: {:?}", self.read_only)?;
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplaceResult {
+    Started,
+    StartedAlready,
+    CompletedAlready,
+    Missing,
+    VcrMatches,
+}
+
+impl Debug for ReplaceResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReplaceResult::Started => {
+                write!(f, "Started")
+            }
+            ReplaceResult::StartedAlready => {
+                write!(f, "StartedAlready")
+            }
+            ReplaceResult::CompletedAlready => {
+                write!(f, "CompletedAlready")
+            }
+            ReplaceResult::Missing => {
+                write!(f, "Missing")
+            }
+            ReplaceResult::VcrMatches { .. } => {
+                write!(f, "VcrMatches")
+            }
+        }
+    }
+}
+
+/// Result of comparing an original volume construction request to a candidate
+/// replacement one.
+pub enum ReplacementRequestCheck {
+    /// The replacement was validated, and this variant holds the old downstairs
+    /// target and the new one replacing it.
+    Valid { old: SocketAddr, new: SocketAddr },
+
+    /// The replacement is not necessary because the replacement matches the
+    /// original.
+    ReplacementMatchesOriginal,
 }

@@ -12,21 +12,19 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use slog::Drain;
 use tempfile::NamedTempFile;
+use tokio::time::{Duration, Instant};
 
 mod region;
 pub use region::{
-    Block, RegionDefinition, RegionOptions, DATABASE_READ_VERSION,
+    Block, ExtentId, RegionDefinition, RegionOptions, DATABASE_READ_VERSION,
     DATABASE_WRITE_VERSION, MAX_BLOCK_SIZE, MAX_SHIFT, MIN_BLOCK_SIZE,
     MIN_SHIFT,
 };
 
+pub mod impacted_blocks;
 pub mod x509;
 
 pub const REPAIR_PORT_OFFSET: u16 = 4000;
-
-// Max number of submitted IOs between the upstairs and the downstairs, above
-// which flow control kicks in.
-pub const MAX_ACTIVE_COUNT: usize = 2600;
 
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(
@@ -57,7 +55,7 @@ pub enum CrucibleError {
     #[error("Error grabbing reader-writer {0} lock")]
     RwLockError(String),
 
-    #[error("BlockReqWaiter recv channel disconnected")]
+    #[error("BlockOpWaiter recv channel disconnected")]
     RecvDisconnected,
 
     #[error("SendError: {0}")]
@@ -158,6 +156,9 @@ pub enum CrucibleError {
 
     #[error("missing block context for non-empty block")]
     MissingBlockContext,
+
+    #[error("Incompatible RegionDefinition {0}")]
+    RegionIncompatible(String),
 }
 
 impl From<std::io::Error> for CrucibleError {
@@ -323,6 +324,11 @@ impl std::fmt::Display for BuildInfo {
  * A common logger setup for all to use.
  */
 pub fn build_logger() -> slog::Logger {
+    build_logger_with_level(slog::Level::Info)
+}
+
+/// Build a logger with the specific log level
+pub fn build_logger_with_level(level: slog::Level) -> slog::Logger {
     let main_drain = if atty::is(atty::Stream::Stdout) {
         let decorator = slog_term::TermDecorator::new().build();
         let drain = slog_term::FullFormat::new(decorator).build().fuse();
@@ -340,7 +346,7 @@ pub fn build_logger() -> slog::Logger {
 
     let (dtrace_drain, probe_reg) = slog_dtrace::Dtrace::new();
 
-    let filtered_main = slog::LevelFilter::new(main_drain, slog::Level::Info);
+    let filtered_main = slog::LevelFilter::new(main_drain, level);
 
     let log = slog::Logger::root(
         slog::Duplicate::new(filtered_main.fuse(), dtrace_drain.fuse()).fuse(),
@@ -363,6 +369,7 @@ impl From<CrucibleError> for dropshot::HttpError {
             | CrucibleError::ModifyingReadOnlyRegion
             | CrucibleError::OffsetInvalid
             | CrucibleError::OffsetUnaligned
+            | CrucibleError::RegionIncompatible(_)
             | CrucibleError::ReplaceRequestInvalid(_)
             | CrucibleError::SnapshotExistsAlready(_)
             | CrucibleError::Unsupported(_) => {
@@ -406,5 +413,19 @@ impl From<CrucibleError> for dropshot::HttpError {
                 dropshot::HttpError::for_internal_error(e.to_string())
             }
         }
+    }
+}
+
+pub fn deadline_secs(secs: f32) -> Instant {
+    Instant::now()
+        .checked_add(Duration::from_secs_f32(secs))
+        .unwrap()
+}
+
+pub async fn verbose_timeout(secs: f32, n: usize, log: slog::Logger) {
+    let d = Duration::from_secs_f32(secs);
+    for i in 0..n {
+        tokio::time::sleep(d).await;
+        slog::warn!(log, "timeout {}/{n}", i + 1,);
     }
 }

@@ -1,17 +1,17 @@
-// Copyright 2023 Oxide Computer Company
+// Copyright 2024 Oxide Computer Company
+
 use super::*;
 
-use dropshot::{
-    ConfigDropshot, ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel,
-    HandlerTaskMode,
-};
 use omicron_common::api::internal::nexus::ProducerEndpoint;
 use omicron_common::api::internal::nexus::ProducerKind;
 use oximeter::{
     types::{Cumulative, Sample},
     Metric, MetricsError, Producer, Target,
 };
-use oximeter_producer::{Config, LogConfig, Server};
+use oximeter_producer::{
+    Config, ConfigLogging, ConfigLoggingIfExists, ConfigLoggingLevel,
+    LogConfig, Server,
+};
 
 // These structs are used to construct the required stats for Oximeter.
 #[derive(Debug, Copy, Clone, Target)]
@@ -70,7 +70,7 @@ impl DsCountStat {
 // share it with the producer trait.
 #[derive(Clone, Debug)]
 pub struct DsStatOuter {
-    pub ds_stat_wrap: Arc<Mutex<DsCountStat>>,
+    pub ds_stat_wrap: Arc<std::sync::Mutex<DsCountStat>>,
 }
 
 impl DsStatOuter {
@@ -79,25 +79,57 @@ impl DsStatOuter {
      * one of these methods will be called.  Each method will get the
      * correct field of DsCountStat to record the update.
      */
-    pub async fn add_connection(&mut self) {
-        let mut dss = self.ds_stat_wrap.lock().await;
+    pub fn add_connection(&mut self) {
+        let mut dss = self.ds_stat_wrap.lock().unwrap();
         let datum = dss.up_connect_count.datum_mut();
         *datum += 1;
     }
-    pub async fn add_write(&mut self) {
-        let mut dss = self.ds_stat_wrap.lock().await;
+    pub fn add_write(&mut self) {
+        let mut dss = self.ds_stat_wrap.lock().unwrap();
         let datum = dss.write_count.datum_mut();
         *datum += 1;
     }
-    pub async fn add_read(&mut self) {
-        let mut dss = self.ds_stat_wrap.lock().await;
+    pub fn add_read(&mut self) {
+        let mut dss = self.ds_stat_wrap.lock().unwrap();
         let datum = dss.read_count.datum_mut();
         *datum += 1;
     }
-    pub async fn add_flush(&mut self) {
-        let mut dss = self.ds_stat_wrap.lock().await;
+    pub fn add_flush(&mut self) {
+        let mut dss = self.ds_stat_wrap.lock().unwrap();
         let datum = dss.flush_count.datum_mut();
         *datum += 1;
+    }
+
+    /// Marks this job as complete, updating our stats and firing `cdt` probes
+    pub fn on_complete(&mut self, m: &Message) {
+        match m {
+            Message::FlushAck { job_id, .. } => {
+                cdt::submit__flush__done!(|| job_id.0);
+                self.add_flush();
+            }
+            Message::WriteAck { job_id, .. } => {
+                cdt::submit__write__done!(|| job_id.0);
+                self.add_write();
+            }
+            Message::WriteUnwrittenAck { job_id, .. } => {
+                cdt::submit__writeunwritten__done!(|| job_id.0);
+                self.add_write();
+            }
+            Message::ReadResponse { header, .. } => {
+                cdt::submit__read__done!(|| header.job_id.0);
+                self.add_read();
+            }
+            Message::ExtentLiveCloseAck { job_id, .. } => {
+                cdt::submit__el__close__done!(|| job_id.0);
+            }
+            Message::ExtentLiveRepairAckId { job_id, .. } => {
+                cdt::submit__el__repair__done!(|| job_id.0);
+            }
+            Message::ExtentLiveAckId { job_id, .. } => {
+                cdt::submit__el__done!(|| job_id.0);
+            }
+            _ => (),
+        }
     }
 }
 
@@ -110,7 +142,7 @@ impl Producer for DsStatOuter {
     fn produce(
         &mut self,
     ) -> Result<Box<dyn Iterator<Item = Sample> + 'static>, MetricsError> {
-        let dss = executor::block_on(self.ds_stat_wrap.lock());
+        let dss = self.ds_stat_wrap.lock().unwrap();
 
         let name = &dss.stat_name;
         let data = vec![
@@ -140,37 +172,32 @@ pub async fn ox_stats(
     my_address: SocketAddr,
     log: &Logger,
 ) -> Result<()> {
-    let dropshot_config = ConfigDropshot {
-        bind_address: my_address,
-        request_body_max_bytes: 2048,
-        default_handler_task_mode: HandlerTaskMode::Detached,
-    };
     let logging_config = ConfigLogging::File {
         level: ConfigLoggingLevel::Error,
         path: "/dev/stdout".into(),
         if_exists: ConfigLoggingIfExists::Append,
     };
 
+    // Use the downstairs's UUID itself in the producer registration, to keep
+    // the same identity across restarts (if any).
     let server_info = ProducerEndpoint {
-        id: Uuid::new_v4(),
+        id: dss.ds_stat_wrap.lock().unwrap().stat_name.downstairs_uuid,
         kind: ProducerKind::Service,
         address: my_address,
-        base_route: "/collect".to_string(),
         interval: Duration::from_secs(10),
     };
 
     let config = Config {
         server_info,
-        registration_address,
-        dropshot: dropshot_config,
+        registration_address: Some(registration_address),
+        request_body_max_bytes: 2048,
         log: LogConfig::Config(logging_config),
     };
 
     // If the server is not responding when the downstairs starts, keep
     // trying.
     loop {
-        let server = Server::start(&config).await;
-        match server {
+        match Server::start(&config) {
             Ok(server) => {
                 server.registry().register_producer(dss.clone()).unwrap();
                 info!(log, "Oximeter producer registered, now serve_forever");

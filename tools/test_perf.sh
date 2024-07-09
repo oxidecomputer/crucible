@@ -31,6 +31,7 @@ count=30000
 prefill=0
 read_loops=2
 write_loops=2
+REGION_ROOT=${REGION_ROOT:-/var/tmp/test_perf}
 region_dir="/var/tmp/dsc"
 
 while getopts 'b:c:g:hfr:w:' opt; do

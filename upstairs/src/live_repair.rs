@@ -102,7 +102,7 @@ pub mod repair_test {
     /// - Ackable jobs will be acked
     /// - Live-repair will continue processing, e.g. moving on to the next
     ///   extent automatically
-    async fn reply_to_repair_job(
+    fn reply_to_repair_job(
         up: &mut Upstairs,
         job_id: JobId,
         client_id: ClientId,
@@ -158,19 +158,18 @@ pub mod repair_test {
             client_id,
             action: ClientAction::Response(m),
         }))
-        .await;
     }
 
     // Test the permutations of calling repair_extent with each downstairs
     // as the one needing LiveRepair
-    #[tokio::test]
-    async fn test_repair_extent_no_action_all() {
+    #[test]
+    fn test_repair_extent_no_action_all() {
         for or_ds in ClientId::iter() {
-            test_repair_extent_no_action(or_ds).await;
+            test_repair_extent_no_action(or_ds);
         }
     }
 
-    async fn test_repair_extent_no_action(or_ds: ClientId) {
+    fn test_repair_extent_no_action(or_ds: ClientId) {
         // Make sure repair jobs can flow through the work queue.
         // This is a pretty heavy test in that we simulate the downstairs tasks
         // and downstairs responses while we verify that the work queue side of
@@ -185,7 +184,7 @@ pub mod repair_test {
         // which we don't call here, we are only testing that the proper number
         // of jobs are issued at the proper times.
 
-        let mut up = start_up_and_repair(or_ds).await;
+        let mut up = start_up_and_repair(or_ds);
 
         // By default, the job IDs always start at 1000 and the gw IDs
         // always start at 1. Take advantage of that and knowing that we
@@ -203,8 +202,7 @@ pub mod repair_test {
             dirty: false,
         };
         for cid in ClientId::iter() {
-            reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei))
-                .await;
+            reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei));
         }
 
         info!(up.log, "done replying to close job");
@@ -216,7 +214,7 @@ pub mod repair_test {
 
         // The repair job has shown up.  Move it forward.
         for cid in ClientId::iter() {
-            reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), None).await;
+            reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), None);
         }
 
         // When we completed the repair jobs, the repair_extent should
@@ -227,16 +225,19 @@ pub mod repair_test {
 
         info!(up.log, "Now move the NoOp job forward");
         for cid in ClientId::iter() {
-            reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None).await;
+            reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None);
         }
 
         info!(up.log, "Finally, move the ReOpen job forward");
         for cid in ClientId::iter() {
-            reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None).await;
+            reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None);
         }
 
         // The extent repair task should complete without error.
-        assert_eq!(up.downstairs.repair().as_ref().unwrap().active_extent, 1);
+        assert_eq!(
+            up.downstairs.repair().as_ref().unwrap().active_extent,
+            ExtentId(1)
+        );
 
         // We should have 6 jobs on the queue; 4 from the first extent, and 2
         // more for the next extent (which was started when the job was acked)
@@ -292,14 +293,14 @@ pub mod repair_test {
 
     // Loop over the possible downstairs to be in LiveRepair and
     // run through the do_repair code path.
-    #[tokio::test]
-    async fn test_repair_extent_do_repair_all() {
+    #[test]
+    fn test_repair_extent_do_repair_all() {
         for or_ds in ClientId::iter() {
-            test_repair_extent_do_repair(or_ds).await;
+            test_repair_extent_do_repair(or_ds);
         }
     }
 
-    async fn test_repair_extent_do_repair(or_ds: ClientId) {
+    fn test_repair_extent_do_repair(or_ds: ClientId) {
         // This test covers a simple case of calling repair_extent().
         // In this test, the simulated downstairs will return data that will
         // indicate that a repair is required for this extent.  We expect to
@@ -313,7 +314,7 @@ pub mod repair_test {
         // we don't check all possible results and assume that the other
         // flow tests cover those cases.
 
-        let mut up = start_up_and_repair(or_ds).await;
+        let mut up = start_up_and_repair(or_ds);
         info!(up.log, "started up");
 
         // By default, the job IDs always start at 1000 and the gw IDs
@@ -347,8 +348,7 @@ pub mod repair_test {
                 cid,
                 Ok(()),
                 Some(if cid == or_ds { bad_ei } else { ei }),
-            )
-            .await;
+            );
         }
 
         // Once we process the IO completion, and drop the lock, the task
@@ -362,7 +362,7 @@ pub mod repair_test {
         // error, we don't pass it to move_and_complete_job
         info!(up.log, "Now reply to the repair job");
         for cid in ClientId::iter() {
-            reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), None).await;
+            reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), None);
         }
 
         // When we completed the repair jobs, the repair_extent should
@@ -370,17 +370,20 @@ pub mod repair_test {
         // next.
         info!(up.log, "Now move the NoOp job forward");
         for cid in ClientId::iter() {
-            reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None).await;
+            reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None);
         }
 
         // The reopen job should already be on the queue, move it forward.
         info!(up.log, "Finally, move the ReOpen job forward");
         for cid in ClientId::iter() {
-            reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None).await;
+            reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None);
         }
 
         // The extent repair task should complete without error.
-        assert_eq!(up.downstairs.repair().as_ref().unwrap().active_extent, 1);
+        assert_eq!(
+            up.downstairs.repair().as_ref().unwrap().active_extent,
+            ExtentId(1)
+        );
 
         // We should have 6 jobs on the queue.
         // Four from the first extent we just repaired, and two more for the
@@ -426,19 +429,19 @@ pub mod repair_test {
         assert_eq!(job.state_count().active, 3);
     }
 
-    #[tokio::test]
-    async fn test_repair_extent_close_fails_all() {
+    #[test]
+    fn test_repair_extent_close_fails_all() {
         // Test all the permutations of
         // A downstairs that is in LiveRepair
         // A downstairs that returns error on the ExtentFlushClose operation.
         for failed_ds in ClientId::iter() {
             for err_ds in ClientId::iter() {
-                test_repair_extent_close_fails(failed_ds, err_ds).await;
+                test_repair_extent_close_fails(failed_ds, err_ds);
             }
         }
     }
 
-    async fn test_repair_extent_close_fails(or_ds: ClientId, err_ds: ClientId) {
+    fn test_repair_extent_close_fails(or_ds: ClientId, err_ds: ClientId) {
         // This test covers calling repair_extent() and tests that the
         // error handling when the initial close command fails.
         // In this test, we will simulate responses from the downstairs tasks.
@@ -447,7 +450,7 @@ pub mod repair_test {
         // downstairs that will return error for the ExtentClose operation.
         // They may be the same downstairs.
 
-        let mut up = start_up_and_repair(or_ds).await;
+        let mut up = start_up_and_repair(or_ds);
 
         // By default, the job IDs always start at 1000 and the gw IDs
         // always start at 1. Take advantage of that and knowing that we
@@ -479,8 +482,7 @@ pub mod repair_test {
                 cid,
                 r,
                 Some(ei), // Err takes precedence
-            )
-            .await;
+            );
         }
 
         // process_ds_completion should force the downstairs to fail
@@ -489,10 +491,9 @@ pub mod repair_test {
         info!(up.log, "repair job should have got here, move it forward");
         // The repair (NoOp) job should have shown up.  Move it forward.
         for cid in ClientId::iter() {
-            if cid != err_ds {
+            if cid != err_ds && cid != or_ds {
                 info!(up.log, "replying to repair job on {cid}");
-                reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), None)
-                    .await;
+                reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), None);
             }
         }
 
@@ -501,20 +502,18 @@ pub mod repair_test {
         // next.
         info!(up.log, "Now move the NoOp job forward");
         for cid in ClientId::iter() {
-            if cid != err_ds {
+            if cid != err_ds && cid != or_ds {
                 info!(up.log, "replying to NoOp job on {cid}");
-                reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None)
-                    .await;
+                reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None);
             }
         }
 
         // The reopen job should already be on the queue, move it forward.
         info!(up.log, "Finally, move the ReOpen job forward");
         for cid in ClientId::iter() {
-            if cid != err_ds {
+            if cid != err_ds && cid != or_ds {
                 info!(up.log, "replying to ReOpen job on {cid}");
-                reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None)
-                    .await;
+                reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None);
             }
         }
 
@@ -601,22 +600,19 @@ pub mod repair_test {
         }
     }
 
-    #[tokio::test]
-    async fn test_repair_extent_repair_fails_all() {
+    #[test]
+    fn test_repair_extent_repair_fails_all() {
         // Test all the permutations of
         // A downstairs that is in LiveRepair
         // A downstairs that returns error on the ExtentFlushClose operation.
         for failed_ds in ClientId::iter() {
             for err_ds in ClientId::iter() {
-                test_repair_extent_repair_fails(failed_ds, err_ds).await;
+                test_repair_extent_repair_fails(failed_ds, err_ds);
             }
         }
     }
 
-    async fn test_repair_extent_repair_fails(
-        or_ds: ClientId,
-        err_ds: ClientId,
-    ) {
+    fn test_repair_extent_repair_fails(or_ds: ClientId, err_ds: ClientId) {
         // This test covers calling repair_extent() and tests that the
         // error handling when the repair command fails.
         // In this test, we will simulate responses from the downstairs tasks.
@@ -625,7 +621,7 @@ pub mod repair_test {
         // downstairs that will return error for the ExtentLiveRepair
         // operation.  They may be the same downstairs.
 
-        let mut up = start_up_and_repair(or_ds).await;
+        let mut up = start_up_and_repair(or_ds);
 
         // By default, the job IDs always start at 1000 and the gw IDs
         // always start at 1. Take advantage of that and knowing that we
@@ -644,8 +640,7 @@ pub mod repair_test {
         };
         info!(up.log, "reply to the close job");
         for cid in ClientId::iter() {
-            reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei))
-                .await;
+            reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei));
         }
 
         // Once we process the IO completion the task
@@ -657,7 +652,7 @@ pub mod repair_test {
             } else {
                 Ok(())
             };
-            reply_to_repair_job(&mut up, ds_repair_id, cid, r, None).await;
+            reply_to_repair_job(&mut up, ds_repair_id, cid, r, None);
         }
 
         // process_ds_completion should force both the downstairs that
@@ -671,8 +666,7 @@ pub mod repair_test {
         info!(up.log, "Now move the NoOp job forward");
         for cid in ClientId::iter() {
             if cid != err_ds && cid != or_ds {
-                reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None)
-                    .await;
+                reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None);
             }
         }
 
@@ -680,8 +674,7 @@ pub mod repair_test {
         info!(up.log, "Finally, move the ReOpen job forward");
         for cid in ClientId::iter() {
             if cid != err_ds && cid != or_ds {
-                reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None)
-                    .await;
+                reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None);
             }
         }
 
@@ -753,24 +746,24 @@ pub mod repair_test {
         }
     }
 
-    #[tokio::test]
-    async fn test_repair_extent_fail_noop_all() {
+    #[test]
+    fn test_repair_extent_fail_noop_all() {
         // Test all the permutations of
         // A downstairs that is in LiveRepair
         // A downstairs that returns error on the ExtentLiveNoOp operation.
         for or_ds in ClientId::iter() {
             for err_ds in ClientId::iter() {
-                test_repair_extent_fail_noop(or_ds, err_ds).await;
+                test_repair_extent_fail_noop(or_ds, err_ds);
             }
         }
     }
 
-    async fn test_repair_extent_fail_noop(or_ds: ClientId, err_ds: ClientId) {
+    fn test_repair_extent_fail_noop(or_ds: ClientId, err_ds: ClientId) {
         // Test repair_extent when the noop job fails.
         // We take input for both which downstairs is in LiveRepair, and
         // which downstairs will return error on the NoOp operation.
 
-        let mut up = start_up_and_repair(or_ds).await;
+        let mut up = start_up_and_repair(or_ds);
 
         // By default, the job IDs always start at 1000 and the gw IDs
         // always start at 1. Take advantage of that and knowing that we
@@ -788,15 +781,13 @@ pub mod repair_test {
             dirty: false,
         };
         for cid in ClientId::iter() {
-            reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei))
-                .await;
+            reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei));
         }
 
         // Once we process the IO completion, the task doing extent
         // repair should submit the next IO.  Move that job forward.
         for cid in ClientId::iter() {
-            reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), Some(ei))
-                .await;
+            reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), Some(ei));
         }
 
         // When we completed the repair jobs, the repair_extent should
@@ -809,14 +800,13 @@ pub mod repair_test {
             } else {
                 Ok(())
             };
-            reply_to_repair_job(&mut up, ds_noop_id, cid, r, None).await;
+            reply_to_repair_job(&mut up, ds_noop_id, cid, r, None);
         }
 
         info!(up.log, "Now ACK the reopen job");
         for cid in ClientId::iter() {
-            if cid != err_ds {
-                reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None)
-                    .await;
+            if cid != err_ds && cid != or_ds {
+                reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None);
             }
         }
 
@@ -869,19 +859,19 @@ pub mod repair_test {
         }
     }
 
-    #[tokio::test]
-    async fn test_repair_extent_fail_noop_out_of_order_all() {
+    #[test]
+    fn test_repair_extent_fail_noop_out_of_order_all() {
         // Test all the permutations of
         // A downstairs that is in LiveRepair
         // A downstairs that returns error on the ExtentLiveNoOp operation.
         for or_ds in ClientId::iter() {
             for err_ds in ClientId::iter() {
-                test_repair_extent_fail_noop_out_of_order(or_ds, err_ds).await;
+                test_repair_extent_fail_noop_out_of_order(or_ds, err_ds);
             }
         }
     }
 
-    async fn test_repair_extent_fail_noop_out_of_order(
+    fn test_repair_extent_fail_noop_out_of_order(
         or_ds: ClientId,
         err_ds: ClientId,
     ) {
@@ -891,7 +881,7 @@ pub mod repair_test {
         // We take input for both which downstairs is in LiveRepair, and
         // which downstairs will return error on the NoOp operation.
 
-        let mut up = start_up_and_repair(or_ds).await;
+        let mut up = start_up_and_repair(or_ds);
 
         // By default, the job IDs always start at 1000 and the gw IDs
         // always start at 1. Take advantage of that and knowing that we
@@ -909,15 +899,13 @@ pub mod repair_test {
             dirty: false,
         };
         for cid in ClientId::iter() {
-            reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei))
-                .await;
+            reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei));
         }
 
         // Once we process the IO completion, the task doing extent
         // repair should submit the next IO.  Move that job forward.
         for cid in ClientId::iter() {
-            reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), Some(ei))
-                .await;
+            reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), Some(ei));
         }
 
         // When we completed the repair jobs, the repair_extent should
@@ -926,16 +914,14 @@ pub mod repair_test {
         info!(up.log, "Now move the NoOp job forward for working DS");
         for cid in ClientId::iter() {
             if cid != err_ds {
-                reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None)
-                    .await;
+                reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None);
             }
         }
 
         info!(up.log, "Now ACK the reopen job");
         for cid in ClientId::iter() {
             if cid != err_ds {
-                reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None)
-                    .await;
+                reply_to_repair_job(&mut up, ds_reopen_id, cid, Ok(()), None);
             }
         }
 
@@ -946,8 +932,7 @@ pub mod repair_test {
             err_ds,
             Err(CrucibleError::GenericError("bad".to_string())),
             None,
-        )
-        .await;
+        );
 
         // We should have five jobs on the queue.
         assert_eq!(up.downstairs.active_count(), 5);
@@ -994,24 +979,24 @@ pub mod repair_test {
         }
     }
 
-    #[tokio::test]
-    async fn test_repair_extent_fail_reopen_all() {
+    #[test]
+    fn test_repair_extent_fail_reopen_all() {
         // Test all the permutations of
         // A downstairs that is in LiveRepair
         // A downstairs that returns error on the ExtentLiveReopen operation.
         for or_ds in ClientId::iter() {
             for err_ds in ClientId::iter() {
-                test_repair_extent_fail_reopen(or_ds, err_ds).await;
+                test_repair_extent_fail_reopen(or_ds, err_ds);
             }
         }
     }
 
-    async fn test_repair_extent_fail_reopen(or_ds: ClientId, err_ds: ClientId) {
+    fn test_repair_extent_fail_reopen(or_ds: ClientId, err_ds: ClientId) {
         // Test repair_extent when the reopen job fails.
         // We take input for both which downstairs is in LiveRepair, and
         // which downstairs will return error on the NoOp operation.
 
-        let mut up = start_up_and_repair(or_ds).await;
+        let mut up = start_up_and_repair(or_ds);
 
         // By default, the job IDs always start at 1000 and the gw IDs
         // always start at 1. Take advantage of that and knowing that we
@@ -1029,8 +1014,7 @@ pub mod repair_test {
             dirty: false,
         };
         for cid in ClientId::iter() {
-            reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei))
-                .await;
+            reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei));
         }
 
         // Once we process the IO completion, and drop the lock, the task
@@ -1038,7 +1022,7 @@ pub mod repair_test {
 
         // The repair job has shown up.  Move it forward.
         for cid in ClientId::iter() {
-            reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), None).await;
+            reply_to_repair_job(&mut up, ds_repair_id, cid, Ok(()), None);
         }
 
         // When we completed the repair jobs, the main task should
@@ -1046,7 +1030,7 @@ pub mod repair_test {
 
         info!(up.log, "Now move the NoOp job forward");
         for cid in ClientId::iter() {
-            reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None).await;
+            reply_to_repair_job(&mut up, ds_noop_id, cid, Ok(()), None);
         }
 
         // Move the reopen job forward
@@ -1056,7 +1040,7 @@ pub mod repair_test {
             } else {
                 Ok(())
             };
-            reply_to_repair_job(&mut up, ds_reopen_id, cid, r, None).await;
+            reply_to_repair_job(&mut up, ds_reopen_id, cid, r, None);
         }
 
         // We should have four repair jobs on the queue along with the
@@ -1112,13 +1096,13 @@ pub mod repair_test {
         client.checked_state_transition(&up.state, DsState::LiveRepairReady);
         up.on_repair_check();
         assert!(up.downstairs.live_repair_in_progress());
-        assert_eq!(up.downstairs.last_repair_extent(), Some(0));
+        assert_eq!(up.downstairs.last_repair_extent(), Some(ExtentId(0)));
 
         // We should have reserved ids 1000 -> 1003
         assert_eq!(up.downstairs.peek_next_id(), JobId(1004));
 
         // Now, reserve IDs for extent 1
-        up.downstairs.reserve_repair_ids_for_extent(1);
+        up.downstairs.reserve_repair_ids_for_extent(ExtentId(1));
         // The reservation should have taken 1004 -> 1007
         assert_eq!(up.downstairs.peek_next_id(), JobId(1008));
     }
@@ -1126,7 +1110,7 @@ pub mod repair_test {
     // Test function to complete a LiveRepair.
     // This assumes a LiveRepair has been started and the first two repair
     // jobs have been issued.  We will use the starting job ID default of 1000.
-    async fn finish_live_repair(up: &mut Upstairs, ds_start: u64) {
+    fn finish_live_repair(up: &mut Upstairs, ds_start: u64) {
         // By default, the job IDs always start at 1000 and the gw IDs
         // always start at 1. Take advantage of that and knowing that we
         // start from a clean slate to predict what the IDs are for jobs
@@ -1142,30 +1126,30 @@ pub mod repair_test {
             dirty: false,
         };
         for cid in ClientId::iter() {
-            reply_to_repair_job(up, ds_close_id, cid, Ok(()), Some(ei)).await;
+            reply_to_repair_job(up, ds_close_id, cid, Ok(()), Some(ei));
         }
 
         for job in [ds_repair_id, ds_noop_id, ds_reopen_id] {
             for cid in ClientId::iter() {
-                reply_to_repair_job(up, job, cid, Ok(()), None).await;
+                reply_to_repair_job(up, job, cid, Ok(()), None);
             }
         }
     }
 
-    #[tokio::test]
-    async fn test_repair_io_below_repair_extent() {
+    #[test]
+    fn test_repair_io_below_repair_extent() {
         // Verify that io put on the queue when a downstairs is in LiveRepair
         // and the IO is below the extent_limit will be sent to all downstairs
         // for processing and not skipped.
-        let mut up = start_up_and_repair(ClientId::new(1)).await;
+        let mut up = start_up_and_repair(ClientId::new(1));
 
         // Do something to finish extent 0.  This reserves IDs 1004-1007 for the
         // next extent's repairs.
-        finish_live_repair(&mut up, 1000).await;
+        finish_live_repair(&mut up, 1000);
 
         up.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from(vec![0xff; 512].as_slice()),
             false,
         );
 
@@ -1174,7 +1158,7 @@ pub mod repair_test {
         // WriteUnwritten
         up.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from(vec![0xff; 512].as_slice()),
             true,
         );
 
@@ -1191,16 +1175,16 @@ pub mod repair_test {
         }
     }
 
-    #[tokio::test]
-    async fn test_repair_io_at_repair_extent() {
+    #[test]
+    fn test_repair_io_at_repair_extent() {
         // Verify that io put on the queue when a downstairs is in LiveRepair
         // and the IO is for the extent under repair will be sent to all
         // downstairs for processing and not skipped.
-        let mut up = start_up_and_repair(ClientId::new(1)).await;
+        let mut up = start_up_and_repair(ClientId::new(1));
 
         up.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from(vec![0xff; 512].as_slice()),
             false,
         );
 
@@ -1209,7 +1193,7 @@ pub mod repair_test {
         // WriteUnwritten
         up.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from(vec![0xff; 512].as_slice()),
             true,
         );
 
@@ -1222,16 +1206,16 @@ pub mod repair_test {
         }
     }
 
-    #[tokio::test]
-    async fn test_repair_io_above_repair_extent() {
+    #[test]
+    fn test_repair_io_above_repair_extent() {
         // Verify that an IO put on the queue when a downstairs is in
         // LiveRepair and the IO is above the extent_limit will be skipped by
         // the downstairs that is in LiveRepair.
-        let mut up = start_up_and_repair(ClientId::new(1)).await;
+        let mut up = start_up_and_repair(ClientId::new(1));
 
         up.submit_dummy_write(
             Block::new_512(3),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from(vec![0xff; 512].as_slice()),
             false,
         );
 
@@ -1240,7 +1224,7 @@ pub mod repair_test {
         // WriteUnwritten
         up.submit_dummy_write(
             Block::new_512(3),
-            Bytes::from(vec![0xff; 512]),
+            BytesMut::from(vec![0xff; 512].as_slice()),
             true,
         );
 
@@ -1257,8 +1241,8 @@ pub mod repair_test {
             assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
         }
     }
-    #[tokio::test]
-    async fn test_repair_io_span_el_sent() {
+    #[test]
+    fn test_repair_io_span_el_sent() {
         // Verify that IOs put on the queue when a downstairs is
         // in LiveRepair and the IO starts at an extent that is below
         // the extent_limit, but extends to beyond the extent limit,
@@ -1302,18 +1286,18 @@ pub mod repair_test {
         //   4 | W W W | W W W | W W W | 3
         //   5 | R R R | R R R | R R R | 4
         //   6 | WuWuWu| WuWuWu| WuWuWu| 5
-        let mut up = start_up_and_repair(ClientId::new(1)).await;
+        let mut up = start_up_and_repair(ClientId::new(1));
 
         // Extent 0 repair has jobs 1000 -> 1003.
         // This will finish the repair on extent 0 and start the repair
         // on extent 1.
         // Extent 1 repair will have jobs 1004 -> 1007.
-        finish_live_repair(&mut up, 1000).await;
+        finish_live_repair(&mut up, 1000);
 
         // Our default extent size is 3, so 9 blocks will span 3 extents
         up.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512 * 9]),
+            BytesMut::from(vec![0xff; 512 * 9].as_slice()),
             false,
         );
 
@@ -1322,7 +1306,7 @@ pub mod repair_test {
         // WriteUnwritten
         up.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512 * 9]),
+            BytesMut::from(vec![0xff; 512 * 9].as_slice()),
             true,
         );
 
@@ -1369,13 +1353,13 @@ pub mod repair_test {
         //   3 |       |       | RpRpRp|
         //   4 | R R R | R R R | R R R | 3
         //
-        let mut up = start_up_and_repair(ClientId::new(1)).await;
+        let mut up = start_up_and_repair(ClientId::new(1));
 
         // Extent 0 repair has jobs 1000 -> 1003.
         // This will finish the repair on extent 0 and start the repair
         // on extent 1.
         // Extent 1 repair will have jobs 1004 -> 1007.
-        finish_live_repair(&mut up, 1000).await;
+        finish_live_repair(&mut up, 1000);
 
         // Our default extent size is 3, so 9 blocks will span 3 extents
         up.submit_dummy_read(Block::new_512(0), Buffer::new(9, 512));
@@ -1396,8 +1380,8 @@ pub mod repair_test {
         assert_eq!(job.work.deps(), &[JobId(1003), JobId(1007), JobId(1011)]);
     }
 
-    #[tokio::test]
-    async fn test_repair_write_span_el_sent() {
+    #[test]
+    fn test_repair_write_span_el_sent() {
         // Verify that a write IO put on the queue when a downstairs is
         // in LiveRepair and the IO starts at an extent that is below
         // the extent_limit, but extends to beyond the extent limit,
@@ -1429,18 +1413,18 @@ pub mod repair_test {
         //   3 |       |       | RpRpRp|
         //   4 | W W W | W W W | W W W | 3
 
-        let mut up = start_up_and_repair(ClientId::new(1)).await;
+        let mut up = start_up_and_repair(ClientId::new(1));
 
         // Extent 0 repair has jobs 1000 -> 1003.
         // This will finish the repair on extent 0 and start the repair
         // on extent 1.
         // Extent 1 repair will have jobs 1004 -> 1007.
-        finish_live_repair(&mut up, 1000).await;
+        finish_live_repair(&mut up, 1000);
 
         // Our default extent size is 3, so 9 blocks will span 3 extents
         up.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512 * 9]),
+            BytesMut::from(vec![0xff; 512 * 9].as_slice()),
             false,
         );
 
@@ -1457,8 +1441,8 @@ pub mod repair_test {
         assert_eq!(job.work.deps(), &[JobId(1003), JobId(1007), JobId(1011)]);
     }
 
-    #[tokio::test]
-    async fn test_repair_write_span_two_el_sent() {
+    #[test]
+    fn test_repair_write_span_two_el_sent() {
         // Verify that a write IO put on the queue when a downstairs is
         // in LiveRepair and the IO starts at the extent that is under
         // repair and extends for an additional two extents.
@@ -1499,12 +1483,12 @@ pub mod repair_test {
         //   8 | W W W | W W W | W W W | 3,7
         //
 
-        let mut up = start_up_and_repair(ClientId::new(1)).await;
+        let mut up = start_up_and_repair(ClientId::new(1));
 
         // Our default extent size is 3, so block 3 will be on extent 1
         up.submit_dummy_write(
             Block::new_512(0),
-            Bytes::from(vec![0xff; 512 * 9]),
+            BytesMut::from(vec![0xff; 512 * 9].as_slice()),
             false,
         );
 
@@ -1523,14 +1507,14 @@ pub mod repair_test {
         assert_eq!(job.work.deps(), &[JobId(1003), JobId(1007), JobId(1011)]);
     }
 
-    #[tokio::test]
-    async fn test_live_repair_update() {
+    #[test]
+    fn test_live_repair_update() {
         // Make sure that process_ds_completion() will take extent info
         // result and put it on the live repair repair_info.
         // As we don't have an actual downstairs here, we "fake it" by
         // feeding the responses we expect back from the downstairs.
 
-        let mut up = start_up_and_repair(ClientId::new(1)).await;
+        let mut up = start_up_and_repair(ClientId::new(1));
 
         let ds_close_id = JobId(1000);
 
@@ -1541,7 +1525,7 @@ pub mod repair_test {
             dirty: false,
         };
         let cid = ClientId::new(0);
-        reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei)).await;
+        reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei));
         let new_ei = up.downstairs.clients[cid].repair_info.unwrap();
         // Verify the extent information has been added to the repair info
         assert_eq!(new_ei.generation, 5);
@@ -1555,7 +1539,7 @@ pub mod repair_test {
             dirty: true,
         };
         let cid = ClientId::new(1);
-        reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei)).await;
+        reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei));
 
         // Verify the extent information has been added to the repair info
         // for client 1
@@ -1572,7 +1556,7 @@ pub mod repair_test {
         };
 
         let cid = ClientId::new(2);
-        reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei)).await;
+        reply_to_repair_job(&mut up, ds_close_id, cid, Ok(()), Some(ei));
 
         // The extent info is added to the repair info for client 2, but then we
         // proceed with the live-repair and the `repair_info` field is taken

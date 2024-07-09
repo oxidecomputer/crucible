@@ -8,7 +8,7 @@ pub enum DynoFlushConfig {
     None,
 }
 
-pub async fn dynamometer(
+pub fn dynamometer(
     mut region: Region,
     num_writes: usize,
     samples: usize,
@@ -50,7 +50,7 @@ pub async fn dynamometer(
 
         let block_bytes = bytes::Bytes::from(block.clone());
 
-        for eid in 0..ddef.extent_count() {
+        for eid in (0..ddef.extent_count()).map(ExtentId) {
             let mut block_offset = 0;
             loop {
                 if (block_offset + num_writes as u64)
@@ -63,14 +63,8 @@ pub async fn dynamometer(
                 let tag = tag.clone();
 
                 let writes: Vec<_> = (0..num_writes)
-                    .map(|i| crucible_protocol::Write {
-                        eid: eid as u64,
-                        offset: Block::new_with_ddef(
-                            i as u64 + block_offset,
-                            &ddef,
-                        ),
-                        data: block_bytes.clone(),
-                        block_context: BlockContext {
+                    .map(|i| {
+                        let ctx = BlockContext {
                             hash,
                             encryption_context: Some(
                                 crucible_protocol::EncryptionContext {
@@ -78,12 +72,24 @@ pub async fn dynamometer(
                                     tag: tag.as_slice().try_into().unwrap(),
                                 },
                             ),
-                        },
+                        };
+                        RegionWriteReq {
+                            extent: eid,
+                            write: ExtentWrite {
+                                offset: Block::new_with_ddef(
+                                    i as u64 + block_offset,
+                                    &ddef,
+                                ),
+                                data: block_bytes.clone(),
+                                block_contexts: vec![ctx],
+                            },
+                        }
                     })
                     .collect();
+                let rw = RegionWrite(writes);
 
                 let io_operation_time = Instant::now();
-                region.region_write(&writes, JobId(1000), false).await?;
+                region.region_write(&rw, JobId(1000), false)?;
 
                 total_io_time += io_operation_time.elapsed();
                 io_operations_sent += num_writes;
@@ -135,15 +141,13 @@ pub async fn dynamometer(
                 };
 
                 if needs_flush {
-                    region
-                        .region_flush(
-                            flush_number,
-                            gen_number,
-                            &None, // snapshot_details
-                            JobId(1000),
-                            None, // extent_limit
-                        )
-                        .await?;
+                    region.region_flush(
+                        flush_number,
+                        gen_number,
+                        &None, // snapshot_details
+                        JobId(1000),
+                        None, // extent_limit
+                    )?;
 
                     flush_number += 1;
                     gen_number += 1;

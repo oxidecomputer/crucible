@@ -6,6 +6,7 @@
 #: output_rules = [
 #:	"/tmp/*.txt",
 #:	"/tmp/*.log",
+#:	"%/tmp/debug/*",
 #:	"/tmp/core.*",
 #:	"/tmp/dsc/*.txt",
 #:	"/tmp/dsc.tar",
@@ -85,10 +86,14 @@ ls -ltr "$BINDIR" || true
 banner CreateDS
 echo $BINDIR/dsc create \
   --ds-bin "$BINDIR"/crucible-downstairs \
+  --extent-size 4000 \
+  --extent-count 200 \
   --region-count 4 \
   --cleanup
 $BINDIR/dsc create \
   --ds-bin "$BINDIR"/crucible-downstairs \
+  --extent-size 4000 \
+  --extent-count 200 \
   --region-count 4 \
   --cleanup
 
@@ -116,6 +121,21 @@ else
     cat /tmp/dsc.log || true
     exit 1
 fi
+
+echo "Setup self timeout"
+# Give this test two hours to finish
+jobpid=$$; (sleep $(( 120 * 60 )); banner fail-timeout; ps -ef; zfs list;kill $jobpid) &
+
+echo "Setup debug logging"
+mkdir /tmp/debug
+psrinfo -v > /tmp/debug/psrinfo.txt
+df -h > /tmp/debug/df.txt || true
+prstat -d d -mLc 1 > /tmp/debug/prstat.txt 2>&1 &
+iostat -T d -xn 1 > /tmp/debug/iostat.txt 2>&1 &
+mpstat -T d 1 > /tmp/debug/mpstat.txt 2>&1 &
+vmstat -T d -p 1 < /dev/null > /tmp/debug/paging.txt 2>&1 &
+pfexec dtrace -Z -s $input/scripts/perf-downstairs-tick.d > /tmp/debug/dtrace.txt 2>&1 &
+pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/debug/upstairs-info.txt 2>&1 &
 
 banner LR
 ptime -m "$BINDIR"/crutest replace \

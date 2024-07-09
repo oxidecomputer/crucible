@@ -45,6 +45,7 @@ impl DataFile {
         let mut conf_path = base_path.to_path_buf();
         conf_path.push("crucible.json");
 
+        info!(log, "Using conf_path:{:?}", conf_path);
         /*
          * Open data file, load contents.
          */
@@ -52,7 +53,7 @@ impl DataFile {
             Ok(Some(inner)) => inner,
             Ok(None) => Inner::default(),
             Err(e) => {
-                bail!("failed to load data file {:?}: {:?}", conf_path, e)
+                bail!("failed to load data file {:?}: {:?}", conf_path, e);
             }
         };
 
@@ -205,6 +206,8 @@ impl DataFile {
          */
         let port_number = self.get_free_port(&inner)?;
 
+        let read_only = create.source.is_some();
+
         let r = Region {
             id: create.id.clone(),
             state: State::Requested,
@@ -218,6 +221,8 @@ impl DataFile {
             cert_pem: create.cert_pem,
             key_pem: create.key_pem,
             root_pem: create.root_pem,
+            source: create.source,
+            read_only,
         };
 
         info!(self.log, "region {} state: {:?}", r.id.0, r.state);
@@ -390,7 +395,8 @@ impl DataFile {
                         existing.state = State::Tombstoned;
 
                         /*
-                         * Wake the worker thread to remove the snapshot we've created.
+                         * Wake the worker thread to remove the snapshot we've
+                         *  created.
                          */
                         self.bell.notify_all();
 
@@ -399,8 +405,8 @@ impl DataFile {
 
                     State::Failed => {
                         /*
-                         * For now, this terminal state will preserve evidence for
-                         * investigation.
+                         * For now, this terminal state will preserve evidence
+                         *  for investigation.
                          */
                         bail!(
                             "region {} running snapshot {} failed to provision \
@@ -460,8 +466,46 @@ impl DataFile {
         path.push("regions");
         path.push(request.id.0.clone());
 
-        let dataset =
-            ZFSDataset::new(path.into_os_string().into_string().unwrap())?;
+        let dataset = match ZFSDataset::new(
+            path.into_os_string().into_string().unwrap(),
+        ) {
+            Ok(dataset) => dataset,
+            Err(e) => {
+                // This branch can only be entered if `zfs list` for that
+                // dataset path failed to return anything.
+
+                // Did the region exist in the past, and was it already deleted?
+                if let Some(region) = inner.regions.get(&request.id) {
+                    match region.state {
+                        State::Tombstoned | State::Destroyed => {
+                            // If so, any snapshots must have been deleted
+                            // before the agent would allow the region to be
+                            // deleted.
+                            return Ok(());
+                        }
+
+                        State::Requested | State::Created => {
+                            // This is a bug: according to the agent's datafile,
+                            // the region exists, but according to zfs list, it
+                            // does not
+                            bail!("Agent thinks region {} exists but zfs list does not! {e}", request.id.0);
+                        }
+
+                        State::Failed => {
+                            // Something has set the region to state failed, so
+                            // we can't delete this snapshot.
+                            bail!(
+                                "Region {} is in state failed! {e}",
+                                request.id.0
+                            );
+                        }
+                    }
+                } else {
+                    // In here, the region never existed!
+                    bail!("Inside region {} snapshot {} delete, region never existed! {e}", request.id.0, request.name);
+                }
+            }
+        };
 
         let snapshot_name = format!("{}@{}", dataset.dataset(), request.name);
 

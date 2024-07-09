@@ -7,12 +7,12 @@
  * arg0 is the job ID number.
  * arg1 is the client ID
  */
-crucible_upstairs*:::ds-*-io-start
+crucible_upstairs*:::ds-*-net-start
 {
     start[arg0, arg1] = timestamp;
 }
 
-crucible_upstairs*:::ds-*-io-done
+crucible_upstairs*:::ds-*-net-done
 /start[arg0, arg1]/
 {
     strtok(probename, "-");
@@ -22,4 +22,3 @@ crucible_upstairs*:::ds-*-io-done
             quantize(timestamp - start[arg0, arg1]);
     start[arg0, arg1] = 0;
 }
-

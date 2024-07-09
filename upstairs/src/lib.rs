@@ -10,24 +10,24 @@ use std::fmt::{Debug, Formatter};
 use std::io::{Read as _, Result as IOResult, Seek, SeekFrom, Write as _};
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use crucible_client_types::{CrucibleOpts, VolumeConstructionRequest};
+pub use crucible_client_types::{
+    CrucibleOpts, ReplaceResult, VolumeConstructionRequest,
+};
 pub use crucible_common::*;
 pub use crucible_protocol::*;
 
 use anyhow::{bail, Result};
 pub use bytes::{Bytes, BytesMut};
 use oximeter::types::ProducerRegistry;
-use ringbuffer::{AllocRingBuffer, RingBuffer};
+use ringbuffer::AllocRingBuffer;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use slog::{error, info, o, warn, Logger};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
-use tokio::time::Instant;
-use tracing::{instrument, span, Level};
+use tracing::instrument;
 use usdt::register_probes;
 use uuid::Uuid;
 
@@ -35,7 +35,10 @@ use aes_gcm_siv::aead::AeadInPlace;
 use aes_gcm_siv::{Aes256GcmSiv, Key, KeyInit, Nonce, Tag};
 
 pub mod control;
+
+#[cfg(test)]
 mod dummy_downstairs_tests;
+
 mod pseudo_file;
 
 pub mod volume;
@@ -48,16 +51,23 @@ pub mod block_io;
 pub use block_io::{FileBlockIO, ReqwestBlockIO};
 
 pub mod block_req;
-pub(crate) use block_req::{BlockReq, BlockReqReply, BlockReqWaiter, BlockRes};
+pub(crate) use block_req::{BlockOpWaiter, BlockRes};
+
+mod buffer;
+pub use buffer::Buffer; // used in BlockIO::Read, so it must be public
+pub(crate) use buffer::UninitializedBuffer; // only used in pub(crate) functions
 
 mod mend;
 pub use mend::{DownstairsMend, ExtentFix, RegionMetadata};
 pub use pseudo_file::CruciblePseudoFile;
 
+pub(crate) mod guest;
+pub use guest::{Guest, WQCounts};
+use guest::{GuestIoHandle, GuestWorkId};
+
 mod stats;
 
-mod impacted_blocks;
-pub use impacted_blocks::*;
+pub use crucible_common::impacted_blocks::*;
 
 mod deferred;
 mod live_repair;
@@ -75,9 +85,17 @@ mod downstairs;
 mod upstairs;
 use upstairs::{UpCounters, UpstairsAction};
 
-// Max number of outstanding IOs between the upstairs and the downstairs
-// before we give up and mark that downstairs faulted.
-const IO_OUTSTANDING_MAX: usize = 57000;
+/// Max number of write bytes between the upstairs and an offline downstairs
+///
+/// If we exceed this value, the upstairs will give
+/// up and mark the offline downstairs as faulted.
+const IO_OUTSTANDING_MAX_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
+
+/// Max number of outstanding IOs between the upstairs and an offline downstairs
+///
+/// If we exceed this value, the upstairs will give up and mark that offline
+/// downstairs as faulted.
+pub const IO_OUTSTANDING_MAX_JOBS: usize = 10000;
 
 /// The BlockIO trait behaves like a physical NVMe disk (or a virtio virtual
 /// disk): there is no contract about what order operations that are submitted
@@ -112,13 +130,13 @@ pub trait BlockIO: Sync {
     async fn write(
         &self,
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
     ) -> Result<(), CrucibleError>;
 
     async fn write_unwritten(
         &self,
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
     ) -> Result<(), CrucibleError>;
 
     async fn flush(
@@ -179,7 +197,7 @@ pub trait BlockIO: Sync {
     async fn write_to_byte_offset(
         &self,
         offset: u64,
-        data: Bytes,
+        data: BytesMut,
     ) -> Result<(), CrucibleError> {
         if !self.query_is_active().await? {
             return Err(CrucibleError::UpstairsInactive);
@@ -219,48 +237,6 @@ pub type CrucibleBlockIOFuture<'a> = Pin<
     >,
 >;
 
-/// Await on the results of multiple BlockIO operations
-///
-/// Using [async_trait] with the BlockIO trait will perform Box::pin on the
-/// result of the async operation functions. `join_all` is provided here to
-/// consume a list of multiple BlockIO operations' futures and await them all.
-#[inline]
-pub async fn join_all<'a>(
-    iter: impl IntoIterator<Item = CrucibleBlockIOFuture<'a>>,
-) -> Result<(), CrucibleError> {
-    futures::future::join_all(iter)
-        .await
-        .into_iter()
-        .collect::<Result<Vec<()>, CrucibleError>>()
-        .map(|_| ())
-}
-
-#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub enum ReplaceResult {
-    Started,
-    StartedAlready,
-    CompletedAlready,
-    Missing,
-}
-impl Debug for ReplaceResult {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ReplaceResult::Started => {
-                write!(f, "Started")
-            }
-            ReplaceResult::StartedAlready => {
-                write!(f, "StartedAlready")
-            }
-            ReplaceResult::CompletedAlready => {
-                write!(f, "CompletedAlready")
-            }
-            ReplaceResult::Missing => {
-                write!(f, "Missing")
-            }
-        }
-    }
-}
-
 /// DTrace probes in the upstairs
 ///
 /// up__status: This tracks the state of each of the three downstairs
@@ -294,14 +270,21 @@ impl Debug for ReplaceResult {
 /// has received or is acting on the IO yet, it just means the notification
 /// has been sent.
 ///
-/// ds__*__io__start: This is when a downstairs task puts an IO on the
-/// wire to the actual downstairs that will do the work. This probe has
+/// ds__*__client__start: This is when a job is sent to the client task
+/// who will handle the network transfer
+///
+/// ds__*__net__start: This is when a downstairs client task puts an IO on
+/// the wire to the actual downstairs that will do the work. This probe has
 /// both the job ID and the client ID so we can tell the individual
 /// downstairs apart.
 ///
-/// ds__*__io_done: An ACK has been received from a downstairs for an IO
+/// ds__*__net__done: An ACK has been received from a downstairs for an IO
 /// sent to it. At the point of this probe the IO has just come off the
 /// wire and we have not processed it yet.
+///
+/// ds__*__client__done: This probe indicates a message off the wire has
+/// been sent back from the client rx task to the main task and is now being
+/// processed.
 ///
 /// up__to__ds__*__done: (Upstairs__to__Downstairs) This is the point where
 /// the upstairs has decided that it has enough data to complete an IO
@@ -343,27 +326,40 @@ mod cdt {
     fn gw__write__unwritten__start(_: u64) {}
     fn gw__write__deps(_: u64, _: u64) {}
     fn gw__flush__start(_: u64) {}
-    fn gw__close__start(_: u64, _: u64) {}
-    fn gw__repair__start(_: u64, _: u64) {}
+    fn gw__close__start(_: u64, _: u32) {}
+    fn gw__repair__start(_: u64, _: u32) {}
     fn gw__noop__start(_: u64) {}
-    fn gw__reopen__start(_: u64, _: u64) {}
+    fn gw__reopen__start(_: u64, _: u32) {}
     fn up__to__ds__read__start(_: u64) {}
     fn up__to__ds__write__start(_: u64) {}
     fn up__to__ds__write__unwritten__start(_: u64) {}
     fn up__to__ds__flush__start(_: u64) {}
     fn up__block__req__dropped() {}
-    fn ds__read__io__start(_: u64, _: u8) {}
-    fn ds__write__io__start(_: u64, _: u8) {}
-    fn ds__write__unwritten__io__start(_: u64, _: u8) {}
-    fn ds__flush__io__start(_: u64, _: u8) {}
-    fn ds__close__start(_: u64, _: u8, _: usize) {}
-    fn ds__repair__start(_: u64, _: u8, _: usize) {}
+    fn ds__read__client__start(_: u64, _: u8) {}
+    fn ds__write__client__start(_: u64, _: u8) {}
+    fn ds__write__unwritten__client__start(_: u64, _: u8) {}
+    fn ds__flush__client__start(_: u64, _: u8) {}
+    fn ds__close__start(_: u64, _: u8, _: u32) {}
+    fn ds__repair__start(_: u64, _: u8, _: u32) {}
     fn ds__noop__start(_: u64, _: u8) {}
-    fn ds__reopen__start(_: u64, _: u8, _: usize) {}
-    fn ds__read__io__done(_: u64, _: u8) {}
-    fn ds__write__io__done(_: u64, _: u8) {}
-    fn ds__write__unwritten__io__done(_: u64, _: u8) {}
-    fn ds__flush__io__done(_: u64, _: u8) {}
+    fn ds__reopen__start(_: u64, _: u8, _: u32) {}
+    fn ds__read__net__start(_: u64, _: u8) {}
+    fn ds__write__net__start(_: u64, _: u8) {}
+    fn ds__write__unwritten__net__start(_: u64, _: u8) {}
+    fn ds__flush__net__start(_: u64, _: u8) {}
+    fn ds__close__net__start(_: u64, _: u8, _: u32) {}
+    fn ds__repair__net__start(_: u64, _: u8, _: u32) {}
+    fn ds__noop__net__start(_: u64, _: u8) {}
+    fn ds__reopen__net__start(_: u64, _: u8, _: u32) {}
+    fn ds__read__net__done(_: u64, _: u8) {}
+    fn ds__write__net__done(_: u64, _: u8) {}
+    fn ds__write__unwritten__net__done(_: u64, _: u8) {}
+    fn ds__flush__net__done(_: u64, _: u8) {}
+    fn ds__close__net__done(_: u64, _: u8) {}
+    fn ds__read__client__done(_: u64, _: u8) {}
+    fn ds__write__client__done(_: u64, _: u8) {}
+    fn ds__write__unwritten__client__done(_: u64, _: u8) {}
+    fn ds__flush__client__done(_: u64, _: u8) {}
     fn ds__close__done(_: u64, _: u8) {}
     fn ds__repair__done(_: u64, _: u8) {}
     fn ds__noop__done(_: u64, _: u8) {}
@@ -376,10 +372,10 @@ mod cdt {
     fn gw__write__done(_: u64) {}
     fn gw__write__unwritten__done(_: u64) {}
     fn gw__flush__done(_: u64) {}
-    fn gw__close__done(_: u64, _: usize) {}
-    fn gw__repair__done(_: u64, _: usize) {}
+    fn gw__close__done(_: u64, _: u32) {}
+    fn gw__repair__done(_: u64, _: u32) {}
     fn gw__noop__done(_: u64) {}
-    fn gw__reopen__done(_: u64, _: usize) {}
+    fn gw__reopen__done(_: u64, _: u32) {}
     fn extent__or__done(_: u64) {}
     fn reqwest__read__start(_: u32, _: Uuid) {}
     fn reqwest__read__done(_: u32, _: Uuid) {}
@@ -387,12 +383,6 @@ mod cdt {
     fn volume__write__done(_: u32, _: Uuid) {}
     fn volume__writeunwritten__done(_: u32, _: Uuid) {}
     fn volume__flush__done(_: u32, _: Uuid) {}
-}
-
-pub fn deadline_secs(secs: f32) -> Instant {
-    Instant::now()
-        .checked_add(Duration::from_secs_f32(secs))
-        .unwrap()
 }
 
 /// Array of data associated with three clients, indexed by `ClientId`
@@ -419,6 +409,12 @@ impl<T: Clone> ClientData<T> {
     }
 }
 impl<T> ClientData<T> {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.0.iter()
     }
@@ -461,12 +457,6 @@ impl<T> std::ops::Index<ClientId> for ClientMap<T> {
     fn index(&self, index: ClientId) -> &Self::Output {
         self.get(&index).unwrap()
     }
-}
-
-#[allow(clippy::large_enum_variant)]
-enum WrappedStream {
-    Http(tokio::net::TcpStream),
-    Https(tokio_rustls::client::TlsStream<tokio::net::TcpStream>),
 }
 
 /*
@@ -559,25 +549,24 @@ impl EncryptionContext {
         random_iv
     }
 
-    pub fn encrypt_in_place(
-        &self,
-        data: &mut [u8],
-    ) -> Result<(Nonce, Tag, u64)> {
+    pub fn encrypt_in_place(&self, data: &mut [u8]) -> (Nonce, Tag, u64) {
         let nonce = self.get_random_nonce();
 
-        let tag = self.cipher.encrypt_in_place_detached(&nonce, b"", data);
-
-        if tag.is_err() {
-            bail!("Could not encrypt! {:?}", tag.err());
-        }
-
-        let tag = tag.unwrap();
+        // Encryption is infallible as long as the data and nonce are both below
+        // 1 << 36 bytes (A_MAX and P_MAX from RFC8452 § 6).  We encrypt on a
+        // per-block basis (max of 1 << 15) with a 12-byte nonce, so these
+        // conditions should never fail.
+        let tag = match self.cipher.encrypt_in_place_detached(&nonce, b"", data)
+        {
+            Ok(tag) => tag,
+            Err(e) => panic!("Could not encrypt! {e:?}"),
+        };
 
         // Hash [nonce + tag + data] in that order. Perform this after
         // encryption so that the downstairs can verify it without the key.
         let computed_hash = integrity_hash(&[&nonce[..], &tag[..], data]);
 
-        Ok((nonce, tag, computed_hash))
+        (nonce, tag, computed_hash)
     }
 
     pub fn decrypt_in_place(
@@ -594,6 +583,27 @@ impl EncryptionContext {
         }
 
         Ok(())
+    }
+}
+
+/// Write data, containing data from all blocks
+#[derive(Debug)]
+pub struct RawWrite {
+    /// Per-block metadata
+    pub blocks: Vec<WriteBlockMetadata>,
+    /// Raw data
+    pub data: bytes::BytesMut,
+}
+
+impl RawWrite {
+    /// Builds a new empty `RawWrite` with the given capacity
+    pub fn with_capacity(block_count: usize, block_size: u64) -> Self {
+        Self {
+            blocks: Vec::with_capacity(block_count),
+            data: bytes::BytesMut::with_capacity(
+                block_count * block_size as usize,
+            ),
+        }
     }
 }
 
@@ -649,6 +659,18 @@ impl RegionDefinitionStatus {
             Received(rd) => Some(*rd),
         }
     }
+}
+
+/// Read response data, containing data from all blocks
+///
+/// Do not derive `Clone` on this type; it will be expensive and tempting to
+/// call by accident!
+#[derive(Debug, Default)]
+pub(crate) struct RawReadResponse {
+    /// Per-block metadata
+    pub blocks: Vec<ReadResponseBlockMetadata>,
+    /// Raw data
+    pub data: bytes::BytesMut,
 }
 
 /*
@@ -880,10 +902,21 @@ impl std::fmt::Display for DsState {
     }
 }
 
+/// Results of validating a single block
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub(crate) enum Validation {
+    /// The block has no hash / context and is empty
+    Empty,
+    /// For an unencrypted block, the result is the hash
+    Unencrypted(u64),
+    /// For an encrypted block, the result is the tag + nonce
+    Encrypted(crucible_protocol::EncryptionContext),
+}
+
 /*
  * A unit of work for downstairs that is put into the hashmap.
  */
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct DownstairsIO {
     ds_id: JobId, // This MUST match our hashmap index
 
@@ -907,10 +940,13 @@ struct DownstairsIO {
 
     /*
      * If the operation is a Read, this holds the resulting buffer
-     * The hashes vec holds the valid hash(es) for the read.
+     * The validation vec holds the validation results for the read
      */
-    data: Option<Vec<ReadResponse>>,
-    read_response_hashes: Vec<Option<u64>>,
+    data: Option<RawReadResponse>,
+    read_validations: Vec<Validation>,
+
+    /// Number of bytes that this job has contributed to guest backpressure
+    backpressure_bytes: Option<u64>,
 }
 
 impl DownstairsIO {
@@ -937,20 +973,16 @@ impl DownstairsIO {
      */
     pub fn io_size(&self) -> usize {
         match &self.work {
-            IOop::Write { writes, .. }
-            | IOop::WriteUnwritten { writes, .. } => {
-                writes.iter().map(|w| w.data.len()).sum()
+            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
+                data.len()
             }
-            IOop::Read { .. } => {
-                if self.data.is_some() {
-                    let rrs = self.data.as_ref().unwrap();
-                    rrs.iter().map(|r| r.data.len()).sum()
-                } else {
-                    0
-                }
+            IOop::Read { requests, .. } => {
+                let Some(r) = requests.first() else {
+                    return 0;
+                };
+                r.offset.block_size_in_bytes() as usize * requests.len()
             }
             IOop::Flush { .. }
-            | IOop::ExtentClose { .. }
             | IOop::ExtentFlushClose { .. }
             | IOop::ExtentLiveRepair { .. }
             | IOop::ExtentLiveReopen { .. }
@@ -1021,12 +1053,6 @@ impl DownstairsIO {
             IOop::Write { .. }
             | IOop::WriteUnwritten { .. }
             | IOop::Flush { .. } => wc.skipped + wc.error > 1,
-            IOop::ExtentClose {
-                dependencies: _,
-                extent,
-            } => {
-                panic!("Received illegal IOop::ExtentClose: {}", extent);
-            }
             IOop::ExtentFlushClose { .. }
             | IOop::ExtentLiveRepair { .. }
             | IOop::ExtentLiveReopen { .. }
@@ -1074,19 +1100,22 @@ impl ReconcileIO {
         }
     }
 }
+
 /*
  * Crucible to storage IO operations.
  */
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, PartialEq)]
-pub enum IOop {
+enum IOop {
     Write {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        writes: Vec<crucible_protocol::Write>,
+        blocks: Vec<WriteBlockMetadata>,
+        data: bytes::Bytes,
     },
     WriteUnwritten {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        writes: Vec<crucible_protocol::Write>,
+        blocks: Vec<WriteBlockMetadata>,
+        data: bytes::Bytes,
     },
     Read {
         dependencies: Vec<JobId>, // Jobs that must finish before this
@@ -1097,33 +1126,28 @@ pub enum IOop {
         flush_number: u64,
         gen_number: u64,
         snapshot_details: Option<SnapshotDetails>,
-        extent_limit: Option<usize>,
+        extent_limit: Option<ExtentId>,
     },
     /*
      * These operations are for repairing a bad downstairs
      */
-    ExtentClose {
-        dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
-    },
     ExtentFlushClose {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
+        extent: ExtentId,
         flush_number: u64,
         gen_number: u64,
-        source_downstairs: ClientId,
         repair_downstairs: Vec<ClientId>,
     },
     ExtentLiveRepair {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
+        extent: ExtentId,
         source_downstairs: ClientId,
         source_repair_address: SocketAddr,
         repair_downstairs: Vec<ClientId>,
     },
     ExtentLiveReopen {
         dependencies: Vec<JobId>, // Jobs that must finish before this
-        extent: usize,
+        extent: ExtentId,
     },
     ExtentLiveNoOp {
         dependencies: Vec<JobId>, // Jobs that must finish before this
@@ -1131,13 +1155,13 @@ pub enum IOop {
 }
 
 impl IOop {
-    pub fn deps(&self) -> &Vec<JobId> {
+    #[cfg(test)]
+    fn deps(&self) -> &Vec<JobId> {
         match &self {
             IOop::Write { dependencies, .. }
             | IOop::Flush { dependencies, .. }
             | IOop::Read { dependencies, .. }
             | IOop::WriteUnwritten { dependencies, .. }
-            | IOop::ExtentClose { dependencies, .. }
             | IOop::ExtentFlushClose { dependencies, .. }
             | IOop::ExtentLiveRepair { dependencies, .. }
             | IOop::ExtentLiveReopen { dependencies, .. }
@@ -1145,26 +1169,13 @@ impl IOop {
         }
     }
 
-    pub fn is_read(&self) -> bool {
-        matches!(self, IOop::Read { .. })
-    }
-
-    pub fn is_write(&self) -> bool {
-        matches!(self, IOop::Write { .. } | IOop::WriteUnwritten { .. })
-    }
-
-    pub fn is_flush(&self) -> bool {
-        matches!(self, IOop::Flush { .. })
-    }
-
     /*
      * Report if the IOop is one used during LiveRepair
      */
-    pub fn is_repair(&self) -> bool {
+    fn is_repair(&self) -> bool {
         matches!(
             self,
-            IOop::ExtentClose { .. }
-                | IOop::ExtentFlushClose { .. }
+            IOop::ExtentFlushClose { .. }
                 | IOop::ExtentLiveRepair { .. }
                 | IOop::ExtentLiveNoOp { .. }
                 | IOop::ExtentLiveReopen { .. }
@@ -1177,7 +1188,7 @@ impl IOop {
      * The size of the IO, or extent number if a repair operation.
      * A Vec of the dependencies.
      */
-    pub fn ioop_summary(&self) -> (String, usize, Vec<JobId>) {
+    fn ioop_summary(&self) -> (String, usize, Vec<JobId>) {
         let (job_type, num_blocks, deps) = match self {
             IOop::Read {
                 dependencies,
@@ -1189,29 +1200,19 @@ impl IOop {
             }
             IOop::Write {
                 dependencies,
-                writes,
+                blocks,
+                ..
             } => {
                 let job_type = "Write".to_string();
-                let mut num_blocks = 0;
-
-                for write in writes {
-                    let block_size = write.offset.block_size_in_bytes();
-                    num_blocks += write.data.len() / block_size as usize;
-                }
-                (job_type, num_blocks, dependencies.clone())
+                (job_type, blocks.len(), dependencies.clone())
             }
             IOop::WriteUnwritten {
                 dependencies,
-                writes,
+                blocks,
+                ..
             } => {
                 let job_type = "WriteU".to_string();
-                let mut num_blocks = 0;
-
-                for write in writes {
-                    let block_size = write.offset.block_size_in_bytes();
-                    num_blocks += write.data.len() / block_size as usize;
-                }
-                (job_type, num_blocks, dependencies.clone())
+                (job_type, blocks.len(), dependencies.clone())
             }
             IOop::Flush {
                 dependencies,
@@ -1223,23 +1224,15 @@ impl IOop {
                 let job_type = "Flush".to_string();
                 (job_type, 0, dependencies.clone())
             }
-            IOop::ExtentClose {
-                dependencies,
-                extent,
-            } => {
-                let job_type = "EClose".to_string();
-                (job_type, *extent, dependencies.clone())
-            }
             IOop::ExtentFlushClose {
                 dependencies,
                 extent,
                 flush_number: _,
                 gen_number: _,
-                source_downstairs: _,
                 repair_downstairs: _,
             } => {
                 let job_type = "FClose".to_string();
-                (job_type, *extent, dependencies.clone())
+                (job_type, extent.0 as usize, dependencies.clone())
             }
             IOop::ExtentLiveRepair {
                 dependencies,
@@ -1249,14 +1242,14 @@ impl IOop {
                 repair_downstairs: _,
             } => {
                 let job_type = "Repair".to_string();
-                (job_type, *extent, dependencies.clone())
+                (job_type, extent.0 as usize, dependencies.clone())
             }
             IOop::ExtentLiveReopen {
                 dependencies,
                 extent,
             } => {
                 let job_type = "Reopen".to_string();
-                (job_type, *extent, dependencies.clone())
+                (job_type, extent.0 as usize, dependencies.clone())
             }
             IOop::ExtentLiveNoOp { dependencies } => {
                 let job_type = "NoOp".to_string();
@@ -1271,7 +1264,7 @@ impl IOop {
     // repair), and determine if this IO should be sent to the downstairs or not
     // (skipped).
     // Return true if we should send it.
-    pub fn send_io_live_repair(&self, extent_limit: Option<u64>) -> bool {
+    fn send_io_live_repair(&self, extent_limit: Option<ExtentId>) -> bool {
         if let Some(extent_limit) = extent_limit {
             // The extent_limit has been set, so we have repair work in
             // progress.  If our IO touches an extent less than or equal
@@ -1281,9 +1274,9 @@ impl IOop {
             // repaired is handled with dependencies, and IOs should arrive
             // here with those dependencies already set.
             match &self {
-                IOop::Write { writes, .. }
-                | IOop::WriteUnwritten { writes, .. } => {
-                    writes.iter().any(|write| write.eid <= extent_limit)
+                IOop::Write { blocks, .. }
+                | IOop::WriteUnwritten { blocks, .. } => {
+                    blocks.iter().any(|b| b.eid <= extent_limit)
                 }
                 IOop::Flush { .. } => {
                     // If we have set extent limit, then we go ahead and
@@ -1302,6 +1295,23 @@ impl IOop {
             // If we have not set an extent_limit yet all IO should
             // be skipped for this downstairs.
             false
+        }
+    }
+
+    /// Returns the number of bytes written or read in this job
+    fn job_bytes(&self) -> u64 {
+        match &self {
+            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
+                data.len() as u64
+            }
+            IOop::Read { requests, .. } => {
+                requests
+                    .first()
+                    .map(|r| r.offset.block_size_in_bytes())
+                    .unwrap_or(0) as u64
+                    * requests.len() as u64
+            }
+            _ => 0,
         }
     }
 }
@@ -1474,410 +1484,84 @@ impl fmt::Display for AckStatus {
     }
 }
 
-/*
- * Provides a strongly-owned Buffer that Read operations will write into.
- *
- * Originally BytesMut was used here, but it didn't guarantee that memory was
- * shared between cloned BytesMut objects. Additionally, we added the idea of
- * ownership and that necessitated another field.
- *
- * Ownership of a block is defined as true if that block has been written to: we
- * say a block is "owned" if the bytes were written to by something, rather than
- * having been initialized to zero. For an Upstairs, a block is owned if it was
- * returned with a non-zero number of block contexts, encrypted or not. This is
- * important when using authenticated encryption to distinguish between zeroes
- * that the Guest has written and blocks that were zero to begin with.
- *
- * It's safe to set ownership to `true` if there's no persistence of ownership
- * information. Persistence is required otherwise: if a particular `BlockIO`
- * implementation is dropped and recreated, the ownership should not be lost as
- * a result.
- *
- * Because persistence is required, ownership will always come from the
- * Downstairs (or other `BlockIO` implementations that persist ownership
- * information) and be propagated "up".
- *
- * The `Buffer` is a block-oriented data structure: any functions which read or
- * write to it's data must be block-aligned and block sized.  Otherwise, these
- * functions will panic.  Any function which panics also notes those conditions
- * in its docstring.
- */
-#[must_use]
-#[derive(Debug, PartialEq, Default)]
-pub struct Buffer {
-    block_size: usize,
-    data: Vec<u8>,
-
-    /// Per-block ownership data
-    ///
-    /// `owned.len() == data.len() / block_size`
-    owned: Vec<bool>,
-}
-
-impl Buffer {
-    pub fn new(block_count: usize, block_size: usize) -> Buffer {
-        let len = block_count * block_size;
-        Buffer {
-            block_size,
-            data: vec![0; len],
-            owned: vec![false; block_count],
-        }
-    }
-
-    /// Builds a new buffer that repeats the given value
-    pub fn repeat(v: u8, block_count: usize, block_size: usize) -> Self {
-        let len = block_count * block_size;
-        Buffer {
-            block_size,
-            data: vec![v; len],
-            owned: vec![false; block_count],
-        }
-    }
-
-    pub fn with_capacity(block_count: usize, block_size: usize) -> Buffer {
-        let len = block_count * block_size;
-        let data = Vec::with_capacity(len);
-        let owned = Vec::with_capacity(block_count);
-
-        Buffer {
-            block_size,
-            data,
-            owned,
-        }
-    }
-
-    /// Extract the underlying `Vec<u8>` bearing buffered data.
-    #[must_use]
-    pub fn into_vec(self) -> Vec<u8> {
-        self.data
-    }
-
-    pub fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
-    /// Writes data to the buffer, setting `owned` to `true`
-    ///
-    /// # Panics
-    /// - The offset must be block-aligned
-    /// - The data length must be divisible by block size
-    /// - Data cannot exceed the buffer's length
-    ///
-    /// If any of these conditions are not met, the function will panic.
-    pub(crate) fn write(&mut self, offset: usize, data: &[u8]) {
-        assert!(offset + data.len() <= self.data.len());
-        assert_eq!(offset % self.block_size, 0);
-        assert_eq!(data.len() % self.block_size, 0);
-
-        self.data[offset..][..data.len()].copy_from_slice(data);
-        self.owned[offset / self.block_size..][..data.len() / self.block_size]
-            .fill(true);
-    }
-
-    /// Writes data to the buffer where `owned` is true
-    ///
-    /// If `owned[i]` is `false`, then that block is not written
-    ///
-    /// # Panics
-    /// - The offset must be block-aligned
-    /// - The data length must be divisible by block size
-    /// - Data cannot exceed the buffer's length
-    /// - `data` and `owned` must be the same size
-    ///
-    /// If any of these conditions are not met, the function will panic.
-    pub(crate) fn write_if_owned(
-        &mut self,
-        offset: usize,
-        data: &[u8],
-        owned: &[bool],
-    ) {
-        assert!(offset + data.len() <= self.data.len());
-        assert_eq!(data.len() % self.block_size, 0);
-        assert_eq!(offset % self.block_size, 0);
-        assert_eq!(data.len() / self.block_size, owned.len());
-
-        let start_block = offset / self.block_size;
-        for (b, chunk) in data.chunks(self.block_size).enumerate() {
-            debug_assert_eq!(chunk.len(), self.block_size);
-            if owned[b] {
-                let block = start_block + b;
-                self.owned[block] = true;
-                self.block_mut(block).copy_from_slice(chunk);
-            }
-        }
-    }
-
-    /// Writes a `ReadResponse` into the buffer, setting `owned` to true
-    ///
-    /// The `ReadResponse` must contain a single block's worth of data.
-    ///
-    /// # Panics
-    /// - The offset must be block-aligned
-    /// - The response data length must be block size
-    /// - Data cannot exceed the buffer's length
-    ///
-    /// If any of these conditions are not met, the function will panic.
-    pub(crate) fn write_read_response(
-        &mut self,
-        offset: usize,
-        response: &ReadResponse,
-    ) {
-        assert!(offset + response.data.len() <= self.data.len());
-        assert_eq!(offset % self.block_size, 0);
-        assert_eq!(response.data.len(), self.block_size);
-        if !response.block_contexts.is_empty() {
-            let block = offset / self.block_size;
-            self.owned[block] = true;
-            self.block_mut(block).copy_from_slice(&response.data);
-        }
-    }
-
-    /// Reads buffer data into the given array
-    ///
-    /// Only blocks with `self.owned` are changed; other blocks are left
-    /// unmodified.
-    ///
-    /// # Panics
-    /// - The offset must be block-aligned
-    /// - The response data length must be divisible by block size
-    /// - Data cannot exceed the buffer's length
-    ///
-    /// If any of these conditions are not met, the function will panic.
-    pub(crate) fn read(&self, offset: usize, data: &mut [u8]) {
-        assert!(offset + data.len() <= self.data.len());
-        assert_eq!(offset % self.block_size, 0);
-        assert_eq!(data.len() % self.block_size, 0);
-
-        let start_block = offset / self.block_size;
-        for (b, chunk) in data.chunks_mut(self.block_size).enumerate() {
-            debug_assert_eq!(chunk.len(), self.block_size);
-            let block = start_block + b;
-            if self.owned[block] {
-                chunk.copy_from_slice(self.block(block));
-            }
-        }
-    }
-
-    /// Consumes the buffer and returns a `Bytes` object
-    ///
-    /// The allocation from the `Vec<u8>` is reused for efficiency
-    pub fn into_bytes(self) -> Bytes {
-        Bytes::from(self.data)
-    }
-
-    /// Consume and layer buffer contents on top of this one
-    ///
-    /// The `buffer` argument will be reset to zero size, but preserves its
-    /// allocations for reuse.
-    ///
-    /// # Panics
-    /// - The offset must be block-aligned
-    /// - Both buffers must have the same block size
-    ///
-    /// If either of these conditions is not met, the function will panic
-    pub(crate) fn eat(&mut self, offset: usize, buffer: &mut Buffer) {
-        assert_eq!(offset % self.block_size, 0);
-        assert_eq!(self.block_size, buffer.block_size);
-
-        let start_block = offset / self.block_size;
-        for (b, (owned, chunk)) in buffer.blocks().enumerate() {
-            if owned {
-                let block = start_block + b;
-                self.owned[block] = true;
-                self.block_mut(block).copy_from_slice(chunk);
-            }
-        }
-
-        buffer.reset(0, self.block_size);
-    }
-
-    pub fn owned_ref(&self) -> &[bool] {
-        &self.owned
-    }
-
-    pub fn reset(&mut self, block_count: usize, block_size: usize) {
-        self.data.clear();
-        self.owned.clear();
-
-        let len = block_count * block_size;
-        self.data.resize(len, 0u8);
-        self.owned.resize(block_count, false);
-        self.block_size = block_size;
-    }
-
-    /// Returns a reference to a particular block
-    pub fn block(&self, b: usize) -> &[u8] {
-        &self.data[b * self.block_size..][..self.block_size]
-    }
-
-    /// Returns a mutable reference to a particular block
-    pub fn block_mut(&mut self, b: usize) -> &mut [u8] {
-        &mut self.data[b * self.block_size..][..self.block_size]
-    }
-
-    /// Returns an iterator over `(owned, block)` tuples
-    pub fn blocks(&self) -> impl Iterator<Item = (bool, &[u8])> {
-        self.owned
-            .iter()
-            .cloned()
-            .zip(self.data.chunks(self.block_size))
-    }
-}
-
-impl std::ops::Deref for Buffer {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        &self.data
-    }
-}
-
-#[test]
-fn test_buffer_sane() {
-    const BLOCK_SIZE: usize = 512;
-    let mut data = Buffer::new(2, BLOCK_SIZE);
-
-    data.write(0, &[99u8; BLOCK_SIZE]);
-
-    let mut read_data = vec![0u8; BLOCK_SIZE];
-    data.read(0, &mut read_data);
-
-    assert_eq!(&read_data[..], &data[..BLOCK_SIZE]);
-    assert_eq!(&data[..BLOCK_SIZE], &[99u8; BLOCK_SIZE]);
-}
-
-#[test]
-fn test_buffer_len() {
-    const READ_SIZE: usize = 512;
-    let data = Buffer::repeat(0x99, 1, READ_SIZE);
-    assert_eq!(data.len(), READ_SIZE);
-}
-
-#[test]
-fn test_buffer_len_over_block_size() {
-    const READ_SIZE: usize = 1024;
-    let data = Buffer::repeat(0x99, 2, 512);
-    assert_eq!(data.len(), READ_SIZE);
-}
-
-#[test]
-fn test_buffer_writes() {
-    const BLOCK_COUNT: usize = 8;
-    const BLOCK_SIZE: usize = 64;
-    let mut data = Buffer::new(BLOCK_COUNT, BLOCK_SIZE); // 512 bytes
-
-    assert_eq!(&data[..], &vec![0u8; 512]);
-
-    data.write(64, &[1u8; 64]);
-
-    assert_eq!(&data[0..64], &vec![0u8; 64]);
-    assert_eq!(&data[64..128], &vec![1u8; 64]);
-    assert_eq!(&data[128..], &vec![0u8; 512 - 64 - 64]);
-
-    data.write(128, &[7u8; 128]);
-
-    assert_eq!(&data[0..64], &vec![0u8; 64]);
-    assert_eq!(&data[64..128], &vec![1u8; 64]);
-    assert_eq!(&data[128..256], &vec![7u8; 128]);
-    assert_eq!(&data[256..], &vec![0u8; 256]);
-}
-
-#[test]
-fn test_buffer_eats() {
-    // We use an artificially low BLOCK_SIZE here for ease of alignment
-    const BLOCK_COUNT: usize = 8;
-    const BLOCK_SIZE: usize = 64;
-    let mut data = Buffer::new(BLOCK_COUNT, BLOCK_SIZE); // 512 bytes
-
-    assert_eq!(&data[..], &vec![0u8; 512]);
-
-    let mut buffer = Buffer::new(BLOCK_COUNT, BLOCK_SIZE);
-    buffer.eat(0, &mut data);
-
-    assert_eq!(&buffer[..], &vec![0u8; 512]);
-
-    let mut data = Buffer::new(BLOCK_COUNT, BLOCK_SIZE);
-    data.write(64, &[1u8; 64]);
-    buffer.eat(0, &mut data);
-
-    assert_eq!(&buffer[0..64], &vec![0u8; 64]);
-    assert_eq!(&buffer[64..128], &vec![1u8; 64]);
-    assert_eq!(&buffer[128..], &vec![0u8; 512 - 64 - 64]);
-
-    let mut data = Buffer::new(BLOCK_COUNT, BLOCK_SIZE);
-    data.write(128, &[7u8; 128]);
-    buffer.eat(0, &mut data);
-
-    assert_eq!(&buffer[0..64], &vec![0u8; 64]);
-    assert_eq!(&buffer[64..128], &vec![1u8; 64]);
-    assert_eq!(&buffer[128..256], &vec![7u8; 128]);
-    assert_eq!(&buffer[256..], &vec![0u8; 256]);
-}
-
-/*
- * Inspired from Propolis block.rs
- *
- * The following are the operations that Crucible supports from outside
- * callers. We have extended this to cover a bunch of test operations as
- * well. The first three are the supported operations, the other operations
- * tell the upstairs to behave in specific ways.
- */
+/// Operations supported by Crucible
+///
+/// This is inspired by Propolis's `block.rs`, but is internal to the Crucible
+/// upstairs crate (i.e. what you're reading right now).  The outside world
+/// uses the [`Guest`] API, which translates into these types internally when
+/// passing messages to the [`Upstairs`](crate::upstairs::Upstairs).
 #[derive(Debug)]
-pub enum BlockOp {
+pub(crate) enum BlockOp {
     Read {
         offset: Block,
         data: Buffer,
+        done: BlockRes<Buffer, (Buffer, CrucibleError)>,
     },
     Write {
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
+        done: BlockRes,
     },
     WriteUnwritten {
         offset: Block,
-        data: Bytes,
+        data: BytesMut,
+        done: BlockRes,
     },
     Flush {
         snapshot_details: Option<SnapshotDetails>,
+        done: BlockRes,
     },
-    GoActive,
+    GoActive {
+        done: BlockRes,
+    },
     GoActiveWithGen {
         gen: u64,
+        done: BlockRes,
     },
-    Deactivate,
+    Deactivate {
+        done: BlockRes,
+    },
     // Management commands
     ReplaceDownstairs {
         id: Uuid,
         old: SocketAddr,
         new: SocketAddr,
-        result: Arc<Mutex<ReplaceResult>>,
+        done: BlockRes<ReplaceResult>,
     },
     // Query ops
     QueryBlockSize {
-        data: Arc<Mutex<u64>>,
+        done: BlockRes<u64>,
     },
     QueryTotalSize {
-        data: Arc<Mutex<u64>>,
+        done: BlockRes<u64>,
     },
     QueryGuestIOReady {
-        data: Arc<Mutex<bool>>,
+        done: BlockRes<bool>,
     },
     QueryUpstairsUuid {
-        data: Arc<Mutex<Uuid>>,
+        done: BlockRes<Uuid>,
     },
     // Begin testing options.
     QueryExtentSize {
-        data: Arc<Mutex<Block>>,
+        done: BlockRes<Block>,
     },
     QueryWorkQueue {
-        data: Arc<Mutex<WQCounts>>,
+        done: BlockRes<WQCounts>,
     },
     // Show internal work queue, return outstanding IO requests.
     ShowWork {
-        data: Arc<Mutex<WQCounts>>,
+        done: BlockRes<WQCounts>,
+    },
+
+    #[cfg(test)]
+    GetDownstairsState {
+        done: BlockRes<ClientData<DsState>>,
+    },
+
+    #[cfg(test)]
+    FaultDownstairs {
+        client_id: ClientId,
+        done: BlockRes<()>,
     },
 }
 
@@ -1903,10 +1587,10 @@ impl BlockOp {
      */
     pub fn iops(&self, iop_sz: usize) -> Option<usize> {
         match self {
-            BlockOp::Read { offset: _, data } => {
+            BlockOp::Read { data, .. } => {
                 Some(ceiling_div!(data.len(), iop_sz))
             }
-            BlockOp::Write { offset: _, data } => {
+            BlockOp::Write { data, .. } => {
                 Some(ceiling_div!(data.len(), iop_sz))
             }
             _ => None,
@@ -1914,18 +1598,14 @@ impl BlockOp {
     }
 
     pub fn consumes_iops(&self) -> bool {
-        matches!(
-            self,
-            BlockOp::Read { offset: _, data: _ }
-                | BlockOp::Write { offset: _, data: _ }
-        )
+        matches!(self, BlockOp::Read { .. } | BlockOp::Write { .. })
     }
 
     // Return the total size of this BlockOp
     pub fn sz(&self) -> Option<usize> {
         match self {
-            BlockOp::Read { offset: _, data } => Some(data.len()),
-            BlockOp::Write { offset: _, data } => Some(data.len()),
+            BlockOp::Read { data, .. } => Some(data.len()),
+            BlockOp::Write { data, .. } => Some(data.len()),
             _ => None,
         }
     }
@@ -1938,891 +1618,30 @@ async fn test_return_iops() {
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(1, 512),
+        done: BlockOpWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(8, 512), // 4096 bytes
+        done: BlockOpWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(31, 512), // 15872 bytes < 16000
+        done: BlockOpWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
     let op = BlockOp::Read {
         offset: Block::new_512(1),
         data: Buffer::new(32, 512), // 16384 bytes > 16000
+        done: BlockOpWaiter::pair().1,
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 2);
-}
-
-/*
- * This structure is for tracking the underlying storage side operations
- * that map to a single Guest IO request. G to S stands for Guest
- * to Storage.
- *
- * The submitted hashmap is indexed by the request number (ds_id) for the
- * downstairs requests issued on behalf of this request.
- */
-#[derive(Debug)]
-struct GtoS {
-    /*
-     * Job we sent on to the downstairs.
-     */
-    ds_id: JobId,
-
-    /*
-     * Buffer provided by the guest request. If this is a read,
-     * data will be written here.
-     */
-    guest_buffer: Option<Buffer>,
-
-    /*
-     * Notify the caller waiting on the job to finish.
-     * This is an Option for the case where we want to send an IO on behalf
-     * of the Upstairs (not guest driven). Right now the only case where we
-     * need that is to flush data to downstairs when the guest has not sent
-     * us a flush in some time.  This allows us to free internal buffers.
-     * If the sender is None, we know it's a request from the Upstairs and
-     * we don't have to ACK it to anyone.
-     */
-    res: Option<BlockRes>,
-}
-
-impl GtoS {
-    /// Create a new GtoS object where one Guest IO request maps to one
-    /// downstairs operation.
-    pub fn new(
-        ds_id: JobId,
-        guest_buffer: Option<Buffer>,
-        res: Option<BlockRes>,
-    ) -> GtoS {
-        GtoS {
-            ds_id,
-            guest_buffer,
-            res,
-        }
-    }
-
-    /*
-     * When all downstairs jobs have completed, and all buffers have been
-     * attached to the GtoS struct, we can do the final copy of the data
-     * from upstairs memory back to the guest's memory. Notify corresponding
-     * BlockReqWaiter if required
-     */
-    #[instrument]
-    fn transfer_and_notify(
-        self,
-        downstairs_responses: Option<Vec<ReadResponse>>,
-        result: Result<(), CrucibleError>,
-    ) {
-        let guest_buffer = if let Some(mut guest_buffer) = self.guest_buffer {
-            if let Some(downstairs_responses) = downstairs_responses {
-                let mut offset = 0;
-
-                // XXX don't do if result.is_err()?
-                for response in &downstairs_responses {
-                    // Copy over into guest memory.
-                    {
-                        let _ignored =
-                            span!(Level::TRACE, "copy to guest buffer")
-                                .entered();
-
-                        guest_buffer.write_read_response(offset, response);
-                        offset += response.data.len();
-                    }
-                }
-            } else {
-                /*
-                 * Should this panic?  If the caller is requesting a transfer,
-                 * the guest_buffer should exist. If it does not exist, then
-                 * either there is a real problem, or the operation was a write
-                 * or flush and why are we requesting a transfer for those.
-                 *
-                 * However, dropping a Guest before receiving a downstairs
-                 * response will trigger this, so eat it for now.
-                 */
-            }
-
-            Some(guest_buffer)
-        } else {
-            None
-        };
-
-        /*
-         * If present, send the result to the guest. If this is a flush
-         * issued on behalf of crucible, then there is no place to send
-         * a result to.
-         *
-         * XXX: If the guest is no longer listening and this returns an
-         * error, do we care?  This could happen if the guest has
-         * given up because an IO took too long, or other possible
-         * guest side reasons.
-         */
-        if let Some(res) = self.res {
-            match result {
-                Ok(_) => match guest_buffer {
-                    Some(guest_buffer) => res.send_ok_with_buffer(guest_buffer),
-                    None => res.send_ok(),
-                },
-
-                Err(e) => match guest_buffer {
-                    Some(guest_buffer) => {
-                        res.send_err_with_buffer(guest_buffer, e)
-                    }
-                    None => res.send_err(e),
-                },
-            }
-        }
-    }
-}
-
-/// Strongly-typed ID for guest work (stored in the [`GuestWork`] map)
-#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
-pub(crate) struct GuestWorkId(pub u64);
-
-impl std::fmt::Display for GuestWorkId {
-    fn fmt(
-        &self,
-        f: &mut std::fmt::Formatter<'_>,
-    ) -> Result<(), std::fmt::Error> {
-        std::fmt::Display::fmt(&self.0, f)
-    }
-}
-
-/**
- * This structure keeps track of work that Crucible has accepted from the
- * "Guest", aka, Propolis.
- *
- * The active is a hashmap of GtoS structures for all I/Os that are
- * outstanding. Either just created or in progress operations. The key
- * for a new job comes from next_gw_id and should always increment.
- *
- * Once we have decided enough downstairs requests are finished, we remove
- * the entry from the active and add the gw_id to the completed vec.
- *
- * TODO: The completed needs to implement some notify back to the Guest, and
- * it should probably be a ring buffer.
- */
-#[derive(Debug)]
-struct GuestWork {
-    active: HashMap<GuestWorkId, GtoS>,
-    next_gw_id: u64,
-    completed: AllocRingBuffer<GuestWorkId>,
-}
-
-impl GuestWork {
-    fn is_empty(&self) -> bool {
-        self.active.is_empty()
-    }
-
-    fn next_gw_id(&mut self) -> GuestWorkId {
-        let id = self.next_gw_id;
-        self.next_gw_id += 1;
-        GuestWorkId(id)
-    }
-
-    /*
-     * When the required number of completions for a downstairs
-     * ds_id have arrived, we call this method on the parent GuestWork
-     * that requested them and include the Option<Bytes> from the IO.
-     *
-     * If this operation was a read, then we attach the Bytes read to the
-     * GtoS struct for later transfer.
-     *
-     * A single GtoS job may have multiple downstairs jobs it created, so
-     * we may not be done yet. When the required number of completions have
-     * arrived from all the downstairs jobs we created, then we
-     * can move forward with finishing up the guest work operation.
-     * This may include moving data buffers from completed reads.
-     */
-    #[instrument]
-    async fn gw_ds_complete(
-        &mut self,
-        gw_id: GuestWorkId,
-        ds_id: JobId,
-        data: Option<Vec<ReadResponse>>,
-        result: Result<(), CrucibleError>,
-        log: &Logger,
-    ) {
-        if let Some(gtos_job) = self.active.remove(&gw_id) {
-            assert_eq!(gtos_job.ds_id, ds_id);
-
-            /*
-             * Copy (if present) read data back to the guest buffer they
-             * provided to us, and notify any waiters.
-             */
-            gtos_job.transfer_and_notify(data, result);
-
-            self.completed.push(gw_id);
-        } else {
-            /*
-             * XXX This is just so I can see if ever does happen.
-             */
-            panic!("gw_id {} for job {} not on active list", gw_id, ds_id);
-        }
-    }
-}
-
-impl Default for GuestWork {
-    fn default() -> Self {
-        Self {
-            active: HashMap::new(), // GtoS
-            next_gw_id: 1,
-            completed: AllocRingBuffer::new(2048),
-        }
-    }
-}
-
-/// IO handles used by the guest uses to pass work into Crucible proper
-///
-/// This data structure is the counterpart to the [`GuestIoHandle`], which
-/// receives work from the guest and is exclusively owned by the
-/// [`upstairs::Upstairs`]
-///
-/// Requests from the guest are put into the `req_tx` queue by the guest, and
-/// received by the [`GuestIoHandle::req_rx`] side.
-#[derive(Debug)]
-pub struct Guest {
-    /// New requests from outside go into this queue
-    req_tx: mpsc::Sender<BlockReq>,
-
-    /// Local cache for block size
-    ///
-    /// This is 0 when unpopulated, and non-zero otherwise; storing it locally
-    /// saves a round-trip through the `reqs` queue, and using an atomic means
-    /// it can be read from a `&self` reference.
-    block_size: AtomicU64,
-
-    /// Backpressure is implemented as a delay on host write operations
-    ///
-    /// It is stored in an `Arc` so that the `GuestIoHandle` can update it from
-    /// the IO task.
-    backpressure_us: Arc<AtomicU64>,
-
-    /// Lock held during backpressure delay
-    ///
-    /// Without this lock, multiple tasks could submit jobs to the upstairs and
-    /// wait in parallel, which defeats the purpose of backpressure (since you
-    /// could send arbitrarily many jobs at high speed by sending them from
-    /// different tasks).
-    backpressure_lock: Mutex<()>,
-
-    /// Logger for the guest
-    log: Logger,
-}
-
-/// Configuration for host-side backpressure
-///
-/// Backpressure adds an artificial delay to host write messages (which are
-/// otherwise acked immediately, before actually being complete).  The delay is
-/// varied based on two metrics:
-///
-/// - number of write bytes outstanding
-/// - queue length as a fraction (where 1.0 is full)
-///
-/// These two metrics are used for quadratic backpressure, picking the larger of
-/// the two delays.
-#[derive(Copy, Clone, Debug)]
-struct BackpressureConfig {
-    /// When should backpressure start (in bytes)?
-    bytes_start: u64,
-    /// Scale for byte-based quadratic backpressure
-    bytes_scale: f64,
-
-    /// When should queue-based backpressure start?
-    queue_start: f64,
-    /// Maximum queue-based delay
-    queue_max_delay: Duration,
-}
-
-/*
- * These methods are how to add or checking for new work on the Guest struct
- */
-impl Guest {
-    pub fn new(log: Option<Logger>) -> (Guest, GuestIoHandle) {
-        let log = log.unwrap_or_else(build_logger);
-
-        // The channel size is chosen arbitrarily here.  The `req_rx` side
-        // is running independently and will constantly be processing messages,
-        // so we don't expect the queue to become full.  The `req_tx` side is
-        // only ever used in `Guest::send`, which waits for acknowledgement from
-        // the other side of the queue; there are no places where we put stuff
-        // into the queue without awaiting a response.
-        //
-        // Together, these facts mean that the queue should remain relatively
-        // small.  The exception is if someone spawns a zillion tasks, all of
-        // which call `Guest` APIs simultaneously.  In that case, having the
-        // queue be full will just look like another source of backpressure (and
-        // will in fact be invisible to the caller, since they can't distinguish
-        // time spent waiting for the queue versus time spent in Upstairs code).
-        let (req_tx, req_rx) = mpsc::channel(500);
-
-        let backpressure_us = Arc::new(AtomicU64::new(0));
-        let limits = GuestLimits {
-            iop_limit: None,
-            bw_limit: None,
-        };
-        let io = GuestIoHandle {
-            req_rx,
-            req_head: None,
-            req_limited: false,
-            limits,
-
-            guest_work: GuestWork {
-                active: HashMap::new(), // GtoS
-                next_gw_id: 1,
-                completed: AllocRingBuffer::new(2048),
-            },
-
-            iop_tokens: 0,
-            bw_tokens: 0,
-            backpressure_us: backpressure_us.clone(),
-            backpressure_config: BackpressureConfig {
-                bytes_start: 1024u64.pow(3), // Start at 1 GiB
-                bytes_scale: 9.3e-8,         // Delay of 10ms at 2 GiB in-flight
-                queue_start: 0.05,
-                queue_max_delay: Duration::from_millis(5),
-            },
-            log: log.clone(),
-        };
-        let guest = Guest {
-            req_tx,
-
-            block_size: AtomicU64::new(0),
-
-            backpressure_us,
-            backpressure_lock: Mutex::new(()),
-            log,
-        };
-        (guest, io)
-    }
-
-    /*
-     * This is used to submit a new BlockOp IO request to Crucible.
-     */
-    async fn send(&self, op: BlockOp) -> BlockReqWaiter {
-        let (brw, res) = BlockReqWaiter::pair();
-        if let Err(e) = self.req_tx.send(BlockReq { op, res }).await {
-            // This could happen during shutdown, if the up_main task is
-            // destroyed while the Guest is still trying to do work.
-            //
-            // If this happens, then the BlockReqWaiter will immediately return
-            // with CrucibleError::RecvDisconnected (since the oneshot::Sender
-            // will have been dropped into the void).
-            warn!(self.log, "failed to send op to guest: {e}");
-        }
-        brw
-    }
-
-    async fn send_and_wait(&self, op: BlockOp) -> BlockReqReply {
-        let brw = self.send(op).await;
-        brw.wait(&self.log).await
-    }
-
-    pub async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
-        let data = Arc::new(Mutex::new(Block::new(0, 9)));
-        let extent_query = BlockOp::QueryExtentSize { data: data.clone() };
-
-        let reply = self.send_and_wait(extent_query).await;
-        assert!(reply.buffer.is_none());
-        reply.result?;
-
-        let es = *data.lock().await;
-        Ok(es)
-    }
-
-    pub async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
-        let wc = WQCounts {
-            up_count: 0,
-            ds_count: 0,
-            active_count: 0,
-        };
-
-        let data = Arc::new(Mutex::new(wc));
-        let qwq = BlockOp::QueryWorkQueue { data: data.clone() };
-
-        let reply = self.send_and_wait(qwq).await;
-        assert!(reply.buffer.is_none());
-        reply.result?;
-
-        let wc = data.lock().await;
-        Ok(*wc)
-    }
-
-    // Maybe this can just be a guest specific thing, not a BlockIO
-    pub async fn activate_with_gen(
-        &self,
-        gen: u64,
-    ) -> Result<(), CrucibleError> {
-        let waiter = self.send(BlockOp::GoActiveWithGen { gen }).await;
-        info!(
-            self.log,
-            "The guest has requested activation with gen:{}", gen
-        );
-
-        let reply = waiter.wait(&self.log).await;
-        assert!(reply.buffer.is_none());
-        reply.result?;
-
-        info!(
-            self.log,
-            "The guest has finished waiting for activation with:{}", gen
-        );
-
-        Ok(())
-    }
-
-    async fn backpressure_sleep(&self) {
-        let bp =
-            Duration::from_micros(self.backpressure_us.load(Ordering::SeqCst));
-        if bp > Duration::ZERO {
-            let _guard = self.backpressure_lock.lock().await;
-            tokio::time::sleep(bp).await;
-            drop(_guard);
-        }
-    }
-}
-
-#[async_trait]
-impl BlockIO for Guest {
-    async fn activate(&self) -> Result<(), CrucibleError> {
-        let waiter = self.send(BlockOp::GoActive).await;
-        info!(self.log, "The guest has requested activation");
-
-        let reply = waiter.wait(&self.log).await;
-        assert!(reply.buffer.is_none());
-        reply.result?;
-
-        info!(self.log, "The guest has finished waiting for activation");
-        Ok(())
-    }
-
-    /// Disable any more IO from this guest and deactivate the downstairs.
-    async fn deactivate(&self) -> Result<(), CrucibleError> {
-        let reply = self.send_and_wait(BlockOp::Deactivate).await;
-        assert!(reply.buffer.is_none());
-        reply.result
-    }
-
-    async fn query_is_active(&self) -> Result<bool, CrucibleError> {
-        let data = Arc::new(Mutex::new(false));
-        let active_query = BlockOp::QueryGuestIOReady { data: data.clone() };
-
-        let reply = self.send_and_wait(active_query).await;
-        assert!(reply.buffer.is_none());
-        reply.result?;
-
-        let is_active = *data.lock().await;
-        Ok(is_active)
-    }
-
-    async fn total_size(&self) -> Result<u64, CrucibleError> {
-        let data = Arc::new(Mutex::new(0));
-        let size_query = BlockOp::QueryTotalSize { data: data.clone() };
-
-        let reply = self.send_and_wait(size_query).await;
-        assert!(reply.buffer.is_none());
-        reply.result?;
-
-        let total_size = *data.lock().await;
-        Ok(total_size)
-    }
-
-    async fn get_block_size(&self) -> Result<u64, CrucibleError> {
-        let bs = self.block_size.load(std::sync::atomic::Ordering::Relaxed);
-        if bs == 0 {
-            let data = Arc::new(Mutex::new(0));
-            let size_query = BlockOp::QueryBlockSize { data: data.clone() };
-
-            let reply = self.send_and_wait(size_query).await;
-            assert!(reply.buffer.is_none());
-            reply.result?;
-
-            let bs = *data.lock().await;
-            self.block_size
-                .store(bs, std::sync::atomic::Ordering::Relaxed);
-            Ok(bs)
-        } else {
-            Ok(bs)
-        }
-    }
-
-    async fn get_uuid(&self) -> Result<Uuid, CrucibleError> {
-        let data = Arc::new(Mutex::new(Uuid::default()));
-        let uuid_query = BlockOp::QueryUpstairsUuid { data: data.clone() };
-
-        let reply = self.send_and_wait(uuid_query).await;
-        assert!(reply.buffer.is_none());
-        reply.result?;
-
-        let uuid = *data.lock().await;
-        Ok(uuid)
-    }
-
-    async fn read(
-        &self,
-        offset: Block,
-        data: &mut Buffer,
-    ) -> Result<(), CrucibleError> {
-        let bs = self.check_data_size(data.len()).await?;
-
-        if offset.block_size_in_bytes() as u64 != bs {
-            crucible_bail!(BlockSizeMismatch);
-        }
-
-        if data.is_empty() {
-            return Ok(());
-        }
-
-        let buffer = std::mem::take(data);
-        let rio = BlockOp::Read {
-            offset,
-            data: buffer,
-        };
-
-        // We've replaced `data` with a blank Buffer, and sent it over the
-        // channel. Replace it regardless of the outcome of the read so that the
-        // caller will not have to reallocate it.
-        let reply = self.send_and_wait(rio).await;
-        *data = reply.buffer.unwrap();
-
-        reply.result
-    }
-
-    async fn write(
-        &self,
-        offset: Block,
-        data: Bytes,
-    ) -> Result<(), CrucibleError> {
-        let bs = self.check_data_size(data.len()).await?;
-
-        if offset.block_size_in_bytes() as u64 != bs {
-            crucible_bail!(BlockSizeMismatch);
-        }
-
-        if data.is_empty() {
-            return Ok(());
-        }
-        let wio = BlockOp::Write { offset, data };
-
-        self.backpressure_sleep().await;
-
-        let reply = self.send_and_wait(wio).await;
-        assert!(reply.buffer.is_none());
-        reply.result
-    }
-
-    async fn write_unwritten(
-        &self,
-        offset: Block,
-        data: Bytes,
-    ) -> Result<(), CrucibleError> {
-        let bs = self.check_data_size(data.len()).await?;
-
-        if offset.block_size_in_bytes() as u64 != bs {
-            crucible_bail!(BlockSizeMismatch);
-        }
-
-        if data.is_empty() {
-            return Ok(());
-        }
-        let wio = BlockOp::WriteUnwritten { offset, data };
-
-        self.backpressure_sleep().await;
-        let reply = self.send_and_wait(wio).await;
-        assert!(reply.buffer.is_none());
-        reply.result
-    }
-
-    async fn flush(
-        &self,
-        snapshot_details: Option<SnapshotDetails>,
-    ) -> Result<(), CrucibleError> {
-        let reply = self
-            .send_and_wait(BlockOp::Flush { snapshot_details })
-            .await;
-        assert!(reply.buffer.is_none());
-        reply.result
-    }
-
-    async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
-        // Note: for this implementation, BlockOp::ShowWork will be sent and
-        // processed by the Upstairs even if it isn't active.
-        let wc = WQCounts {
-            up_count: 0,
-            ds_count: 0,
-            active_count: 0,
-        };
-
-        let data = Arc::new(Mutex::new(wc));
-        let sw = BlockOp::ShowWork { data: data.clone() };
-
-        let reply = self.send_and_wait(sw).await;
-        assert!(reply.buffer.is_none());
-        reply.result?;
-
-        let wc = data.lock().await;
-        Ok(*wc)
-    }
-
-    async fn replace_downstairs(
-        &self,
-        id: Uuid,
-        old: SocketAddr,
-        new: SocketAddr,
-    ) -> Result<ReplaceResult, CrucibleError> {
-        let data = Arc::new(Mutex::new(ReplaceResult::Missing));
-        let sw = BlockOp::ReplaceDownstairs {
-            id,
-            old,
-            new,
-            result: data.clone(),
-        };
-
-        let reply = self.send_and_wait(sw).await;
-        assert!(reply.buffer.is_none());
-        reply.result?;
-
-        let result = data.lock().await;
-        Ok(*result)
-    }
-}
-
-/// Configuration for iops-per-second limiting
-#[derive(Copy, Clone, Debug)]
-pub struct IopLimit {
-    bytes_per_iop: usize,
-    iop_limit: usize,
-}
-
-/// Configuration for guest limits
-#[derive(Copy, Clone, Debug)]
-pub struct GuestLimits {
-    iop_limit: Option<IopLimit>,
-    bw_limit: Option<usize>,
-}
-
-/// Handle for receiving requests from the guest
-///
-/// This is the counterpart to the [`Guest`], which sends requests.  It includes
-/// the receiving side of the request queue, along with infrastructure for
-/// bandwidth and IOP limiting.
-///
-/// In addition, it contains information about the mapping from guest to
-/// downstairs data structures, in the form of the [`GuestWork`] map.
-///
-/// The life-cycle of a request is roughly the following:
-///
-/// * Pop the request off the reqs queue.
-///
-/// * Copy (and optionally encrypt) any data buffers provided to us by the
-///   Guest.
-///
-/// * Create one or more downstairs DownstairsIO structures.
-///
-/// * Create a GtoS tracking structure with the id's for each downstairs task
-///   and the read result buffer if required.
-///
-/// * Add the GtoS struct to the in GuestWork active work hashmap.
-///
-/// * Put all the DownstairsIO structures on the downstairs work queue
-///
-/// * Wait for them to complete, then notify the guest through oneshot channels
-pub struct GuestIoHandle {
-    /// Queue to receive new blockreqs
-    req_rx: mpsc::Receiver<BlockReq>,
-
-    /// Guest IO and bandwidth limits
-    limits: GuestLimits,
-
-    /// `BlockReq` that is at the head of the queue
-    ///
-    /// If a `BlockReq` was pulled from the queue but couldn't be used due to
-    /// IOP or bandwidth limiting, it's stored here instead (and we check this
-    /// before awaiting the queue).
-    req_head: Option<BlockReq>,
-
-    /// Are we currently IOP or bandwidth limited?
-    ///
-    /// If so, we don't return anything in `recv()`
-    req_limited: bool,
-
-    /// Current number of IOP tokens
-    iop_tokens: usize,
-
-    /// Current backpressure (shared with the `Guest`)
-    backpressure_us: Arc<AtomicU64>,
-
-    /// Backpressure configuration, as a starting point and max delay
-    backpressure_config: BackpressureConfig,
-
-    /// Bandwidth tokens (in bytes)
-    bw_tokens: usize,
-
-    /// Active work from the guest
-    ///
-    /// When the crucible listening task has noticed a new IO request, it
-    /// will pull it from the reqs queue and create an GuestWork struct
-    /// as well as convert the new IO request into the matching
-    /// downstairs request(s). Each new GuestWork request will get a
-    /// unique gw_id, which is also the index for that operation into the
-    /// hashmap.
-    ///
-    /// It is during this process that data will encrypted. For a read, the
-    /// data is decrypted back to the guest provided buffer after all the
-    /// required downstairs operations are completed.
-    guest_work: GuestWork,
-
-    /// Log handle, mainly to pass it into the [`Upstairs`]
-    log: Logger,
-}
-
-impl GuestIoHandle {
-    /// Leak IOPs tokens
-    fn leak_iop_tokens(&mut self, tokens: usize) {
-        self.iop_tokens = self.iop_tokens.saturating_sub(tokens);
-        self.req_limited = false;
-    }
-
-    /// Leak bytes from bandwidth tokens
-    fn leak_bw_tokens(&mut self, bytes: usize) {
-        self.bw_tokens = self.bw_tokens.saturating_sub(bytes);
-        self.req_limited = false;
-    }
-
-    /// Listen for new work
-    ///
-    /// This will wait forever if we are currently IOP / BW limited; otherwise,
-    /// it will return the next value from the `BlockReq` queue.
-    ///
-    /// To avoid being stuck forever, this function should be called as **a
-    /// branch** of a `select!` statement that _also_ includes at least one
-    /// timeout; we should use that timeout to periodically service the IOP / BW
-    /// token counters, which will unblock the `GuestIoHandle` in future calls.
-    async fn recv(&mut self) -> UpstairsAction {
-        let req = if self.req_limited {
-            futures::future::pending().await
-        } else if let Some(req) = self.req_head.take() {
-            req
-        } else if let Some(req) = self.req_rx.recv().await {
-            // NOTE: once we take this req from the queue, we must be cancel
-            // safe!  In other words, we cannot yield until either (1) returning
-            // the req or (2) storing it in self.req_head for safe-keeping.
-            req
-        } else {
-            warn!(self.log, "Guest handle has been dropped");
-            return UpstairsAction::GuestDropped;
-        };
-
-        // Check if we can consume right away
-        let iop_limit_applies =
-            self.limits.iop_limit.is_some() && req.op.consumes_iops();
-        let bw_limit_applies =
-            self.limits.bw_limit.is_some() && req.op.sz().is_some();
-
-        if !iop_limit_applies && !bw_limit_applies {
-            return UpstairsAction::Guest(req);
-        }
-
-        // Check bandwidth limit before IOP limit, but make sure only to consume
-        // tokens if both checks pass!
-
-        let mut bw_check_ok = true;
-        let mut iop_check_ok = true;
-
-        // When checking tokens vs the limit, do not check by checking if adding
-        // the block request's values to the applicable limit: this would create
-        // a scenario where a large IO enough would stall the pipeline (see
-        // test_impossible_io). Instead, check if the limits are already
-        // reached.
-
-        if let Some(bw_limit) = self.limits.bw_limit {
-            if req.op.sz().is_some() && self.bw_tokens >= bw_limit {
-                bw_check_ok = false;
-            }
-        }
-
-        if let Some(iop_limit_cfg) = &self.limits.iop_limit {
-            let bytes_per_iops = iop_limit_cfg.bytes_per_iop;
-            if req.op.iops(bytes_per_iops).is_some()
-                && self.iop_tokens >= iop_limit_cfg.iop_limit
-            {
-                iop_check_ok = false;
-            }
-        }
-
-        // If both checks pass, consume appropriate resources and return the
-        // block req
-        if bw_check_ok && iop_check_ok {
-            if self.limits.bw_limit.is_some() {
-                if let Some(sz) = req.op.sz() {
-                    self.bw_tokens += sz;
-                }
-            }
-
-            if let Some(cfg) = &self.limits.iop_limit {
-                if let Some(req_iops) = req.op.iops(cfg.bytes_per_iop) {
-                    self.iop_tokens += req_iops;
-                }
-            }
-
-            UpstairsAction::Guest(req)
-        } else {
-            assert!(self.req_head.is_none());
-            self.req_head = Some(req);
-            futures::future::pending().await
-        }
-    }
-
-    /// Set `self.backpressure_us` based on outstanding IO ratio
-    fn set_backpressure(&self, bytes: u64, ratio: f64) {
-        // Check to see if the number of outstanding write bytes (between
-        // the upstairs and downstairs) is particularly high.  If so,
-        // apply some backpressure by delaying host operations, with a
-        // quadratically-increasing delay.
-        let d1 = (bytes.saturating_sub(self.backpressure_config.bytes_start)
-            as f64
-            * self.backpressure_config.bytes_scale)
-            .powf(2.0) as u64;
-
-        // Compute an alternate delay based on queue length
-        let d2 = self
-            .backpressure_config
-            .queue_max_delay
-            .mul_f64(
-                ((ratio - self.backpressure_config.queue_start).max(0.0)
-                    / (1.0 - self.backpressure_config.queue_start))
-                    .powf(2.0),
-            )
-            .as_micros() as u64;
-        self.backpressure_us.store(d1.max(d2), Ordering::SeqCst);
-    }
-
-    pub fn set_iop_limit(&mut self, bytes_per_iop: usize, limit: usize) {
-        self.limits.iop_limit = Some(IopLimit {
-            bytes_per_iop,
-            iop_limit: limit,
-        });
-    }
-
-    pub fn set_bw_limit(&mut self, bytes_per_second: usize) {
-        self.limits.bw_limit = Some(bytes_per_second);
-    }
-}
-
-/*
- * Work Queue Counts, for debug ShowWork IO type
- */
-#[derive(Debug, Copy, Clone)]
-pub struct WQCounts {
-    pub up_count: usize,
-    pub ds_count: usize,
-    pub active_count: usize,
 }
 
 /**
@@ -2830,10 +1649,14 @@ pub struct WQCounts {
  */
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Arg {
+    /// Upstairs session UUID
+    pub session_id: String,
     /// Jobs on the upstairs guest work queue.
     pub up_count: u32,
     /// Apply loop counter
     pub up_counters: UpCounters,
+    /// Next JobID
+    pub next_job_id: JobId,
     /// Backpressure value
     pub up_backpressure: u64,
     /// Jobs on the downstairs work queue.
@@ -2848,6 +1671,8 @@ pub struct Arg {
     pub ds_reconciled: usize,
     /// Extents still needing repair during initial reconciliation.
     pub ds_reconcile_needed: usize,
+    /// Times we failed the initial reconcile.
+    pub ds_reconcile_aborted: usize,
     /// Times we have completed a LiveRepair on a downstairs.
     pub ds_live_repair_completed: [usize; 3],
     /// Times we aborted a LiveRepair on a downstairs.
@@ -2856,12 +1681,14 @@ pub struct Arg {
     pub ds_connected: [usize; 3],
     /// Times this downstairs has been replaced.
     pub ds_replaced: [usize; 3],
-    /// Times flow control has been enabled on this downstairs.
-    pub ds_flow_control: [usize; 3],
     /// Times we have live repaired an extent on this downstairs.
     pub ds_extents_repaired: [usize; 3],
     /// Times we have live confirmed  an extent on this downstairs.
     pub ds_extents_confirmed: [usize; 3],
+    /// If in Live Repair, the current extent we are repairing.
+    pub ds_extent_limit: usize,
+    /// Per-client delay to keep them roughly in sync
+    pub ds_delay_us: [usize; 3],
     /// Times we skipped repairing a downstairs because we are read_only.
     pub ds_ro_lr_skipped: [usize; 3],
 }
@@ -2909,12 +1736,20 @@ pub fn up_main(
         None
     };
 
+    #[cfg(test)]
+    let disable_backpressure = guest.is_queue_backpressure_disabled();
+
     /*
      * Build the Upstairs struct that we use to share data between
      * the different async tasks
      */
     let mut up =
         upstairs::Upstairs::new(&opt, gen, region_def, guest, tls_context);
+
+    #[cfg(test)]
+    if disable_backpressure {
+        up.disable_client_backpressure();
+    }
 
     if let Some(pr) = producer_registry {
         let ups = up.stats.clone();
@@ -2937,25 +1772,62 @@ pub fn up_main(
     Ok(join_handle)
 }
 
-/*
- * Debug function to dump the guest work structure.
- * This does a bit while holding the mutex, so don't expect performance
- * to get better when calling it.
- *
- * TODO: make this one big dump, where we include the up.work.active
- * printing for each guest_work. It will be much more dense, but require
- * holding both locks for the duration.
- */
-fn show_guest_work(guest: &GuestIoHandle) -> usize {
-    println!("Guest work:  Active and Completed Jobs:");
-    let gw = &guest.guest_work;
-    let mut kvec: Vec<_> = gw.active.keys().cloned().collect();
-    kvec.sort_unstable();
-    for id in kvec.iter() {
-        let job = gw.active.get(id).unwrap();
-        println!("GW_JOB active:[{:04}] D:{:?} ", id, job.ds_id);
+/// Gets a Nexus client based on any IPv6 address
+#[cfg(feature = "notify-nexus")]
+pub(crate) async fn get_nexus_client(
+    log: &Logger,
+    client: reqwest::Client,
+    target_addrs: &[SocketAddr],
+) -> Option<nexus_client::Client> {
+    use internal_dns::resolver::Resolver;
+    use internal_dns::ServiceName;
+    use std::net::Ipv6Addr;
+
+    // Use any rack internal address for `Resolver::new_from_ip`, as that will
+    // use the AZ_PREFIX to find internal DNS servers.
+    let mut addr: Option<Ipv6Addr> = None;
+
+    for target_addr in target_addrs {
+        match &target_addr {
+            SocketAddr::V6(target_addr) => {
+                addr = Some(*target_addr.ip());
+                break;
+            }
+
+            SocketAddr::V4(_) => {
+                // This branch is seen if compiling with the `notify-nexus`
+                // feature but deploying in an ipv4 environment, usually during
+                // development. `Resolver::new_from_ip` only accepts IPv6
+                // addresses, so we can't use it to look up an address for the
+                // Nexus client.
+            }
+        }
     }
-    let done = gw.completed.to_vec();
-    println!("GW_JOB completed count:{:?} ", done.len());
-    kvec.len()
+
+    let Some(addr) = addr else {
+        return None;
+    };
+
+    let resolver = match Resolver::new_from_ip(log.clone(), addr) {
+        Ok(resolver) => resolver,
+        Err(e) => {
+            error!(log, "could not make resolver: {e}");
+            return None;
+        }
+    };
+
+    let nexus_address =
+        match resolver.lookup_socket_v6(ServiceName::Nexus).await {
+            Ok(addr) => addr,
+            Err(e) => {
+                error!(log, "lookup Nexus address failed: {e}");
+                return None;
+            }
+        };
+
+    Some(nexus_client::Client::new_with_client(
+        &format!("http://{}", nexus_address),
+        client,
+        log.clone(),
+    ))
 }

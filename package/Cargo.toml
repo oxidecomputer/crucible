@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow.workspace = true
+camino.workspace = true
+crucible-workspace-hack.workspace = true
 omicron-zone-package.workspace = true
 tokio.workspace = true
-crucible-workspace-hack.workspace = true

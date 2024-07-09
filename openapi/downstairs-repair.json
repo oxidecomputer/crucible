@@ -46,6 +46,43 @@
         }
       }
     },
+    "/extent/{eid}/repair-ready": {
+      "get": {
+        "summary": "Return true if the provided extent is closed or the region is read only",
+        "operationId": "extent_repair_ready",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "eid",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Boolean",
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/newextent/{eid}/{file_type}": {
       "get": {
         "operationId": "get_extent_file",
@@ -80,10 +117,103 @@
           }
         }
       }
+    },
+    "/region-info": {
+      "get": {
+        "summary": "Return the RegionDefinition describing our region.",
+        "operationId": "get_region_info",
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegionDefinition"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/region-mode": {
+      "get": {
+        "summary": "Return the region-mode describing our region.",
+        "operationId": "get_region_mode",
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Boolean",
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/work": {
+      "get": {
+        "summary": "Work queue",
+        "operationId": "get_work",
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Boolean",
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     }
   },
   "components": {
     "schemas": {
+      "Block": {
+        "type": "object",
+        "properties": {
+          "shift": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "value": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "shift",
+          "value"
+        ]
+      },
       "Error": {
         "description": "Error information from a response.",
         "type": "object",
@@ -101,6 +231,61 @@
         "required": [
           "message",
           "request_id"
+        ]
+      },
+      "RegionDefinition": {
+        "type": "object",
+        "properties": {
+          "block_size": {
+            "description": "The size of each block in bytes. Must be a power of 2, minimum 512.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "database_read_version": {
+            "description": "The database version format for reading an extent database file.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "database_write_version": {
+            "description": "The database version format for writing an extent database file.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0
+          },
+          "encrypted": {
+            "description": "region data will be encrypted",
+            "type": "boolean"
+          },
+          "extent_count": {
+            "description": "How many whole extents comprise this region?",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          },
+          "extent_size": {
+            "description": "How many blocks should appear in each extent?",
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Block"
+              }
+            ]
+          },
+          "uuid": {
+            "description": "UUID for this region",
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "block_size",
+          "database_read_version",
+          "database_write_version",
+          "encrypted",
+          "extent_count",
+          "extent_size",
+          "uuid"
         ]
       },
       "FileType": {

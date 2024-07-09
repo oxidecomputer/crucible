@@ -8,14 +8,14 @@ mod test {
 
     use anyhow::*;
     use base64::{engine, Engine};
-    use crucible::{Bytes, *};
+    use crucible::*;
     use crucible_client_types::VolumeConstructionRequest;
     use crucible_downstairs::*;
     use crucible_pantry::pantry::Pantry;
     use crucible_pantry_client::Client as CruciblePantryClient;
-    use futures::lock::Mutex;
     use httptest::{matchers::*, responders::*, Expectation, Server};
     use rand::Rng;
+    use repair_client::Client;
     use sha2::Digest;
     use slog::{info, o, warn, Drain, Logger};
     use tempfile::*;
@@ -33,10 +33,11 @@ mod test {
     struct TestDownstairs {
         address: IpAddr,
         tempdir: TempDir,
-        downstairs: Arc<Mutex<Downstairs>>,
+        downstairs: Option<RunningDownstairs>,
     }
 
     impl TestDownstairs {
+        #[allow(clippy::too_many_arguments)]
         pub async fn new(
             address: IpAddr,
             encrypted: bool,
@@ -45,42 +46,48 @@ mod test {
             extent_count: u32,
             problematic: bool,
             backend: Backend,
+            clone_source: Option<SocketAddr>,
         ) -> Result<Self> {
             let tempdir = tempfile::Builder::new()
                 .prefix(&"downstairs-")
                 .rand_bytes(8)
                 .tempdir()?;
 
-            let _region = create_region_with_backend(
+            let region = create_region_with_backend(
                 tempdir.path().to_path_buf(),
                 Block {
                     value: blocks_per_extent,
                     shift: 9,
                 },
-                extent_count.into(),
+                extent_count,
                 Uuid::new_v4(),
                 encrypted,
                 backend,
                 csl(),
-            )
-            .await?;
+            )?;
 
-            let downstairs = build_downstairs_for_region_with_backend(
-                tempdir.path(),
-                problematic, /* lossy */
-                problematic, /* read errors */
-                problematic, /* write errors */
-                problematic, /* flush errors */
-                read_only,
-                backend,
-                Some(csl()),
-            )
-            .await?;
+            // If this is a read-write extent, then reuse the existing region;
+            // this skips automatic migration of SQLite -> raw extents and lets
+            // us keep writing to a SQLite region.
+            let builder = if read_only {
+                Downstairs::new_builder(tempdir.path(), read_only)
+            } else {
+                assert!(!region.read_only());
+                DownstairsBuilder::from_region(region)
+            };
 
-            let _join_handle = start_downstairs(
-                downstairs.clone(),
-                address,
-                None, /* oximeter */
+            let mut downstairs = builder
+                .set_lossy(problematic)
+                .set_logger(csl())
+                .set_test_errors(problematic, problematic, problematic)
+                .build()?;
+
+            if let Some(ref clone_source) = clone_source {
+                downstairs.clone_region(*clone_source).await?
+            }
+
+            let downstairs = start_downstairs(
+                downstairs, address, None, /* oximeter */
                 0,    /* any port */
                 0,    /* any rport */
                 None, /* cert_pem */
@@ -92,67 +99,79 @@ mod test {
             Ok(TestDownstairs {
                 address,
                 tempdir,
-                downstairs,
+                downstairs: Some(downstairs),
             })
         }
 
         pub async fn reboot_read_only(&mut self) -> Result<()> {
-            self.downstairs = build_downstairs_for_region(
-                self.tempdir.path(),
-                false, /* lossy */
-                false, /* read errors */
-                false, /* write errors */
-                false, /* flush errors */
-                true,
-                Some(csl()),
-            )
-            .await?;
+            let downstairs = Downstairs::new_builder(self.tempdir.path(), true)
+                .set_logger(csl())
+                .build()?;
 
-            let _join_handle = start_downstairs(
-                self.downstairs.clone(),
-                self.address,
-                None, /* oximeter */
-                0,    /* any port */
-                0,    /* any rport */
-                None, /* cert_pem */
-                None, /* key_pem */
-                None, /* root_cert_pem */
-            )
-            .await?;
+            self.downstairs = Some(
+                start_downstairs(
+                    downstairs,
+                    self.address,
+                    None, /* oximeter */
+                    0,    /* any port */
+                    0,    /* any rport */
+                    None, /* cert_pem */
+                    None, /* key_pem */
+                    None, /* root_cert_pem */
+                )
+                .await?,
+            );
 
             Ok(())
         }
 
         pub async fn reboot_read_write(&mut self) -> Result<()> {
-            self.downstairs = build_downstairs_for_region(
-                self.tempdir.path(),
-                false, /* lossy */
-                false, /* read errors */
-                false, /* write errors */
-                false, /* flush errors */
-                false,
-                Some(csl()),
-            )
-            .await?;
+            let downstairs =
+                Downstairs::new_builder(self.tempdir.path(), false)
+                    .set_logger(csl())
+                    .build()?;
 
-            let _join_handle = start_downstairs(
-                self.downstairs.clone(),
-                self.address,
-                None, /* oximeter */
-                0,    /* any port */
-                0,    /* any rport */
-                None, /* cert_pem */
-                None, /* key_pem */
-                None, /* root_cert_pem */
-            )
-            .await?;
+            self.downstairs = Some(
+                start_downstairs(
+                    downstairs,
+                    self.address,
+                    None, /* oximeter */
+                    0,    /* any port */
+                    0,    /* any rport */
+                    None, /* cert_pem */
+                    None, /* key_pem */
+                    None, /* root_cert_pem */
+                )
+                .await?,
+            );
 
             Ok(())
         }
 
-        pub async fn address(&self) -> SocketAddr {
+        // Take a downstairs and start it with clone option.  This should
+        // attempt to clone extents from the provided source IP:Port downstairs.
+        //
+        // The Result is returned to the caller.
+        pub async fn reboot_clone(&mut self, source: SocketAddr) -> Result<()> {
+            // Note that we don't start the new Downstairs here, so we'll clear
+            // out `self.downstairs`.
+            self.downstairs = None;
+            let mut downstairs =
+                Downstairs::new_builder(self.tempdir.path(), true)
+                    .set_logger(csl())
+                    .build()?;
+            downstairs.clone_region(source).await
+        }
+
+        pub fn address(&self) -> SocketAddr {
             // If start_downstairs returned Ok, then address will be populated
-            self.downstairs.lock().await.address.unwrap()
+            self.downstairs.as_ref().unwrap().address
+        }
+
+        // Return the repair address for a running downstairs
+        pub fn repair_address(&self) -> SocketAddr {
+            // If start_downstairs returned Ok, then address will be populated
+            self.downstairs.as_ref().unwrap().repair_address
         }
     }
 
@@ -245,6 +264,7 @@ mod test {
                 extent_count,
                 problematic,
                 backend,
+                None,
             )
             .await?;
             let downstairs2 = TestDownstairs::new(
@@ -255,6 +275,7 @@ mod test {
                 extent_count,
                 problematic,
                 backend,
+                None,
             )
             .await?;
             let downstairs3 = TestDownstairs::new(
@@ -265,6 +286,7 @@ mod test {
                 extent_count,
                 problematic,
                 backend,
+                None,
             )
             .await?;
 
@@ -276,9 +298,9 @@ mod test {
             let crucible_opts = CrucibleOpts {
                 id: Uuid::new_v4(),
                 target: vec![
-                    downstairs1.address().await,
-                    downstairs2.address().await,
-                    downstairs3.address().await,
+                    downstairs1.address(),
+                    downstairs2.address(),
+                    downstairs3.address(),
                 ],
                 lossy: false,
                 flush_timeout: None,
@@ -321,9 +343,9 @@ mod test {
 
             self.crucible_opts.read_only = true;
             self.crucible_opts.target = vec![
-                self.downstairs1.address().await,
-                self.downstairs2.address().await,
-                self.downstairs3.address().await,
+                self.downstairs1.address(),
+                self.downstairs2.address(),
+                self.downstairs3.address(),
             ];
 
             Ok(())
@@ -336,9 +358,9 @@ mod test {
             self.downstairs3.reboot_read_write().await?;
 
             self.crucible_opts.target = vec![
-                self.downstairs1.address().await,
-                self.downstairs2.address().await,
-                self.downstairs3.address().await,
+                self.downstairs1.address(),
+                self.downstairs2.address(),
+                self.downstairs3.address(),
             ];
 
             Ok(())
@@ -353,20 +375,21 @@ mod test {
                 self.extent_count,
                 false,
                 Backend::RawFile,
+                None,
             )
             .await
         }
 
-        pub async fn downstairs1_address(&self) -> SocketAddr {
-            self.downstairs1.address().await
+        pub fn downstairs1_address(&self) -> SocketAddr {
+            self.downstairs1.address()
         }
 
-        pub async fn downstairs2_address(&self) -> SocketAddr {
-            self.downstairs2.address().await
+        pub fn downstairs2_address(&self) -> SocketAddr {
+            self.downstairs2.address()
         }
 
-        pub async fn downstairs3_address(&self) -> SocketAddr {
-            self.downstairs3.address().await
+        pub fn downstairs3_address(&self) -> SocketAddr {
+            self.downstairs3.address()
         }
     }
 
@@ -378,19 +401,18 @@ mod test {
         let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts,
+                gen: 1,
+            }],
+            read_only_parent: None,
+        };
 
         let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
@@ -408,7 +430,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -424,25 +446,94 @@ mod test {
     }
 
     #[tokio::test]
+    async fn integration_test_region_huge_io() -> Result<()> {
+        // Test a simple single layer volume with a read, write, read, with IOs
+        // that exceed our MDTS (and should be split automatically)
+        const BLOCK_SIZE: usize = 512;
+
+        let tds = TestDownstairsSet::big(false).await?;
+        let opts = tds.opts();
+
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: BLOCK_SIZE as u64,
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts,
+                gen: 1,
+            }],
+            read_only_parent: None,
+        };
+
+        let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
+
+        volume.activate().await?;
+
+        // We'll do a 4 MiB read, which is > 1 MiB (our MDTS)
+        const NUM_BLOCKS: usize = (4 * 1024 * 1024) / BLOCK_SIZE + 1;
+
+        // Verify contents are zero on init
+        let mut buffer = Buffer::new(NUM_BLOCKS, BLOCK_SIZE);
+        for i in 0..10 {
+            volume
+                .read(Block::new(i, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+                .await?;
+            assert_eq!(vec![0x00_u8; BLOCK_SIZE * NUM_BLOCKS], &buffer[..]);
+        }
+
+        for i in 0..10 {
+            let mut data = vec![0; BLOCK_SIZE * NUM_BLOCKS];
+            rand::thread_rng().fill(&mut data[..]);
+            volume
+                .write(
+                    Block::new(i, BLOCK_SIZE.trailing_zeros()),
+                    BytesMut::from(data.as_slice()),
+                )
+                .await?;
+
+            // Read parent, verify contents
+            let mut buffer = Buffer::new(NUM_BLOCKS, BLOCK_SIZE);
+            volume
+                .read(Block::new(i, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+                .await?;
+            assert_eq!(&data, &buffer[..]);
+
+            // Do a shifted read, to detect any block shuffling that's
+            // consistent between reads and writes (which would be weird!)
+            let mut buffer = Buffer::new(NUM_BLOCKS - 1, BLOCK_SIZE);
+            volume
+                .read(
+                    Block::new(i + 1, BLOCK_SIZE.trailing_zeros()),
+                    &mut buffer,
+                )
+                .await?;
+            assert_eq!(&data[BLOCK_SIZE..], &buffer[..]);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn volume_zero_length_io() -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
         let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts,
+                gen: 1,
+            }],
+            read_only_parent: None,
+        };
 
         let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
@@ -458,7 +549,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; 0]),
+                BytesMut::from(vec![0x55; 0].as_slice()),
             )
             .await?;
 
@@ -495,7 +586,7 @@ mod test {
         in_memory_data
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![11; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -536,14 +627,14 @@ mod test {
             volume
                 .write_unwritten(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    Bytes::from(vec![55; BLOCK_SIZE * 10]),
+                    BytesMut::from(vec![55; BLOCK_SIZE * 10].as_slice()),
                 )
                 .await?;
         } else {
             volume
                 .write(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    Bytes::from(vec![55; BLOCK_SIZE * 10]),
+                    BytesMut::from(vec![55; BLOCK_SIZE * 10].as_slice()),
                 )
                 .await?;
         }
@@ -584,7 +675,7 @@ mod test {
         in_memory_data
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![11; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -596,19 +687,18 @@ mod test {
         assert_eq!(vec![11; BLOCK_SIZE * 10], &buffer[..]);
 
         // Create volume with read only parent
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts,
+                gen: 1,
+            }],
+            read_only_parent: None,
+        };
 
         let log = csl();
         let mut volume = Volume::construct(vcr, None, log.clone()).await?;
@@ -635,7 +725,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -680,30 +770,29 @@ mod test {
                 )),
         );
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts,
+                gen: 1,
+            }],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Volume {
+                    id: Uuid::new_v4(),
                     block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 1,
-                }],
-                read_only_parent: Some(Box::new(
-                    VolumeConstructionRequest::Volume {
+                    sub_volumes: vec![VolumeConstructionRequest::Url {
                         id: Uuid::new_v4(),
                         block_size: BLOCK_SIZE as u64,
-                        sub_volumes: vec![VolumeConstructionRequest::Url {
-                            id: Uuid::new_v4(),
-                            block_size: BLOCK_SIZE as u64,
-                            url: server.url("/ff.raw").to_string(),
-                        }],
-                        read_only_parent: None,
-                    },
-                )),
-            };
+                        url: server.url("/ff.raw").to_string(),
+                    }],
+                    read_only_parent: None,
+                },
+            )),
+        };
 
         let volume = Volume::construct(vcr, None, csl()).await?;
         volume.activate().await?;
@@ -720,7 +809,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x01; BLOCK_SIZE]),
+                BytesMut::from(vec![0x01; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -742,21 +831,20 @@ mod test {
         let tds = TestDownstairsSet::small(true).await?;
         let opts = tds.opts();
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![],
-                read_only_parent: Some(Box::new(
-                    VolumeConstructionRequest::Region {
-                        block_size: BLOCK_SIZE as u64,
-                        blocks_per_extent: tds.blocks_per_extent(),
-                        extent_count: tds.extent_count(),
-                        opts,
-                        gen: 1,
-                    },
-                )),
-            };
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
+                    opts,
+                    gen: 1,
+                },
+            )),
+        };
 
         let volume = Volume::construct(vcr, None, csl()).await?;
         volume.activate().await?;
@@ -791,19 +879,18 @@ mod test {
         let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts,
+                gen: 1,
+            }],
+            read_only_parent: None,
+        };
 
         let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
@@ -813,7 +900,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -829,7 +916,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x22; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x22; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -862,19 +949,18 @@ mod test {
         let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts,
+                gen: 1,
+            }],
+            read_only_parent: None,
+        };
 
         let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
@@ -884,7 +970,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -900,7 +986,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x22; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x22; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -935,19 +1021,18 @@ mod test {
         let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts,
+                gen: 1,
+            }],
+            read_only_parent: None,
+        };
 
         let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
@@ -957,7 +1042,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x33; BLOCK_SIZE]),
+                BytesMut::from(vec![0x33; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -965,7 +1050,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -1023,13 +1108,12 @@ mod test {
             gen: 1,
         });
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: sv,
-                read_only_parent: None,
-            };
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: sv,
+            read_only_parent: None,
+        };
 
         let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
@@ -1041,7 +1125,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; full_volume_size]),
+                BytesMut::from(vec![0x55; full_volume_size].as_slice()),
             )
             .await?;
 
@@ -1057,7 +1141,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x22; full_volume_size]),
+                BytesMut::from(vec![0x22; full_volume_size].as_slice()),
             )
             .await?;
 
@@ -1110,13 +1194,12 @@ mod test {
             gen: 1,
         });
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: sv,
-                read_only_parent: None,
-            };
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: sv,
+            read_only_parent: None,
+        };
 
         let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
@@ -1129,7 +1212,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(9, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 2].as_slice()),
             )
             .await?;
 
@@ -1147,7 +1230,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x22; full_volume_size]),
+                BytesMut::from(vec![0x22; full_volume_size].as_slice()),
             )
             .await?;
 
@@ -1216,13 +1299,12 @@ mod test {
             gen: 1,
         });
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: sv,
-                read_only_parent: None,
-            };
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: sv,
+            read_only_parent: None,
+        };
 
         let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
 
@@ -1235,7 +1317,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(9, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 2].as_slice()),
             )
             .await?;
 
@@ -1245,7 +1327,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x22; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x22; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -1253,7 +1335,7 @@ mod test {
         volume
             .write(
                 Block::new(7, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x11; BLOCK_SIZE * 13]),
+                BytesMut::from(vec![0x11; BLOCK_SIZE * 13].as_slice()),
             )
             .await?;
 
@@ -1309,7 +1391,7 @@ mod test {
         in_memory_data
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 5]),
+                BytesMut::from(vec![11; BLOCK_SIZE * 5].as_slice()),
             )
             .await?;
 
@@ -1350,7 +1432,7 @@ mod test {
 
         // One big write!
         let write_offset = Block::new(0, BLOCK_SIZE.trailing_zeros());
-        let write_data = Bytes::from(vec![55; BLOCK_SIZE * 10]);
+        let write_data = BytesMut::from(vec![55; BLOCK_SIZE * 10].as_slice());
         if is_write_unwritten {
             volume.write(write_offset, write_data).await?;
         } else {
@@ -1397,7 +1479,7 @@ mod test {
         in_memory_data
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![11; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -1435,7 +1517,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -1480,7 +1562,7 @@ mod test {
         in_memory_data
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 5]),
+                BytesMut::from(vec![11; BLOCK_SIZE * 5].as_slice()),
             )
             .await?;
 
@@ -1526,7 +1608,7 @@ mod test {
         volume
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -1581,7 +1663,7 @@ mod test {
         in_memory_data
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 5]),
+                BytesMut::from(vec![11; BLOCK_SIZE * 5].as_slice()),
             )
             .await?;
 
@@ -1606,7 +1688,7 @@ mod test {
         volume
             .write(
                 Block::new(2, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![22; BLOCK_SIZE]),
+                BytesMut::from(vec![22; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -1614,7 +1696,7 @@ mod test {
         volume
             .write(
                 Block::new(7, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![33; BLOCK_SIZE]),
+                BytesMut::from(vec![33; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -1676,7 +1758,7 @@ mod test {
         in_memory_data
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![11; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -1709,7 +1791,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -1759,7 +1841,7 @@ mod test {
         in_memory_data
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![11; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -1783,13 +1865,12 @@ mod test {
             gen: 1,
         });
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: sv,
-                read_only_parent: None,
-            };
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: sv,
+            read_only_parent: None,
+        };
 
         let log = csl();
         let mut volume = Volume::construct(vcr, None, log.clone()).await?;
@@ -1809,7 +1890,7 @@ mod test {
         volume
             .write(
                 Block::new(9, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![22; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![22; BLOCK_SIZE * 2].as_slice()),
             )
             .await?;
 
@@ -1825,7 +1906,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![33; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![33; BLOCK_SIZE * 2].as_slice()),
             )
             .await?;
 
@@ -1885,7 +1966,7 @@ mod test {
         in_memory_data
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![11; BLOCK_SIZE * 15]),
+                BytesMut::from(vec![11; BLOCK_SIZE * 15].as_slice()),
             )
             .await?;
 
@@ -1909,13 +1990,12 @@ mod test {
             gen: 1,
         });
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: sv,
-                read_only_parent: None,
-            };
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: sv,
+            read_only_parent: None,
+        };
 
         let log = csl();
         let mut volume = Volume::construct(vcr, None, log.clone()).await?;
@@ -1936,7 +2016,7 @@ mod test {
         volume
             .write(
                 Block::new(9, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![22; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![22; BLOCK_SIZE * 2].as_slice()),
             )
             .await?;
 
@@ -1953,7 +2033,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![33; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![33; BLOCK_SIZE * 2].as_slice()),
             )
             .await?;
 
@@ -1962,7 +2042,7 @@ mod test {
         volume
             .write(
                 Block::new(14, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![44; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![44; BLOCK_SIZE * 2].as_slice()),
             )
             .await?;
 
@@ -2001,40 +2081,38 @@ mod test {
         let tds = TestDownstairsSet::small(true).await?;
         let mut opts = tds.opts();
 
-        let vcr_1: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![],
-                read_only_parent: Some(Box::new(
-                    VolumeConstructionRequest::Region {
-                        block_size: BLOCK_SIZE as u64,
-                        blocks_per_extent: tds.blocks_per_extent(),
-                        extent_count: tds.extent_count(),
-                        opts: opts.clone(),
-                        gen: 1,
-                    },
-                )),
-            };
+        let vcr_1 = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
+                    opts: opts.clone(),
+                    gen: 1,
+                },
+            )),
+        };
 
         // Second volume should have a unique UUID
         opts.id = Uuid::new_v4();
 
-        let vcr_2: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
-                block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![],
-                read_only_parent: Some(Box::new(
-                    VolumeConstructionRequest::Region {
-                        block_size: BLOCK_SIZE as u64,
-                        blocks_per_extent: tds.blocks_per_extent(),
-                        extent_count: tds.extent_count(),
-                        opts,
-                        gen: 1,
-                    },
-                )),
-            };
+        let vcr_2 = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Region {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: tds.blocks_per_extent(),
+                    extent_count: tds.extent_count(),
+                    opts,
+                    gen: 1,
+                },
+            )),
+        };
 
         let log = csl();
         let volume1 = Volume::construct(vcr_1, None, log.clone()).await?;
@@ -2108,7 +2186,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![55; BLOCK_SIZE * 5]),
+                BytesMut::from(vec![55; BLOCK_SIZE * 5].as_slice()),
             )
             .await?;
 
@@ -2168,7 +2246,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(random_buffer.clone()),
+                BytesMut::from(random_buffer.as_slice()),
             )
             .await?;
 
@@ -2209,7 +2287,7 @@ mod test {
             assert!(volume
                 .write(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    Bytes::from(vec![0u8; BLOCK_SIZE]),
+                    BytesMut::from(vec![0u8; BLOCK_SIZE].as_slice()),
                 )
                 .await
                 .is_err());
@@ -2223,33 +2301,32 @@ mod test {
         let top_layer_opts = top_layer_tds.opts();
         let bottom_layer_opts = test_downstairs_set.opts();
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
+                blocks_per_extent: top_layer_tds.blocks_per_extent(),
+                extent_count: top_layer_tds.extent_count(),
+                opts: top_layer_opts,
+                gen: 3,
+            }],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Volume {
+                    id: Uuid::new_v4(),
                     block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: top_layer_tds.blocks_per_extent(),
-                    extent_count: top_layer_tds.extent_count(),
-                    opts: top_layer_opts,
-                    gen: 3,
-                }],
-                read_only_parent: Some(Box::new(
-                    VolumeConstructionRequest::Volume {
-                        id: Uuid::new_v4(),
+                    sub_volumes: vec![VolumeConstructionRequest::Region {
                         block_size: BLOCK_SIZE as u64,
-                        sub_volumes: vec![VolumeConstructionRequest::Region {
-                            block_size: BLOCK_SIZE as u64,
-                            blocks_per_extent: test_downstairs_set
-                                .blocks_per_extent(),
-                            extent_count: test_downstairs_set.extent_count(),
-                            opts: bottom_layer_opts,
-                            gen: 3,
-                        }],
-                        read_only_parent: None,
-                    },
-                )),
-            };
+                        blocks_per_extent: test_downstairs_set
+                            .blocks_per_extent(),
+                        extent_count: test_downstairs_set.extent_count(),
+                        opts: bottom_layer_opts,
+                        gen: 3,
+                    }],
+                    read_only_parent: None,
+                },
+            )),
+        };
 
         let volume = Volume::construct(vcr, None, csl()).await?;
         volume.activate().await?;
@@ -2273,7 +2350,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0u8; BLOCK_SIZE]),
+                BytesMut::from(vec![0u8; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -2340,7 +2417,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(random_buffer.clone()),
+                BytesMut::from(random_buffer.as_slice()),
             )
             .await?;
 
@@ -2389,7 +2466,7 @@ mod test {
             assert!(volume
                 .write(
                     Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                    Bytes::from(vec![0u8; BLOCK_SIZE]),
+                    BytesMut::from(vec![0u8; BLOCK_SIZE].as_slice()),
                 )
                 .await
                 .is_err());
@@ -2411,33 +2488,32 @@ mod test {
             .join("00/000/000.db")
             .exists());
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: Uuid::new_v4(),
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
+                blocks_per_extent: top_layer_tds.blocks_per_extent(),
+                extent_count: top_layer_tds.extent_count(),
+                opts: top_layer_opts,
+                gen: 3,
+            }],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Volume {
+                    id: Uuid::new_v4(),
                     block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: top_layer_tds.blocks_per_extent(),
-                    extent_count: top_layer_tds.extent_count(),
-                    opts: top_layer_opts,
-                    gen: 3,
-                }],
-                read_only_parent: Some(Box::new(
-                    VolumeConstructionRequest::Volume {
-                        id: Uuid::new_v4(),
+                    sub_volumes: vec![VolumeConstructionRequest::Region {
                         block_size: BLOCK_SIZE as u64,
-                        sub_volumes: vec![VolumeConstructionRequest::Region {
-                            block_size: BLOCK_SIZE as u64,
-                            blocks_per_extent: test_downstairs_set
-                                .blocks_per_extent(),
-                            extent_count: test_downstairs_set.extent_count(),
-                            opts: bottom_layer_opts,
-                            gen: 3,
-                        }],
-                        read_only_parent: None,
-                    },
-                )),
-            };
+                        blocks_per_extent: test_downstairs_set
+                            .blocks_per_extent(),
+                        extent_count: test_downstairs_set.extent_count(),
+                        opts: bottom_layer_opts,
+                        gen: 3,
+                    }],
+                    read_only_parent: None,
+                },
+            )),
+        };
 
         let volume = Volume::construct(vcr, None, csl()).await?;
         volume.activate().await?;
@@ -2461,7 +2537,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0u8; BLOCK_SIZE]),
+                BytesMut::from(vec![0u8; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -2525,13 +2601,21 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(random_buffer.clone()),
+                BytesMut::from(random_buffer.as_slice()),
             )
             .await?;
 
         volume.deactivate().await?;
 
         drop(volume);
+
+        // This must still be a SQLite extent!
+        assert!(test_downstairs_set
+            .downstairs1
+            .tempdir
+            .path()
+            .join("00/000/000.db")
+            .exists());
 
         test_downstairs_set.reboot_read_write().await?;
         // This should now be migrated, and the DB file should be deleted
@@ -2571,6 +2655,500 @@ mod test {
     }
 
     #[tokio::test]
+    async fn integration_test_clone_raw() -> Result<()> {
+        // Test downstairs region clone.
+        // Create three downstairs with raw backend, write some data to them.
+        // Restart them all read only.
+        // Create a new downstairs.
+        // Clone a read only downstairs to the new downstairs
+        // Make a new volume with two old and the one new downstairs and verify
+        // the original data we wrote.
+        // Create a new downstairs directly from the clone.
+        // Make a new volume with two old and the one new downstairs and verify
+        // the original data we wrote.
+        const BLOCK_SIZE: usize = 512;
+
+        // boot three downstairs, write some data to them, then change to
+        // read-only.
+        let mut test_downstairs_set = TestDownstairsSet::small(false).await?;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        let random_buffer = {
+            let mut random_buffer =
+                vec![0u8; volume.total_size().await? as usize];
+            rand::thread_rng().fill(&mut random_buffer[..]);
+            random_buffer
+        };
+
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                BytesMut::from(random_buffer.as_slice()),
+            )
+            .await?;
+
+        volume.deactivate().await.unwrap();
+        drop(volume);
+
+        // Restart all the downstairs read only
+        test_downstairs_set.reboot_read_only().await?;
+
+        // Make the new downstairs
+        let mut new_ds = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            5,
+            2,
+            false,
+            Backend::RawFile,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Clone an original downstairs to our new downstairs
+        let clone_source = test_downstairs_set.downstairs1.repair_address();
+        new_ds.reboot_clone(clone_source).await.unwrap();
+
+        // Restart the new downstairs read only.
+        new_ds.reboot_read_only().await.unwrap();
+        let new_target = new_ds.address();
+
+        // Take our original opts, and replace a target with the downstairs
+        // we just cloned.
+        let mut new_opts = test_downstairs_set.opts();
+        new_opts.target[0] = new_target;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                new_opts,
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                3,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        // Verify our volume still has the random data we wrote.
+        let volume_size = volume.total_size().await? as usize;
+        let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+            .await?;
+
+        assert_eq!(&buffer[BLOCK_SIZE..], &random_buffer[BLOCK_SIZE..]);
+
+        // Clone an original downstairs directly to our new downstairs
+        let clone_source = test_downstairs_set.downstairs1.repair_address();
+        let mut new_ds = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            5,
+            2,
+            false,
+            Backend::RawFile,
+            Some(clone_source),
+        )
+        .await
+        .unwrap();
+
+        // Restart the new downstairs read only.
+        new_ds.reboot_read_only().await.unwrap();
+        let new_target = new_ds.address();
+
+        // Take our original opts, and replace a target with the downstairs
+        // we just cloned.
+        let mut new_opts = test_downstairs_set.opts();
+        new_opts.target[0] = new_target;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                new_opts,
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                3,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        // Verify our volume still has the random data we wrote.
+        let volume_size = volume.total_size().await? as usize;
+        let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+            .await?;
+
+        assert_eq!(&buffer[BLOCK_SIZE..], &random_buffer[BLOCK_SIZE..]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_clone_sql() -> Result<()> {
+        // Test downstairs region clone.
+        // Create three downstairs with sql backend, write some data to them.
+        // Restart them all read only.
+        // Create a new downstairs.
+        // Clone a read only downstairs to the new downstairs
+        // Make a new volume with two old and the one new downstairs and verify
+        // the original data we wrote.
+        const BLOCK_SIZE: usize = 512;
+
+        // boot three downstairs, write some data to them, then change to
+        // read-only.
+        let mut test_downstairs_set =
+            TestDownstairsSet::small_sqlite(false).await?;
+
+        // This must be a SQLite extent!
+        assert!(test_downstairs_set
+            .downstairs1
+            .tempdir
+            .path()
+            .join("00/000/000.db")
+            .exists());
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        let random_buffer = {
+            let mut random_buffer =
+                vec![0u8; volume.total_size().await? as usize];
+            rand::thread_rng().fill(&mut random_buffer[..]);
+            random_buffer
+        };
+
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                BytesMut::from(random_buffer.as_slice()),
+            )
+            .await?;
+
+        volume.deactivate().await.unwrap();
+        drop(volume);
+
+        // Restart the original downstairs read only.
+        test_downstairs_set.reboot_read_only().await?;
+
+        // Make the new downstairs
+        let mut new_ds = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            5,
+            2,
+            false,
+            Backend::RawFile,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Clone a read only downstairs to our new downstairs.
+        let clone_source = test_downstairs_set.downstairs1.repair_address();
+        new_ds.reboot_clone(clone_source).await.unwrap();
+
+        new_ds.reboot_read_only().await.unwrap();
+        let new_target = new_ds.address();
+
+        // The cloned region should have the .db file
+        assert!(new_ds.tempdir.path().join("00/000/000.db").exists());
+
+        // Replace one of the targets in our original with the new downstairs.
+        let mut new_opts = test_downstairs_set.opts();
+        new_opts.target[0] = new_target;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                new_opts,
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                3,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        // Verify our volume still has the random data we wrote.
+        let volume_size = volume.total_size().await? as usize;
+        let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+            .await?;
+
+        assert_eq!(&buffer[BLOCK_SIZE..], &random_buffer[BLOCK_SIZE..]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_repair_ready_not_closed() -> Result<()> {
+        // Create a new downstairs.
+        // Verify repair ready returns false when an extent is open
+
+        // Create a downstairs
+        let new_ds = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,  // encrypted
+            false, // read only
+            5,
+            2,
+            false,
+            Backend::RawFile,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let repair_addr = new_ds.repair_address();
+
+        let url = format!("http://{:?}", repair_addr);
+        let repair_server = Client::new(&url);
+
+        // Extent are open, so the repair ready request should return false.
+        let rc = repair_server.extent_repair_ready(0).await;
+        assert!(!rc.unwrap().into_inner());
+
+        let rc = repair_server.extent_repair_ready(1).await;
+        assert!(!rc.unwrap().into_inner());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_repair_ready_read_only() -> Result<()> {
+        // Create a new downstairs.
+        // Verify repair ready returns true for read only downstairs,
+        // even when extents are open.
+
+        // Create a downstairs
+        let new_ds = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true, // encrypted
+            true, // read only
+            5,
+            2,
+            false,
+            Backend::RawFile,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let repair_addr = new_ds.repair_address();
+
+        let url = format!("http://{:?}", repair_addr);
+        let repair_server = Client::new(&url);
+
+        // Extent are not open, but the region is read only, so the requests
+        // should all return true.
+        let rc = repair_server.extent_repair_ready(0).await;
+        assert!(rc.unwrap().into_inner());
+
+        let rc = repair_server.extent_repair_ready(1).await;
+        assert!(rc.unwrap().into_inner());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_clone_diff_ec() -> Result<()> {
+        // Test downstairs region clone.
+        // Verify different extent count will fail.
+
+        let mut ds_one = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            5,
+            3,
+            false,
+            Backend::RawFile,
+            None,
+        )
+        .await
+        .unwrap();
+
+        ds_one.reboot_read_only().await.unwrap();
+        let clone_source = ds_one.repair_address();
+
+        let mut ds_two = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            5,
+            2, // <- Different than above
+            false,
+            Backend::RawFile,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(ds_two.reboot_clone(clone_source).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_clone_diff_es() -> Result<()> {
+        // Test downstairs region clone.
+        // Verify different extent size will fail.
+
+        let mut ds_one = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            9,
+            2,
+            false,
+            Backend::RawFile,
+            None,
+        )
+        .await
+        .unwrap();
+
+        ds_one.reboot_read_only().await.unwrap();
+        let clone_source = ds_one.repair_address();
+
+        let mut ds_two = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            5, // <- Different than above
+            2,
+            false,
+            Backend::RawFile,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(ds_two.reboot_clone(clone_source).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_clone_not_ro() -> Result<()> {
+        // Test downstairs region clone.
+        // Verify you can't clone from a RW downstairs
+
+        let ds_one = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            false, // <- RO is false.
+            5,
+            2,
+            false,
+            Backend::RawFile,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let clone_source = ds_one.repair_address();
+
+        let mut ds_two = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            5,
+            2,
+            false,
+            Backend::RawFile,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(ds_two.reboot_clone(clone_source).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_clone_diff_encrypted() -> Result<()> {
+        // Test downstairs region clone.
+        // Verify downstairs encryption state must match.
+
+        let ds_one = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            false,
+            true,
+            5,
+            2,
+            false,
+            Backend::RawFile,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let clone_source = ds_one.repair_address();
+
+        let mut ds_two = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true, // <- Encrypted is different
+            true,
+            5,
+            2,
+            false,
+            Backend::RawFile,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(ds_two.reboot_clone(clone_source).await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn integration_test_volume_replace_downstairs() -> Result<()> {
         // Replace a downstairs with a new one
         const BLOCK_SIZE: usize = 512;
@@ -2604,7 +3182,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(random_buffer.clone()),
+                BytesMut::from(random_buffer.as_slice()),
             )
             .await?;
 
@@ -2615,8 +3193,8 @@ mod test {
         let res = volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                test_downstairs_set.downstairs1_address().await,
-                new_downstairs.address().await,
+                test_downstairs_set.downstairs1_address(),
+                new_downstairs.address(),
             )
             .await
             .unwrap();
@@ -2630,8 +3208,144 @@ mod test {
             match volume
                 .replace_downstairs(
                     test_downstairs_set.opts().id,
-                    test_downstairs_set.downstairs1_address().await,
-                    new_downstairs.address().await,
+                    test_downstairs_set.downstairs1_address(),
+                    new_downstairs.address(),
+                )
+                .await
+                .unwrap()
+            {
+                ReplaceResult::StartedAlready => {
+                    println!("Waiting for replacement to finish");
+                }
+                ReplaceResult::CompletedAlready => {
+                    println!("Downstairs replacement completed");
+                    break;
+                }
+                x => {
+                    panic!("Bad result from replace_downstairs: {:?}", x);
+                }
+            }
+        }
+
+        // Read back what we wrote.
+        let volume_size = volume.total_size().await? as usize;
+        assert_eq!(volume_size % BLOCK_SIZE, 0);
+        let mut buffer = Buffer::new(volume_size / BLOCK_SIZE, BLOCK_SIZE);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+            .await?;
+
+        assert_eq!(&buffer[BLOCK_SIZE..], &random_buffer[BLOCK_SIZE..]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_volume_clone_replace_ro_downstairs() -> Result<()>
+    {
+        // Replace a read only downstairs with a new one, that we cloned
+        // from the original ro downstairs.
+        const BLOCK_SIZE: usize = 512;
+
+        // boot three downstairs, write some data to them, then change to
+        // read-only.
+        let mut test_downstairs_set = TestDownstairsSet::small(false).await?;
+
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                1,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        let random_buffer = {
+            let mut random_buffer =
+                vec![0u8; volume.total_size().await? as usize];
+            rand::thread_rng().fill(&mut random_buffer[..]);
+            random_buffer
+        };
+
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                BytesMut::from(random_buffer.as_slice()),
+            )
+            .await?;
+
+        volume.deactivate().await.unwrap();
+
+        // Restart the three downstairs in read only mode.
+        test_downstairs_set.reboot_read_only().await?;
+
+        // Restart our volume with the restarted read-only downstairs.
+        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
+        volume
+            .add_subvolume_create_guest(
+                test_downstairs_set.opts(),
+                volume::RegionExtentInfo {
+                    block_size: BLOCK_SIZE as u64,
+                    blocks_per_extent: test_downstairs_set.blocks_per_extent(),
+                    extent_count: test_downstairs_set.extent_count(),
+                },
+                2,
+                None,
+            )
+            .await?;
+
+        volume.activate().await?;
+
+        // Make the new downstairs, but don't start it
+        let mut new_ds = TestDownstairs::new(
+            "127.0.0.1".parse().unwrap(),
+            true,
+            true,
+            5,
+            2,
+            false,
+            Backend::RawFile,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let clone_source = test_downstairs_set.downstairs1.repair_address();
+
+        // Clone a read only downstairs into the new downstairs region.
+        new_ds.reboot_clone(clone_source).await.unwrap();
+        // Start the new downstairs read only.
+        new_ds.reboot_read_only().await.unwrap();
+
+        // Replace a downstairs in our RO volume with the new downstairs we
+        // just cloned.
+        let res = volume
+            .replace_downstairs(
+                test_downstairs_set.opts().id,
+                test_downstairs_set.downstairs1.address(),
+                new_ds.address(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res, ReplaceResult::Started);
+
+        // We can use the result from calling replace_downstairs to
+        // intuit status on progress of the replacement.
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            match volume
+                .replace_downstairs(
+                    test_downstairs_set.opts().id,
+                    test_downstairs_set.downstairs1.address(),
+                    new_ds.address(),
                 )
                 .await
                 .unwrap()
@@ -2695,8 +3409,8 @@ mod test {
         let res = volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                new_downstairs.address().await,
-                other_new_downstairs.address().await,
+                new_downstairs.address(),
+                other_new_downstairs.address(),
             )
             .await
             .unwrap();
@@ -2735,8 +3449,8 @@ mod test {
         let res = volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                test_downstairs_set.downstairs1_address().await,
-                new_downstairs.address().await,
+                test_downstairs_set.downstairs1_address(),
+                new_downstairs.address(),
             )
             .await
             .unwrap();
@@ -2775,8 +3489,8 @@ mod test {
         let res = volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                test_downstairs_set.downstairs1_address().await,
-                new_downstairs.address().await,
+                test_downstairs_set.downstairs1_address(),
+                new_downstairs.address(),
             )
             .await
             .unwrap();
@@ -2787,8 +3501,8 @@ mod test {
         let res = volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                test_downstairs_set.downstairs1_address().await,
-                new_downstairs.address().await,
+                test_downstairs_set.downstairs1_address(),
+                new_downstairs.address(),
             )
             .await
             .unwrap();
@@ -2828,8 +3542,8 @@ mod test {
         volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                test_downstairs_set.downstairs1_address().await,
-                test_downstairs_set.downstairs2_address().await,
+                test_downstairs_set.downstairs1_address(),
+                test_downstairs_set.downstairs2_address(),
             )
             .await
             .unwrap_err();
@@ -2839,8 +3553,8 @@ mod test {
         volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                test_downstairs_set.downstairs2_address().await,
-                test_downstairs_set.downstairs1_address().await,
+                test_downstairs_set.downstairs2_address(),
+                test_downstairs_set.downstairs1_address(),
             )
             .await
             .unwrap_err();
@@ -2887,7 +3601,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(random_buffer.clone()),
+                BytesMut::from(random_buffer.as_slice()),
             )
             .await?;
 
@@ -2900,8 +3614,8 @@ mod test {
         let res = volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                test_downstairs_set.downstairs1_address().await,
-                new_downstairs.address().await,
+                test_downstairs_set.downstairs1_address(),
+                new_downstairs.address(),
             )
             .await
             .unwrap();
@@ -2910,8 +3624,8 @@ mod test {
         match volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                test_downstairs_set.downstairs1_address().await,
-                new_downstairs.address().await,
+                test_downstairs_set.downstairs1_address(),
+                new_downstairs.address(),
             )
             .await
             .unwrap()
@@ -2932,9 +3646,9 @@ mod test {
         // target list
         let mut opts = test_downstairs_set.opts();
         opts.target = vec![
-            new_downstairs.address().await,
-            test_downstairs_set.downstairs2_address().await,
-            test_downstairs_set.downstairs3_address().await,
+            new_downstairs.address(),
+            test_downstairs_set.downstairs2_address(),
+            test_downstairs_set.downstairs3_address(),
         ];
 
         let mut new_volume = Volume::new(BLOCK_SIZE as u64, csl());
@@ -3019,7 +3733,7 @@ mod test {
                 volume
                     .write(
                         Block::new(*i as u64, BLOCK_SIZE.trailing_zeros()),
-                        Bytes::from(random_buffer.clone()),
+                        BytesMut::from(random_buffer.as_slice()),
                     )
                     .await?;
             }
@@ -3077,7 +3791,7 @@ mod test {
         guest
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -3138,7 +3852,7 @@ mod test {
         guest
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -3180,10 +3894,7 @@ mod test {
 
         // Write of length 0
         guest
-            .write(
-                Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(Vec::new()),
-            )
+            .write(Block::new(0, BLOCK_SIZE.trailing_zeros()), BytesMut::new())
             .await?;
 
         Ok(())
@@ -3209,7 +3920,7 @@ mod test {
         guest
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -3220,8 +3931,8 @@ mod test {
         let res = guest
             .replace_downstairs(
                 tds.opts().id,
-                tds.downstairs1_address().await,
-                new_downstairs.address().await,
+                tds.downstairs1_address(),
+                new_downstairs.address(),
             )
             .await
             .unwrap();
@@ -3235,8 +3946,8 @@ mod test {
             match guest
                 .replace_downstairs(
                     tds.opts().id,
-                    tds.downstairs1_address().await,
-                    new_downstairs.address().await,
+                    tds.downstairs1_address(),
+                    new_downstairs.address(),
                 )
                 .await
                 .unwrap()
@@ -3284,7 +3995,7 @@ mod test {
         let write_result = guest
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await;
         assert!(write_result.is_err());
@@ -3319,8 +4030,8 @@ mod test {
         let res = guest
             .replace_downstairs(
                 tds.opts().id,
-                tds.downstairs1_address().await,
-                new_downstairs.address().await,
+                tds.downstairs1_address(),
+                new_downstairs.address(),
             )
             .await
             .unwrap();
@@ -3332,8 +4043,8 @@ mod test {
         guest
             .replace_downstairs(
                 tds.opts().id,
-                tds.downstairs2_address().await,
-                another_new_downstairs.address().await,
+                tds.downstairs2_address(),
+                another_new_downstairs.address(),
             )
             .await
             .unwrap_err();
@@ -3363,7 +4074,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -3379,7 +4090,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x99; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x99; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -3396,7 +4107,7 @@ mod test {
         guest
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x89; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x89; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
@@ -3435,7 +4146,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -3444,7 +4155,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x99; BLOCK_SIZE * 3]),
+                BytesMut::from(vec![0x99; BLOCK_SIZE * 3].as_slice()),
             )
             .await?;
 
@@ -3492,7 +4203,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(1, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -3501,7 +4212,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x99; BLOCK_SIZE * 3]),
+                BytesMut::from(vec![0x99; BLOCK_SIZE * 3].as_slice()),
             )
             .await?;
 
@@ -3550,7 +4261,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(2, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -3559,7 +4270,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x99; BLOCK_SIZE * 3]),
+                BytesMut::from(vec![0x99; BLOCK_SIZE * 3].as_slice()),
             )
             .await?;
 
@@ -3603,7 +4314,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(4, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -3612,7 +4323,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(4, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x99; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![0x99; BLOCK_SIZE * 2].as_slice()),
             )
             .await?;
 
@@ -3656,7 +4367,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(4, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE].as_slice()),
             )
             .await?;
 
@@ -3665,7 +4376,7 @@ mod test {
         guest
             .write_unwritten(
                 Block::new(4, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x99; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![0x99; BLOCK_SIZE * 2].as_slice()),
             )
             .await?;
 
@@ -3706,7 +4417,7 @@ mod test {
         let res = guest
             .write(
                 Block::new(11, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE].as_slice()),
             )
             .await;
 
@@ -3741,7 +4452,7 @@ mod test {
         let res = guest
             .write(
                 Block::new(10, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 2]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 2].as_slice()),
             )
             .await;
 
@@ -3780,19 +4491,18 @@ mod test {
         let volume_id = Uuid::new_v4();
         let opts = tds.opts();
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
+        let vcr = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts: opts.clone(),
+                gen: 1,
+            }],
+            read_only_parent: None,
+        };
 
         let client =
             CruciblePantryClient::new(&format!("http://{}", pantry_addr));
@@ -3884,19 +4594,18 @@ mod test {
             .await
             .unwrap();
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
+        let vcr = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 2,
-                }],
-                read_only_parent: None,
-            };
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts: opts.clone(),
+                gen: 2,
+            }],
+            read_only_parent: None,
+        };
         let volume = Volume::construct(vcr, None, csl()).await.unwrap();
         volume.activate().await.unwrap();
 
@@ -3988,19 +4697,18 @@ mod test {
         let opts = tds.opts();
 
         let volume_id = Uuid::new_v4();
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
+        let vcr = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 1,
-                }],
-                read_only_parent: None,
-            };
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts: opts.clone(),
+                gen: 1,
+            }],
+            read_only_parent: None,
+        };
 
         // Verify contents are zero on init
         {
@@ -4045,19 +4753,18 @@ mod test {
 
         // Attach, validate img.raw got imported
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
+        let vcr = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 3,
-                }],
-                read_only_parent: None,
-            };
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts,
+                gen: 3,
+            }],
+            read_only_parent: None,
+        };
         let volume = Volume::construct(vcr, None, log.clone()).await.unwrap();
         volume.activate().await.unwrap();
 
@@ -4123,19 +4830,18 @@ mod test {
 
         // Attach, validate bulk write worked
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
+        let vcr = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 2,
-                }],
-                read_only_parent: None,
-            };
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts,
+                gen: 2,
+            }],
+            read_only_parent: None,
+        };
         let volume = Volume::construct(vcr, None, csl()).await.unwrap();
         volume.activate().await.unwrap();
 
@@ -4186,19 +4892,18 @@ mod test {
 
         // Attach, validate bulk write worked
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
+        let vcr = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 2,
-                }],
-                read_only_parent: None,
-            };
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts,
+                gen: 2,
+            }],
+            read_only_parent: None,
+        };
         let volume = Volume::construct(vcr, None, csl()).await.unwrap();
         volume.activate().await.unwrap();
 
@@ -4320,19 +5025,18 @@ mod test {
             url: url.clone(),
         }));
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
+        let vcr = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 1,
-                }],
-                read_only_parent: read_only_parent.clone(),
-            };
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts: opts.clone(),
+                gen: 1,
+            }],
+            read_only_parent: read_only_parent.clone(),
+        };
 
         // Verify contents match data on init
         {
@@ -4366,19 +5070,18 @@ mod test {
         let client =
             CruciblePantryClient::new(&format!("http://{}", pantry_addr));
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
+        let vcr = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 2,
-                }],
-                read_only_parent,
-            };
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts: opts.clone(),
+                gen: 2,
+            }],
+            read_only_parent,
+        };
         client
             .attach(
                 &volume_id.to_string(),
@@ -4416,19 +5119,18 @@ mod test {
 
         // Drop the read only parent from the volume construction request
 
-        let vcr: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
+        let vcr = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts,
-                    gen: 3,
-                }],
-                read_only_parent: None,
-            };
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts,
+                gen: 3,
+            }],
+            read_only_parent: None,
+        };
 
         // Attach, validate random data got imported
 
@@ -4898,19 +5600,18 @@ mod test {
         let opts = tds.opts();
         let volume_id = Uuid::new_v4();
 
-        let original: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
+        let original = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: opts.clone(),
-                    gen: 2,
-                }],
-                read_only_parent: None,
-            };
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts: opts.clone(),
+                gen: 2,
+            }],
+            read_only_parent: None,
+        };
 
         let volume = Volume::construct(original.clone(), None, log.clone())
             .await
@@ -4921,7 +5622,7 @@ mod test {
         volume
             .write(
                 Block::new(0, BLOCK_SIZE.trailing_zeros()),
-                Bytes::from(vec![0x55; BLOCK_SIZE * 10]),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await
             .unwrap();
@@ -4937,32 +5638,27 @@ mod test {
 
         // Make one new downstairs
         let new_downstairs = tds.new_downstairs().await.unwrap();
-        info!(
-            log,
-            "A New downstairs: {:?}",
-            new_downstairs.address().await
-        );
+        info!(log, "A New downstairs: {:?}", new_downstairs.address());
 
         let mut new_opts = tds.opts().clone();
-        new_opts.target[0] = new_downstairs.address().await;
+        new_opts.target[0] = new_downstairs.address();
         info!(log, "Old ops target: {:?}", opts.target);
         info!(log, "New ops target: {:?}", new_opts.target);
 
         // Our "new" VCR must have a new downstairs in the opts, and have
         // the generation number be larger than the original.
-        let replacement: VolumeConstructionRequest =
-            VolumeConstructionRequest::Volume {
-                id: volume_id,
+        let replacement = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
                 block_size: BLOCK_SIZE as u64,
-                sub_volumes: vec![VolumeConstructionRequest::Region {
-                    block_size: BLOCK_SIZE as u64,
-                    blocks_per_extent: tds.blocks_per_extent(),
-                    extent_count: tds.extent_count(),
-                    opts: new_opts.clone(),
-                    gen: 3,
-                }],
-                read_only_parent: None,
-            };
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts: new_opts.clone(),
+                gen: 3,
+            }],
+            read_only_parent: None,
+        };
 
         info!(log, "Replace VCR now: {:?}", replacement);
         volume.target_replace(original, replacement).await.unwrap();
@@ -4974,5 +5670,195 @@ mod test {
             .unwrap();
 
         assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
+    }
+
+    #[tokio::test]
+    async fn test_volume_replace_rop_in_vcr() {
+        // Verify that we can do replacement of a read_only_parent target
+        // for a volume.
+        const BLOCK_SIZE: usize = 512;
+        let log = csl();
+
+        // Make three downstairs
+        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let opts = tds.opts();
+        let volume_id = Uuid::new_v4();
+
+        let original = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: BLOCK_SIZE as u64,
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts: opts.clone(),
+                gen: 1,
+            }],
+            read_only_parent: None,
+        };
+
+        let volume = Volume::construct(original.clone(), None, log.clone())
+            .await
+            .unwrap();
+        volume.activate().await.unwrap();
+
+        // Write data in
+        volume
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
+            )
+            .await
+            .unwrap();
+
+        // Read parent, verify contents
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+            .await
+            .unwrap();
+
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
+        volume.deactivate().await.unwrap();
+
+        drop(volume);
+
+        // Make a new volume, and make the original volume the read only
+        // parent.
+        // Make three new downstairs for the new volume.
+        let sv_tds = TestDownstairsSet::small(false).await.unwrap();
+        let sv_opts = sv_tds.opts();
+        let sv_volume_id = Uuid::new_v4();
+
+        // Use the original opts above, but now for the ROP.
+        let rop = Box::new(VolumeConstructionRequest::Region {
+            block_size: BLOCK_SIZE as u64,
+            blocks_per_extent: tds.blocks_per_extent(),
+            extent_count: tds.extent_count(),
+            opts: opts.clone(),
+            gen: 2,
+        });
+
+        let new_sub_vol = vec![VolumeConstructionRequest::Region {
+            block_size: BLOCK_SIZE as u64,
+            blocks_per_extent: sv_tds.blocks_per_extent(),
+            extent_count: sv_tds.extent_count(),
+            opts: sv_opts.clone(),
+            gen: 1,
+        }];
+
+        let new_vol = VolumeConstructionRequest::Volume {
+            id: sv_volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: new_sub_vol.clone(),
+            read_only_parent: Some(rop),
+        };
+
+        // Make our new volume that has a read_only_parent.
+        let volume = Volume::construct(new_vol.clone(), None, log.clone())
+            .await
+            .unwrap();
+        volume.activate().await.unwrap();
+
+        // Make one new downstairs
+        let new_downstairs = tds.new_downstairs().await.unwrap();
+        info!(log, "A New downstairs: {:?}", new_downstairs.address());
+
+        let mut new_opts = tds.opts().clone();
+        new_opts.target[0] = new_downstairs.address();
+        info!(log, "Old ops target: {:?}", opts.target);
+        info!(log, "New ops target: {:?}", new_opts.target);
+        let new_rop = Box::new(VolumeConstructionRequest::Region {
+            block_size: BLOCK_SIZE as u64,
+            blocks_per_extent: tds.blocks_per_extent(),
+            extent_count: tds.extent_count(),
+            opts: new_opts.clone(),
+            gen: 3,
+        });
+
+        // Our "new" VCR must have a new downstairs in the opts, and have
+        // the generation number be larger than the original.
+        let replacement = VolumeConstructionRequest::Volume {
+            id: sv_volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: new_sub_vol.clone(),
+            read_only_parent: Some(new_rop),
+        };
+
+        info!(log, "Replace VCR now: {:?}", replacement);
+        let rop_replace = volume.target_replace(new_vol, replacement).await;
+        info!(log, "Replace VCR returns: {:?}", rop_replace);
+        assert!(rop_replace.is_ok());
+        info!(log, "send read now");
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
+        volume
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+            .await
+            .unwrap();
+
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
+    }
+
+    /// Getting a volume's status should work even if something else took over
+    #[tokio::test]
+    async fn test_pantry_get_status_after_activation() {
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+
+        let tds = TestDownstairsSet::big(false).await.unwrap();
+        let opts = tds.opts();
+
+        // Start a pantry, get the client for it, then use it to bulk_write
+        // in data
+        let (_pantry, volume_id, client) =
+            get_pantry_and_client_for_tds(&tds).await;
+
+        // volume status should return active = true, and seen_active = true.
+
+        let status =
+            client.volume_status(&volume_id.to_string()).await.unwrap();
+
+        assert!(matches!(
+            status.into_inner(),
+            crucible_pantry_client::types::VolumeStatus {
+                active: true,
+                seen_active: true,
+                num_job_handles: 0,
+            }
+        ));
+
+        // Take over the Volume activation here
+
+        let vcr = VolumeConstructionRequest::Volume {
+            id: volume_id,
+            block_size: BLOCK_SIZE as u64,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: BLOCK_SIZE as u64,
+                blocks_per_extent: tds.blocks_per_extent(),
+                extent_count: tds.extent_count(),
+                opts,
+                gen: 2,
+            }],
+            read_only_parent: None,
+        };
+
+        let log = csl();
+        let volume = Volume::construct(vcr, None, log.clone()).await.unwrap();
+        volume.activate().await.unwrap();
+
+        // volume status should return active = false, and seen_active = true.
+
+        let status =
+            client.volume_status(&volume_id.to_string()).await.unwrap();
+
+        assert!(matches!(
+            status.into_inner(),
+            crucible_pantry_client::types::VolumeStatus {
+                active: false,
+                seen_active: true,
+                num_job_handles: 0,
+            }
+        ));
     }
 }

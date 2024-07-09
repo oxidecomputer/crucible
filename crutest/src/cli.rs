@@ -219,7 +219,7 @@ async fn cli_read(
     ri: &mut RegionInfo,
     block_index: usize,
     size: usize,
-) -> Result<Vec<u8>, CrucibleError> {
+) -> Result<Bytes, CrucibleError> {
     /*
      * Convert offset to its byte value.
      */
@@ -229,7 +229,7 @@ async fn cli_read(
     println!("Read  at block {:5}, len:{:7}", offset.value, data.len());
     guest.read(offset, &mut data).await?;
 
-    let mut dl = data.into_vec();
+    let mut dl = data.into_bytes();
     match validate_vec(
         dl.clone(),
         block_index,
@@ -298,17 +298,17 @@ async fn cli_write(
      * If so, then don't update any write counts and just make
      * the correct size buffer with all zeros.
      */
-    let vec = if block_index + size > ri.total_blocks {
+    let data = if block_index + size > ri.total_blocks {
         println!("Skip write log for invalid size {}", ri.total_blocks);
-        vec![0; size * ri.block_size as usize]
+        let mut out = BytesMut::new();
+        out.resize(size * ri.block_size as usize, 0);
+        out
     } else {
         for bi in block_index..block_index + size {
             ri.write_log.update_wc(bi);
         }
         fill_vec(block_index, size, &ri.write_log, ri.block_size)
     };
-
-    let data = Bytes::from(vec);
 
     println!("Write at block {:5}, len:{:7}", offset.value, data.len());
 
@@ -342,18 +342,15 @@ async fn cli_write_unwritten(
         // like normal and update our internal counter to reflect that.
 
         ri.write_log.update_wc(block_index);
-        let vec = fill_vec(block_index, 1, &ri.write_log, ri.block_size);
-        Bytes::from(vec)
+        fill_vec(block_index, 1, &ri.write_log, ri.block_size)
     } else {
         println!("This block has been written");
         // Fill the write buffer with random data.  We don't expect this
         // to actually make it to disk.
 
-        let mut vec = Vec::with_capacity(ri.block_size as usize);
-        for _ in 0..ri.block_size {
-            vec.push(rand::thread_rng().gen::<u8>());
-        }
-        Bytes::from(vec)
+        let mut data = BytesMut::with_capacity(ri.block_size as usize);
+        data.extend((0..ri.block_size).map(|_| rand::thread_rng().gen::<u8>()));
+        data
     };
 
     println!(
@@ -658,24 +655,22 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
         let tcp = sock.connect(attach);
         tokio::pin!(tcp);
 
-        let mut tcp: TcpStream = loop {
-            tokio::select! {
-                _ = &mut deadline => {
-                    println!("connect timeout");
-                    continue 'outer;
-                }
-                tcp = &mut tcp => {
-                    match tcp {
-                        Ok(tcp) => {
-                            println!("connected to {}", attach);
-                            break tcp;
-                        }
-                        Err(e) => {
-                            println!("connect to {0} failure: {1:?}",
-                                attach, e);
-                            tokio::time::sleep_until(deadline_secs(10.0)).await;
-                            continue 'outer;
-                        }
+        let mut tcp: TcpStream = tokio::select! {
+            _ = &mut deadline => {
+                println!("connect timeout");
+                continue 'outer;
+            }
+            tcp = &mut tcp => {
+                match tcp {
+                    Ok(tcp) => {
+                        println!("connected to {}", attach);
+                        tcp
+                    }
+                    Err(e) => {
+                        println!("connect to {0} failure: {1:?}",
+                            attach, e);
+                        tokio::time::sleep_until(deadline_secs(10.0)).await;
+                        continue 'outer;
                     }
                 }
             }
@@ -892,7 +887,7 @@ async fn process_cli_command(
                 match perf_workload(
                     guest,
                     ri,
-                    &mut None,
+                    None,
                     count,
                     io_size,
                     io_depth,
