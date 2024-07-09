@@ -232,7 +232,7 @@ impl ImpactedBlocks {
     }
 }
 
-/// Given an global offset and number of blocks, compute a list of individually
+/// Given a global offset and number of blocks, compute a list of individually
 /// impacted blocks:
 ///
 ///  |eid0                   |eid1
