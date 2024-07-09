@@ -1082,7 +1082,14 @@ impl DownstairsClient {
                     | DsState::Replay
                     | DsState::LiveRepair
                     | DsState::LiveRepairReady
+                    | DsState::Offline
                     | DsState::Reconcile => {} // Okay
+                    DsState::Faulted => {
+                        if matches!(up_state, UpstairsState::Active) {
+                            // Can't transition like this when active
+                            panic_invalid();
+                        }
+                    }
                     _ => {
                         panic_invalid();
                     }
@@ -2349,6 +2356,9 @@ pub(crate) enum ClientStopReason {
     /// The test suite has requested a fault
     #[cfg(test)]
     RequestedFault,
+
+    /// The upstairs has requested that we deactivate when we were offline
+    OfflineDeactivated,
 }
 
 /// Response received from the I/O task

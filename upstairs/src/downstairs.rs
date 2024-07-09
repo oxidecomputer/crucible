@@ -789,32 +789,7 @@ impl Downstairs {
     /// Returns true if we can deactivate immediately
     ///
     /// This is the case if there are no pending jobs in the queue.
-    ///
-    /// # Panics
-    /// If  any downstairs is offline
     pub(crate) fn can_deactivate_immediately(&self) -> bool {
-        /*
-         * If any downstairs are currently offline, then we are going
-         * to lock the door behind them and not let them back in until
-         * all non-offline downstairs have deactivated themselves.
-         *
-         * However: TODO: This is not done yet.
-         */
-        let offline_ds: Vec<ClientId> = self
-            .clients
-            .iter()
-            .enumerate()
-            .filter(|(_i, c)| c.state() == DsState::Offline)
-            .map(|(i, _c)| ClientId::new(i as u8))
-            .collect();
-
-        /*
-         * TODO: Handle deactivation when a downstairs is offline.
-         */
-        if !offline_ds.is_empty() {
-            panic!("Can't deactivate with downstairs offline (yet)");
-        }
-
         // If there are no jobs, then we're immediately done!
         self.ds_active.is_empty()
     }
@@ -842,6 +817,20 @@ impl Downstairs {
             info!(self.log, "[{}] deactivate, no work so YES", client_id);
             self.clients[client_id].deactivate(up_state);
             return true;
+        }
+        // If this client is offline, then move it to faulted after skipping
+        // all the outstanding jobs.  This will shut the door on this client till
+        // the deactivation has finished on all downstairs and the upstairs has
+        // completed deactivation.  After skipping jobs and setting faulted,
+        // we return false here and let the faulting framework take care of
+        // clearing out the skipped jobs.  This then allows the requested
+        // deactivation to finish.
+        if self.clients[client_id].state() == DsState::Offline {
+            info!(self.log, "[{}] Offline client moved to Faulted", client_id);
+            self.skip_all_jobs(client_id);
+            self.clients[client_id]
+                .fault(up_state, ClientStopReason::OfflineDeactivated);
+            return false;
         }
         // If there are jobs in the queue, then we have to check them!
         let last_id = self.ds_active.keys().next_back().unwrap();
