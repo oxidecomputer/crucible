@@ -1093,6 +1093,7 @@ name = "crucible-package"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "camino",
  "crucible-workspace-hack",
  "omicron-zone-package",
  "tokio",
@@ -1181,6 +1182,7 @@ dependencies = [
 name = "crucible-workspace-hack"
 version = "0.1.0"
 dependencies = [
+ "arrayvec",
  "bitflags 2.5.0",
  "bytes",
  "cc",
