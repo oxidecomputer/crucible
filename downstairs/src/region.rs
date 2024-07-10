@@ -843,8 +843,9 @@ impl Region {
 
         cdt::os__read__start!(|| job_id.0);
         for req in req.iter() {
-            let extent = self.get_opened_extent_mut(req.extent);
-            let req = response.request(req.offset, req.count.get());
+            let extent = req.extent;
+            let req = response.request(req.offset, req.count.get(), &self.def);
+            let extent = self.get_opened_extent_mut(extent);
 
             // Run sufficiently large reads in the blocking pool
             let out = if req.data.capacity() > MIN_BLOCKING_SIZE {
@@ -1603,7 +1604,7 @@ pub(crate) mod test {
                 RegionWriteReq {
                     extent: ExtentId(1),
                     write: ExtentWrite {
-                        offset: Block::new_512(0),
+                        offset: BlockOffset(0),
                         data: Bytes::from(vec![1u8; 512]),
                         block_contexts: vec![BlockContext {
                             encryption_context: None,
@@ -1614,7 +1615,7 @@ pub(crate) mod test {
                 RegionWriteReq {
                     extent: ExtentId(2),
                     write: ExtentWrite {
-                        offset: Block::new_512(0),
+                        offset: BlockOffset(0),
                         data: Bytes::from(vec![2u8; 512]),
                         block_contexts: vec![BlockContext {
                             encryption_context: None,
@@ -1667,12 +1668,12 @@ pub(crate) mod test {
             &RegionReadRequest(vec![
                 RegionReadReq {
                     extent: ExtentId(1),
-                    offset: Block::new_512(0),
+                    offset: BlockOffset(0),
                     count: NonZeroUsize::new(1).unwrap(),
                 },
                 RegionReadReq {
                     extent: ExtentId(2),
-                    offset: Block::new_512(0),
+                    offset: BlockOffset(0),
                     count: NonZeroUsize::new(1).unwrap(),
                 },
             ]),
@@ -1698,7 +1699,7 @@ pub(crate) mod test {
                 RegionWriteReq {
                     extent: ExtentId(1),
                     write: ExtentWrite {
-                        offset: Block::new_512(0),
+                        offset: BlockOffset(0),
                         data: Bytes::from(vec![1u8; 512]),
                         block_contexts: vec![BlockContext {
                             encryption_context: None,
@@ -1709,7 +1710,7 @@ pub(crate) mod test {
                 RegionWriteReq {
                     extent: ExtentId(2),
                     write: ExtentWrite {
-                        offset: Block::new_512(0),
+                        offset: BlockOffset(0),
                         data: Bytes::from(vec![2u8; 512]),
                         block_contexts: vec![BlockContext {
                             encryption_context: None,
@@ -1763,12 +1764,12 @@ pub(crate) mod test {
             &RegionReadRequest(vec![
                 RegionReadReq {
                     extent: ExtentId(1),
-                    offset: Block::new_512(0),
+                    offset: BlockOffset(0),
                     count: NonZeroUsize::new(1).unwrap(),
                 },
                 RegionReadReq {
                     extent: ExtentId(2),
-                    offset: Block::new_512(0),
+                    offset: BlockOffset(0),
                     count: NonZeroUsize::new(1).unwrap(),
                 },
             ]),
@@ -2086,7 +2087,7 @@ pub(crate) mod test {
 
         let bytes_per_extent = ddef.extent_size().value * ddef.block_size();
         for eid in (0..ddef.extent_count()).map(ExtentId) {
-            let offset = Block::new_512(0);
+            let offset = BlockOffset(0);
 
             let data = Bytes::from(
                 buffer[(eid.0 as u64 * bytes_per_extent) as usize..]
@@ -2144,8 +2145,7 @@ pub(crate) mod test {
 
         for i in 0..num_blocks {
             let eid = ExtentId((i as u64 / ddef.extent_size().value) as u32);
-            let offset: Block =
-                Block::new_512((i as u64) % ddef.extent_size().value);
+            let offset = BlockOffset((i as u64) % ddef.extent_size().value);
 
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
@@ -2198,8 +2198,7 @@ pub(crate) mod test {
 
         for i in 0..num_blocks {
             let eid = ExtentId((i as u64 / ddef.extent_size().value) as u32);
-            let offset: Block =
-                Block::new_512((i as u64) % ddef.extent_size().value);
+            let offset = BlockOffset((i as u64) % ddef.extent_size().value);
 
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
@@ -2287,7 +2286,7 @@ pub(crate) mod test {
                 &RegionWrite(vec![RegionWriteReq {
                     extent: ExtentId(0),
                     write: ExtentWrite {
-                        offset: Block::new_512(0),
+                        offset: BlockOffset(0),
                         data,
                         block_contexts: vec![BlockContext {
                             encryption_context: None,
@@ -2304,7 +2303,7 @@ pub(crate) mod test {
             .region_read(
                 &RegionReadRequest(vec![RegionReadReq {
                     extent: ExtentId(0),
-                    offset: Block::new_512(0),
+                    offset: BlockOffset(0),
                     count: NonZeroUsize::new(1).unwrap(),
                 }]),
                 JobId(125),
@@ -2323,7 +2322,7 @@ pub(crate) mod test {
         let data = Bytes::from(vec![1u8; 512]);
 
         let write = ExtentWrite {
-            offset: Block::new_512(0),
+            offset: BlockOffset(0),
             data,
             block_contexts: vec![BlockContext {
                 encryption_context: Some(
@@ -2362,7 +2361,7 @@ pub(crate) mod test {
         // Fill a buffer with "9"'s (random)
         let data = Bytes::from(vec![9u8; 512]);
         let eid = ExtentId(0);
-        let offset = Block::new_512(0);
+        let offset = BlockOffset(0);
 
         let write = ExtentWrite {
             offset,
@@ -2421,7 +2420,7 @@ pub(crate) mod test {
         // Fill a buffer with "9"'s (random)
         let data = Bytes::from(vec![9u8; 512]);
         let eid = ExtentId(0);
-        let offset = Block::new_512(0);
+        let offset = BlockOffset(0);
 
         // Write the block
         let write = ExtentWrite {
@@ -2508,7 +2507,7 @@ pub(crate) mod test {
         // Fill a buffer with "9"'s
         let data = Bytes::from(vec![9u8; 512]);
         let eid = ExtentId(0);
-        let offset = Block::new_512(0);
+        let offset = BlockOffset(0);
 
         // Write the block
         let write = ExtentWrite {
@@ -2623,8 +2622,7 @@ pub(crate) mod test {
 
         for i in 0..num_blocks {
             let eid = ExtentId((i as u64 / ddef.extent_size().value) as u32);
-            let offset: Block =
-                Block::new_512((i as u64) % ddef.extent_size().value);
+            let offset = BlockOffset((i as u64) % ddef.extent_size().value);
 
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
@@ -2653,7 +2651,7 @@ pub(crate) mod test {
         // Fill a buffer with "9"'s
         let data = Bytes::from(vec![9u8; 512]);
         let eid = ExtentId(0);
-        let offset = Block::new_512(0);
+        let offset = BlockOffset(0);
 
         // Write the block
         let write = ExtentWrite {
@@ -2704,8 +2702,7 @@ pub(crate) mod test {
 
         for i in 0..num_blocks {
             let eid = ExtentId((i as u64 / ddef.extent_size().value) as u32);
-            let offset: Block =
-                Block::new_512((i as u64) % ddef.extent_size().value);
+            let offset = BlockOffset((i as u64) % ddef.extent_size().value);
 
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
@@ -2735,7 +2732,7 @@ pub(crate) mod test {
 
         // Construct the write for the second block on the first EID.
         let eid = ExtentId(0);
-        let offset = Block::new_512(1);
+        let offset = BlockOffset(1);
         let write = ExtentWrite {
             offset,
             data,
@@ -2784,8 +2781,7 @@ pub(crate) mod test {
 
         for i in 0..num_blocks {
             let eid = ExtentId((i as u64 / ddef.extent_size().value) as u32);
-            let offset: Block =
-                Block::new_512((i as u64) % ddef.extent_size().value);
+            let offset = BlockOffset((i as u64) % ddef.extent_size().value);
 
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
@@ -2819,7 +2815,7 @@ pub(crate) mod test {
 
         // Construct the write for the second block on the first EID.
         let eid = ExtentId(0);
-        let offset = Block::new_512(3);
+        let offset = BlockOffset(3);
         let write = ExtentWrite {
             offset,
             data,
@@ -2862,7 +2858,7 @@ pub(crate) mod test {
             })
             .collect();
         let write = ExtentWrite {
-            offset: Block::new_512(0),
+            offset: BlockOffset(0),
             data: Bytes::from(buffer.as_slice().to_vec()),
             block_contexts,
         };
@@ -2889,8 +2885,7 @@ pub(crate) mod test {
 
         for i in 0..num_blocks {
             let eid = ExtentId((i as u64 / ddef.extent_size().value) as u32);
-            let offset: Block =
-                Block::new_512((i as u64) % ddef.extent_size().value);
+            let offset = BlockOffset((i as u64) % ddef.extent_size().value);
 
             println!("Read eid: {}, {} offset: {:?}", eid, i, offset);
             requests.push(crucible_protocol::ReadRequest { eid, offset });
@@ -2921,8 +2916,7 @@ pub(crate) mod test {
         for b in blocks_to_write {
             let data = Bytes::from(vec![9u8; 512]);
             let eid = ExtentId((b as u64 / ddef.extent_size().value) as u32);
-            let offset: Block =
-                Block::new_512((b as u64) % ddef.extent_size().value);
+            let offset = BlockOffset((b as u64) % ddef.extent_size().value);
 
             // Write a few different blocks
             let write = ExtentWrite {
@@ -2972,8 +2966,7 @@ pub(crate) mod test {
 
         for i in 0..num_blocks {
             let eid = ExtentId((i as u64 / ddef.extent_size().value) as u32);
-            let offset: Block =
-                Block::new_512((i as u64) % ddef.extent_size().value);
+            let offset = BlockOffset((i as u64) % ddef.extent_size().value);
 
             requests.push(crucible_protocol::ReadRequest { eid, offset });
         }
@@ -2986,10 +2979,7 @@ pub(crate) mod test {
 
     // A test function to return a generic'ish write command.
     // We use the "all 9's data" and checksum.
-    fn create_generic_write(
-        eid: ExtentId,
-        offset: crucible_common::Block,
-    ) -> RegionWrite {
+    fn create_generic_write(eid: ExtentId, offset: BlockOffset) -> RegionWrite {
         let data = Bytes::from(vec![9u8; 512]);
         RegionWrite(vec![RegionWriteReq {
             extent: eid,
@@ -3020,11 +3010,11 @@ pub(crate) mod test {
         region.extend(2, backend).unwrap();
 
         // Write to extent 0 block 0 first
-        let writes = create_generic_write(ExtentId(0), Block::new_512(0));
+        let writes = create_generic_write(ExtentId(0), BlockOffset(0));
         region.region_write(&writes, JobId(0), true).unwrap();
 
         // Now write to extent 1 block 0
-        let writes = create_generic_write(ExtentId(1), Block::new_512(0));
+        let writes = create_generic_write(ExtentId(1), BlockOffset(0));
 
         region.region_write(&writes, JobId(0), true).unwrap();
 
@@ -3052,11 +3042,11 @@ pub(crate) mod test {
         region.extend(3, backend).unwrap();
 
         // Write to extent 1 block 9 first
-        let writes = create_generic_write(ExtentId(1), Block::new_512(9));
+        let writes = create_generic_write(ExtentId(1), BlockOffset(9));
         region.region_write(&writes, JobId(1), true).unwrap();
 
         // Now write to extent 2 block 9
-        let writes = create_generic_write(ExtentId(2), Block::new_512(9));
+        let writes = create_generic_write(ExtentId(2), BlockOffset(9));
         region.region_write(&writes, JobId(2), true).unwrap();
 
         // Verify the dirty bit is now set for both extents.
@@ -3091,7 +3081,7 @@ pub(crate) mod test {
         // Write to extents 0 to 9
         let mut job_id = 1;
         for ext in (0..10).map(ExtentId) {
-            let writes = create_generic_write(ext, Block::new_512(5));
+            let writes = create_generic_write(ext, BlockOffset(5));
             region.region_write(&writes, JobId(job_id), true).unwrap();
             job_id += 1;
         }
@@ -3146,7 +3136,7 @@ pub(crate) mod test {
         // Fill a buffer with "9"'s
         let data = Bytes::from(vec![9u8; 512]);
         let eid = ExtentId(0);
-        let offset = Block::new_512(0);
+        let offset = BlockOffset(0);
 
         // Write the block
         let write = ExtentWrite {
@@ -3198,7 +3188,7 @@ pub(crate) mod test {
         // Fill a buffer with "9"'s
         let data = Bytes::from(vec![9u8; 512]);
         let eid = ExtentId(0);
-        let offset = Block::new_512(0);
+        let offset = BlockOffset(0);
 
         // Write the block
         let write = ExtentWrite {
@@ -3295,7 +3285,7 @@ pub(crate) mod test {
                         RegionWriteReq {
                             extent: ExtentId(0),
                             write: ExtentWrite {
-                                offset: Block::new_512(range.start),
+                                offset: BlockOffset(range.start),
                                 data: Bytes::from(data.as_slice().to_vec()),
                                 block_contexts,
                             },
@@ -3321,7 +3311,7 @@ pub(crate) mod test {
 
         for (i, range) in ranges.iter().enumerate() {
             let req = ExtentReadRequest {
-                offset: Block::new_512(range.start),
+                offset: BlockOffset(range.start),
                 data: BytesMut::with_capacity(
                     512 * (range.end - range.start) as usize,
                 ),
@@ -3366,7 +3356,7 @@ pub(crate) mod test {
                     })
                     .collect();
                 ExtentWrite {
-                    offset: Block::new_512(0),
+                    offset: BlockOffset(0),
                     data: Bytes::from(data.as_slice().to_vec()),
                     block_contexts,
                 }
@@ -3397,7 +3387,7 @@ pub(crate) mod test {
 
         // Get the contexts for the range
         let req = ExtentReadRequest {
-            offset: Block::new_512(0),
+            offset: BlockOffset(0),
             data: BytesMut::with_capacity(512 * EXTENT_SIZE as usize),
         };
         let out = ext.read(JobId(0), req).unwrap();
@@ -3420,7 +3410,7 @@ pub(crate) mod test {
         let data = Bytes::from(vec![1u8; 512]);
 
         let write = ExtentWrite {
-            offset: Block::new_512(0),
+            offset: BlockOffset(0),
             data,
             block_contexts: vec![BlockContext {
                 encryption_context: Some(
@@ -3467,7 +3457,7 @@ pub(crate) mod test {
             .region_read(
                 &RegionReadRequest(vec![RegionReadReq {
                     extent: ExtentId(0),
-                    offset: Block::new_512(0),
+                    offset: BlockOffset(0),
                     count: NonZeroUsize::new(1).unwrap(),
                 }]),
                 JobId(0),
@@ -3519,7 +3509,7 @@ pub(crate) mod test {
             writes.push(RegionWriteReq {
                 extent: eid,
                 write: ExtentWrite {
-                    offset: Block::new_512(0),
+                    offset: BlockOffset(0),
                     data,
                     block_contexts,
                 },
@@ -3540,7 +3530,7 @@ pub(crate) mod test {
         let requests: Vec<crucible_protocol::ReadRequest> = (1..8)
             .map(|i| crucible_protocol::ReadRequest {
                 eid: ExtentId(0),
-                offset: Block::new_512(i),
+                offset: BlockOffset(i),
             })
             .collect();
 
@@ -3559,7 +3549,7 @@ pub(crate) mod test {
         let requests: Vec<crucible_protocol::ReadRequest> = (9..28)
             .map(|i| crucible_protocol::ReadRequest {
                 eid: ExtentId(i / 10),
-                offset: Block::new_512(i as u64 % 10),
+                offset: BlockOffset(i as u64 % 10),
             })
             .collect();
 
@@ -3578,19 +3568,19 @@ pub(crate) mod test {
             (1..4)
                 .map(|i| crucible_protocol::ReadRequest {
                     eid: ExtentId(i / 10),
-                    offset: Block::new_512(i as u64 % 10),
+                    offset: BlockOffset(i as u64 % 10),
                 })
                 .collect::<Vec<crucible_protocol::ReadRequest>>(),
             (15..24)
                 .map(|i| crucible_protocol::ReadRequest {
                     eid: ExtentId(i / 10),
-                    offset: Block::new_512(i as u64 % 10),
+                    offset: BlockOffset(i as u64 % 10),
                 })
                 .collect::<Vec<crucible_protocol::ReadRequest>>(),
             (27..28)
                 .map(|i| crucible_protocol::ReadRequest {
                     eid: ExtentId(i / 10),
-                    offset: Block::new_512(i as u64 % 10),
+                    offset: BlockOffset(i as u64 % 10),
                 })
                 .collect::<Vec<crucible_protocol::ReadRequest>>(),
         ]
@@ -3620,19 +3610,19 @@ pub(crate) mod test {
         let requests: Vec<crucible_protocol::ReadRequest> = vec![
             crucible_protocol::ReadRequest {
                 eid: ExtentId(0),
-                offset: Block::new_512(0),
+                offset: BlockOffset(0),
             },
             crucible_protocol::ReadRequest {
                 eid: ExtentId(1),
-                offset: Block::new_512(4),
+                offset: BlockOffset(4),
             },
             crucible_protocol::ReadRequest {
                 eid: ExtentId(1),
-                offset: Block::new_512(9),
+                offset: BlockOffset(9),
             },
             crucible_protocol::ReadRequest {
                 eid: ExtentId(2),
-                offset: Block::new_512(4),
+                offset: BlockOffset(4),
             },
         ];
 
@@ -3684,9 +3674,7 @@ pub(crate) mod test {
             writes.push(RegionWriteReq {
                 extent: eid,
                 write: ExtentWrite {
-                    offset: Block::new_512(
-                        (start as u64) % (EXTENT_SIZE as u64),
-                    ),
+                    offset: BlockOffset((start as u64) % (EXTENT_SIZE as u64)),
                     data: Bytes::from(buffer),
                     block_contexts,
                 },
@@ -3704,7 +3692,7 @@ pub(crate) mod test {
         let requests: Vec<crucible_protocol::ReadRequest> = (0..num_blocks)
             .map(|i| crucible_protocol::ReadRequest {
                 eid: ExtentId((i / 10) as u32),
-                offset: Block::new_512(i % 10),
+                offset: BlockOffset(i % 10),
             })
             .collect();
 

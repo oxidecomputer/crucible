@@ -535,7 +535,7 @@ fn show_extent(
             let response = region.region_read(
                 &RegionReadRequest(vec![RegionReadReq {
                     extent: cmp_extent,
-                    offset: Block::new_with_ddef(block, &region.def()),
+                    offset: BlockOffset(block),
                     count: NonZeroUsize::new(1).unwrap(),
                 }]),
                 JobId(0),
@@ -647,7 +647,7 @@ fn show_extent_block(
         let response = region.region_read(
             &RegionReadRequest(vec![RegionReadReq {
                 extent: cmp_extent,
-                offset: Block::new_with_ddef(block_in_extent, &region.def()),
+                offset: BlockOffset(block_in_extent),
                 count: NonZeroUsize::new(1).unwrap(),
             }]),
             JobId(0),

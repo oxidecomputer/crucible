@@ -21,6 +21,9 @@ pub struct Extent {
     read_only: bool,
     iov_max: usize,
 
+    /// Number of bytes per block
+    block_size_bytes: u64,
+
     /// Inner contains information about the actual extent file that holds the
     /// data, the metadata about that extent, and the set of dirty blocks that
     /// have been written to since last flush.  We use dynamic dispatch here to
@@ -455,6 +458,7 @@ impl Extent {
         let extent = Extent {
             number,
             read_only,
+            block_size_bytes: def.block_size(),
             iov_max: Extent::get_iov_max()?,
             inner,
         };
@@ -518,6 +522,7 @@ impl Extent {
         Ok(Extent {
             number,
             read_only: false,
+            block_size_bytes: def.block_size(),
             iov_max: Extent::get_iov_max()?,
             inner,
         })
@@ -542,7 +547,7 @@ impl Extent {
         req: ExtentReadRequest,
     ) -> Result<ExtentReadResponse, CrucibleError> {
         let num_blocks =
-            (req.data.len() / req.offset.block_size_in_bytes() as usize) as u64;
+            (req.data.len() / self.block_size_bytes as usize) as u64;
         cdt::extent__read__start!(|| (job_id.0, self.number.0, num_blocks));
 
         let out = self.inner.read(job_id, req, self.iov_max)?;
@@ -822,7 +827,7 @@ pub fn sync_path<P: AsRef<Path> + std::fmt::Debug>(
 /// will fit within the extent.
 pub(crate) fn check_input(
     extent_size: Block,
-    offset: Block,
+    offset: BlockOffset,
     data_len: usize,
 ) -> Result<(), CrucibleError> {
     let block_size = extent_size.block_size_in_bytes() as u64;
@@ -833,16 +838,8 @@ pub(crate) fn check_input(
         crucible_bail!(DataLenUnaligned);
     }
 
-    if offset.block_size_in_bytes() != block_size as u32 {
-        crucible_bail!(BlockSizeMismatch);
-    }
-
-    if offset.shift != extent_size.shift {
-        crucible_bail!(BlockSizeMismatch);
-    }
-
     let total_size = block_size * extent_size.value;
-    let byte_offset = offset.value * block_size;
+    let byte_offset = offset.0 * block_size;
 
     if (byte_offset + data_len as u64) > total_size {
         crucible_bail!(OffsetInvalid);
@@ -862,8 +859,8 @@ mod test {
         let mut data = BytesMut::with_capacity(512);
         data.put(&[1; 512][..]);
 
-        check_input(extent_size, Block::new_512(0), data.len()).unwrap();
-        check_input(extent_size, Block::new_512(99), data.len()).unwrap();
+        check_input(extent_size, BlockOffset(0), data.len()).unwrap();
+        check_input(extent_size, BlockOffset(99), data.len()).unwrap();
     }
 
     #[test]
@@ -873,7 +870,7 @@ mod test {
         let mut data = BytesMut::with_capacity(513);
         data.put(&[1; 513][..]);
 
-        check_input(extent_size, Block::new_512(0), data.len()).unwrap();
+        check_input(extent_size, BlockOffset(0), data.len()).unwrap();
     }
 
     #[test]
@@ -883,7 +880,7 @@ mod test {
         let mut data = BytesMut::with_capacity(511);
         data.put(&[1; 511][..]);
 
-        check_input(extent_size, Block::new_512(0), data.len()).unwrap();
+        check_input(extent_size, BlockOffset(0), data.len()).unwrap();
     }
 
     #[test]
@@ -893,7 +890,7 @@ mod test {
         let mut data = BytesMut::with_capacity(512);
         data.put(&[1; 512][..]);
 
-        check_input(extent_size, Block::new_512(100), data.len()).unwrap();
+        check_input(extent_size, BlockOffset(100), data.len()).unwrap();
     }
 
     #[test]
@@ -903,7 +900,7 @@ mod test {
         let mut data = BytesMut::with_capacity(1024);
         data.put(&[1; 1024][..]);
 
-        check_input(extent_size, Block::new_512(99), data.len()).unwrap();
+        check_input(extent_size, BlockOffset(99), data.len()).unwrap();
     }
 
     #[test]
@@ -913,7 +910,7 @@ mod test {
         let mut data = BytesMut::with_capacity(512 * 100);
         data.put(&[1; 512 * 100][..]);
 
-        check_input(extent_size, Block::new_512(1), data.len()).unwrap();
+        check_input(extent_size, BlockOffset(1), data.len()).unwrap();
     }
 
     #[test]

@@ -1,6 +1,6 @@
 // Copyright 2023 Oxide Computer Company
 
-use crucible_common::ExtentId;
+use crucible_common::{BlockOffset, ExtentId};
 use crucible_protocol::JobId;
 
 use crate::{
@@ -130,11 +130,11 @@ impl ActiveJobs {
         let blocks = ImpactedBlocks::InclusiveRange(
             ImpactedAddr {
                 extent_id: ExtentId(0),
-                block: 0,
+                block: BlockOffset(0),
             },
             ImpactedAddr {
                 extent_id: ExtentId(u32::MAX),
-                block: u64::MAX,
+                block: BlockOffset(u64::MAX),
             },
         );
         let dep = self.block_to_active.check_range(blocks, true);
@@ -185,11 +185,11 @@ impl ActiveJobs {
         let blocks = ImpactedBlocks::InclusiveRange(
             ImpactedAddr {
                 extent_id: extent,
-                block: 0,
+                block: BlockOffset(0),
             },
             ImpactedAddr {
                 extent_id: extent,
-                block: u64::MAX,
+                block: BlockOffset(u64::MAX),
             },
         );
         let dep = self.block_to_active.check_range(blocks, true);
@@ -260,7 +260,7 @@ impl BlockMap {
             ImpactedBlocks::InclusiveRange(first, last) => Some(
                 first..ImpactedAddr {
                     extent_id: last.extent_id,
-                    block: last.block.saturating_add(1),
+                    block: BlockOffset(last.block.0.saturating_add(1)),
                 },
             ),
         }
@@ -402,9 +402,9 @@ impl BlockMap {
                 }
                 _ => {
                     // Remove blocks which are pathologically empty
-                    if (pos.block == u64::MAX
-                        || Some(pos.block) == self.blocks_per_extent)
-                        && end.block == 0
+                    if (pos.block.0 == u64::MAX
+                        || Some(pos.block.0) == self.blocks_per_extent)
+                        && end.block.0 == 0
                         && end.extent_id == pos.extent_id + 1
                     {
                         self.addr_to_jobs.remove(&pos).unwrap();
@@ -470,7 +470,7 @@ impl BlockMap {
                 .map(|(start, _)| *start)
                 .unwrap_or(ImpactedAddr {
                     extent_id: ExtentId(u32::MAX),
-                    block: u64::MAX,
+                    block: BlockOffset(u64::MAX),
                 });
             if next_start == pos {
                 // Remove ourself from the existing range
@@ -650,7 +650,7 @@ mod test {
             for (i, b) in r.blocks(&self.ddef) {
                 let addr = ImpactedAddr {
                     extent_id: i,
-                    block: b.value,
+                    block: b,
                 };
                 let v = self.addr_to_jobs.entry(addr).or_default();
                 if blocking {
@@ -666,7 +666,7 @@ mod test {
             for (i, b) in r.blocks(&self.ddef) {
                 let addr = ImpactedAddr {
                     extent_id: i,
-                    block: b.value,
+                    block: b,
                 };
                 if let Some(s) = self.addr_to_jobs.get(&addr) {
                     out.extend(s.iter_jobs(blocking));
@@ -679,7 +679,7 @@ mod test {
             for (i, b) in r.blocks(&self.ddef) {
                 let addr = ImpactedAddr {
                     extent_id: i,
-                    block: b.value,
+                    block: b,
                 };
                 if let Some(s) = self.addr_to_jobs.get_mut(&addr) {
                     s.remove(job);
@@ -702,13 +702,15 @@ mod test {
                 ImpactedBlocks::InclusiveRange(
                     ImpactedAddr {
                         extent_id: ExtentId((start / BLOCKS_PER_EXTENT) as u32),
-                        block: start % BLOCKS_PER_EXTENT,
+                        block: BlockOffset(start % BLOCKS_PER_EXTENT),
                     },
                     ImpactedAddr {
                         extent_id: ExtentId(
                             ((start + len - 1) / BLOCKS_PER_EXTENT) as u32,
                         ),
-                        block: (start + len - 1) % BLOCKS_PER_EXTENT,
+                        block: BlockOffset(
+                            (start + len - 1) % BLOCKS_PER_EXTENT,
+                        ),
                     },
                 )
             }
@@ -869,11 +871,11 @@ mod test {
             let flush_range = ImpactedBlocks::InclusiveRange(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
-                    block: 0,
+                    block: BlockOffset(0),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(u32::MAX),
-                    block: u64::MAX,
+                    block: BlockOffset(u64::MAX),
                 },
             );
 

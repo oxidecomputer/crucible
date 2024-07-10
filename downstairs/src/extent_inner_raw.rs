@@ -198,7 +198,7 @@ impl ExtentInner for RawInner {
 
             // Query hashes for the write range.
             let block_contexts =
-                self.get_block_contexts(write.offset.value, num_blocks)?;
+                self.get_block_contexts(write.offset.0, num_blocks)?;
 
             for (i, block_contexts) in block_contexts.iter().enumerate() {
                 if block_contexts.is_some() {
@@ -241,7 +241,7 @@ impl ExtentInner for RawInner {
 
                 DownstairsBlockContext {
                     block_context: *ctx,
-                    block: write.offset.value + i as u64,
+                    block: write.offset.0 + i as u64,
                     on_disk_hash,
                 }
             })
@@ -282,7 +282,7 @@ impl ExtentInner for RawInner {
                     // Try to recompute the context slot from the file.  If this
                     // fails, then we _really_ can't recover, so bail out
                     // unceremoniously.
-                    let block = write.offset.value + i as u64;
+                    let block = write.offset.0 + i as u64;
                     self.recompute_slot_from_file(block).unwrap();
                 }
             }
@@ -291,7 +291,7 @@ impl ExtentInner for RawInner {
             for i in 0..write.block_contexts.len() {
                 if !writes_to_skip.contains(&i) {
                     // We always write to the inactive slot, so just swap it
-                    let block = write.offset.value as usize + i;
+                    let block = write.offset.0 as usize + i;
                     self.active_context[block] = !self.active_context[block];
                 }
             }
@@ -320,7 +320,7 @@ impl ExtentInner for RawInner {
             (job_id.0, self.extent_number.0, num_blocks)
         });
         let blocks = self.get_block_contexts_inner(
-            req.offset.value,
+            req.offset.0,
             num_blocks,
             |ctx, _block| ctx.map(|c| c.block_context),
         )?;
@@ -346,7 +346,7 @@ impl ExtentInner for RawInner {
                 self.file.as_raw_fd(),
                 buf.spare_capacity_mut().as_mut_ptr() as *mut libc::c_void,
                 expected_bytes as libc::size_t,
-                req.offset.value as i64 * block_size as i64,
+                req.offset.0 as i64 * block_size as i64,
             )
         };
         // Check against the expected number of bytes.  We could do more
@@ -945,7 +945,7 @@ impl RawInner {
 
             let data = &write.data[start * block_size as usize..]
                 [..count * block_size as usize];
-            let start_block = write.offset.value + start as u64;
+            let start_block = write.offset.0 + start as u64;
 
             pwrite_all(
                 self.file.as_fd(),
@@ -1363,6 +1363,7 @@ mod test {
     use super::*;
     use anyhow::Result;
     use bytes::{Bytes, BytesMut};
+    use crucible_common::BlockOffset;
     use crucible_protocol::EncryptionContext;
     use rand::Rng;
     use tempfile::tempdir;
@@ -1595,7 +1596,7 @@ mod test {
         let data = Bytes::from(vec![0x55; 512]);
         let hash = integrity_hash(&[&data[..]]);
         let write = ExtentWrite {
-            offset: Block::new_512(0),
+            offset: BlockOffset(0),
             data,
             block_contexts: vec![BlockContext {
                 encryption_context: None,
@@ -1616,14 +1617,14 @@ mod test {
                 hash,
             };
             let write = ExtentWrite {
-                offset: Block::new_512(0),
+                offset: BlockOffset(0),
                 data: data.clone(),
                 block_contexts: vec![block_context],
             };
             inner.write(JobId(20), &write, true, IOV_MAX_TEST)?;
 
             let read = ExtentReadRequest {
-                offset: Block::new_512(0),
+                offset: BlockOffset(0),
                 data: BytesMut::with_capacity(512),
             };
             let resp = inner.read(JobId(21), read, IOV_MAX_TEST)?;
@@ -1642,14 +1643,14 @@ mod test {
                 hash,
             };
             let write = ExtentWrite {
-                offset: Block::new_512(1),
+                offset: BlockOffset(1),
                 data: data.clone(),
                 block_contexts: vec![block_context],
             };
             inner.write(JobId(30), &write, true, IOV_MAX_TEST)?;
 
             let read = ExtentReadRequest {
-                offset: Block::new_512(1),
+                offset: BlockOffset(1),
                 data: BytesMut::with_capacity(512),
             };
             let resp = inner.read(JobId(31), read, IOV_MAX_TEST)?;
@@ -1676,7 +1677,7 @@ mod test {
         let data = Bytes::from(vec![0x55; 512]);
         let hash = integrity_hash(&[&data[..]]);
         let write = ExtentWrite {
-            offset: Block::new_512(0),
+            offset: BlockOffset(0),
             data,
             block_contexts: vec![BlockContext {
                 encryption_context: None,
@@ -1687,7 +1688,7 @@ mod test {
         // Write block 1, so that we can notice when a sync happens.  The write
         // should go to slot B.
         let write1 = ExtentWrite {
-            offset: Block::new_512(1),
+            offset: BlockOffset(1),
             ..write.clone()
         };
         inner.write(JobId(10), &write1, false, IOV_MAX_TEST)?;
@@ -1734,7 +1735,7 @@ mod test {
         let data = Bytes::from(vec![0x55; 512]);
         let hash = integrity_hash(&[&data[..]]);
         let write = ExtentWrite {
-            offset: Block::new_512(0),
+            offset: BlockOffset(0),
             data,
             block_contexts: vec![BlockContext {
                 encryption_context: None,
@@ -1783,7 +1784,7 @@ mod test {
         let data = Bytes::from(vec![0x55; 512]);
         let hash = integrity_hash(&[&data[..]]);
         let write = ExtentWrite {
-            offset: Block::new_512(0),
+            offset: BlockOffset(0),
             data,
             block_contexts: vec![BlockContext {
                 encryption_context: None,
@@ -1869,14 +1870,14 @@ mod test {
                 hash,
             };
             let write = ExtentWrite {
-                offset: Block::new_512(0),
+                offset: BlockOffset(0),
                 data: data.clone(),
                 block_contexts: vec![block_context],
             };
             inner.write(JobId(30), &write, true, IOV_MAX_TEST)?;
 
             let read = ExtentReadRequest {
-                offset: Block::new_512(0),
+                offset: BlockOffset(0),
                 data: BytesMut::with_capacity(512),
             };
             let resp = inner.read(JobId(31), read, IOV_MAX_TEST)?;
@@ -1904,7 +1905,7 @@ mod test {
         let hash = integrity_hash(&[&data[..]]);
         for i in 0..5 {
             let write = ExtentWrite {
-                offset: Block::new_512(i * 2),
+                offset: BlockOffset(i * 2),
                 data: data.clone(),
                 block_contexts: vec![BlockContext {
                     encryption_context: None,
@@ -1952,7 +1953,7 @@ mod test {
             })
             .collect();
         let write = ExtentWrite {
-            offset: Block::new_512(0),
+            offset: BlockOffset(0),
             data,
             block_contexts,
         };
@@ -2005,7 +2006,7 @@ mod test {
 
         for i in 0..3 {
             let write = ExtentWrite {
-                offset: Block::new_512(i * 2),
+                offset: BlockOffset(i * 2),
                 data: data.clone(),
                 block_contexts: vec![BlockContext {
                     encryption_context: None,
@@ -2055,7 +2056,7 @@ mod test {
             })
             .collect();
         let write = ExtentWrite {
-            offset: Block::new_512(0),
+            offset: BlockOffset(0),
             data,
             block_contexts,
         };
@@ -2112,7 +2113,7 @@ mod test {
 
         for i in 0..3 {
             let write = ExtentWrite {
-                offset: Block::new_512(i * 2),
+                offset: BlockOffset(i * 2),
                 data: data.clone(),
                 block_contexts: vec![BlockContext {
                     encryption_context: None,
@@ -2162,7 +2163,7 @@ mod test {
             })
             .collect();
         let write = ExtentWrite {
-            offset: Block::new_512(0),
+            offset: BlockOffset(0),
             data,
             block_contexts,
         };
@@ -2220,7 +2221,7 @@ mod test {
 
         for i in 0..2 {
             let write = ExtentWrite {
-                offset: Block::new_512(i * 2),
+                offset: BlockOffset(i * 2),
                 data: data.clone(),
                 block_contexts: vec![BlockContext {
                     encryption_context: None,
@@ -2270,7 +2271,7 @@ mod test {
             })
             .collect();
         let write = ExtentWrite {
-            offset: Block::new_512(0),
+            offset: BlockOffset(0),
             data,
             block_contexts,
         };

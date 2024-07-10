@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 const MAX_FRM_LEN: usize = 100 * 1024 * 1024; // 100M
 
-use crucible_common::{Block, CrucibleError, ExtentId, RegionDefinition};
+use crucible_common::{BlockOffset, CrucibleError, ExtentId, RegionDefinition};
 
 /// Wrapper type for a job ID
 ///
@@ -119,7 +119,7 @@ impl std::fmt::Display for ClientId {
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReadRequest {
     pub eid: ExtentId,
-    pub offset: Block,
+    pub offset: BlockOffset,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -169,6 +169,9 @@ pub struct SnapshotDetails {
 #[repr(u32)]
 #[derive(IntoPrimitive)]
 pub enum MessageVersion {
+    /// Use `BlockOffset` instead of `Block` in many places
+    V9 = 9,
+
     /// Updated `ReadResponseBlockMetadata` to store an `Option<BlockContext>`
     /// instead of a `Vec<BlockContext>`, because our extent files can only
     /// store a single context.
@@ -205,7 +208,7 @@ pub enum MessageVersion {
 }
 impl MessageVersion {
     pub const fn current() -> Self {
-        Self::V8
+        Self::V9
     }
 }
 
@@ -214,7 +217,7 @@ impl MessageVersion {
  * This, along with the MessageVersion enum above should be updated whenever
  * changes are made to the Message enum below.
  */
-pub const CRUCIBLE_MESSAGE_VERSION: u32 = 8;
+pub const CRUCIBLE_MESSAGE_VERSION: u32 = 9;
 
 /*
  * If you add or change the Message enum, you must also increment the
@@ -558,7 +561,7 @@ pub struct WriteHeader {
 #[derive(Debug, PartialEq, Copy, Clone, Serialize, Deserialize)]
 pub struct WriteBlockMetadata {
     pub eid: ExtentId,
-    pub offset: Block,
+    pub offset: BlockOffset,
     pub block_context: BlockContext,
 }
 
@@ -573,7 +576,7 @@ pub struct ReadResponseHeader {
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReadResponseBlockMetadata {
     pub eid: ExtentId,
-    pub offset: Block,
+    pub offset: BlockOffset,
     pub block_context: Option<BlockContext>,
 }
 
@@ -828,10 +831,10 @@ impl CrucibleEncoder {
         Ok(len)
     }
 
-    fn a_write(bs: usize) -> WriteBlockMetadata {
+    fn a_write() -> WriteBlockMetadata {
         WriteBlockMetadata {
             eid: ExtentId(1),
-            offset: Block::new(1, bs.trailing_zeros()),
+            offset: BlockOffset(1),
             block_context: BlockContext {
                 hash: 0,
                 encryption_context: Some(EncryptionContext {
@@ -851,10 +854,9 @@ impl CrucibleEncoder {
      * given our constant MAX_FRM_LEN.
      */
     pub fn max_io_blocks(bs: usize) -> Result<usize, anyhow::Error> {
-        let block_meta = CrucibleEncoder::a_write(bs);
+        let block_meta = CrucibleEncoder::a_write();
         let size_of_write_message =
-            CrucibleEncoder::serialized_size(CrucibleEncoder::a_write(bs))?
-                + bs;
+            CrucibleEncoder::serialized_size(CrucibleEncoder::a_write())? + bs;
 
         // Maximum frame length divided by a write of one block is the lower
         // bound.
@@ -1257,7 +1259,7 @@ mod tests {
                 dependencies: vec![],
                 blocks: vec![WriteBlockMetadata {
                     eid: ExtentId(0),
-                    offset: Block::new_512(0),
+                    offset: BlockOffset(0),
                     block_context: BlockContext {
                         hash,
                         encryption_context: None,

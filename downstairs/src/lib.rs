@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use crucible_common::{
     build_logger, impacted_blocks::extent_from_offset, integrity_hash,
-    mkdir_for_file, verbose_timeout, Block, CrucibleError, ExtentId,
-    RegionDefinition, MAX_BLOCK_SIZE,
+    mkdir_for_file, verbose_timeout, Block, BlockIndex, BlockOffset,
+    CrucibleError, ExtentId, RegionDefinition, MAX_BLOCK_SIZE,
 };
 use crucible_protocol::{
     BlockContext, CrucibleDecoder, JobId, Message, MessageWriter,
@@ -133,7 +133,7 @@ impl IOop {
 /// of `data`, so it's rarely the correct choice.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct ExtentReadRequest {
-    offset: Block,
+    offset: BlockOffset,
     /// This buffer should be uninitialized; read size is set by its capacity
     data: BytesMut,
 }
@@ -142,11 +142,11 @@ pub(crate) struct ExtentReadRequest {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct RegionReadRequest(Vec<RegionReadReq>);
 
-/// Inner type for a single read requests
+/// Inner type for a single read request
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct RegionReadReq {
     extent: ExtentId,
-    offset: Block,
+    offset: BlockOffset,
     count: NonZeroUsize,
 }
 
@@ -159,8 +159,8 @@ impl RegionReadRequest {
                 // extent as the previous read request
                 Some(prev)
                     if prev.extent == req.eid
-                        && prev.offset.value + prev.count.get() as u64
-                            == req.offset.value =>
+                        && prev.offset.0 + prev.count.get() as u64
+                            == req.offset.0 =>
                 {
                     // If so, enlarge it by one block
                     prev.count = prev.count.saturating_add(1);
@@ -239,12 +239,13 @@ impl RegionReadResponse {
     /// If the size of the request is larger than our remaining buffer capacity
     fn request(
         &mut self,
-        offset: Block,
+        offset: BlockOffset,
         block_count: usize,
+        def: &RegionDefinition,
     ) -> ExtentReadRequest {
         let mut data = self
             .uninit
-            .split_off(block_count * offset.block_size_in_bytes() as usize);
+            .split_off(block_count * def.block_size() as usize);
         std::mem::swap(&mut data, &mut self.uninit);
         ExtentReadRequest { offset, data }
     }
@@ -317,7 +318,7 @@ pub(crate) struct ExtentReadResponse {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct ExtentWrite {
     /// Block offset, relative to the start of this extent
-    pub offset: Block,
+    pub offset: BlockOffset,
 
     /// One context per block to be written
     pub block_contexts: Vec<BlockContext>,
@@ -353,12 +354,9 @@ impl RegionWrite {
     pub fn new(
         blocks: &[crucible_protocol::WriteBlockMetadata],
         mut buf: bytes::Bytes,
+        ddef: &RegionDefinition,
     ) -> Result<Self, CrucibleError> {
-        let block_size = if let Some(b) = blocks.first() {
-            b.offset.block_size_in_bytes() as usize
-        } else {
-            return Ok(Self(vec![]));
-        };
+        let block_size = ddef.block_size() as usize;
         if buf.len() % block_size != 0 {
             return Err(CrucibleError::DataLenUnaligned);
         } else if buf.len() / block_size != blocks.len() {
@@ -388,9 +386,9 @@ impl RegionWrite {
             None => false,
             Some(prev) => {
                 prev.extent == b.eid
-                    && prev.write.offset.value
+                    && prev.write.offset.0
                         + prev.write.block_contexts.len() as u64
-                        == b.offset.value
+                        == b.offset.0
             }
         }
     }
@@ -491,10 +489,7 @@ pub fn downstairs_export<P: AsRef<Path> + std::fmt::Debug>(
                 let response = region.region_read(
                     &RegionReadRequest(vec![RegionReadReq {
                         extent: eid,
-                        offset: Block::new_with_ddef(
-                            block_offset,
-                            &region.def(),
-                        ),
+                        offset: BlockOffset(block_offset),
                         count: NonZeroUsize::new(1).unwrap(),
                     }]),
                     JobId(0),
@@ -563,7 +558,7 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
     const CHUNK_SIZE: usize = 32 * 1024 * 1024;
     assert_eq!(CHUNK_SIZE % MAX_BLOCK_SIZE, 0);
 
-    let mut offset = Block::new_with_ddef(0, &region.def());
+    let mut offset = BlockIndex(0);
     loop {
         let mut buffer = BytesMut::new();
         buffer.resize(CHUNK_SIZE, 0u8);
@@ -590,7 +585,7 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
                  * We have hit EOF.  Extend the read buffer with zeroes until
                  * it is a multiple of the block size.
                  */
-                while !Block::is_valid_byte_size(total, &rm) {
+                while !rm.is_valid_byte_size(total) {
                     buffer[total] = 0;
                     total += 1;
                 }
@@ -615,7 +610,7 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
          * Use the same function upstairs uses to decide where to put the
          * data based on the LBA offset.
          */
-        let nblocks = Block::from_bytes(total, &rm);
+        let nblocks = rm.bytes_to_blocks(total);
         let block_size = region.def().block_size() as usize;
         let blocks: Vec<_> = extent_from_offset(&rm, offset, nblocks)
             .blocks(&rm)
@@ -636,11 +631,11 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
             })
             .collect();
 
-        let write = RegionWrite::new(&blocks, buffer)?;
+        let write = RegionWrite::new(&blocks, buffer, &region.def())?;
 
         // We have no job ID, so it makes no sense for accounting.
         region.region_write(&write, JobId(0), false)?;
-        offset.advance(nblocks);
+        offset.0 += nblocks;
     }
 
     /*
@@ -651,8 +646,8 @@ pub fn downstairs_import<P: AsRef<Path> + std::fmt::Debug>(
     println!(
         "Populated {} extents by copying {} bytes ({} blocks)",
         extents_needed,
-        offset.byte_value(),
-        offset.value,
+        offset.0 * region.def().block_size(),
+        offset.0,
     );
 
     Ok(())
@@ -1131,7 +1126,8 @@ impl ActiveConnection {
         let r = match m {
             Message::Write { header, data } => {
                 cdt::submit__write__start!(|| header.job_id.0);
-                let writes = RegionWrite::new(&header.blocks, data)?;
+                let writes =
+                    RegionWrite::new(&header.blocks, data, &region.def())?;
 
                 let new_write = IOop::Write {
                     dependencies: header.dependencies,
@@ -1178,7 +1174,8 @@ impl ActiveConnection {
             }
             Message::WriteUnwritten { header, data } => {
                 cdt::submit__writeunwritten__start!(|| header.job_id.0);
-                let writes = RegionWrite::new(&header.blocks, data)?;
+                let writes =
+                    RegionWrite::new(&header.blocks, data, &region.def())?;
 
                 let new_write = IOop::WriteUnwritten {
                     dependencies: header.dependencies,
@@ -1661,10 +1658,7 @@ impl ActiveConnection {
                                 (0..req.count.get()).map(|i| {
                                     (
                                         req.extent,
-                                        Block {
-                                            value: req.offset.value + i as u64,
-                                            shift: req.offset.shift,
-                                        },
+                                        BlockOffset(req.offset.0 + i as u64),
                                     )
                                 })
                             })
@@ -3712,7 +3706,7 @@ mod test {
                     dependencies: deps,
                     requests: RegionReadRequest(vec![RegionReadReq {
                         extent: ExtentId(1),
-                        offset: Block::new_512(1),
+                        offset: BlockOffset(1),
                         count: NonZeroUsize::new(1).unwrap(),
                     }]),
                 }
@@ -3845,7 +3839,7 @@ mod test {
             dependencies: Vec::new(),
             requests: RegionReadRequest(vec![RegionReadReq {
                 extent: ExtentId(0),
-                offset: Block::new_512(1),
+                offset: BlockOffset(1),
                 count: NonZeroUsize::new(1).unwrap(),
             }]),
         };
@@ -3856,7 +3850,7 @@ mod test {
             dependencies: deps,
             requests: RegionReadRequest(vec![RegionReadReq {
                 extent: ExtentId(1),
-                offset: Block::new_512(1),
+                offset: BlockOffset(1),
                 count: NonZeroUsize::new(1).unwrap(),
             }]),
         };
@@ -3956,7 +3950,7 @@ mod test {
             dependencies: deps,
             requests: RegionReadRequest(vec![RegionReadReq {
                 extent: ExtentId(2),
-                offset: Block::new_512(1),
+                offset: BlockOffset(1),
                 count: NonZeroUsize::new(1).unwrap(),
             }]),
         };
@@ -4138,7 +4132,7 @@ mod test {
     // matches the hash.
     fn create_generic_test_write(eid: ExtentId) -> RegionWrite {
         let data = Bytes::from(vec![9u8; 512]);
-        let offset = Block::new_512(1);
+        let offset = BlockOffset(1);
 
         RegionWrite(vec![RegionWriteReq {
             extent: eid,
@@ -5470,7 +5464,7 @@ mod test {
                 let response = region.region_read(
                     &RegionReadRequest(vec![RegionReadReq {
                         extent: eid,
-                        offset: Block::new_512(offset),
+                        offset: BlockOffset(offset),
                         count: NonZeroUsize::new(1).unwrap(),
                     }]),
                     JobId(0),
@@ -5858,7 +5852,7 @@ mod test {
             dependencies: Vec::new(),
             requests: RegionReadRequest(vec![RegionReadReq {
                 extent: ExtentId(0),
-                offset: Block::new_512(1),
+                offset: BlockOffset(1),
                 count: NonZeroUsize::new(1).unwrap(),
             }]),
         };
@@ -5868,7 +5862,7 @@ mod test {
             dependencies: Vec::new(),
             requests: RegionReadRequest(vec![RegionReadReq {
                 extent: ExtentId(1),
-                offset: Block::new_512(2),
+                offset: BlockOffset(2),
                 count: NonZeroUsize::new(1).unwrap(),
             }]),
         };
@@ -6119,24 +6113,28 @@ mod test {
 
     #[test]
     fn decode_write() {
+        let mut def = RegionDefinition::default();
+        def.set_block_size(512);
+        def.set_extent_size(Block::new_512(10));
+
         use crucible_protocol::WriteBlockMetadata;
         let blocks = vec![WriteBlockMetadata {
             eid: ExtentId(0),
-            offset: Block::new_512(0),
+            offset: BlockOffset(0),
             block_context: BlockContext {
                 hash: 123,
                 encryption_context: None,
             },
         }];
         let data = Bytes::from(vec![1u8; 512]);
-        let w = RegionWrite::new(&blocks, data).unwrap();
+        let w = RegionWrite::new(&blocks, data, &def).unwrap();
         assert_eq!(w.0.len(), 1);
 
         // Two contiguous blocks
         let blocks = vec![
             WriteBlockMetadata {
                 eid: ExtentId(0),
-                offset: Block::new_512(0),
+                offset: BlockOffset(0),
                 block_context: BlockContext {
                     hash: 123,
                     encryption_context: None,
@@ -6144,7 +6142,7 @@ mod test {
             },
             WriteBlockMetadata {
                 eid: ExtentId(0),
-                offset: Block::new_512(1),
+                offset: BlockOffset(1),
                 block_context: BlockContext {
                     hash: 123,
                     encryption_context: None,
@@ -6152,17 +6150,17 @@ mod test {
             },
         ];
         let data = Bytes::from(vec![1u8; 512 * 2]);
-        let w = RegionWrite::new(&blocks, data).unwrap();
+        let w = RegionWrite::new(&blocks, data, &def).unwrap();
         assert_eq!(w.0.len(), 1);
         assert_eq!(w.0[0].extent, ExtentId(0));
-        assert_eq!(w.0[0].write.offset, Block::new_512(0));
+        assert_eq!(w.0[0].write.offset, BlockOffset(0));
         assert_eq!(w.0[0].write.data.len(), 512 * 2);
 
         // Two non-contiguous blocks
         let blocks = vec![
             WriteBlockMetadata {
                 eid: ExtentId(1),
-                offset: Block::new_512(0),
+                offset: BlockOffset(0),
                 block_context: BlockContext {
                     hash: 123,
                     encryption_context: None,
@@ -6170,7 +6168,7 @@ mod test {
             },
             WriteBlockMetadata {
                 eid: ExtentId(2),
-                offset: Block::new_512(1),
+                offset: BlockOffset(1),
                 block_context: BlockContext {
                     hash: 123,
                     encryption_context: None,
@@ -6178,20 +6176,20 @@ mod test {
             },
         ];
         let data = Bytes::from(vec![1u8; 512 * 2]);
-        let w = RegionWrite::new(&blocks, data).unwrap();
+        let w = RegionWrite::new(&blocks, data, &def).unwrap();
         assert_eq!(w.0.len(), 2);
         assert_eq!(w.0[0].extent, ExtentId(1));
-        assert_eq!(w.0[0].write.offset, Block::new_512(0));
+        assert_eq!(w.0[0].write.offset, BlockOffset(0));
         assert_eq!(w.0[0].write.data.len(), 512);
         assert_eq!(w.0[1].extent, ExtentId(2));
-        assert_eq!(w.0[1].write.offset, Block::new_512(1));
+        assert_eq!(w.0[1].write.offset, BlockOffset(1));
         assert_eq!(w.0[1].write.data.len(), 512);
 
         // Overlapping writes to the same block
         let blocks = vec![
             WriteBlockMetadata {
                 eid: ExtentId(1),
-                offset: Block::new_512(3),
+                offset: BlockOffset(3),
                 block_context: BlockContext {
                     hash: 123,
                     encryption_context: None,
@@ -6199,7 +6197,7 @@ mod test {
             },
             WriteBlockMetadata {
                 eid: ExtentId(1),
-                offset: Block::new_512(3),
+                offset: BlockOffset(3),
                 block_context: BlockContext {
                     hash: 123,
                     encryption_context: None,
@@ -6207,30 +6205,30 @@ mod test {
             },
         ];
         let data = Bytes::from(vec![1u8; 512 * 2]);
-        let w = RegionWrite::new(&blocks, data).unwrap();
+        let w = RegionWrite::new(&blocks, data, &def).unwrap();
         assert_eq!(w.0.len(), 2);
         assert_eq!(w.0[0].extent, ExtentId(1));
-        assert_eq!(w.0[0].write.offset, Block::new_512(3));
+        assert_eq!(w.0[0].write.offset, BlockOffset(3));
         assert_eq!(w.0[0].write.data.len(), 512);
         assert_eq!(w.0[1].extent, ExtentId(1));
-        assert_eq!(w.0[1].write.offset, Block::new_512(3));
+        assert_eq!(w.0[1].write.offset, BlockOffset(3));
         assert_eq!(w.0[1].write.data.len(), 512);
 
         // Mismatched block / data sizes
         let blocks = vec![WriteBlockMetadata {
             eid: ExtentId(1),
-            offset: Block::new_512(3),
+            offset: BlockOffset(3),
             block_context: BlockContext {
                 hash: 123,
                 encryption_context: None,
             },
         }];
         let data = Bytes::from(vec![1u8; 512 * 2]);
-        let r = RegionWrite::new(&blocks, data);
+        let r = RegionWrite::new(&blocks, data, &def);
         assert!(r.is_err());
 
         let data = Bytes::from(vec![1u8; 513]);
-        let r = RegionWrite::new(&blocks, data);
+        let r = RegionWrite::new(&blocks, data, &def);
         assert!(r.is_err());
     }
 }

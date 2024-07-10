@@ -1301,10 +1301,7 @@ impl DownstairsClient {
                         }
 
                         // If a read job fails, we sometimes need to panic.
-                        IOop::Read {
-                            dependencies: _,
-                            requests: _,
-                        } => {
+                        IOop::Read { .. } => {
                             // It's possible we get a read error if the
                             // downstairs disconnects. However XXX, someone
                             // should be told about this error.
@@ -1345,19 +1342,10 @@ impl DownstairsClient {
              * sure to update the last flush for this client.
              */
             match &job.work {
-                IOop::Flush {
-                    dependencies: _dependencies,
-                    flush_number: _flush_number,
-                    gen_number: _gen_number,
-                    snapshot_details: _,
-                    extent_limit: _,
-                } => {
+                IOop::Flush { .. } => {
                     self.last_flush = ds_id;
                 }
-                IOop::Read {
-                    dependencies: _dependencies,
-                    requests,
-                } => {
+                IOop::Read { requests, .. } => {
                     /*
                      * For a read, make sure the data from a previous read
                      * has the same hash

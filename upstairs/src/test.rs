@@ -59,8 +59,8 @@ pub(crate) mod up_test {
         build_logger()
     }
 
-    fn extent_tuple(eid: u32, offset: u64) -> (ExtentId, Block) {
-        (ExtentId(eid), Block::new_512(offset))
+    fn extent_tuple(eid: u32, offset: u64) -> (ExtentId, BlockOffset) {
+        (ExtentId(eid), BlockOffset(offset))
     }
 
     #[test]
@@ -129,11 +129,10 @@ pub(crate) mod up_test {
      */
     fn up_efo(
         up: &Upstairs,
-        offset: Block,
+        offset: BlockIndex,
         num_blocks: u64,
-    ) -> Vec<(ExtentId, Block)> {
+    ) -> Vec<(ExtentId, BlockOffset)> {
         let ddef = up.get_region_definition();
-        let num_blocks = Block::new_with_ddef(num_blocks, &ddef);
         extent_from_offset(&ddef, offset, num_blocks)
             .blocks(&ddef)
             .collect()
@@ -145,19 +144,19 @@ pub(crate) mod up_test {
 
         for i in 0..100 {
             let exv = vec![extent_tuple(0, i)];
-            assert_eq!(up_efo(&up, Block::new_512(i), 1), exv);
+            assert_eq!(up_efo(&up, BlockIndex(i), 1), exv);
         }
 
         for i in 0..100 {
             let exv = vec![extent_tuple(1, i)];
-            assert_eq!(up_efo(&up, Block::new_512(100 + i), 1), exv);
+            assert_eq!(up_efo(&up, BlockIndex(100 + i), 1), exv);
         }
 
         let exv = vec![extent_tuple(2, 0)];
-        assert_eq!(up_efo(&up, Block::new_512(200), 1), exv);
+        assert_eq!(up_efo(&up, BlockIndex(200), 1), exv);
 
         let exv = vec![extent_tuple(9, 99)];
-        assert_eq!(up_efo(&up, Block::new_512(999), 1), exv);
+        assert_eq!(up_efo(&up, BlockIndex(999), 1), exv);
     }
 
     #[test]
@@ -166,25 +165,25 @@ pub(crate) mod up_test {
 
         for i in 0..99 {
             let exv = vec![extent_tuple(0, i), extent_tuple(0, i + 1)];
-            assert_eq!(up_efo(&up, Block::new_512(i), 2), exv);
+            assert_eq!(up_efo(&up, BlockIndex(i), 2), exv);
         }
 
         let exv = vec![extent_tuple(0, 99), extent_tuple(1, 0)];
-        assert_eq!(up_efo(&up, Block::new_512(99), 2), exv);
+        assert_eq!(up_efo(&up, BlockIndex(99), 2), exv);
 
         for i in 0..99 {
             let exv = vec![extent_tuple(1, i)];
-            assert_eq!(up_efo(&up, Block::new_512(100 + i), 1), exv);
+            assert_eq!(up_efo(&up, BlockIndex(100 + i), 1), exv);
         }
 
         let exv = vec![extent_tuple(1, 99), extent_tuple(2, 0)];
-        assert_eq!(up_efo(&up, Block::new_512(199), 2), exv);
+        assert_eq!(up_efo(&up, BlockIndex(199), 2), exv);
 
         let exv = vec![extent_tuple(2, 0), extent_tuple(2, 1)];
-        assert_eq!(up_efo(&up, Block::new_512(200), 2), exv);
+        assert_eq!(up_efo(&up, BlockIndex(200), 2), exv);
 
         let exv = vec![extent_tuple(9, 98), extent_tuple(9, 99)];
-        assert_eq!(up_efo(&up, Block::new_512(998), 2), exv);
+        assert_eq!(up_efo(&up, BlockIndex(998), 2), exv);
     }
 
     #[test]
@@ -198,11 +197,11 @@ pub(crate) mod up_test {
          * 1024 buffer
          */
         assert_eq!(
-            up_efo(&up, Block::new_512(99), 2),
+            up_efo(&up, BlockIndex(99), 2),
             vec![extent_tuple(0, 99), extent_tuple(1, 0)],
         );
         assert_eq!(
-            up_efo(&up, Block::new_512(98), 4),
+            up_efo(&up, BlockIndex(98), 4),
             vec![
                 extent_tuple(0, 98),
                 extent_tuple(0, 99),
@@ -224,7 +223,7 @@ pub(crate) mod up_test {
                 })
                 .collect();
             assert_eq!(
-                up_efo(&up, Block::new_512(u64::from(offset)), 100),
+                up_efo(&up, BlockIndex(u64::from(offset)), 100),
                 expected
             );
         }
@@ -236,40 +235,33 @@ pub(crate) mod up_test {
     #[test]
     fn off_to_extent_length_zero() {
         let up = make_upstairs();
-        assert_eq!(up_efo(&up, Block::new_512(0), 0), vec![]);
+        assert_eq!(up_efo(&up, BlockIndex(0), 0), vec![]);
     }
 
     #[test]
     fn off_to_extent_length_almost_too_big() {
         let up = make_upstairs();
-        up_efo(&up, Block::new_512(0), 1000);
+        up_efo(&up, BlockIndex(0), 1000);
     }
 
     #[test]
     #[should_panic]
     fn off_to_extent_length_too_big() {
         let up = make_upstairs();
-        up_efo(&up, Block::new_512(0), 1001);
+        up_efo(&up, BlockIndex(0), 1001);
     }
 
     #[test]
     fn off_to_extent_length_and_offset_almost_too_big() {
         let up = make_upstairs();
-        up_efo(&up, Block::new_512(900), 100);
+        up_efo(&up, BlockIndex(900), 100);
     }
 
     #[test]
     #[should_panic]
     fn off_to_extent_length_and_offset_too_big() {
         let up = make_upstairs();
-        up_efo(&up, Block::new_512(1000), 1);
-    }
-
-    #[test]
-    #[should_panic]
-    fn not_right_block_size() {
-        let up = make_upstairs();
-        up_efo(&up, Block::new_4096(900), 1);
+        up_efo(&up, BlockIndex(1000), 1);
     }
 
     // key material made with `openssl rand -base64 32`
@@ -519,10 +511,11 @@ pub(crate) mod up_test {
         // Below limit
         let request = ReadRequest {
             eid: ExtentId(0),
-            offset: Block::new_512(7),
+            offset: BlockOffset(7),
         };
         let op = IOop::Read {
             dependencies: vec![],
+            block_size: 512,
             requests: vec![request],
         };
         assert!(op.send_io_live_repair(Some(ExtentId(2))));
@@ -530,20 +523,22 @@ pub(crate) mod up_test {
         // At limit
         let request = ReadRequest {
             eid: ExtentId(2),
-            offset: Block::new_512(7),
+            offset: BlockOffset(7),
         };
         let op = IOop::Read {
             dependencies: vec![],
+            block_size: 512,
             requests: vec![request],
         };
         assert!(op.send_io_live_repair(Some(ExtentId(2))));
 
         let request = ReadRequest {
             eid: ExtentId(3),
-            offset: Block::new_512(7),
+            offset: BlockOffset(7),
         };
         let op = IOop::Read {
             dependencies: vec![],
+            block_size: 512,
             requests: vec![request],
         };
         // We are past the extent limit, so this should return false
@@ -557,7 +552,7 @@ pub(crate) mod up_test {
     fn write_at_extent(eid: ExtentId, wu: bool) -> IOop {
         let request = crucible_protocol::WriteBlockMetadata {
             eid,
-            offset: Block::new_512(7),
+            offset: BlockOffset(7),
             block_context: BlockContext {
                 encryption_context: None,
                 hash: 0,

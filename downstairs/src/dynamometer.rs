@@ -76,10 +76,7 @@ pub fn dynamometer(
                         RegionWriteReq {
                             extent: eid,
                             write: ExtentWrite {
-                                offset: Block::new_with_ddef(
-                                    i as u64 + block_offset,
-                                    &ddef,
-                                ),
+                                offset: BlockOffset(i as u64 + block_offset),
                                 data: block_bytes.clone(),
                                 block_contexts: vec![ctx],
                             },

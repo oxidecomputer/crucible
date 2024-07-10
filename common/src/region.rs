@@ -39,6 +39,18 @@ pub struct Block {
     pub shift: u32,
 }
 
+/// Represents an offset (in blocks) relative to the start of an extent
+#[derive(
+    Deserialize, Serialize, Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord,
+)]
+pub struct BlockOffset(pub u64);
+
+/// Represents an absolute block index
+#[derive(
+    Deserialize, Serialize, Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord,
+)]
+pub struct BlockIndex(pub u64);
+
 pub const MIN_SHIFT: u32 = 9;
 pub const MAX_SHIFT: u32 = 15;
 
@@ -77,54 +89,12 @@ impl Block {
         Block::new(value, 12)
     }
 
-    pub fn new_with_ddef(value: u64, ddef: &RegionDefinition) -> Block {
-        Block {
-            value,
-            shift: ddef.block_size().trailing_zeros(),
-        }
-    }
-
-    /**
-     * Create a block number from a byte length using the region definition
-     * to determine the block size.  This routine will panic if the byte
-     * length is not a whole number of blocks.
-     */
-    pub fn from_bytes(bytelen: usize, ddef: &RegionDefinition) -> Block {
-        assert!(Self::is_valid_byte_size(bytelen, ddef));
-        Block {
-            value: (bytelen as u64) / ddef.block_size(),
-            shift: ddef.block_size().trailing_zeros(),
-        }
-    }
-
-    pub fn is_valid_byte_size(bytelen: usize, ddef: &RegionDefinition) -> bool {
-        bytelen % (ddef.block_size() as usize) == 0
-    }
-
     pub fn block_size_in_bytes(&self) -> u32 {
         1 << self.shift
     }
 
     pub fn byte_value(&self) -> u64 {
         self.value * self.block_size_in_bytes() as u64
-    }
-
-    /**
-     * The size of this block value in bytes, for use in indexing into
-     * buffers.
-     */
-    pub fn bytes(&self) -> usize {
-        (self.value as usize) * (self.block_size_in_bytes() as usize)
-    }
-
-    /**
-     * If this block value is an offset, advance that offset by another
-     * block value representing a length.  Both block values must have
-     * the same block size or this routine will panic.
-     */
-    pub fn advance(&mut self, offset: Block) {
-        assert_eq!(offset.shift, self.shift);
-        self.value = self.value.checked_add(offset.value).unwrap();
     }
 }
 
@@ -282,19 +252,33 @@ impl RegionDefinition {
      */
     pub fn validate_io(
         &self,
-        offset: Block,
+        offset: BlockIndex,
         length: usize,
     ) -> Result<(), CrucibleError> {
-        if offset.shift != self.extent_size.shift {
-            return Err(CrucibleError::BlockSizeMismatch);
-        }
-
-        let final_offset = offset.byte_value() + length as u64;
+        let final_offset = offset.0 * self.block_size + length as u64;
 
         if final_offset > self.total_size() {
             return Err(CrucibleError::OffsetInvalid);
         }
         Ok(())
+    }
+
+    /// Converts from bytes to blocks
+    ///
+    /// # Panics
+    /// If the byte length is not an even multiple of block size
+    pub fn bytes_to_blocks(&self, bytes: usize) -> u64 {
+        assert_eq!(
+            bytes as u64 % self.block_size,
+            0,
+            "bytes must be a multiple of block size"
+        );
+        bytes as u64 / self.block_size
+    }
+
+    /// Checks whether the byte length is valid
+    pub fn is_valid_byte_size(&self, bytelen: usize) -> bool {
+        bytelen % (self.block_size as usize) == 0
     }
 }
 
@@ -526,91 +510,91 @@ mod test {
          *   Region |---|---|---|---|
          *   IO     |---|
          */
-        assert_eq!(rd.validate_io(Block::new(0, 9), 512), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(0), 512), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO         |---|
          */
-        assert_eq!(rd.validate_io(Block::new(1, 9), 512), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(1), 512), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO             |---|
          */
-        assert_eq!(rd.validate_io(Block::new(2, 9), 512), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(2), 512), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO                 |---|
          */
-        assert_eq!(rd.validate_io(Block::new(3, 9), 512), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(3), 512), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO                     |---|
          */
-        assert!(rd.validate_io(Block::new(4, 9), 512).is_err());
+        assert!(rd.validate_io(BlockIndex(4), 512).is_err());
 
         /*
          *   Region |---|---|---|---|
          *   IO     |---|---|
          */
-        assert_eq!(rd.validate_io(Block::new(0, 9), 1024), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(0), 1024), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO         |---|---|
          */
-        assert_eq!(rd.validate_io(Block::new(1, 9), 1024), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(1), 1024), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO             |---|---|
          */
-        assert_eq!(rd.validate_io(Block::new(2, 9), 1024), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(2), 1024), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO                 |---|---|
          */
-        assert!(rd.validate_io(Block::new(3, 9), 1024).is_err());
+        assert!(rd.validate_io(BlockIndex(3), 1024).is_err());
 
         /*
          *   Region |---|---|---|---|
          *   IO                     |---|---|
          */
-        assert!(rd.validate_io(Block::new(4, 9), 1024).is_err());
+        assert!(rd.validate_io(BlockIndex(4), 1024).is_err());
 
         /*
          *   Region |---|---|---|---|
          *   IO     |---|---|---|
          */
-        assert_eq!(rd.validate_io(Block::new(0, 9), 1536), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(0), 1536), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO         |---|---|---|
          */
-        assert_eq!(rd.validate_io(Block::new(1, 9), 1536), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(1), 1536), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO             |---|---|---|
          */
-        assert!(rd.validate_io(Block::new(2, 9), 1536).is_err());
+        assert!(rd.validate_io(BlockIndex(2), 1536).is_err());
 
         /*
          *   Region |---|---|---|---|
          *   IO     |---|---|---|---|
          */
-        assert_eq!(rd.validate_io(Block::new(0, 9), 2048), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(0), 2048), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO         |---|---|---|---|
          */
-        assert!(rd.validate_io(Block::new(1, 9), 2048).is_err());
+        assert!(rd.validate_io(BlockIndex(1), 2048).is_err());
     }
 
     fn test_rd() -> RegionDefinition {

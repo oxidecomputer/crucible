@@ -602,6 +602,7 @@ impl Downstairs {
                 IOop::Read {
                     dependencies,
                     requests,
+                    ..
                 } => {
                     cdt::ds__read__client__start!(|| (
                         new_id.0,
@@ -1783,19 +1784,19 @@ impl Downstairs {
     #[cfg(test)]
     fn create_and_enqueue_generic_read_eob(&mut self) -> (JobId, ReadRequest) {
         use crate::impacted_blocks::ImpactedAddr;
-        use crucible_common::Block;
+        use crucible_common::BlockOffset;
         let request = ReadRequest {
             eid: ExtentId(0),
-            offset: Block::new_512(7),
+            offset: BlockOffset(7),
         };
         let iblocks = ImpactedBlocks::new(
             ImpactedAddr {
                 extent_id: ExtentId(0),
-                block: 7,
+                block: BlockOffset(7),
             },
             ImpactedAddr {
                 extent_id: ExtentId(0),
-                block: 7,
+                block: BlockOffset(7),
             },
         );
         let id = self.create_and_enqueue_read_eob(
@@ -1820,6 +1821,7 @@ impl Downstairs {
         let aread = IOop::Read {
             dependencies,
             requests,
+            block_size: 512,
         };
 
         let io = DownstairsIO {
@@ -1843,13 +1845,13 @@ impl Downstairs {
         is_write_unwritten: bool,
     ) -> JobId {
         use crate::impacted_blocks::ImpactedAddr;
-        use crucible_common::Block;
+        use crucible_common::BlockOffset;
         use crucible_protocol::{BlockContext, WriteBlockMetadata};
         let request = RawWrite {
             data: bytes::BytesMut::from(vec![1].as_slice()),
             blocks: vec![WriteBlockMetadata {
                 eid: ExtentId(0),
-                offset: Block::new_512(7),
+                offset: BlockOffset(7),
                 block_context: BlockContext {
                     encryption_context: None,
                     hash: 0,
@@ -1859,11 +1861,11 @@ impl Downstairs {
         let iblocks = ImpactedBlocks::new(
             ImpactedAddr {
                 extent_id: ExtentId(0),
-                block: 7,
+                block: BlockOffset(7),
             },
             ImpactedAddr {
                 extent_id: ExtentId(0),
-                block: 7,
+                block: BlockOffset(7),
             },
         );
         self.create_and_enqueue_write_eob(
@@ -2466,6 +2468,7 @@ impl Downstairs {
         let aread = IOop::Read {
             dependencies,
             requests,
+            block_size: ddef.block_size(),
         };
 
         let io = DownstairsIO {
@@ -3648,7 +3651,7 @@ impl Downstairs {
         &mut self,
         gwid: GuestWorkId,
         eid: ExtentId,
-        block: u64,
+        block: crucible_common::BlockOffset,
         is_write_unwritten: bool,
     ) -> JobId {
         use crate::ImpactedAddr;
@@ -3665,7 +3668,7 @@ impl Downstairs {
         );
 
         // Extent size doesn't matter as long as it can contain our write
-        self.submit_test_write(gwid, block + 1, blocks, is_write_unwritten)
+        self.submit_test_write(gwid, block.0 + 1, blocks, is_write_unwritten)
     }
 
     #[cfg(test)]
@@ -3724,7 +3727,7 @@ impl Downstairs {
         &mut self,
         gwid: GuestWorkId,
         eid: ExtentId,
-        block: u64,
+        block: crucible_common::BlockOffset,
     ) -> JobId {
         use crate::ImpactedAddr;
 
@@ -3739,7 +3742,8 @@ impl Downstairs {
             },
         );
 
-        self.submit_test_read(gwid, block + 1, blocks)
+        // Use a dummy extent size which is one bigger than our target block
+        self.submit_test_read(gwid, block.0 + 1, blocks)
     }
 
     #[cfg(test)]
@@ -4505,7 +4509,7 @@ pub(crate) mod test {
     };
 
     use bytes::BytesMut;
-    use crucible_common::ExtentId;
+    use crucible_common::{BlockOffset, ExtentId};
     use crucible_protocol::{
         BlockContext, Message, ReadRequest, ReadResponseBlockMetadata,
     };
@@ -9419,7 +9423,12 @@ pub(crate) mod test {
 
         // Write operations 0 to 2
         for i in 0..3 {
-            ds.submit_test_write_block(gw.next_gw_id(), eid, i, false);
+            ds.submit_test_write_block(
+                gw.next_gw_id(),
+                eid,
+                BlockOffset(i),
+                false,
+            );
         }
 
         // Repair IO functions assume you have the locks
@@ -9462,7 +9471,7 @@ pub(crate) mod test {
 
         // Create read operations 0 to 2
         for i in 0..3 {
-            ds.submit_test_read_block(gw.next_gw_id(), eid, i);
+            ds.submit_test_read_block(gw.next_gw_id(), eid, BlockOffset(i));
         }
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
@@ -9501,8 +9510,8 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
         let eid = ExtentId(1);
 
-        ds.submit_test_read_block(gw.next_gw_id(), eid, 0);
-        ds.submit_test_write_block(gw.next_gw_id(), eid, 1, false);
+        ds.submit_test_read_block(gw.next_gw_id(), eid, BlockOffset(0));
+        ds.submit_test_write_block(gw.next_gw_id(), eid, BlockOffset(1), false);
         ds.submit_flush(gw.next_gw_id(), None);
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
@@ -9571,7 +9580,7 @@ pub(crate) mod test {
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
 
-        ds.submit_test_write_block(gw.next_gw_id(), eid, 2, false);
+        ds.submit_test_write_block(gw.next_gw_id(), eid, BlockOffset(2), false);
 
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
@@ -9600,7 +9609,7 @@ pub(crate) mod test {
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
 
-        ds.submit_test_read_block(gw.next_gw_id(), eid, 0);
+        ds.submit_test_read_block(gw.next_gw_id(), eid, BlockOffset(0));
 
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
@@ -9655,8 +9664,13 @@ pub(crate) mod test {
         //   5 |       | RpRpRp|       |
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_test_write_block(gw.next_gw_id(), ExtentId(0), 2, false);
-        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(2), 0);
+        ds.submit_test_write_block(
+            gw.next_gw_id(),
+            ExtentId(0),
+            BlockOffset(2),
+            false,
+        );
+        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(2), BlockOffset(0));
         create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
 
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
@@ -9684,8 +9698,13 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
-        ds.submit_test_write_block(gw.next_gw_id(), ExtentId(0), 2, false);
-        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(2), 1);
+        ds.submit_test_write_block(
+            gw.next_gw_id(),
+            ExtentId(0),
+            BlockOffset(2),
+            false,
+        );
+        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(2), BlockOffset(1));
 
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
@@ -9786,11 +9805,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
-                    block: 1,
+                    block: BlockOffset(1),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 0,
+                    block: BlockOffset(0),
                 },
             ),
             false,
@@ -9826,11 +9845,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
-                    block: 2,
+                    block: BlockOffset(2),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 1,
+                    block: BlockOffset(1),
                 },
             ),
             false,
@@ -9867,11 +9886,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
-                    block: 1,
+                    block: BlockOffset(1),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 0,
+                    block: BlockOffset(0),
                 },
             ),
         );
@@ -9906,11 +9925,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
-                    block: 2,
+                    block: BlockOffset(2),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 1,
+                    block: BlockOffset(1),
                 },
             ),
         );
@@ -9951,11 +9970,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
-                    block: 2,
+                    block: BlockOffset(2),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 0,
+                    block: BlockOffset(0),
                 },
             ),
             false,
@@ -9992,11 +10011,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
-                    block: 0,
+                    block: BlockOffset(0),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(2),
-                    block: 2,
+                    block: BlockOffset(2),
                 },
             ),
         );
@@ -10087,11 +10106,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
-                    block: 2,
+                    block: BlockOffset(2),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 1,
+                    block: BlockOffset(1),
                 },
             ),
             false,
@@ -10133,11 +10152,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
-                    block: 1,
+                    block: BlockOffset(1),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 0,
+                    block: BlockOffset(0),
                 },
             ),
         );
@@ -10173,11 +10192,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
-                    block: 0,
+                    block: BlockOffset(0),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 0,
+                    block: BlockOffset(0),
                 },
             ),
         );
@@ -10188,11 +10207,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 2,
+                    block: BlockOffset(2),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(2),
-                    block: 2,
+                    block: BlockOffset(2),
                 },
             ),
             false,
@@ -10237,19 +10256,34 @@ pub(crate) mod test {
         //  15 |       |       | RpRpRp| 14
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_test_write_block(gw.next_gw_id(), ExtentId(2), 1, false);
+        ds.submit_test_write_block(
+            gw.next_gw_id(),
+            ExtentId(2),
+            BlockOffset(1),
+            false,
+        );
 
         // The first repair command
         create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(0));
 
-        ds.submit_test_write_block(gw.next_gw_id(), ExtentId(1), 1, false);
+        ds.submit_test_write_block(
+            gw.next_gw_id(),
+            ExtentId(1),
+            BlockOffset(1),
+            false,
+        );
 
-        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(0), 2);
+        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(2));
 
         // The second repair command
         create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
 
-        ds.submit_test_write_block(gw.next_gw_id(), ExtentId(1), 2, false);
+        ds.submit_test_write_block(
+            gw.next_gw_id(),
+            ExtentId(1),
+            BlockOffset(2),
+            false,
+        );
 
         // The third repair command
         create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(2));
@@ -10303,17 +10337,17 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
-                    block: 2,
+                    block: BlockOffset(2),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 1,
+                    block: BlockOffset(1),
                 },
             ),
             false,
         );
 
-        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(0), 1);
+        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(1));
 
         ds.submit_flush(gw.next_gw_id(), None);
 
@@ -10385,11 +10419,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
-                    block: 2,
+                    block: BlockOffset(2),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 1,
+                    block: BlockOffset(1),
                 },
             ),
             false,
@@ -10457,11 +10491,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
-                    block: 2,
+                    block: BlockOffset(2),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 1,
+                    block: BlockOffset(1),
                 },
             ),
         );
@@ -10554,8 +10588,12 @@ pub(crate) mod test {
         });
 
         // A write of block 1 extents 0 (already repaired).
-        let job_id =
-            ds.submit_test_write_block(gw.next_gw_id(), ExtentId(0), 1, false);
+        let job_id = ds.submit_test_write_block(
+            gw.next_gw_id(),
+            ExtentId(0),
+            BlockOffset(1),
+            false,
+        );
 
         assert!(ds.in_progress(job_id, ClientId::new(0)).is_some());
         assert!(ds.in_progress(job_id, ClientId::new(1)).is_some());
@@ -10563,12 +10601,22 @@ pub(crate) mod test {
     }
 
     fn submit_three_ios(gw: &mut GuestWork, ds: &mut Downstairs) {
-        ds.submit_test_write_block(gw.next_gw_id(), ExtentId(0), 0, false);
+        ds.submit_test_write_block(
+            gw.next_gw_id(),
+            ExtentId(0),
+            BlockOffset(0),
+            false,
+        );
 
-        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(0), 0);
+        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(0));
 
         // WriteUnwritten
-        ds.submit_test_write_block(gw.next_gw_id(), ExtentId(0), 0, true);
+        ds.submit_test_write_block(
+            gw.next_gw_id(),
+            ExtentId(0),
+            BlockOffset(0),
+            true,
+        );
     }
 
     #[test]
@@ -10732,11 +10780,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
-                    block: 1,
+                    block: BlockOffset(1),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 0,
+                    block: BlockOffset(0),
                 },
             ),
             false,
@@ -10747,11 +10795,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
-                    block: 2,
+                    block: BlockOffset(2),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 1,
+                    block: BlockOffset(1),
                 },
             ),
             false,
@@ -10762,11 +10810,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 0,
+                    block: BlockOffset(0),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 2,
+                    block: BlockOffset(2),
                 },
             ),
             false,
@@ -10817,11 +10865,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 0,
+                    block: BlockOffset(0),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 2,
+                    block: BlockOffset(2),
                 },
             ),
             false,
@@ -10829,7 +10877,12 @@ pub(crate) mod test {
 
         // Now, submit another write, this one will be on the extent
         // that is under repair.
-        ds.submit_test_write_block(gw.next_gw_id(), ExtentId(0), 1, false);
+        ds.submit_test_write_block(
+            gw.next_gw_id(),
+            ExtentId(0),
+            BlockOffset(1),
+            false,
+        );
 
         // Submit a final write.  This has a shadow that covers every
         // IO submitted so far, and will also require creation of
@@ -10840,11 +10893,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
-                    block: 1,
+                    block: BlockOffset(1),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 0,
+                    block: BlockOffset(0),
                 },
             ),
             false,
@@ -10934,7 +10987,12 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_all_active();
 
         // Put the first write on the queue
-        ds.submit_test_write_block(gw.next_gw_id(), ExtentId(0), 1, false);
+        ds.submit_test_write_block(
+            gw.next_gw_id(),
+            ExtentId(0),
+            BlockOffset(1),
+            false,
+        );
 
         // Fault the downstairs
         let to_repair = ClientId::new(1);
@@ -10951,7 +11009,12 @@ pub(crate) mod test {
         assert!(ds.start_live_repair(&UpstairsState::Active, &mut gw, 3));
 
         // Submit a write.
-        ds.submit_test_write_block(gw.next_gw_id(), ExtentId(0), 1, false);
+        ds.submit_test_write_block(
+            gw.next_gw_id(),
+            ExtentId(0),
+            BlockOffset(1),
+            false,
+        );
 
         let flushclose_jobid = 1001;
         let flushclose_job =
@@ -11088,11 +11151,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
-                    block: 2,
+                    block: BlockOffset(2),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 1,
+                    block: BlockOffset(1),
                 },
             ),
             false,
@@ -11100,7 +11163,12 @@ pub(crate) mod test {
 
         // A write of block 5 which is on extent 1, but does not
         // overlap with the previous write
-        ds.submit_test_write_block(gw.next_gw_id(), ExtentId(1), 2, false);
+        ds.submit_test_write_block(
+            gw.next_gw_id(),
+            ExtentId(1),
+            BlockOffset(2),
+            false,
+        );
 
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
@@ -11188,11 +11256,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 0,
+                    block: BlockOffset(0),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(2),
-                    block: 0,
+                    block: BlockOffset(0),
                 },
             ),
             false,
@@ -11206,11 +11274,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
-                    block: 2,
+                    block: BlockOffset(2),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 0,
+                    block: BlockOffset(0),
                 },
             ),
             false,
@@ -11224,11 +11292,11 @@ pub(crate) mod test {
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),
-                    block: 2,
+                    block: BlockOffset(2),
                 },
                 ImpactedAddr {
                     extent_id: ExtentId(2),
-                    block: 1,
+                    block: BlockOffset(1),
                 },
             ),
         );
