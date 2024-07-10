@@ -1124,7 +1124,7 @@ async fn main() -> Result<()> {
         Workload::ReplaceBeforeActive { dsc, replacement } => {
             let dsc_client = Client::new(&dsc);
             // Either we have a count, or we run until we get a signal.
-            let mut wtq = {
+            let wtq = {
                 if opt.continuous {
                     WhenToQuit::Signal { shutdown_rx }
                 } else {
@@ -1140,7 +1140,7 @@ async fn main() -> Result<()> {
             targets.push(replacement);
             replace_before_active(
                 &guest,
-                &mut wtq,
+                wtq,
                 &mut region_info,
                 targets,
                 dsc_client,
@@ -1152,7 +1152,7 @@ async fn main() -> Result<()> {
         Workload::ReplaceReconcile { dsc, replacement } => {
             let dsc_client = Client::new(&dsc);
             // Either we have a count, or we run until we get a signal.
-            let mut wtq = {
+            let wtq = {
                 if opt.continuous {
                     WhenToQuit::Signal { shutdown_rx }
                 } else {
@@ -1168,7 +1168,7 @@ async fn main() -> Result<()> {
             targets.push(replacement);
             replace_while_reconcile(
                 &guest,
-                &mut wtq,
+                wtq,
                 &mut region_info,
                 targets,
                 dsc_client,
@@ -2054,7 +2054,7 @@ async fn replay_workload(
 // trigger a reconcile.
 async fn replace_while_reconcile(
     guest: &Arc<Guest>,
-    wtq: &mut WhenToQuit,
+    mut wtq: WhenToQuit,
     ri: &mut RegionInfo,
     targets: Vec<SocketAddr>,
     dsc_client: Client,
@@ -2144,7 +2144,7 @@ async fn replace_while_reconcile(
                 // the downstairs region size is too small for this test.
                 panic!(
                     "Downstairs reconciliation too fast for this test, \
-                        consider making a larger downstairs region"
+                    consider making a larger downstairs region"
                 );
             }
         }
@@ -2215,11 +2215,13 @@ async fn replace_while_reconcile(
         c += 1;
         match wtq {
             WhenToQuit::Count { count } => {
-                if c > *count {
+                if c > count {
                     break;
                 }
             }
-            WhenToQuit::Signal { shutdown_rx } => {
+            WhenToQuit::Signal {
+                ref mut shutdown_rx,
+            } => {
                 match shutdown_rx.try_recv() {
                     Ok(SignalAction::Shutdown) => {
                         println!("shutting down in response to SIGUSR1");
@@ -2247,7 +2249,7 @@ async fn replace_while_reconcile(
 // Do a fill on each loop so every extent will need to be repaired.
 async fn replace_before_active(
     guest: &Arc<Guest>,
-    wtq: &mut WhenToQuit,
+    mut wtq: WhenToQuit,
     ri: &mut RegionInfo,
     targets: Vec<SocketAddr>,
     dsc_client: Client,
@@ -2367,11 +2369,13 @@ async fn replace_before_active(
 
         match wtq {
             WhenToQuit::Count { count } => {
-                if c > *count {
+                if c > count {
                     break;
                 }
             }
-            WhenToQuit::Signal { shutdown_rx } => {
+            WhenToQuit::Signal {
+                ref mut shutdown_rx,
+            } => {
                 match shutdown_rx.try_recv() {
                     Ok(SignalAction::Shutdown) => {
                         println!("shutting down in response to SIGUSR1");

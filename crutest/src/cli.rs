@@ -1105,14 +1105,14 @@ pub async fn start_cli_server(
                         },
                         Some(cmd) => {
                             process_cli_command(
-                                    guest,
-                                    &mut fw,
-                                    cmd,
-                                    &mut ri,
-                                    &mut wc_filled,
-                                    verify_input.clone(),
-                                    verify_output.clone()
-                                ).await?;
+                                guest,
+                                &mut fw,
+                                cmd,
+                                &mut ri,
+                                &mut wc_filled,
+                                verify_input.clone(),
+                                verify_output.clone()
+                            ).await?;
                         }
                     }
                 }
