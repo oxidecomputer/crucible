@@ -254,9 +254,8 @@ impl RegionDefinition {
         &self,
         offset: BlockIndex,
         length: usize,
-        ddef: &RegionDefinition,
     ) -> Result<(), CrucibleError> {
-        let final_offset = offset.0 * ddef.block_size + length as u64;
+        let final_offset = offset.0 * self.block_size + length as u64;
 
         if final_offset > self.total_size() {
             return Err(CrucibleError::OffsetInvalid);
@@ -511,91 +510,91 @@ mod test {
          *   Region |---|---|---|---|
          *   IO     |---|
          */
-        assert_eq!(rd.validate_io(BlockIndex(0), 512, &rd), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(0), 512), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO         |---|
          */
-        assert_eq!(rd.validate_io(BlockIndex(1), 512, &rd), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(1), 512), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO             |---|
          */
-        assert_eq!(rd.validate_io(BlockIndex(2), 512, &rd), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(2), 512), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO                 |---|
          */
-        assert_eq!(rd.validate_io(BlockIndex(3), 512, &rd), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(3), 512), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO                     |---|
          */
-        assert!(rd.validate_io(BlockIndex(4), 512, &rd).is_err());
+        assert!(rd.validate_io(BlockIndex(4), 512).is_err());
 
         /*
          *   Region |---|---|---|---|
          *   IO     |---|---|
          */
-        assert_eq!(rd.validate_io(BlockIndex(0), 1024, &rd), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(0), 1024), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO         |---|---|
          */
-        assert_eq!(rd.validate_io(BlockIndex(1), 1024, &rd), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(1), 1024), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO             |---|---|
          */
-        assert_eq!(rd.validate_io(BlockIndex(2), 1024, &rd), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(2), 1024), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO                 |---|---|
          */
-        assert!(rd.validate_io(BlockIndex(3), 1024, &rd).is_err());
+        assert!(rd.validate_io(BlockIndex(3), 1024).is_err());
 
         /*
          *   Region |---|---|---|---|
          *   IO                     |---|---|
          */
-        assert!(rd.validate_io(BlockIndex(4), 1024, &rd).is_err());
+        assert!(rd.validate_io(BlockIndex(4), 1024).is_err());
 
         /*
          *   Region |---|---|---|---|
          *   IO     |---|---|---|
          */
-        assert_eq!(rd.validate_io(BlockIndex(0), 1536, &rd), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(0), 1536), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO         |---|---|---|
          */
-        assert_eq!(rd.validate_io(BlockIndex(1), 1536, &rd), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(1), 1536), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO             |---|---|---|
          */
-        assert!(rd.validate_io(BlockIndex(2), 1536, &rd).is_err());
+        assert!(rd.validate_io(BlockIndex(2), 1536).is_err());
 
         /*
          *   Region |---|---|---|---|
          *   IO     |---|---|---|---|
          */
-        assert_eq!(rd.validate_io(BlockIndex(0), 2048, &rd), Ok(()));
+        assert_eq!(rd.validate_io(BlockIndex(0), 2048), Ok(()));
 
         /*
          *   Region |---|---|---|---|
          *   IO         |---|---|---|---|
          */
-        assert!(rd.validate_io(BlockIndex(1), 2048, &rd).is_err());
+        assert!(rd.validate_io(BlockIndex(1), 2048).is_err());
     }
 
     fn test_rd() -> RegionDefinition {

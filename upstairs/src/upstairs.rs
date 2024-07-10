@@ -1316,7 +1316,7 @@ impl Upstairs {
         /*
          * Verify IO is in range for our region
          */
-        if let Err(e) = ddef.validate_io(offset, data.len(), &ddef) {
+        if let Err(e) = ddef.validate_io(offset, data.len()) {
             if let Some(res) = res {
                 res.send_err((data, e));
             }
@@ -1448,7 +1448,7 @@ impl Upstairs {
          * Verify IO is in range for our region
          */
         let ddef = self.ddef.get_def().unwrap();
-        if let Err(e) = ddef.validate_io(offset, data.len(), &ddef) {
+        if let Err(e) = ddef.validate_io(offset, data.len()) {
             if let Some(res) = res {
                 res.send_err(e);
             }
