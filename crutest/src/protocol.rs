@@ -18,6 +18,8 @@ use crucible_common::CrucibleError;
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum CliMessage {
     Activate(u64),
+    // Request an activation but don't wait for the result.
+    ActivateRequest(u64),
     ActiveIs(bool),
     // Tell the cliserver to commit the current write log
     Commit,
@@ -225,6 +227,13 @@ mod tests {
     #[test]
     fn rt_activate() -> Result<()> {
         let input = CliMessage::Activate(99);
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_activate_request() -> Result<()> {
+        let input = CliMessage::ActivateRequest(99);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }

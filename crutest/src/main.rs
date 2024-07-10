@@ -2237,7 +2237,7 @@ async fn replace_while_reconcile(
         }
     }
 
-    info!(log, "Test replace_special has completed");
+    info!(log, "Test replace_while_reconcile has completed");
     Ok(())
 }
 

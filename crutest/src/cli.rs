@@ -94,6 +94,15 @@ enum CliCommand {
         #[clap(long, short, default_value = "1", action)]
         gen: u64,
     },
+    /// Send an activation message and don't wait for an answer.
+    ///
+    /// This will spawn a background task that will wait on the result of
+    /// the request and display a message with the result when it comes.
+    ActivateRequest {
+        /// Specify this generation number to use when requesting activation.
+        #[clap(long, short, default_value = "1", action)]
+        gen: u64,
+    },
     /// Commit the current write_log data to the minimum expected counts.
     Commit,
     /// Deactivate the upstairs
@@ -467,6 +476,9 @@ async fn cmd_to_msg(
         CliCommand::Activate { gen } => {
             fw.send(CliMessage::Activate(gen)).await?;
         }
+        CliCommand::ActivateRequest { gen } => {
+            fw.send(CliMessage::ActivateRequest(gen)).await?;
+        }
         CliCommand::Commit => {
             fw.send(CliMessage::Commit).await?;
         }
@@ -742,7 +754,11 @@ async fn process_cli_command(
     verify_output: Option<PathBuf>,
 ) -> Result<()> {
     match cmd {
-        CliMessage::Activate(gen) => {
+        CliMessage::Activate(gen) => match guest.activate_with_gen(gen).await {
+            Ok(_) => fw.send(CliMessage::DoneOk).await,
+            Err(e) => fw.send(CliMessage::Error(e)).await,
+        },
+        CliMessage::ActivateRequest(gen) => {
             let gc = guest.clone();
             let _handle = tokio::spawn(async move {
                 match gc.activate_with_gen(gen).await {
@@ -754,6 +770,9 @@ async fn process_cli_command(
                     }
                 }
             });
+            // We return OK here as we have sent off the request.  It's up to
+            // the caller to now check is-active to determine if the
+            // activation has completed.
             fw.send(CliMessage::DoneOk).await
         }
         CliMessage::Deactivate => match guest.deactivate().await {
