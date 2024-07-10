@@ -1,13 +1,9 @@
 #!/bin/bash
 
-# Create regions and start up four downstairs.
-# We create four and use the forth downstairs as the replacement
-# downstairs.
-# Run the crutest replace (live_repair) test using the downstairs
-# we just started.  Each test lap will do 50 replacements and we
-# verify our volume on start and record what we wrote on exit
-# so the next loop will start assuming to read the data the previous
-# loop wrote.
+# A stress test of replacing a downstairs while reconciliation is underway.
+# Using dsc, we create the regions and start up four downstairs.
+# Run the crutest special replacement tests using the downstairs we just
+# started, with the fourth being the first one to replace.
 err=0
 total=0
 pass_total=0
@@ -20,15 +16,15 @@ function ctrl_c() {
     ${dsc} cmd shutdown
 }
 
-REGION_ROOT=${REGION_ROOT:-/var/tmp/test_live_repair}
+REGION_ROOT=${REGION_ROOT:-/var/tmp/test_replace_special}
 mkdir -p "$REGION_ROOT"
 
 # Location of logs and working files
 WORK_ROOT=${WORK_ROOT:-/tmp}
 mkdir -p "$WORK_ROOT"
 
-loop_log="$WORK_ROOT"/test_live_repair_summary.log
-test_log="$WORK_ROOT"/test_live_repair.log
+loop_log="$WORK_ROOT"/test_replace_special_summary.log
+test_log="$WORK_ROOT"/test_replace_special.log
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
@@ -68,8 +64,8 @@ if ! ${dsc} create --cleanup \
   --region-dir "$REGION_ROOT" \
   --region-count 4 \
   --ds-bin "$downstairs" \
-  --extent-size 4000 \
-  --extent-count 200 >> "$test_log"; then
+  --extent-count 400 \
+  --block-size 4096 >> "$test_log"; then
     echo "Failed to create downstairs regions"
     exit 1
 fi
@@ -98,14 +94,14 @@ if ! "$crucible_test" fill "${args[@]}" -q -g "$gen"\
 fi
 (( gen += 1 ))
 
-# Now run the crutest replace test in a loop
+# Now run the crutest replace-reconcole test in a loop
 count=1
 while [[ $count -le $loops ]]; do
     SECONDS=0
     cp "$test_log" "$test_log".last
     echo "" > "$test_log"
     echo "New loop, $count starts now $(date)" >> "$test_log"
-    "$crucible_test" replace "${args[@]}" -c 5 \
+    "$crucible_test" replace-reconcile "${args[@]}" -c 5 \
             --replacement 127.0.0.1:8840 \
             --stable -g "$gen" --verify-out alan \
             --verify-at-start \
@@ -121,17 +117,18 @@ while [[ $count -le $loops ]]; do
         break
     fi
     duration=$SECONDS
-    (( gen += 1 ))
+    # Gen should grow by at least the `-c` from crutest
+    (( gen += 10 ))
     (( pass_total += 1 ))
     (( total += duration ))
     ave=$(( total / pass_total ))
     printf "[%03d/%03d] %d:%02d  ave:%d:%02d  total:%d:%02d errors:%d \
-last_run_seconds:%d\n" \
-  "$count" "$loops" \
-  $((duration / 60)) $((duration % 60)) \
-  $((ave / 60)) $((ave % 60)) \
-  $((total / 60)) $((total % 60)) \
-  "$err" $duration | tee -a "$loop_log"
+      last_run_seconds:%d\n" \
+      "$count" "$loops" \
+    $((duration / 60)) $((duration % 60)) \
+    $((ave / 60)) $((ave % 60)) \
+    $((total / 60)) $((total % 60)) \
+    "$err" $duration | tee -a "$loop_log"
     (( count += 1 ))
 
 done

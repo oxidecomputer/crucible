@@ -12,7 +12,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BINDIR=${BINDIR:-$ROOT/target/debug}
 
 echo "$ROOT"
-cd "$ROOT"
+cd "$ROOT" || exit 1
 
 if pgrep -fl crucible-downstairs; then
     echo 'Downstairs already running?' >&2
@@ -96,7 +96,6 @@ mkdir -p ${dsc_output_dir}
 dsc_output="${test_output_dir}/dsc-out.txt"
 
 dsc_create_args+=( --cleanup )
-dsc_create_args+=( --extent-size 10 --extent-count 5 )
 dsc_args+=( --output-dir "$dsc_output_dir" )
 dsc_args+=( --ds-bin "$cds" )
 
@@ -113,8 +112,8 @@ dsc_args+=( --region-dir "$testdir" )
 echo "dsc output goes to $dsc_output"
 
 echo "Creating three downstairs regions"
-echo "${dsc}" create "${dsc_create_args[@]}" "${dsc_args[@]}" > "$dsc_output"
-"${dsc}" create "${dsc_create_args[@]}" "${dsc_args[@]}" >> "$dsc_output" 2>&1
+echo "${dsc}" create "${dsc_create_args[@]}" --extent-size 10 --extent-count 5 "${dsc_args[@]}" > "$dsc_output"
+"${dsc}" create "${dsc_create_args[@]}" --extent-size 10 --extent-count 5 "${dsc_args[@]}" >> "$dsc_output" 2>&1
 
 echo "Starting three downstairs"
 echo "${dsc}" start "${dsc_args[@]}" >> "$dsc_output"
@@ -190,10 +189,11 @@ fi
 echo "" >> "${log_prefix}_out.txt"
 echo "Run repair tests" | tee -a "${log_prefix}_out.txt"
 
-args+=( --verify-out "${testdir}/verify_file" )
-echo "$ct" fill -g "$gen" -q "${args[@]}" | tee -a "${log_prefix}_out.txt"
+new_args=( "${args[@]}" )
+new_args+=( --verify-out "${testdir}/verify_file" )
+echo "$ct" fill -g "$gen" -q "${new_args[@]}" | tee -a "${log_prefix}_out.txt"
 
-if ! "$ct" fill -g "$gen" -q "${args[@]}"; then
+if ! "$ct" fill -g "$gen" -q "${new_args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed setup repair test" | tee -a "${log_prefix}_out.txt"
@@ -212,9 +212,9 @@ echo "Copy the $port file" | tee -a "${log_prefix}_out.txt"
 echo cp -r "${testdir}/${port}" "${testdir}/previous"
 cp -r "${testdir}/${port}" "${testdir}/previous"
 
-args+=( --verify-in "${testdir}/verify_file" )
-echo "$ct" repair -g "$gen" -q "${args[@]}"
-if ! "$ct" repair -g "$gen" -q "${args[@]}"; then
+new_args+=( --verify-in "${testdir}/verify_file" )
+echo "$ct" repair -g "$gen" -q "${new_args[@]}"
+if ! "$ct" repair -g "$gen" -q "${new_args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed repair test part 1"
@@ -282,8 +282,8 @@ fi
 
 echo ""
 echo ""
-echo "$ct" "$tt" --range -g "$gen" -q "${args[@]}"
-if ! "$ct" verify --range -g "$gen" -q "${args[@]}"; then
+echo "$ct" "$tt" --range -g "$gen" -q "${new_args[@]}"
+if ! "$ct" verify --range -g "$gen" -q "${new_args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed repair test part 2"
@@ -332,6 +332,73 @@ fi
 
 # Tests done, shut down the downstairs.
 echo "Upstairs tests have completed, stopping all downstairs"
+if ! "$dsc" cmd shutdown; then
+    (( res += 1 ))
+    echo ""
+    echo "Failed dsc shutdown"
+    echo "Failed dsc shutdown" >> "$fail_log"
+    echo
+fi
+
+# Loop till dsc has stopped
+sleep 5
+while : ; do
+    if ! pgrep -P $dsc_pid > /dev/null; then
+        break
+    fi
+    echo "dsc at $dsc_pid has not yet stopped, waiting"
+    sleep 5
+done
+
+echo "Begin replace reconcile test" >> "${log_prefix}_out.txt"
+
+# Create a larger region size for these tests.
+echo "Creating four larger downstairs regions"
+echo "${dsc}" create "${dsc_create_args[@]}" --region-count 4 --extent-count 300 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output"
+"${dsc}" create "${dsc_create_args[@]}" --region-count 4 --extent-count 100 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output" 2>&1
+
+echo "Starting four downstairs"
+echo "${dsc}" start --region-count 4 "${dsc_args[@]}" >> "$dsc_output"
+"${dsc}" start --region-count 4 "${dsc_args[@]}" >> "$dsc_output" 2>&1 &
+dsc_pid=$!
+
+sleep 5
+if ! pgrep -P $dsc_pid > /dev/null; then
+    echo "larger dsc at $dsc_pid failed to start"
+    exit 1
+fi
+echo "" >> "${log_prefix}_out.txt"
+
+echo "Now do the replace-reconcile test"
+
+echo "$ct" replace-reconcile --replacement 127.0.0.1:8840 -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt"
+if ! "$ct" replace-reconcile --replacement 127.0.0.1:8840 -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
+    (( res += 1 ))
+    echo ""
+    echo "Failed crutest replace-reconcile test"
+    echo "Failed crutest replace-reconcile test" >> "${log_prefix}_out.txt"
+    echo "Failed crutest replace-reconcile test" >> "$fail_log"
+    echo ""
+else
+    echo "Completed test: replace-reconcile"
+fi
+
+((gen += 20))
+echo "Now do the replace-before-active test"
+echo "$ct" replace-before-active --replacement 127.0.0.1:8840 -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt"
+if ! "$ct" replace-before-active --replacement 127.0.0.1:8840 -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
+    (( res += 1 ))
+    echo ""
+    echo "Failed crutest replace-before-active"
+    echo "Failed crutest replace-before-active" >> "${log_prefix}_out.txt"
+    echo "Failed crutest replace-before-active" >> "$fail_log"
+    echo ""
+else
+    echo "Completed test: replace-before-active"
+fi
+
+# Tests done, shut down the downstairs.
+echo "Tests have completed, stopping all downstairs"
 if ! "$dsc" cmd shutdown; then
     (( res += 1 ))
     echo ""

@@ -30,6 +30,7 @@ tar cavf out/crucible-nightly.tar.gz \
   tools/test_perf.sh \
   tools/test_replay.sh \
   tools/test_repair.sh \
+  tools/test_replace_special.sh \
   tools/test_restart_repair.sh \
   tools/test_nightly.sh \
   tools/loop-repair.sh \

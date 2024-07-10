@@ -68,6 +68,17 @@ else
     echo "$(date) live_repair fail with: $res" >> "$output_file"
     (( err += 1 ))
 fi
+
+banner replace_reconcile
+echo "$(date) replace_reconcile start" >> "$output_file"
+./tools/test_replace_special.sh -l 20
+res=$?
+if [[ "$res" -eq 0 ]]; then
+    echo "$(date) replace_reconcile pass" >> "$output_file"
+else
+    echo "$(date) replace_reconcile fail with: $res" >> "$output_file"
+    (( err += 1 ))
+fi
 duration=$SECONDS
 
 banner results
