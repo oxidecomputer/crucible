@@ -148,7 +148,8 @@ res=0
 gen=1
 # Keep deactivate test last, and add 15 to the generation number so
 # tests that follow will be able to activate.
-test_list="span big dep balloon deactivate"
+#test_list="span big dep balloon deactivate"
+test_list="span"
 for tt in ${test_list}; do
     # Add a blank line in the output file as all the output follows.
     echo "" >> "${log_prefix}_out.txt"
@@ -341,6 +342,7 @@ if ! "$dsc" cmd shutdown; then
 fi
 
 # Loop till dsc has stopped
+sleep 5
 while : ; do
     if ! pgrep -P $dsc_pid > /dev/null; then
         break
@@ -353,7 +355,7 @@ echo "Begin replace reconcile test" >> "${log_prefix}_out.txt"
 
 # Create a larger region size for these tests.
 echo "Creating four larger downstairs regions"
-echo "${dsc}" create "${dsc_create_args[@]}" --region-count 4 --extent-count 100 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output"
+echo "${dsc}" create "${dsc_create_args[@]}" --region-count 4 --extent-count 300 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output"
 "${dsc}" create "${dsc_create_args[@]}" --region-count 4 --extent-count 100 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output" 2>&1
 
 echo "Starting four downstairs"

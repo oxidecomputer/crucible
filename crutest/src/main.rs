@@ -23,7 +23,7 @@ use rand_chacha::rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 use signal_hook::consts::signal::*;
 use signal_hook_tokio::Signals;
-use slog::{info, o, Logger};
+use slog::{info, o, warn, Logger};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -2065,9 +2065,12 @@ async fn replace_while_reconcile(
 
     let mut old_ds = 0;
     let mut new_ds = 3;
+    let mut c = 1;
+    // How long we wait for reconcile to start before we replace
+    let mut active_wait = 6;
 
     info!(log, "Begin replacement while reconciliation test");
-    for c in 1.. {
+    loop {
         info!(log, "[{c}] Touch every extent part 1");
         fill_sparse_workload(guest, ri).await?;
 
@@ -2119,16 +2122,32 @@ async fn replace_while_reconcile(
         let handle =
             tokio::spawn(async move { gc.activate_with_gen(gen).await });
 
-        info!(log, "[{c}] here, we want to replace as reconcile starts");
-        tokio::time::sleep(tokio::time::Duration::from_secs(6)).await;
+        info!(log, "[{c}] wait {active_wait} for reconcile to start");
+        tokio::time::sleep(tokio::time::Duration::from_secs(active_wait)).await;
 
         //  Give the activation request time to percolate in the upstairs.
         let is_active = guest.query_is_active().await.unwrap();
         info!(log, "[{c}] activate should now be waiting {:?}", is_active);
-        // If this assertions fails, then the reconciliation has finished
-        // before we had a chance to replace our downstairs.  Either make
-        // a larger region size, or reduce the sleep time above.
-        assert!(!is_active);
+        // If this check fails, then the reconciliation has finished
+        // before we had a chance to replace our downstairs. We try here to
+        // reduce the wait time and do another loop.
+        if is_active {
+            if active_wait > 1 {
+                active_wait -= 1;
+                warn!(
+                    log,
+                    "[{c}] Adjusting wait time smaller to catch reconcile",
+                );
+                continue;
+            } else {
+                // A second was not long enough to catch the reconcile, so
+                // the downstairs region size is too small for this test.
+                panic!(
+                    "Downstairs reconciliation too fast for this test, \
+                        consider making a larger downstairs region"
+                );
+            }
+        }
 
         info!(
             log,
@@ -2173,10 +2192,6 @@ async fn replace_while_reconcile(
             bail!("Requested volume verify failed: {:?}", e)
         }
 
-        // Start up the old downstairs so it is ready for the next loop.
-        let res = dsc_client.dsc_start(old_ds).await;
-        info!(log, "[{c}] Replay: started {old_ds}, returned:{:?}", res);
-
         // Wait for all IO to finish before we continue
         loop {
             let wc = guest.show_work().await?;
@@ -2197,6 +2212,7 @@ async fn replace_while_reconcile(
         old_ds = (old_ds + 1) % 4;
         new_ds = (new_ds + 1) % 4;
 
+        c += 1;
         match wtq {
             WhenToQuit::Count { count } => {
                 if c > *count {

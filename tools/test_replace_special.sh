@@ -64,7 +64,7 @@ if ! ${dsc} create --cleanup \
   --region-dir "$REGION_ROOT" \
   --region-count 4 \
   --ds-bin "$downstairs" \
-  --extent-count 100 \
+  --extent-count 400 \
   --block-size 4096 >> "$test_log"; then
     echo "Failed to create downstairs regions"
     exit 1
