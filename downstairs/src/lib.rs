@@ -20,7 +20,8 @@ use crucible_common::{
 };
 use crucible_protocol::{
     BlockContext, CrucibleDecoder, JobId, Message, MessageWriter,
-    ReconciliationId, SnapshotDetails, CRUCIBLE_MESSAGE_VERSION,
+    ReadBlockContext, ReconciliationId, SnapshotDetails,
+    CRUCIBLE_MESSAGE_VERSION,
 };
 use repair_client::Client;
 
@@ -204,7 +205,7 @@ impl IntoIterator for RegionReadRequest {
 /// Do not derive `Clone` on this type; it will be expensive and tempting to
 /// call by accident!
 pub(crate) struct RegionReadResponse {
-    blocks: Vec<Option<BlockContext>>,
+    blocks: Vec<ReadBlockContext>,
     data: BytesMut,
     uninit: BytesMut,
 }
@@ -281,24 +282,27 @@ impl RegionReadResponse {
         assert!(was_empty || prev_ptr == self.data.as_ptr());
     }
 
-    /// Returns hashes for the given response
-    ///
-    /// This is expensive and should only be used for debugging
-    pub fn hashes(&self, i: usize) -> Vec<u64> {
-        self.blocks[i].iter().map(|ctx| ctx.hash).collect()
+    /// Returns the hash for the given response (if unencrypted)
+    pub fn hashes(&self, i: usize) -> Option<u64> {
+        match self.blocks[i] {
+            ReadBlockContext::Empty | ReadBlockContext::Encrypted { .. } => {
+                None
+            }
+            ReadBlockContext::Unencrypted { hash } => Some(hash),
+        }
     }
 
     /// Returns encryption contexts for the given response
-    ///
-    /// This is expensive and should only be used for debugging
     pub fn encryption_contexts(
         &self,
         i: usize,
-    ) -> Vec<Option<&crucible_protocol::EncryptionContext>> {
-        self.blocks[i]
-            .iter()
-            .map(|ctx| ctx.encryption_context.as_ref())
-            .collect()
+    ) -> Option<crucible_protocol::EncryptionContext> {
+        match self.blocks[i] {
+            ReadBlockContext::Empty | ReadBlockContext::Unencrypted { .. } => {
+                None
+            }
+            ReadBlockContext::Encrypted { ctx } => Some(ctx),
+        }
     }
 }
 
@@ -307,7 +311,7 @@ impl RegionReadResponse {
 /// Do not derive `Clone` on this type; it will be expensive and tempting to
 /// call by accident!
 pub(crate) struct ExtentReadResponse {
-    blocks: Vec<Option<BlockContext>>,
+    blocks: Vec<ReadBlockContext>,
     /// At this point, the buffer must be fully initialized
     data: BytesMut,
 }
@@ -5444,9 +5448,11 @@ mod test {
 
                 assert_eq!(response.blocks.len(), 1);
 
-                let hashes = response.hashes(0);
-                assert_eq!(hashes.len(), 1);
-                assert_eq!(integrity_hash(&[&response.data[..]]), hashes[0],);
+                let hash = response.hashes(0);
+                assert_eq!(
+                    integrity_hash(&[&response.data[..]]),
+                    hash.unwrap()
+                );
 
                 read_data.extend_from_slice(&response.data[..]);
             }

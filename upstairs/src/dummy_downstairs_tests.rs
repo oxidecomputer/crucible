@@ -10,7 +10,6 @@ use std::time::Duration;
 use crate::client::CLIENT_TIMEOUT_SECS;
 use crate::guest::Guest;
 use crate::up_main;
-use crate::BlockContext;
 use crate::BlockIO;
 use crate::Buffer;
 use crate::CrucibleError;
@@ -27,6 +26,7 @@ use crucible_protocol::CrucibleDecoder;
 use crucible_protocol::CrucibleEncoder;
 use crucible_protocol::JobId;
 use crucible_protocol::Message;
+use crucible_protocol::ReadBlockContext;
 use crucible_protocol::ReadResponseHeader;
 use crucible_protocol::WriteHeader;
 
@@ -609,15 +609,12 @@ impl TestHarness {
     }
 }
 
-fn make_blank_read_response() -> (Option<BlockContext>, BytesMut) {
+fn make_blank_read_response() -> (ReadBlockContext, BytesMut) {
     let data = vec![0u8; 512];
     let hash = crucible_common::integrity_hash(&[&data]);
 
     (
-        Some(BlockContext {
-            hash,
-            encryption_context: None,
-        }),
+        ReadBlockContext::Unencrypted { hash },
         BytesMut::from(&data[..]),
     )
 }

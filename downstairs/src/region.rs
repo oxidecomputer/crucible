@@ -2384,7 +2384,8 @@ pub(crate) mod test {
             .unwrap();
 
         assert_eq!(responses.blocks.len(), 1);
-        assert_eq!(responses.hashes(0).len(), 1);
+        assert!(responses.hashes(0).is_none());
+        assert!(responses.encryption_contexts(0).is_some());
         assert_eq!(responses.data[..], [9u8; 512][..]);
     }
 
@@ -2429,19 +2430,15 @@ pub(crate) mod test {
 
         // Same block, now try to write something else to it.
         let data = Bytes::from(vec![1u8; 512]);
+        let ctx = crucible_protocol::EncryptionContext {
+            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            tag: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+        };
         let write = ExtentWrite {
             offset,
             data,
             block_contexts: vec![BlockContext {
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                        tag: [
-                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
-                            18, 19,
-                        ],
-                    },
-                ),
+                encryption_context: Some(ctx),
                 hash: 9163319254371683066, // hash for all 1s
             }],
         };
@@ -2468,8 +2465,9 @@ pub(crate) mod test {
 
         // We should still have one response.
         assert_eq!(responses.blocks.len(), 1);
-        // Hash should be just 1
-        assert_eq!(responses.hashes(0).len(), 1);
+        // We don't return the hash, because we've got encryption
+        assert!(responses.hashes(0).is_none());
+        assert_eq!(responses.encryption_contexts(0), Some(ctx));
         // Data should match first write
         assert_eq!(responses.data[..], [9u8; 512][..]);
     }
@@ -2525,19 +2523,15 @@ pub(crate) mod test {
 
         // Create a new write IO with different data.
         let data = Bytes::from(vec![1u8; 512]);
+        let ctx = crucible_protocol::EncryptionContext {
+            nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+            tag: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+        };
         let write = ExtentWrite {
             offset,
             data,
             block_contexts: vec![BlockContext {
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext {
-                        nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-                        tag: [
-                            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,
-                            18, 19,
-                        ],
-                    },
-                ),
+                encryption_context: Some(ctx),
                 hash: 9163319254371683066, // hash for all 1s
             }],
         };
@@ -2568,8 +2562,9 @@ pub(crate) mod test {
 
         // We should still have one response.
         assert_eq!(responses.blocks.len(), 1);
-        // Hash should be just 1
-        assert_eq!(responses.hashes(0).len(), 1);
+        // We don't return the hash, because we have encryption
+        assert!(responses.hashes(0).is_none());
+        assert_eq!(responses.encryption_contexts(0), Some(ctx));
         // Data should match first write
         assert_eq!(responses.data[..], [9u8; 512][..]);
     }
@@ -3244,12 +3239,18 @@ pub(crate) mod test {
             let resp = ext.read(JobId(i as u64), req).unwrap();
 
             // Now that we've checked that, flatten out for an easier eq
-            let actual_ctxts: Vec<_> =
-                resp.blocks.iter().map(|b| b.unwrap()).collect();
+            let actual_ctxts = resp.blocks.clone();
 
             // What we expect is the hashes for the last write we did
-            let expected_ctxts: Vec<_> =
-                last_writes.0[i].write.block_contexts.clone();
+            let expected_ctxts: Vec<_> = last_writes.0[i]
+                .write
+                .block_contexts
+                .iter()
+                .map(|b| match b.encryption_context {
+                    Some(ctx) => ReadBlockContext::Encrypted { ctx },
+                    None => ReadBlockContext::Unencrypted { hash: b.hash },
+                })
+                .collect();
 
             // Check that they're right.
             assert_eq!(expected_ctxts, actual_ctxts);
@@ -3318,12 +3319,21 @@ pub(crate) mod test {
         let out = ext.read(JobId(0), req).unwrap();
 
         // Now that we've checked that, flatten out for an easier eq
-        let actual_ctxts: Vec<_> =
-            out.blocks.iter().map(|b| b.unwrap()).collect();
+        let actual_ctxts = out.blocks.clone();
+
+        // What we expect is the hashes for the last write we did
+        let expected_ctxts: Vec<_> = last_write
+            .block_contexts
+            .iter()
+            .map(|b| match b.encryption_context {
+                Some(ctx) => ReadBlockContext::Encrypted { ctx },
+                None => ReadBlockContext::Unencrypted { hash: b.hash },
+            })
+            .collect();
 
         // What we expect is the hashes for the last write we did
         // Check that they're right.
-        assert_eq!(last_write.block_contexts, actual_ctxts);
+        assert_eq!(expected_ctxts, actual_ctxts);
     }
 
     fn test_bad_hash_bad(backend: Backend) {
@@ -3390,7 +3400,8 @@ pub(crate) mod test {
             .unwrap();
 
         assert_eq!(responses.blocks.len(), 1);
-        assert_eq!(responses.hashes(0).len(), 0);
+        assert!(responses.hashes(0).is_none());
+        assert!(responses.encryption_contexts(0).is_none());
         assert_eq!(responses.data[..], [0u8; 512][..]);
     }
 

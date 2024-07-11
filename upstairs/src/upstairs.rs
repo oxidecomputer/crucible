@@ -2094,11 +2094,11 @@ pub(crate) mod test {
         client::ClientStopReason,
         downstairs::test::set_all_active,
         test::{make_encrypted_upstairs, make_upstairs},
-        Block, BlockContext, BlockOp, BlockOpWaiter, DsState, JobId,
+        Block, BlockOp, BlockOpWaiter, DsState, JobId,
     };
     use bytes::BytesMut;
     use crucible_common::integrity_hash;
-    use crucible_protocol::ReadResponseHeader;
+    use crucible_protocol::{ReadBlockContext, ReadResponseHeader};
     use futures::FutureExt;
 
     // Test function to create just enough of an Upstairs for our needs.
@@ -3650,20 +3650,19 @@ pub(crate) mod test {
         // fake read response from downstairs that will successfully decrypt
         let mut data = Vec::from([1u8; 512]);
 
-        let (nonce, tag, hash) = up
+        let (nonce, tag, _hash) = up
             .cfg
             .encryption_context
             .as_ref()
             .unwrap()
             .encrypt_in_place(&mut data);
 
-        let blocks = Ok(vec![Some(BlockContext {
-            encryption_context: Some(crucible_protocol::EncryptionContext {
+        let blocks = Ok(vec![ReadBlockContext::Encrypted {
+            ctx: crucible_protocol::EncryptionContext {
                 nonce: nonce.into(),
                 tag: tag.into(),
-            }),
-            hash,
-        })]);
+            },
+        }]);
         let data = BytesMut::from(&data[..]);
 
         // Because this read is small, it happens right away
@@ -3699,7 +3698,7 @@ pub(crate) mod test {
 
         let mut data = Vec::from([1u8; 512]);
 
-        let (nonce, tag, hash) = up
+        let (nonce, tag, _hash) = up
             .cfg
             .encryption_context
             .as_ref()
@@ -3714,12 +3713,9 @@ pub(crate) mod test {
         let mut responses = vec![];
         let mut buf = BytesMut::new();
         for _ in 0..blocks {
-            responses.push(Some(BlockContext {
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext { nonce, tag },
-                ),
-                hash,
-            }));
+            responses.push(ReadBlockContext::Encrypted {
+                ctx: crucible_protocol::EncryptionContext { nonce, tag },
+            });
 
             buf.extend(&data);
         }
@@ -3779,21 +3775,14 @@ pub(crate) mod test {
             tag[3] = 0xFF;
         }
 
-        // compute integrity hash after alteration above! It should still
-        // validate
-        let hash = integrity_hash(&[&nonce, &tag, &data]);
-
         // Build up the long read response, which should be long enough to
         // trigger the deferred read path.
         let mut responses = vec![];
         let mut buf = BytesMut::new();
         for _ in 0..blocks {
-            responses.push(Some(BlockContext {
-                encryption_context: Some(
-                    crucible_protocol::EncryptionContext { nonce, tag },
-                ),
-                hash,
-            }));
+            responses.push(ReadBlockContext::Encrypted {
+                ctx: crucible_protocol::EncryptionContext { nonce, tag },
+            });
 
             buf.extend(&data[..]);
         }
@@ -3863,17 +3852,9 @@ pub(crate) mod test {
             tag[3] = 0xFF;
         }
 
-        // compute integrity hash after alteration above! It should still
-        // validate
-        let hash = integrity_hash(&[&nonce, &tag, &data]);
-
-        let responses = Ok(vec![Some(BlockContext {
-            encryption_context: Some(crucible_protocol::EncryptionContext {
-                nonce,
-                tag,
-            }),
-            hash,
-        })]);
+        let responses = Ok(vec![ReadBlockContext::Encrypted {
+            ctx: crucible_protocol::EncryptionContext { nonce, tag },
+        }]);
 
         // Prepare to receive the message with an invalid tag
         let thread = std::thread::spawn(move || {
@@ -3917,10 +3898,9 @@ pub(crate) mod test {
 
         // fake read response from downstairs that will fail integrity hash
         // check
-        let responses = Ok(vec![Some(BlockContext {
-            encryption_context: None,
+        let responses = Ok(vec![ReadBlockContext::Unencrypted {
             hash: 10000, // junk hash
-        })]);
+        }]);
 
         // Prepare to handle the response with a junk hash
         let thread = std::thread::spawn(move || {
@@ -3964,10 +3944,7 @@ pub(crate) mod test {
 
         let data = BytesMut::from([1u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
-        let r1 = Ok(vec![Some(BlockContext {
-            encryption_context: None,
-            hash,
-        })]);
+        let r1 = Ok(vec![ReadBlockContext::Unencrypted { hash }]);
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
             client_id: ClientId::new(1),
             action: ClientAction::Response(Message::ReadResponse {
@@ -3988,10 +3965,7 @@ pub(crate) mod test {
         // between multiple ReadResponse
         let data = BytesMut::from([2u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
-        let r2 = Ok(vec![Some(BlockContext {
-            encryption_context: None,
-            hash,
-        })]);
+        let r2 = Ok(vec![ReadBlockContext::Unencrypted { hash }]);
         let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id: ClientId::new(2),
@@ -4033,10 +4007,7 @@ pub(crate) mod test {
         for client_id in [ClientId::new(0), ClientId::new(1)] {
             let data = BytesMut::from([1u8; 512].as_slice());
             let hash = integrity_hash(&[&data]);
-            let r = Ok(vec![Some(BlockContext {
-                encryption_context: None,
-                hash,
-            })]);
+            let r = Ok(vec![ReadBlockContext::Unencrypted { hash }]);
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id,
                 action: ClientAction::Response(Message::ReadResponse {
@@ -4058,10 +4029,7 @@ pub(crate) mod test {
         // between multiple ReadResponse
         let data = BytesMut::from([2u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
-        let r = Ok(vec![Some(BlockContext {
-            encryption_context: None,
-            hash,
-        })]);
+        let r = Ok(vec![ReadBlockContext::Unencrypted { hash }]);
         let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id: ClientId::new(2),
@@ -4102,10 +4070,7 @@ pub(crate) mod test {
 
         let data = BytesMut::from([1u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
-        let r1 = Ok(vec![Some(BlockContext {
-            encryption_context: None,
-            hash,
-        })]);
+        let r1 = Ok(vec![ReadBlockContext::Unencrypted { hash }]);
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
             client_id: ClientId::new(1),
             action: ClientAction::Response(Message::ReadResponse {
@@ -4123,10 +4088,7 @@ pub(crate) mod test {
         // the first block matches.
         let data = BytesMut::from([1u8; 512 * 2].as_slice());
         let hash = integrity_hash(&[&data[0..512]]);
-        let response = Some(BlockContext {
-            encryption_context: None,
-            hash,
-        });
+        let response = ReadBlockContext::Unencrypted { hash };
         let r2 = Ok(vec![response, response]);
         let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
@@ -4169,7 +4131,7 @@ pub(crate) mod test {
 
         // The first read has no block contexts, because it was unwritten
         let data = BytesMut::from([0u8; 512].as_slice());
-        let r1 = Ok(vec![None]);
+        let r1 = Ok(vec![ReadBlockContext::Empty]);
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
             client_id: ClientId::new(1),
             action: ClientAction::Response(Message::ReadResponse {
@@ -4185,10 +4147,7 @@ pub(crate) mod test {
 
         // Send back a second response with actual block contexts (oh no!)
         let hash = integrity_hash(&[&data]);
-        let r2 = Ok(vec![Some(BlockContext {
-            encryption_context: None,
-            hash,
-        })]);
+        let r2 = Ok(vec![ReadBlockContext::Unencrypted { hash }]);
         let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id: ClientId::new(2),
@@ -4230,10 +4189,7 @@ pub(crate) mod test {
         // The first read has no block contexts, because it was unwritten
         let data = BytesMut::from([0u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
-        let r1 = Ok(vec![Some(BlockContext {
-            encryption_context: None,
-            hash,
-        })]);
+        let r1 = Ok(vec![ReadBlockContext::Unencrypted { hash }]);
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
             client_id: ClientId::new(1),
             action: ClientAction::Response(Message::ReadResponse {
@@ -4248,7 +4204,7 @@ pub(crate) mod test {
         }));
 
         // Send back a second response with no actual data (oh no!)
-        let r2 = Ok(vec![None]);
+        let r2 = Ok(vec![ReadBlockContext::Empty]);
         let thread = std::thread::spawn(move || {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id: ClientId::new(2),

@@ -8,6 +8,7 @@ use crate::{
 };
 use bytes::BytesMut;
 use crucible_common::{integrity_hash, RegionDefinition};
+use crucible_protocol::ReadBlockContext;
 use futures::{
     future::{ready, Either, Ready},
     stream::FuturesOrdered,
@@ -233,15 +234,39 @@ impl DeferredRead {
             let block_size = data.len() / rs.len();
             for (i, r) in rs.iter_mut().enumerate() {
                 let v = if let Some(ctx) = &self.cfg.encryption_context {
+                    let r = match r {
+                        ReadBlockContext::Empty => None,
+                        ReadBlockContext::Unencrypted { .. } => {
+                            error!(
+                                self.log,
+                                "expected encrypted but got unencrypted \
+                                 block context"
+                            );
+                            None
+                        }
+                        ReadBlockContext::Encrypted { ctx } => Some(*ctx),
+                    };
                     validate_encrypted_read_response(
-                        *r,
+                        r,
                         &mut data[i * block_size..][..block_size],
                         ctx,
                         &self.log,
                     )
                 } else {
+                    let r = match r {
+                        ReadBlockContext::Empty => None,
+                        ReadBlockContext::Encrypted { .. } => {
+                            error!(
+                                self.log,
+                                "expected unencrypted but got encrypted \
+                                 block context"
+                            );
+                            None
+                        }
+                        ReadBlockContext::Unencrypted { hash } => Some(*hash),
+                    };
                     validate_unencrypted_read_response(
-                        *r,
+                        r,
                         &mut data[i * block_size..][..block_size],
                         &self.log,
                     )

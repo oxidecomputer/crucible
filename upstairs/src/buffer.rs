@@ -1,6 +1,7 @@
 // Copyright 2023 Oxide Computer Company
 use crate::RawReadResponse;
 use bytes::{Bytes, BytesMut};
+use crucible_protocol::ReadBlockContext;
 use itertools::Itertools;
 
 /*
@@ -150,7 +151,7 @@ impl Buffer {
             .blocks
             .iter()
             .enumerate()
-            .group_by(|(_i, b)| b.is_none())
+            .group_by(|(_i, b)| matches!(b, ReadBlockContext::Empty))
         {
             if empty {
                 continue;
@@ -374,7 +375,6 @@ impl UninitializedBuffer {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::BlockContext;
     use rand::RngCore;
 
     #[test]
@@ -496,12 +496,9 @@ mod test {
         let blocks = (0..10)
             .map(|i| {
                 if f(i) {
-                    Some(BlockContext {
-                        hash: 123,
-                        encryption_context: None,
-                    })
+                    ReadBlockContext::Unencrypted { hash: 123 }
                 } else {
-                    None
+                    ReadBlockContext::Empty
                 }
             })
             .collect();
@@ -568,12 +565,7 @@ mod test {
         rng.fill_bytes(&mut data);
 
         let blocks = (0..10)
-            .map(|_| {
-                Some(BlockContext {
-                    hash: 123,
-                    encryption_context: None,
-                })
-            })
+            .map(|_| ReadBlockContext::Unencrypted { hash: 123 })
             .collect();
 
         let prev_data_ptr = data.as_ptr();

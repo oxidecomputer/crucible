@@ -4514,7 +4514,7 @@ pub(crate) mod test {
 
     use bytes::BytesMut;
     use crucible_common::{BlockOffset, ExtentId};
-    use crucible_protocol::{BlockContext, Message};
+    use crucible_protocol::{Message, ReadBlockContext};
     use ringbuffer::RingBuffer;
 
     use std::{
@@ -4528,10 +4528,9 @@ pub(crate) mod test {
     pub fn build_read_response(data: &[u8]) -> RawReadResponse {
         RawReadResponse {
             data: BytesMut::from(data),
-            blocks: vec![Some(BlockContext {
+            blocks: vec![ReadBlockContext::Unencrypted {
                 hash: crucible_common::integrity_hash(&[data]),
-                encryption_context: None,
-            })],
+            }],
         }
     }
 

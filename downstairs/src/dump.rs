@@ -699,8 +699,10 @@ fn show_extent_block(
         for (dir_index, r) in dvec.iter().enumerate() {
             print!("{:^24} ", dir_index);
 
-            max_nonce_depth =
-                std::cmp::max(max_nonce_depth, r.encryption_contexts(0).len());
+            max_nonce_depth = std::cmp::max(
+                max_nonce_depth,
+                r.encryption_contexts(0).is_some() as usize,
+            );
         }
         if !only_show_differences {
             print!(" {:<5}", "DIFF");
@@ -722,17 +724,14 @@ fn show_extent_block(
             let mut all_same_len = true;
             let mut nonces = Vec::with_capacity(dir_count);
             for r in dvec.iter() {
-                let ctxs = r.encryption_contexts(0);
+                // TODO this can only be 0 or 1
+                let ctxs =
+                    r.encryption_contexts(0).into_iter().collect::<Vec<_>>();
                 print!(
                     "{:^24} ",
                     if depth < ctxs.len() {
-                        if let Some(ec) = ctxs[depth] {
-                            nonces.push(&ec.nonce);
-                            hex::encode(ec.nonce)
-                        } else {
-                            all_same_len = false;
-                            "".to_string()
-                        }
+                        nonces.push(ctxs[depth].nonce);
+                        hex::encode(ctxs[depth].nonce)
                     } else {
                         all_same_len = false;
                         "".to_string()
@@ -756,8 +755,10 @@ fn show_extent_block(
         for (dir_index, r) in dvec.iter().enumerate() {
             print!("{:^32} ", dir_index);
 
-            max_tag_depth =
-                std::cmp::max(max_tag_depth, r.encryption_contexts(0).len());
+            max_tag_depth = std::cmp::max(
+                max_tag_depth,
+                r.encryption_contexts(0).is_some() as usize,
+            );
         }
         if !only_show_differences {
             print!(" {:<5}", "DIFF");
@@ -779,17 +780,13 @@ fn show_extent_block(
             let mut all_same_len = true;
             let mut tags = Vec::with_capacity(dir_count);
             for r in dvec.iter() {
-                let ctxs = r.encryption_contexts(0);
+                let ctxs =
+                    r.encryption_contexts(0).into_iter().collect::<Vec<_>>();
                 print!(
                     "{:^32} ",
                     if depth < ctxs.len() {
-                        if let Some(ec) = ctxs[depth] {
-                            tags.push(&ec.tag);
-                            hex::encode(ec.tag)
-                        } else {
-                            all_same_len = false;
-                            "".to_string()
-                        }
+                        tags.push(ctxs[depth].tag);
+                        hex::encode(ctxs[depth].tag)
                     } else {
                         all_same_len = false;
                         "".to_string()
@@ -820,7 +817,8 @@ fn show_extent_block(
         for (dir_index, r) in dvec.iter().enumerate() {
             print!("{:^16} ", dir_index);
 
-            max_hash_depth = std::cmp::max(max_hash_depth, r.hashes(0).len());
+            max_hash_depth =
+                std::cmp::max(max_hash_depth, r.hashes(0).is_some() as usize);
         }
         if !only_show_differences {
             print!(" {:<5}", "DIFF");
@@ -842,7 +840,7 @@ fn show_extent_block(
             let mut all_same_len = true;
             let mut hashes = Vec::with_capacity(dir_count);
             for r in dvec.iter() {
-                let block_hashes = r.hashes(0);
+                let block_hashes = r.hashes(0).into_iter().collect::<Vec<_>>();
                 print!(
                     "{:^16} ",
                     if depth < block_hashes.len() {
