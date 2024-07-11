@@ -61,7 +61,7 @@ indicatif = { version = "0.17.8", features = ["rayon"] }
 itertools = "0.12.1"
 libc = "0.2"
 mime_guess = "2.0.4"
-nbd = "0.3.0"
+nbd = "0.3.1"
 nix = { version = "0.28", features = [ "feature", "uio" ] }
 num_enum = "0.7"
 num-derive = "0.4"
