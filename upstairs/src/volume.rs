@@ -5149,4 +5149,183 @@ mod test {
             )),
         );
     }
+
+    #[tokio::test]
+    async fn volume_cannot_construct_mixed_block_size_1() {
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: 512,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: 4096,
+                blocks_per_extent: 1,
+                extent_count: 1,
+                opts: CrucibleOpts {
+                    id: Uuid::new_v4(),
+                    target: vec![],
+                    lossy: false,
+                    flush_timeout: None,
+                    key: None,
+                    cert_pem: None,
+                    key_pem: None,
+                    root_cert_pem: None,
+                    control: None,
+                    read_only: false,
+                },
+                gen: 1,
+            }],
+            read_only_parent: None,
+        };
+
+        Volume::construct(vcr, None, csl()).await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn volume_cannot_construct_mixed_block_size_2() {
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: 512,
+            sub_volumes: vec![
+                VolumeConstructionRequest::Region {
+                    block_size: 512,
+                    blocks_per_extent: 1,
+                    extent_count: 1,
+                    opts: CrucibleOpts {
+                        id: Uuid::new_v4(),
+                        target: vec![],
+                        lossy: false,
+                        flush_timeout: None,
+                        key: None,
+                        cert_pem: None,
+                        key_pem: None,
+                        root_cert_pem: None,
+                        control: None,
+                        read_only: false,
+                    },
+                    gen: 1,
+                },
+                VolumeConstructionRequest::Region {
+                    block_size: 4096,
+                    blocks_per_extent: 1,
+                    extent_count: 1,
+                    opts: CrucibleOpts {
+                        id: Uuid::new_v4(),
+                        target: vec![],
+                        lossy: false,
+                        flush_timeout: None,
+                        key: None,
+                        cert_pem: None,
+                        key_pem: None,
+                        root_cert_pem: None,
+                        control: None,
+                        read_only: false,
+                    },
+                    gen: 1,
+                },
+            ],
+            read_only_parent: None,
+        };
+
+        Volume::construct(vcr, None, csl()).await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn volume_cannot_construct_mixed_block_size_3() {
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: 512,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: 512,
+                blocks_per_extent: 1,
+                extent_count: 1,
+                opts: CrucibleOpts {
+                    id: Uuid::new_v4(),
+                    target: vec![],
+                    lossy: false,
+                    flush_timeout: None,
+                    key: None,
+                    cert_pem: None,
+                    key_pem: None,
+                    root_cert_pem: None,
+                    control: None,
+                    read_only: false,
+                },
+                gen: 1,
+            }],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Region {
+                    block_size: 4096,
+                    blocks_per_extent: 1,
+                    extent_count: 1,
+                    opts: CrucibleOpts {
+                        id: Uuid::new_v4(),
+                        target: vec![],
+                        lossy: false,
+                        flush_timeout: None,
+                        key: None,
+                        cert_pem: None,
+                        key_pem: None,
+                        root_cert_pem: None,
+                        control: None,
+                        read_only: false,
+                    },
+                    gen: 1,
+                },
+            )),
+        };
+
+        Volume::construct(vcr, None, csl()).await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn volume_cannot_construct_mixed_block_size_4() {
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: 4096,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: 4096,
+                blocks_per_extent: 1,
+                extent_count: 1,
+                opts: CrucibleOpts {
+                    id: Uuid::new_v4(),
+                    target: vec![],
+                    lossy: false,
+                    flush_timeout: None,
+                    key: None,
+                    cert_pem: None,
+                    key_pem: None,
+                    root_cert_pem: None,
+                    control: None,
+                    read_only: false,
+                },
+                gen: 1,
+            }],
+            read_only_parent: Some(Box::new(
+                VolumeConstructionRequest::Volume {
+                    id: Uuid::new_v4(),
+                    block_size: 512,
+                    sub_volumes: vec![VolumeConstructionRequest::Region {
+                        block_size: 4096,
+                        blocks_per_extent: 1,
+                        extent_count: 1,
+                        opts: CrucibleOpts {
+                            id: Uuid::new_v4(),
+                            target: vec![],
+                            lossy: false,
+                            flush_timeout: None,
+                            key: None,
+                            cert_pem: None,
+                            key_pem: None,
+                            root_cert_pem: None,
+                            control: None,
+                            read_only: false,
+                        },
+                        gen: 1,
+                    }],
+                    read_only_parent: None,
+                },
+            )),
+        };
+
+        Volume::construct(vcr, None, csl()).await.unwrap_err();
+    }
 }
