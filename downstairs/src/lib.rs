@@ -46,6 +46,7 @@ mod stats;
 
 mod extent_inner_raw;
 pub(crate) mod extent_inner_raw_common;
+mod extent_inner_raw_v2;
 mod extent_inner_sqlite;
 
 use extent::ExtentState;
@@ -3416,8 +3417,11 @@ enum WrappedStream {
 /// tests, it can be useful to create volumes using older backends.
 #[derive(Copy, Clone, Default, Debug, PartialEq)]
 pub enum Backend {
-    #[default]
+    #[cfg(any(test, feature = "integration-tests"))]
     RawFile,
+
+    #[default]
+    RawFileV2,
 
     #[cfg(any(test, feature = "integration-tests"))]
     SQLite,

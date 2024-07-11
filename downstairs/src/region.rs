@@ -696,6 +696,7 @@ impl Region {
         let current_dir = extent_dir(&self.dir, eid);
 
         sync_path(current_dir, &self.log)?;
+
         Ok(())
     }
 
@@ -2060,13 +2061,32 @@ pub(crate) mod test {
         let extent_data_size =
             (ddef.extent_size().value * ddef.block_size()) as usize;
         for i in (0..ddef.extent_count()).map(ExtentId) {
+            let path = extent_path(dir, i);
+            let data = std::fs::read(path).expect("Unable to read file");
+
             match backend {
                 Backend::RawFile | Backend::SQLite => {
-                    let path = extent_path(dir, i);
-                    let data =
-                        std::fs::read(path).expect("Unable to read file");
-
                     out.extend(&data[..extent_data_size]);
+                }
+                Backend::RawFileV2 => {
+                    use extent_inner_raw_v2::{
+                        BLOCK_CONTEXT_SIZE_BYTES, DEFAULT_ZFS_RECORDSIZE,
+                    };
+                    let blocks_per_record = (DEFAULT_ZFS_RECORDSIZE
+                        / (ddef.block_size() + BLOCK_CONTEXT_SIZE_BYTES))
+                        as usize;
+                    println!("BLOCKS PER RECORD: {blocks_per_record}");
+                    for i in 0..ddef.extent_size().value as usize {
+                        let record = i / blocks_per_record;
+                        let block = i % blocks_per_record;
+                        let start = record * DEFAULT_ZFS_RECORDSIZE as usize
+                            + block
+                                * (ddef.block_size() + BLOCK_CONTEXT_SIZE_BYTES)
+                                    as usize;
+                        out.extend(
+                            &data[start..][..ddef.block_size() as usize],
+                        );
+                    }
                 }
             }
         }
@@ -2211,6 +2231,12 @@ pub(crate) mod test {
     }
 
     fn test_region_open_removes_partial_writes(backend: Backend) {
+        // The RawFileV2 backend cannot write contexts separately from block
+        // data, so there's no such thing as a partial write.
+        if backend == Backend::RawFileV2 {
+            return;
+        }
+
         // Opening a dirty extent should fully rehash the extent to remove any
         // contexts that don't correlate with data on disk. This is necessary
         // for write_unwritten to work after a crash, and to move us into a
@@ -3679,6 +3705,10 @@ pub(crate) mod test {
     mod raw_file {
         use super::*;
         region_test_suite!(RawFile);
+    }
+    mod raw_file_v2 {
+        use super::*;
+        region_test_suite!(RawFileV2);
     }
     mod sqlite {
         use super::*;
