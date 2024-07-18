@@ -14,9 +14,7 @@ use crate::{
     ReplaceResult, UpstairsAction, IO_OUTSTANDING_MAX_BYTES,
     IO_OUTSTANDING_MAX_JOBS,
 };
-use crucible_common::{
-    build_logger, crucible_bail, Block, BlockIndex, CrucibleError,
-};
+use crucible_common::{build_logger, Block, BlockIndex, CrucibleError};
 use crucible_protocol::SnapshotDetails;
 
 use async_trait::async_trait;
@@ -576,14 +574,10 @@ impl BlockIO for Guest {
 
     async fn read(
         &self,
-        mut offset: Block,
+        mut offset: BlockIndex,
         data: &mut Buffer,
     ) -> Result<(), CrucibleError> {
         let bs = self.check_data_size(data.len()).await?;
-
-        if offset.block_size_in_bytes() as u64 != bs {
-            crucible_bail!(BlockSizeMismatch);
-        }
 
         if data.is_empty() {
             return Ok(());
@@ -613,7 +607,7 @@ impl BlockIO for Guest {
             let offset_change = chunk.len() as u64 / bs;
             let (rx, done) = BlockOpWaiter::pair();
             let rio = BlockOp::Read {
-                offset: BlockIndex(offset.value),
+                offset,
                 data: chunk,
                 done,
             };
@@ -645,7 +639,7 @@ impl BlockIO for Guest {
                 return Err(e);
             }
 
-            offset.value += offset_change;
+            offset.0 += offset_change;
         }
 
         Ok(())
@@ -653,14 +647,10 @@ impl BlockIO for Guest {
 
     async fn write(
         &self,
-        mut offset: Block,
+        mut offset: BlockIndex,
         mut data: BytesMut,
     ) -> Result<(), CrucibleError> {
         let bs = self.check_data_size(data.len()).await?;
-
-        if offset.block_size_in_bytes() as u64 != bs {
-            crucible_bail!(BlockSizeMismatch);
-        }
 
         if data.is_empty() {
             return Ok(());
@@ -681,13 +671,13 @@ impl BlockIO for Guest {
 
             let reply = self
                 .send_and_wait(|done| BlockOp::Write {
-                    offset: BlockIndex(offset.value),
+                    offset,
                     data: buf,
                     done,
                 })
                 .await;
             reply?;
-            offset.value += offset_change;
+            offset.0 += offset_change;
         }
 
         Ok(())
@@ -695,14 +685,10 @@ impl BlockIO for Guest {
 
     async fn write_unwritten(
         &self,
-        offset: Block,
+        offset: BlockIndex,
         data: BytesMut,
     ) -> Result<(), CrucibleError> {
-        let bs = self.check_data_size(data.len()).await?;
-
-        if offset.block_size_in_bytes() as u64 != bs {
-            crucible_bail!(BlockSizeMismatch);
-        }
+        let _bs = self.check_data_size(data.len()).await?;
 
         if data.is_empty() {
             return Ok(());
@@ -710,7 +696,7 @@ impl BlockIO for Guest {
 
         self.backpressure_sleep().await;
         self.send_and_wait(|done| BlockOp::WriteUnwritten {
-            offset: BlockIndex(offset.value),
+            offset,
             data,
             done,
         })

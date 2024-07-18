@@ -1310,8 +1310,7 @@ async fn verify_volume(
             let mut result = Ok(());
             let mut data = crucible::Buffer::new(0, block_size as usize);
             while block_index < total_blocks {
-                let offset =
-                    Block::new(block_index as u64, block_size.trailing_zeros());
+                let offset = BlockIndex(block_index as u64);
 
                 let next_io_blocks = (total_blocks - block_index).min(IO_SIZE);
                 data.reset(next_io_blocks, block_size as usize);
@@ -1644,8 +1643,7 @@ async fn balloon_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
             /*
              * Convert block_index to its byte value.
              */
-            let offset =
-                Block::new(block_index as u64, ri.block_size.trailing_zeros());
+            let offset = BlockIndex(block_index as u64);
 
             println!("IO at block:{}  size in blocks:{}", block_index, size);
             guest.write(offset, data).await?;
@@ -1709,8 +1707,7 @@ async fn fill_workload(
         let pb = pb.clone();
         tasks.push(tokio::task::spawn(async move {
             while block_index < total_blocks {
-                let offset =
-                    Block::new(block_index as u64, block_size.trailing_zeros());
+                let offset = BlockIndex(block_index as u64);
 
                 let next_io_blocks = (total_blocks - block_index).min(IO_SIZE);
 
@@ -1785,8 +1782,7 @@ async fn fill_sparse_workload(
         let random_offset: usize = rng.gen_range(0..extent_size);
         block_index += random_offset;
 
-        let offset =
-            Block::new(block_index as u64, ri.block_size.trailing_zeros());
+        let offset = BlockIndex(block_index as u64);
 
         ri.write_log.update_wc(block_index);
 
@@ -1857,8 +1853,7 @@ async fn generic_workload(
             let block_index = rng.gen_range(0..block_max);
 
             // Convert offset and length to their byte values.
-            let offset =
-                Block::new(block_index as u64, ri.block_size.trailing_zeros());
+            let offset = BlockIndex(block_index as u64);
 
             if op <= 4 {
                 // Write
@@ -1890,7 +1885,7 @@ async fn generic_workload(
                 if !quiet {
                     print!(
                         " Write block {:>bw$}  len {:>sw$}  data:",
-                        offset.value,
+                        offset.0,
                         data.len(),
                         bw = block_width,
                         sw = size_width,
@@ -1924,7 +1919,7 @@ async fn generic_workload(
                     }
                     println!(
                         " Read  block {:>bw$}  len {:>sw$}",
-                        offset.value,
+                        offset.0,
                         data.len(),
                         bw = block_width,
                         sw = size_width,
@@ -2586,8 +2581,7 @@ async fn dirty_workload(
         /*
          * Convert offset and length to their byte values.
          */
-        let offset =
-            Block::new(block_index as u64, ri.block_size.trailing_zeros());
+        let offset = BlockIndex(block_index as u64);
 
         /*
          * Update the write count for the block we plan to write to.
@@ -2600,7 +2594,7 @@ async fn dirty_workload(
             "[{:>0width$}/{:>0width$}] Write at block {}, len:{}",
             c,
             count,
-            offset.value,
+            offset.0,
             data.len(),
             width = count_width,
         );
@@ -3008,15 +3002,11 @@ async fn rand_read_write_workload(
                     buf.resize(cfg.blocks_per_io * block_size, 0u8);
                     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
                     rng.fill_bytes(&mut buf);
-                    let block_shift = block_size.trailing_zeros();
                     while !stop.load(Ordering::Acquire) {
                         let offset =
                             rng.gen_range(0..=total_blocks - cfg.blocks_per_io);
                         guest
-                            .write(
-                                Block::new(offset as u64, block_shift),
-                                buf.clone(),
-                            )
+                            .write(BlockIndex(offset as u64), buf.clone())
                             .await
                             .unwrap();
                         byte_count.fetch_add(buf.len(), Ordering::Relaxed);
@@ -3025,15 +3015,11 @@ async fn rand_read_write_workload(
                 RandReadWriteMode::Read => {
                     let mut buf = Buffer::new(cfg.blocks_per_io, block_size);
                     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
-                    let block_shift = block_size.trailing_zeros();
                     while !stop.load(Ordering::Acquire) {
                         let offset =
                             rng.gen_range(0..=total_blocks - cfg.blocks_per_io);
                         guest
-                            .read(
-                                Block::new(offset as u64, block_shift),
-                                &mut buf,
-                            )
+                            .read(BlockIndex(offset as u64), &mut buf)
                             .await
                             .unwrap();
                         byte_count.fetch_add(buf.len(), Ordering::Relaxed);
@@ -3156,7 +3142,7 @@ async fn one_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
     /*
      * Convert offset and length to their byte values.
      */
-    let offset = Block::new(block_index as u64, ri.block_size.trailing_zeros());
+    let offset = BlockIndex(block_index as u64);
 
     /*
      * Update the write count for the block we plan to write to.
@@ -3165,13 +3151,13 @@ async fn one_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
 
     let data = fill_vec(block_index, size, &ri.write_log, ri.block_size);
 
-    println!("Write at block {:5}, len:{:7}", offset.value, data.len());
+    println!("Write at block {:5}, len:{:7}", offset.0, data.len());
 
     guest.write(offset, data).await?;
 
     let mut data = crucible::Buffer::repeat(255, size, ri.block_size as usize);
 
-    println!("Read  at block {:5}, len:{:7}", offset.value, data.len());
+    println!("Read  at block {:5}, len:{:7}", offset.0, data.len());
     guest.read(offset, &mut data).await?;
 
     let dl = data.into_bytes();
@@ -3297,8 +3283,7 @@ async fn write_flush_read_workload(
         /*
          * Convert offset and length to their byte values.
          */
-        let offset =
-            Block::new(block_index as u64, ri.block_size.trailing_zeros());
+        let offset = BlockIndex(block_index as u64);
 
         /*
          * Update the write count for all blocks we plan to write to.
@@ -3313,7 +3298,7 @@ async fn write_flush_read_workload(
             "{:>0width$}/{:>0width$} IO at block {:5}, len:{:7}",
             c,
             count,
-            offset.value,
+            offset.0,
             data.len(),
             width = count_width,
         );
@@ -3447,8 +3432,7 @@ async fn repair_workload(
             let block_index = rng.gen_range(0..block_max);
 
             // Convert offset and length to their byte values.
-            let offset =
-                Block::new(block_index as u64, ri.block_size.trailing_zeros());
+            let offset = BlockIndex(block_index as u64);
 
             if !one_write || op <= 4 {
                 // Write
@@ -3466,7 +3450,7 @@ async fn repair_workload(
                     block {:>bw$}  len {:>sw$}  data:",
                     c,
                     count,
-                    offset.value,
+                    offset.0,
                     data.len(),
                     width = count_width,
                     bw = block_width,
@@ -3488,7 +3472,7 @@ async fn repair_workload(
                     block {:>bw$}  len {:>sw$}",
                     c,
                     count,
-                    offset.value,
+                    offset.0,
                     data.len(),
                     width = count_width,
                     bw = block_width,
@@ -3545,8 +3529,7 @@ async fn demo_workload(
             let block_index = rng.gen_range(0..block_max);
 
             // Convert offset and length to their byte values.
-            let offset =
-                Block::new(block_index as u64, ri.block_size.trailing_zeros());
+            let offset = BlockIndex(block_index as u64);
 
             if op <= 4 {
                 // Write
@@ -3626,7 +3609,7 @@ async fn span_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
     ri.write_log.update_wc(block_index);
     ri.write_log.update_wc(block_index + 1);
 
-    let offset = Block::new(block_index as u64, ri.block_size.trailing_zeros());
+    let offset = BlockIndex(block_index as u64);
     let data = fill_vec(block_index, 2, &ri.write_log, ri.block_size);
 
     println!("Sending a write spanning two extents");
@@ -3666,8 +3649,7 @@ async fn big_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
         /*
          * Convert block_index to its byte value.
          */
-        let offset =
-            Block::new(block_index as u64, ri.block_size.trailing_zeros());
+        let offset = BlockIndex(block_index as u64);
 
         guest.write(offset, data).await?;
 
@@ -3725,8 +3707,7 @@ async fn biggest_io_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
     );
     let mut block_index = 0;
     while block_index < ri.total_blocks {
-        let offset =
-            Block::new(block_index as u64, ri.block_size.trailing_zeros());
+        let offset = BlockIndex(block_index as u64);
 
         let next_io_blocks =
             if block_index + biggest_io_in_blocks > ri.total_blocks {

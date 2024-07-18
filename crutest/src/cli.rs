@@ -232,10 +232,10 @@ async fn cli_read(
     /*
      * Convert offset to its byte value.
      */
-    let offset = Block::new(block_index as u64, ri.block_size.trailing_zeros());
+    let offset = BlockIndex(block_index as u64);
     let mut data = crucible::Buffer::repeat(255, size, ri.block_size as usize);
 
-    println!("Read  at block {:5}, len:{:7}", offset.value, data.len());
+    println!("Read  at block {:5}, len:{:7}", offset.0, data.len());
     guest.read(offset, &mut data).await?;
 
     let mut dl = data.into_bytes();
@@ -299,7 +299,7 @@ async fn cli_write(
     /*
      * Convert offset and length to their byte values.
      */
-    let offset = Block::new(block_index as u64, ri.block_size.trailing_zeros());
+    let offset = BlockIndex(block_index as u64);
 
     /*
      * Update the write count for the block we plan to write to.
@@ -319,7 +319,7 @@ async fn cli_write(
         fill_vec(block_index, size, &ri.write_log, ri.block_size)
     };
 
-    println!("Write at block {:5}, len:{:7}", offset.value, data.len());
+    println!("Write at block {:5}, len:{:7}", offset.0, data.len());
 
     guest.write(offset, data).await?;
 
@@ -342,7 +342,7 @@ async fn cli_write_unwritten(
     /*
      * Convert offset to its byte value.
      */
-    let offset = Block::new(block_index as u64, ri.block_size.trailing_zeros());
+    let offset = BlockIndex(block_index as u64);
 
     // To determine what we put into our write buffer, look to see if
     // we believe we have written to this block or not.
@@ -364,7 +364,7 @@ async fn cli_write_unwritten(
 
     println!(
         "WriteUnwritten at block {:5}, len:{:7}",
-        offset.value,
+        offset.0,
         data.len(),
     );
 
