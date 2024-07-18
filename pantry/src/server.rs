@@ -432,7 +432,10 @@ async fn detach(
     Ok(HttpResponseDeleted())
 }
 
-pub fn make_api() -> Result<dropshot::ApiDescription<Arc<Pantry>>, String> {
+pub fn make_api() -> Result<
+    dropshot::ApiDescription<Arc<Pantry>>,
+    dropshot::ApiDescriptionRegisterError,
+> {
     let mut api = dropshot::ApiDescription::new();
 
     api.register(pantry_status)?;
@@ -468,6 +471,7 @@ pub fn run_server(
             request_body_max_bytes: 1024
                 + crate::pantry::PantryEntry::MAX_CHUNK_SIZE * 2,
             default_handler_task_mode: HandlerTaskMode::Detached,
+            log_headers: vec![],
         },
         api,
         df.clone(),
