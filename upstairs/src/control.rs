@@ -37,6 +37,7 @@ pub async fn start(
         bind_address: addr,
         request_body_max_bytes: 1024,
         default_handler_task_mode: HandlerTaskMode::Detached,
+        log_headers: vec![],
     };
 
     /*

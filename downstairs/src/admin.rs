@@ -95,10 +95,8 @@ pub async fn run_downstairs_for_region(
 
 fn register_endpoints(
     api_description: &mut ApiDescription<Arc<ServerContext>>,
-) -> Result<(), String> {
-    api_description.register(run_downstairs_for_region)?;
-
-    Ok(())
+) -> Result<(), dropshot::ApiDescriptionRegisterError> {
+    api_description.register(run_downstairs_for_region)
 }
 
 pub async fn run_dropshot(

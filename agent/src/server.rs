@@ -1,4 +1,4 @@
-// Copyright 2021 Oxide Computer Company
+// Copyright 2024 Oxide Computer Company
 use super::datafile::DataFile;
 use super::model;
 use anyhow::{anyhow, Result};
@@ -13,16 +13,6 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::result::Result as SResult;
 use std::sync::Arc;
-
-trait AnyhowFromString<T> {
-    fn or_bail(self, msg: &str) -> Result<T>;
-}
-
-impl<T> AnyhowFromString<T> for SResult<T, String> {
-    fn or_bail(self, msg: &str) -> Result<T> {
-        self.map_err(|e| anyhow!("{}: {:?}", msg, e))
-    }
-}
 
 #[endpoint {
     method = GET,
@@ -337,24 +327,17 @@ async fn region_delete_running_snapshot(
 pub fn make_api() -> Result<dropshot::ApiDescription<Arc<DataFile>>> {
     let mut api = dropshot::ApiDescription::new();
 
-    api.register(region_list).or_bail("registration failure")?;
-    api.register(region_create)
-        .or_bail("registration failure")?;
-    api.register(region_get).or_bail("registration failure")?;
-    api.register(region_delete)
-        .or_bail("registration failure")?;
+    api.register(region_list)?;
+    api.register(region_create)?;
+    api.register(region_get)?;
+    api.register(region_delete)?;
 
-    api.register(region_get_snapshots)
-        .or_bail("registration failure")?;
-    api.register(region_get_snapshot)
-        .or_bail("registration failure")?;
-    api.register(region_delete_snapshot)
-        .or_bail("registration failure")?;
+    api.register(region_get_snapshots)?;
+    api.register(region_get_snapshot)?;
+    api.register(region_delete_snapshot)?;
 
-    api.register(region_run_snapshot)
-        .or_bail("registration failure")?;
-    api.register(region_delete_running_snapshot)
-        .or_bail("registration failure")?;
+    api.register(region_run_snapshot)?;
+    api.register(region_delete_running_snapshot)?;
 
     Ok(api)
 }
@@ -371,6 +354,7 @@ pub async fn run_server(
             bind_address,
             request_body_max_bytes: 1024 * 10,
             default_handler_task_mode: HandlerTaskMode::Detached,
+            log_headers: vec![],
         },
         api,
         df,
