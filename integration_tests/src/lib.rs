@@ -3840,16 +3840,14 @@ mod test {
         // Write data in
         guest
             .write(
-                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                BlockIndex(0),
                 BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
             )
             .await?;
 
         // Read back our block post replacement, verify contents
         let mut buffer = Buffer::new(10, BLOCK_SIZE);
-        guest
-            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
-            .await?;
+        guest.read(BlockIndex(0), &mut buffer).await?;
 
         assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
 
