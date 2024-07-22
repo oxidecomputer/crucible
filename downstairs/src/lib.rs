@@ -1641,13 +1641,9 @@ impl ActiveConnection {
                     response.is_ok(),
                 );
 
-                // We've got one or more block contexts per block returned, but
-                // the response format need to be in the form of
-                // `ReadResponseBlockMetadata` (which also contains extent and
-                // offset); we inject that extra information in this terrible
-                // match statement.
+                // Unpack into context blocks and stored data
                 let (blocks, data) = match response {
-                    Ok(r) => (Ok(r.blocks.clone()), r.data),
+                    Ok(r) => (Ok(r.blocks), r.data),
                     Err(e) => (Err(e), Default::default()),
                 };
 
