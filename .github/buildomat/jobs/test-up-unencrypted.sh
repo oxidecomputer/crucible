@@ -4,8 +4,9 @@
 #: variety = "basic"
 #: target = "helios-2.0"
 #: output_rules = [
-#:	"/tmp/test_up/*.txt",
-#:	"/tmp/test_up/dsc/*.txt",
+#:	"%/tmp/test_up/*.txt",
+#:	"%/tmp/test_up/dsc/*.txt",
+#:	"%/tmp/debug/*",
 #:	"/tmp/core.*",
 #: ]
 #: skip_clone = true
@@ -41,7 +42,21 @@ done
 
 export BINDIR=/var/tmp/bins
 
+# Give this test two hours to finish
+jobpid=$$; (sleep $(( 120 * 60 )); banner fail-timeout; ps -ef; zfs list;kill $jobpid) &
+
+echo "Setup debug logging"
+mkdir /tmp/debug
+psrinfo -v > /tmp/debug/psrinfo.txt
+df -h > /tmp/debug/df.txt || true
+prstat -d d -mLc 1 > /tmp/debug/prstat.txt 2>&1 &
+iostat -T d -xn 1 > /tmp/debug/iostat.txt 2>&1 &
+mpstat -T d 1 > /tmp/debug/mpstat.txt 2>&1 &
+vmstat -T d -p 1 < /dev/null > /tmp/debug/paging.txt 2>&1 &
+pfexec dtrace -Z -s $input/scripts/perf-downstairs-tick.d > /tmp/debug/dtrace.txt 2>&1 &
+pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/debug/upstairs-info.txt 2>&1 &
+
 banner test_up_unencrypted
 ptime -m bash "$input/scripts/test_up.sh" -N unencrypted
 
-# Save the output files?
+echo "test-up-unencrypted ends"
