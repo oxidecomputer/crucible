@@ -901,7 +901,7 @@ impl CrucibleEncoder {
                     job_id: JobId(1),
                     dependencies: vec![JobId(1)],
                     start: BlockIndex(0),
-                    contexts: vec![ctx; n],
+                    contexts: vec![ctx; mid],
                 },
                 data: vec![0; mid * bs].into(),
             };
