@@ -129,6 +129,14 @@ impl ImpactedBlocks {
         ImpactedBlocks::Empty
     }
 
+    /// Returns the first impacted address
+    pub fn start(&self) -> Option<ImpactedAddr> {
+        match self {
+            ImpactedBlocks::InclusiveRange(a, _) => Some(*a),
+            ImpactedBlocks::Empty => None,
+        }
+    }
+
     /// Create a new ImpactedBlocks range starting at a given offset, and
     /// stretching n_blocks further into the extent. Panics an error if
     /// `extent_size` is 0. Returns ImpactedBlocks::Empty if n_blocks is 0.

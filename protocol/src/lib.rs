@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 const MAX_FRM_LEN: usize = 100 * 1024 * 1024; // 100M
 
-use crucible_common::{BlockOffset, CrucibleError, ExtentId, RegionDefinition};
+use crucible_common::{BlockIndex, CrucibleError, ExtentId, RegionDefinition};
 
 /// Wrapper type for a job ID
 ///
@@ -115,13 +115,6 @@ impl std::fmt::Display for ClientId {
     }
 }
 
-#[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-pub struct ReadRequest {
-    pub eid: ExtentId,
-    pub offset: BlockOffset,
-}
-
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BlockContext {
     /// If this is a non-encrypted write, then the integrity hasher has the
@@ -169,6 +162,9 @@ pub struct SnapshotDetails {
 #[repr(u32)]
 #[derive(IntoPrimitive)]
 pub enum MessageVersion {
+    /// Reorganize messages to be start + length, instead of random-access
+    V10 = 10,
+
     /// Use `BlockOffset` instead of `Block` in many places
     V9 = 9,
 
@@ -208,7 +204,7 @@ pub enum MessageVersion {
 }
 impl MessageVersion {
     pub const fn current() -> Self {
-        Self::V9
+        Self::V10
     }
 }
 
@@ -217,7 +213,7 @@ impl MessageVersion {
  * This, along with the MessageVersion enum above should be updated whenever
  * changes are made to the Message enum below.
  */
-pub const CRUCIBLE_MESSAGE_VERSION: u32 = 9;
+pub const CRUCIBLE_MESSAGE_VERSION: u32 = 10;
 
 /*
  * If you add or change the Message enum, you must also increment the
@@ -513,7 +509,10 @@ pub enum Message {
         session_id: Uuid,
         job_id: JobId,
         dependencies: Vec<JobId>,
-        requests: Vec<ReadRequest>,
+        /// Read position, as an **absolute** block position
+        start: BlockIndex,
+        /// Number of blocks to read
+        count: u64,
     },
     ReadResponse {
         header: ReadResponseHeader,
@@ -555,14 +554,20 @@ pub struct WriteHeader {
     pub session_id: Uuid,
     pub job_id: JobId,
     pub dependencies: Vec<JobId>,
-    pub blocks: Vec<WriteBlockMetadata>,
-}
 
-#[derive(Debug, PartialEq, Copy, Clone, Serialize, Deserialize)]
-pub struct WriteBlockMetadata {
-    pub eid: ExtentId,
-    pub offset: BlockOffset,
-    pub block_context: BlockContext,
+    /// Starting block, as an **absolute** block position
+    pub start: BlockIndex,
+
+    /// Block contexts to write (one per block)
+    ///
+    /// The write size is implicitly set by `contexts.len()`, which **must**
+    /// be compatible with the size of `data` in the container
+    /// `Message::Write/WriteUnwritten`, i.e.
+    ///
+    /// ```text
+    /// contexts.len() == data.len() / block_size
+    /// ```
+    pub contexts: Vec<BlockContext>,
 }
 
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
@@ -570,33 +575,7 @@ pub struct ReadResponseHeader {
     pub upstairs_id: Uuid,
     pub session_id: Uuid,
     pub job_id: JobId,
-    pub blocks: Result<Vec<ReadResponseBlockMetadata>, CrucibleError>,
-}
-
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
-pub struct ReadResponseBlockMetadata {
-    pub eid: ExtentId,
-    pub offset: BlockOffset,
-    pub block_context: Option<BlockContext>,
-}
-
-impl ReadResponseBlockMetadata {
-    // TODO this is dumb
-    pub fn hashes(&self) -> Vec<u64> {
-        self.block_context.iter().map(|x| x.hash).collect()
-    }
-
-    pub fn first_hash(&self) -> Option<u64> {
-        self.block_context.map(|ctx| ctx.hash)
-    }
-
-    // TODO this is dumb
-    pub fn encryption_contexts(&self) -> Vec<Option<&EncryptionContext>> {
-        self.block_context
-            .iter()
-            .map(|x| x.encryption_context.as_ref())
-            .collect()
-    }
+    pub blocks: Result<Vec<Option<BlockContext>>, CrucibleError>,
 }
 
 impl Message {
@@ -666,7 +645,8 @@ impl std::fmt::Display for Message {
                         session_id,
                         job_id,
                         dependencies,
-                        blocks,
+                        start,
+                        ..
                     },
                 data: _,
             } => f
@@ -675,7 +655,7 @@ impl std::fmt::Display for Message {
                 .field("session_id", &session_id)
                 .field("job_id", &job_id)
                 .field("dependencies", &dependencies)
-                .field("blocks", &blocks)
+                .field("start", &start)
                 .field("writes", &"..")
                 .finish(),
             Message::WriteUnwritten {
@@ -685,7 +665,8 @@ impl std::fmt::Display for Message {
                         session_id,
                         job_id,
                         dependencies,
-                        blocks,
+                        start,
+                        ..
                     },
                 data: _,
             } => f
@@ -694,7 +675,7 @@ impl std::fmt::Display for Message {
                 .field("session_id", &session_id)
                 .field("job_id", &job_id)
                 .field("dependencies", &dependencies)
-                .field("blocks", &blocks)
+                .field("start", &start)
                 .field("writes", &"..")
                 .finish(),
             Message::ReadResponse {
@@ -831,20 +812,6 @@ impl CrucibleEncoder {
         Ok(len)
     }
 
-    fn a_write() -> WriteBlockMetadata {
-        WriteBlockMetadata {
-            eid: ExtentId(1),
-            offset: BlockOffset(1),
-            block_context: BlockContext {
-                hash: 0,
-                encryption_context: Some(EncryptionContext {
-                    nonce: [0; 12],
-                    tag: [0; 16],
-                }),
-            },
-        }
-    }
-
     /*
      * Binary search to find the maximum number of blocks we can send.
      *
@@ -854,9 +821,14 @@ impl CrucibleEncoder {
      * given our constant MAX_FRM_LEN.
      */
     pub fn max_io_blocks(bs: usize) -> Result<usize, anyhow::Error> {
-        let block_meta = CrucibleEncoder::a_write();
-        let size_of_write_message =
-            CrucibleEncoder::serialized_size(CrucibleEncoder::a_write())? + bs;
+        let ctx = BlockContext {
+            hash: 0,
+            encryption_context: Some(EncryptionContext {
+                nonce: [0; 12],
+                tag: [0; 16],
+            }),
+        };
+        let size_of_write_message = CrucibleEncoder::serialized_size(ctx)? + bs;
 
         // Maximum frame length divided by a write of one block is the lower
         // bound.
@@ -867,7 +839,8 @@ impl CrucibleEncoder {
                 session_id: Uuid::new_v4(),
                 job_id: JobId(1),
                 dependencies: vec![JobId(1)],
-                blocks: vec![block_meta; n],
+                start: BlockIndex(0),
+                contexts: vec![ctx; n],
             },
             data: vec![0; n * bs].into(),
         };
@@ -886,7 +859,8 @@ impl CrucibleEncoder {
                 session_id: Uuid::new_v4(),
                 job_id: JobId(1),
                 dependencies: vec![JobId(1)],
-                blocks: vec![block_meta; n],
+                start: BlockIndex(0),
+                contexts: vec![ctx; n],
             },
             data: vec![0; n * bs].into(),
         };
@@ -900,14 +874,14 @@ impl CrucibleEncoder {
         // given MAX_FRM_LEN.
 
         let mut lower = match lower_size_write_message {
-            Message::Write { header, .. } => header.blocks.len(),
+            Message::Write { header, .. } => header.contexts.len(),
             _ => {
                 bail!("wat");
             }
         };
 
         let mut upper = match upper_size_write_message {
-            Message::Write { header, .. } => header.blocks.len(),
+            Message::Write { header, .. } => header.contexts.len(),
             _ => {
                 bail!("wat");
             }
@@ -926,7 +900,8 @@ impl CrucibleEncoder {
                     session_id: Uuid::new_v4(),
                     job_id: JobId(1),
                     dependencies: vec![JobId(1)],
-                    blocks: vec![block_meta; mid],
+                    start: BlockIndex(0),
+                    contexts: vec![ctx; mid],
                 },
                 data: vec![0; mid * bs].into(),
             };
@@ -1257,13 +1232,10 @@ mod tests {
                 session_id: Uuid::new_v4(),
                 job_id: JobId(1),
                 dependencies: vec![],
-                blocks: vec![WriteBlockMetadata {
-                    eid: ExtentId(0),
-                    offset: BlockOffset(0),
-                    block_context: BlockContext {
-                        hash,
-                        encryption_context: None,
-                    },
+                start: BlockIndex(0),
+                contexts: vec![BlockContext {
+                    hash,
+                    encryption_context: None,
                 }],
             },
             data,

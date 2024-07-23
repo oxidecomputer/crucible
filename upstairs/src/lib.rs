@@ -590,7 +590,7 @@ impl EncryptionContext {
 #[derive(Debug)]
 pub struct RawWrite {
     /// Per-block metadata
-    pub blocks: Vec<WriteBlockMetadata>,
+    pub blocks: Vec<BlockContext>,
     /// Raw data
     pub data: bytes::BytesMut,
 }
@@ -668,7 +668,7 @@ impl RegionDefinitionStatus {
 #[derive(Debug, Default)]
 pub(crate) struct RawReadResponse {
     /// Per-block metadata
-    pub blocks: Vec<ReadResponseBlockMetadata>,
+    pub blocks: Vec<Option<BlockContext>>,
     /// Raw data
     pub data: bytes::BytesMut,
 }
@@ -972,7 +972,19 @@ impl DownstairsIO {
      * We don't consider repair IOs in the size calculation.
      */
     pub fn io_size(&self) -> usize {
-        self.work.job_bytes() as usize
+        match &self.work {
+            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
+                data.len()
+            }
+            IOop::Read {
+                count, block_size, ..
+            } => (*count * *block_size) as usize,
+            IOop::Flush { .. }
+            | IOop::ExtentFlushClose { .. }
+            | IOop::ExtentLiveRepair { .. }
+            | IOop::ExtentLiveReopen { .. }
+            | IOop::ExtentLiveNoOp { .. } => 0,
+        }
     }
 
     /*
@@ -1093,19 +1105,40 @@ impl ReconcileIO {
 #[derive(Debug, Clone, PartialEq)]
 enum IOop {
     Write {
-        dependencies: Vec<JobId>, // Jobs that must finish before this
-        blocks: Vec<WriteBlockMetadata>,
+        /// Jobs that mush finish before this
+        dependencies: Vec<JobId>,
+        /// Extent in which the write starts
+        start_eid: ExtentId,
+        /// Relative offset (within that extent) to start writing
+        start_offset: BlockOffset,
+        /// Per-block context
+        blocks: Vec<BlockContext>,
+        /// Raw data, tightly packed
         data: bytes::Bytes,
     },
     WriteUnwritten {
-        dependencies: Vec<JobId>, // Jobs that must finish before this
-        blocks: Vec<WriteBlockMetadata>,
+        /// Jobs that mush finish before this
+        dependencies: Vec<JobId>,
+        /// Extent in which the write starts
+        start_eid: ExtentId,
+        /// Relative offset (within that extent) to start writing
+        start_offset: BlockOffset,
+        /// Per-block context
+        blocks: Vec<BlockContext>,
+        /// Raw data, tightly packed
         data: bytes::Bytes,
     },
     Read {
-        dependencies: Vec<JobId>, // Jobs that must finish before this
+        /// Jobs that must finish before this
+        dependencies: Vec<JobId>,
+        /// Extent in which the read starts
+        start_eid: ExtentId,
+        /// Relative offset (within that extent) to start reading
+        start_offset: BlockOffset,
+        /// Number of blocks to read
+        count: u64,
+        /// Block size for this region (stored here for convenience)
         block_size: u64,
-        requests: Vec<ReadRequest>,
     },
     Flush {
         dependencies: Vec<JobId>, // Jobs that must finish before this
@@ -1178,12 +1211,11 @@ impl IOop {
         let (job_type, num_blocks, deps) = match self {
             IOop::Read {
                 dependencies,
-                requests,
+                count,
                 ..
             } => {
                 let job_type = "Read".to_string();
-                let num_blocks = requests.len();
-                (job_type, num_blocks, dependencies.clone())
+                (job_type, *count as usize, dependencies.clone())
             }
             IOop::Write {
                 dependencies,
@@ -1261,18 +1293,14 @@ impl IOop {
             // repaired is handled with dependencies, and IOs should arrive
             // here with those dependencies already set.
             match &self {
-                IOop::Write { blocks, .. }
-                | IOop::WriteUnwritten { blocks, .. } => {
-                    blocks.iter().any(|b| b.eid <= extent_limit)
-                }
+                IOop::Write { start_eid, .. }
+                | IOop::WriteUnwritten { start_eid, .. }
+                | IOop::Read { start_eid, .. } => *start_eid <= extent_limit,
                 IOop::Flush { .. } => {
                     // If we have set extent limit, then we go ahead and
                     // send the flush with the extent_limit in it, and allow
                     // the downstairs to act based on that.
                     true
-                }
-                IOop::Read { requests, .. } => {
-                    requests.iter().any(|req| req.eid <= extent_limit)
                 }
                 _ => {
                     panic!("Unsupported IO check {:?}", self);
@@ -1292,10 +1320,8 @@ impl IOop {
                 data.len() as u64
             }
             IOop::Read {
-                requests,
-                block_size,
-                ..
-            } => requests.len() as u64 * block_size,
+                count, block_size, ..
+            } => *block_size * *count,
             _ => 0,
         }
     }

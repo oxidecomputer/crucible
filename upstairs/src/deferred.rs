@@ -8,7 +8,6 @@ use crate::{
 };
 use bytes::BytesMut;
 use crucible_common::{integrity_hash, RegionDefinition};
-use crucible_protocol::WriteBlockMetadata;
 use futures::{
     future::{ready, Either, Ready},
     stream::FuturesOrdered,
@@ -139,7 +138,7 @@ impl DeferredWrite {
 
         // In-place encryption into `self.data`
         let mut pos: usize = 0;
-        for (eid, offset) in self.impacted_blocks.blocks(&self.ddef) {
+        for _ in 0..num_blocks {
             let (encryption_context, hash) = if let Some(ctx) =
                 &self.cfg.encryption_context
             {
@@ -160,13 +159,9 @@ impl DeferredWrite {
 
                 (None, hash)
             };
-            blocks.push(WriteBlockMetadata {
-                eid,
-                offset,
-                block_context: BlockContext {
-                    hash,
-                    encryption_context,
-                },
+            blocks.push(BlockContext {
+                hash,
+                encryption_context,
             });
             pos += block_size;
         }
@@ -239,14 +234,14 @@ impl DeferredRead {
             for (i, r) in rs.iter_mut().enumerate() {
                 let v = if let Some(ctx) = &self.cfg.encryption_context {
                     validate_encrypted_read_response(
-                        r.block_context,
+                        *r,
                         &mut data[i * block_size..][..block_size],
                         ctx,
                         &self.log,
                     )
                 } else {
                     validate_unencrypted_read_response(
-                        r.block_context,
+                        *r,
                         &mut data[i * block_size..][..block_size],
                         &self.log,
                     )

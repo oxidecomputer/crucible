@@ -150,7 +150,7 @@ impl Buffer {
             .blocks
             .iter()
             .enumerate()
-            .group_by(|(_i, b)| b.block_context.is_none())
+            .group_by(|(_i, b)| b.is_none())
         {
             if empty {
                 continue;
@@ -374,8 +374,7 @@ impl UninitializedBuffer {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::{BlockContext, BlockOffset, ReadResponseBlockMetadata};
-    use crucible_common::ExtentId;
+    use crate::BlockContext;
     use rand::RngCore;
 
     #[test]
@@ -495,17 +494,15 @@ mod test {
         rng.fill_bytes(&mut data);
 
         let blocks = (0..10)
-            .map(|i| ReadResponseBlockMetadata {
-                eid: ExtentId(0),
-                offset: BlockOffset(i),
-                block_context: if f(i) {
+            .map(|i| {
+                if f(i) {
                     Some(BlockContext {
                         hash: 123,
                         encryption_context: None,
                     })
                 } else {
                     None
-                },
+                }
             })
             .collect();
 
@@ -571,13 +568,11 @@ mod test {
         rng.fill_bytes(&mut data);
 
         let blocks = (0..10)
-            .map(|i| ReadResponseBlockMetadata {
-                eid: ExtentId(0),
-                offset: BlockOffset(i),
-                block_context: Some(BlockContext {
+            .map(|_| {
+                Some(BlockContext {
                     hash: 123,
                     encryption_context: None,
-                }),
+                })
             })
             .collect();
 

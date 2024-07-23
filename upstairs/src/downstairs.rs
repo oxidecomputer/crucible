@@ -16,11 +16,13 @@ use crate::{
     AckStatus, ActiveJobs, AllocRingBuffer, ClientData, ClientIOStateCount,
     ClientId, ClientMap, CrucibleError, DownstairsIO, DownstairsMend, DsState,
     ExtentFix, ExtentRepairIDs, GuestWorkId, IOState, IOStateCount, IOop,
-    ImpactedBlocks, JobId, Message, RawReadResponse, RawWrite, ReadRequest,
-    ReconcileIO, ReconciliationId, RegionDefinition, ReplaceResult,
-    SnapshotDetails, Validation, WorkSummary,
+    ImpactedBlocks, JobId, Message, RawReadResponse, RawWrite, ReconcileIO,
+    ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
+    Validation, WorkSummary,
 };
-use crucible_common::ExtentId;
+use crucible_common::{
+    impacted_blocks::ImpactedAddr, BlockIndex, BlockOffset, ExtentId,
+};
 use crucible_protocol::WriteHeader;
 
 use rand::prelude::*;
@@ -502,10 +504,16 @@ impl Downstairs {
         }
     }
 
-    pub(crate) fn io_send(&mut self, client_id: ClientId) {
+    pub(crate) fn io_send(
+        &mut self,
+        client_id: ClientId,
+        def: &RegionDefinition,
+    ) {
         // Send all jobs to the downstairs
         let client = &mut self.clients[client_id];
         let new_work = client.new_work();
+
+        let blocks_per_extent = def.extent_size().value;
 
         /*
          * Now we have a list of all the job IDs that are new for our client id.
@@ -539,6 +547,8 @@ impl Downstairs {
             let message = match job {
                 IOop::Write {
                     dependencies,
+                    start_eid,
+                    start_offset,
                     blocks,
                     data,
                 } => {
@@ -552,12 +562,18 @@ impl Downstairs {
                             session_id: self.cfg.session_id,
                             job_id: new_id,
                             dependencies,
-                            blocks,
+                            start: BlockIndex(
+                                start_eid.0 as u64 * blocks_per_extent
+                                    + start_offset.0,
+                            ),
+                            contexts: blocks,
                         },
                         data,
                     }
                 }
                 IOop::WriteUnwritten {
+                    start_eid,
+                    start_offset,
                     blocks,
                     dependencies,
                     data,
@@ -572,7 +588,11 @@ impl Downstairs {
                             session_id: self.cfg.session_id,
                             job_id: new_id,
                             dependencies,
-                            blocks,
+                            start: BlockIndex(
+                                start_eid.0 as u64 * blocks_per_extent
+                                    + start_offset.0,
+                            ),
+                            contexts: blocks,
                         },
                         data,
                     }
@@ -601,7 +621,9 @@ impl Downstairs {
                 }
                 IOop::Read {
                     dependencies,
-                    requests,
+                    start_eid,
+                    start_offset,
+                    count,
                     ..
                 } => {
                     cdt::ds__read__client__start!(|| (
@@ -613,7 +635,11 @@ impl Downstairs {
                         session_id: self.cfg.session_id,
                         job_id: new_id,
                         dependencies,
-                        requests,
+                        start: BlockIndex(
+                            start_eid.0 as u64 * blocks_per_extent
+                                + start_offset.0,
+                        ),
+                        count,
                     }
                 }
                 IOop::ExtentFlushClose {
@@ -1782,13 +1808,7 @@ impl Downstairs {
     }
 
     #[cfg(test)]
-    fn create_and_enqueue_generic_read_eob(&mut self) -> (JobId, ReadRequest) {
-        use crate::impacted_blocks::ImpactedAddr;
-        use crucible_common::BlockOffset;
-        let request = ReadRequest {
-            eid: ExtentId(0),
-            offset: BlockOffset(7),
-        };
+    fn create_and_enqueue_generic_read_eob(&mut self) -> JobId {
         let iblocks = ImpactedBlocks::new(
             ImpactedAddr {
                 extent_id: ExtentId(0),
@@ -1799,28 +1819,17 @@ impl Downstairs {
                 block: BlockOffset(7),
             },
         );
-        let id = self.create_and_enqueue_read_eob(
-            iblocks,
-            GuestWorkId(10),
-            vec![request.clone()],
-        );
-        (id, request)
-    }
+        let gw_id = GuestWorkId(10);
 
-    #[cfg(test)]
-    fn create_and_enqueue_read_eob(
-        &mut self,
-        blocks: ImpactedBlocks,
-        gw_id: GuestWorkId,
-        requests: Vec<ReadRequest>,
-    ) -> JobId {
         let ds_id = self.next_id();
-        let dependencies = self.ds_active.deps_for_read(ds_id, blocks);
+        let dependencies = self.ds_active.deps_for_read(ds_id, iblocks);
         debug!(self.log, "IO Read  {} has deps {:?}", ds_id, dependencies);
 
         let aread = IOop::Read {
             dependencies,
-            requests,
+            start_eid: ExtentId(0),
+            start_offset: BlockOffset(7),
+            count: 1,
             block_size: 512,
         };
 
@@ -1844,18 +1853,12 @@ impl Downstairs {
         &mut self,
         is_write_unwritten: bool,
     ) -> JobId {
-        use crate::impacted_blocks::ImpactedAddr;
-        use crucible_common::BlockOffset;
-        use crucible_protocol::{BlockContext, WriteBlockMetadata};
+        use crucible_protocol::BlockContext;
         let request = RawWrite {
             data: bytes::BytesMut::from(vec![1].as_slice()),
-            blocks: vec![WriteBlockMetadata {
-                eid: ExtentId(0),
-                offset: BlockOffset(7),
-                block_context: BlockContext {
-                    encryption_context: None,
-                    hash: 0,
-                },
+            blocks: vec![BlockContext {
+                encryption_context: None,
+                hash: 0,
             }],
         };
         let iblocks = ImpactedBlocks::new(
@@ -1891,15 +1894,24 @@ impl Downstairs {
         ));
         debug!(self.log, "IO Write {} has deps {:?}", ds_id, dependencies);
 
+        // TODO: can anyone actually give us an empty write?
+        let start = blocks.start().unwrap_or(ImpactedAddr {
+            extent_id: ExtentId(0),
+            block: BlockOffset(0),
+        });
         let awrite = if is_write_unwritten {
             IOop::WriteUnwritten {
                 dependencies,
+                start_eid: start.extent_id,
+                start_offset: start.block,
                 data: write.data.freeze(),
                 blocks: write.blocks,
             }
         } else {
             IOop::Write {
                 dependencies,
+                start_eid: start.extent_id,
+                start_offset: start.block,
                 data: write.data.freeze(),
                 blocks: write.blocks,
             }
@@ -2459,20 +2471,16 @@ impl Downstairs {
         let dependencies = self.ds_active.deps_for_read(ds_id, blocks);
         debug!(self.log, "IO Read  {} has deps {:?}", ds_id, dependencies);
 
-        /*
-         * Now create a downstairs work job for each (eid, bo) returned
-         * from extent_from_offset.
-         */
-        let mut requests: Vec<ReadRequest> =
-            Vec::with_capacity(blocks.len(&ddef));
-
-        for (eid, offset) in blocks.blocks(&ddef) {
-            requests.push(ReadRequest { eid, offset });
-        }
-
+        // TODO: can anyone actually give us an empty write?
+        let start = blocks.start().unwrap_or(ImpactedAddr {
+            extent_id: ExtentId(0),
+            block: BlockOffset(0),
+        });
         let aread = IOop::Read {
             dependencies,
-            requests,
+            start_eid: start.extent_id,
+            start_offset: start.block,
+            count: blocks.blocks(&ddef).len() as u64,
             block_size: ddef.block_size(),
         };
 
@@ -3006,10 +3014,9 @@ impl Downstairs {
 
             let (job_type, blocks_or_extent): (String, usize) = match &job.work
             {
-                IOop::Read { requests, .. } => {
+                IOop::Read { count, .. } => {
                     let job_type = "Read".to_string();
-                    let num_blocks = requests.len();
-                    (job_type, num_blocks)
+                    (job_type, *count as usize)
                 }
                 IOop::Write { blocks, .. } => {
                     let job_type = "Write".to_string();
@@ -3656,11 +3663,9 @@ impl Downstairs {
         &mut self,
         gwid: GuestWorkId,
         eid: ExtentId,
-        block: crucible_common::BlockOffset,
+        block: BlockOffset,
         is_write_unwritten: bool,
     ) -> JobId {
-        use crate::ImpactedAddr;
-
         let blocks = ImpactedBlocks::new(
             ImpactedAddr {
                 extent_id: eid,
@@ -3689,7 +3694,7 @@ impl Downstairs {
     ) -> JobId {
         use bytes::BytesMut;
         use crucible_common::Block;
-        use crucible_protocol::{BlockContext, WriteBlockMetadata};
+        use crucible_protocol::BlockContext;
 
         // ddef is used in submit_read for enumerating the individual blocks.
         // values here dont matter as long as the ddef can contain
@@ -3701,13 +3706,9 @@ impl Downstairs {
 
         let write_blocks: Vec<_> = blocks
             .blocks(&ddef)
-            .map(|(eid, b)| WriteBlockMetadata {
-                eid,
-                offset: b,
-                block_context: BlockContext {
-                    hash: crucible_common::integrity_hash(&[&vec![0xff; 512]]),
-                    encryption_context: None,
-                },
+            .map(|(_eid, _b)| BlockContext {
+                hash: crucible_common::integrity_hash(&[&vec![0xff; 512]]),
+                encryption_context: None,
             })
             .collect();
         let data =
@@ -3732,10 +3733,8 @@ impl Downstairs {
         &mut self,
         gwid: GuestWorkId,
         eid: ExtentId,
-        block: crucible_common::BlockOffset,
+        block: BlockOffset,
     ) -> JobId {
-        use crate::ImpactedAddr;
-
         let blocks = ImpactedBlocks::new(
             ImpactedAddr {
                 extent_id: eid,
@@ -3747,7 +3746,7 @@ impl Downstairs {
             },
         );
 
-        // Use a dummy extent size which is one bigger than our target block
+        // Use a dummy extent size that can contain our block
         self.submit_test_read(gwid, block.0 + 1, blocks)
     }
 
@@ -4515,9 +4514,7 @@ pub(crate) mod test {
 
     use bytes::BytesMut;
     use crucible_common::{BlockOffset, ExtentId};
-    use crucible_protocol::{
-        BlockContext, Message, ReadRequest, ReadResponseBlockMetadata,
-    };
+    use crucible_protocol::{BlockContext, Message};
     use ringbuffer::RingBuffer;
 
     use std::{
@@ -4528,20 +4525,13 @@ pub(crate) mod test {
     use uuid::Uuid;
 
     /// Builds a single-block reply from the given request and response data
-    pub fn build_read_response(
-        request: &ReadRequest,
-        data: &[u8],
-    ) -> RawReadResponse {
+    pub fn build_read_response(data: &[u8]) -> RawReadResponse {
         RawReadResponse {
             data: BytesMut::from(data),
-            blocks: vec![ReadResponseBlockMetadata {
-                eid: request.eid,
-                offset: request.offset,
-                block_context: Some(BlockContext {
-                    hash: crucible_common::integrity_hash(&[data]),
-                    encryption_context: None,
-                }),
-            }],
+            blocks: vec![Some(BlockContext {
+                hash: crucible_common::integrity_hash(&[data]),
+                encryption_context: None,
+            })],
         }
     }
 
@@ -4796,13 +4786,13 @@ pub(crate) mod test {
     fn work_read_one_ok() {
         let mut ds = Downstairs::test_default();
 
-        let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
+        let next_id = ds.create_and_enqueue_generic_read_eob();
 
         ds.in_progress(next_id, ClientId::new(0));
         ds.in_progress(next_id, ClientId::new(1));
         ds.in_progress(next_id, ClientId::new(2));
 
-        let response = Ok(build_read_response(&request, &[]));
+        let response = Ok(build_read_response(&[]));
 
         assert!(ds.process_ds_completion(
             next_id,
@@ -4816,7 +4806,7 @@ pub(crate) mod test {
 
         ds.ack(next_id);
 
-        let response = Ok(build_read_response(&request, &[]));
+        let response = Ok(build_read_response(&[]));
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -4828,7 +4818,7 @@ pub(crate) mod test {
         assert!(ds.ackable_work.is_empty());
         assert!(ds.completed.is_empty());
 
-        let response = Ok(build_read_response(&request, &[]));
+        let response = Ok(build_read_response(&[]));
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -4846,7 +4836,7 @@ pub(crate) mod test {
     fn work_read_one_bad_two_ok() {
         let mut ds = Downstairs::test_default();
 
-        let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
+        let next_id = ds.create_and_enqueue_generic_read_eob();
 
         ds.in_progress(next_id, ClientId::new(0));
         ds.in_progress(next_id, ClientId::new(1));
@@ -4862,7 +4852,7 @@ pub(crate) mod test {
         assert!(ds.ackable_work.is_empty());
         assert!(ds.completed.is_empty());
 
-        let response = Ok(build_read_response(&request, &[]));
+        let response = Ok(build_read_response(&[]));
 
         assert!(ds.process_ds_completion(
             next_id,
@@ -4876,7 +4866,7 @@ pub(crate) mod test {
 
         ds.ack(next_id);
 
-        let response = Ok(build_read_response(&request, &[]));
+        let response = Ok(build_read_response(&[]));
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -4895,7 +4885,7 @@ pub(crate) mod test {
     fn work_read_two_bad_one_ok() {
         let mut ds = Downstairs::test_default();
 
-        let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
+        let next_id = ds.create_and_enqueue_generic_read_eob();
 
         ds.in_progress(next_id, ClientId::new(0));
         ds.in_progress(next_id, ClientId::new(1));
@@ -4921,7 +4911,7 @@ pub(crate) mod test {
         assert!(ds.ackable_work.is_empty());
         assert!(ds.completed.is_empty());
 
-        let response = Ok(build_read_response(&request, &[]));
+        let response = Ok(build_read_response(&[]));
 
         assert!(ds.process_ds_completion(
             next_id,
@@ -4944,7 +4934,7 @@ pub(crate) mod test {
     fn work_read_three_bad() {
         let mut ds = Downstairs::test_default();
 
-        let (next_id, _request) = ds.create_and_enqueue_generic_read_eob();
+        let next_id = ds.create_and_enqueue_generic_read_eob();
 
         ds.in_progress(next_id, ClientId::new(0));
         ds.in_progress(next_id, ClientId::new(1));
@@ -4991,13 +4981,13 @@ pub(crate) mod test {
         // Test that missing data on the 2nd read response will panic
         let mut ds = Downstairs::test_default();
 
-        let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
+        let next_id = ds.create_and_enqueue_generic_read_eob();
 
         ds.in_progress(next_id, ClientId::new(0));
         ds.in_progress(next_id, ClientId::new(1));
         ds.in_progress(next_id, ClientId::new(2));
 
-        let response = || Ok(build_read_response(&request, &[]));
+        let response = || Ok(build_read_response(&[]));
 
         assert!(ds.process_ds_completion(
             next_id,
@@ -5265,7 +5255,7 @@ pub(crate) mod test {
 
         // send a read, and clients 0 and 1 will return errors
 
-        let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
+        let next_id = ds.create_and_enqueue_generic_read_eob();
 
         assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
         assert!(ds.in_progress(next_id, ClientId::new(1)).is_some());
@@ -5291,7 +5281,7 @@ pub(crate) mod test {
 
         assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
 
-        let response = Ok(build_read_response(&request, &[3]));
+        let response = Ok(build_read_response(&[3]));
 
         assert!(ds.process_ds_completion(
             next_id,
@@ -5315,7 +5305,7 @@ pub(crate) mod test {
         // send another read, and expect all to return something
         // (reads shouldn't cause a Failed transition)
 
-        let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
+        let next_id = ds.create_and_enqueue_generic_read_eob();
 
         assert!(ds.in_progress(next_id, ClientId::new(0)).is_some());
         assert!(ds.in_progress(next_id, ClientId::new(1)).is_some());
@@ -5341,7 +5331,7 @@ pub(crate) mod test {
 
         assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
 
-        let response = Ok(build_read_response(&request, &[6]));
+        let response = Ok(build_read_response(&[6]));
 
         assert!(ds.process_ds_completion(
             next_id,
@@ -5366,7 +5356,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
 
         // Build our read, put it into the work queue
-        let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
+        let next_id = ds.create_and_enqueue_generic_read_eob();
 
         // Move the work to submitted like we sent it to each downstairs
         ds.in_progress(next_id, ClientId::new(0));
@@ -5374,7 +5364,7 @@ pub(crate) mod test {
         ds.in_progress(next_id, ClientId::new(2));
 
         // Downstairs 0 now has completed this work.
-        let response = Ok(build_read_response(&request, &[]));
+        let response = Ok(build_read_response(&[]));
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -5387,7 +5377,7 @@ pub(crate) mod test {
         assert_eq!(ds.ackable_work.len(), 1);
 
         // Complete downstairs 1 and 2
-        let response = Ok(build_read_response(&request, &[]));
+        let response = Ok(build_read_response(&[]));
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
@@ -5396,7 +5386,7 @@ pub(crate) mod test {
             None
         ));
 
-        let response = Ok(build_read_response(&request, &[]));
+        let response = Ok(build_read_response(&[]));
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
@@ -5464,7 +5454,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
 
         // Build our read, put it into the work queue
-        let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
+        let next_id = ds.create_and_enqueue_generic_read_eob();
 
         // Move the work to submitted like we sent it to each downstairs
         ds.in_progress(next_id, ClientId::new(0));
@@ -5472,7 +5462,7 @@ pub(crate) mod test {
         ds.in_progress(next_id, ClientId::new(2));
 
         // Downstairs 0 now has completed this work.
-        let response = Ok(build_read_response(&request, &[]));
+        let response = Ok(build_read_response(&[]));
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -5769,7 +5759,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
 
         // Build our read IO and submit it to the work queue.
-        let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
+        let next_id = ds.create_and_enqueue_generic_read_eob();
 
         // Submit the read to all three downstairs
         ds.in_progress(next_id, ClientId::new(0));
@@ -5777,7 +5767,7 @@ pub(crate) mod test {
         ds.in_progress(next_id, ClientId::new(2));
 
         // Complete the read on one downstairs.
-        let response = Ok(build_read_response(&request, &[]));
+        let response = Ok(build_read_response(&[]));
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -5812,7 +5802,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
 
         // Build a read and put it on the work queue.
-        let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
+        let next_id = ds.create_and_enqueue_generic_read_eob();
 
         // Submit the read to each downstairs.
         ds.in_progress(next_id, ClientId::new(0));
@@ -5820,7 +5810,7 @@ pub(crate) mod test {
         ds.in_progress(next_id, ClientId::new(2));
 
         // Complete the read on one downstairs, verify it is ack ready.
-        let response = Ok(build_read_response(&request, &[1, 2, 3, 4]));
+        let response = Ok(build_read_response(&[1, 2, 3, 4]));
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -5832,7 +5822,7 @@ pub(crate) mod test {
         ds.ack(next_id);
 
         // Complete the read on a 2nd downstairs.
-        let response = Ok(build_read_response(&request, &[1, 2, 3, 4]));
+        let response = Ok(build_read_response(&[1, 2, 3, 4]));
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(1),
@@ -5854,7 +5844,7 @@ pub(crate) mod test {
         // Redo the read on DS 0, IO should remain acked
         ds.in_progress(next_id, ClientId::new(0));
 
-        let response = Ok(build_read_response(&request, &[]));
+        let response = Ok(build_read_response(&[]));
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -5873,7 +5863,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
 
         // Create the read and put it on the work queue.
-        let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
+        let next_id = ds.create_and_enqueue_generic_read_eob();
 
         // Submit the read to each downstairs.
         ds.in_progress(next_id, ClientId::new(0));
@@ -5881,7 +5871,7 @@ pub(crate) mod test {
         ds.in_progress(next_id, ClientId::new(2));
 
         // Complete the read on one downstairs.
-        let response = Ok(build_read_response(&request, &[]));
+        let response = Ok(build_read_response(&[]));
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -5908,7 +5898,7 @@ pub(crate) mod test {
 
         // Redo on DS 0, IO should remain acked.
         ds.in_progress(next_id, ClientId::new(0));
-        let response = Ok(build_read_response(&request, &[]));
+        let response = Ok(build_read_response(&[]));
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -5946,7 +5936,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
 
         // Create the read and put it on the work queue.
-        let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
+        let next_id = ds.create_and_enqueue_generic_read_eob();
 
         // Submit the read to each downstairs.
         ds.in_progress(next_id, ClientId::new(0));
@@ -5955,7 +5945,6 @@ pub(crate) mod test {
 
         // Construct our fake response
         let response = Ok(build_read_response(
-            &request,
             &[122], // Original data.
         ));
 
@@ -5984,7 +5973,6 @@ pub(crate) mod test {
         // Now, create a new response that has different data, and will
         // produce a different hash.
         let response = Ok(build_read_response(
-            &request,
             &[123], // Different data than before
         ));
 
@@ -6026,7 +6014,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
 
         // Create the read and put it on the work queue.
-        let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
+        let next_id = ds.create_and_enqueue_generic_read_eob();
 
         // Submit the read to each downstairs.
         ds.in_progress(next_id, ClientId::new(0));
@@ -6035,7 +6023,6 @@ pub(crate) mod test {
 
         // Construct our fake response
         let response = Ok(build_read_response(
-            &request,
             &[122], // Original data.
         ));
 
@@ -6050,7 +6037,6 @@ pub(crate) mod test {
 
         // Construct our fake response for another downstairs.
         let response = Ok(build_read_response(
-            &request,
             &[122], // Original data.
         ));
 
@@ -6077,7 +6063,6 @@ pub(crate) mod test {
         // Now, create a new response that has different data, and will
         // produce a different hash.
         let response = Ok(build_read_response(
-            &request,
             &[123], // Different data than before
         ));
 
@@ -7298,7 +7283,7 @@ pub(crate) mod test {
 
         // Now, do a read.
 
-        let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
+        let next_id = ds.create_and_enqueue_generic_read_eob();
 
         // As this DS is failed, it should return none
         assert_eq!(ds.in_progress(next_id, ClientId::new(0)), None);
@@ -7311,7 +7296,7 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
 
-        let response = || Ok(build_read_response(&request, &[]));
+        let response = || Ok(build_read_response(&[]));
 
         // Process the operation for client 1 this should return true
         assert!(ds.process_ds_completion(
@@ -7443,7 +7428,7 @@ pub(crate) mod test {
         assert_eq!(ds.ackable_work().len(), 1);
 
         // Now, do a read.
-        let (next_id, request) = ds.create_and_enqueue_generic_read_eob();
+        let next_id = ds.create_and_enqueue_generic_read_eob();
 
         // As this DS is failed, it should return none
         assert_eq!(ds.in_progress(next_id, ClientId::new(0)), None);
@@ -7455,7 +7440,7 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
 
-        let response = Ok(build_read_response(&request, &[]));
+        let response = Ok(build_read_response(&[]));
 
         // Process the operation for client 2, which makes the job ackable
         assert!(ds.process_ds_completion(
@@ -7630,7 +7615,7 @@ pub(crate) mod test {
         }
 
         // Now, add a read.  Don't move it to InProgress yet.
-        let (read_id, _request) = ds.create_and_enqueue_generic_read_eob();
+        let read_id = ds.create_and_enqueue_generic_read_eob();
 
         // Verify the read is all new still
         let job = ds.ds_active.get(&read_id).unwrap();
@@ -7705,7 +7690,7 @@ pub(crate) mod test {
         }
 
         // Now, add a read.
-        let (read_id, _request) = ds.create_and_enqueue_generic_read_eob();
+        let read_id = ds.create_and_enqueue_generic_read_eob();
         for i in ClientId::iter() {
             ds.in_progress(read_id, i);
         }
@@ -7787,13 +7772,13 @@ pub(crate) mod test {
         }
 
         // Now, add a read.
-        let (read_one, request) = ds.create_and_enqueue_generic_read_eob();
+        let read_one = ds.create_and_enqueue_generic_read_eob();
         for i in ClientId::iter() {
             ds.in_progress(read_one, i);
         }
 
         // Make the read ok response
-        let rr = || Ok(build_read_response(&request, &[]));
+        let rr = || Ok(build_read_response(&[]));
 
         for cid in ClientId::iter() {
             ds.process_ds_completion(
@@ -7905,13 +7890,13 @@ pub(crate) mod test {
         }
 
         // Now, add a read.
-        let (read_one, request) = ds.create_and_enqueue_generic_read_eob();
+        let read_one = ds.create_and_enqueue_generic_read_eob();
         for i in ClientId::iter() {
             ds.in_progress(read_one, i);
         }
 
         // Make the read ok response
-        let rr = || Ok(build_read_response(&request, &[]));
+        let rr = || Ok(build_read_response(&[]));
 
         for cid in ClientId::iter() {
             ds.process_ds_completion(
@@ -7952,7 +7937,7 @@ pub(crate) mod test {
         let err_response = Err(CrucibleError::GenericError("bad".to_string()));
 
         // Create some reads as well that will be InProgress
-        let (read_two, _request) = ds.create_and_enqueue_generic_read_eob();
+        let read_two = ds.create_and_enqueue_generic_read_eob();
         for i in ClientId::iter() {
             ds.in_progress(read_two, i);
         }
@@ -8034,7 +8019,7 @@ pub(crate) mod test {
         // don't make them in-progress
 
         // Now, add a read.
-        let (read_one, _request) = ds.create_and_enqueue_generic_read_eob();
+        let read_one = ds.create_and_enqueue_generic_read_eob();
         // same, don't make it in-progress
 
         let flush_one = ds.create_and_enqueue_generic_flush(None);
@@ -8077,7 +8062,7 @@ pub(crate) mod test {
         }
 
         // Now, add a read.
-        let (read_one, request) = ds.create_and_enqueue_generic_read_eob();
+        let read_one = ds.create_and_enqueue_generic_read_eob();
         for i in ClientId::iter() {
             ds.in_progress(read_one, i);
         }
@@ -8125,7 +8110,7 @@ pub(crate) mod test {
         );
 
         // Make the read ok response, do the read
-        let rr = || Ok(build_read_response(&request, &[]));
+        let rr = || Ok(build_read_response(&[]));
 
         ds.process_ds_completion(
             read_one,
@@ -8211,7 +8196,7 @@ pub(crate) mod test {
         }
 
         // Now, add a read.
-        let (read_one, request) = ds.create_and_enqueue_generic_read_eob();
+        let read_one = ds.create_and_enqueue_generic_read_eob();
         for i in ClientId::iter() {
             ds.in_progress(read_one, i);
         }
@@ -8252,7 +8237,7 @@ pub(crate) mod test {
         );
 
         // Make the read ok response, do the read
-        let rr = Ok(build_read_response(&request, &[]));
+        let rr = Ok(build_read_response(&[]));
 
         ds.process_ds_completion(
             read_one,
@@ -8321,7 +8306,7 @@ pub(crate) mod test {
         }
 
         // Create a read, but don't move it to InProgress
-        let (read_one, _) = ds.create_and_enqueue_generic_read_eob();
+        let read_one = ds.create_and_enqueue_generic_read_eob();
 
         let job = ds.ds_active.get(&read_one).unwrap();
         assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
@@ -8464,7 +8449,7 @@ pub(crate) mod test {
         }
 
         // Create a read.
-        let (read_one, _request) = ds.create_and_enqueue_generic_read_eob();
+        let read_one = ds.create_and_enqueue_generic_read_eob();
 
         // Create a write.
         let write_one = ds.create_and_enqueue_generic_write_eob(false);
@@ -8528,7 +8513,7 @@ pub(crate) mod test {
         }
 
         // Create a read.
-        let (read_one, _request) = ds.create_and_enqueue_generic_read_eob();
+        let read_one = ds.create_and_enqueue_generic_read_eob();
 
         let write_one = ds.create_and_enqueue_generic_write_eob(false);
         for i in ClientId::iter() {
@@ -8538,7 +8523,7 @@ pub(crate) mod test {
         let flush_one = ds.create_and_enqueue_generic_flush(None);
 
         // Create more IOs.
-        let (_read_two, _request) = ds.create_and_enqueue_generic_read_eob();
+        let _read_two = ds.create_and_enqueue_generic_read_eob();
 
         let write_two = ds.create_and_enqueue_generic_write_eob(false);
         for i in ClientId::iter() {

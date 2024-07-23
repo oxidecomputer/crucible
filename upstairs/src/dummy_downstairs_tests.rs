@@ -19,7 +19,6 @@ use crate::{IO_OUTSTANDING_MAX_BYTES, IO_OUTSTANDING_MAX_JOBS};
 use crucible_client_types::CrucibleOpts;
 use crucible_common::Block;
 use crucible_common::BlockIndex;
-use crucible_common::BlockOffset;
 use crucible_common::ExtentId;
 use crucible_common::RegionDefinition;
 use crucible_common::RegionOptions;
@@ -28,7 +27,6 @@ use crucible_protocol::CrucibleDecoder;
 use crucible_protocol::CrucibleEncoder;
 use crucible_protocol::JobId;
 use crucible_protocol::Message;
-use crucible_protocol::ReadResponseBlockMetadata;
 use crucible_protocol::ReadResponseHeader;
 use crucible_protocol::WriteHeader;
 
@@ -331,7 +329,7 @@ impl DownstairsHandle {
                 upstairs_id,
                 session_id: self.upstairs_session_id.unwrap(),
                 job_id,
-                blocks: Ok(vec![block.clone()]),
+                blocks: Ok(vec![block]),
             },
             data: data.clone(),
         })
@@ -611,19 +609,15 @@ impl TestHarness {
     }
 }
 
-fn make_blank_read_response() -> (ReadResponseBlockMetadata, BytesMut) {
+fn make_blank_read_response() -> (Option<BlockContext>, BytesMut) {
     let data = vec![0u8; 512];
     let hash = crucible_common::integrity_hash(&[&data]);
 
     (
-        ReadResponseBlockMetadata {
-            eid: ExtentId(0),
-            offset: BlockOffset(0),
-            block_context: Some(BlockContext {
-                hash,
-                encryption_context: None,
-            }),
-        },
+        Some(BlockContext {
+            hash,
+            encryption_context: None,
+        }),
         BytesMut::from(&data[..]),
     )
 }
@@ -770,7 +764,7 @@ async fn run_live_repair(mut harness: TestHarness) {
                 upstairs_id,
                 session_id,
                 job_id,
-                blocks: Ok(vec![block.clone()]),
+                blocks: Ok(vec![block]),
             },
             data: data.clone(),
         }) {
@@ -905,7 +899,7 @@ async fn run_live_repair(mut harness: TestHarness) {
                                 upstairs_id: *upstairs_id,
                                 session_id: *session_id,
                                 job_id: *job_id,
-                                blocks: Ok(vec![block.clone()]),
+                                blocks: Ok(vec![block]),
                             },
                             data,
                         });
@@ -951,7 +945,7 @@ async fn run_live_repair(mut harness: TestHarness) {
                             upstairs_id: *upstairs_id,
                             session_id: *session_id,
                             job_id: *job_id,
-                            blocks: Ok(vec![block.clone()]),
+                            blocks: Ok(vec![block]),
                         },
                         data,
                     });
@@ -978,7 +972,7 @@ async fn run_live_repair(mut harness: TestHarness) {
                             upstairs_id: *upstairs_id,
                             session_id: *session_id,
                             job_id: *job_id,
-                            blocks: Ok(vec![block.clone()]),
+                            blocks: Ok(vec![block]),
                         },
                         data,
                     });
@@ -2021,7 +2015,7 @@ async fn test_error_during_live_repair_no_halt() {
                 upstairs_id,
                 session_id,
                 job_id: job_ids[0],
-                blocks: Ok(vec![block.clone()]),
+                blocks: Ok(vec![block]),
             },
             data: data.clone(),
         }) {
@@ -2464,7 +2458,7 @@ async fn test_no_read_only_live_repair() {
                 upstairs_id,
                 session_id,
                 job_id: job_ids[0],
-                blocks: Ok(vec![block.clone()]),
+                blocks: Ok(vec![block]),
             },
             data: data.clone(),
         }) {

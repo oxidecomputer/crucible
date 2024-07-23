@@ -509,37 +509,31 @@ pub(crate) mod up_test {
         // at extent limit, and above extent limit.
 
         // Below limit
-        let request = ReadRequest {
-            eid: ExtentId(0),
-            offset: BlockOffset(7),
-        };
         let op = IOop::Read {
             dependencies: vec![],
+            start_eid: ExtentId(0),
+            start_offset: BlockOffset(7),
+            count: 1,
             block_size: 512,
-            requests: vec![request],
         };
         assert!(op.send_io_live_repair(Some(ExtentId(2))));
 
         // At limit
-        let request = ReadRequest {
-            eid: ExtentId(2),
-            offset: BlockOffset(7),
-        };
         let op = IOop::Read {
             dependencies: vec![],
+            start_eid: ExtentId(2),
+            start_offset: BlockOffset(7),
+            count: 1,
             block_size: 512,
-            requests: vec![request],
         };
         assert!(op.send_io_live_repair(Some(ExtentId(2))));
 
-        let request = ReadRequest {
-            eid: ExtentId(3),
-            offset: BlockOffset(7),
-        };
         let op = IOop::Read {
             dependencies: vec![],
+            start_eid: ExtentId(3),
+            start_offset: BlockOffset(7),
+            count: 1,
             block_size: 512,
-            requests: vec![request],
         };
         // We are past the extent limit, so this should return false
         assert!(!op.send_io_live_repair(Some(ExtentId(2))));
@@ -550,13 +544,9 @@ pub(crate) mod up_test {
 
     // Construct an IOop::Write or IOop::WriteUnwritten at the given extent
     fn write_at_extent(eid: ExtentId, wu: bool) -> IOop {
-        let request = crucible_protocol::WriteBlockMetadata {
-            eid,
-            offset: BlockOffset(7),
-            block_context: BlockContext {
-                encryption_context: None,
-                hash: 0,
-            },
+        let request = BlockContext {
+            encryption_context: None,
+            hash: 0,
         };
         let data = BytesMut::from(vec![1].as_slice());
         let blocks = vec![request];
@@ -565,12 +555,16 @@ pub(crate) mod up_test {
             IOop::WriteUnwritten {
                 dependencies: vec![],
                 blocks,
+                start_eid: eid,
+                start_offset: BlockOffset(7),
                 data: data.freeze(),
             }
         } else {
             IOop::Write {
                 dependencies: vec![],
                 blocks,
+                start_eid: eid,
+                start_offset: BlockOffset(7),
                 data: data.freeze(),
             }
         }
