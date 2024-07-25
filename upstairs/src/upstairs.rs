@@ -393,7 +393,7 @@ impl Upstairs {
             tls_context,
             log.new(o!("" => "downstairs")),
         );
-        let flush_timeout_secs = opt.flush_timeout.unwrap_or(0.5);
+        let flush_timeout_secs = opt.flush_timeout.unwrap_or(5.0);
         let (control_tx, control_rx) = tokio::sync::mpsc::channel(500);
 
         Upstairs {
