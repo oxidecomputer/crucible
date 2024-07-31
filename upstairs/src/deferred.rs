@@ -7,7 +7,8 @@ use crate::{
     BlockRes, ClientId, ImpactedBlocks, Message, RawWrite, Validation,
 };
 use bytes::BytesMut;
-use crucible_common::{integrity_hash, RegionDefinition};
+use crucible_common::{integrity_hash, CrucibleError, RegionDefinition};
+use crucible_protocol::ReadBlockContext;
 use futures::{
     future::{ready, Either, Ready},
     stream::FuturesOrdered,
@@ -233,18 +234,48 @@ impl DeferredRead {
             let block_size = data.len() / rs.len();
             for (i, r) in rs.iter_mut().enumerate() {
                 let v = if let Some(ctx) = &self.cfg.encryption_context {
-                    validate_encrypted_read_response(
-                        *r,
-                        &mut data[i * block_size..][..block_size],
-                        ctx,
-                        &self.log,
-                    )
+                    match r {
+                        ReadBlockContext::Empty => Ok(None),
+                        ReadBlockContext::Encrypted { ctx } => Ok(Some(*ctx)),
+                        ReadBlockContext::Unencrypted { .. } => {
+                            error!(
+                                self.log,
+                                "expected encrypted but got unencrypted \
+                                 block context"
+                            );
+                            Err(CrucibleError::MissingBlockContext)
+                        }
+                    }
+                    .and_then(|r| {
+                        validate_encrypted_read_response(
+                            r,
+                            &mut data[i * block_size..][..block_size],
+                            ctx,
+                            &self.log,
+                        )
+                    })
                 } else {
-                    validate_unencrypted_read_response(
-                        *r,
-                        &mut data[i * block_size..][..block_size],
-                        &self.log,
-                    )
+                    match r {
+                        ReadBlockContext::Empty => Ok(None),
+                        ReadBlockContext::Unencrypted { hash } => {
+                            Ok(Some(*hash))
+                        }
+                        ReadBlockContext::Encrypted { .. } => {
+                            error!(
+                                self.log,
+                                "expected unencrypted but got encrypted \
+                                 block context"
+                            );
+                            Err(CrucibleError::MissingBlockContext)
+                        }
+                    }
+                    .and_then(|r| {
+                        validate_unencrypted_read_response(
+                            r,
+                            &mut data[i * block_size..][..block_size],
+                            &self.log,
+                        )
+                    })
                 };
                 match v {
                     Ok(hash) => hashes.push(hash),

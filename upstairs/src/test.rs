@@ -377,29 +377,21 @@ pub(crate) mod up_test {
 
         assert_ne!(original_data, data);
 
-        let read_response_hash = integrity_hash(&[&nonce, &tag, &data[..]]);
-
-        // Create the read response
-        let block_context = BlockContext {
-            hash: read_response_hash,
-            encryption_context: Some(crucible_protocol::EncryptionContext {
-                nonce: nonce.into(),
-                tag: tag.into(),
-            }),
+        // Create the read response context
+        let ctx = crucible_protocol::EncryptionContext {
+            nonce: nonce.into(),
+            tag: tag.into(),
         };
 
         // Validate it
         let successful_hash = validate_encrypted_read_response(
-            Some(block_context),
+            Some(ctx),
             &mut data,
             &Arc::new(context),
             &csl(),
         )?;
 
-        assert_eq!(
-            successful_hash,
-            Validation::Encrypted(block_context.encryption_context.unwrap())
-        );
+        assert_eq!(successful_hash, Validation::Encrypted(ctx));
 
         // `validate_encrypted_read_response` will mutate the read
         // response's data value, make sure it decrypted
@@ -463,15 +455,9 @@ pub(crate) mod up_test {
         let read_response_hash = integrity_hash(&[&data[..]]);
         let original_data = data.clone();
 
-        // Create the read response
-        let block_context = BlockContext {
-            hash: read_response_hash,
-            encryption_context: None,
-        };
-
         // Validate it
         let successful_hash = validate_unencrypted_read_response(
-            Some(block_context),
+            Some(read_response_hash),
             &mut data,
             &csl(),
         )?;

@@ -10,7 +10,7 @@ use crucible_common::{
     deadline_secs, verbose_timeout, x509::TLSContext, ExtentId,
 };
 use crucible_protocol::{
-    BlockContext, MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
+    MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
 };
 
 use std::{
@@ -2923,7 +2923,7 @@ fn update_net_done_probes(m: &Message, cid: ClientId) {
 /// The return value of this will be stored with the job, and compared
 /// between each read.
 pub(crate) fn validate_encrypted_read_response(
-    block_context: Option<BlockContext>,
+    block_context: Option<crucible_protocol::EncryptionContext>,
     data: &mut [u8],
     encryption_context: &EncryptionContext,
     log: &Logger,
@@ -2937,7 +2937,7 @@ pub(crate) fn validate_encrypted_read_response(
     // check that this read response contains block contexts that contain
     // a matching encryption context.
 
-    let Some(context) = block_context else {
+    let Some(ctx) = block_context else {
         // No block context(s) in the response!
         //
         // Either this is a read of an unwritten block, or an attacker
@@ -2956,49 +2956,25 @@ pub(crate) fn validate_encrypted_read_response(
         }
     };
 
-    let Some(block_encryption_ctx) = &context.encryption_context else {
-        // this block context is missing an encryption context!
-        return Err(CrucibleError::DecryptionError);
-    };
-
-    // We'll start with decryption, ignoring the hash; we're using authenticated
-    // encryption, so the check is just as strong as the hash check.
+    // We're using authenticated encryption, so if it decrypts correctly, we can
+    // be confident that it wasn't corrupted.  Corruption either on-disk
+    // (unlikely due to ZFS) or in-transit (unlikely-ish due to TCP checksums)
+    // will both result in decryption failure; we can't tell these cases apart.
     //
-    // Note: decrypt_in_place does not overwrite the buffer if
-    // it fails, otherwise we would need to copy here. There's a
-    // unit test to validate this behaviour.
+    // Note: decrypt_in_place does not overwrite the buffer if it fails,
+    // otherwise we would need to copy here. There's a unit test to validate
+    // this behaviour.
     use aes_gcm_siv::{Nonce, Tag};
     let decryption_result = encryption_context.decrypt_in_place(
         data,
-        Nonce::from_slice(&block_encryption_ctx.nonce[..]),
-        Tag::from_slice(&block_encryption_ctx.tag[..]),
+        Nonce::from_slice(&ctx.nonce[..]),
+        Tag::from_slice(&ctx.tag[..]),
     );
     if decryption_result.is_ok() {
-        Ok(Validation::Encrypted(*block_encryption_ctx))
+        Ok(Validation::Encrypted(ctx))
     } else {
-        // Validate integrity hash before decryption
-        let computed_hash = integrity_hash(&[
-            &block_encryption_ctx.nonce[..],
-            &block_encryption_ctx.tag[..],
-            data,
-        ]);
-
-        if computed_hash == context.hash {
-            // No encryption context combination decrypted this block, but
-            // one valid hash was found. This can occur if the decryption
-            // key doesn't match the key that the data was encrypted with.
-            error!(log, "Decryption failed with correct hash");
-            Err(CrucibleError::DecryptionError)
-        } else {
-            error!(
-                log,
-                "No match for integrity hash\n\
-             Expected: 0x{:x} != Computed: 0x{:x}",
-                context.hash,
-                computed_hash
-            );
-            Err(CrucibleError::HashMismatch)
-        }
+        error!(log, "Decryption failed!");
+        Err(CrucibleError::DecryptionError)
     }
 }
 
@@ -3008,20 +2984,20 @@ pub(crate) fn validate_encrypted_read_response(
 ///   block is all 0
 /// - Err otherwise
 pub(crate) fn validate_unencrypted_read_response(
-    block_context: Option<BlockContext>,
+    block_hash: Option<u64>,
     data: &mut [u8],
     log: &Logger,
 ) -> Result<Validation, CrucibleError> {
-    if let Some(context) = block_context {
+    if let Some(hash) = block_hash {
         // check integrity hashes - make sure it is correct
         let computed_hash = integrity_hash(&[data]);
 
-        if computed_hash == context.hash {
+        if computed_hash == hash {
             Ok(Validation::Unencrypted(computed_hash))
         } else {
             // No integrity hash was correct for this response
             error!(log, "No match computed hash:0x{:x}", computed_hash,);
-            error!(log, "No match          hash:0x{:x}", context.hash);
+            error!(log, "No match          hash:0x{:x}", hash);
             error!(log, "Data from hash:");
             for (i, d) in data[..6].iter().enumerate() {
                 error!(log, "[{i}]:{d}");

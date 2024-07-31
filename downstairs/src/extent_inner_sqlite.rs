@@ -9,7 +9,7 @@ use crate::{
     ExtentWrite, JobId, RegionDefinition,
 };
 use crucible_common::{crucible_bail, ExtentId};
-use crucible_protocol::EncryptionContext;
+use crucible_protocol::{EncryptionContext, ReadBlockContext};
 
 use anyhow::{bail, Result};
 use itertools::Itertools;
@@ -301,10 +301,18 @@ impl SqliteMoreInner {
         cdt::extent__read__get__contexts__done!(|| {
             (job_id.0, self.extent_number.0, num_blocks)
         });
-        // Convert from DownstairsBlockContext -> BlockContext
+        // Convert from DownstairsBlockContext -> ReadBlockContext
         let blocks = block_contexts
             .into_iter()
-            .map(|bs| bs.map(|b| b.block_context))
+            .map(|bs| match bs {
+                None => ReadBlockContext::Empty,
+                Some(b) => match b.block_context.encryption_context {
+                    Some(ctx) => ReadBlockContext::Encrypted { ctx },
+                    None => ReadBlockContext::Unencrypted {
+                        hash: b.block_context.hash,
+                    },
+                },
+            })
             .collect();
 
         // To avoid a `memset`, we're reading directly into uninitialized
@@ -1542,6 +1550,7 @@ mod test {
 
         // We haven't flushed, but this should leave our context in place.
         inner.fully_rehash_and_clean_all_stale_contexts(false)?;
+        let prev_hash = hash;
 
         // Therefore, we expect that write_unwritten to the first block won't
         // do anything.
@@ -1565,8 +1574,11 @@ mod test {
             };
             let resp = inner.read(JobId(21), read, IOV_MAX_TEST)?;
 
-            // We should not get back our data, because block 0 was written.
-            assert_ne!(resp.blocks, vec![Some(block_context)]);
+            // We should get back our old data, because block 0 was written.
+            assert_eq!(
+                resp.blocks,
+                vec![ReadBlockContext::Unencrypted { hash: prev_hash }]
+            );
             assert_ne!(resp.data, BytesMut::from(data.as_ref()));
         }
 
@@ -1592,7 +1604,10 @@ mod test {
             let resp = inner.read(JobId(31), read, IOV_MAX_TEST)?;
 
             // We should get back our data! Block 1 was never written.
-            assert_eq!(resp.blocks, vec![Some(block_context)]);
+            assert_eq!(
+                resp.blocks,
+                vec![ReadBlockContext::Unencrypted { hash }]
+            );
             assert_eq!(resp.data, BytesMut::from(data.as_ref()));
         }
 
@@ -1653,7 +1668,10 @@ mod test {
             let resp = inner.read(JobId(31), read, IOV_MAX_TEST)?;
 
             // We should get back our data! Block 1 was never written.
-            assert_eq!(resp.blocks, vec![Some(block_context)]);
+            assert_eq!(
+                resp.blocks,
+                vec![ReadBlockContext::Unencrypted { hash }]
+            );
             assert_eq!(resp.data, BytesMut::from(data.as_ref()));
         }
 
@@ -1694,8 +1712,10 @@ mod test {
             data: BytesMut::with_capacity(512 * 2),
         };
         let resp = inner.read(JobId(31), read(), IOV_MAX_TEST)?;
-        let expected_blocks: Vec<_> =
-            block_contexts.iter().map(|b| Some(*b)).collect();
+        let expected_blocks: Vec<_> = block_contexts
+            .iter()
+            .map(|b| ReadBlockContext::Unencrypted { hash: b.hash })
+            .collect();
         assert_eq!(resp.blocks, expected_blocks);
         assert_eq!(resp.data, BytesMut::from(data.as_ref()));
 

@@ -162,6 +162,9 @@ pub struct SnapshotDetails {
 #[repr(u32)]
 #[derive(IntoPrimitive)]
 pub enum MessageVersion {
+    /// Use `ReadBlockContext` instead of `Option<BlockContext>`
+    V11 = 11,
+
     /// Reorganize messages to be start + length, instead of random-access
     V10 = 10,
 
@@ -204,7 +207,7 @@ pub enum MessageVersion {
 }
 impl MessageVersion {
     pub const fn current() -> Self {
-        Self::V10
+        Self::V11
     }
 }
 
@@ -213,7 +216,7 @@ impl MessageVersion {
  * This, along with the MessageVersion enum above should be updated whenever
  * changes are made to the Message enum below.
  */
-pub const CRUCIBLE_MESSAGE_VERSION: u32 = 10;
+pub const CRUCIBLE_MESSAGE_VERSION: u32 = 11;
 
 /*
  * If you add or change the Message enum, you must also increment the
@@ -570,12 +573,19 @@ pub struct WriteHeader {
     pub contexts: Vec<BlockContext>,
 }
 
+#[derive(Debug, PartialEq, Copy, Clone, Serialize, Deserialize)]
+pub enum ReadBlockContext {
+    Empty,
+    Encrypted { ctx: EncryptionContext },
+    Unencrypted { hash: u64 },
+}
+
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReadResponseHeader {
     pub upstairs_id: Uuid,
     pub session_id: Uuid,
     pub job_id: JobId,
-    pub blocks: Result<Vec<Option<BlockContext>>, CrucibleError>,
+    pub blocks: Result<Vec<ReadBlockContext>, CrucibleError>,
 }
 
 impl Message {
@@ -1303,6 +1313,30 @@ mod tests {
             [
                 1, 0, 0, 0, // tag
                 123, 0, 0, 0 // version
+            ]
+        );
+    }
+
+    #[test]
+    fn read_block_context_size() {
+        let m = ReadBlockContext::Encrypted {
+            ctx: EncryptionContext {
+                nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2],
+                tag: [
+                    10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+                    25,
+                ],
+            },
+        };
+        let encoded = bincode::serialize(&m).unwrap();
+        assert_eq!(encoded.len(), 32);
+        assert_eq!(
+            &encoded,
+            &[
+                1, 0, 0, 0, // enum tag
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1, 2, // nonce
+                10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+                25, // tag
             ]
         );
     }

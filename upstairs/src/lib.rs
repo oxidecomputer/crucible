@@ -668,7 +668,7 @@ impl RegionDefinitionStatus {
 #[derive(Debug, Default)]
 pub(crate) struct RawReadResponse {
     /// Per-block metadata
-    pub blocks: Vec<Option<BlockContext>>,
+    pub blocks: Vec<ReadBlockContext>,
     /// Raw data
     pub data: bytes::BytesMut,
 }
