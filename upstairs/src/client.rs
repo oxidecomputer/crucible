@@ -2956,12 +2956,14 @@ pub(crate) fn validate_encrypted_read_response(
         }
     };
 
-    // We'll start with decryption, ignoring the hash; we're using authenticated
-    // encryption, so the check is just as strong as the hash check.
+    // We're using authenticated encryption, so if it decrypts correctly, we can
+    // be confident that it wasn't corrupted.  Corruption either on-disk
+    // (unlikely due to ZFS) or in-transit (unlikely-ish due to TCP checksums)
+    // will both result in decryption failure; we can't tell these cases apart.
     //
-    // Note: decrypt_in_place does not overwrite the buffer if
-    // it fails, otherwise we would need to copy here. There's a
-    // unit test to validate this behaviour.
+    // Note: decrypt_in_place does not overwrite the buffer if it fails,
+    // otherwise we would need to copy here. There's a unit test to validate
+    // this behaviour.
     use aes_gcm_siv::{Nonce, Tag};
     let decryption_result = encryption_context.decrypt_in_place(
         data,
