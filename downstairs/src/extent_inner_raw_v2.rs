@@ -614,23 +614,42 @@ impl RawInnerV2 {
                             "call to `zfs` failed: {e}"
                         ))
                     })?;
-                    let mut out = vec![];
-                    p.stdout.unwrap().read_to_end(&mut out).map_err(|e| {
+                    let mut err = vec![];
+                    p.stderr.unwrap().read_to_end(&mut err).map_err(|e| {
                         CrucibleError::IoError(format!(
-                            "failed to read stdout from `zfs`: {e:?}"
+                            "failed to read stderr from `zfs`: {e:?}"
                         ))
                     })?;
-                    let out = std::str::from_utf8(&out).map_err(|e| {
+                    let err = std::str::from_utf8(&err).map_err(|e| {
                         CrucibleError::IoError(format!(
-                            "zfs returned invalid UTF-8 string: {out:?} ({e})"
+                            "zfs returned invalid UTF-8 string: {err:?} ({e})"
                         ))
                     })?;
-                    out.trim().parse::<u64>().map_err(|e| {
-                        CrucibleError::IoError(format!(
-                            "zfs returned non-integer for recordsize: {out:?} \
-                             ({e})"
-                        ))
-                    })?
+                    if err.contains("not a ZFS filesystem") {
+                        DEFAULT_ZFS_RECORDSIZE
+                    } else {
+                        let mut out = vec![];
+                        p.stdout.unwrap().read_to_end(&mut out).map_err(
+                            |e| {
+                                CrucibleError::IoError(format!(
+                                    "failed to read stdout from `zfs`: {e:?}, \
+                                     stderr: {err}"
+                                ))
+                            },
+                        )?;
+                        let out = std::str::from_utf8(&out).map_err(|e| {
+                            CrucibleError::IoError(format!(
+                                "zfs returned invalid UTF-8 string: {out:?} \
+                                 ({e}), stderr: {err}"
+                            ))
+                        })?;
+                        out.trim().parse::<u64>().map_err(|e| {
+                            CrucibleError::IoError(format!(
+                                "zfs returned non-integer for recordsize: \
+                                  {out:?} ({e}), stderr: {err}"
+                            ))
+                        })?
+                    }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     // If the `zfs` executable isn't present, then we're
