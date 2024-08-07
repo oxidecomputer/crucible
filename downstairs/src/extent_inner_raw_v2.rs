@@ -1,4 +1,4 @@
-// Copyright 2023 Oxide Computer Company
+// Copyright 2024 Oxide Computer Company
 use crate::{
     cdt,
     extent::{check_input, extent_path, ExtentInner, EXTENT_META_RAW_V2},
@@ -36,17 +36,17 @@ pub(crate) const BLOCK_CONTEXT_SIZE_BYTES: u64 = 32;
 /// writing as `N` for simplicity here.
 ///
 /// # File organization
-/// The file is structured in three parts.  Getting specific offsets within the
+/// The file is structured in four parts.  Getting specific offsets within the
 /// file is implemented in the [`RawLayout`] helper class.
 ///
 /// ## Block data and contexts
 /// Block data and per-block contexts are paired up as follows:
 /// ```text
-/// [ ----- block  ----- | context | ----- block  ----- | context] x R
+/// [ ----- block  ----- | context ] x R
 /// [ --- padding to recordsize --- ]
-/// [ ----- block  ----- | context | ----- block  ----- | context] x R
+/// [ ----- block  ----- | context ] x R
 /// [ --- padding to recordsize --- ]
-/// [ ----- block  ----- | context | ----- block  ----- | context] x R
+/// [ ----- block  ----- | context ] x R
 /// [ --- padding to recordsize --- ]
 /// ```
 ///
@@ -331,14 +331,28 @@ impl ExtentInner for RawInnerV2 {
             // robust error handling here (e.g. retrying in a loop), but for
             // now, simply bailing out seems wise.
             let r = nix::errno::Errno::result(r).map(|r| r as usize);
-            let num_bytes = r.map_err(|e| {
+            let num_bytes = match r.map_err(|e| {
                 CrucibleError::IoError(format!(
                     "extent {}: read failed: {e}",
                     self.extent_number
                 ))
-            })?;
+            }) {
+                Ok(n) => n,
+                Err(e) => {
+                    // Early exit, so fire the DTrace probe here
+                    cdt::extent__read__file__done!(|| {
+                        (job_id.0, self.extent_number.0, num_blocks as u64)
+                    });
+                    return Err(e);
+                }
+            };
             total_bytes += num_bytes;
         }
+
+        // Fire the DTrace probe to indicate the read is done
+        cdt::extent__read__file__done!(|| {
+            (job_id.0, self.extent_number.0, num_blocks as u64)
+        });
 
         if total_bytes != expected_bytes as usize {
             return Err(CrucibleError::IoError(format!(
@@ -347,9 +361,6 @@ impl ExtentInner for RawInnerV2 {
                 self.extent_number
             )));
         }
-        cdt::extent__read__file__done!(|| {
-            (job_id.0, self.extent_number.0, num_blocks as u64)
-        });
 
         // SAFETY: we just initialized this chunk of the buffer
         unsafe {
@@ -848,7 +859,7 @@ impl RawLayout {
 
     /// Checks whether there is padding after the given block
     fn has_padding_after(&self, block: BlockOffset) -> bool {
-        // No padding at the end of the file
+        // No padding at the end of the data section
         if block.0 == self.block_count() - 1 {
             return false;
         }

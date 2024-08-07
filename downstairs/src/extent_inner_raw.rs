@@ -358,6 +358,11 @@ impl ExtentInner for RawInner {
                 req.offset.0 as i64 * block_size as i64,
             )
         };
+
+        cdt::extent__read__file__done!(|| {
+            (job_id.0, self.extent_number.0, num_blocks)
+        });
+
         // Check against the expected number of bytes.  We could do more
         // robust error handling here (e.g. retrying in a loop), but for
         // now, simply bailing out seems wise.
@@ -379,10 +384,6 @@ impl ExtentInner for RawInner {
         unsafe {
             buf.set_len(expected_bytes);
         }
-
-        cdt::extent__read__file__done!(|| {
-            (job_id.0, self.extent_number.0, num_blocks)
-        });
 
         Ok(ExtentReadResponse { data: buf, blocks })
     }
