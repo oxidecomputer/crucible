@@ -353,6 +353,8 @@ impl Region {
     /// Returns an error if extent files are missing.
     fn open_extents(&mut self) -> Result<()> {
         let next_eid = self.extents.len() as u32;
+
+        std::fs::create_dir_all(&self.dir)?;
         let recordsize = Self::get_recordsize(&self.dir)?;
 
         let eid_range = next_eid..self.def.extent_count();
@@ -383,7 +385,7 @@ impl Region {
         let eid_range = next_eid..self.def.extent_count();
 
         // Get ZFS recordsize, which matters for certain extent formats
-        mkdir_for_file(&self.dir)?;
+        std::fs::create_dir_all(&self.dir)?;
         let recordsize = Self::get_recordsize(&self.dir)?;
 
         for eid in eid_range.map(ExtentId) {
