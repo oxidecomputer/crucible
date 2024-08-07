@@ -455,7 +455,14 @@ impl Region {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                     // If the `zfs` executable isn't present, then we're
                     // presumably on a non-ZFS filesystem and will use a default
-                    // recordsize
+                    // recordsize, except on illumos (where `zfs` not being
+                    // present is a Problem).
+                    #[cfg(target_os = "illumos")]
+                    return Err(CrucibleError::IoError(format!(
+                        "could not find `zfs` executable: {e:?}"
+                    )));
+
+                    #[cfg(not(target_os = "illumos"))]
                     extent_inner_raw_v2::DUMMY_RECORDSIZE
                 }
                 Err(e) => {
