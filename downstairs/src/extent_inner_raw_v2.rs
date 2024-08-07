@@ -629,7 +629,7 @@ impl RawInnerV2 {
                         ))
                     })?;
                     if err.contains("not a ZFS filesystem") {
-                        DEFAULT_ZFS_RECORDSIZE
+                        DUMMY_RECORDSIZE
                     } else {
                         let mut out = vec![];
                         p.stdout.unwrap().read_to_end(&mut out).map_err(
@@ -672,17 +672,10 @@ impl RawInnerV2 {
 }
 
 /// Data structure that implements the on-disk layout of a raw extent file
+#[derive(Debug)]
 struct RawLayout {
     extent_size: Block,
     recordsize: u64,
-}
-
-impl std::fmt::Debug for RawLayout {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RawLayout")
-            .field("extent_size", &self.extent_size)
-            .finish()
-    }
 }
 
 impl RawLayout {

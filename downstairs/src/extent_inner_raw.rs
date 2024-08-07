@@ -1104,16 +1104,9 @@ impl RawInner {
 }
 
 /// Data structure that implements the on-disk layout of a raw extent file
+#[derive(Debug)]
 struct RawLayout {
     extent_size: Block,
-}
-
-impl std::fmt::Debug for RawLayout {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RawLayout")
-            .field("extent_size", &self.extent_size)
-            .finish()
-    }
 }
 
 impl RawLayout {
