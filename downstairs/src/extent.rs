@@ -295,6 +295,7 @@ impl Extent {
         def: &RegionDefinition,
         number: ExtentId,
         read_only: bool,
+        recordsize: u64,
         log: &Logger,
     ) -> Result<Extent> {
         /*
@@ -448,7 +449,7 @@ impl Extent {
                     }
                     EXTENT_META_RAW_V2 => {
                         Box::new(extent_inner_raw_v2::RawInnerV2::open(
-                            dir, def, number, read_only, log,
+                            dir, def, number, read_only, recordsize, log,
                         )?)
                     }
                     i => {
@@ -495,6 +496,7 @@ impl Extent {
         def: &RegionDefinition,
         number: ExtentId,
         backend: Backend,
+        recordsize: u64,
     ) -> Result<Extent> {
         /*
          * Store extent data in files within a directory hierarchy so that
@@ -517,9 +519,11 @@ impl Extent {
             Backend::RawFile => {
                 Box::new(extent_inner_raw::RawInner::create(dir, def, number)?)
             }
-            Backend::RawFileV2 => Box::new(
-                extent_inner_raw_v2::RawInnerV2::create(dir, def, number)?,
-            ),
+            Backend::RawFileV2 => {
+                Box::new(extent_inner_raw_v2::RawInnerV2::create(
+                    dir, def, number, recordsize,
+                )?)
+            }
             #[cfg(any(test, feature = "integration-tests"))]
             Backend::SQLite => Box::new(
                 extent_inner_sqlite::SqliteInner::create(dir, def, number)?,

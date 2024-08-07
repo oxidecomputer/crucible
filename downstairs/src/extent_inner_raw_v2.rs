@@ -79,6 +79,27 @@ pub(crate) const BLOCK_CONTEXT_SIZE_BYTES: u64 = 32;
 /// - We have multiple different raw file formats, but they all place an
 ///   [`OnDiskMeta`] in the last [`BLOCK_META_SIZE_BYTES`] bytes of the file.
 ///   This means we can read the metadata and pick the correct extent version.
+///
+/// # Safety
+/// This raw file format relies heavily on ZFS for guarantees.  Specifically, it
+/// relies on the following properties:
+///
+/// - Data will not be corrupted on-disk (enforced by ZFS's checksums)
+/// - A single `pwritev` call which only touches a single ZFS record is
+///   guaranteed to be all-or-nothing; it cannot be split or partially land.
+///
+/// The latter is not obvious, and requires reading the ZFS source code; see
+/// [https://rfd.shared.oxide.computer/rfd/490#_designing_for_crash_consistency](RFD 492)
+/// for a more detailed analysis.
+///
+/// To enforce all-or-nothing writes, data which must land together cannot span
+/// multiple ZFS records.  This means that our file layout is dependent on
+/// recordsize (see [`RawLayout`]).  In addition, we store the expected
+/// recordsize in the file and check it when reopening.
+///
+/// Changing the dataset's recordsize (or copying an extent file to a dataset
+/// with a different recordsize) will produce an error when loading the extent
+/// file.
 #[derive(Debug)]
 pub struct RawInnerV2 {
     file: File,
@@ -407,11 +428,11 @@ impl RawInnerV2 {
         dir: &Path,
         def: &RegionDefinition,
         extent_number: ExtentId,
+        extent_recordsize: u64,
     ) -> Result<Self, CrucibleError> {
         let path = extent_path(dir, extent_number);
         let extent_size = def.extent_size();
-        let recordsize = Self::get_recordsize(dir)?;
-        let layout = RawLayout::new(extent_size, recordsize);
+        let layout = RawLayout::new(extent_size, extent_recordsize);
         let size = layout.file_size();
 
         mkdir_for_file(&path)?;
@@ -423,7 +444,7 @@ impl RawInnerV2 {
 
         // All 0s are fine for everything except recordsize and metadata
         file.set_len(size)?;
-        layout.write_recordsize(&file, recordsize)?;
+        layout.write_recordsize(&file, extent_recordsize)?;
         let mut out = Self {
             file,
             dirty: false,
@@ -452,11 +473,11 @@ impl RawInnerV2 {
         def: &RegionDefinition,
         extent_number: ExtentId,
         read_only: bool,
+        recordsize: u64,
         log: &Logger,
     ) -> Result<Self, CrucibleError> {
         let path = extent_path(dir, extent_number);
         let extent_size = def.extent_size();
-        let recordsize = Self::get_recordsize(&path)?;
         let layout = RawLayout::new(extent_size, recordsize);
         let size = layout.file_size();
 
@@ -597,77 +618,6 @@ impl RawInnerV2 {
         )?;
         self.dirty = false;
         Ok(())
-    }
-
-    fn get_recordsize(path: &Path) -> Result<u64, CrucibleError> {
-        let recordsize = {
-            let p = std::process::Command::new("zfs")
-                .arg("get")
-                .arg("-Hp") // scripting mode
-                .arg("-ovalue")
-                .arg("recordsize")
-                .arg(path)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn();
-            match p {
-                Ok(mut p) => {
-                    p.wait().map_err(|e| {
-                        CrucibleError::IoError(format!(
-                            "call to `zfs` failed: {e}"
-                        ))
-                    })?;
-                    let mut err = vec![];
-                    p.stderr.unwrap().read_to_end(&mut err).map_err(|e| {
-                        CrucibleError::IoError(format!(
-                            "failed to read stderr from `zfs`: {e:?}"
-                        ))
-                    })?;
-                    let err = std::str::from_utf8(&err).map_err(|e| {
-                        CrucibleError::IoError(format!(
-                            "zfs returned invalid UTF-8 string: {err:?} ({e})"
-                        ))
-                    })?;
-                    if err.contains("not a ZFS filesystem") {
-                        DUMMY_RECORDSIZE
-                    } else {
-                        let mut out = vec![];
-                        p.stdout.unwrap().read_to_end(&mut out).map_err(
-                            |e| {
-                                CrucibleError::IoError(format!(
-                                    "failed to read stdout from `zfs`: {e:?}, \
-                                     stderr: {err}"
-                                ))
-                            },
-                        )?;
-                        let out = std::str::from_utf8(&out).map_err(|e| {
-                            CrucibleError::IoError(format!(
-                                "zfs returned invalid UTF-8 string: {out:?} \
-                                 ({e}), stderr: {err}"
-                            ))
-                        })?;
-                        out.trim().parse::<u64>().map_err(|e| {
-                            CrucibleError::IoError(format!(
-                                "zfs returned non-integer for recordsize: \
-                                  {out:?} ({e}), stderr: {err}"
-                            ))
-                        })?
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // If the `zfs` executable isn't present, then we're
-                    // presumably on a non-ZFS filesystem and will use a default
-                    // recordsize
-                    DUMMY_RECORDSIZE
-                }
-                Err(e) => {
-                    return Err(CrucibleError::IoError(format!(
-                        "could not call `zfs` executable: {e:?}"
-                    )))
-                }
-            }
-        };
-        Ok(recordsize)
     }
 }
 
@@ -936,7 +886,9 @@ mod test {
 
         let def = new_region_definition();
         let eid = ExtentId(0);
-        let inner = RawInnerV2::create(dir.as_ref(), &def, eid).unwrap();
+        let inner =
+            RawInnerV2::create(dir.as_ref(), &def, eid, DUMMY_RECORDSIZE)
+                .unwrap();
         let recordsize = inner.layout.recordsize;
 
         // Manually tweak the recordsize in the raw file's on-disk data
@@ -946,8 +898,14 @@ mod test {
             .unwrap();
 
         // Reopen, which should fail due to a recordsize mismatch
-        let reopen =
-            RawInnerV2::open(dir.as_ref(), &def, eid, false, &build_logger());
+        let reopen = RawInnerV2::open(
+            dir.as_ref(),
+            &def,
+            eid,
+            false,
+            DUMMY_RECORDSIZE,
+            &build_logger(),
+        );
         assert!(reopen.is_err());
 
         Ok(())
@@ -971,6 +929,7 @@ mod test {
             dir.as_ref(),
             &new_region_definition(),
             ExtentId(0),
+            DUMMY_RECORDSIZE,
         )
         .unwrap();
 

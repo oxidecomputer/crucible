@@ -353,6 +353,7 @@ impl Region {
     /// Returns an error if extent files are missing.
     fn open_extents(&mut self) -> Result<()> {
         let next_eid = self.extents.len() as u32;
+        let recordsize = Self::get_recordsize(&self.dir)?;
 
         let eid_range = next_eid..self.def.extent_count();
         for eid in eid_range.map(ExtentId) {
@@ -361,6 +362,7 @@ impl Region {
                 &self.def,
                 eid,
                 self.read_only,
+                recordsize,
                 &self.log,
             )?;
 
@@ -380,13 +382,90 @@ impl Region {
 
         let eid_range = next_eid..self.def.extent_count();
 
+        // Get ZFS recordsize, which matters for certain extent formats
+        mkdir_for_file(&self.dir)?;
+        let recordsize = Self::get_recordsize(&self.dir)?;
+
         for eid in eid_range.map(ExtentId) {
-            let extent = Extent::create(&self.dir, &self.def, eid, backend)?;
+            let extent =
+                Extent::create(&self.dir, &self.def, eid, backend, recordsize)?;
             self.extents.push(ExtentState::Opened(extent));
         }
         self.check_extents();
 
         Ok(())
+    }
+
+    /// Looks up the recordsize for a particular path
+    fn get_recordsize(path: &Path) -> Result<u64, CrucibleError> {
+        let recordsize = {
+            let p = std::process::Command::new("zfs")
+                .arg("get")
+                .arg("-Hp") // scripting mode
+                .arg("-ovalue")
+                .arg("recordsize")
+                .arg(path)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn();
+            match p {
+                Ok(mut p) => {
+                    p.wait().map_err(|e| {
+                        CrucibleError::IoError(format!(
+                            "call to `zfs` failed: {e}"
+                        ))
+                    })?;
+                    let mut err = vec![];
+                    p.stderr.unwrap().read_to_end(&mut err).map_err(|e| {
+                        CrucibleError::IoError(format!(
+                            "failed to read stderr from `zfs`: {e:?}"
+                        ))
+                    })?;
+                    let err = std::str::from_utf8(&err).map_err(|e| {
+                        CrucibleError::IoError(format!(
+                            "zfs returned invalid UTF-8 string: {err:?} ({e})"
+                        ))
+                    })?;
+                    if err.contains("not a ZFS filesystem") {
+                        extent_inner_raw_v2::DUMMY_RECORDSIZE
+                    } else {
+                        let mut out = vec![];
+                        p.stdout.unwrap().read_to_end(&mut out).map_err(
+                            |e| {
+                                CrucibleError::IoError(format!(
+                                    "failed to read stdout from `zfs`: {e:?}, \
+                                     stderr: {err}"
+                                ))
+                            },
+                        )?;
+                        let out = std::str::from_utf8(&out).map_err(|e| {
+                            CrucibleError::IoError(format!(
+                                "zfs returned invalid UTF-8 string: {out:?} \
+                                 ({e}), stderr: {err}"
+                            ))
+                        })?;
+                        out.trim().parse::<u64>().map_err(|e| {
+                            CrucibleError::IoError(format!(
+                                "zfs returned non-integer for recordsize: \
+                                  {out:?} ({e}), stderr: {err}"
+                            ))
+                        })?
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // If the `zfs` executable isn't present, then we're
+                    // presumably on a non-ZFS filesystem and will use a default
+                    // recordsize
+                    extent_inner_raw_v2::DUMMY_RECORDSIZE
+                }
+                Err(e) => {
+                    return Err(CrucibleError::IoError(format!(
+                        "could not call `zfs` executable: {e:?}"
+                    )))
+                }
+            }
+        };
+        Ok(recordsize)
     }
 
     /// Checks that all extents are open and have the correct `number`
@@ -427,19 +506,37 @@ impl Region {
             }
         }
 
+        let recordsize = Self::get_recordsize(&self.dir)?;
+
         for eid in to_open {
-            self.reopen_extent(eid)?;
+            self.reopen_extent_with_recordsize(eid, recordsize)?;
         }
 
         Ok(())
     }
 
-    /**
-     * Re open an extent that was previously closed
-     */
+    /// Reopens an extent that was previously closed
+    ///
+    /// This function is expensive, because it calls `zfs` to get the current
+    /// recordsize for the dataset.  If you are going to open many extents, it's
+    /// recommended to call [`Self::get_recordsize`] once, then use
+    /// [`reopen_extent_with_recordsize`](Self::reopen_extent_with_recordsize)
+    /// to open each extent.
     pub fn reopen_extent(
         &mut self,
         eid: ExtentId,
+    ) -> Result<(), CrucibleError> {
+        let recordsize = Self::get_recordsize(&self.dir)?;
+        self.reopen_extent_with_recordsize(eid, recordsize)
+    }
+
+    /**
+     * Re open an extent that was previously closed
+     */
+    pub fn reopen_extent_with_recordsize(
+        &mut self,
+        eid: ExtentId,
+        recordsize: u64,
     ) -> Result<(), CrucibleError> {
         /*
          * Make sure the extent :
@@ -452,8 +549,14 @@ impl Region {
         assert!(matches!(mg, ExtentState::Closed));
         assert!(!self.read_only);
 
-        let new_extent =
-            Extent::open(&self.dir, &self.def, eid, self.read_only, &self.log)?;
+        let new_extent = Extent::open(
+            &self.dir,
+            &self.def,
+            eid,
+            self.read_only,
+            recordsize,
+            &self.log,
+        )?;
 
         if new_extent.dirty() {
             self.dirty_extents.insert(eid);
@@ -1163,6 +1266,7 @@ pub(crate) mod test {
         completed_dir, copy_dir, extent_path, remove_copy_cleanup_dir,
         DownstairsBlockContext,
     };
+    use crate::extent_inner_raw_v2::DUMMY_RECORDSIZE;
 
     use super::*;
 
@@ -2069,9 +2173,7 @@ pub(crate) mod test {
                     out.extend(&data[..extent_data_size]);
                 }
                 Backend::RawFileV2 => {
-                    use extent_inner_raw_v2::{
-                        BLOCK_CONTEXT_SIZE_BYTES, DUMMY_RECORDSIZE,
-                    };
+                    use extent_inner_raw_v2::BLOCK_CONTEXT_SIZE_BYTES;
                     let blocks_per_record = (DUMMY_RECORDSIZE
                         / (ddef.block_size() + BLOCK_CONTEXT_SIZE_BYTES))
                         as usize;
