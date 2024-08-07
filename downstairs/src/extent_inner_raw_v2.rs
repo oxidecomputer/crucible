@@ -24,7 +24,10 @@ use std::{
 };
 use zerocopy::AsBytes;
 
-pub(crate) const DEFAULT_ZFS_RECORDSIZE: u64 = 128 * 1024;
+/// Recordsize for non-ZFS systems (matching the ZFS default)
+pub(crate) const DUMMY_RECORDSIZE: u64 = 128 * 1024;
+
+/// Max of serialized block context (which is a [`ReadBlockContext`])
 pub(crate) const BLOCK_CONTEXT_SIZE_BYTES: u64 = 32;
 
 /// `RawInnerV2` is a wrapper around a [`std::fs::File`] representing an extent
@@ -655,7 +658,7 @@ impl RawInnerV2 {
                     // If the `zfs` executable isn't present, then we're
                     // presumably on a non-ZFS filesystem and will use a default
                     // recordsize
-                    DEFAULT_ZFS_RECORDSIZE
+                    DUMMY_RECORDSIZE
                 }
                 Err(e) => {
                     return Err(CrucibleError::IoError(format!(
@@ -959,13 +962,13 @@ mod test {
 
     #[test]
     fn test_metadata_position() {
-        let layout = RawLayout::new(Block::new(240, 9), DEFAULT_ZFS_RECORDSIZE);
-        assert!(layout.file_size() > DEFAULT_ZFS_RECORDSIZE);
-        assert!(layout.recordsize_offset() == DEFAULT_ZFS_RECORDSIZE);
+        let layout = RawLayout::new(Block::new(240, 9), DUMMY_RECORDSIZE);
+        assert!(layout.file_size() > DUMMY_RECORDSIZE);
+        assert!(layout.recordsize_offset() == DUMMY_RECORDSIZE);
 
-        let layout = RawLayout::new(Block::new(230, 9), DEFAULT_ZFS_RECORDSIZE);
-        assert!(layout.file_size() < DEFAULT_ZFS_RECORDSIZE);
-        assert!(layout.recordsize_offset() < DEFAULT_ZFS_RECORDSIZE);
+        let layout = RawLayout::new(Block::new(230, 9), DUMMY_RECORDSIZE);
+        assert!(layout.file_size() < DUMMY_RECORDSIZE);
+        assert!(layout.recordsize_offset() < DUMMY_RECORDSIZE);
     }
 
     #[test]

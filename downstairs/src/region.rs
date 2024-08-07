@@ -2070,16 +2070,16 @@ pub(crate) mod test {
                 }
                 Backend::RawFileV2 => {
                     use extent_inner_raw_v2::{
-                        BLOCK_CONTEXT_SIZE_BYTES, DEFAULT_ZFS_RECORDSIZE,
+                        BLOCK_CONTEXT_SIZE_BYTES, DUMMY_RECORDSIZE,
                     };
-                    let blocks_per_record = (DEFAULT_ZFS_RECORDSIZE
+                    let blocks_per_record = (DUMMY_RECORDSIZE
                         / (ddef.block_size() + BLOCK_CONTEXT_SIZE_BYTES))
                         as usize;
                     println!("BLOCKS PER RECORD: {blocks_per_record}");
                     for i in 0..ddef.extent_size().value as usize {
                         let record = i / blocks_per_record;
                         let block = i % blocks_per_record;
-                        let start = record * DEFAULT_ZFS_RECORDSIZE as usize
+                        let start = record * DUMMY_RECORDSIZE as usize
                             + block
                                 * (ddef.block_size() + BLOCK_CONTEXT_SIZE_BYTES)
                                     as usize;
