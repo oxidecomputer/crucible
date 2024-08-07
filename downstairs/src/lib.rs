@@ -5467,7 +5467,10 @@ mod test {
         Ok(())
     }
 
-    fn build_test_downstairs(read_only: bool) -> Result<Downstairs> {
+    fn build_test_downstairs(
+        read_only: bool,
+        dir: &Path,
+    ) -> Result<Downstairs> {
         let block_size: u64 = 512;
         let extent_size = 4;
 
@@ -5480,13 +5483,12 @@ mod test {
         ));
         region_options.set_uuid(Uuid::new_v4());
 
-        let dir = tempdir()?;
-        mkdir_for_file(dir.path())?;
+        mkdir_for_file(dir)?;
 
-        let mut region = Region::create(&dir, region_options, csl())?;
+        let mut region = Region::create(dir, region_options, csl())?;
         region.extend(2, Backend::default())?;
 
-        let path_dir = dir.as_ref().to_path_buf();
+        let path_dir = dir.to_path_buf();
 
         let mut ds = Downstairs::new_builder(&path_dir, read_only)
             .set_logger(csl())
@@ -5497,7 +5499,8 @@ mod test {
 
     #[test]
     fn test_promote_to_active_one_read_write() -> Result<()> {
-        let mut ds = build_test_downstairs(false)?;
+        let dir = tempdir()?;
+        let mut ds = build_test_downstairs(false, dir.path())?;
 
         let upstairs_connection = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -5515,7 +5518,8 @@ mod test {
 
     #[test]
     fn test_promote_to_active_one_read_only() -> Result<()> {
-        let mut ds = build_test_downstairs(true)?;
+        let dir = tempdir()?;
+        let mut ds = build_test_downstairs(true, dir.path())?;
 
         let upstairs_connection = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -5536,7 +5540,8 @@ mod test {
     ) -> Result<()> {
         // Attempting to activate multiple read-write (where it's different
         // Upstairs) but with the same gen should be blocked
-        let mut ds = build_test_downstairs(false)?;
+        let dir = tempdir()?;
+        let mut ds = build_test_downstairs(false, dir.path())?;
 
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -5581,7 +5586,8 @@ mod test {
     ) -> Result<()> {
         // Attempting to activate multiple read-write (where it's different
         // Upstairs) but with a lower gen should be blocked.
-        let mut ds = build_test_downstairs(false)?;
+        let dir = tempdir()?;
+        let mut ds = build_test_downstairs(false, dir.path())?;
 
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -5630,7 +5636,8 @@ mod test {
         // Attempting to activate multiple read-write (where it's the same
         // Upstairs but a different session) will block the "new" connection
         // if it has the same generation number.
-        let mut ds = build_test_downstairs(false)?;
+        let dir = tempdir()?;
+        let mut ds = build_test_downstairs(false, dir.path())?;
 
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -5675,7 +5682,8 @@ mod test {
         // Attempting to activate multiple read-write where it's the same
         // Upstairs, but a different session, and with a larger generation
         // should allow the new connection to take over.
-        let mut ds = build_test_downstairs(false)?;
+        let dir = tempdir()?;
+        let mut ds = build_test_downstairs(false, dir.path())?;
 
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -5717,7 +5725,8 @@ mod test {
     fn test_promote_to_active_multi_read_only_different_uuid() -> Result<()> {
         // Activating multiple read-only with different Upstairs UUIDs should
         // work.
-        let mut ds = build_test_downstairs(true)?;
+        let dir = tempdir()?;
+        let mut ds = build_test_downstairs(true, dir.path())?;
 
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -5758,7 +5767,8 @@ mod test {
     fn test_promote_to_active_multi_read_only_same_uuid() -> Result<()> {
         // Activating multiple read-only with the same Upstairs UUID should
         // kick out the other active one.
-        let mut ds = build_test_downstairs(true)?;
+        let dir = tempdir()?;
+        let mut ds = build_test_downstairs(true, dir.path())?;
 
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
@@ -5799,7 +5809,8 @@ mod test {
     #[test]
     fn test_multiple_read_only_no_job_id_collision() -> Result<()> {
         // Two read-only Upstairs shouldn't see each other's jobs
-        let mut ds = build_test_downstairs(true)?;
+        let dir = tempdir()?;
+        let mut ds = build_test_downstairs(true, dir.path())?;
 
         let upstairs_connection_1 = UpstairsConnection {
             upstairs_id: Uuid::new_v4(),
