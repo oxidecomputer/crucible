@@ -355,7 +355,7 @@ impl Region {
         let next_eid = self.extents.len() as u32;
 
         std::fs::create_dir_all(&self.dir)?;
-        let recordsize = Self::get_recordsize(&self.dir)?;
+        let recordsize = self.get_recordsize()?;
 
         let eid_range = next_eid..self.def.extent_count();
         for eid in eid_range.map(ExtentId) {
@@ -386,7 +386,7 @@ impl Region {
 
         // Get ZFS recordsize, which matters for certain extent formats
         std::fs::create_dir_all(&self.dir)?;
-        let recordsize = Self::get_recordsize(&self.dir)?;
+        let recordsize = self.get_recordsize()?;
 
         for eid in eid_range.map(ExtentId) {
             let extent =
@@ -399,14 +399,14 @@ impl Region {
     }
 
     /// Looks up the recordsize for a particular path
-    fn get_recordsize(path: &Path) -> Result<u64, CrucibleError> {
+    fn get_recordsize(&self) -> Result<u64, CrucibleError> {
         let recordsize = {
             let p = std::process::Command::new("zfs")
                 .arg("get")
                 .arg("-Hp") // scripting mode
                 .arg("-ovalue")
                 .arg("recordsize")
-                .arg(path)
+                .arg(&self.dir)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .spawn();
@@ -515,7 +515,7 @@ impl Region {
             }
         }
 
-        let recordsize = Self::get_recordsize(&self.dir)?;
+        let recordsize = self.get_recordsize()?;
 
         for eid in to_open {
             self.reopen_extent_with_recordsize(eid, recordsize)?;
@@ -535,7 +535,7 @@ impl Region {
         &mut self,
         eid: ExtentId,
     ) -> Result<(), CrucibleError> {
-        let recordsize = Self::get_recordsize(&self.dir)?;
+        let recordsize = self.get_recordsize()?;
         self.reopen_extent_with_recordsize(eid, recordsize)
     }
 
