@@ -247,9 +247,10 @@ impl ExtentInner for RawInnerV2 {
             for i in 0..n_blocks {
                 let block = BlockOffset(write.offset.0 + i as u64);
 
-                // Try to recompute the context slot from the file.  If this
-                // fails, then we _really_ can't recover, so bail out
-                // unceremoniously.
+                // If the write failed, then the block may or may not have
+                // landed on disk.  Read it back and update `self.block_written`
+                // accordingly.  If this fails, then we _really_ can't recover,
+                // so bail out unceremoniously.
                 self.recompute_block_written_from_file(block).unwrap();
             }
         } else {
