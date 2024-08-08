@@ -398,7 +398,13 @@ impl Region {
         Ok(())
     }
 
-    /// Looks up the recordsize for a particular path
+    #[cfg(not(target_os = "illumos"))]
+    fn get_recordsize(&self) -> Result<u64, CrucibleError> {
+        Ok(extent_inner_raw_v2::DUMMY_RECORDSIZE)
+    }
+
+    /// Looks up the recordsize for the base path
+    #[cfg(target_os = "illumos")]
     fn get_recordsize(&self) -> Result<u64, CrucibleError> {
         let recordsize = {
             let p = std::process::Command::new("zfs")
@@ -407,69 +413,35 @@ impl Region {
                 .arg("-ovalue")
                 .arg("recordsize")
                 .arg(&self.dir)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn();
+                .output();
             match p {
-                Ok(mut p) => {
-                    p.wait().map_err(|e| {
+                Ok(p) => {
+                    let err = std::str::from_utf8(&p.stderr).map_err(|e| {
                         CrucibleError::IoError(format!(
-                            "call to `zfs` failed: {e}"
-                        ))
-                    })?;
-                    let mut err = vec![];
-                    p.stderr.unwrap().read_to_end(&mut err).map_err(|e| {
-                        CrucibleError::IoError(format!(
-                            "failed to read stderr from `zfs`: {e:?}"
-                        ))
-                    })?;
-                    let err = std::str::from_utf8(&err).map_err(|e| {
-                        CrucibleError::IoError(format!(
-                            "zfs returned invalid UTF-8 string: {err:?} ({e})"
+                            "zfs returned invalid UTF-8 string: {e}"
                         ))
                     })?;
                     if err.contains("not a ZFS filesystem") {
                         extent_inner_raw_v2::DUMMY_RECORDSIZE
                     } else {
-                        let mut out = vec![];
-                        p.stdout.unwrap().read_to_end(&mut out).map_err(
-                            |e| {
+                        let out =
+                            std::str::from_utf8(&p.stdout).map_err(|e| {
                                 CrucibleError::IoError(format!(
-                                    "failed to read stdout from `zfs`: {e:?}, \
+                                    "zfs returned invalid UTF-8 string: {e}, \
                                      stderr: {err}"
                                 ))
-                            },
-                        )?;
-                        let out = std::str::from_utf8(&out).map_err(|e| {
-                            CrucibleError::IoError(format!(
-                                "zfs returned invalid UTF-8 string: {out:?} \
-                                 ({e}), stderr: {err}"
-                            ))
-                        })?;
+                            })?;
                         out.trim().parse::<u64>().map_err(|e| {
                             CrucibleError::IoError(format!(
                                 "zfs returned non-integer for recordsize: \
-                                  {out:?} ({e}), stderr: {err}"
+                                 {out:?} ({e}), stderr: {err}"
                             ))
                         })?
                     }
                 }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // If the `zfs` executable isn't present, then we're
-                    // presumably on a non-ZFS filesystem and will use a default
-                    // recordsize, except on illumos (where `zfs` not being
-                    // present is a Problem).
-                    #[cfg(target_os = "illumos")]
-                    return Err(CrucibleError::IoError(format!(
-                        "could not find `zfs` executable: {e:?}"
-                    )));
-
-                    #[cfg(not(target_os = "illumos"))]
-                    extent_inner_raw_v2::DUMMY_RECORDSIZE
-                }
                 Err(e) => {
                     return Err(CrucibleError::IoError(format!(
-                        "could not call `zfs` executable: {e:?}"
+                        "could not call `zfs` executable: {e:?} {e}"
                     )))
                 }
             }
