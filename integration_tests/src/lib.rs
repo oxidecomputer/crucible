@@ -187,7 +187,10 @@ mod test {
 
     impl TestDownstairsSet {
         /// Spin off three downstairs, with a 5120b region
-        pub async fn small(read_only: bool) -> Result<TestDownstairsSet> {
+        pub async fn small(
+            read_only: bool,
+            backend: Backend,
+        ) -> Result<TestDownstairsSet> {
             // 5 * 2 * 512 = 5120b
             let blocks_per_extent = 5;
             let extent_count = 2;
@@ -196,7 +199,7 @@ mod test {
                 blocks_per_extent,
                 extent_count,
                 false,
-                Backend::RawFile,
+                backend,
             )
             .await
         }
@@ -219,7 +222,10 @@ mod test {
         }
 
         /// Spin off three downstairs, with a 50 MB region
-        pub async fn big(read_only: bool) -> Result<TestDownstairsSet> {
+        pub async fn big(
+            read_only: bool,
+            backend: Backend,
+        ) -> Result<TestDownstairsSet> {
             // 512 * 188 * 512 = 49283072b ~= 50MB
             let blocks_per_extent = 512;
             let extent_count = 188;
@@ -228,13 +234,13 @@ mod test {
                 blocks_per_extent,
                 extent_count,
                 false,
-                Backend::RawFile,
+                backend,
             )
             .await
         }
 
         /// Spin off three problematic downstairs, with a 10 MB region
-        pub async fn problem() -> Result<TestDownstairsSet> {
+        pub async fn problem(backend: Backend) -> Result<TestDownstairsSet> {
             // 512 * 40 * 512 = 10485760b = 10MB
             let blocks_per_extent = 512;
             let extent_count = 188;
@@ -243,7 +249,7 @@ mod test {
                 blocks_per_extent,
                 extent_count,
                 true, // problematic
-                Backend::RawFile,
+                backend,
             )
             .await
         }
@@ -393,12 +399,11 @@ mod test {
         }
     }
 
-    #[tokio::test]
-    async fn integration_test_region() -> Result<()> {
+    async fn integration_test_region(backend: Backend) -> Result<()> {
         // Test a simple single layer volume with a read, write, read
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -441,13 +446,12 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_region_huge_io() -> Result<()> {
+    async fn integration_test_region_huge_io(backend: Backend) -> Result<()> {
         // Test a simple single layer volume with a read, write, read, with IOs
         // that exceed our MDTS (and should be split automatically)
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::big(false).await?;
+        let tds = TestDownstairsSet::big(false, backend).await?;
         let opts = tds.opts();
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -499,11 +503,10 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn volume_zero_length_io() -> Result<()> {
+    async fn volume_zero_length_io(backend: Backend) -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -535,16 +538,16 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_two_layers() -> Result<()> {
-        let tds = TestDownstairsSet::small(false).await?;
+    async fn integration_test_two_layers(backend: Backend) -> Result<()> {
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
         integration_test_two_layers_common(tds, opts, false).await
     }
 
-    #[tokio::test]
-    async fn integration_test_two_layers_write_unwritten() -> Result<()> {
-        let tds = TestDownstairsSet::small(false).await?;
+    async fn integration_test_two_layers_write_unwritten(
+        backend: Backend,
+    ) -> Result<()> {
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
         integration_test_two_layers_common(tds, opts, true).await
     }
@@ -629,11 +632,10 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_three_layers() -> Result<()> {
+    async fn integration_test_three_layers(backend: Backend) -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         // Create in memory block io full of 11
@@ -711,11 +713,10 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_url() -> Result<()> {
+    async fn integration_test_url(backend: Backend) -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let server = Server::run();
@@ -782,12 +783,11 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_just_read() -> Result<()> {
+    async fn integration_test_just_read(backend: Backend) -> Result<()> {
         // Just do a read of a new volume.
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::small(true).await?;
+        let tds = TestDownstairsSet::small(true, backend).await?;
         let opts = tds.opts();
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -817,8 +817,9 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_volume_write_unwritten_1() -> Result<()> {
+    async fn integration_test_volume_write_unwritten_1(
+        backend: Backend,
+    ) -> Result<()> {
         // Test a simple single layer volume, verify write_unwritten
         // works as expected.
         // Volume with a subvolume:
@@ -833,7 +834,7 @@ mod test {
         // |AAAAAAAAAA|
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -884,8 +885,9 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_volume_write_unwritten_2() -> Result<()> {
+    async fn integration_test_volume_write_unwritten_2(
+        backend: Backend,
+    ) -> Result<()> {
         // Test a simple single layer volume, verify a first write_unwritten
         // won't be altered by a 2nd write_unwritten.
         // Volume with a subvolume:
@@ -899,7 +901,7 @@ mod test {
         // Should result in:
         // |AAAAAAAAAA|
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -950,8 +952,9 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_volume_write_unwritten_sparse() -> Result<()> {
+    async fn integration_test_volume_write_unwritten_sparse(
+        backend: Backend,
+    ) -> Result<()> {
         // Test a simple single layer volume
         // Perform a smaller write, then a larger write_unwritten and
         // verify the smaller write is not over-written.
@@ -967,7 +970,7 @@ mod test {
         // |ABBBBBBBBBB|
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let vcr = VolumeConstructionRequest::Volume {
@@ -1019,8 +1022,9 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_volume_write_unwritten_subvols() -> Result<()> {
+    async fn integration_test_volume_write_unwritten_subvols(
+        backend: Backend,
+    ) -> Result<()> {
         // Test a single layer volume with two subvolumes,
         // verify a first write_unwritten that crosses the subvols
         // works as expected.
@@ -1036,7 +1040,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::small(false).await?;
+        let tds1 = TestDownstairsSet::small(false, backend).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1045,7 +1049,7 @@ mod test {
             opts,
             gen: 1,
         });
-        let tds2 = TestDownstairsSet::small(false).await?;
+        let tds2 = TestDownstairsSet::small(false, backend).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1099,8 +1103,8 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
     async fn integration_test_volume_write_unwritten_subvols_sparse(
+        backend: Backend,
     ) -> Result<()> {
         // Test a single layer volume with two subvolumes,
         // verify a first write_unwritten that crosses the subvols
@@ -1118,7 +1122,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::small(false).await?;
+        let tds1 = TestDownstairsSet::small(false, backend).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1127,7 +1131,7 @@ mod test {
             opts,
             gen: 1,
         });
-        let tds2 = TestDownstairsSet::small(false).await?;
+        let tds2 = TestDownstairsSet::small(false, backend).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1198,8 +1202,9 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_volume_write_unwritten_subvols_3() -> Result<()> {
+    async fn integration_test_volume_write_unwritten_subvols_3(
+        backend: Backend,
+    ) -> Result<()> {
         // Test a single layer volume with two subvolumes,
         // A first write_unwritten that crosses the subvols
         // A 2nd write unwritten.
@@ -1219,7 +1224,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::small(false).await?;
+        let tds1 = TestDownstairsSet::small(false, backend).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1228,7 +1233,7 @@ mod test {
             opts,
             gen: 1,
         });
-        let tds2 = TestDownstairsSet::small(false).await?;
+        let tds2 = TestDownstairsSet::small(false, backend).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1294,17 +1299,18 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_two_layers_parent_smaller() -> Result<()> {
-        let tds = TestDownstairsSet::small(false).await?;
+    async fn integration_test_two_layers_parent_smaller(
+        backend: Backend,
+    ) -> Result<()> {
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
         integration_test_two_layers_small_common(tds, opts, false).await
     }
 
-    #[tokio::test]
-    async fn integration_test_two_layers_parent_smaller_unwritten() -> Result<()>
-    {
-        let tds = TestDownstairsSet::small(false).await?;
+    async fn integration_test_two_layers_parent_smaller_unwritten(
+        backend: Backend,
+    ) -> Result<()> {
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
         integration_test_two_layers_small_common(tds, opts, true).await
     }
@@ -1381,8 +1387,7 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_scrub() -> Result<()> {
+    async fn integration_test_scrub(backend: Backend) -> Result<()> {
         // Volume with a subvolume and a RO parent:
         // SV: |----------|
         // RO: |1111111111|
@@ -1396,7 +1401,7 @@ mod test {
         //     |1111111111|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         // Create in_memory block_io
@@ -1459,8 +1464,7 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_scrub_short() -> Result<()> {
+    async fn integration_test_scrub_short(backend: Backend) -> Result<()> {
         // Volume with a subvolume and a smaller RO parent:
         // SV: |----------|
         // RO: |11111|
@@ -1475,7 +1479,7 @@ mod test {
         //     |1111155555|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         // Create in_memory block_io
@@ -1550,8 +1554,9 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_scrub_short_sparse() -> Result<()> {
+    async fn integration_test_scrub_short_sparse(
+        backend: Backend,
+    ) -> Result<()> {
         // Volume with a subvolume and a smaller RO parent:
         // SV: |----------|
         // RO: |11111|
@@ -1570,7 +1575,7 @@ mod test {
         //     |1121100300|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         // Create in_memory block_io
@@ -1647,8 +1652,7 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_scrub_useless() -> Result<()> {
+    async fn integration_test_scrub_useless(backend: Backend) -> Result<()> {
         // Volume with a subvolume and a RO parent:
         // SV: |----------|
         // RO: |1111111111|
@@ -1663,7 +1667,7 @@ mod test {
         // SV  |5555555555|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         // Create in_memory block_io
@@ -1724,9 +1728,9 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_volume_subvols_parent_scrub_sparse() -> Result<()>
-    {
+    async fn integration_test_volume_subvols_parent_scrub_sparse(
+        backend: Backend,
+    ) -> Result<()> {
         // Test a volume with two sub volumes, and RO parent
         // verify two writes, one that crosses the subvolume boundary
         // are persisted and data from the RO parent fills in
@@ -1761,7 +1765,7 @@ mod test {
             .await?;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::small(false).await?;
+        let tds1 = TestDownstairsSet::small(false, backend).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1770,7 +1774,7 @@ mod test {
             opts,
             gen: 1,
         });
-        let tds2 = TestDownstairsSet::small(false).await?;
+        let tds2 = TestDownstairsSet::small(false, backend).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1844,8 +1848,8 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
     async fn integration_test_volume_subvols_parent_scrub_sparse_2(
+        backend: Backend,
     ) -> Result<()> {
         // Test a volume with two sub volumes, and 3/4th RO parent
         // Write a few spots, one spanning the sub vols.
@@ -1882,7 +1886,7 @@ mod test {
             .await?;
 
         let mut sv = Vec::new();
-        let tds1 = TestDownstairsSet::small(false).await?;
+        let tds1 = TestDownstairsSet::small(false, backend).await?;
         let opts = tds1.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1891,7 +1895,7 @@ mod test {
             opts,
             gen: 1,
         });
-        let tds2 = TestDownstairsSet::small(false).await?;
+        let tds2 = TestDownstairsSet::small(false, backend).await?;
         let opts = tds2.opts();
         sv.push(VolumeConstructionRequest::Region {
             block_size: BLOCK_SIZE as u64,
@@ -1981,11 +1985,10 @@ mod test {
     }
 
     // Test that multiple upstairs can connect to a single read-only downstairs
-    #[tokio::test]
-    async fn integration_test_multi_read_only() -> Result<()> {
+    async fn integration_test_multi_read_only(backend: Backend) -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
-        let tds = TestDownstairsSet::small(true).await?;
+        let tds = TestDownstairsSet::small(true, backend).await?;
         let mut opts = tds.opts();
 
         let vcr_1 = VolumeConstructionRequest::Volume {
@@ -2042,8 +2045,7 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_scrub_no_rop() -> Result<()> {
+    async fn integration_test_scrub_no_rop(backend: Backend) -> Result<()> {
         // Volume with a subvolume and no RO parent:, verify the scrub
         // does no work
         // SV: |----------|
@@ -2058,7 +2060,7 @@ mod test {
         // SV  |55555-----|
 
         const BLOCK_SIZE: usize = 512;
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
@@ -2108,8 +2110,9 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_snapshot_backed_vol() -> Result<()> {
+    async fn integration_test_snapshot_backed_vol(
+        backend: Backend,
+    ) -> Result<()> {
         // Test using a "snapshot" (for this test, downstairs booted read-only)
         // as a read-only parent.
 
@@ -2117,7 +2120,8 @@ mod test {
 
         // boot three downstairs, write some data to them, then change to
         // read-only.
-        let mut test_downstairs_set = TestDownstairsSet::small(false).await?;
+        let mut test_downstairs_set =
+            TestDownstairsSet::small(false, backend).await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
@@ -2191,7 +2195,7 @@ mod test {
 
         // create a new volume, layering a new set of downstairs on top of the
         // read-only one we just (re)booted
-        let top_layer_tds = TestDownstairsSet::small(false).await?;
+        let top_layer_tds = TestDownstairsSet::small(false, backend).await?;
         let top_layer_opts = top_layer_tds.opts();
         let bottom_layer_opts = test_downstairs_set.opts();
 
@@ -2262,8 +2266,9 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_sqlite_backed_vol() -> Result<()> {
+    async fn integration_test_sqlite_backed_vol(
+        backend: Backend,
+    ) -> Result<()> {
         // Test using an old SQLite backend as a read-only parent.
 
         const BLOCK_SIZE: usize = 512;
@@ -2361,17 +2366,19 @@ mod test {
 
         // create a new volume, layering a new set of downstairs on top of the
         // read-only one we just (re)booted
-        let top_layer_tds = TestDownstairsSet::small(false).await?;
+        let top_layer_tds = TestDownstairsSet::small(false, backend).await?;
         let top_layer_opts = top_layer_tds.opts();
         let bottom_layer_opts = test_downstairs_set.opts();
 
         // The new volume is **not** using the SQLite backend!
-        assert!(!top_layer_tds
-            .downstairs1
-            .tempdir
-            .path()
-            .join("00/000/000.db")
-            .exists());
+        if !matches!(backend, Backend::SQLite) {
+            assert!(!top_layer_tds
+                .downstairs1
+                .tempdir
+                .path()
+                .join("00/000/000.db")
+                .exists());
+        }
 
         let vcr = VolumeConstructionRequest::Volume {
             id: Uuid::new_v4(),
@@ -2530,10 +2537,9 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_clone_raw() -> Result<()> {
+    async fn integration_test_clone_raw(backend: Backend) -> Result<()> {
         // Test downstairs region clone.
-        // Create three downstairs with raw backend, write some data to them.
+        // Create three downstairs with some backend, write some data to them.
         // Restart them all read only.
         // Create a new downstairs.
         // Clone a read only downstairs to the new downstairs
@@ -2546,7 +2552,8 @@ mod test {
 
         // boot three downstairs, write some data to them, then change to
         // read-only.
-        let mut test_downstairs_set = TestDownstairsSet::small(false).await?;
+        let mut test_downstairs_set =
+            TestDownstairsSet::small(false, backend).await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
@@ -3012,13 +3019,15 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_volume_replace_downstairs() -> Result<()> {
+    async fn integration_test_volume_replace_downstairs(
+        backend: Backend,
+    ) -> Result<()> {
         // Replace a downstairs with a new one
         const BLOCK_SIZE: usize = 512;
 
         // boot three downstairs, write some data to them
-        let test_downstairs_set = TestDownstairsSet::small(false).await?;
+        let test_downstairs_set =
+            TestDownstairsSet::small(false, backend).await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
@@ -3099,16 +3108,17 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_volume_clone_replace_ro_downstairs() -> Result<()>
-    {
+    async fn integration_test_volume_clone_replace_ro_downstairs(
+        backend: Backend,
+    ) -> Result<()> {
         // Replace a read only downstairs with a new one, that we cloned
         // from the original ro downstairs.
         const BLOCK_SIZE: usize = 512;
 
         // boot three downstairs, write some data to them, then change to
         // read-only.
-        let mut test_downstairs_set = TestDownstairsSet::small(false).await?;
+        let mut test_downstairs_set =
+            TestDownstairsSet::small(false, backend).await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
@@ -3230,13 +3240,15 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_volume_replace_bad_downstairs() -> Result<()> {
+    async fn integration_test_volume_replace_bad_downstairs(
+        backend: Backend,
+    ) -> Result<()> {
         // Attempt to replace a downstairs that we don't have.
         const BLOCK_SIZE: usize = 512;
 
         // Create three downstairs.
-        let test_downstairs_set = TestDownstairsSet::small(false).await?;
+        let test_downstairs_set =
+            TestDownstairsSet::small(false, backend).await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
@@ -3273,14 +3285,15 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_volume_inactive_replace_downstairs() -> Result<()>
-    {
+    async fn integration_test_volume_inactive_replace_downstairs(
+        backend: Backend,
+    ) -> Result<()> {
         // Replace a downstairs before the volume is active.
         const BLOCK_SIZE: usize = 512;
 
         // Create three downstairs.
-        let test_downstairs_set = TestDownstairsSet::small(false).await?;
+        let test_downstairs_set =
+            TestDownstairsSet::small(false, backend).await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
@@ -3313,13 +3326,15 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_volume_twice_replace_downstairs() -> Result<()> {
+    async fn integration_test_volume_twice_replace_downstairs(
+        backend: Backend,
+    ) -> Result<()> {
         // Replace a downstairs, then replace it again.
         const BLOCK_SIZE: usize = 512;
 
         // Create three downstairs.
-        let test_downstairs_set = TestDownstairsSet::small(false).await?;
+        let test_downstairs_set =
+            TestDownstairsSet::small(false, backend).await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
@@ -3365,15 +3380,17 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_volume_replace_active() -> Result<()> {
+    async fn integration_test_volume_replace_active(
+        backend: Backend,
+    ) -> Result<()> {
         // Attempt to replace a downstairs with one of our other
         // active downstairs.  This should return error as its is not
         // a legal replacement.
         const BLOCK_SIZE: usize = 512;
 
         // Create three downstairs.
-        let test_downstairs_set = TestDownstairsSet::small(false).await?;
+        let test_downstairs_set =
+            TestDownstairsSet::small(false, backend).await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
@@ -3416,9 +3433,14 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
     async fn integration_test_volume_replace_downstairs_then_takeover(
+        backend: Backend,
     ) -> Result<()> {
+        // This test is only valid for backends that will undergo replacement
+        if backend == Backend::SQLite {
+            return Ok(());
+        }
+
         let log = csl();
         // Replace a downstairs with a new one which will kick off
         // LiveRepair. Then spin up a new Upstairs with a newer
@@ -3427,7 +3449,8 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // boot three downstairs, write some data to them
-        let test_downstairs_set = TestDownstairsSet::big(false).await?;
+        let test_downstairs_set =
+            TestDownstairsSet::big(false, backend).await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
@@ -3535,13 +3558,14 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_problematic_downstairs() -> Result<()> {
+    async fn integration_test_problematic_downstairs(
+        backend: Backend,
+    ) -> Result<()> {
         // Make sure problematic downstairs don't cause problems Upstairs.
         const BLOCK_SIZE: usize = 512;
 
         // Create three problematic downstairs.
-        let test_downstairs_set = TestDownstairsSet::problem().await?;
+        let test_downstairs_set = TestDownstairsSet::problem(backend).await?;
 
         let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
         volume
@@ -3606,14 +3630,13 @@ mod test {
 
     // ZZZ Make a test of guest.activate_with_gen both fail and pass.
     // Maybe in a different place?  We need downstairs to do this.
-    #[tokio::test]
-    async fn integration_test_guest_downstairs() -> Result<()> {
+    async fn integration_test_guest_downstairs(backend: Backend) -> Result<()> {
         // Test using the guest layer to verify a new region is
         // what we expect, and a write and read work as expected
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -3647,10 +3670,9 @@ mod test {
     }
 
     /// Drop the guest right away and confirm that the worker thread stops
-    #[tokio::test]
-    async fn integration_test_guest_drop_early() -> Result<()> {
+    async fn integration_test_guest_drop_early(backend: Backend) -> Result<()> {
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -3666,11 +3688,11 @@ mod test {
 
     /// Same as `integration_test_guest_downstairs`, but dropping the Guest at
     /// the end and confirming that the worker thread stops
-    #[tokio::test]
-    async fn integration_test_guest_drop() -> Result<()> {
+    async fn integration_test_guest_drop(backend: Backend) -> Result<()> {
         const BLOCK_SIZE: usize = 512;
+
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -3706,13 +3728,14 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_guest_zero_length_io() -> Result<()> {
+    async fn integration_test_guest_zero_length_io(
+        backend: Backend,
+    ) -> Result<()> {
         // Test the guest layer with a write and read of zero length
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -3732,14 +3755,15 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_guest_replace_downstairs() -> Result<()> {
+    async fn integration_test_guest_replace_downstairs(
+        backend: Backend,
+    ) -> Result<()> {
         // Test using the guest layer to verify we can replace
         // a downstairs
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let log = csl();
@@ -3806,14 +3830,15 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_guest_replace_ds_before_active() -> Result<()> {
+    async fn integration_test_guest_replace_ds_before_active(
+        backend: Backend,
+    ) -> Result<()> {
         // Test using the guest layer to verify we can replace a downstairs
         // before the upstairs is active.
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let log = csl();
@@ -3854,12 +3879,13 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_upstairs_read_only_rejects_write() -> Result<()> {
+    async fn integration_test_upstairs_read_only_rejects_write(
+        backend: Backend,
+    ) -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
         // Spin up three read-only downstairs
-        let tds = TestDownstairsSet::small(true).await?;
+        let tds = TestDownstairsSet::small(true, backend).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -3885,13 +3911,14 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_guest_replace_many_downstairs() -> Result<()> {
+    async fn integration_test_guest_replace_many_downstairs(
+        backend: Backend,
+    ) -> Result<()> {
         // Test using the guest layer to verify we can replace one
         // downstairs, but not another while the replace is active.
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let log = csl();
@@ -3930,15 +3957,16 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_guest_downstairs_unwritten() -> Result<()> {
+    async fn integration_test_guest_downstairs_unwritten(
+        backend: Backend,
+    ) -> Result<()> {
         // Test using the guest layer to verify a new region is
         // what we expect, and a write_unwritten and read work as expected
         // The size here spans two extents.
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -3995,16 +4023,16 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_guest_downstairs_unwritten_sparse_1() -> Result<()>
-    {
+    async fn integration_test_guest_downstairs_unwritten_sparse_1(
+        backend: Backend,
+    ) -> Result<()> {
         // Test using the guest layer to verify a new region is
         // what we expect, and a write_unwritten and read work as expected,
         // this time with sparse writes
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -4048,8 +4076,8 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
     async fn integration_test_guest_downstairs_unwritten_sparse_mid(
+        backend: Backend,
     ) -> Result<()> {
         // Test using the guest layer to verify a new region is
         // what we expect, and a write_unwritten and read work as expected,
@@ -4057,7 +4085,7 @@ mod test {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -4105,15 +4133,15 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
     async fn integration_test_guest_downstairs_unwritten_sparse_end(
+        backend: Backend,
     ) -> Result<()> {
         // Test write_unwritten and read work as expected,
         // this time with sparse writes where the last block is written
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -4157,14 +4185,15 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_guest_downstairs_unwritten_span() -> Result<()> {
+    async fn integration_test_guest_downstairs_unwritten_span(
+        backend: Backend,
+    ) -> Result<()> {
         // Test write_unwritten and read work as expected,
         // Have the IO span an extent boundary.
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -4207,15 +4236,15 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_guest_downstairs_unwritten_span_2() -> Result<()>
-    {
+    async fn integration_test_guest_downstairs_unwritten_span_2(
+        backend: Backend,
+    ) -> Result<()> {
         // Test write_unwritten and read work as expected,
         // Have the IO span an extent boundary.
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await?;
+        let tds = TestDownstairsSet::small(false, backend).await?;
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -4258,13 +4287,12 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_io_out_of_range() {
+    async fn integration_test_io_out_of_range(backend: Backend) -> Result<()> {
         // Test reads and writes outside the valid region return error.
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = TestDownstairsSet::small(false, backend).await.unwrap();
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -4288,16 +4316,18 @@ mod test {
         let res = guest.read(BlockIndex(11), &mut buffer).await;
 
         assert!(res.is_err());
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn integration_test_io_span_out_of_range() {
+    async fn integration_test_io_span_out_of_range(
+        backend: Backend,
+    ) -> Result<()> {
         // Test reads and writes that start inside and extend
         // past the end of the region will return error.
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = TestDownstairsSet::small(false, backend).await.unwrap();
         let opts = tds.opts();
 
         let (guest, io) = Guest::new(None);
@@ -4321,6 +4351,7 @@ mod test {
         let res = guest.read(BlockIndex(10), &mut buffer).await;
 
         assert!(res.is_err());
+        Ok(())
     }
 
     // The following tests are for the Pantry
@@ -4385,12 +4416,11 @@ mod test {
         (pantry, volume_id, client)
     }
 
-    #[tokio::test]
-    async fn test_pantry_import_from_url_ovmf() {
+    async fn test_pantry_import_from_url_ovmf(backend: Backend) -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::big(false).await.unwrap();
+        let tds = TestDownstairsSet::big(false, backend).await.unwrap();
         let opts = tds.opts();
 
         // Start a pantry, and get the client for it
@@ -4477,12 +4507,14 @@ mod test {
             assert_eq!(&bytes[..][start..end], &buffer[start..end]);
             eprintln!("{} {} ok", start, end);
         }
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn test_pantry_import_from_url_ovmf_bad_digest() {
+    async fn test_pantry_import_from_url_ovmf_bad_digest(
+        backend: Backend,
+    ) -> Result<()> {
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::big(false).await.unwrap();
+        let tds = TestDownstairsSet::big(false, backend).await.unwrap();
 
         // Start a pantry, and get the client for it
         let (_pantry, volume_id, client) =
@@ -4522,10 +4554,12 @@ mod test {
         assert!(!result.job_result_ok);
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn test_pantry_import_from_local_server() {
+    async fn test_pantry_import_from_local_server(
+        backend: Backend,
+    ) -> Result<()> {
         const BLOCK_SIZE: usize = 512;
         let log = csl();
 
@@ -4546,7 +4580,7 @@ mod test {
 
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = TestDownstairsSet::small(false, backend).await.unwrap();
         let opts = tds.opts();
 
         let volume_id = Uuid::new_v4();
@@ -4622,12 +4656,12 @@ mod test {
         volume.read(BlockIndex(0), &mut buffer).await.unwrap();
 
         assert_eq!(vec![0x55; 5120], &buffer[..]);
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn test_pantry_snapshot() {
+    async fn test_pantry_snapshot(backend: Backend) -> Result<()> {
         // Spin off three downstairs, build our Crucible struct.
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = TestDownstairsSet::small(false, backend).await.unwrap();
 
         // Start a pantry, get the client for it, then use it to snapshot
         let (_pantry, volume_id, client) =
@@ -4644,15 +4678,15 @@ mod test {
             .unwrap();
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn test_pantry_bulk_write() {
+    async fn test_pantry_bulk_write(backend: Backend) -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = TestDownstairsSet::small(false, backend).await.unwrap();
         let opts = tds.opts();
 
         // Start a pantry, get the client for it, then use it to bulk_write in data
@@ -4702,15 +4736,17 @@ mod test {
             let end = (i + 1) * 512;
             assert_eq!(vec![i as u8; 512], buffer_data[start..end]);
         }
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn test_pantry_bulk_write_max_chunk_size() {
+    async fn test_pantry_bulk_write_max_chunk_size(
+        backend: Backend,
+    ) -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::big(false).await.unwrap();
+        let tds = TestDownstairsSet::big(false, backend).await.unwrap();
         let opts = tds.opts();
 
         // Start a pantry, get the client for it, then use it to bulk_write in data
@@ -4758,14 +4794,16 @@ mod test {
         volume.read(BlockIndex(0), &mut buffer).await.unwrap();
 
         assert_eq!(vec![0x99; PantryEntry::MAX_CHUNK_SIZE], &buffer[..]);
+        Ok(())
     }
 
     /// Assert that the Pantry will fail for non-block sized writes
-    #[tokio::test]
-    async fn test_pantry_fail_bulk_write_one_byte() {
+    async fn test_pantry_fail_bulk_write_one_byte(
+        backend: Backend,
+    ) -> Result<()> {
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = TestDownstairsSet::small(false, backend).await.unwrap();
 
         // Start a pantry, get the client for it, then use it to bulk_write in data
         let (_pantry, volume_id, client) =
@@ -4790,14 +4828,16 @@ mod test {
         assert_eq!(e.status(), reqwest::StatusCode::BAD_REQUEST);
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        Ok(())
     }
 
     /// Assert that the Pantry will fail for non-block sized reads
-    #[tokio::test]
-    async fn test_pantry_fail_bulk_read_one_byte() {
+    async fn test_pantry_fail_bulk_read_one_byte(
+        backend: Backend,
+    ) -> Result<()> {
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = TestDownstairsSet::small(false, backend).await.unwrap();
 
         // Start a pantry, get the client for it, then use it to bulk_read data
         let (_pantry, volume_id, client) =
@@ -4821,10 +4861,10 @@ mod test {
         assert_eq!(e.status(), reqwest::StatusCode::BAD_REQUEST);
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn test_pantry_scrub() {
+    async fn test_pantry_scrub(backend: Backend) -> Result<()> {
         // Test scrubbing the OVMF image from a URL
         // XXX httptest::Server does not support range requests, otherwise that
         // should be used here instead.
@@ -4855,7 +4895,7 @@ mod test {
         // Spin off three downstairs, build our Crucible struct (with a
         // read-only parent pointing to the random data above)
 
-        let tds = TestDownstairsSet::big(false).await.unwrap();
+        let tds = TestDownstairsSet::big(false, backend).await.unwrap();
         let opts = tds.opts();
 
         let volume_id = Uuid::new_v4();
@@ -4980,13 +5020,13 @@ mod test {
         volume.read(BlockIndex(0), &mut buffer).await.unwrap();
 
         assert_eq!(data, &buffer[..]);
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn test_pantry_bulk_read() {
+    async fn test_pantry_bulk_read(backend: Backend) -> Result<()> {
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = TestDownstairsSet::small(false, backend).await.unwrap();
 
         // Start a pantry, get the client for it, then use it to bulk_write then
         // bulk_read in data
@@ -5062,13 +5102,15 @@ mod test {
         );
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn test_pantry_bulk_read_max_chunk_size() {
+    async fn test_pantry_bulk_read_max_chunk_size(
+        backend: Backend,
+    ) -> Result<()> {
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::big(false).await.unwrap();
+        let tds = TestDownstairsSet::big(false, backend).await.unwrap();
 
         // Start a pantry, get the client for it, then use it to bulk_write in
         // data
@@ -5115,15 +5157,15 @@ mod test {
         );
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn test_pantry_validate() {
+    async fn test_pantry_validate(backend: Backend) -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = TestDownstairsSet::small(false, backend).await.unwrap();
 
         // Start a pantry, get the client for it, then use it to bulk_write in
         // data
@@ -5244,16 +5286,16 @@ mod test {
         assert!(response.job_result_ok);
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        Ok(())
     }
 
     // Test validating a subset of the beginning of the volume
-    #[tokio::test]
-    async fn test_pantry_validate_subset() {
+    async fn test_pantry_validate_subset(backend: Backend) -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = TestDownstairsSet::small(false, backend).await.unwrap();
 
         // Start a pantry, get the client for it, then use it to bulk_write in
         // data
@@ -5375,14 +5417,14 @@ mod test {
         assert!(response.job_result_ok);
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        Ok(())
     }
 
     // Test validating a non-block size amount fails
-    #[tokio::test]
-    async fn test_pantry_validate_fail() {
+    async fn test_pantry_validate_fail(backend: Backend) -> Result<()> {
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = TestDownstairsSet::small(false, backend).await.unwrap();
 
         // Start a pantry, get the client for it
         let (_pantry, volume_id, client) =
@@ -5417,10 +5459,10 @@ mod test {
         assert!(!response.job_result_ok);
 
         client.detach(&volume_id.to_string()).await.unwrap();
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn test_volume_replace_vcr() {
+    async fn test_volume_replace_vcr(backend: Backend) -> Result<()> {
         // Test of a replacement of a downstairs given two
         // VolumeConstructionRequests.
         // We create a volume, write some data to it, then replace a downstairs
@@ -5431,7 +5473,7 @@ mod test {
 
         info!(log, "test_volume_replace of a volume");
         // Make three downstairs
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = TestDownstairsSet::small(false, backend).await.unwrap();
         let opts = tds.opts();
         let volume_id = Uuid::new_v4();
 
@@ -5499,17 +5541,17 @@ mod test {
         volume.read(BlockIndex(0), &mut buffer).await.unwrap();
 
         assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
+        Ok(())
     }
 
-    #[tokio::test]
-    async fn test_volume_replace_rop_in_vcr() {
+    async fn test_volume_replace_rop_in_vcr(backend: Backend) -> Result<()> {
         // Verify that we can do replacement of a read_only_parent target
         // for a volume.
         const BLOCK_SIZE: usize = 512;
         let log = csl();
 
         // Make three downstairs
-        let tds = TestDownstairsSet::small(false).await.unwrap();
+        let tds = TestDownstairsSet::small(false, backend).await.unwrap();
         let opts = tds.opts();
         let volume_id = Uuid::new_v4();
 
@@ -5552,7 +5594,7 @@ mod test {
         // Make a new volume, and make the original volume the read only
         // parent.
         // Make three new downstairs for the new volume.
-        let sv_tds = TestDownstairsSet::small(false).await.unwrap();
+        let sv_tds = TestDownstairsSet::small(false, backend).await.unwrap();
         let sv_opts = sv_tds.opts();
         let sv_volume_id = Uuid::new_v4();
 
@@ -5620,16 +5662,18 @@ mod test {
         volume.read(BlockIndex(0), &mut buffer).await.unwrap();
 
         assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
+        Ok(())
     }
 
     /// Getting a volume's status should work even if something else took over
-    #[tokio::test]
-    async fn test_pantry_get_status_after_activation() {
+    async fn test_pantry_get_status_after_activation(
+        backend: Backend,
+    ) -> Result<()> {
         const BLOCK_SIZE: usize = 512;
 
         // Spin off three downstairs, build our Crucible struct.
 
-        let tds = TestDownstairsSet::big(false).await.unwrap();
+        let tds = TestDownstairsSet::big(false, backend).await.unwrap();
         let opts = tds.opts();
 
         // Start a pantry, get the client for it, then use it to bulk_write
@@ -5683,5 +5727,109 @@ mod test {
                 num_job_handles: 0,
             }
         ));
+        Ok(())
+    }
+
+    /// Macro defining the full integration test suite
+    ///
+    /// Functions in the test suite should take a `b: Backend` parameter and
+    /// return a `Result<()>`, which is unwrapped by the generated test function
+    ///
+    /// Add new functions here to ensure that they're tested for every backend!
+    macro_rules! integration_test_suite {
+        ($b:ident) => {
+            integration_test_suite!(
+                $b,
+                integration_test_region,
+                integration_test_region_huge_io,
+                volume_zero_length_io,
+                integration_test_two_layers,
+                integration_test_two_layers_write_unwritten,
+                integration_test_three_layers,
+                integration_test_url,
+                integration_test_just_read,
+                integration_test_volume_write_unwritten_1,
+                integration_test_volume_write_unwritten_2,
+                integration_test_volume_write_unwritten_sparse,
+                integration_test_volume_write_unwritten_subvols,
+                integration_test_volume_write_unwritten_subvols_sparse,
+                integration_test_volume_write_unwritten_subvols_3,
+                integration_test_two_layers_parent_smaller,
+                integration_test_two_layers_parent_smaller_unwritten,
+                integration_test_scrub,
+                integration_test_scrub_short,
+                integration_test_scrub_short_sparse,
+                integration_test_scrub_useless,
+                integration_test_volume_subvols_parent_scrub_sparse,
+                integration_test_volume_subvols_parent_scrub_sparse_2,
+                integration_test_multi_read_only,
+                integration_test_scrub_no_rop,
+                integration_test_snapshot_backed_vol,
+                test_pantry_get_status_after_activation,
+                integration_test_clone_raw,
+                integration_test_volume_clone_replace_ro_downstairs,
+                integration_test_volume_replace_bad_downstairs,
+                integration_test_volume_twice_replace_downstairs,
+                integration_test_volume_replace_active,
+                integration_test_volume_replace_downstairs,
+                integration_test_volume_inactive_replace_downstairs,
+                integration_test_volume_replace_downstairs_then_takeover,
+                integration_test_problematic_downstairs,
+                integration_test_sqlite_backed_vol,
+                integration_test_guest_replace_many_downstairs,
+                integration_test_guest_downstairs_unwritten,
+                integration_test_guest_drop,
+                integration_test_guest_zero_length_io,
+                integration_test_guest_replace_downstairs,
+                integration_test_guest_replace_ds_before_active,
+                integration_test_upstairs_read_only_rejects_write,
+                integration_test_guest_downstairs_unwritten_sparse_1,
+                integration_test_guest_downstairs_unwritten_sparse_mid,
+                integration_test_guest_downstairs_unwritten_sparse_end,
+                integration_test_guest_downstairs_unwritten_span,
+                integration_test_guest_downstairs_unwritten_span_2,
+                integration_test_io_out_of_range,
+                integration_test_io_span_out_of_range,
+                test_pantry_import_from_url_ovmf,
+                test_pantry_import_from_url_ovmf_bad_digest,
+                test_pantry_import_from_local_server,
+                test_pantry_snapshot,
+                test_pantry_bulk_write,
+                test_pantry_bulk_write_max_chunk_size,
+                test_pantry_fail_bulk_write_one_byte,
+                test_pantry_fail_bulk_read_one_byte,
+                test_pantry_scrub,
+                test_pantry_bulk_read,
+                test_pantry_bulk_read_max_chunk_size,
+                test_pantry_validate,
+                test_pantry_validate_subset,
+                test_pantry_validate_fail,
+                test_volume_replace_vcr,
+                test_volume_replace_rop_in_vcr,
+                integration_test_guest_drop_early,
+                integration_test_guest_downstairs,
+            );
+        };
+
+        ($b:ident, $($fs:ident),+ $(,)?) => {
+        $(
+            #[tokio::test]
+            async fn $fs() {
+                super::$fs(Backend::$b).await.unwrap()
+            }
+         )+};
+    }
+
+    mod raw_file {
+        use super::*;
+        integration_test_suite!(RawFile);
+    }
+    mod raw_file_v2 {
+        use super::*;
+        integration_test_suite!(RawFileV2);
+    }
+    mod sqlite {
+        use super::*;
+        integration_test_suite!(SQLite);
     }
 }
