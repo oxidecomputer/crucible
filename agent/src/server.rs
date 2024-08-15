@@ -1,5 +1,5 @@
 // Copyright 2024 Oxide Computer Company
-use super::datafile::DataFile;
+use super::datafile::{DataFile, JobInfo};
 use super::model;
 use anyhow::{anyhow, Result};
 use dropshot::{
@@ -318,10 +318,20 @@ async fn region_delete_running_snapshot(
     match rc.context().delete_running_snapshot_request(request) {
         Ok(_) => Ok(HttpResponseDeleted()),
         Err(e) => Err(HttpError::for_internal_error(format!(
-            "running snapshot create failure: {:?}",
+            "running snapshot delete failure: {:?}",
             e
         ))),
     }
+}
+
+#[endpoint {
+    method = GET,
+    path = "/crucible/0/work",
+}]
+async fn region_get_work_queue(
+    rc: RequestContext<Arc<DataFile>>,
+) -> SResult<HttpResponseOk<Vec<JobInfo>>, HttpError> {
+    Ok(HttpResponseOk(rc.context().get_work_queue()))
 }
 
 pub fn make_api() -> Result<dropshot::ApiDescription<Arc<DataFile>>> {
@@ -339,6 +349,7 @@ pub fn make_api() -> Result<dropshot::ApiDescription<Arc<DataFile>>> {
     api.register(region_run_snapshot)?;
     api.register(region_delete_running_snapshot)?;
 
+    api.register(region_get_work_queue)?;
     Ok(api)
 }
 
