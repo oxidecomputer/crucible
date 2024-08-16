@@ -3780,9 +3780,9 @@ dependencies = [
 
 [[package]]
 name = "proptest"
-version = "1.4.0"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31b476131c3c86cb68032fdc5cb6d5a1045e3e42d96b69fa599fd77701e1f5bf"
+checksum = "b4c2511913b88df1637da85cc8d96ec8e43a3f8bb8ccb71ee1ac240d6f3df58d"
 dependencies = [
  "bit-set",
  "bit-vec",
@@ -5666,7 +5666,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
  "cfg-if",
- "rand 0.6.5",
+ "rand 0.8.5",
  "static_assertions",
 ]
 
