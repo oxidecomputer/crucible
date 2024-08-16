@@ -654,7 +654,7 @@ dependencies = [
  "crucible-protocol",
  "crucible-workspace-hack",
  "serde_json",
- "strum 0.26.1",
+ "strum",
  "strum_macros 0.26.1",
  "tokio",
 ]
@@ -1702,13 +1702,13 @@ checksum = "25cbce373ec4653f1a01a31e8a5e5ec0c622dc27ff9c4e6606eefef5cbbed4a5"
 
 [[package]]
 name = "fd-lock"
-version = "3.0.13"
+version = "4.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef033ed5e9bad94e55838ca0ca906db0e043f517adda0c8b79c7a8c66c93c1b5"
+checksum = "7e5768da2206272c81ef0b5e951a41862938a6070da63bcea197899942d3b947"
 dependencies = [
  "cfg-if",
  "rustix",
- "windows-sys 0.48.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2818,7 +2818,7 @@ dependencies = [
  "slog",
  "slog-error-chain",
  "steno",
- "strum 0.26.1",
+ "strum",
  "thiserror",
  "uuid",
 ]
@@ -3092,7 +3092,7 @@ dependencies = [
  "serde_with",
  "slog",
  "slog-error-chain",
- "strum 0.26.1",
+ "strum",
  "thiserror",
  "tokio",
  "uuid",
@@ -3377,7 +3377,7 @@ dependencies = [
  "serde",
  "serde_json",
  "slog-error-chain",
- "strum 0.26.1",
+ "strum",
  "syn 2.0.71",
  "thiserror",
  "toml 0.8.14",
@@ -4044,9 +4044,9 @@ dependencies = [
 
 [[package]]
 name = "reedline"
-version = "0.30.0"
+version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "413a9fa6a5d8c937d3ae1e975bfb6a918bb0b6cdfae6a10416218c837a31b8fc"
+checksum = "2f8c676a3f3814a23c6a0fc9dff6b6c35b2e04df8134aae6f3929cc34de21a53"
 dependencies = [
  "chrono",
  "crossterm",
@@ -4055,8 +4055,8 @@ dependencies = [
  "nu-ansi-term 0.50.0",
  "serde",
  "strip-ansi-escapes",
- "strum 0.25.0",
- "strum_macros 0.25.3",
+ "strum",
+ "strum_macros 0.26.1",
  "thiserror",
  "unicode-segmentation",
  "unicode-width",
@@ -5044,12 +5044,6 @@ dependencies = [
 
 [[package]]
 name = "strum"
-version = "0.25.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "290d54ea6f91c969195bdbcd7442c8c2a2ba87da8bf60a7ee86a235d4bc1e125"
-
-[[package]]
-name = "strum"
 version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "723b93e8addf9aa965ebe2d11da6d7540fa2283fcea14b3371ff055f7ba13f5f"
@@ -5666,7 +5660,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
  "cfg-if",
- "rand 0.6.5",
+ "rand 0.8.5",
  "static_assertions",
 ]
 
