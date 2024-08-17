@@ -981,7 +981,7 @@ dependencies = [
  "omicron-common",
  "openapi-lint",
  "openapiv3",
- "opentelemetry 0.22.0",
+ "opentelemetry 0.24.0",
  "opentelemetry-jaeger",
  "oximeter",
  "oximeter-producer",
@@ -1024,7 +1024,7 @@ dependencies = [
  "crucible",
  "crucible-common",
  "crucible-workspace-hack",
- "opentelemetry 0.22.0",
+ "opentelemetry 0.24.0",
  "opentelemetry-jaeger",
  "rand 0.8.5",
  "tokio",
@@ -3257,9 +3257,9 @@ dependencies = [
 
 [[package]]
 name = "opentelemetry"
-version = "0.22.0"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "900d57987be3f2aeb70d385fff9b27fb74c5723cc9a52d904d4f9c807a0667bf"
+checksum = "4c365a63eec4f55b7efeceb724f1336f26a9cf3427b70e59e2cd2a5b947fba96"
 dependencies = [
  "futures-core",
  "futures-sink",
@@ -3267,7 +3267,6 @@ dependencies = [
  "once_cell",
  "pin-project-lite",
  "thiserror",
- "urlencoding",
 ]
 
 [[package]]
