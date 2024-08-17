@@ -60,7 +60,7 @@ hyper-staticfile = "0.9.6"
 indicatif = { version = "0.17.8", features = ["rayon"] }
 itertools = "0.12.1"
 libc = "0.2"
-mime_guess = "2.0.4"
+mime_guess = "2.0.5"
 nbd = "0.3.1"
 nix = { version = "0.29", features = [ "feature", "uio" ] }
 num_enum = "0.7"
