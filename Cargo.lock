@@ -661,7 +661,7 @@ dependencies = [
  "crucible-workspace-hack",
  "serde_json",
  "strum",
- "strum_macros 0.26.1",
+ "strum_macros 0.26.4",
  "tokio",
 ]
 
@@ -1167,7 +1167,7 @@ dependencies = [
  "num_enum",
  "schemars",
  "serde",
- "strum_macros 0.26.1",
+ "strum_macros 0.26.4",
  "tokio",
  "tokio-util",
  "uuid",
@@ -4061,7 +4061,7 @@ dependencies = [
  "serde",
  "strip-ansi-escapes",
  "strum",
- "strum_macros 0.26.1",
+ "strum_macros 0.26.4",
  "thiserror",
  "unicode-segmentation",
  "unicode-width",
@@ -5026,11 +5026,11 @@ dependencies = [
 
 [[package]]
 name = "strum"
-version = "0.26.1"
+version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "723b93e8addf9aa965ebe2d11da6d7540fa2283fcea14b3371ff055f7ba13f5f"
+checksum = "8fec0f0aef304996cf250b31b5a10dee7980c85da9d759361292b8bca5a18f06"
 dependencies = [
- "strum_macros 0.26.1",
+ "strum_macros 0.26.4",
 ]
 
 [[package]]
@@ -5048,11 +5048,11 @@ dependencies = [
 
 [[package]]
 name = "strum_macros"
-version = "0.26.1"
+version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a3417fc93d76740d974a01654a09777cb500428cc874ca9f45edfe0c4d4cd18"
+checksum = "4c6bee85a5a24955dc440386795aa378cd9cf82acd5f764469152d2270e581be"
 dependencies = [
- "heck 0.4.1",
+ "heck 0.5.0",
  "proc-macro2",
  "quote",
  "rustversion",
