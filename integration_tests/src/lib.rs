@@ -2732,8 +2732,8 @@ mod test {
         let res = volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                test_downstairs_set.downstairs1_address(),
-                new_downstairs.address(),
+                Some(test_downstairs_set.downstairs1_address()),
+                Some(new_downstairs.address()),
             )
             .await
             .unwrap();
@@ -2747,8 +2747,8 @@ mod test {
             match volume
                 .replace_downstairs(
                     test_downstairs_set.opts().id,
-                    test_downstairs_set.downstairs1_address(),
-                    new_downstairs.address(),
+                    Some(test_downstairs_set.downstairs1_address()),
+                    Some(new_downstairs.address()),
                 )
                 .await
                 .unwrap()
@@ -2868,8 +2868,8 @@ mod test {
         let res = volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                test_downstairs_set.downstairs1.address(),
-                new_ds.address(),
+                Some(test_downstairs_set.downstairs1.address()),
+                Some(new_ds.address()),
             )
             .await
             .unwrap();
@@ -2883,8 +2883,8 @@ mod test {
             match volume
                 .replace_downstairs(
                     test_downstairs_set.opts().id,
-                    test_downstairs_set.downstairs1.address(),
-                    new_ds.address(),
+                    Some(test_downstairs_set.downstairs1.address()),
+                    Some(new_ds.address()),
                 )
                 .await
                 .unwrap()
@@ -2948,8 +2948,8 @@ mod test {
         let res = volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                new_downstairs.address(),
-                other_new_downstairs.address(),
+                Some(new_downstairs.address()),
+                Some(other_new_downstairs.address()),
             )
             .await
             .unwrap();
@@ -2988,8 +2988,8 @@ mod test {
         let res = volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                test_downstairs_set.downstairs1_address(),
-                new_downstairs.address(),
+                Some(test_downstairs_set.downstairs1_address()),
+                Some(new_downstairs.address()),
             )
             .await
             .unwrap();
@@ -3028,8 +3028,8 @@ mod test {
         let res = volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                test_downstairs_set.downstairs1_address(),
-                new_downstairs.address(),
+                Some(test_downstairs_set.downstairs1_address()),
+                Some(new_downstairs.address()),
             )
             .await
             .unwrap();
@@ -3040,8 +3040,8 @@ mod test {
         let res = volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                test_downstairs_set.downstairs1_address(),
-                new_downstairs.address(),
+                Some(test_downstairs_set.downstairs1_address()),
+                Some(new_downstairs.address()),
             )
             .await
             .unwrap();
@@ -3081,8 +3081,8 @@ mod test {
         volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                test_downstairs_set.downstairs1_address(),
-                test_downstairs_set.downstairs2_address(),
+                Some(test_downstairs_set.downstairs1_address()),
+                Some(test_downstairs_set.downstairs2_address()),
             )
             .await
             .unwrap_err();
@@ -3092,8 +3092,8 @@ mod test {
         volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                test_downstairs_set.downstairs2_address(),
-                test_downstairs_set.downstairs1_address(),
+                Some(test_downstairs_set.downstairs2_address()),
+                Some(test_downstairs_set.downstairs1_address()),
             )
             .await
             .unwrap_err();
@@ -3153,8 +3153,8 @@ mod test {
         let res = volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                test_downstairs_set.downstairs1_address(),
-                new_downstairs.address(),
+                Some(test_downstairs_set.downstairs1_address()),
+                Some(new_downstairs.address()),
             )
             .await
             .unwrap();
@@ -3163,8 +3163,8 @@ mod test {
         match volume
             .replace_downstairs(
                 test_downstairs_set.opts().id,
-                test_downstairs_set.downstairs1_address(),
-                new_downstairs.address(),
+                Some(test_downstairs_set.downstairs1_address()),
+                Some(new_downstairs.address()),
             )
             .await
             .unwrap()
@@ -3470,8 +3470,83 @@ mod test {
         let res = guest
             .replace_downstairs(
                 tds.opts().id,
-                tds.downstairs1_address(),
-                new_downstairs.address(),
+                Some(tds.downstairs1_address()),
+                Some(new_downstairs.address()),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(res, ReplaceResult::Started);
+
+        // We can use the result from calling replace_downstairs to
+        // intuit status on progress of the replacement.
+        loop {
+            info!(log, "loop sleep start");
+            tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
+            info!(log, "loop sleep end");
+            match guest
+                .replace_downstairs(
+                    tds.opts().id,
+                    Some(tds.downstairs1_address()),
+                    Some(new_downstairs.address()),
+                )
+                .await
+                .unwrap()
+            {
+                ReplaceResult::StartedAlready => {
+                    info!(log, "Waiting for replacement to finish");
+                }
+                ReplaceResult::CompletedAlready => {
+                    info!(log, "Downstairs replacement completed");
+                    break;
+                }
+                x => {
+                    panic!("Bad result from replace_downstairs: {:?}", x);
+                }
+            }
+        }
+
+        // Read back our block post replacement, verify contents
+        let mut buffer = Buffer::new(10, BLOCK_SIZE);
+        guest
+            .read(Block::new(0, BLOCK_SIZE.trailing_zeros()), &mut buffer)
+            .await?;
+
+        assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_guest_replace_none_downstairs() -> Result<()> {
+        // Test using the guest layer to verify we can replace
+        // a downstairs with a NONE ZZZ XXX
+        const BLOCK_SIZE: usize = 512;
+
+        // Spin off three downstairs, build our Crucible struct.
+        let tds = TestDownstairsSet::small(false).await?;
+        let opts = tds.opts();
+
+        let log = csl();
+        let (guest, io) = Guest::new(Some(log.clone()));
+        let _jh = up_main(opts, 1, None, io, None)?;
+
+        guest.activate().await?;
+
+        // Write data in
+        guest
+            .write(
+                Block::new(0, BLOCK_SIZE.trailing_zeros()),
+                BytesMut::from(vec![0x55; BLOCK_SIZE * 10].as_slice()),
+            )
+            .await?;
+
+        // Replace a downstairs.
+        let res = guest
+            .replace_downstairs(
+                tds.opts().id,
+                Some(tds.downstairs1_address()),
+                None,
             )
             .await
             .unwrap();
@@ -3485,8 +3560,8 @@ mod test {
             match guest
                 .replace_downstairs(
                     tds.opts().id,
-                    tds.downstairs1_address(),
-                    new_downstairs.address(),
+                    Some(tds.downstairs1_address()),
+                    None,
                 )
                 .await
                 .unwrap()
@@ -3569,8 +3644,8 @@ mod test {
         let res = guest
             .replace_downstairs(
                 tds.opts().id,
-                tds.downstairs1_address(),
-                new_downstairs.address(),
+                Some(tds.downstairs1_address()),
+                Some(new_downstairs.address()),
             )
             .await
             .unwrap();
@@ -3582,8 +3657,8 @@ mod test {
         guest
             .replace_downstairs(
                 tds.opts().id,
-                tds.downstairs2_address(),
-                another_new_downstairs.address(),
+                Some(tds.downstairs2_address()),
+                Some(another_new_downstairs.address()),
             )
             .await
             .unwrap_err();

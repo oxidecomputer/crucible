@@ -2644,17 +2644,34 @@ impl Downstairs {
         self.ds_active.insert(ds_id, io);
     }
 
-    pub(crate) fn replace(
+    pub(crate) fn replace_target(
         &mut self,
         id: Uuid,
-        old: SocketAddr,
-        new: SocketAddr,
+        old: Option<SocketAddr>,
+        new: Option<SocketAddr>,
         up_state: &UpstairsState,
     ) -> Result<ReplaceResult, CrucibleError> {
         warn!(
             self.log,
-            "{id} request to replace downstairs {old} with {new}"
+            "{id} request to replace downstairs {:?} with {:?}", old, new
         );
+
+        if old.is_none() && new.is_none() {
+            return Err(CrucibleError::ReplaceRequestInvalid(format!(
+                "Both old and new targets can't be Empty",
+            )));
+        }
+
+        /*
+        Both old and new can't be none.
+        If old is None, then we only need to find one None and verify that
+        our new does not already exist.
+        If new is None, then we just make sure that our old does exist,
+        or there is at least one None.
+        If both old and new exist, then we have to be sure that both old
+        and new don't currently exist, or
+        be sure that if new exists, old does not.
+        */
 
         // We check all targets first to not only find our current target,
         // but to be sure our new target is not an already active target
@@ -2662,13 +2679,15 @@ impl Downstairs {
         let mut new_client_id: Option<ClientId> = None;
         let mut old_client_id: Option<ClientId> = None;
         for (i, c) in self.clients.iter().enumerate() {
-            if c.target_addr == Some(new) {
+            if c.target_addr == new {
                 new_client_id = Some(ClientId::new(i as u8));
-                info!(self.log, "{id} found new target: {new} at {i}");
+                info!(self.log, "{id} found new target: {:?} at {i}", new);
+                // If this is None, then it only matters if we don't find
+                // old.
             }
-            if c.target_addr == Some(old) {
+            if c.target_addr == old {
                 old_client_id = Some(ClientId::new(i as u8));
-                info!(self.log, "{id} found old target: {old} at {i}");
+                info!(self.log, "{id} found old target: {:?} at {i}", old);
             }
         }
 
@@ -2677,9 +2696,16 @@ impl Downstairs {
             if old_client_id.is_some() {
                 // New target is present, but old is present too, so this is not
                 // a valid replacement request.
-                return Err(CrucibleError::ReplaceRequestInvalid(format!(
-                    "Both old {old} and new {new} targets are in use",
-                )));
+                // Unless, there is already a None, we let a second None
+                // target land here. ZZZ
+                if old.is_some() {
+                    return Err(CrucibleError::ReplaceRequestInvalid(format!(
+                        "Both old {:?} and new {:?} targets are in use",
+                        old, new,
+                    )));
+                } else {
+                    info!(self.log, "Is this a 2nd None?");
+                }
             }
 
             // We don't really know if the "old" matches what was old,
@@ -2703,7 +2729,7 @@ impl Downstairs {
         // new because we want to be able to check if a replacement has
         // already happened and return status for that first.
         let Some(old_client_id) = old_client_id else {
-            warn!(self.log, "{id} downstairs {old} not found");
+            warn!(self.log, "{id} downstairs {:?} not found", old);
             return Ok(ReplaceResult::Missing);
         };
 
@@ -2720,7 +2746,8 @@ impl Downstairs {
                 | DsState::LiveRepairReady
                 | DsState::LiveRepair => {
                     return Err(CrucibleError::ReplaceRequestInvalid(format!(
-                        "Replace {old} failed, downstairs {client_id} is {:?}",
+                        "Replace {:?} failed, downstairs {client_id} is {:?}",
+                        old,
                         self.clients[client_id].state(),
                     )));
                 }
@@ -2731,13 +2758,73 @@ impl Downstairs {
         // Now we have found our old downstairs, verified the new is not in use
         // elsewhere, verified no other downstairs are in a bad state, we can
         // move forward with the replacement.
-        info!(self.log, "{id} replacing old: {old} at {old_client_id}");
+        info!(self.log, "{id} replacing old: {:?} at {old_client_id}", old);
 
         // Skip all outstanding jobs for this client
         self.skip_all_jobs(old_client_id);
 
         // Clear the client state and restart the IO task
-        self.clients[old_client_id].replace(up_state, new);
+        self.clients[old_client_id].replace_target(up_state, new);
+
+        Ok(ReplaceResult::Started)
+    }
+
+    pub(crate) fn _no_remove(
+        &mut self,
+        id: Uuid,
+        old: SocketAddr,
+        _up_state: &UpstairsState,
+    ) -> Result<ReplaceResult, CrucibleError> {
+        warn!(self.log, "{id} request to remove downstairs {old}");
+
+        // We check all targets first to not only find our current target,
+        let mut old_client_id: Option<ClientId> = None;
+        for (i, c) in self.clients.iter().enumerate() {
+            if c.target_addr == Some(old) {
+                old_client_id = Some(ClientId::new(i as u8));
+                info!(self.log, "{id} found old target: {old} at {i}");
+            }
+        }
+
+        // We put the check for the old downstairs after checking for the
+        // new because we want to be able to check if a replacement has
+        // already happened and return status for that first.
+        let Some(old_client_id) = old_client_id else {
+            warn!(self.log, "{id} downstairs {old} not found");
+            return Ok(ReplaceResult::Missing);
+        };
+
+        // Check for and Block a replacement if any (other) downstairs are
+        // in any of these states as we don't want to take more than one
+        // downstairs offline at the same time.
+        for client_id in ClientId::iter() {
+            if client_id == old_client_id {
+                continue;
+            }
+            match self.clients[client_id].state() {
+                DsState::Replacing // ZZZ Do we want to allow two Removed?
+                | DsState::Replaced
+                | DsState::LiveRepairReady
+                | DsState::LiveRepair => {
+                    return Err(CrucibleError::ReplaceRequestInvalid(format!(
+                        "Remove {old} failed, downstairs {client_id} is {:?}",
+                        self.clients[client_id].state(),
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        // Now we have found our old downstairs, verified the new is not in use
+        // elsewhere, verified no other downstairs are in a bad state, we can
+        // move forward with the replacement.
+        info!(self.log, "{id} removing old: {old} at {old_client_id}");
+
+        // Skip all outstanding jobs for this client
+        self.skip_all_jobs(old_client_id);
+
+        // Clear the client state and restart the IO task
+        //self.clients[old_client_id].replace_target(up_state);
 
         Ok(ReplaceResult::Started)
     }

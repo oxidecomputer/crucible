@@ -839,8 +839,8 @@ impl BlockIO for Volume {
     async fn replace_downstairs(
         &self,
         id: Uuid,
-        old: SocketAddr,
-        new: SocketAddr,
+        old: Option<SocketAddr>,
+        new: Option<SocketAddr>,
     ) -> Result<ReplaceResult, CrucibleError> {
         for sub_volume in &self.sub_volumes {
             let result = sub_volume.replace_downstairs(id, old, new).await?;
@@ -1031,8 +1031,8 @@ impl BlockIO for SubVolume {
     async fn replace_downstairs(
         &self,
         id: Uuid,
-        old: SocketAddr,
-        new: SocketAddr,
+        old: Option<SocketAddr>,
+        new: Option<SocketAddr>,
     ) -> Result<ReplaceResult, CrucibleError> {
         self.block_io.replace_downstairs(id, old, new).await
     }
@@ -1688,6 +1688,7 @@ impl Volume {
         original: VolumeConstructionRequest,
         replacement: VolumeConstructionRequest,
     ) -> Result<ReplaceResult, CrucibleError> {
+        // ZZZ fix this for  Some(target) as we need to support that.
         let (original_target, new_target) =
             match Self::compare_vcr_for_target_replacement(
                 original,
@@ -1710,7 +1711,11 @@ impl Volume {
         );
 
         match self
-            .replace_downstairs(self.uuid, original_target, new_target)
+            .replace_downstairs(
+                self.uuid,
+                Some(original_target),
+                Some(new_target),
+            )
             .await
         {
             Ok(ReplaceResult::Missing) => {

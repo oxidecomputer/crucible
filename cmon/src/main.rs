@@ -108,6 +108,7 @@ fn short_state(dss: DsState) -> String {
         DsState::Disabled => "DIS".to_string(),
         DsState::Replacing => "RPC".to_string(),
         DsState::Replaced => "RPD".to_string(),
+        DsState::Removed => "REM".to_string(),
     }
 }
 

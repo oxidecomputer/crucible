@@ -43,7 +43,7 @@ pub enum CliMessage {
     RandRead,
     ReadResponse(usize, Result<Bytes, CrucibleError>),
     RandWrite,
-    Replace(SocketAddr, SocketAddr),
+    Replace(Option<SocketAddr>, Option<SocketAddr>),
     ReplaceResult(Result<ReplaceResult, CrucibleError>),
     // Show the work queues
     ShowWork,
@@ -265,10 +265,33 @@ mod tests {
     }
 
     #[test]
-    fn rt_replace() -> Result<()> {
+    fn rt_replace_some() -> Result<()> {
         let d0: SocketAddr = "127.0.0.1:1234".parse().unwrap();
         let d1: SocketAddr = "127.0.0.1:5332".parse().unwrap();
-        let input = CliMessage::Replace(d0, d1);
+        let input = CliMessage::Replace(Some(d0), Some(d1));
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_replace_none_one() -> Result<()> {
+        let d0: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        let input = CliMessage::Replace(Some(d0), None);
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_replace_none_two() -> Result<()> {
+        let d0: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        let input = CliMessage::Replace(None, Some(d0));
+        assert_eq!(input, round_trip(&input)?);
+        Ok(())
+    }
+
+    #[test]
+    fn rt_replace_none_both() -> Result<()> {
+        let input = CliMessage::Replace(None, None);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }

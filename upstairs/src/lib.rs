@@ -155,8 +155,8 @@ pub trait BlockIO: Sync {
     async fn replace_downstairs(
         &self,
         _id: Uuid,
-        _old: SocketAddr,
-        _new: SocketAddr,
+        _old: Option<SocketAddr>,
+        _new: Option<SocketAddr>,
     ) -> Result<ReplaceResult, CrucibleError> {
         panic!("should never hit here!");
     }
@@ -837,6 +837,8 @@ pub enum DsState {
      * begun.
      */
     Replaced,
+    /// The downstairs is gone, but a replacement has not arrived.
+    Removed,
 }
 impl std::fmt::Display for DsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -897,6 +899,9 @@ impl std::fmt::Display for DsState {
             }
             DsState::Replaced => {
                 write!(f, "Replaced")
+            }
+            DsState::Removed => {
+                write!(f, "Removed")
             }
         }
     }
@@ -1513,8 +1518,8 @@ pub(crate) enum BlockOp {
     // Management commands
     ReplaceDownstairs {
         id: Uuid,
-        old: SocketAddr,
-        new: SocketAddr,
+        old: Option<SocketAddr>,
+        new: Option<SocketAddr>,
         done: BlockRes<ReplaceResult>,
     },
     // Query ops

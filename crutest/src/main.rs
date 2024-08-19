@@ -2008,8 +2008,8 @@ async fn replace_workload(
             match guest_c
                 .replace_downstairs(
                     Uuid::new_v4(),
-                    targets[old_ds],
-                    targets[new_ds],
+                    Some(targets[old_ds]),
+                    Some(targets[new_ds]),
                 )
                 .await
             {

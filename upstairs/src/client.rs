@@ -543,6 +543,7 @@ impl DownstairsClient {
 
             DsState::Replacing => DsState::Replaced,
 
+            DsState::Removed => DsState::Removed,
             DsState::Migrating => panic!(),
         };
 
@@ -590,7 +591,7 @@ impl DownstairsClient {
     /// Resets this Downstairs and start a fresh connection
     ///
     /// # Panics
-    /// If `self.client_task` is not `None`, or `self.target_addr` is `None`
+    /// If `self.client_task` is not `None`, or ZZZ `self.target_addr` is `None`
     pub(crate) fn reinitialize(&mut self, auto_promote: bool) {
         // Clear this Downstair's repair address, and let the YesItsMe set it.
         // This works if this Downstairs is new, reconnecting, or was replaced
@@ -652,7 +653,7 @@ impl DownstairsClient {
         log: &Logger,
     ) -> ClientTaskHandle {
         #[cfg(test)]
-        if let Some(target) = target {
+        if target.is_some() {
             Self::new_network_task(
                 target,
                 delay,
@@ -668,7 +669,7 @@ impl DownstairsClient {
 
         #[cfg(not(test))]
         Self::new_network_task(
-            target.expect("must provide socketaddr"),
+            target,
             delay,
             connect,
             client_id,
@@ -679,7 +680,7 @@ impl DownstairsClient {
     }
 
     fn new_network_task(
-        target: SocketAddr,
+        target: Option<SocketAddr>,
         delay: bool,
         connect: bool,
         client_id: ClientId,
@@ -858,6 +859,7 @@ impl DownstairsClient {
             DsState::LiveRepair => DsState::Faulted,
             DsState::LiveRepairReady => DsState::Faulted,
             DsState::Replacing => DsState::Replaced,
+            DsState::Removed => DsState::Removed,
             _ => {
                 /*
                  * Any other state means we had not yet enabled this
@@ -903,6 +905,7 @@ impl DownstairsClient {
             DsState::Faulted
             | DsState::Replaced
             | DsState::Replacing
+            | DsState::Removed
             | DsState::LiveRepairReady => {
                 io.state.insert(self.client_id, IOState::Skipped);
                 self.skipped_jobs.insert(io.ds_id);
@@ -939,18 +942,23 @@ impl DownstairsClient {
     }
 
     /// Prepares for a new connection, then restarts the IO task
-    pub(crate) fn replace(
+    pub(crate) fn replace_target(
         &mut self,
         up_state: &UpstairsState,
-        new: SocketAddr,
+        new: Option<SocketAddr>,
     ) {
-        self.target_addr = Some(new);
+        self.target_addr = new;
 
         self.region_metadata = None;
-        self.checked_state_transition(up_state, DsState::Replacing);
         self.stats.replaced += 1;
 
-        self.halt_io_task(ClientStopReason::Replacing);
+        if new.is_some() {
+            self.checked_state_transition(up_state, DsState::Replacing);
+            self.halt_io_task(ClientStopReason::Replacing);
+        } else {
+            self.checked_state_transition(up_state, DsState::Removed);
+            self.halt_io_task(ClientStopReason::Removed);
+        }
     }
 
     /// Sets `self.state` to `new_state`, with logging and validity checking
@@ -995,6 +1003,9 @@ impl DownstairsClient {
         match new_state {
             DsState::Replacing => {
                 // A downstairs can be replaced at any time.
+            }
+            DsState::Removed => {
+                // A downstairs can be removed at any time.
             }
             DsState::Replaced => {
                 assert_eq!(old_state, DsState::Replacing);
@@ -2002,6 +2013,16 @@ impl DownstairsClient {
                             ClientStopReason::Replacing,
                         );
                     }
+                    DsState::Removed => {
+                        warn!(
+                            self.log,
+                            "exiting negotiation because we're removed"
+                        );
+                        self.restart_connection(
+                            up_state,
+                            ClientStopReason::Removed,
+                        );
+                    }
                     bad_state => {
                         panic!(
                             "[{}] join from invalid state {} {} {:?}",
@@ -2032,6 +2053,18 @@ impl DownstairsClient {
                         self.restart_connection(
                             up_state,
                             ClientStopReason::Replacing,
+                        );
+                        return Ok(false); // TODO should we trigger set_inactive?
+                    }
+                    DsState::Removed => {
+                        error!(
+                            self.log,
+                            "exiting negotiation due to LastFlushAck \
+                             while replacing"
+                        );
+                        self.restart_connection(
+                            up_state,
+                            ClientStopReason::Removed,
                         );
                         return Ok(false); // TODO should we trigger set_inactive?
                     }
@@ -2083,6 +2116,18 @@ impl DownstairsClient {
                             self.log,
                             "exiting negotiation due to ExtentVersions while \
                              replacing"
+                        );
+                        self.restart_connection(
+                            up_state,
+                            ClientStopReason::Replacing,
+                        );
+                        return Ok(false); // TODO should we trigger set_inactive?
+                    }
+                    DsState::Removed => {
+                        warn!(
+                            self.log,
+                            "exiting negotiation due to ExtentVersions while \
+                             removed"
                         );
                         self.restart_connection(
                             up_state,
@@ -2349,6 +2394,9 @@ pub(crate) enum ClientStopReason {
     /// The test suite has requested a fault
     #[cfg(test)]
     RequestedFault,
+
+    /// The downstairs is gone
+    Removed,
 }
 
 /// Response received from the I/O task
@@ -2416,7 +2464,7 @@ pub(crate) enum ClientRunResult {
 struct ClientIoTask {
     client_id: ClientId,
     tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
-    target: SocketAddr,
+    target: Option<SocketAddr>,
 
     /// Request channel from the main task
     request_rx: mpsc::UnboundedReceiver<Message>,
@@ -2507,6 +2555,30 @@ impl ClientIoTask {
     }
 
     async fn run_inner(&mut self) -> ClientRunResult {
+        // If we have no target, then this downstairs is removed.
+        // All we do here is wait for the new downstairs to show up, which
+        // will send us a stop.
+        if self.target.is_none() {
+            // ZZZ Assert or something that state is Removed
+            warn!(self.log, "Client IO task does nothing without a target");
+            tokio::select! {
+                s = &mut self.stop => {
+                    return match s {
+                        Ok(s) =>
+                            ClientRunResult::RequestedStop(s),
+                        Err(e) => {
+                            warn!(
+                                self.log,
+                               "client_stop_rx closed unexpectedly: {e:?}"
+                            );
+                            ClientRunResult::QueueClosed
+                        }
+                    }
+                }
+            }
+        }
+        let target = self.target.unwrap();
+
         // If we're reconnecting, then add a short delay to avoid constantly
         // spinning (e.g. if something is fundamentally wrong with the
         // Downstairs)
@@ -2565,20 +2637,20 @@ impl ClientIoTask {
         }
 
         // Make connection to this downstairs.
-        let sock = if self.target.is_ipv4() {
+        let sock = if target.is_ipv4() {
             TcpSocket::new_v4().unwrap()
         } else {
             TcpSocket::new_v6().unwrap()
         };
 
         // Set a connect timeout, and connect to the target:
-        info!(self.log, "connecting to {}", self.target);
+        info!(self.log, "connecting to {}", target);
         let tcp: TcpStream = tokio::select! {
             _ = sleep_until(deadline_secs(10.0))=> {
                 warn!(self.log, "connect timeout");
                 return ClientRunResult::ConnectionTimeout;
             }
-            tcp = sock.connect(self.target) => {
+            tcp = sock.connect(target) => {
                 match tcp {
                     Ok(tcp) => {
                         info!(
@@ -2592,7 +2664,7 @@ impl ClientIoTask {
                         warn!(
                             self.log,
                             "ds_connection connect to {} failure: {e:?}",
-                            self.target,
+                            target,
                         );
                         return ClientRunResult::ConnectionFailed(e);
                     }

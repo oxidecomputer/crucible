@@ -88,27 +88,38 @@
         ]
       },
       "DsState": {
-        "type": "string",
-        "enum": [
-          "new",
-          "bad_version",
-          "wait_active",
-          "wait_quorum",
-          "bad_region",
-          "disconnected",
-          "reconcile",
-          "failed_reconcile",
-          "active",
-          "faulted",
-          "live_repair_ready",
-          "live_repair",
-          "migrating",
-          "offline",
-          "replay",
-          "deactivated",
-          "disabled",
-          "replacing",
-          "replaced"
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "new",
+              "bad_version",
+              "wait_active",
+              "wait_quorum",
+              "bad_region",
+              "disconnected",
+              "reconcile",
+              "failed_reconcile",
+              "active",
+              "faulted",
+              "live_repair_ready",
+              "live_repair",
+              "migrating",
+              "offline",
+              "replay",
+              "deactivated",
+              "disabled",
+              "replacing",
+              "replaced"
+            ]
+          },
+          {
+            "description": "The downstairs is gone, but a replacement has not arrived.",
+            "type": "string",
+            "enum": [
+              "removed"
+            ]
+          }
         ]
       },
       "Error": {

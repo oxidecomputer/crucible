@@ -162,13 +162,14 @@ enum CliCommand {
         #[clap(long, short, default_value = "1", action)]
         len: usize,
     },
+    /// Replace a downstairs target.
     Replace {
-        /// Replace a downstairs old (current) SocketAddr.
+        /// The current SocketAddr target (or None) you wish to replace.
         #[clap(long, short, action)]
-        old: SocketAddr,
-        /// Replace a downstairs new SocketAddr.
+        old: Option<SocketAddr>,
+        /// The new downstairs SocketAddr (or None)
         #[clap(long, short, action)]
-        new: SocketAddr,
+        new: Option<SocketAddr>,
     },
     /// Issue a random read
     Rr,

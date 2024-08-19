@@ -1092,7 +1092,8 @@ impl Upstairs {
                 self.submit_flush(Some(done), snapshot_details);
             }
             BlockOp::ReplaceDownstairs { id, old, new, done } => {
-                let r = self.downstairs.replace(id, old, new, &self.state);
+                let r =
+                    self.downstairs.replace_target(id, old, new, &self.state);
                 done.send_result(r);
             }
 

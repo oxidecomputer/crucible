@@ -735,8 +735,8 @@ impl BlockIO for Guest {
     async fn replace_downstairs(
         &self,
         id: Uuid,
-        old: SocketAddr,
-        new: SocketAddr,
+        old: Option<SocketAddr>,
+        new: Option<SocketAddr>,
     ) -> Result<ReplaceResult, CrucibleError> {
         self.send_and_wait(|done| BlockOp::ReplaceDownstairs {
             id,
