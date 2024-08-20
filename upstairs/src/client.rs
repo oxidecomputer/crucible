@@ -527,8 +527,7 @@ impl DownstairsClient {
 
             DsState::Faulted
             | DsState::LiveRepair
-            | DsState::LiveRepairReady
-            | DsState::Replaced => DsState::Faulted,
+            | DsState::LiveRepairReady => DsState::Faulted,
 
             DsState::New
             | DsState::Deactivated
@@ -541,7 +540,8 @@ impl DownstairsClient {
             | DsState::WaitActive
             | DsState::Disabled => DsState::Disconnected,
 
-            DsState::Replacing => DsState::Replaced,
+            // If we have replaced a downstairs, don't forget that.
+            DsState::Replacing | DsState::Replaced => DsState::Replaced,
 
             DsState::Migrating => panic!(),
         };
