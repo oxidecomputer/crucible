@@ -55,8 +55,8 @@ http = "0.2.12"
 httptest = "0.15.5"
 human_bytes = "0.4.3"
 humantime = "2.1.0"
-hyper = { version = "0.14", features = [ "full" ] }
-hyper-staticfile = "0.9.6"
+hyper = { version = "1", features = [ "full" ] }
+hyper-staticfile = "0.10.0"
 indicatif = { version = "0.17.8", features = ["rayon"] }
 itertools = "0.12.1"
 libc = "0.2"
@@ -112,7 +112,8 @@ usdt = "0.5.0"
 uuid = { version = "1", features = [ "serde", "v4" ] }
 
 # git
-dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main", features = [ "usdt-probes" ] }
+# dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main", features = [ "usdt-probes" ] }
+dropshot = { git = "https://github.com/seanmonstar/dropshot", branch = "hyper-v1-2.4-own-body" }
 omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 nexus-client = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 internal-dns = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }

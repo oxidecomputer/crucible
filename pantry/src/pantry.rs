@@ -851,7 +851,7 @@ impl Pantry {
                             "volume {} is no longer active!",
                             volume_id
                         )),
-                        http::StatusCode::GONE,
+                        hyper::StatusCode::GONE,
                         format!("volume {} is no longer active!", volume_id),
                     ))
                 } else {
