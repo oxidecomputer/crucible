@@ -28,7 +28,7 @@ pfexec coreadm -i /tmp/core.%f.%p \
  -e global-setid
 
 banner build
-ptime -m cargo build --verbose
+ptime -m cargo build --verbose --all-features
 
 banner output
 
