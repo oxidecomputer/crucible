@@ -360,7 +360,7 @@ impl BackpressureChannelState {
             1.0 / (1.0 - (frac - 1.0))
         };
         cfg.scale
-            .mul_f64(v.powi(2) + self.integral * cfg.integral_gain)
+            .mul_f64((v.powi(2) + self.integral).max(0.0))
             .as_micros() as u64
     }
 
@@ -368,8 +368,11 @@ impl BackpressureChannelState {
         if self.count == 0 {
             self.integral = 0.0;
         } else {
-            let n = self.count - cfg.start;
-            self.integral += n as f64 * dt;
+            let n = self.count as i64 - cfg.start as i64;
+            self.integral += (n as f64 * dt) * cfg.integral_gain;
+
+            // Limit the integral term to applying at most 2x scale weight
+            self.integral = self.integral.min(2.0);
         }
     }
 }
@@ -386,12 +389,12 @@ impl BackpressureState {
         let bp_queue = self.queue.get_backpressure_us(&cfg.queue);
 
         // Reset the integral term for the inactive control regime, to avoid
-        // accumulation.
-        if bp_bytes > bp_queue {
+        // integral windup.
+        if bp_queue > bp_bytes {
             self.bytes.integral = 0.0;
             self.queue.update_integral(&cfg.queue, dt);
         } else {
-            self.bytes.update_integral(&cfg.queue, dt);
+            self.bytes.update_integral(&cfg.bytes, dt);
             self.queue.integral = 0.0;
         }
     }
