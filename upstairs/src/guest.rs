@@ -10,9 +10,9 @@ use std::{
 };
 
 use crate::{
-    BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, JobId, RawReadResponse,
-    ReplaceResult, UpstairsAction, IO_OUTSTANDING_MAX_BYTES,
-    IO_OUTSTANDING_MAX_JOBS,
+    upstairs::BACKPRESSURE_INTEGRAL_SECS, BlockIO, BlockOp, BlockOpWaiter,
+    BlockRes, Buffer, JobId, RawReadResponse, ReplaceResult, UpstairsAction,
+    IO_OUTSTANDING_MAX_BYTES, IO_OUTSTANDING_MAX_JOBS,
 };
 use crucible_common::{build_logger, Block, BlockIndex, CrucibleError};
 use crucible_protocol::SnapshotDetails;
@@ -310,55 +310,90 @@ pub struct Guest {
 /// the two delays.
 #[derive(Copy, Clone, Debug)]
 struct BackpressureConfig {
-    /// When should backpressure start, in units of bytes
-    bytes_start: u64,
-    /// Maximum number of bytes (i.e. backpressure goes to infinity)
-    bytes_max: u64,
-    /// Scale of bytes-based backpressure
-    bytes_scale: Duration,
-
-    /// When should backpressure start, in units of jobs
-    queue_start: u64,
-    /// Maximum number of jobs (i.e. backpressure goes to infinity)
-    queue_max: u64,
-    /// Scale of queue-based delay
-    queue_scale: Duration,
+    /// Backpressure driven by bytes in flight
+    bytes: BackpressureChannelConfig,
+    /// Backpressure driven by jobs in the queue
+    queue: BackpressureChannelConfig,
 }
 
-impl BackpressureConfig {
-    // Our chosen backpressure curve is quadratic for 1/2 of its range, then
-    // goes to infinity in the second half.  This gives C0 + C1 continuity.
-    fn curve(frac: f64, scale: Duration) -> Duration {
-        // Remap from 0-1 to 0-1.5 for ease of calculation
-        let frac = frac * 2.0;
+#[derive(Copy, Clone, Debug, Default)]
+struct BackpressureChannelConfig {
+    /// When should backpressure start
+    start: u64,
+    /// Maximum value (i.e. where backpressure goes to infinity)
+    max: u64,
+    /// Scale for backpressure
+    scale: Duration,
+    /// Integral gain
+    integral_gain: f64,
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+struct BackpressureChannelState {
+    count: u64,
+    integral: f64,
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+struct BackpressureState {
+    bytes: BackpressureChannelState,
+    queue: BackpressureChannelState,
+}
+
+impl BackpressureChannelState {
+    fn get_backpressure_us(&self, cfg: &BackpressureChannelConfig) -> u64 {
+        // Saturate at 1 hour per job, which is basically infinite
+        if self.count >= cfg.max {
+            return Duration::from_secs(60 * 60).as_micros() as u64;
+        }
+
+        // These ratios start at 0 (at start) and hit 2 when backpressure
+        // should be infinite.
+        let frac = 2.0 * self.count.saturating_sub(cfg.start) as f64
+            / (cfg.max - cfg.start) as f64;
+
+        // Our chosen backpressure curve is quadratic for 1/2 of its range, then
+        // goes to infinity in the second half.  This gives C0 + C1 continuity.
         let v = if frac < 1.0 {
             frac
         } else {
             1.0 / (1.0 - (frac - 1.0))
         };
-        scale.mul_f64(v.powi(2))
+        cfg.scale
+            .mul_f64(v.powi(2) + self.integral * cfg.integral_gain)
+            .as_micros() as u64
     }
 
-    fn get_backpressure_us(&self, bytes: u64, jobs: u64) -> u64 {
-        // Saturate at 1 hour per job, which is basically infinite
-        if bytes >= self.bytes_max || jobs >= self.queue_max {
-            return Duration::from_secs(60 * 60).as_micros() as u64;
+    fn update_integral(&mut self, cfg: &BackpressureChannelConfig, dt: f64) {
+        if self.count == 0 {
+            self.integral = 0.0;
+        } else {
+            let n = self.count - cfg.start;
+            self.integral += n as f64 * dt;
         }
+    }
+}
 
-        // These ratios start at 0 (at *_start) and hit 1 when backpressure
-        // should be infinite.
-        let jobs_frac = jobs.saturating_sub(self.queue_start) as f64
-            / (self.queue_max - self.queue_start) as f64;
-        let bytes_frac = bytes.saturating_sub(self.bytes_start) as f64
-            / (self.bytes_max - self.bytes_start) as f64;
+impl BackpressureState {
+    fn get_backpressure_us(&self, cfg: &BackpressureConfig) -> u64 {
+        self.bytes
+            .get_backpressure_us(&cfg.bytes)
+            .max(self.queue.get_backpressure_us(&cfg.queue))
+    }
 
-        // Delay should be 0 at frac = 0, and infinite at frac = 1
-        let delay_bytes =
-            Self::curve(bytes_frac, self.bytes_scale).as_micros() as u64;
-        let delay_jobs =
-            Self::curve(jobs_frac, self.queue_scale).as_micros() as u64;
+    fn update_integrals(&mut self, cfg: &BackpressureConfig, dt: f64) {
+        let bp_bytes = self.bytes.get_backpressure_us(&cfg.bytes);
+        let bp_queue = self.queue.get_backpressure_us(&cfg.queue);
 
-        delay_bytes.max(delay_jobs)
+        // Reset the integral term for the inactive control regime, to avoid
+        // accumulation.
+        if bp_bytes > bp_queue {
+            self.bytes.integral = 0.0;
+            self.queue.update_integral(&cfg.queue, dt);
+        } else {
+            self.bytes.update_integral(&cfg.queue, dt);
+            self.queue.integral = 0.0;
+        }
     }
 }
 
@@ -405,6 +440,7 @@ impl Guest {
             bw_tokens: 0,
             backpressure_us: backpressure_us.clone(),
             backpressure_config: Self::default_backpressure_config(),
+            backpressure_state: BackpressureState::default(),
             log: log.clone(),
         };
         let guest = Guest {
@@ -422,14 +458,20 @@ impl Guest {
     fn default_backpressure_config() -> BackpressureConfig {
         BackpressureConfig {
             // Byte-based backpressure
-            bytes_start: 50 * 1024u64.pow(2), // 50 MiB
-            bytes_max: IO_OUTSTANDING_MAX_BYTES * 2,
-            bytes_scale: Duration::from_millis(100),
+            bytes: BackpressureChannelConfig {
+                start: 50 * 1024u64.pow(2), // 50 MiB
+                max: IO_OUTSTANDING_MAX_BYTES * 2,
+                scale: Duration::from_millis(100),
+                integral_gain: 1e-10, // hand-tuned
+            },
 
             // Queue-based backpressure
-            queue_start: 500,
-            queue_max: IO_OUTSTANDING_MAX_JOBS as u64 * 2,
-            queue_scale: Duration::from_millis(5),
+            queue: BackpressureChannelConfig {
+                start: 500,
+                max: IO_OUTSTANDING_MAX_JOBS as u64 * 2,
+                scale: Duration::from_millis(5),
+                integral_gain: 1e-5, // hand-tuned
+            },
         }
     }
 
@@ -804,6 +846,9 @@ pub struct GuestIoHandle {
     /// Backpressure configuration, as a starting point and max delay
     backpressure_config: BackpressureConfig,
 
+    /// Current backpressure state (i.e. integral terms)
+    backpressure_state: BackpressureState,
+
     /// Bandwidth tokens (in bytes)
     bw_tokens: usize,
 
@@ -939,24 +984,42 @@ impl GuestIoHandle {
         }
     }
 
+    pub fn update_backpressure_integral(&mut self) {
+        self.backpressure_state.update_integrals(
+            &self.backpressure_config,
+            BACKPRESSURE_INTEGRAL_SECS as f64,
+        );
+    }
+
     #[cfg(test)]
     pub fn disable_queue_backpressure(&mut self) {
-        self.backpressure_config.queue_scale = Duration::ZERO;
+        self.backpressure_config.queue.scale = Duration::ZERO;
+        self.backpressure_config.queue.integral_gain = 0.0;
+        self.backpressure_state.queue.count = 0;
+        self.backpressure_state.queue.integral = 0.0;
     }
 
     #[cfg(test)]
     pub fn disable_byte_backpressure(&mut self) {
-        self.backpressure_config.bytes_scale = Duration::ZERO;
+        self.backpressure_config.bytes.scale = Duration::ZERO;
+        self.backpressure_config.bytes.integral_gain = 0.0;
+        self.backpressure_state.bytes.count = 0;
+        self.backpressure_state.bytes.integral = 0.0;
     }
 
     #[cfg(test)]
     pub fn is_queue_backpressure_disabled(&self) -> bool {
-        self.backpressure_config.queue_scale == Duration::ZERO
+        self.backpressure_config.queue.scale == Duration::ZERO
     }
 
     /// Set `self.backpressure_us` based on outstanding IO ratio
-    pub fn set_backpressure(&self, bytes: u64, jobs: u64) {
-        let bp_usec = self.backpressure_config.get_backpressure_us(bytes, jobs);
+    pub fn set_backpressure(&mut self, bytes: u64, jobs: u64) {
+        self.backpressure_state.bytes.count = bytes;
+        self.backpressure_state.queue.count = jobs;
+
+        let bp_usec = self
+            .backpressure_state
+            .get_backpressure_us(&self.backpressure_config);
         self.backpressure_us.store(bp_usec, Ordering::SeqCst);
     }
 
@@ -1473,8 +1536,17 @@ mod test {
             let cfg = Guest::default_backpressure_config();
 
             let (t, desc) = loop {
-                let bp_usec =
-                    cfg.get_backpressure_us(bytes_in_flight, jobs_in_flight);
+                let state = BackpressureState {
+                    bytes: BackpressureChannelState {
+                        count: bytes_in_flight,
+                        integral: 0.0,
+                    },
+                    queue: BackpressureChannelState {
+                        count: jobs_in_flight,
+                        integral: 0.0,
+                    },
+                };
+                let bp_usec = state.get_backpressure_us(&cfg);
                 time_usec = time_usec.saturating_add(bp_usec);
 
                 if bytes_in_flight >= IO_OUTSTANDING_MAX_BYTES {
@@ -1513,10 +1585,17 @@ mod test {
     #[test]
     fn check_max_backpressure() {
         let cfg = Guest::default_backpressure_config();
-        let t = cfg.get_backpressure_us(
-            IO_OUTSTANDING_MAX_BYTES * 2 - 1024u64.pow(2),
-            0,
-        );
+        let state = BackpressureState {
+            bytes: BackpressureChannelState {
+                count: IO_OUTSTANDING_MAX_BYTES * 2 - 1024u64.pow(2),
+                integral: 0.0,
+            },
+            queue: BackpressureChannelState {
+                count: 0,
+                integral: 0.0,
+            },
+        };
+        let t = state.get_backpressure_us(&cfg);
         let timeout = Duration::from_micros(t);
         println!(
             "max byte-based delay: {}",
@@ -1529,8 +1608,17 @@ mod test {
             humantime::format_duration(timeout)
         );
 
-        let t =
-            cfg.get_backpressure_us(0, IO_OUTSTANDING_MAX_JOBS as u64 * 2 - 1);
+        let state = BackpressureState {
+            bytes: BackpressureChannelState {
+                count: 0,
+                integral: 0.0,
+            },
+            queue: BackpressureChannelState {
+                count: IO_OUTSTANDING_MAX_JOBS as u64 * 2 - 1,
+                integral: 0.0,
+            },
+        };
+        let t = state.get_backpressure_us(&cfg);
         let timeout = Duration::from_micros(t);
         println!(
             "max job-based delay: {}",
