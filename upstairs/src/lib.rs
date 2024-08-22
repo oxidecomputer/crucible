@@ -61,6 +61,7 @@ mod mend;
 pub use mend::{DownstairsMend, ExtentFix, RegionMetadata};
 pub use pseudo_file::CruciblePseudoFile;
 
+pub(crate) mod backpressure;
 pub(crate) mod guest;
 pub use guest::{Guest, WQCounts};
 use guest::{GuestIoHandle, GuestWorkId};
@@ -1748,7 +1749,7 @@ pub fn up_main(
     };
 
     #[cfg(test)]
-    let disable_backpressure = guest.is_queue_backpressure_disabled();
+    let disable_backpressure = guest.is_backpressure_disabled();
 
     /*
      * Build the Upstairs struct that we use to share data between

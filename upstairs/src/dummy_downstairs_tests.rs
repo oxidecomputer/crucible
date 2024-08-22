@@ -519,8 +519,7 @@ impl TestHarness {
         // Configure our guest without backpressure, to speed up tests which
         // require triggering a timeout
         let (g, mut io) = Guest::new(Some(log.clone()));
-        io.disable_queue_backpressure();
-        io.disable_byte_backpressure();
+        io.disable_backpressure();
         let guest = Arc::new(g);
 
         let crucible_opts = CrucibleOpts {

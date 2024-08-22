@@ -20,9 +20,12 @@ use crate::{
 use crucible_common::{BlockIndex, CrucibleError};
 use serde::{Deserialize, Serialize};
 
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 
 use bytes::BytesMut;
@@ -37,8 +40,9 @@ use uuid::Uuid;
 /// How often to log stats for DTrace
 const STAT_INTERVAL_SECS: f32 = 1.0;
 
-/// How often to update the backpressure integral term
-pub(crate) const BACKPRESSURE_INTEGRAL_SECS: f32 = 0.2;
+/// How often to run the backpressure control loop
+pub(crate) const BACKPRESSURE_CONTROL_SECS: Duration =
+    Duration::from_millis(20); // 50 Hz
 
 /// Minimum IO size (in bytes) before encryption / decryption is done off-thread
 const MIN_DEFER_SIZE_BYTES: u64 = 8192;
@@ -242,7 +246,7 @@ pub(crate) struct Upstairs {
     stat_deadline: Instant,
 
     /// Next time to update backpressure integrals
-    backpressure_integral_deadline: Instant,
+    backpressure_control_deadline: Instant,
 
     /// Interval between automatic flushes
     flush_timeout_secs: f32,
@@ -286,8 +290,8 @@ pub(crate) enum UpstairsAction {
     /// The guest connection has been dropped
     GuestDropped,
 
-    /// Accumulate current job / byte counts into the backpressure integrals
-    UpdateBackpressureIntegral,
+    /// Tick the backpressure control loop
+    BackpressureControl,
 
     /// We received an event of some kind, but it requires no follow-up work
     NoOp,
@@ -412,9 +416,8 @@ impl Upstairs {
             leak_deadline: deadline_secs(1.0),
             flush_deadline: deadline_secs(flush_timeout_secs),
             stat_deadline: deadline_secs(STAT_INTERVAL_SECS),
-            backpressure_integral_deadline: deadline_secs(
-                BACKPRESSURE_INTEGRAL_SECS,
-            ),
+            backpressure_control_deadline: Instant::now()
+                + BACKPRESSURE_CONTROL_SECS,
             flush_timeout_secs,
             guest,
             guest_dropped: false,
@@ -532,8 +535,8 @@ impl Upstairs {
             _ = sleep_until(self.stat_deadline) => {
                 UpstairsAction::StatUpdate
             }
-            _ = sleep_until(self.backpressure_integral_deadline) => {
-                UpstairsAction::UpdateBackpressureIntegral
+            _ = sleep_until(self.backpressure_control_deadline) => {
+                UpstairsAction::BackpressureControl
             }
             c = self.control_rx.recv() => {
                 // We can always unwrap this, because we hold a handle to the tx
@@ -545,11 +548,6 @@ impl Upstairs {
 
     /// Apply an action returned from [`Upstairs::select`]
     pub(crate) fn apply(&mut self, action: UpstairsAction) {
-        // Flag to indicate whether we should update the integral when updating
-        // backpressure below.  We update backpressure after every event, but
-        // only update the integral term at a fixed rate.
-        let mut update_backpressure_integral = false;
-
         // Dispatch based on action
         match action {
             UpstairsAction::Downstairs(d) => {
@@ -625,10 +623,10 @@ impl Upstairs {
                     .action_control_check));
                 self.on_control_req(c);
             }
-            UpstairsAction::UpdateBackpressureIntegral => {
-                update_backpressure_integral = true;
-                self.backpressure_integral_deadline =
-                    deadline_secs(BACKPRESSURE_INTEGRAL_SECS);
+            UpstairsAction::BackpressureControl => {
+                self.backpressure_control(BACKPRESSURE_CONTROL_SECS);
+                self.backpressure_control_deadline =
+                    Instant::now() + BACKPRESSURE_CONTROL_SECS;
             }
             UpstairsAction::NoOp => {
                 self.counters.action_noop += 1;
@@ -702,10 +700,6 @@ impl Upstairs {
                 res.send_ok(());
             }
         }
-
-        // For now, check backpressure after every event.  We may want to make
-        // this more nuanced in the future.
-        self.set_backpressure(update_backpressure_integral);
     }
 
     /// Helper function to await all deferred block requests
@@ -2069,7 +2063,7 @@ impl Upstairs {
     }
 
     /// Sets both guest and per-client backpressure
-    fn set_backpressure(&mut self, update_integral: bool) {
+    fn backpressure_control(&mut self, dt: Duration) {
         let dsw_max = self
             .downstairs
             .clients
@@ -2077,14 +2071,11 @@ impl Upstairs {
             .map(|c| c.total_live_work())
             .max()
             .unwrap_or(0);
-        self.guest.set_backpressure(
+        self.guest.backpressure_control(
             self.downstairs.write_bytes_outstanding(),
             dsw_max as u64,
+            dt,
         );
-        if update_integral {
-            self.guest.update_backpressure_integral();
-        }
-
         self.downstairs.set_client_backpressure();
     }
 
