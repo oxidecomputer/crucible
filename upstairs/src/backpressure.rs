@@ -1,5 +1,6 @@
 // Copyright 2024 Oxide Computer Company
 //! Backpressure control loop
+use crate::cdt;
 use std::time::Duration;
 
 /// Configuration for host-side backpressure
@@ -24,15 +25,17 @@ impl Default for BackpressureConfig {
             // Byte-based backpressure
             bytes: BackpressureChannelConfig {
                 target: 50 * 1024u64.pow(2), // 50 MiB
-                p_gain: 4e-9,                // manually tuned
-                i_gain: 4e-10,
+                p_gain: 4e-3,                // manually tuned
+                i_gain: 4e-4,
+                clamp: 500_000.0,
             },
 
             // Queue-based backpressure
             queue: BackpressureChannelConfig {
                 target: 500,
-                p_gain: 4e-5, // manually tuned
-                i_gain: 4e-6,
+                p_gain: 40.0, // manually tuned
+                i_gain: 4.0,
+                clamp: 50_000.0,
             },
         }
     }
@@ -65,6 +68,9 @@ pub struct BackpressureChannelConfig {
 
     /// Integral gain
     i_gain: f64,
+
+    /// Clamping value
+    clamp: f64,
 }
 
 #[cfg(test)]
@@ -112,7 +118,17 @@ impl BackpressureState {
             self.queue.reset();
         }
 
-        bp_bytes.max(bp_queue)
+        let out = bp_bytes.max(bp_queue);
+
+        cdt::up__pid!(|| (
+            self.bytes.error,
+            self.bytes.integral,
+            self.queue.error,
+            self.queue.integral,
+            out
+        ));
+
+        out
     }
 }
 
@@ -132,13 +148,16 @@ impl BackpressureChannelState {
         let prev_error = self.error;
         self.error = v as f64 - cfg.target as f64;
 
-        // Saturate at 1 hour per job, which is basically infinite
-        if self.error < cfg.target as f64 {
+        let mut p = cfg.p_gain * self.error;
+
+        // Avoid integral windup if we're clamping the P term
+        if p < cfg.clamp {
             // Accumulate average error over the timestep
             self.integral += (self.error + prev_error) / 2.0 * dt.as_secs_f64();
+        } else {
+            p = cfg.clamp;
         }
 
-        let p = cfg.p_gain * self.error;
         let i = cfg.i_gain * self.integral;
         // TODO: D term?
 
