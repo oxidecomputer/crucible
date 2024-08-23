@@ -1,4 +1,5 @@
 // Copyright 2022 Oxide Computer Company
+use crate::backpressure::BackpressureChannelConfig;
 use dropshot::endpoint;
 use dropshot::ApiDescription;
 use dropshot::ConfigDropshot;
@@ -7,6 +8,7 @@ use dropshot::HttpError;
 use dropshot::HttpResponseOk;
 use dropshot::HttpServerStarter;
 use dropshot::RequestContext;
+use dropshot::TypedBody;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -16,6 +18,8 @@ use super::*;
 pub(crate) fn build_api() -> ApiDescription<UpstairsInfo> {
     let mut api = ApiDescription::new();
     api.register(upstairs_fill_info).unwrap();
+    api.register(upstairs_pid_bytes).unwrap();
+    api.register(upstairs_pid_queue).unwrap();
     api.register(downstairs_work_queue).unwrap();
 
     api
@@ -72,6 +76,8 @@ pub async fn start(
 pub(crate) enum ControlRequest {
     DownstairsWorkQueue(oneshot::Sender<DownstairsWork>),
     UpstairsStats(oneshot::Sender<UpstairsStats>),
+    UpstairsPidBytesCfg(BackpressureChannelConfig),
+    UpstairsPidQueueCfg(BackpressureChannelConfig),
 }
 
 impl std::fmt::Debug for ControlRequest {
@@ -82,6 +88,12 @@ impl std::fmt::Debug for ControlRequest {
             }
             ControlRequest::UpstairsStats(..) => {
                 f.debug_struct("UpstairsStats").finish()
+            }
+            ControlRequest::UpstairsPidBytesCfg(c) => {
+                f.debug_struct("UpstairsPidBytes").field("cfg", c).finish()
+            }
+            ControlRequest::UpstairsPidQueueCfg(c) => {
+                f.debug_struct("UpstairsPidQueue").field("cfg", c).finish()
             }
         }
     }
@@ -147,6 +159,52 @@ async fn upstairs_fill_info(
 
     let out = rx.await.unwrap();
     Ok(HttpResponseOk(out))
+}
+
+/**
+ * Fetch the current value for all the stats in the UpstairsStats struct
+ */
+#[endpoint {
+    method = POST,
+    path = "/pid/bytes",
+    unpublished = true,
+}]
+async fn upstairs_pid_bytes(
+    rqctx: RequestContext<UpstairsInfo>,
+    body_param: TypedBody<BackpressureChannelConfig>,
+) -> Result<HttpResponseOk<()>, HttpError> {
+    let api_context = rqctx.context();
+
+    api_context
+        .up
+        .send(ControlRequest::UpstairsPidBytesCfg(body_param.into_inner()))
+        .await
+        .unwrap();
+
+    Ok(HttpResponseOk(()))
+}
+
+/**
+ * Fetch the current value for all the stats in the UpstairsStats struct
+ */
+#[endpoint {
+    method = POST,
+    path = "/pid/queue",
+    unpublished = true,
+}]
+async fn upstairs_pid_queue(
+    rqctx: RequestContext<UpstairsInfo>,
+    body_param: TypedBody<BackpressureChannelConfig>,
+) -> Result<HttpResponseOk<()>, HttpError> {
+    let api_context = rqctx.context();
+
+    api_context
+        .up
+        .send(ControlRequest::UpstairsPidQueueCfg(body_param.into_inner()))
+        .await
+        .unwrap();
+
+    Ok(HttpResponseOk(()))
 }
 
 /**

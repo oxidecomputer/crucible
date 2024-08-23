@@ -802,7 +802,7 @@ impl Upstairs {
     }
 
     /// Handles a request from the (optional) control server
-    fn on_control_req(&self, c: ControlRequest) {
+    fn on_control_req(&mut self, c: ControlRequest) {
         match c {
             ControlRequest::UpstairsStats(tx) => {
                 let ds_state = self.downstairs.collect_stats(|c| c.state());
@@ -871,6 +871,14 @@ impl Upstairs {
                 if r.is_err() {
                     warn!(self.log, "control message reply failed");
                 }
+            }
+            ControlRequest::UpstairsPidBytesCfg(cfg) => {
+                info!(self.log, "setting backpressure byte config to {cfg:?}");
+                self.guest.backpressure_cfg_bytes(cfg);
+            }
+            ControlRequest::UpstairsPidQueueCfg(cfg) => {
+                info!(self.log, "setting backpressure queue config to {cfg:?}");
+                self.guest.backpressure_cfg_queue(cfg);
             }
         }
     }

@@ -1,6 +1,8 @@
 // Copyright 2024 Oxide Computer Company
 //! Backpressure control loop
 use crate::cdt;
+use schemars::JsonSchema;
+use serde::Deserialize;
 use std::time::Duration;
 
 /// Configuration for host-side backpressure
@@ -43,6 +45,16 @@ impl Default for BackpressureConfig {
     }
 }
 
+impl BackpressureConfig {
+    pub fn set_byte_config(&mut self, cfg: BackpressureChannelConfig) {
+        // TODO: adjust integral windup to avoid jitter?
+        self.bytes = cfg;
+    }
+    pub fn set_queue_config(&mut self, cfg: BackpressureChannelConfig) {
+        self.queue = cfg;
+    }
+}
+
 /// We can disable backpressure in the test suite, where we often want to
 /// schedule a bunch of IO operations at once.
 #[cfg(test)]
@@ -57,7 +69,7 @@ impl BackpressureConfig {
     }
 }
 
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, Deserialize, JsonSchema)]
 pub struct BackpressureChannelConfig {
     /// Target value to which we should drive our count
     ///

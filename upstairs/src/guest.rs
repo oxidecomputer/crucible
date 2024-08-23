@@ -10,7 +10,9 @@ use std::{
 };
 
 use crate::{
-    backpressure::{BackpressureConfig, BackpressureState},
+    backpressure::{
+        BackpressureChannelConfig, BackpressureConfig, BackpressureState,
+    },
     BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, JobId, RawReadResponse,
     ReplaceResult, UpstairsAction,
 };
@@ -862,6 +864,20 @@ impl GuestIoHandle {
             self.req_head = Some(req);
             futures::future::pending().await
         }
+    }
+
+    pub(crate) fn backpressure_cfg_queue(
+        &mut self,
+        cfg: BackpressureChannelConfig,
+    ) {
+        self.backpressure_config.set_queue_config(cfg);
+    }
+
+    pub(crate) fn backpressure_cfg_bytes(
+        &mut self,
+        cfg: BackpressureChannelConfig,
+    ) {
+        self.backpressure_config.set_byte_config(cfg);
     }
 
     #[cfg(test)]
