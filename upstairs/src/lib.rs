@@ -317,7 +317,7 @@ mod cdt {
     fn up__action_repair_check(_: u64) {}
     fn up__action_control_check(_: u64) {}
     fn up__action_noop(_: u64) {}
-    fn up__pid(_: f64, _: f64, _: f64, _: f64, _: u64) {}
+    fn up__pid(_: u64, _: u64, _: u64, _: u64, _: u64) {}
     fn volume__read__start(_: u32, _: Uuid) {}
     fn volume__write__start(_: u32, _: Uuid) {}
     fn volume__writeunwritten__start(_: u32, _: Uuid) {}

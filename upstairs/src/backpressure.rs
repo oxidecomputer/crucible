@@ -25,8 +25,9 @@ impl Default for BackpressureConfig {
             // Byte-based backpressure
             bytes: BackpressureChannelConfig {
                 target: 50 * 1024u64.pow(2), // 50 MiB
-                p_gain: 4e-3,                // manually tuned
-                i_gain: 4e-4,
+                p_gain: 5e-4,                // manually tuned
+                i_gain: 5e-5,
+                d_gain: 0.0,
                 clamp: 500_000.0,
             },
 
@@ -35,6 +36,7 @@ impl Default for BackpressureConfig {
                 target: 500,
                 p_gain: 40.0, // manually tuned
                 i_gain: 4.0,
+                d_gain: 0.0,
                 clamp: 50_000.0,
             },
         }
@@ -68,6 +70,9 @@ pub struct BackpressureChannelConfig {
 
     /// Integral gain
     i_gain: f64,
+
+    /// Derivative gain
+    d_gain: f64,
 
     /// Clamping value
     clamp: f64,
@@ -121,10 +126,10 @@ impl BackpressureState {
         let out = bp_bytes.max(bp_queue);
 
         cdt::up__pid!(|| (
-            self.bytes.error,
-            self.bytes.integral,
-            self.queue.error,
-            self.queue.integral,
+            u64::from_ne_bytes(self.bytes.error.to_ne_bytes()),
+            u64::from_ne_bytes(self.bytes.integral.to_ne_bytes()),
+            u64::from_ne_bytes(self.queue.error.to_ne_bytes()),
+            u64::from_ne_bytes(self.queue.integral.to_ne_bytes()),
             out
         ));
 
@@ -159,9 +164,9 @@ impl BackpressureChannelState {
         }
 
         let i = cfg.i_gain * self.integral;
-        // TODO: D term?
+        let d = (self.error - prev_error) / dt.as_secs_f64() * cfg.d_gain;
 
-        let v = p + i;
+        let v = p + i + d;
         v.max(0.0) as u64
     }
 }
