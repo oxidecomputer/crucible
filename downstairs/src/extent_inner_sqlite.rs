@@ -527,7 +527,7 @@ impl SqliteMoreInner {
 
         // Perform writes, which may be broken up by skipped blocks
         for (skip, mut group) in (0..write.block_contexts.len())
-            .group_by(|i| writes_to_skip.contains(i))
+            .chunk_by(|i| writes_to_skip.contains(i))
             .into_iter()
         {
             if skip {

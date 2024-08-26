@@ -151,7 +151,7 @@ impl Buffer {
             .blocks
             .iter()
             .enumerate()
-            .group_by(|(_i, b)| matches!(b, ReadBlockContext::Empty))
+            .chunk_by(|(_i, b)| matches!(b, ReadBlockContext::Empty))
         {
             if empty {
                 continue;
