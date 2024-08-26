@@ -714,15 +714,15 @@ pub(crate) struct RawReadResponse {
  *              │     ▼   ▼   ▲    ▲                     ║     │
  *              │     │   │   │    │                     ║     │
  *              │     │   │   │    │                     ║     │
- *              │     │   │   ▲  ┌─┘                     ║     │
- *              │     │   │ ┌─┴──┴──┐                    ║     │
- *              │     │   │ │Replay │                    ║     │
- *              │     │   │ │       ├─►─┐                ║     │
- *              │     │   │ └─┬──┬──┘   │                ║     │
- *              │     │   ▼   ▼  ▲      │                ║     │
- *              │     │   │   │  │      │                ▲     │
- *              │     │ ┌─┴───┴──┴──┐   │   ┌────────────╨──┐  │
- *              │     │ │  Offline  │   └─►─┤   Faulted     │  │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   ▼   ▲    ▲                     ║     │
+ *              │     │   │   │    │                     ▲     │
+ *              │     │ ┌─┴───┴────┴┐       ┌────────────╨──┐  │
+ *              │     │ │  Offline  │       │   Faulted     │  │
  *              │     │ │           ├─────►─┤               │  │
  *              │     │ └───────────┘       └─┬─┬───────┬─┬─┘  │
  *              │     │                       ▲ ▲       ▼ ▲    ▲
@@ -813,11 +813,6 @@ pub enum DsState {
      */
     Offline,
     /*
-     * This downstairs was offline but is now back online and we are
-     * sending it all the I/O it missed when it was unavailable.
-     */
-    Replay,
-    /*
      * A guest requested deactivation, this downstairs has completed all
      * its outstanding work and is now waiting for the upstairs to
      * transition back to initializing.
@@ -882,9 +877,6 @@ impl std::fmt::Display for DsState {
             }
             DsState::Offline => {
                 write!(f, "Offline")
-            }
-            DsState::Replay => {
-                write!(f, "Replay")
             }
             DsState::Deactivated => {
                 write!(f, "Deactivated")
