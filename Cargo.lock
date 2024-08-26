@@ -846,7 +846,7 @@ dependencies = [
  "http 0.2.12",
  "humantime",
  "internal-dns",
- "itertools",
+ "itertools 0.13.0",
  "libc",
  "nexus-client",
  "omicron-common",
@@ -1003,7 +1003,7 @@ dependencies = [
  "http 0.2.12",
  "hyper",
  "hyper-staticfile",
- "itertools",
+ "itertools 0.13.0",
  "libc",
  "mime_guess",
  "nix 0.29.0",
@@ -1283,7 +1283,7 @@ dependencies = [
  "crucible-workspace-hack",
  "futures",
  "futures-core",
- "itertools",
+ "itertools 0.13.0",
  "ringbuffer",
  "serde",
  "serde_json",
@@ -2461,6 +2461,15 @@ name = "itertools"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
+dependencies = [
+ "either",
+]
+
+[[package]]
+name = "itertools"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "413ee7dfc52ee1a4949ceeb7dbc8a33f2d6c088194d9f922fb8318faf1f01186"
 dependencies = [
  "either",
 ]
@@ -4080,7 +4089,7 @@ dependencies = [
  "chrono",
  "crossterm",
  "fd-lock",
- "itertools",
+ "itertools 0.12.1",
  "nu-ansi-term 0.50.0",
  "serde",
  "strip-ansi-escapes",
