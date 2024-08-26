@@ -67,17 +67,21 @@ pub struct BackpressureConfig {
 
 impl Default for BackpressureConfig {
     fn default() -> BackpressureConfig {
+        // `max` values below must be higher than `IO_OUTSTANDING_MAX_*`;
+        // otherwise, replaying jobs to a previously-Offline Downstairs could
+        // immediately kick us into the infinite-backpressure regine, which
+        // would be unfortunate.
         BackpressureConfig {
             // Byte-based backpressure
             bytes: BackpressureChannelConfig {
-                start: 50 * 1024u64.pow(2), // 50 MiB
+                start: 4 * 1024u64.pow(2), // 4 MiB
                 max: IO_OUTSTANDING_MAX_BYTES * 2,
-                scale: Duration::from_millis(100),
+                scale: Duration::from_millis(50),
             },
 
             // Queue-based backpressure
             queue: BackpressureChannelConfig {
-                start: 500,
+                start: 50,
                 max: IO_OUTSTANDING_MAX_JOBS as u64 * 2,
                 scale: Duration::from_millis(5),
             },
@@ -114,7 +118,7 @@ impl BackpressureChannelConfig {
         } else {
             1.0 / (1.0 - (frac - 1.0))
         };
-        self.scale.mul_f64(v.powi(2))
+        self.scale.mul_f64(v)
     }
 }
 
