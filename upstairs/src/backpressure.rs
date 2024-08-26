@@ -4,7 +4,13 @@ use crate::{
     ClientId, DownstairsIO, IOop, IO_OUTSTANDING_MAX_BYTES,
     IO_OUTSTANDING_MAX_JOBS,
 };
-use std::time::Duration;
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 /// Helper struct to contain a count of backpressure bytes
 #[derive(Debug)]
@@ -67,19 +73,25 @@ pub struct BackpressureConfig {
 
 impl Default for BackpressureConfig {
     fn default() -> BackpressureConfig {
+        // `max_value` values below must be higher than `IO_OUTSTANDING_MAX_*`;
+        // otherwise, replaying jobs to a previously-Offline Downstairs could
+        // immediately kick us into the saturated regine, which would be
+        // unfortunate.
         BackpressureConfig {
             // Byte-based backpressure
             bytes: BackpressureChannelConfig {
-                start: 50 * 1024u64.pow(2), // 50 MiB
-                max: IO_OUTSTANDING_MAX_BYTES * 2,
-                scale: Duration::from_millis(100),
+                start_value: 50 * 1024u64.pow(2), // 50 MiB
+                max_value: IO_OUTSTANDING_MAX_BYTES * 2,
+                delay_scale: Duration::from_millis(100),
+                delay_max: Duration::from_millis(30_000),
             },
 
             // Queue-based backpressure
             queue: BackpressureChannelConfig {
-                start: 500,
-                max: IO_OUTSTANDING_MAX_JOBS as u64 * 2,
-                scale: Duration::from_millis(5),
+                start_value: 500,
+                max_value: IO_OUTSTANDING_MAX_JOBS as u64 * 2,
+                delay_scale: Duration::from_millis(5),
+                delay_max: Duration::from_millis(30_000),
             },
         }
     }
@@ -88,40 +100,120 @@ impl Default for BackpressureConfig {
 #[derive(Copy, Clone, Debug)]
 pub struct BackpressureChannelConfig {
     /// When should backpressure start
-    pub start: u64,
-    /// Value at which backpressure goes to infinity
-    pub max: u64,
-    /// Scale of backpressure
-    pub scale: Duration,
+    pub start_value: u64,
+    /// Value at which backpressure is saturated
+    pub max_value: u64,
+
+    /// Characteristic scale of backpressure
+    ///
+    /// This scale sets the backpressure delay halfway between `start`_value and
+    /// `max_value`
+    pub delay_scale: Duration,
+
+    /// Maximum delay (returned at `max_value`)
+    pub delay_max: Duration,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum BackpressureAmount {
+    Duration(Duration),
+    Saturated,
+}
+
+impl std::cmp::Ord for BackpressureAmount {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self, other) {
+            (BackpressureAmount::Saturated, _) => std::cmp::Ordering::Greater,
+            (_, BackpressureAmount::Saturated) => std::cmp::Ordering::Less,
+            (
+                BackpressureAmount::Duration(a),
+                BackpressureAmount::Duration(b),
+            ) => a.cmp(b),
+        }
+    }
+}
+
+impl std::cmp::PartialOrd for BackpressureAmount {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl BackpressureAmount {
+    /// Converts to a delay in microseconds
+    ///
+    /// The saturated case is marked by `u64::MAX`
+    pub fn as_micros(&self) -> u64 {
+        match self {
+            BackpressureAmount::Duration(t) => t.as_micros() as u64,
+            BackpressureAmount::Saturated => u64::MAX,
+        }
+    }
+}
+
+/// Helper `struct` to store a shared backpressure amount
+///
+/// Under the hood, this stores a value in microseconds in an `AtomicU64`, so it
+/// can be read and written atomically.  `BackpressureAmount::Saturated` is
+/// indicated by `u64::MAX`.
+#[derive(Clone, Debug)]
+pub struct SharedBackpressureAmount(Arc<AtomicU64>);
+
+impl SharedBackpressureAmount {
+    pub fn new() -> Self {
+        Self(Arc::new(AtomicU64::new(0)))
+    }
+
+    pub fn store(&self, b: BackpressureAmount) {
+        let v = match b {
+            BackpressureAmount::Duration(d) => d.as_micros() as u64,
+            BackpressureAmount::Saturated => u64::MAX,
+        };
+        self.0.store(v, Ordering::Relaxed);
+    }
+
+    pub fn load(&self) -> BackpressureAmount {
+        match self.0.load(Ordering::Relaxed) {
+            u64::MAX => BackpressureAmount::Saturated,
+            delay_us => {
+                BackpressureAmount::Duration(Duration::from_micros(delay_us))
+            }
+        }
+    }
 }
 
 impl BackpressureChannelConfig {
-    fn get_backpressure(&self, value: u64) -> Duration {
-        // Saturate at 1 hour per job, which is basically infinite
-        if value >= self.max {
-            return Duration::from_secs(60 * 60);
+    fn get_backpressure(&self, value: u64) -> BackpressureAmount {
+        // Return a special value if we're saturated
+        if value >= self.max_value {
+            return BackpressureAmount::Saturated;
         }
 
-        // These ratios start at 0 (at *_start) and hit 1 when backpressure
-        // should be infinite.
-        let frac = value.saturating_sub(self.start) as f64
-            / (self.max - self.start) as f64;
+        // This ratio start at 0 (at start_value) and hits 1 when backpressure
+        // should be maxed out.
+        let frac = value.saturating_sub(self.start_value) as f64
+            / (self.max_value - self.start_value) as f64;
 
-        // Delay should be 0 at frac = 0, and infinite at frac = 1
-        let frac = frac * 2.0;
-        let v = if frac < 1.0 {
-            frac
+        let v = if frac < 0.5 {
+            frac * 2.0
         } else {
-            1.0 / (1.0 - (frac - 1.0))
+            1.0 / (2.0 * (1.0 - frac))
         };
-        self.scale.mul_f64(v.powi(2))
+
+        BackpressureAmount::Duration(
+            self.delay_scale.mul_f64(v).min(self.delay_max),
+        )
     }
 }
 
 impl BackpressureConfig {
-    pub fn get_backpressure_us(&self, bytes: u64, jobs: u64) -> u64 {
-        let bp_bytes = self.bytes.get_backpressure(bytes).as_micros() as u64;
-        let bp_queue = self.queue.get_backpressure(jobs).as_micros() as u64;
+    pub fn get_backpressure(
+        &self,
+        bytes: u64,
+        jobs: u64,
+    ) -> BackpressureAmount {
+        let bp_bytes = self.bytes.get_backpressure(bytes);
+        let bp_queue = self.queue.get_backpressure(jobs);
         bp_bytes.max(bp_queue)
     }
 }
@@ -130,36 +222,55 @@ impl BackpressureConfig {
 mod test {
     use super::*;
 
+    /// Confirm that replaying the max number of jobs / bytes will not saturate
+    #[test]
+    fn check_outstanding_backpressure() {
+        let cfg = BackpressureConfig::default();
+        let BackpressureAmount::Duration(_) =
+            cfg.get_backpressure(IO_OUTSTANDING_MAX_BYTES, 0)
+        else {
+            panic!("backpressure saturated")
+        };
+
+        let BackpressureAmount::Duration(_) =
+            cfg.get_backpressure(0, IO_OUTSTANDING_MAX_JOBS as u64)
+        else {
+            panic!("backpressure saturated")
+        };
+    }
+
     #[test]
     fn check_max_backpressure() {
         let cfg = BackpressureConfig::default();
-        let t = cfg.get_backpressure_us(
-            IO_OUTSTANDING_MAX_BYTES * 2 - 1024u64.pow(2),
-            0,
-        );
-        let timeout = Duration::from_micros(t);
+        let BackpressureAmount::Duration(timeout) = cfg
+            .get_backpressure(IO_OUTSTANDING_MAX_BYTES * 2 - 1024u64.pow(2), 0)
+        else {
+            panic!("backpressure saturated")
+        };
         println!(
             "max byte-based delay: {}",
             humantime::format_duration(timeout)
         );
         assert!(
-            timeout > Duration::from_secs(60 * 60),
+            timeout >= Duration::from_secs(30),
             "max byte-based backpressure delay is too low;
-            expected > 1 hr, got {}",
+            expected > 30 secs, got {}",
             humantime::format_duration(timeout)
         );
 
-        let t =
-            cfg.get_backpressure_us(0, IO_OUTSTANDING_MAX_JOBS as u64 * 2 - 1);
-        let timeout = Duration::from_micros(t);
+        let BackpressureAmount::Duration(timeout) =
+            cfg.get_backpressure(0, IO_OUTSTANDING_MAX_JOBS as u64 * 2 - 1)
+        else {
+            panic!("backpressure saturated")
+        };
         println!(
             "max job-based delay: {}",
             humantime::format_duration(timeout)
         );
         assert!(
-            timeout > Duration::from_secs(60 * 60),
+            timeout >= Duration::from_secs(30),
             "max job-based backpressure delay is too low;
-            expected > 1 hr, got {}",
+            expected > 30 secs, got {}",
             humantime::format_duration(timeout)
         );
     }
