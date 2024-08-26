@@ -153,7 +153,7 @@ impl Default for BackpressureConfig {
         BackpressureConfig {
             // Byte-based backpressure
             bytes: BackpressureChannelConfig {
-                start_value: 50 * 1024u64.pow(2), // 50 MiB
+                start_value: 4 * 1024u64.pow(2), // 4 MiB
                 max_value: IO_OUTSTANDING_MAX_BYTES * 2,
                 delay_scale: Duration::from_millis(100),
                 delay_max: Duration::from_millis(30_000),
@@ -161,7 +161,7 @@ impl Default for BackpressureConfig {
 
             // Queue-based backpressure
             queue: BackpressureChannelConfig {
-                start_value: 500,
+                start_value: 100,
                 max_value: IO_OUTSTANDING_MAX_JOBS as u64 * 2,
                 delay_scale: Duration::from_millis(5),
                 delay_max: Duration::from_millis(30_000),
