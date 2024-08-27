@@ -50,6 +50,11 @@ enum Workload {
     Balloon,
     Big,
     Biggest,
+    /// Send many random writes, then report how long a single read takes
+    Bufferbloat {
+        #[clap(flatten)]
+        cfg: BufferbloatWorkload,
+    },
     Burst,
     /// Starts a CLI client
     Cli {
@@ -300,6 +305,27 @@ fn history_file<P: AsRef<Path>>(file: P) -> PathBuf {
 }
 
 #[derive(Copy, Clone, Debug, clap::Args)]
+struct BufferbloatWorkload {
+    /// Size in blocks of each IO
+    #[clap(long, default_value_t = 1, action)]
+    io_size: usize,
+    /// Number of outstanding IOs at the same time.
+    #[clap(long, default_value_t = 1, action)]
+    io_depth: usize,
+    /// Number of seconds to run
+    #[clap(long, default_value_t = 10, action)]
+    time: u64,
+    /// Print the guest log (at `INFO` level) to `stderr`
+    ///
+    /// If this is not set, then only `ERROR` messages are logged
+    ///
+    /// By default, this is not set, because the guest log is noisy and
+    /// interrupts our intentional logging.
+    #[clap(short, long)]
+    verbose: bool,
+}
+
+#[derive(Copy, Clone, Debug, clap::Args)]
 struct RandReadWriteWorkload {
     /// Size in blocks of each IO
     #[clap(long, default_value_t = 1, action)]
@@ -374,6 +400,26 @@ impl RandReadWriteConfig {
             subsample_count: cfg.subsample_count,
             fill: cfg.fill,
             mode,
+        }
+    }
+}
+
+/// Configuration for `bufferbloat_workload`
+#[derive(Copy, Clone, Debug)]
+struct BufferbloatConfig {
+    encrypted: bool,
+    io_depth: usize,
+    blocks_per_io: usize,
+    time_secs: u64,
+}
+
+impl BufferbloatConfig {
+    fn new(cfg: BufferbloatWorkload, encrypted: bool) -> Self {
+        BufferbloatConfig {
+            encrypted,
+            io_depth: cfg.io_depth,
+            blocks_per_io: cfg.io_size,
+            time_secs: cfg.time,
         }
     }
 }
@@ -748,8 +794,16 @@ async fn main() -> Result<()> {
 
     // Opt out of verbose logs for certain tests
     let log_level = match opt.workload {
-        Workload::RandRead { cfg } | Workload::RandWrite { cfg } => {
-            if cfg.verbose {
+        Workload::RandRead {
+            cfg: RandReadWriteWorkload { verbose, .. },
+        }
+        | Workload::RandWrite {
+            cfg: RandReadWriteWorkload { verbose, .. },
+        }
+        | Workload::Bufferbloat {
+            cfg: BufferbloatWorkload { verbose, .. },
+        } => {
+            if verbose {
                 slog::Level::Info
             } else {
                 slog::Level::Error
@@ -1047,6 +1101,17 @@ async fn main() -> Result<()> {
                     is_encrypted,
                     RandReadWriteMode::Write,
                 ),
+            )
+            .await?;
+            if opt.quit {
+                return Ok(());
+            }
+        }
+        Workload::Bufferbloat { cfg } => {
+            bufferbloat_workload(
+                &guest,
+                &mut region_info,
+                BufferbloatConfig::new(cfg, is_encrypted),
             )
             .await?;
             if opt.quit {
@@ -3116,6 +3181,119 @@ async fn rand_read_write_workload(
         human_bytes(stdev),
         mean as usize / (cfg.blocks_per_io * block_size),
     );
+
+    Ok(())
+}
+
+async fn bufferbloat_workload(
+    guest: &Arc<Guest>,
+    ri: &mut RegionInfo,
+    cfg: BufferbloatConfig,
+) -> Result<()> {
+    // Before we start, make sure the work queues are empty.
+    loop {
+        let wc = guest.query_work_queue().await?;
+        if wc.up_count + wc.ds_count == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    if cfg.blocks_per_io > ri.total_blocks {
+        bail!("too many blocks per IO; can't exceed {}", ri.total_blocks);
+    }
+
+    println!(
+        "\n----------------------------------------------\
+        \nbufferbloat test\
+        \n----------------------------------------------\
+        \ninitial {:?} sec random write with {} chunks ({} block{})",
+        cfg.time_secs,
+        human_bytes((cfg.blocks_per_io as u64 * ri.block_size) as f64),
+        cfg.blocks_per_io,
+        if cfg.blocks_per_io > 1 { "s" } else { "" },
+    );
+    print_region_description(ri, cfg.encrypted);
+    println!("----------------------------------------------");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let byte_count = Arc::new(AtomicUsize::new(0));
+
+    let block_size = ri.block_size as usize;
+    let total_blocks = ri.total_blocks;
+    let mut workers = vec![];
+    for _ in 0..cfg.io_depth {
+        let stop = stop.clone();
+        let guest = guest.clone();
+        let byte_count = byte_count.clone();
+        let handle = tokio::spawn(async move {
+            let mut buf = BytesMut::new();
+            buf.resize(cfg.blocks_per_io * block_size, 0u8);
+            let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+            rng.fill_bytes(&mut buf);
+            while !stop.load(Ordering::Acquire) {
+                let offset =
+                    rng.gen_range(0..=total_blocks - cfg.blocks_per_io);
+                guest
+                    .write(BlockIndex(offset as u64), buf.clone())
+                    .await
+                    .unwrap();
+                byte_count.fetch_add(buf.len(), Ordering::Relaxed);
+            }
+            Ok::<(), CrucibleError>(())
+        });
+        workers.push(handle);
+    }
+
+    let start = std::time::Instant::now();
+    let sleep_time = Duration::from_secs(cfg.time_secs);
+    {
+        let guest = guest.clone();
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                let Ok(wq) = guest.query_work_queue().await else {
+                    break;
+                };
+                if sleep_time > start.elapsed() {
+                    let dt = sleep_time - start.elapsed();
+                    print!(
+                        "\r{} jobs in queue, {:.1?} secs remaining      ",
+                        wq.ds_count + wq.up_count,
+                        dt,
+                    );
+                    std::io::stdout().lock().flush().unwrap();
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
+    }
+
+    // Sleep to fill up the buffers
+    tokio::time::sleep(Duration::from_secs(cfg.time_secs)).await;
+
+    // Create a read action
+    let read = {
+        let g = guest.clone();
+        tokio::spawn(async move {
+            let mut buffer = Buffer::new(1, block_size);
+            let start = std::time::Instant::now();
+            g.read(BlockIndex(0), &mut buffer).await.unwrap();
+            start.elapsed()
+        })
+    };
+    stop.store(true, Ordering::Release);
+
+    // Join all workers
+    for h in workers {
+        h.await??;
+    }
+
+    println!("\nawaiting final read...");
+    let read_time = read.await?;
+    println!("read took {read_time:?}");
+
+    guest.flush(None).await?;
 
     Ok(())
 }
