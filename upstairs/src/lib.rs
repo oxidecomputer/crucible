@@ -50,6 +50,8 @@ pub use in_memory::InMemoryBlockIO;
 pub mod block_io;
 pub use block_io::{FileBlockIO, ReqwestBlockIO};
 
+pub(crate) mod backpressure;
+
 pub mod block_req;
 pub(crate) use block_req::{BlockOpWaiter, BlockRes};
 
@@ -449,6 +451,12 @@ impl<T> ClientMap<T> {
     }
     pub fn get(&self, c: &ClientId) -> Option<&T> {
         self.0[*c].as_ref()
+    }
+    pub fn contains(&self, c: &ClientId) -> bool {
+        self.0[*c].is_some()
+    }
+    pub fn take(&mut self, c: &ClientId) -> Option<T> {
+        self.0[*c].take()
     }
 }
 
@@ -938,7 +946,7 @@ struct DownstairsIO {
     read_validations: Vec<Validation>,
 
     /// Number of bytes that this job has contributed to guest backpressure
-    backpressure_bytes: Option<u64>,
+    backpressure_bytes: ClientMap<u64>,
 }
 
 impl DownstairsIO {

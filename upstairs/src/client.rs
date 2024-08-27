@@ -1,10 +1,10 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
-    cdt, integrity_hash, live_repair::ExtentInfo, upstairs::UpstairsConfig,
-    upstairs::UpstairsState, ClientIOStateCount, ClientId, CrucibleDecoder,
-    CrucibleError, DownstairsIO, DsState, EncryptionContext, IOState, IOop,
-    JobId, Message, RawReadResponse, ReconcileIO, RegionDefinitionStatus,
-    RegionMetadata, Validation,
+    backpressure::BackpressureBytes, cdt, integrity_hash,
+    live_repair::ExtentInfo, upstairs::UpstairsConfig, upstairs::UpstairsState,
+    ClientIOStateCount, ClientId, CrucibleDecoder, CrucibleError, DownstairsIO,
+    DsState, EncryptionContext, IOState, IOop, JobId, Message, RawReadResponse,
+    ReconcileIO, RegionDefinitionStatus, RegionMetadata, Validation,
 };
 use crucible_common::{
     deadline_secs, verbose_timeout, x509::TLSContext, ExtentId,
@@ -126,6 +126,9 @@ pub(crate) struct DownstairsClient {
     /// estimate per-client backpressure to keep the 3x downstairs in sync.
     pub(crate) bytes_outstanding: u64,
 
+    /// Write bytes in this queue, used for global backpressure
+    pub(crate) write_bytes_outstanding: BackpressureBytes,
+
     /// UUID for this downstairs region
     ///
     /// Unpopulated until provided by `Message::RegionInfo`
@@ -230,6 +233,7 @@ impl DownstairsClient {
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
             bytes_outstanding: 0,
+            write_bytes_outstanding: BackpressureBytes::new(),
             connection_id: ConnectionId(0),
             client_delay_us,
         }
@@ -270,6 +274,7 @@ impl DownstairsClient {
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
             bytes_outstanding: 0,
+            write_bytes_outstanding: BackpressureBytes::new(),
             connection_id: ConnectionId(0),
             client_delay_us,
         }
@@ -379,10 +384,12 @@ impl DownstairsClient {
                 .bytes_outstanding
                 .checked_sub(job.work.job_bytes())
                 .unwrap();
+            self.write_bytes_outstanding.decrement(job, self.client_id);
         } else if is_running && !was_running {
             // This should only happen if a job is replayed, but that still
             // counts!
             self.bytes_outstanding += job.work.job_bytes();
+            self.write_bytes_outstanding.increment(job, self.client_id);
         }
 
         old_state
@@ -934,6 +941,7 @@ impl DownstairsClient {
         };
         if r == IOState::New {
             self.bytes_outstanding += io.work.job_bytes();
+            self.write_bytes_outstanding.increment(io, self.client_id);
         }
         self.io_state_count.incr(&r);
         r

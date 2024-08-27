@@ -1461,55 +1461,6 @@ mod test {
         Ok(())
     }
 
-    /// Confirm that the offline timeout is reasonable
-    #[test]
-    fn check_offline_timeout() {
-        for job_size in
-            [512, 4 * 1024, 16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024]
-        {
-            let mut bytes_in_flight = 0;
-            let mut jobs_in_flight = 0;
-            let mut time_usec: u64 = 0;
-            let cfg = Guest::default_backpressure_config();
-
-            let (t, desc) = loop {
-                let bp_usec =
-                    cfg.get_backpressure_us(bytes_in_flight, jobs_in_flight);
-                time_usec = time_usec.saturating_add(bp_usec);
-
-                if bytes_in_flight >= IO_OUTSTANDING_MAX_BYTES {
-                    break (time_usec, "bytes");
-                }
-
-                if jobs_in_flight >= IO_OUTSTANDING_MAX_JOBS as u64 {
-                    break (time_usec, "jobs");
-                }
-
-                bytes_in_flight += job_size;
-                jobs_in_flight += 1;
-            };
-
-            let timeout = Duration::from_micros(t);
-            assert!(
-                timeout > Duration::from_secs(1),
-                "offline -> faulted transition happens too quickly \
-                 with job size {job_size};  expected > 1 sec, got {}",
-                humantime::format_duration(timeout)
-            );
-            assert!(
-                timeout < Duration::from_secs(180),
-                "offline -> faulted transition happens too slowly \
-                 with job size {job_size};  expected < 3 mins, got {}",
-                humantime::format_duration(timeout)
-            );
-
-            println!(
-                "job size {job_size:>8}:\n    Timeout in {} ({desc})\n",
-                humantime::format_duration(timeout)
-            );
-        }
-    }
-
     #[test]
     fn check_max_backpressure() {
         let cfg = Guest::default_backpressure_config();
