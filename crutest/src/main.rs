@@ -50,6 +50,11 @@ enum Workload {
     Balloon,
     Big,
     Biggest,
+    /// Send many random writes, then report how long a single read takes
+    Bufferbloat {
+        #[clap(flatten)]
+        cfg: BufferbloatWorkload,
+    },
     Burst,
     /// Starts a CLI client
     Cli {
@@ -105,11 +110,6 @@ enum Workload {
     RandWrite {
         #[clap(flatten)]
         cfg: RandReadWriteWorkload,
-    },
-    /// Send many random reads, then report how long a single write takes
-    Bufferbloat {
-        #[clap(flatten)]
-        cfg: BufferbloatWorkload,
     },
     Repair,
     /// Test the downstairs replay path.
