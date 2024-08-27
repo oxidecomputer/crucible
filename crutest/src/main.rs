@@ -3293,7 +3293,7 @@ async fn bufferbloat_workload(
     let read_time = read.await?;
     println!("read took {read_time:?}");
 
-    guest.deactivate().await?;
+    guest.flush(None).await?;
 
     Ok(())
 }
