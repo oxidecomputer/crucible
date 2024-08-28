@@ -20,6 +20,7 @@ mkdir -p "$WORK_ROOT"
 test_log="$WORK_ROOT/test_replay.log"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
 crucible_test="$BINDIR/crutest"
 dsc="$BINDIR/dsc"

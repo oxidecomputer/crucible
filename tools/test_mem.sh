@@ -169,7 +169,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BINDIR=${BINDIR:-$ROOT/target/release}
 
 echo "$ROOT"
-cd "$ROOT"
+cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 
 ct="$BINDIR/crutest"
 dsc="$BINDIR/dsc"

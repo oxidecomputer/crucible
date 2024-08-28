@@ -54,6 +54,7 @@ function stop_all_downstairs() {
 }
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
 
 cds="$BINDIR/crucible-downstairs"

@@ -41,6 +41,7 @@ dsc_test_log=/tmp/test_fail_live_repair_dsc.log
 verify_file=/tmp/test_fail_live_verify
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/release}
 crucible_test="$BINDIR/crutest"
 cds="$BINDIR/crucible-downstairs"
