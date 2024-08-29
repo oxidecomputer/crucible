@@ -3,8 +3,10 @@
 use super::model::*;
 use anyhow::{bail, Result};
 use slog::{error, info, Logger};
+#[cfg(test)]
 use std::collections::HashSet;
 use std::process::Command;
+#[cfg(test)]
 use std::sync::Mutex;
 
 use chrono::{TimeZone, Utc};
@@ -201,13 +203,14 @@ impl SnapshotInterface for ZfsSnapshotInterface {
     }
 }
 
+#[cfg(test)]
 pub struct TestSnapshotInterface {
     log: Logger,
     snapshots: Mutex<HashSet<String>>,
 }
 
+#[cfg(test)]
 impl TestSnapshotInterface {
-    #[cfg(test)]
     pub fn new(log: Logger) -> TestSnapshotInterface {
         TestSnapshotInterface {
             log,
@@ -216,6 +219,7 @@ impl TestSnapshotInterface {
     }
 }
 
+#[cfg(test)]
 impl SnapshotInterface for TestSnapshotInterface {
     fn get_snapshots_for_dataset(
         &self,

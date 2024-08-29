@@ -529,6 +529,7 @@ impl RawInner {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&path)?;
 
         // All 0s are fine for everything except extent version in the metadata
