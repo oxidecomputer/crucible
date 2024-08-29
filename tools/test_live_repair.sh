@@ -29,6 +29,7 @@ mkdir -p "$WORK_ROOT"
 
 loop_log="$WORK_ROOT"/test_live_repair_summary.log
 test_log="$WORK_ROOT"/test_live_repair.log
+verify_log="$WORK_ROOT/test_live_repair_verify.log"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
@@ -92,7 +93,7 @@ args+=( -t "127.0.0.1:8830" )
 gen=1
 # Initial seed for verify file
 if ! "$crucible_test" fill "${args[@]}" -q -g "$gen"\
-          --verify-out alan >> "$test_log" 2>&1 ; then
+          --verify-out "$verify_log" >> "$test_log" 2>&1 ; then
     echo Failed on initial verify seed, check "$test_log"
     ${dsc} cmd shutdown
     exit 1
@@ -108,9 +109,9 @@ while [[ $count -le $loops ]]; do
     echo "New loop, $count starts now $(date)" >> "$test_log"
     "$crucible_test" replace "${args[@]}" -c 5 \
             --replacement 127.0.0.1:8840 \
-            --stable -g "$gen" --verify-out alan \
+            --stable -g "$gen" --verify-out "$verify_log" \
             --verify-at-start \
-            --verify-in alan >> "$test_log" 2>&1
+            --verify-in "$verify_log" >> "$test_log" 2>&1
     result=$?
     if [[ $result -ne 0 ]]; then
         touch /var/tmp/ds_test/up 2> /dev/null
