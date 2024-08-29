@@ -718,6 +718,7 @@ impl SqliteMoreInner {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&path)?;
 
         file.set_len(size)?;
@@ -1002,8 +1003,7 @@ impl SqliteMoreInner {
     /// unadorned variant should be called instead.
     fn truncate_encryption_contexts_and_hashes_with_tx(
         &self,
-        extent_block_indexes_and_hashes: impl Iterator<Item = (usize, u64)>
-            + ExactSizeIterator,
+        extent_block_indexes_and_hashes: impl ExactSizeIterator<Item = (usize, u64)>,
         tx: &Transaction,
     ) -> Result<()> {
         let n_blocks = extent_block_indexes_and_hashes.len();

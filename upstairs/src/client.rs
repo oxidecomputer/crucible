@@ -2408,14 +2408,18 @@ pub(crate) enum ClientRunResult {
     /// The initial connection timed out
     ConnectionTimeout,
     /// We failed to make the initial connection
+    #[allow(dead_code)]
     ConnectionFailed(std::io::Error),
     /// We experienced a timeout after connecting
     Timeout,
     /// A socket write failed
+    #[allow(dead_code)]
     WriteFailed(anyhow::Error),
     /// We received an error while reading from the connection
+    #[allow(dead_code)]
     ReadFailed(anyhow::Error),
     /// The `DownstairsClient` requested that the task stop, so it did
+    #[allow(dead_code)]
     RequestedStop(ClientStopReason),
     /// The socket closed cleanly and the task exited
     Finished,

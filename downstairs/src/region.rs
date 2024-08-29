@@ -769,10 +769,10 @@ impl Region {
                         integrity_hash(&[
                             &encryption_context.nonce[..],
                             &encryption_context.tag[..],
-                            &block,
+                            block,
                         ])
                     } else {
-                        integrity_hash(&[&block])
+                        integrity_hash(&[block])
                     };
 
                 if computed_hash != ctx.hash {
@@ -1098,6 +1098,7 @@ impl Region {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&copy_path)?;
         Ok(file)
     }

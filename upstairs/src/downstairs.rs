@@ -3316,10 +3316,7 @@ impl Downstairs {
         ds_id: JobId,
         client_id: ClientId,
     ) -> Option<CrucibleError> {
-        let Some(job) = self.ds_active.get(&ds_id) else {
-            return None;
-        };
-
+        let job = self.ds_active.get(&ds_id)?;
         let state = &job.state[client_id];
 
         if let IOState::Error(e) = state {
