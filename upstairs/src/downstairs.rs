@@ -3905,7 +3905,7 @@ impl Downstairs {
         // Nexus.
         let target_addrs = self.get_target_addrs();
         let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
+        self.safe_spawn(async move {
             let Some(nexus_client) =
                 get_nexus_client(&log, client, &target_addrs).await
             else {
@@ -3986,7 +3986,7 @@ impl Downstairs {
         // Nexus.
         let target_addrs = self.get_target_addrs();
         let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
+        self.safe_spawn(async move {
             let Some(nexus_client) =
                 get_nexus_client(&log, client, &target_addrs).await
             else {
@@ -4046,7 +4046,7 @@ impl Downstairs {
         // Nexus.
         let target_addrs = self.get_target_addrs();
         let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
+        self.safe_spawn(async move {
             let Some(nexus_client) =
                 get_nexus_client(&log, client, &target_addrs).await
             else {
@@ -4130,7 +4130,7 @@ impl Downstairs {
         // Nexus.
         let target_addrs = self.get_target_addrs();
         let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
+        self.safe_spawn(async move {
             let Some(nexus_client) =
                 get_nexus_client(&log, client, &target_addrs).await
             else {
@@ -4217,7 +4217,7 @@ impl Downstairs {
         // Nexus.
         let target_addrs = self.get_target_addrs();
         let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
+        self.safe_spawn(async move {
             let Some(nexus_client) =
                 get_nexus_client(&log, client, &target_addrs).await
             else {
@@ -4280,7 +4280,7 @@ impl Downstairs {
         // Nexus.
         let target_addrs = self.get_target_addrs();
         let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
+        self.safe_spawn(async move {
             let Some(nexus_client) =
                 get_nexus_client(&log, client, &target_addrs).await
             else {
@@ -4382,7 +4382,7 @@ impl Downstairs {
         // Nexus.
         let target_addrs = self.get_target_addrs();
         let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
+        self.safe_spawn(async move {
             let Some(nexus_client) =
                 get_nexus_client(&log, client, &target_addrs).await
             else {
@@ -4414,6 +4414,31 @@ impl Downstairs {
                 }
             }
         });
+    }
+
+    /// Helper function to spawn a task if the Tokio runtime is available
+    ///
+    /// This allows us to call synchronous functions in unit tests which may
+    /// spawn tasks, without immediately crashing.
+    ///
+    /// # Panics
+    /// If called outside of unit tests (mimicking tokio's behavior)
+    #[cfg(feature = "notify-nexus")]
+    fn safe_spawn<F>(&self, f: F)
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        if let Ok(h) = tokio::runtime::Handle::try_current() {
+            h.spawn(f);
+        } else if cfg!(test) {
+            info!(
+                self.log,
+                "skipping spawn because no Tokio runtime is present"
+            );
+        } else {
+            panic!("cannot spawn tasks without a tokio runtime");
+        }
     }
 }
 
