@@ -19,7 +19,7 @@ use crucible_protocol::SnapshotDetails;
 use async_trait::async_trait;
 use bytes::BytesMut;
 use ringbuffer::{AllocRingBuffer, RingBuffer};
-use slog::{info, warn, Logger};
+use slog::{error, info, warn, Logger};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{instrument, span, Level};
 use uuid::Uuid;
@@ -413,13 +413,25 @@ impl Guest {
         Ok(())
     }
 
-    async fn backpressure_sleep(&self) {
-        let bp =
-            Duration::from_micros(self.backpressure_us.load(Ordering::SeqCst));
-        if bp > Duration::ZERO {
-            let _guard = self.backpressure_lock.lock().await;
-            tokio::time::sleep(bp).await;
-            drop(_guard);
+    /// Sleeps for a backpressure-dependent amount, holding the lock
+    ///
+    /// If backpressure is saturated, logs and returns an error.
+    async fn backpressure_sleep(&self) -> Result<(), CrucibleError> {
+        let bp = self.backpressure_us.load(Ordering::SeqCst);
+        match bp {
+            u64::MAX => {
+                let err = "write queue is saturated";
+                error!(self.log, "{err}");
+                Err(CrucibleError::IoError(err.to_owned()))
+            }
+            0 => Ok(()),
+            _ => {
+                let bp = Duration::from_micros(bp);
+                let _guard = self.backpressure_lock.lock().await;
+                tokio::time::sleep(bp).await;
+                drop(_guard);
+                Ok(())
+            }
         }
     }
 
@@ -587,7 +599,7 @@ impl BlockIO for Guest {
             assert_eq!(buf.len() as u64 % bs, 0);
             let offset_change = buf.len() as u64 / bs;
 
-            self.backpressure_sleep().await;
+            self.backpressure_sleep().await?;
 
             let reply = self
                 .send_and_wait(|done| BlockOp::Write {
@@ -614,7 +626,7 @@ impl BlockIO for Guest {
             return Ok(());
         }
 
-        self.backpressure_sleep().await;
+        self.backpressure_sleep().await?;
         self.send_and_wait(|done| BlockOp::WriteUnwritten {
             offset,
             data,

@@ -93,39 +93,63 @@ impl Default for BackpressureConfig {
 pub struct BackpressureChannelConfig {
     /// When should backpressure start
     pub start: u64,
-    /// Value at which backpressure goes to infinity
+    /// Value at which backpressure is saturated
     pub max: u64,
-    /// Scale of backpressure
+    /// Characteristic scale of backpressure
+    ///
+    /// This scale sets the backpressure delay halfway between `start` and
+    /// `max`; maximum backpressure is clamped to some multiple of this scale.
     pub scale: Duration,
 }
 
+#[derive(Copy, Clone, Debug)]
+enum BackpressureAmount {
+    Duration(Duration),
+    Saturated,
+}
+
+impl BackpressureAmount {
+    /// Converts to a delay in microseconds
+    ///
+    /// The saturated case is marked by `u64::MAX`
+    fn as_micros(&self) -> u64 {
+        match self {
+            BackpressureAmount::Duration(t) => t.as_micros() as u64,
+            BackpressureAmount::Saturated => u64::MAX,
+        }
+    }
+}
+
 impl BackpressureChannelConfig {
-    fn get_backpressure(&self, value: u64) -> Duration {
-        // Saturate at 1 hour per job, which is basically infinite
+    fn get_backpressure(&self, value: u64) -> BackpressureAmount {
+        // Return a special value if we're saturated
         if value >= self.max {
-            return Duration::from_secs(60 * 60);
+            return BackpressureAmount::Saturated;
         }
 
         // These ratios start at 0 (at *_start) and hit 1 when backpressure
-        // should be infinite.
+        // should be maxed out.
         let frac = value.saturating_sub(self.start) as f64
             / (self.max - self.start) as f64;
 
-        // Delay should be 0 at frac = 0, and infinite at frac = 1
+        // Limit the maximum multiplier on `self.scale` to avoid going to
+        // infinity, which is awkwardly nonlinear.
+        const MAX_MUL: f64 = 50.0;
         let frac = frac * 2.0;
         let v = if frac < 1.0 {
             frac
         } else {
-            1.0 / (1.0 - (frac - 1.0))
+            (1.0 / (2.0 - frac)).max(MAX_MUL)
         };
-        self.scale.mul_f64(v)
+
+        BackpressureAmount::Duration(self.scale.mul_f64(v))
     }
 }
 
 impl BackpressureConfig {
     pub fn get_backpressure_us(&self, bytes: u64, jobs: u64) -> u64 {
-        let bp_bytes = self.bytes.get_backpressure(bytes).as_micros() as u64;
-        let bp_queue = self.queue.get_backpressure(jobs).as_micros() as u64;
+        let bp_bytes = self.bytes.get_backpressure(bytes).as_micros();
+        let bp_queue = self.queue.get_backpressure(jobs).as_micros();
         bp_bytes.max(bp_queue)
     }
 }
@@ -147,9 +171,9 @@ mod test {
             humantime::format_duration(timeout)
         );
         assert!(
-            timeout > Duration::from_secs(60 * 60),
+            timeout > Duration::from_secs(1),
             "max byte-based backpressure delay is too low;
-            expected > 1 hr, got {}",
+            expected > 1 s, got {}",
             humantime::format_duration(timeout)
         );
 
@@ -161,9 +185,9 @@ mod test {
             humantime::format_duration(timeout)
         );
         assert!(
-            timeout > Duration::from_secs(60 * 60),
+            timeout > Duration::from_secs(1),
             "max job-based backpressure delay is too low;
-            expected > 1 hr, got {}",
+            expected > 1 s, got {}",
             humantime::format_duration(timeout)
         );
     }
