@@ -139,7 +139,7 @@ impl BackpressureChannelConfig {
         let v = if frac < 1.0 {
             frac
         } else {
-            (1.0 / (2.0 - frac)).max(MAX_MUL)
+            (1.0 / (2.0 - frac)).min(MAX_MUL)
         };
 
         BackpressureAmount::Duration(self.scale.mul_f64(v))
