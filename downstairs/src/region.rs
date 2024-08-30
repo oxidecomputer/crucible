@@ -114,7 +114,7 @@ pub struct Region {
     log: Logger,
 
     /// Thread pool for doing long-running CPU work outside the Tokio runtime
-    #[allow(unused)]
+    #[cfg_attr(feature = "omicron-build", allow(unused))]
     pool: rayon::ThreadPool,
 }
 

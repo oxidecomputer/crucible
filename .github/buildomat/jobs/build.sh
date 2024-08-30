@@ -50,4 +50,4 @@ echo in_work_bins
 ls -l /work/bins
 
 banner test
-ptime -m cargo test --verbose -- --nocapture > /tmp/cargo-test-out.log 2>&1
+ptime -m cargo test --verbose --features=omicron-build -- --nocapture > /tmp/cargo-test-out.log 2>&1
