@@ -3493,7 +3493,7 @@ pub(crate) mod test {
         // Offsets are given as blocks; we convert to extents here
         const EXTENT_SIZE: usize = 10; // hard-coded default
         for (eid, mut group) in offsets
-            .group_by(|o| ExtentId((*o / EXTENT_SIZE) as u32))
+            .chunk_by(|o| ExtentId((*o / EXTENT_SIZE) as u32))
             .into_iter()
         {
             let start = group.next().unwrap();
