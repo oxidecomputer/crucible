@@ -1,9 +1,6 @@
 // Copyright 2024 Oxide Computer Company
 
-use crate::{
-    ClientId, DownstairsIO, IOop, IO_OUTSTANDING_MAX_BYTES,
-    IO_OUTSTANDING_MAX_JOBS,
-};
+use crate::{IOop, IO_OUTSTANDING_MAX_BYTES, IO_OUTSTANDING_MAX_JOBS};
 use std::{
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -12,44 +9,90 @@ use std::{
     time::Duration,
 };
 
-/// Helper struct to contain a count of backpressure bytes
+/// Helper struct to contain a set of backpressure counters
 #[derive(Debug)]
-pub struct BackpressureBytes(u64);
+pub struct BackpressureCounters(Arc<BackpressureCountersInner>);
 
-impl BackpressureBytes {
+/// Inner data structure for individual backpressure counters
+#[derive(Debug)]
+struct BackpressureCountersInner {
+    /// Number of bytes from `Write` and `WriteUnwritten` operations
+    ///
+    /// This value is used for global backpressure, to avoid buffering too many
+    /// writes (which otherwise return immediately, and are not persistent until
+    /// a flush)
+    write_bytes: AtomicU64,
+
+    /// Number of jobs in the queue
+    ///
+    /// This value is also used for global backpressure
+    // XXX should we only count write jobs here?  Or should we also count read
+    // bytes for global backpressure?  Much to ponder...
+    jobs: AtomicU64,
+
+    /// Number of bytes from `Write`, `WriteUnwritten`, and `Read` operations
+    ///
+    /// This value is used for local backpressure, to keep the 3x Downstairs
+    /// roughly in sync.  Otherwise, the fastest Downstairs will answer all read
+    /// requests, and the others can get arbitrarily far behind.
+    io_bytes: AtomicU64,
+}
+
+/// Guard to automatically decrement backpressure bytes when dropped
+#[derive(Debug)]
+pub struct BackpressureGuard {
+    counter: Arc<BackpressureCountersInner>,
+    write_bytes: u64,
+    io_bytes: u64,
+    // There's also an implicit "1 job" here
+}
+
+impl Drop for BackpressureGuard {
+    fn drop(&mut self) {
+        self.counter
+            .write_bytes
+            .fetch_sub(self.write_bytes, Ordering::Relaxed);
+        self.counter
+            .io_bytes
+            .fetch_sub(self.io_bytes, Ordering::Relaxed);
+        self.counter.jobs.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl BackpressureCounters {
     pub fn new() -> Self {
-        BackpressureBytes(0)
+        Self(Arc::new(BackpressureCountersInner {
+            write_bytes: AtomicU64::new(0),
+            io_bytes: AtomicU64::new(0),
+            jobs: AtomicU64::new(0),
+        }))
     }
 
-    pub fn get(&self) -> u64 {
-        self.0
+    pub fn get_write_bytes(&self) -> u64 {
+        self.0.write_bytes.load(Ordering::Relaxed)
     }
 
-    /// Ensures that the given `DownstairsIO` is counted for backpressure
-    ///
-    /// This is idempotent: if the job has already been counted, indicated by
-    /// the `DownstairsIO::backpressure_bytes[c]` member being `Some(..)`, it
-    /// will not be counted again.
-    pub fn increment(&mut self, io: &mut DownstairsIO, c: ClientId) {
-        match &io.work {
-            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
-                if !io.backpressure_bytes.contains(&c) {
-                    let n = data.len() as u64;
-                    io.backpressure_bytes.insert(c, n);
-                    self.0 += n;
-                }
-            }
-            _ => (),
-        };
+    pub fn get_io_bytes(&self) -> u64 {
+        self.0.io_bytes.load(Ordering::Relaxed)
     }
 
-    /// Remove the given job's contribution to backpressure
-    ///
-    /// This is idempotent: `DownstairsIO::backpressure_bytes[c]` is set to
-    /// `None` by this function call, so it's harmless to call repeatedly.
-    pub fn decrement(&mut self, io: &mut DownstairsIO, c: ClientId) {
-        if let Some(n) = io.backpressure_bytes.take(&c) {
-            self.0 = self.0.checked_sub(n).unwrap();
+    pub fn get_jobs(&self) -> u64 {
+        self.0.jobs.load(Ordering::Relaxed)
+    }
+
+    /// Stores write / IO bytes (and 1 job) in the backpressure counters
+    #[must_use]
+    pub fn increment(&mut self, io: &IOop) -> BackpressureGuard {
+        let write_bytes = io.write_bytes();
+        let io_bytes = io.job_bytes();
+        self.0.write_bytes.fetch_add(write_bytes, Ordering::Relaxed);
+        self.0.io_bytes.fetch_add(io_bytes, Ordering::Relaxed);
+        self.0.jobs.fetch_add(1, Ordering::Relaxed);
+        BackpressureGuard {
+            counter: self.0.clone(),
+            write_bytes,
+            io_bytes,
+            // implicit 1 job
         }
     }
 }
