@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::{
+    backpressure::BackpressureGuard,
     cdt,
     client::{ClientAction, ClientStopReason, DownstairsClient},
     guest::GuestWork,
@@ -1822,6 +1823,7 @@ impl Downstairs {
             GuestWorkId(10),
             request,
             is_write_unwritten,
+            ClientData::from_fn(|_| BackpressureGuard::dummy()),
         )
     }
 
@@ -1831,6 +1833,7 @@ impl Downstairs {
         gw_id: GuestWorkId,
         write: RawWrite,
         is_write_unwritten: bool,
+        bp_guard: ClientData<BackpressureGuard>,
     ) -> JobId {
         let ds_id = self.next_id();
         let dependencies = self.ds_active.deps_for_write(ds_id, blocks);
@@ -1872,7 +1875,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_guard: ClientMap::new(),
+            backpressure_guard: bp_guard.into(),
         };
         self.enqueue(io);
         ds_id
@@ -2453,6 +2456,7 @@ impl Downstairs {
         blocks: ImpactedBlocks,
         write: RawWrite,
         is_write_unwritten: bool,
+        backpressure_guard: ClientData<BackpressureGuard>,
     ) -> JobId {
         // If there is a live-repair in progress that intersects with this read,
         // then reserve job IDs for those jobs.
@@ -2463,6 +2467,7 @@ impl Downstairs {
             guest_id,
             write,
             is_write_unwritten,
+            backpressure_guard,
         )
     }
 
@@ -3674,6 +3679,7 @@ impl Downstairs {
                 data,
             },
             is_write_unwritten,
+            ClientData::from_fn(|_| BackpressureGuard::dummy()),
         )
     }
 
@@ -4421,6 +4427,19 @@ impl Downstairs {
                 }
             }
         });
+    }
+
+    /// Assign the given number of write bytes to the backpressure counters
+    #[must_use]
+    pub(crate) fn early_write_backpressure(
+        &mut self,
+        bytes: u64,
+    ) -> ClientData<BackpressureGuard> {
+        ClientData::from_fn(|i| {
+            self.clients[i]
+                .backpressure_counters
+                .early_write_increment(bytes)
+        })
     }
 }
 

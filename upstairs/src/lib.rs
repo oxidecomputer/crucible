@@ -427,6 +427,15 @@ impl<T> ClientData<T> {
         std::mem::swap(&mut self[c], &mut v);
         v
     }
+
+    /// Builds a `ClientData` from a builder function
+    pub fn from_fn<F: FnMut(ClientId) -> T>(mut f: F) -> Self {
+        Self([
+            f(ClientId::new(0)),
+            f(ClientId::new(1)),
+            f(ClientId::new(2)),
+        ])
+    }
 }
 
 /// Map of data associated with clients, keyed by `ClientId`
@@ -463,6 +472,12 @@ impl<T> std::ops::Index<ClientId> for ClientMap<T> {
     type Output = T;
     fn index(&self, index: ClientId) -> &Self::Output {
         self.get(&index).unwrap()
+    }
+}
+
+impl<T> From<ClientData<T>> for ClientMap<T> {
+    fn from(c: ClientData<T>) -> Self {
+        Self(ClientData(c.0.map(Option::Some)))
     }
 }
 

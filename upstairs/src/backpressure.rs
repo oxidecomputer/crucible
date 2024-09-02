@@ -59,6 +59,22 @@ impl Drop for BackpressureGuard {
     }
 }
 
+impl BackpressureGuard {
+    #[cfg(test)]
+    pub fn dummy() -> Self {
+        let counter = Arc::new(BackpressureCountersInner {
+            write_bytes: 0.into(),
+            io_bytes: 0.into(),
+            jobs: 1.into(),
+        });
+        Self {
+            counter,
+            write_bytes: 0,
+            io_bytes: 0,
+        }
+    }
+}
+
 impl BackpressureCounters {
     pub fn new() -> Self {
         Self(Arc::new(BackpressureCountersInner {
@@ -78,6 +94,20 @@ impl BackpressureCounters {
 
     pub fn get_jobs(&self) -> u64 {
         self.0.jobs.load(Ordering::Relaxed)
+    }
+
+    /// Stores write / IO bytes (and 1 job) for a pending write
+    #[must_use]
+    pub fn early_write_increment(&mut self, bytes: u64) -> BackpressureGuard {
+        self.0.write_bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.0.io_bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.0.jobs.fetch_add(1, Ordering::Relaxed);
+        BackpressureGuard {
+            counter: self.0.clone(),
+            write_bytes: bytes,
+            io_bytes: bytes,
+            // implicit 1 job
+        }
     }
 
     /// Stores write / IO bytes (and 1 job) in the backpressure counters

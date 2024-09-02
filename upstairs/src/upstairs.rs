@@ -1439,6 +1439,8 @@ impl Upstairs {
         let impacted_blocks =
             extent_from_offset(&ddef, offset, ddef.bytes_to_blocks(data.len()));
 
+        let guard = self.downstairs.early_write_backpressure(data.len() as u64);
+
         Some(DeferredWrite {
             ddef,
             impacted_blocks,
@@ -1446,6 +1448,7 @@ impl Upstairs {
             res,
             is_write_unwritten,
             cfg: self.cfg.clone(),
+            guard,
         })
     }
 
@@ -1473,6 +1476,7 @@ impl Upstairs {
                     write.impacted_blocks,
                     write.data,
                     write.is_write_unwritten,
+                    write.guard,
                 )
             },
             Some(GuestBlockRes::Other(write.res)),
