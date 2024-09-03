@@ -942,7 +942,7 @@ impl Upstairs {
                 self.deferred_ops.push_immediate(DeferredBlockOp::Other(op));
             }
             // Otherwise, we can apply a non-write operation immediately, saving
-            // a trip through the FuturesUnordered
+            // a trip through the DeferredQueue
             _ => {
                 self.apply_guest_request_inner(op);
             }
