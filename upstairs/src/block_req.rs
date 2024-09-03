@@ -24,6 +24,12 @@ impl<T, E> BlockRes<T, E> {
         // XXX this eats the result!
         let _ = self.0.take().expect("sender was populated").send(result);
     }
+
+    /// Builds an empty `BlockRes`, for use in unit testing
+    #[cfg(test)]
+    pub fn dummy() -> Self {
+        Self(None)
+    }
 }
 
 impl<T, E> Drop for BlockRes<T, E> {

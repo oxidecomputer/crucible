@@ -1352,26 +1352,6 @@ impl Upstairs {
         cdt::up__to__ds__read__start!(|| (gw_id.0));
     }
 
-    /// Submits a new write job to the upstairs
-    ///
-    /// This function **defers** the write job submission, because writes
-    /// require encrypting data (which is expensive) and we'd like to return as
-    /// quickly as possible.
-    fn submit_deferred_write(
-        &mut self,
-        offset: BlockIndex,
-        data: BytesMut,
-        res: BlockRes,
-        is_write_unwritten: bool,
-    ) {
-        self.submit_deferred_write_inner(
-            offset,
-            data,
-            Some(res),
-            is_write_unwritten,
-        )
-    }
-
     /// Submits a dummy write (without an associated `BlockOp`)
     ///
     /// This **does not** go through the deferred-write pipeline
@@ -1382,22 +1362,26 @@ impl Upstairs {
         data: BytesMut,
         is_write_unwritten: bool,
     ) {
-        if let Some(w) =
-            self.compute_deferred_write(offset, data, None, is_write_unwritten)
-        {
+        if let Some(w) = self.compute_deferred_write(
+            offset,
+            data,
+            BlockRes::dummy(),
+            is_write_unwritten,
+        ) {
             self.submit_write(DeferredWrite::run(w))
         }
     }
 
-    /// Submits a new write job to the upstairs, optionally without a `BlockRes`
+    /// Submits a new write job to the upstairs
     ///
-    /// # Panics
-    /// If `res` is `None` and this isn't running in the test suite
-    fn submit_deferred_write_inner(
+    /// This function **defers** the write job submission, because writes
+    /// require encrypting data (which is expensive) and we'd like to return as
+    /// quickly as possible.
+    fn submit_deferred_write(
         &mut self,
         offset: BlockIndex,
         data: BytesMut,
-        res: Option<BlockRes>,
+        res: BlockRes,
         is_write_unwritten: bool,
     ) {
         // It's possible for the write to be invalid out of the gate, in which
@@ -1426,22 +1410,15 @@ impl Upstairs {
         &mut self,
         offset: BlockIndex,
         data: BytesMut,
-        res: Option<BlockRes>,
+        res: BlockRes,
         is_write_unwritten: bool,
     ) -> Option<DeferredWrite> {
-        #[cfg(not(test))]
-        assert!(res.is_some());
-
         if !self.guest_io_ready() {
-            if let Some(res) = res {
-                res.send_err(CrucibleError::UpstairsInactive);
-            }
+            res.send_err(CrucibleError::UpstairsInactive);
             return None;
         }
         if self.cfg.read_only {
-            if let Some(res) = res {
-                res.send_err(CrucibleError::ModifyingReadOnlyRegion);
-            }
+            res.send_err(CrucibleError::ModifyingReadOnlyRegion);
             return None;
         }
 
@@ -1450,9 +1427,7 @@ impl Upstairs {
          */
         let ddef = self.ddef.get_def().unwrap();
         if let Err(e) = ddef.validate_io(offset, data.len()) {
-            if let Some(res) = res {
-                res.send_err(e);
-            }
+            res.send_err(e);
             return None;
         }
 
@@ -1500,7 +1475,7 @@ impl Upstairs {
                     write.is_write_unwritten,
                 )
             },
-            write.res.map(GuestBlockRes::Other),
+            Some(GuestBlockRes::Other(write.res)),
         );
 
         if write.is_write_unwritten {
