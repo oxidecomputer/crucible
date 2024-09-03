@@ -112,10 +112,20 @@ pub(crate) struct DeferredWrite {
     pub ddef: RegionDefinition,
     pub impacted_blocks: ImpactedBlocks,
     pub data: BytesMut,
-    pub res: BlockRes,
-    pub is_write_unwritten: bool,
+    pub res: WriteRes,
     pub cfg: Arc<UpstairsConfig>,
     pub guard: ClientData<BackpressureGuard>,
+}
+
+/// Handle to reply to the guest
+///
+/// If this is a `Write` operation, then we replied immediately and this is
+/// `Write` (without a data member); if it's a `WriteUnwritten`, then we reply
+/// after the IO is complete and there's a data member.
+#[derive(Debug)]
+pub(crate) enum WriteRes {
+    Write,
+    WriteUnwritten(BlockRes),
 }
 
 /// Result of a deferred `BlockOp`
@@ -135,9 +145,14 @@ pub(crate) struct EncryptedWrite {
     /// An `RawWrite` containing our encrypted data
     pub data: RawWrite,
     pub impacted_blocks: ImpactedBlocks,
-    pub res: BlockRes,
-    pub is_write_unwritten: bool,
+    pub res: WriteRes,
     pub guard: ClientData<BackpressureGuard>,
+}
+
+impl EncryptedWrite {
+    pub fn is_write_unwritten(&self) -> bool {
+        matches!(self.res, WriteRes::WriteUnwritten(..))
+    }
 }
 
 impl DeferredWrite {
@@ -185,7 +200,6 @@ impl DeferredWrite {
             data,
             impacted_blocks: self.impacted_blocks,
             res: self.res,
-            is_write_unwritten: self.is_write_unwritten,
             guard: self.guard,
         }
     }

@@ -59,6 +59,9 @@ pub(crate) enum GuestBlockRes {
 
     /// Other operations send an empty tuple to indicate completion
     Other(BlockRes),
+
+    /// The given job has already been acked
+    Acked,
 }
 
 impl GtoS {
@@ -118,6 +121,7 @@ impl GtoS {
                 // Should we panic if someone provided downstairs_responses?
                 res.send_result(result)
             }
+            Some(GuestBlockRes::Acked) => (),
             None => (),
         }
     }
@@ -175,7 +179,11 @@ impl GuestWork {
         let gw_id = self.next_gw_id();
         let ds_id = f(gw_id);
 
-        self.active.insert(gw_id, GtoS::new(ds_id, res));
+        if matches!(res, Some(GuestBlockRes::Acked)) {
+            self.completed.push(gw_id);
+        } else {
+            self.active.insert(gw_id, GtoS::new(ds_id, res));
+        }
         (gw_id, ds_id)
     }
 
