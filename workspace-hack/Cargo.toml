@@ -15,7 +15,7 @@ publish = false
 ### BEGIN HAKARI SECTION
 [dependencies]
 arrayvec = { version = "0.7", default-features = false, features = ["std"] }
-bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
+bitflags-f595c2ba2a3f28df = { package = "bitflags", version = "2", default-features = false, features = ["serde", "std"] }
 bytes = { version = "1", features = ["serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["cargo", "derive", "env", "wrap_help"] }
@@ -56,18 +56,18 @@ tokio = { version = "1", features = ["full", "test-util"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
 tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
-unicode-bidi = { version = "0.3" }
-unicode-normalization = { version = "0.1" }
 usdt = { version = "0.5" }
 usdt-impl = { version = "0.5", default-features = false, features = ["asm", "des"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 zerocopy = { version = "0.7", features = ["derive", "simd"] }
 
 [build-dependencies]
-bitflags = { version = "2", default-features = false, features = ["serde", "std"] }
+bitflags-f595c2ba2a3f28df = { package = "bitflags", version = "2", default-features = false, features = ["serde", "std"] }
 bytes = { version = "1", features = ["serde"] }
 cc = { version = "1", default-features = false, features = ["parallel"] }
 chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["cargo", "derive", "env", "wrap_help"] }
+clap_builder = { version = "4", default-features = false, features = ["cargo", "color", "env", "std", "suggestions", "usage", "wrap_help"] }
 crossbeam-utils = { version = "0.8" }
 crypto-common = { version = "0.1", default-features = false, features = ["getrandom", "std"] }
 digest = { version = "0.10", features = ["mac", "std"] }
@@ -104,17 +104,15 @@ tokio = { version = "1", features = ["full", "test-util"] }
 toml_datetime = { version = "0.6", default-features = false, features = ["serde"] }
 tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
-unicode-bidi = { version = "0.3" }
-unicode-normalization = { version = "0.1" }
 usdt = { version = "0.5" }
 usdt-impl = { version = "0.5", default-features = false, features = ["asm", "des"] }
 uuid = { version = "1", features = ["serde", "v4"] }
 zerocopy = { version = "0.7", features = ["derive", "simd"] }
 
 [target.x86_64-unknown-linux-gnu.dependencies]
+bitflags-dff4ba8e3ae991db = { package = "bitflags", version = "1" }
 dof = { version = "0.3", default-features = false, features = ["des"] }
 hyper = { version = "0.14", features = ["full"] }
-mio = { version = "0.8", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
 rustix = { version = "0.38", features = ["fs", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
@@ -123,40 +121,40 @@ spin = { version = "0.9", default-features = false, features = ["once", "spin_mu
 [target.x86_64-unknown-linux-gnu.build-dependencies]
 dof = { version = "0.3", default-features = false, features = ["des"] }
 hyper = { version = "0.14", features = ["full"] }
-mio = { version = "0.8", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
+rustix = { version = "0.38", features = ["fs", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
 
 [target.aarch64-apple-darwin.dependencies]
 hyper = { version = "0.14", features = ["full"] }
-mio = { version = "0.8", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
 rustix = { version = "0.38", features = ["fs", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
 hyper = { version = "0.14", features = ["full"] }
-mio = { version = "0.8", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
 rustix = { version = "0.38", features = ["fs", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 
 [target.x86_64-unknown-illumos.dependencies]
+bitflags-dff4ba8e3ae991db = { package = "bitflags", version = "1" }
 dof = { version = "0.3", default-features = false, features = ["des"] }
 hyper = { version = "0.14", features = ["full"] }
-mio = { version = "0.8", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
 rustix = { version = "0.38", features = ["fs", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
+toml_edit = { version = "0.19", features = ["serde"] }
 
 [target.x86_64-unknown-illumos.build-dependencies]
 dof = { version = "0.3", default-features = false, features = ["des"] }
 hyper = { version = "0.14", features = ["full"] }
-mio = { version = "0.8", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
+rustix = { version = "0.38", features = ["fs", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
+toml_edit = { version = "0.19", features = ["serde"] }
 
 ### END HAKARI SECTION
