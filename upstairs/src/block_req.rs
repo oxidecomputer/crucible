@@ -28,7 +28,8 @@ impl<T, E> BlockRes<T, E> {
     /// Builds an empty `BlockRes`, for use in unit testing
     #[cfg(test)]
     pub fn dummy() -> Self {
-        Self(None)
+        let (tx, _) = oneshot::channel();
+        Self(Some(tx))
     }
 }
 
