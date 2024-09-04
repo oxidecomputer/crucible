@@ -93,6 +93,12 @@ impl<T> DeferredQueue<T> {
     pub fn is_empty(&self) -> bool {
         self.empty
     }
+
+    /// Returns the number of futures in the queue
+    #[allow(dead_code)] // only used in unit tests
+    pub fn len(&self) -> usize {
+        self.stream.len()
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
