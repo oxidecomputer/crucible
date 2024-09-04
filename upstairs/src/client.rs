@@ -375,6 +375,9 @@ impl DownstairsClient {
 
         // Update our bytes-in-flight counter
         if was_running && !is_running {
+            // Because the job is no longer running, it shouldn't count for
+            // backpressure.  Remove the backpressure guard for this client,
+            // which decrements backpressure counters on drop.
             job.backpressure_guard.take(&self.client_id);
         } else if is_running && !was_running {
             // This should only happen if a job is replayed, but that still
