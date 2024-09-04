@@ -75,7 +75,7 @@ impl Default for BackpressureConfig {
     fn default() -> BackpressureConfig {
         // `max_value` values below must be higher than `IO_OUTSTANDING_MAX_*`;
         // otherwise, replaying jobs to a previously-Offline Downstairs could
-        // immediately kick us into the saturated regine, which would be
+        // immediately kick us into the saturated regime, which would be
         // unfortunate.
         BackpressureConfig {
             // Byte-based backpressure
@@ -123,6 +123,9 @@ pub enum BackpressureAmount {
 impl std::cmp::Ord for BackpressureAmount {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match (self, other) {
+            (BackpressureAmount::Saturated, BackpressureAmount::Saturated) => {
+                std::cmp::Ordering::Equal
+            }
             (BackpressureAmount::Saturated, _) => std::cmp::Ordering::Greater,
             (_, BackpressureAmount::Saturated) => std::cmp::Ordering::Less,
             (
@@ -254,7 +257,7 @@ mod test {
         assert!(
             timeout >= Duration::from_secs(30),
             "max byte-based backpressure delay is too low;
-            expected > 30 secs, got {}",
+            expected >= 30 secs, got {}",
             humantime::format_duration(timeout)
         );
 
@@ -270,8 +273,30 @@ mod test {
         assert!(
             timeout >= Duration::from_secs(30),
             "max job-based backpressure delay is too low;
-            expected > 30 secs, got {}",
+            expected >= 30 secs, got {}",
             humantime::format_duration(timeout)
         );
+    }
+
+    #[test]
+    fn check_saturated_backpressure() {
+        let cfg = BackpressureConfig::default();
+        assert!(matches!(
+            cfg.get_backpressure(IO_OUTSTANDING_MAX_BYTES * 2 + 1, 0),
+            BackpressureAmount::Saturated
+        ));
+        assert!(matches!(
+            cfg.get_backpressure(IO_OUTSTANDING_MAX_BYTES * 2, 0),
+            BackpressureAmount::Saturated
+        ));
+
+        assert!(matches!(
+            cfg.get_backpressure(0, IO_OUTSTANDING_MAX_JOBS as u64 * 2 + 1),
+            BackpressureAmount::Saturated
+        ));
+        assert!(matches!(
+            cfg.get_backpressure(0, IO_OUTSTANDING_MAX_JOBS as u64 * 2),
+            BackpressureAmount::Saturated
+        ));
     }
 }
