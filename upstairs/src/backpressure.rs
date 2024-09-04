@@ -192,7 +192,7 @@ impl BackpressureChannelConfig {
             return BackpressureAmount::Saturated;
         }
 
-        // This ratio start at 0 (at start_value) and hits 1 when backpressure
+        // This ratio starts at 0 (at start_value) and hits 1 when backpressure
         // should be maxed out.
         let frac = value.saturating_sub(self.start_value) as f64
             / (self.max_value - self.start_value) as f64;
