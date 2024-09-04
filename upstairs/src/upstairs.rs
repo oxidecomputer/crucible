@@ -1391,7 +1391,7 @@ impl Upstairs {
         if let Some(w) =
             self.compute_deferred_write(offset, data, res, is_write_unwritten)
         {
-            let should_defer = !self.deferred_msgs.is_empty()
+            let should_defer = !self.deferred_ops.is_empty()
                 || w.data.len() > MIN_DEFER_SIZE_BYTES as usize;
             if should_defer {
                 let tx = self.deferred_ops.push_oneshot();
@@ -4204,5 +4204,42 @@ pub(crate) mod test {
             .unwrap();
         assert!(!r.contains("HashMismatch"));
         assert!(r.contains("read hash mismatch"));
+    }
+
+    #[test]
+    fn write_defer() {
+        let mut up = make_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        const NODEFER_SIZE: usize = MIN_DEFER_SIZE_BYTES as usize - 512;
+        const DEFER_SIZE: usize = MIN_DEFER_SIZE_BYTES as usize * 2;
+
+        // Submit a short write, which should not be deferred
+        let mut data = BytesMut::new();
+        data.extend_from_slice(vec![1; NODEFER_SIZE].as_slice());
+        let offset = BlockIndex(7);
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Write { offset, data, done }));
+        assert_eq!(up.deferred_ops.len(), 0);
+
+        // Submit a long write, which should be deferred
+        let mut data = BytesMut::new();
+        data.extend_from_slice(vec![2; DEFER_SIZE].as_slice());
+        let offset = BlockIndex(7);
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Write { offset, data, done }));
+        assert_eq!(up.deferred_ops.len(), 1);
+        assert_eq!(up.deferred_msgs.len(), 0);
+
+        // Submit a short write, which would normally not be deferred, but
+        // there's already a deferred job in the queue
+        let mut data = BytesMut::new();
+        data.extend_from_slice(vec![3; NODEFER_SIZE].as_slice());
+        let offset = BlockIndex(7);
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Write { offset, data, done }));
+        assert_eq!(up.deferred_ops.len(), 2);
+        assert_eq!(up.deferred_msgs.len(), 0);
     }
 }
