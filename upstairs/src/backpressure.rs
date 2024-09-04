@@ -204,7 +204,7 @@ impl BackpressureChannelConfig {
         };
 
         BackpressureAmount::Duration(
-            self.delay_scale.mul_f64(v).min(self.delay_max),
+            self.delay_scale.mul_f64(v.powi(2)).min(self.delay_max),
         )
     }
 }
