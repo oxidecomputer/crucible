@@ -1672,6 +1672,11 @@ impl Upstairs {
                         // Copy the region definition into the Downstairs
                         self.downstairs.set_ddef(self.ddef.get_def().unwrap());
 
+                        // Check to see whether we want to replay jobs (if the
+                        // Downstairs is coming back from being Offline)
+                        // TODO should we only do this in certain new states?
+                        self.downstairs.check_replay(client_id);
+
                         // Negotiation succeeded for this Downstairs, let's see
                         // what we can do from here
                         match self.downstairs.clients[client_id].state() {

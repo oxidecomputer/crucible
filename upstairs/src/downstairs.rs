@@ -329,6 +329,13 @@ impl Downstairs {
             ds.clients[cid].repair_addr =
                 Some("127.0.0.1:1234".parse().unwrap());
         }
+
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(crate::Block::new_512(3));
+        ddef.set_extent_count(u32::MAX);
+        ds.ddef = Some(ddef);
+
         ds
     }
 
@@ -473,6 +480,16 @@ impl Downstairs {
             .in_progress(job, self.repair.as_ref().map(|r| r.min_id))
     }
 
+    /// Helper function to calculate pruned deps for a given job
+    #[cfg(test)]
+    fn get_pruned_deps(&self, ds_id: JobId, client_id: ClientId) -> Vec<JobId> {
+        let job = self.ds_active.get(&ds_id).unwrap();
+        self.clients[client_id]
+            .prune_deps(job, self.repair.as_ref().map(|r| r.min_id))
+            .deps()
+            .clone()
+    }
+
     /// Reinitialize the given client
     pub(crate) fn reinitialize(
         &mut self,
@@ -519,7 +536,7 @@ impl Downstairs {
         // If this client is coming back from being offline, then replay all of
         // its jobs.
         if self.clients[client_id].state() == DsState::Offline {
-            self.replay_jobs(client_id);
+            self.clients[client_id].needs_replay();
         }
     }
 
@@ -623,7 +640,14 @@ impl Downstairs {
         self.next_id
     }
 
-    /// Moves all pending jobs back to the `new_jobs` queue
+    /// Sends replay jobs to the given client if `needs_replay` is set
+    pub(crate) fn check_replay(&mut self, client_id: ClientId) {
+        if self.clients[client_id].check_replay() {
+            self.replay_jobs(client_id);
+        }
+    }
+
+    /// Sends all pending jobs for the given client
     ///
     /// Jobs are pending if they have not yet been flushed by this client.
     fn replay_jobs(&mut self, client_id: ClientId) {
@@ -635,7 +659,6 @@ impl Downstairs {
             self.ds_active.len(),
         );
 
-        let mut count = 0;
         let mut to_send = vec![];
         self.ds_active.for_each(|ds_id, job| {
             // We don't need to send anything before our last good flush
@@ -645,9 +668,9 @@ impl Downstairs {
             }
 
             self.clients[client_id].replay_job(job);
-            count += 1;
             to_send.push(*ds_id);
         });
+        let count = to_send.len();
         for ds_id in to_send {
             self.send(ds_id, client_id);
         }
@@ -886,29 +909,15 @@ impl Downstairs {
         assert!(!repair_downstairs.is_empty());
 
         // Submit the initial repair jobs, which kicks everything off
-        let state = self.begin_repair_for(
+        self.begin_repair_for(
             ExtentId(0),
+            Some(extent_count),
             false,
             &repair_downstairs,
             source_downstairs,
             up_state,
             gw,
         );
-        let LiveRepairState::Closing { close_id, .. } = &state else {
-            panic!("invalid response from `begin_repair_for`");
-        };
-
-        self.repair = Some(LiveRepairData {
-            id: Uuid::new_v4(),
-            extent_count,
-            repair_downstairs,
-            source_downstairs,
-            aborting_repair: false,
-            active_extent: ExtentId(0),
-            min_id: *close_id,
-            repair_job_ids: BTreeMap::new(),
-            state,
-        });
 
         info!(
             self.log,
@@ -1116,9 +1125,7 @@ impl Downstairs {
                 // We return the previous state here, because the new state must
                 // be constructed by calling functions on `&mut self`.  The
                 // reassignment is handled below.
-                let next_state = if finished
-                    || (repair.aborting_repair && !have_reserved_jobs)
-                {
+                if finished || (repair.aborting_repair && !have_reserved_jobs) {
                     // We're done, submit a final flush!
                     let (gw_id, flush_id) = gw.submit_job(
                         |gw_id| {
@@ -1130,7 +1137,9 @@ impl Downstairs {
                     info!(self.log, "LiveRepair final flush submitted");
                     cdt::up__to__ds__flush__start!(|| (gw_id.0));
 
-                    LiveRepairState::FinalFlush { flush_id }
+                    // The borrow was dropped earlier, so reborrow `self.repair`
+                    self.repair.as_mut().unwrap().state =
+                        LiveRepairState::FinalFlush { flush_id }
                 } else {
                     // Keep going!
                     repair.active_extent = next_extent;
@@ -1154,15 +1163,14 @@ impl Downstairs {
 
                     self.begin_repair_for(
                         active_extent,
+                        None,
                         aborting,
                         &repair_downstairs,
                         source_downstairs,
                         up_state,
                         gw,
-                    )
+                    );
                 };
-                // The borrow was dropped earlier, so reborrow `self.repair`
-                self.repair.as_mut().unwrap().state = next_state;
             }
             LiveRepairState::FinalFlush { .. } => {
                 info!(self.log, "LiveRepair final flush returned {r:?}");
@@ -1350,8 +1358,9 @@ impl Downstairs {
 
     /// Begins live-repair for the given extent
     ///
-    /// Claims initial IDs and submits initial jobs, then returns a
-    /// `LiveRepairState::Closing`.
+    /// Claims initial IDs and submits submits initial jobs.  If `extent_count`
+    /// is set, then we also set `self.repair` here; otherwise, we update
+    /// the current state (`self.repair.as_mut().unwrap().state`).
     ///
     /// If `aborting` is true, then all of the submitted jobs are no-ops.
     ///
@@ -1364,12 +1373,13 @@ impl Downstairs {
     fn begin_repair_for(
         &mut self,
         extent: ExtentId,
+        extent_count: Option<u32>,
         aborting: bool,
         repair_downstairs: &[ClientId],
         source_downstairs: ClientId,
         up_state: &UpstairsState,
         gw: &mut GuestWork,
-    ) -> LiveRepairState {
+    ) {
         // Invariant checking to begin
         assert!(
             matches!(up_state, UpstairsState::Active),
@@ -1418,6 +1428,31 @@ impl Downstairs {
             close_deps,
         );
 
+        let state = LiveRepairState::Closing {
+            close_id,
+            repair_id,
+            reopen_id,
+            noop_id,
+
+            gw_noop_id,
+            gw_repair_id,
+        };
+        if let Some(extent_count) = extent_count {
+            self.repair = Some(LiveRepairData {
+                id: Uuid::new_v4(),
+                extent_count,
+                repair_downstairs: repair_downstairs.to_vec(),
+                source_downstairs,
+                aborting_repair: false,
+                active_extent: ExtentId(0),
+                min_id: close_id,
+                repair_job_ids: BTreeMap::new(),
+                state,
+            });
+        } else {
+            self.repair.as_mut().unwrap().state = state;
+        }
+
         if aborting {
             self.create_and_enqueue_noop_io(
                 gw,
@@ -1452,16 +1487,6 @@ impl Downstairs {
                 repair_downstairs,
             )
         };
-
-        LiveRepairState::Closing {
-            close_id,
-            repair_id,
-            reopen_id,
-            noop_id,
-
-            gw_noop_id,
-            gw_repair_id,
-        }
     }
 
     /// Creates a [DownstairsIO] job for an [IOop::ExtentLiveReopen]
@@ -4371,6 +4396,22 @@ impl Downstairs {
     pub(crate) fn set_ddef(&mut self, ddef: RegionDefinition) {
         self.ddef = Some(ddef);
     }
+
+    /// Returns the per-client state for the given job
+    ///
+    /// This is a helper function to make unit tests shorter
+    ///
+    /// # Panics
+    /// If the job isn't present in `ds_active`
+    #[cfg(test)]
+    fn job_state(&self, ds_id: JobId, cid: ClientId) -> IOState {
+        self.ds_active.get(&ds_id).unwrap().state[cid].clone()
+    }
+
+    #[cfg(test)]
+    fn job_states(&self, ds_id: JobId) -> [IOState; 3] {
+        self.ds_active.get(&ds_id).unwrap().state.get().clone()
+    }
 }
 
 /// Configuration for per-client backpressure
@@ -4442,7 +4483,6 @@ pub(crate) mod test {
     #[cfg(test)]
     pub(crate) fn finish_job(ds: &mut Downstairs, ds_id: JobId) {
         for client_id in ClientId::iter() {
-            ds.in_progress(ds_id, client_id);
             ds.process_ds_completion(
                 ds_id,
                 client_id,
@@ -4498,10 +4538,6 @@ pub(crate) mod test {
 
         let next_id = ds.create_and_enqueue_generic_flush(None);
 
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
-
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -4545,10 +4581,6 @@ pub(crate) mod test {
             ds.create_and_enqueue_generic_flush(Some(SnapshotDetails {
                 snapshot_name: String::from("snap"),
             }));
-
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -4594,10 +4626,6 @@ pub(crate) mod test {
         set_all_active(&mut ds);
 
         let next_id = ds.create_and_enqueue_generic_flush(None);
-
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -4645,10 +4673,6 @@ pub(crate) mod test {
 
         let next_id = ds.create_and_enqueue_generic_flush(None);
 
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
-
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -4689,10 +4713,6 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
 
         let next_id = ds.create_and_enqueue_generic_read_eob();
-
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
 
         let response = Ok(build_read_response(&[]));
 
@@ -4740,10 +4760,6 @@ pub(crate) mod test {
 
         let next_id = ds.create_and_enqueue_generic_read_eob();
 
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
-
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -4788,10 +4804,6 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
 
         let next_id = ds.create_and_enqueue_generic_read_eob();
-
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -4838,10 +4850,6 @@ pub(crate) mod test {
 
         let next_id = ds.create_and_enqueue_generic_read_eob();
 
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
-
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -4884,10 +4892,6 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
 
         let next_id = ds.create_and_enqueue_generic_read_eob();
-
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
 
         let response = || Ok(build_read_response(&[]));
 
@@ -4946,10 +4950,6 @@ pub(crate) mod test {
 
         let next_id =
             ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
-
-        ds.in_progress(next_id, ClientId::new(0)); // shouldn't panic!
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -5014,16 +5014,9 @@ pub(crate) mod test {
         // completed.
         let mut ds = Downstairs::test_default();
 
-        // Create two writes, put them on the work queue
+        // Create two writes and send them to the downstairs
         let id1 = ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
-
         let id2 = ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
-
-        // Simulate sending both writes to downstairs 0 and 1
-        ds.in_progress(id1, ClientId::new(0)); // no panics!
-        ds.in_progress(id1, ClientId::new(1));
-        ds.in_progress(id2, ClientId::new(0));
-        ds.in_progress(id2, ClientId::new(1));
 
         // Simulate completing both writes to downstairs 0 and 1
         //
@@ -5067,12 +5060,8 @@ pub(crate) mod test {
         assert!(ds.ackable_work.is_empty());
         assert!(ds.completed.is_empty());
 
-        // Create the flush, put on the work queue
+        // Create the flush and send it to the downstairs
         let flush_id = ds.create_and_enqueue_generic_flush(None);
-
-        // Simulate sending the flush to downstairs 0 and 1
-        ds.in_progress(flush_id, ClientId::new(0));
-        ds.in_progress(flush_id, ClientId::new(1));
 
         // Simulate completing the flush to downstairs 0 and 1
         assert!(!ds.process_ds_completion(
@@ -5108,8 +5097,6 @@ pub(crate) mod test {
         assert!(ds.completed.is_empty());
 
         // Now, finish the writes to downstairs 2
-        ds.in_progress(id1, ClientId::new(2));
-        ds.in_progress(id2, ClientId::new(2));
         assert!(!ds.process_ds_completion(
             id1,
             ClientId::new(2),
@@ -5129,7 +5116,6 @@ pub(crate) mod test {
         assert!(ds.completed.is_empty());
 
         // Complete the flush on downstairs 2.
-        ds.in_progress(flush_id, ClientId::new(2));
         assert!(!ds.process_ds_completion(
             flush_id,
             ClientId::new(2),
@@ -5151,10 +5137,6 @@ pub(crate) mod test {
         // send a read, and clients 0 and 1 will return errors
 
         let next_id = ds.create_and_enqueue_generic_read_eob();
-
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -5201,10 +5183,6 @@ pub(crate) mod test {
         // (reads shouldn't cause a Failed transition)
 
         let next_id = ds.create_and_enqueue_generic_read_eob();
-
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -5253,11 +5231,6 @@ pub(crate) mod test {
         // Build our read, put it into the work queue
         let next_id = ds.create_and_enqueue_generic_read_eob();
 
-        // Move the work to submitted like we sent it to each downstairs
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
-
         // Downstairs 0 now has completed this work.
         let response = Ok(build_read_response(&[]));
         assert!(ds.process_ds_completion(
@@ -5304,10 +5277,6 @@ pub(crate) mod test {
         // Create the flush then send it to all downstairs.
         let next_id = ds.create_and_enqueue_generic_flush(None);
 
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
-
         // Complete the Flush at each downstairs.
         assert!(!ds.process_ds_completion(
             next_id,
@@ -5351,11 +5320,6 @@ pub(crate) mod test {
         // Build our read, put it into the work queue
         let next_id = ds.create_and_enqueue_generic_read_eob();
 
-        // Move the work to submitted like we sent it to each downstairs
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
-
         // Downstairs 0 now has completed this work.
         let response = Ok(build_read_response(&[]));
         assert!(ds.process_ds_completion(
@@ -5380,7 +5344,6 @@ pub(crate) mod test {
 
         // Send and complete the Flush at each downstairs.
         for cid in ClientId::iter() {
-            ds.in_progress(next_id, cid);
             ds.process_ds_completion(
                 next_id,
                 cid,
@@ -5422,11 +5385,6 @@ pub(crate) mod test {
             ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
         // Put the write on the queue.
 
-        // Submit the write to all three downstairs.
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
-
         // Complete the write on all three downstairs.
         assert!(!ds.process_ds_completion(
             next_id,
@@ -5459,11 +5417,6 @@ pub(crate) mod test {
 
         // Create the flush IO
         let next_id = ds.create_and_enqueue_generic_flush(None);
-
-        // Submit the flush to all three downstairs.
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
 
         // Complete the flush on all three downstairs.
         assert!(!ds.process_ds_completion(
@@ -5516,16 +5469,9 @@ pub(crate) mod test {
 
         // Build two writes, put them on the work queue.
         let id1 = ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
-
         let id2 = ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
 
-        // Submit the two writes, to 2/3 of the downstairs.
-        ds.in_progress(id1, ClientId::new(0));
-        ds.in_progress(id1, ClientId::new(1));
-        ds.in_progress(id2, ClientId::new(1));
-        ds.in_progress(id2, ClientId::new(2));
-
-        // Complete the writes that we sent to the 2 downstairs.
+        // Complete the writes on the 2 downstairs.
         assert!(!ds.process_ds_completion(
             id1,
             ClientId::new(0),
@@ -5563,12 +5509,8 @@ pub(crate) mod test {
         assert!(ds.ackable_work.is_empty());
         assert!(ds.completed.is_empty());
 
-        // Create and enqueue the flush.
+        // Create and send the flush.
         let flush_id = ds.create_and_enqueue_generic_flush(None);
-
-        // Send the flush to two downstairs.
-        ds.in_progress(flush_id, ClientId::new(0));
-        ds.in_progress(flush_id, ClientId::new(2));
 
         // Complete the flush on those downstairs.
         assert!(!ds.process_ds_completion(
@@ -5601,9 +5543,7 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(1)].last_flush, JobId(0));
         assert_eq!(ds.clients[ClientId::new(2)].last_flush, flush_id);
 
-        // Now, finish sending and completing the writes
-        ds.in_progress(id1, ClientId::new(2));
-        ds.in_progress(id2, ClientId::new(0));
+        // Now, complete the writes
         assert!(!ds.process_ds_completion(
             id1,
             ClientId::new(2),
@@ -5622,8 +5562,7 @@ pub(crate) mod test {
         // Completed work won't happen till the last flush is done
         assert!(ds.completed.is_empty());
 
-        // Send and complete the flush
-        ds.in_progress(flush_id, ClientId::new(1));
+        // Complete the flush
         assert!(!ds.process_ds_completion(
             flush_id,
             ClientId::new(1),
@@ -5646,11 +5585,6 @@ pub(crate) mod test {
 
         // Build our read IO and submit it to the work queue.
         let next_id = ds.create_and_enqueue_generic_read_eob();
-
-        // Submit the read to all three downstairs
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
 
         // Complete the read on one downstairs.
         let response = Ok(build_read_response(&[]));
@@ -5690,11 +5624,6 @@ pub(crate) mod test {
         // Build a read and put it on the work queue.
         let next_id = ds.create_and_enqueue_generic_read_eob();
 
-        // Submit the read to each downstairs.
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
-
         // Complete the read on one downstairs, verify it is ack ready.
         let response = Ok(build_read_response(&[1, 2, 3, 4]));
         assert!(ds.process_ds_completion(
@@ -5728,7 +5657,10 @@ pub(crate) mod test {
         assert!(ds.ds_active.get(&next_id).unwrap().acked);
 
         // Redo the read on DS 0, IO should remain acked
-        ds.in_progress(next_id, ClientId::new(0));
+        assert_eq!(
+            ds.job_state(next_id, ClientId::new(0)),
+            IOState::InProgress
+        );
 
         let response = Ok(build_read_response(&[]));
         assert!(!ds.process_ds_completion(
@@ -5748,13 +5680,8 @@ pub(crate) mod test {
         // goes away. Make sure everything still finishes ok.
         let mut ds = Downstairs::test_default();
 
-        // Create the read and put it on the work queue.
+        // Create the read and submit it to the three Downstairs queues
         let next_id = ds.create_and_enqueue_generic_read_eob();
-
-        // Submit the read to each downstairs.
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
 
         // Complete the read on one downstairs.
         let response = Ok(build_read_response(&[]));
@@ -5779,11 +5706,14 @@ pub(crate) mod test {
         // Now, take that downstairs offline
         ds.replay_jobs(ClientId::new(0));
 
-        // Acked IO should remain so.
+        // Acked IO should remain so, but should be newly InProgress
         assert!(ds.ds_active.get(&next_id).unwrap().acked);
+        assert_eq!(
+            ds.job_state(next_id, ClientId::new(0)),
+            IOState::InProgress
+        );
 
         // Redo on DS 0, IO should remain acked.
-        ds.in_progress(next_id, ClientId::new(0));
         let response = Ok(build_read_response(&[]));
         assert!(!ds.process_ds_completion(
             next_id,
@@ -5821,13 +5751,8 @@ pub(crate) mod test {
         // received different data than the original read.
         let mut ds = Downstairs::test_default();
 
-        // Create the read and put it on the work queue.
+        // Create the read and submit to the three Downstairs
         let next_id = ds.create_and_enqueue_generic_read_eob();
-
-        // Submit the read to each downstairs.
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
 
         // Construct our fake response
         let response = Ok(build_read_response(
@@ -5852,9 +5777,10 @@ pub(crate) mod test {
         ds.replay_jobs(ClientId::new(0));
         // Now the IO should be replay
         assert!(ds.ds_active.get(&next_id).unwrap().replay);
-
-        // Move it to in-progress.
-        ds.in_progress(next_id, ClientId::new(0));
+        assert_eq!(
+            ds.job_state(next_id, ClientId::new(0)),
+            IOState::InProgress
+        );
 
         // Now, create a new response that has different data, and will
         // produce a different hash.
@@ -5899,13 +5825,8 @@ pub(crate) mod test {
         // received different data than the original read.
         let mut ds = Downstairs::test_default();
 
-        // Create the read and put it on the work queue.
+        // Create the read and submit it to the three downstairs
         let next_id = ds.create_and_enqueue_generic_read_eob();
-
-        // Submit the read to each downstairs.
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
 
         // Construct our fake response
         let response = Ok(build_read_response(
@@ -5943,8 +5864,11 @@ pub(crate) mod test {
         // Now the IO should be replay
         assert!(ds.ds_active.get(&next_id).unwrap().replay);
 
-        // Move it to in-progress.
-        ds.in_progress(next_id, ClientId::new(1));
+        // The job should be newly InProgress
+        assert_eq!(
+            ds.job_state(next_id, ClientId::new(1)),
+            IOState::InProgress
+        );
 
         // Now, create a new response that has different data, and will
         // produce a different hash.
@@ -5986,10 +5910,6 @@ pub(crate) mod test {
         // Create the write and put it on the work queue.
         let id1 = ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
 
-        // Submit the read to two downstairs.
-        ds.in_progress(id1, ClientId::new(0));
-        ds.in_progress(id1, ClientId::new(1));
-
         // Complete the write on two downstairs.
         assert!(!ds.process_ds_completion(
             id1,
@@ -6020,7 +5940,7 @@ pub(crate) mod test {
         assert!(ds.ds_active.get(&id1).unwrap().acked);
 
         // Re-submit and complete the write
-        ds.in_progress(id1, ClientId::new(1));
+        assert_eq!(ds.job_state(id1, ClientId::new(1)), IOState::InProgress);
         assert!(!ds.process_ds_completion(
             id1,
             ClientId::new(1),
@@ -6052,10 +5972,6 @@ pub(crate) mod test {
         // Create the write and put it on the work queue.
         let id1 = ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
 
-        // Submit the write to two downstairs.
-        ds.in_progress(id1, ClientId::new(0));
-        ds.in_progress(id1, ClientId::new(1));
-
         // Complete the write on two downstairs.
         assert!(!ds.process_ds_completion(
             id1,
@@ -6083,10 +5999,6 @@ pub(crate) mod test {
 
         // State should stay acked
         assert!(ds.ds_active.get(&id1).unwrap().acked);
-
-        // Finish the write all the way out.
-        ds.in_progress(id1, ClientId::new(0));
-        ds.in_progress(id1, ClientId::new(2));
 
         assert!(!ds.process_ds_completion(
             id1,
@@ -6742,10 +6654,6 @@ pub(crate) mod test {
         let next_id =
             ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
 
-        // Send out the jobs
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(2));
-
         // Process resplies from the two running downstairs
         let response = || Ok(Default::default());
         ds.process_ds_completion(
@@ -6802,8 +6710,6 @@ pub(crate) mod test {
         let next_id =
             ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
 
-        ds.in_progress(next_id, ClientId::new(0));
-
         ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -6843,9 +6749,6 @@ pub(crate) mod test {
         // and the guest work queues.
         let next_id =
             ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
-
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(1));
 
         // DS 0, the good IO.
         ds.process_ds_completion(
@@ -6887,9 +6790,6 @@ pub(crate) mod test {
         // Create a flush, enqueue it on both the downstairs
         // and the guest work queues.
         let next_id = ds.create_and_enqueue_generic_flush(None);
-
-        ds.in_progress(next_id, ClientId::new(0));
-        ds.in_progress(next_id, ClientId::new(2));
 
         let response = || Ok(Default::default());
         ds.process_ds_completion(
@@ -6936,8 +6836,6 @@ pub(crate) mod test {
         // Create a flush, enqueue it on both the downstairs
         // and the guest work queues.
         let next_id = ds.create_and_enqueue_generic_flush(None);
-        ds.in_progress(next_id, ClientId::new(0));
-
         ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -6972,8 +6870,6 @@ pub(crate) mod test {
         // Create a flush, enqueue it on both the downstairs
         // and the guest work queues.
         let next_id = ds.create_and_enqueue_generic_flush(None);
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
 
         // DS 1 has a failure, and this won't return true as we don't
         // have enough success yet to ACK to the guest.
@@ -7018,15 +6914,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
         set_all_active(&mut ds);
 
-        let next_id = {
-            let next_id = ds.create_and_enqueue_generic_write_eob(false);
-
-            ds.in_progress(next_id, ClientId::new(0));
-            ds.in_progress(next_id, ClientId::new(1));
-            ds.in_progress(next_id, ClientId::new(2));
-
-            next_id
-        };
+        let next_id = ds.create_and_enqueue_generic_write_eob(false);
 
         // Set the error that everyone will use.
         let response = || Err(CrucibleError::GenericError("bad".to_string()));
@@ -7086,15 +6974,7 @@ pub(crate) mod test {
         set_all_active(&mut ds);
 
         // Create the write that fails on one DS
-        let next_id = {
-            let next_id = ds.create_and_enqueue_generic_write_eob(false);
-
-            ds.in_progress(next_id, ClientId::new(0));
-            ds.in_progress(next_id, ClientId::new(1));
-            ds.in_progress(next_id, ClientId::new(2));
-
-            next_id
-        };
+        let next_id = ds.create_and_enqueue_generic_write_eob(false);
 
         // Set the error that everyone will use.
         let err_response = Err(CrucibleError::GenericError("bad".to_string()));
@@ -7142,12 +7022,9 @@ pub(crate) mod test {
 
         // As this DS is failed, it should have been skipped
         assert_eq!(
-            ds.ds_active.get_mut(&next_id).unwrap().state[ClientId::new(0)],
-            IOState::Skipped
+            ds.job_states(next_id),
+            [IOState::Skipped, IOState::InProgress, IOState::InProgress]
         );
-
-        ds.in_progress(next_id, ClientId::new(1));
-        ds.in_progress(next_id, ClientId::new(2));
 
         // We should have one job on the skipped job list for failed DS
         assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
@@ -7184,11 +7061,9 @@ pub(crate) mod test {
 
             // As this DS is failed, it should have been skipped
             assert_eq!(
-                ds.ds_active.get_mut(&next_id).unwrap().state[ClientId::new(0)],
-                IOState::Skipped
+                ds.job_states(next_id),
+                [IOState::Skipped, IOState::InProgress, IOState::InProgress]
             );
-            ds.in_progress(next_id, ClientId::new(1));
-            ds.in_progress(next_id, ClientId::new(2));
 
             next_id
         };
@@ -7239,9 +7114,6 @@ pub(crate) mod test {
 
         // Create the write that fails on two DS
         let next_id = ds.create_and_enqueue_generic_write_eob(false);
-        for i in ClientId::iter() {
-            ds.in_progress(next_id, i);
-        }
 
         // Set the error that everyone will use.
         let err_response =
@@ -7292,16 +7164,11 @@ pub(crate) mod test {
         // Now, do a read.
         let next_id = ds.create_and_enqueue_generic_read_eob();
 
-        // As this DS is failed, it should return none
+        // As this DS is failed, the jobs should be skipped
         assert_eq!(
-            ds.ds_active.get_mut(&next_id).unwrap().state[ClientId::new(0)],
-            IOState::Skipped
+            ds.job_states(next_id),
+            [IOState::Skipped, IOState::Skipped, IOState::InProgress]
         );
-        assert_eq!(
-            ds.ds_active.get_mut(&next_id).unwrap().state[ClientId::new(1)],
-            IOState::Skipped
-        );
-        ds.in_progress(next_id, ClientId::new(2));
 
         // Two downstairs should have a skipped job on their lists.
         assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
@@ -7330,9 +7197,6 @@ pub(crate) mod test {
 
         // Create the write that fails on one DS
         let next_id = ds.create_and_enqueue_generic_write_eob(false);
-        for c in ClientId::iter() {
-            ds.in_progress(next_id, c);
-        }
 
         // Make the error and ok responses
         let err_response =
@@ -7383,12 +7247,10 @@ pub(crate) mod test {
 
         // Now, do another write.
         let next_id = ds.create_and_enqueue_generic_write_eob(false);
-        ds.in_progress(next_id, ClientId::new(0));
         assert_eq!(
-            ds.ds_active.get_mut(&next_id).unwrap().state[ClientId::new(1)],
-            IOState::Skipped
+            ds.job_states(next_id),
+            [IOState::InProgress, IOState::Skipped, IOState::InProgress]
         );
-        ds.in_progress(next_id, ClientId::new(2));
 
         // Process the operation for client 0, re-use ok_response from above.
         // This will return false as we don't have enough work done yet.
@@ -7424,13 +7286,10 @@ pub(crate) mod test {
         // Enqueue the flush.
         let flush_id = ds.create_and_enqueue_generic_flush(None);
 
-        ds.in_progress(flush_id, ClientId::new(0));
-        // As this DS is failed, it should return none
         assert_eq!(
-            ds.ds_active.get_mut(&next_id).unwrap().state[ClientId::new(1)],
-            IOState::Skipped
+            ds.job_states(flush_id),
+            [IOState::InProgress, IOState::Skipped, IOState::InProgress]
         );
-        ds.in_progress(flush_id, ClientId::new(2));
 
         let ok_response = || Ok(Default::default());
         // Process the operation for client 0
@@ -7473,29 +7332,25 @@ pub(crate) mod test {
 
     #[test]
     fn write_fail_skips_new_jobs() {
-        // Verify that if a single write fails on a downstairs, any
-        // work that was IOState::New for that downstairs will change
-        // to IOState::Skipped.  This also verifies that the list of
-        // skipped jobs for each downstairs has the inflight job added
-        // to it.
+        // Verify that if a single write fails on a downstairs, any work that
+        // was IOState::InProgress for that downstairs will change to
+        // IOState::Skipped.  This also verifies that the list of skipped jobs
+        // for each downstairs has the inflight job added to it.
         let mut ds = Downstairs::test_default();
         set_all_active(&mut ds);
 
         // Create the write that fails on one DS
         let write_id = ds.create_and_enqueue_generic_write_eob(false);
-        for i in ClientId::iter() {
-            ds.in_progress(write_id, i);
-        }
 
-        // Now, add a read.  Don't move it to InProgress yet.
+        // Now, add a read.
         let read_id = ds.create_and_enqueue_generic_read_eob();
 
         // Verify the read is all new still
         let job = ds.ds_active.get(&read_id).unwrap();
 
-        assert_eq!(job.state[ClientId::new(0)], IOState::New);
-        assert_eq!(job.state[ClientId::new(1)], IOState::New);
-        assert_eq!(job.state[ClientId::new(2)], IOState::New);
+        assert_eq!(job.state[ClientId::new(0)], IOState::InProgress);
+        assert_eq!(job.state[ClientId::new(1)], IOState::InProgress);
+        assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
 
         // Make the error and ok responses
         let err_response = Err(CrucibleError::GenericError("bad".to_string()));
@@ -7536,12 +7391,12 @@ pub(crate) mod test {
         // This job was immediately acked
         assert_eq!(ds.ackable_work().len(), 0);
 
-        // Verify the read switched from new to skipped
+        // Verify the read switched from InProgress to Skipped
         let job = ds.ds_active.get(&read_id).unwrap();
 
-        assert_eq!(job.state[ClientId::new(0)], IOState::New);
+        assert_eq!(job.state[ClientId::new(0)], IOState::InProgress);
         assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(2)], IOState::New);
+        assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
 
         assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
         assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
@@ -7565,9 +7420,6 @@ pub(crate) mod test {
 
         // Now, add a read.
         let read_id = ds.create_and_enqueue_generic_read_eob();
-        for i in ClientId::iter() {
-            ds.in_progress(read_id, i);
-        }
 
         // Make the error and ok responses
         let err_response =
@@ -7642,15 +7494,9 @@ pub(crate) mod test {
         set_all_active(&mut ds);
         let write_one = ds.create_and_enqueue_generic_write_eob(false);
         assert!(ds.ds_active.get(&write_one).unwrap().acked);
-        for i in ClientId::iter() {
-            ds.in_progress(write_one, i);
-        }
 
         // Now, add a read.
         let read_one = ds.create_and_enqueue_generic_read_eob();
-        for i in ClientId::iter() {
-            ds.in_progress(read_one, i);
-        }
 
         // Make the read ok response
         let rr = || Ok(build_read_response(&[]));
@@ -7690,9 +7536,6 @@ pub(crate) mod test {
         // New write, this one will have a failure
         // Create a write
         let write_fail = ds.create_and_enqueue_generic_write_eob(false);
-        for i in ClientId::iter() {
-            ds.in_progress(write_fail, i);
-        }
 
         let err_response = Err(CrucibleError::GenericError("bad".to_string()));
 
@@ -7760,16 +7603,10 @@ pub(crate) mod test {
 
         // Create a write
         let write_one = ds.create_and_enqueue_generic_write_eob(false);
-        for i in ClientId::iter() {
-            ds.in_progress(write_one, i);
-        }
         assert!(ds.ds_active.get(&write_one).unwrap().acked);
 
         // Now, add a read.
         let read_one = ds.create_and_enqueue_generic_read_eob();
-        for i in ClientId::iter() {
-            ds.in_progress(read_one, i);
-        }
 
         // Make the read ok response
         let rr = || Ok(build_read_response(&[]));
@@ -7806,18 +7643,12 @@ pub(crate) mod test {
         // Create a New write, this one will fail on one downstairs
         let write_fail = ds.create_and_enqueue_generic_write_eob(false);
         assert!(ds.ds_active.get(&write_fail).unwrap().acked);
-        for i in ClientId::iter() {
-            ds.in_progress(write_fail, i);
-        }
 
         // Response for the write failure
         let err_response = Err(CrucibleError::GenericError("bad".to_string()));
 
         // Create some reads as well that will be InProgress
         let read_two = ds.create_and_enqueue_generic_read_eob();
-        for i in ClientId::iter() {
-            ds.in_progress(read_two, i);
-        }
 
         // Process the write operation for downstairs 0, 1
         ds.process_ds_completion(
@@ -7883,47 +7714,6 @@ pub(crate) mod test {
     }
 
     #[test]
-    fn faulted_downstairs_skips_work() {
-        // Verify that any job submitted with a faulted downstairs is
-        // automatically moved to skipped.
-        let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
-        ds.clients[ClientId::new(0)]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
-
-        // Create a write
-        let write_one = ds.create_and_enqueue_generic_write_eob(false);
-        // don't make them in-progress
-
-        // Now, add a read.
-        let read_one = ds.create_and_enqueue_generic_read_eob();
-        // same, don't make it in-progress
-
-        let flush_one = ds.create_and_enqueue_generic_flush(None);
-        // same, don't make it in-progress
-
-        let job = ds.ds_active.get(&write_one).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(1)], IOState::New);
-        assert_eq!(job.state[ClientId::new(2)], IOState::New);
-
-        let job = ds.ds_active.get(&read_one).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(1)], IOState::New);
-        assert_eq!(job.state[ClientId::new(2)], IOState::New);
-
-        let job = ds.ds_active.get(&flush_one).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(1)], IOState::New);
-        assert_eq!(job.state[ClientId::new(2)], IOState::New);
-
-        // Three skipped jobs for downstairs zero
-        assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 3);
-        assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
-        assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
-    }
-
-    #[test]
     fn faulted_downstairs_skips_but_still_does_work() {
         // Verify work can progress through the work queue even when one
         // downstairs has failed. One write, one read, and one flush.
@@ -7934,21 +7724,12 @@ pub(crate) mod test {
 
         // Create a write
         let write_one = ds.create_and_enqueue_generic_write_eob(false);
-        for i in ClientId::iter() {
-            ds.in_progress(write_one, i);
-        }
 
         // Now, add a read.
         let read_one = ds.create_and_enqueue_generic_read_eob();
-        for i in ClientId::iter() {
-            ds.in_progress(read_one, i);
-        }
 
         // Finally, add a flush
         let flush_one = ds.create_and_enqueue_generic_flush(None);
-        for i in ClientId::iter() {
-            ds.in_progress(flush_one, i);
-        }
 
         let job = ds.ds_active.get(&write_one).unwrap();
         assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
@@ -8069,21 +7850,12 @@ pub(crate) mod test {
 
         // Create a write
         let write_one = ds.create_and_enqueue_generic_write_eob(false);
-        for i in ClientId::iter() {
-            ds.in_progress(write_one, i);
-        }
 
         // Now, add a read.
         let read_one = ds.create_and_enqueue_generic_read_eob();
-        for i in ClientId::iter() {
-            ds.in_progress(read_one, i);
-        }
 
         // Finally, add a flush
         let flush_one = ds.create_and_enqueue_generic_flush(None);
-        for i in ClientId::iter() {
-            ds.in_progress(flush_one, i);
-        }
 
         let job = ds.ds_active.get(&write_one).unwrap();
         assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
@@ -8236,15 +8008,6 @@ pub(crate) mod test {
         assert_eq!(job.state[ClientId::new(2)], IOState::Skipped);
         assert!(job.acked, "job should be fast-acked");
 
-        // Making the jobs in-progress shouldn't change anything
-        for i in ClientId::iter() {
-            ds.in_progress(write_one, i);
-        }
-        let job = ds.ds_active.get(&write_one).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(2)], IOState::Skipped);
-
         assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 1);
         assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 1);
@@ -8328,10 +8091,8 @@ pub(crate) mod test {
 
         // Create a write.
         let write_one = ds.create_and_enqueue_generic_write_eob(false);
-        for i in ClientId::iter() {
-            ds.in_progress(write_one, i);
-        }
 
+        // Create a flush
         let flush_one = ds.create_and_enqueue_generic_flush(None);
 
         // Verify all jobs can be acked (or should have been fast-acked)
@@ -8389,24 +8150,14 @@ pub(crate) mod test {
             );
         }
 
-        // Create a read.
+        // Create a read, write, flush
         let read_one = ds.create_and_enqueue_generic_read_eob();
-
         let write_one = ds.create_and_enqueue_generic_write_eob(false);
-        for i in ClientId::iter() {
-            ds.in_progress(write_one, i);
-        }
-
         let flush_one = ds.create_and_enqueue_generic_flush(None);
 
         // Create more IOs.
         let _read_two = ds.create_and_enqueue_generic_read_eob();
-
-        let write_two = ds.create_and_enqueue_generic_write_eob(false);
-        for i in ClientId::iter() {
-            ds.in_progress(write_two, i);
-        }
-
+        let _write_two = ds.create_and_enqueue_generic_write_eob(false);
         let _flush_two = ds.create_and_enqueue_generic_flush(None);
 
         // Six jobs have been skipped.
@@ -8970,7 +8721,7 @@ pub(crate) mod test {
             }
         }
         for cid in ClientId::iter() {
-            assert_eq!(job.state[cid], IOState::New);
+            assert_eq!(job.state[cid], IOState::InProgress);
         }
         assert!(!job.acked);
         assert!(!job.replay);
@@ -9041,7 +8792,7 @@ pub(crate) mod test {
             }
         }
         for cid in ClientId::iter() {
-            assert_eq!(job.state[cid], IOState::New);
+            assert_eq!(job.state[cid], IOState::InProgress);
         }
         assert!(!job.acked);
         assert!(!job.replay);
@@ -9109,7 +8860,7 @@ pub(crate) mod test {
             }
         }
         for cid in ClientId::iter() {
-            assert_eq!(job.state[cid], IOState::New);
+            assert_eq!(job.state[cid], IOState::InProgress);
         }
         assert!(!job.acked);
         assert!(!job.replay);
@@ -9200,7 +8951,7 @@ pub(crate) mod test {
             }
         }
         for cid in ClientId::iter() {
-            assert_eq!(job.state[cid], IOState::New);
+            assert_eq!(job.state[cid], IOState::InProgress);
         }
         assert!(!job.acked);
         assert!(!job.replay);
@@ -9230,6 +8981,31 @@ pub(crate) mod test {
         let (extent_repair_ids, deps) = ds.get_repair_ids(eid);
 
         let gw_close_id = gw.next_gw_id();
+        let gw_repair_id = gw.next_gw_id();
+        let gw_noop_id = gw.next_gw_id();
+        let gw_reopen_id = gw.next_gw_id();
+
+        if ds.repair.is_none() {
+            ds.repair = Some(LiveRepairData {
+                id: Uuid::new_v4(),
+                extent_count: 3,
+                active_extent: eid,
+                min_id: JobId(1000),
+                repair_job_ids: BTreeMap::new(),
+                source_downstairs: ClientId::new(0),
+                repair_downstairs: vec![ClientId::new(1)],
+                aborting_repair: false,
+                state: LiveRepairState::Closing {
+                    close_id: extent_repair_ids.close_id,
+                    repair_id: extent_repair_ids.repair_id,
+                    noop_id: extent_repair_ids.noop_id,
+                    reopen_id: extent_repair_ids.reopen_id,
+                    gw_repair_id,
+                    gw_noop_id,
+                },
+            });
+        }
+
         ds.create_and_enqueue_close_io(
             gw,
             eid,
@@ -9238,21 +9014,18 @@ pub(crate) mod test {
             gw_close_id,
             &[ClientId::new(1)], // repair downstairs
         );
-        let gw_repair_id = gw.next_gw_id();
         ds.create_and_enqueue_noop_io(
             gw,
             vec![extent_repair_ids.close_id],
             extent_repair_ids.repair_id,
             gw_repair_id,
         );
-        let gw_noop_id = gw.next_gw_id();
         ds.create_and_enqueue_noop_io(
             gw,
             vec![extent_repair_ids.repair_id],
             extent_repair_ids.noop_id,
             gw_noop_id,
         );
-        let gw_reopen_id = gw.next_gw_id();
         ds.create_and_enqueue_reopen_io(
             gw,
             eid,
@@ -9940,24 +9713,6 @@ pub(crate) mod test {
         // downstairs has `repair` set to Some sensible value, so we populate it
         // with what things would look like at the start of the repair. But, we
         // enqueue jobs ourselves.
-        ds.repair = Some(LiveRepairData {
-            id: Uuid::new_v4(),
-            extent_count: 3,
-            active_extent: ExtentId(0),
-            min_id: JobId(1000),
-            repair_job_ids: BTreeMap::new(),
-            source_downstairs: ClientId::new(0),
-            repair_downstairs: vec![ClientId::new(1)],
-            aborting_repair: false,
-            state: LiveRepairState::Closing {
-                close_id: JobId(1000),
-                repair_id: JobId(1001),
-                noop_id: JobId(1002),
-                reopen_id: JobId(1003),
-                gw_repair_id: gw.next_gw_id(),
-                gw_noop_id: gw.next_gw_id(),
-            },
-        });
         create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(0));
 
         // A write of blocks 2,3,4 which spans extent 0 and extent 1.
@@ -10449,9 +10204,9 @@ pub(crate) mod test {
             false,
         );
 
-        ds.in_progress(job_id, ClientId::new(0));
-        ds.in_progress(job_id, ClientId::new(1));
-        ds.in_progress(job_id, ClientId::new(2));
+        for cid in ClientId::iter() {
+            assert_eq!(ds.job_state(job_id, cid), IOState::InProgress);
+        }
     }
 
     fn submit_three_ios(gw: &mut GuestWork, ds: &mut Downstairs) {
@@ -10560,9 +10315,9 @@ pub(crate) mod test {
         // are on an extent we "already repaired".
         for job_id in (1006..1009).map(JobId) {
             let job = ds.ds_active.get(&job_id).unwrap();
-            assert_eq!(job.state[ClientId::new(0)], IOState::New);
-            assert_eq!(job.state[ClientId::new(1)], IOState::New);
-            assert_eq!(job.state[ClientId::new(2)], IOState::New);
+            assert_eq!(job.state[ClientId::new(0)], IOState::InProgress);
+            assert_eq!(job.state[ClientId::new(1)], IOState::InProgress);
+            assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
         }
 
         // Walk the three final jobs, verify that the dependencies will be
@@ -10572,18 +10327,15 @@ pub(crate) mod test {
         let current_deps = job.work.deps().clone();
 
         assert_eq!(current_deps, &[JobId(1005)]);
-        assert_eq!(
-            ds.in_progress(JobId(1006), ClientId::new(1)).deps(),
-            &vec![]
-        );
+        assert_eq!(ds.get_pruned_deps(JobId(1006), ClientId::new(1)), []);
 
         let job = ds.ds_active.get(&JobId(1007)).unwrap();
         let current_deps = job.work.deps().clone();
 
         assert_eq!(current_deps, &[JobId(1006)]);
         assert_eq!(
-            ds.in_progress(JobId(1007), ClientId::new(1)).deps(),
-            &vec![JobId(1006)]
+            ds.get_pruned_deps(JobId(1007), ClientId::new(1)),
+            [JobId(1006)]
         );
 
         let job = ds.ds_active.get(&JobId(1008)).unwrap();
@@ -10591,8 +10343,8 @@ pub(crate) mod test {
 
         assert_eq!(current_deps, &[JobId(1007)]);
         assert_eq!(
-            ds.in_progress(JobId(1008), ClientId::new(1)).deps(),
-            &vec![JobId(1007)]
+            ds.get_pruned_deps(JobId(1008), ClientId::new(1)),
+            [JobId(1007)]
         );
     }
 
@@ -10755,16 +10507,16 @@ pub(crate) mod test {
         // itself is Skipped there, so we won't actually send it.
 
         let job = ds.ds_active.get(&JobId(1007)).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::New);
+        assert_eq!(job.state[ClientId::new(0)], IOState::InProgress);
         assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(2)], IOState::New);
+        assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
 
         let current_deps = job.work.deps().clone();
         assert_eq!(current_deps, &[JobId(1002)]);
 
         // Verify that the Skipped job is Skipped
         assert_eq!(
-            ds.ds_active.get_mut(&JobId(1007)).unwrap().state[ClientId::new(1)],
+            ds.job_state(JobId(1007), ClientId::new(1)),
             IOState::Skipped
         );
 
@@ -10772,25 +10524,25 @@ pub(crate) mod test {
         // the final job of the repair) on both the Active and LiveRepair
         // downstairs, since it masks job 0
         let job = ds.ds_active.get(&JobId(1008)).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::New);
-        assert_eq!(job.state[ClientId::new(1)], IOState::New);
-        assert_eq!(job.state[ClientId::new(2)], IOState::New);
+        assert_eq!(job.state[ClientId::new(0)], IOState::InProgress);
+        assert_eq!(job.state[ClientId::new(1)], IOState::InProgress);
+        assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
 
         let current_deps = job.work.deps().clone();
         assert_eq!(current_deps, &[JobId(1006)]);
 
         // LiveRepair downstairs won't see past the repair.
         assert_eq!(
-            ds.in_progress(JobId(1008), ClientId::new(1)).deps(),
-            &vec![JobId(1006)]
+            ds.get_pruned_deps(JobId(1008), ClientId::new(1)),
+            [JobId(1006)]
         );
 
         // This final job depends on everything on Active downstairs, but
         // a smaller subset for the LiveRepair downstairs
         let job = ds.ds_active.get(&JobId(1013)).unwrap();
-        assert_eq!(job.state[ClientId::new(0)], IOState::New);
-        assert_eq!(job.state[ClientId::new(1)], IOState::New);
-        assert_eq!(job.state[ClientId::new(2)], IOState::New);
+        assert_eq!(job.state[ClientId::new(0)], IOState::InProgress);
+        assert_eq!(job.state[ClientId::new(1)], IOState::InProgress);
+        assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
 
         // The last write depends on
         // 1) the final operation on the repair of extent 0
@@ -10800,8 +10552,8 @@ pub(crate) mod test {
         assert_eq!(current_deps, &[JobId(1006), JobId(1008), JobId(1012)]);
 
         assert_eq!(
-            ds.in_progress(JobId(1013), ClientId::new(1)).deps(),
-            &vec![JobId(1006), JobId(1008), JobId(1012)]
+            ds.get_pruned_deps(JobId(1013), ClientId::new(1)),
+            [JobId(1006), JobId(1008), JobId(1012)]
         );
         assert_eq!(current_deps, &[JobId(1006), JobId(1008), JobId(1012)]);
     }
@@ -10873,39 +10625,40 @@ pub(crate) mod test {
         // the write for the active downstairs, but will not depend on anything
         // for the downstairs in LiveRepair.
         assert_eq!(
-            ds.in_progress(JobId(flushclose_jobid), ClientId::new(0))
-                .deps(),
-            &vec![JobId(1000)]
+            ds.get_pruned_deps(JobId(flushclose_jobid), ClientId::new(0)),
+            [JobId(1000)]
         );
         assert_eq!(
-            ds.in_progress(JobId(flushclose_jobid), ClientId::new(1))
-                .deps(),
-            &vec![]
+            ds.get_pruned_deps(JobId(flushclose_jobid), ClientId::new(1)),
+            []
         );
         assert_eq!(
-            ds.in_progress(JobId(flushclose_jobid), ClientId::new(2))
-                .deps(),
-            &vec![JobId(1000)]
+            ds.get_pruned_deps(JobId(flushclose_jobid), ClientId::new(2)),
+            [JobId(1000)]
         );
 
         // The second write should depend on the reopen on all downstairs
         let write_jobid = JobId(1005);
-        let write_job = ds.ds_active.get(&write_jobid).unwrap();
-        assert_eq!(write_job.state[ClientId::new(0)], IOState::New);
-        assert_eq!(write_job.state[ClientId::new(1)], IOState::New);
-        assert_eq!(write_job.state[ClientId::new(2)], IOState::New);
+        assert_eq!(
+            ds.job_states(write_jobid),
+            [
+                IOState::InProgress,
+                IOState::InProgress,
+                IOState::InProgress,
+            ]
+        );
 
         assert_eq!(
-            ds.in_progress(write_jobid, ClientId::new(0)).deps(),
-            &vec![JobId(1004)]
+            ds.get_pruned_deps(write_jobid, ClientId::new(0)),
+            [JobId(1004)]
         );
         assert_eq!(
-            ds.in_progress(write_jobid, ClientId::new(1)).deps(),
-            &vec![JobId(1004)]
+            ds.get_pruned_deps(write_jobid, ClientId::new(1)),
+            [JobId(1004)]
         );
         assert_eq!(
-            ds.in_progress(write_jobid, ClientId::new(2)).deps(),
-            &vec![JobId(1004)]
+            ds.get_pruned_deps(write_jobid, ClientId::new(2)),
+            [JobId(1004)]
         );
     }
 
@@ -11009,15 +10762,15 @@ pub(crate) mod test {
         // The first job, should have the dependences for the new repair work
         assert_eq!(jobs[0].ds_id, JobId(1004));
         assert_eq!(jobs[0].work.deps(), &[JobId(1003)]);
-        assert_eq!(jobs[0].state[ClientId::new(0)], IOState::New);
-        assert_eq!(jobs[0].state[ClientId::new(1)], IOState::New);
-        assert_eq!(jobs[0].state[ClientId::new(2)], IOState::New);
+        assert_eq!(jobs[0].state[ClientId::new(0)], IOState::InProgress);
+        assert_eq!(jobs[0].state[ClientId::new(1)], IOState::InProgress);
+        assert_eq!(jobs[0].state[ClientId::new(2)], IOState::InProgress);
 
         // The 2nd job should also have the dependences for the new repair work
         assert_eq!(jobs[1].work.deps(), &[JobId(1003)]);
-        assert_eq!(jobs[1].state[ClientId::new(0)], IOState::New);
-        assert_eq!(jobs[1].state[ClientId::new(1)], IOState::New);
-        assert_eq!(jobs[1].state[ClientId::new(2)], IOState::New);
+        assert_eq!(jobs[1].state[ClientId::new(0)], IOState::InProgress);
+        assert_eq!(jobs[1].state[ClientId::new(1)], IOState::InProgress);
+        assert_eq!(jobs[1].state[ClientId::new(2)], IOState::InProgress);
     }
 
     #[test]
@@ -11137,20 +10890,20 @@ pub(crate) mod test {
         // The first job should have no dependencies
         assert_eq!(jobs[0].ds_id, JobId(1000));
         assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[0].state[ClientId::new(0)], IOState::New);
+        assert_eq!(jobs[0].state[ClientId::new(0)], IOState::InProgress);
         assert_eq!(jobs[0].state[ClientId::new(1)], IOState::Skipped);
-        assert_eq!(jobs[0].state[ClientId::new(2)], IOState::New);
+        assert_eq!(jobs[0].state[ClientId::new(2)], IOState::InProgress);
 
         assert_eq!(jobs[1].ds_id, JobId(1005));
         assert_eq!(jobs[1].work.deps(), &[JobId(1004)]);
-        assert_eq!(jobs[1].state[ClientId::new(0)], IOState::New);
-        assert_eq!(jobs[1].state[ClientId::new(1)], IOState::New);
-        assert_eq!(jobs[1].state[ClientId::new(2)], IOState::New);
+        assert_eq!(jobs[1].state[ClientId::new(0)], IOState::InProgress);
+        assert_eq!(jobs[1].state[ClientId::new(1)], IOState::InProgress);
+        assert_eq!(jobs[1].state[ClientId::new(2)], IOState::InProgress);
 
         assert_eq!(jobs[2].ds_id, JobId(1010));
         assert_eq!(jobs[2].work.deps(), &[JobId(1004), JobId(1009)]);
-        assert_eq!(jobs[2].state[ClientId::new(0)], IOState::New);
-        assert_eq!(jobs[2].state[ClientId::new(1)], IOState::New);
-        assert_eq!(jobs[2].state[ClientId::new(2)], IOState::New);
+        assert_eq!(jobs[2].state[ClientId::new(0)], IOState::InProgress);
+        assert_eq!(jobs[2].state[ClientId::new(1)], IOState::InProgress);
+        assert_eq!(jobs[2].state[ClientId::new(2)], IOState::InProgress);
     }
 }

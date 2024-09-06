@@ -141,6 +141,9 @@ pub(crate) struct DownstairsClient {
     /// This is set to `None` during initialization
     pub(crate) repair_addr: Option<SocketAddr>,
 
+    /// Flag indicating that the Upstairs should replay jobs to this client
+    needs_replay: bool,
+
     /// TLS context (if present)
     ///
     /// This is passed as a pointer to minimize copies
@@ -212,6 +215,7 @@ impl DownstairsClient {
             ),
             client_id,
             region_uuid: None,
+            needs_replay: false,
             negotiation_state: NegotiationState::Start,
             tls_context,
             promote_state: None,
@@ -250,6 +254,7 @@ impl DownstairsClient {
             client_task: Self::new_dummy_task(false),
             client_id: ClientId::new(0),
             region_uuid: None,
+            needs_replay: false,
             negotiation_state: NegotiationState::Start,
             tls_context: None,
             promote_state: None,
@@ -379,6 +384,21 @@ impl DownstairsClient {
         let old_state = self.set_job_state(job, IOState::InProgress);
         assert_eq!(old_state, IOState::New);
 
+        self.prune_deps(job, repair_min_id)
+    }
+
+    /// Returns a client-specialized copy of the job's `IOop`
+    ///
+    /// Dependencies are pruned if we're in live-repair, and the `extent_limit`
+    /// is cleared if we're _not_ in live-repair.
+    ///
+    /// This is public so that we can call it in unit tests, but should
+    /// generally not be called from general-purpose code.
+    pub(crate) fn prune_deps(
+        &self,
+        job: &DownstairsIO,
+        repair_min_id: Option<JobId>,
+    ) -> IOop {
         let mut out = job.work.clone();
         if self.dependencies_need_cleanup() {
             match &mut out {
@@ -409,15 +429,11 @@ impl DownstairsClient {
     }
 
     /// Ensures that the given job is in the job queue and in `IOState::New`
-    ///
-    /// Returns `true` if the job must be sent, or `false` if it was already `New`
     pub(crate) fn replay_job(&mut self, job: &mut DownstairsIO) {
-        /*
-         * If the job is InProgress or New, then we can just go back
-         * to New and no extra work is required.
-         * If it's Done, then by definition it has been acked; test that here
-         * to double-check.
-         */
+        // If the job is InProgress, then we can just go back to New and no
+        // extra work is required.
+        // If it's Done, then by definition it has been acked; test that here
+        // to double-check.
         if IOState::Done == job.state[self.client_id] && !job.acked {
             panic!("[{}] This job was not acked: {:?}", self.client_id, job);
         }
@@ -571,6 +587,7 @@ impl DownstairsClient {
         // entirely; the repair address could have changed in any of these
         // cases.
         self.repair_addr = None;
+        self.needs_replay = false;
 
         if auto_promote {
             self.promote_state = Some(PromoteState::Waiting);
@@ -589,6 +606,16 @@ impl DownstairsClient {
 
         // Restart with a short delay
         self.start_task(true, auto_promote);
+    }
+
+    /// Sets the `needs_replay` flag
+    pub(crate) fn needs_replay(&mut self) {
+        self.needs_replay = true;
+    }
+
+    /// Returns and clears the `needs_replay` flag
+    pub(crate) fn check_replay(&mut self) -> bool {
+        std::mem::take(&mut self.needs_replay)
     }
 
     /// Returns the last flush ID handled by this client
