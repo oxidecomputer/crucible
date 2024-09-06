@@ -737,7 +737,7 @@ impl Upstairs {
                 up_count: self.guest.guest_work.len() as u32,
                 up_counters: self.counters,
                 next_job_id: self.downstairs.peek_next_id(),
-                up_backpressure: self.guest.backpressure_us(),
+                up_backpressure: self.guest.get_backpressure().as_micros(),
                 write_bytes_out: self.downstairs.write_bytes_outstanding(),
                 ds_count: self.downstairs.active_count() as u32,
                 ds_state: self.downstairs.collect_stats(|c| c.state()),
