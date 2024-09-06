@@ -303,7 +303,6 @@ mod test {
                     downstairs2.address(),
                     downstairs3.address(),
                 ],
-                lossy: false,
                 flush_timeout: None,
                 key: Some(key_string),
                 cert_pem: None,

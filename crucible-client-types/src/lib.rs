@@ -45,7 +45,6 @@ pub enum VolumeConstructionRequest {
 pub struct CrucibleOpts {
     pub id: Uuid,
     pub target: Vec<SocketAddr>,
-    pub lossy: bool,
     pub flush_timeout: Option<f32>,
     pub key: Option<String>,
     pub cert_pem: Option<String>,
@@ -80,7 +79,6 @@ impl std::fmt::Display for CrucibleOpts {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Upstairs UUID: {},", self.id)?;
         write!(f, " Targets: {:?},", self.target)?;
-        write!(f, " lossy: {:?},", self.lossy)?;
         write!(f, " flush_timeout: {:?},", self.flush_timeout)?;
         write!(f, " key populated: {}, ", self.key.is_some())?;
         write!(f, " cert_pem populated: {}, ", self.cert_pem.is_some())?;

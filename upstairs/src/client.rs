@@ -155,9 +155,6 @@ pub(crate) struct DownstairsClient {
     /// [`Downstairs::next_flush`], which is a flush index).
     pub(crate) last_flush: JobId,
 
-    /// Cache of new jobs
-    new_jobs: BTreeSet<JobId>,
-
     /// Jobs that have been skipped
     pub(crate) skipped_jobs: BTreeSet<JobId>,
 
@@ -224,7 +221,6 @@ impl DownstairsClient {
             state: DsState::New,
             last_flush: JobId(0),
             stats: DownstairsStats::default(),
-            new_jobs: BTreeSet::new(),
             skipped_jobs: BTreeSet::new(),
             region_metadata: None,
             repair_info: None,
@@ -248,7 +244,6 @@ impl DownstairsClient {
             session_id: Uuid::new_v4(),
             generation: std::sync::atomic::AtomicU64::new(1),
             read_only: false,
-            lossy: false,
         });
         Self {
             cfg,
@@ -264,7 +259,6 @@ impl DownstairsClient {
             state: DsState::New,
             last_flush: JobId(0),
             stats: DownstairsStats::default(),
-            new_jobs: BTreeSet::new(),
             skipped_jobs: BTreeSet::new(),
             region_metadata: None,
             repair_info: None,
@@ -273,12 +267,6 @@ impl DownstairsClient {
             connection_id: ConnectionId(0),
             client_delay_us,
         }
-    }
-
-    /// Return true if `io_send` can send more work, otherwise return false
-    pub(crate) fn should_do_more_work(&self) -> bool {
-        !self.new_jobs.is_empty()
-            && matches!(self.state, DsState::Active | DsState::LiveRepair)
     }
 
     /// Choose which `ClientAction` to apply
@@ -327,20 +315,6 @@ impl DownstairsClient {
         } else {
             warn!(self.log, "client task is already stopping")
         }
-    }
-
-    /// Return a list of downstairs request IDs that represent unissued
-    /// requests for this client.
-    pub(crate) fn new_work(&mut self) -> BTreeSet<JobId> {
-        std::mem::take(&mut self.new_jobs)
-    }
-
-    /// Requeues a single job
-    ///
-    /// This is used when running in lossy mode, where jobs may be skipped in
-    /// `io_send`.
-    pub(crate) fn requeue_one(&mut self, work: JobId) {
-        self.new_jobs.insert(work);
     }
 
     pub(crate) fn send(&mut self, m: Message) {
@@ -436,8 +410,8 @@ impl DownstairsClient {
 
     /// Ensures that the given job is in the job queue and in `IOState::New`
     ///
-    /// Returns `true` if the job was requeued, or `false` if it was already `New`
-    pub(crate) fn replay_job(&mut self, job: &mut DownstairsIO) -> bool {
+    /// Returns `true` if the job must be sent, or `false` if it was already `New`
+    pub(crate) fn replay_job(&mut self, job: &mut DownstairsIO) {
         /*
          * If the job is InProgress or New, then we can just go back
          * to New and no extra work is required.
@@ -450,12 +424,11 @@ impl DownstairsClient {
 
         let old_state = self.set_job_state(job, IOState::New);
         job.replay = true;
-        if old_state != IOState::New {
-            self.requeue_one(job.ds_id);
-            true
-        } else {
-            false
-        }
+        assert_ne!(
+            old_state,
+            IOState::New,
+            "IOState::New is transitory and should not be seen"
+        );
     }
 
     /// Sets this job as skipped and moves it to `skipped_jobs`
@@ -923,7 +896,6 @@ impl DownstairsClient {
                 // caller has provided it to us.
                 if io.work.send_io_live_repair(last_repair_extent) {
                     // Leave this IO as New, the downstairs will receive it.
-                    self.new_jobs.insert(io.ds_id);
                     IOState::New
                 } else {
                     // Move this IO to skipped, we are not ready for
@@ -933,10 +905,7 @@ impl DownstairsClient {
                     IOState::Skipped
                 }
             }
-            _ => {
-                self.new_jobs.insert(io.ds_id);
-                IOState::New
-            }
+            _ => IOState::New,
         };
         if r == IOState::New && !io.backpressure_guard.contains(&self.client_id)
         {
@@ -1166,13 +1135,6 @@ impl DownstairsClient {
                 "[{}] transition to same state: {}", self.client_id, new_state
             );
         }
-    }
-
-    /// Remove all jobs from `self.new_jobs`
-    ///
-    /// This is only useful when marking the downstairs as faulted or similar
-    pub(crate) fn clear_new_jobs(&mut self) {
-        self.new_jobs.clear()
     }
 
     /// Aborts an in-progress live repair, conditionally restarting the task
