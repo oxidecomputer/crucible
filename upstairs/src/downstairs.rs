@@ -1465,7 +1465,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -1589,7 +1589,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -1730,7 +1730,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -1788,7 +1788,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         };
         self.enqueue(io);
         ds_id
@@ -1872,7 +1872,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         };
         self.enqueue(io);
         ds_id
@@ -1903,7 +1903,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -2312,7 +2312,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         };
 
         self.enqueue(fl);
@@ -2439,7 +2439,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         };
 
         self.enqueue(io);
@@ -2902,22 +2902,20 @@ impl Downstairs {
             }
             // Now that we've collected jobs to retire, remove them from the map
             for &id in &retired {
-                let mut job = self.ds_active.remove(&id);
+                let job = self.ds_active.remove(&id);
 
                 // Jobs should have their backpressure contribution removed when
                 // they are completed (in `process_io_completion_inner`),
                 // **not** when they are retired.  We'll do a sanity check here
                 // and print a warning if that's not the case.
                 for c in ClientId::iter() {
-                    if job.backpressure_bytes.contains(&c) {
+                    if job.backpressure_guard.contains(&c) {
                         warn!(
                             self.log,
                             "job {ds_id} had pending backpressure bytes \
                              for client {c}"
                         );
-                        self.clients[c]
-                            .write_bytes_outstanding
-                            .decrement(&mut job, c);
+                        // Backpressure is decremented on drop
                     }
                 }
             }
@@ -3532,7 +3530,16 @@ impl Downstairs {
         self.clients
             .iter()
             .filter(|c| matches!(c.state(), DsState::Active))
-            .map(|c| c.write_bytes_outstanding.get())
+            .map(|c| c.backpressure_counters.get_write_bytes())
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn jobs_outstanding(&self) -> u64 {
+        self.clients
+            .iter()
+            .filter(|c| matches!(c.state(), DsState::Active))
+            .map(|c| c.backpressure_counters.get_jobs())
             .max()
             .unwrap_or(0)
     }

@@ -49,6 +49,7 @@ pub mod block_io;
 pub use block_io::{FileBlockIO, ReqwestBlockIO};
 
 pub(crate) mod backpressure;
+use backpressure::BackpressureGuard;
 
 pub mod block_req;
 pub(crate) use block_req::{BlockOpWaiter, BlockRes};
@@ -943,8 +944,11 @@ struct DownstairsIO {
     data: Option<RawReadResponse>,
     read_validations: Vec<Validation>,
 
-    /// Number of bytes that this job has contributed to guest backpressure
-    backpressure_bytes: ClientMap<u64>,
+    /// Handle for this job's contribution to guest backpressure
+    ///
+    /// Each of these guard handles will automatically decrement the
+    /// backpressure count for their respective Downstairs when dropped.
+    backpressure_guard: ClientMap<BackpressureGuard>,
 }
 
 impl DownstairsIO {
@@ -1320,6 +1324,16 @@ impl IOop {
             IOop::Read {
                 count, block_size, ..
             } => *block_size * *count,
+            _ => 0,
+        }
+    }
+
+    /// Returns the number of bytes written
+    fn write_bytes(&self) -> u64 {
+        match &self {
+            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
+                data.len() as u64
+            }
             _ => 0,
         }
     }

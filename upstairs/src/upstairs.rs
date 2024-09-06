@@ -2019,16 +2019,9 @@ impl Upstairs {
 
     /// Sets both guest and per-client backpressure
     fn set_backpressure(&self) {
-        let dsw_max = self
-            .downstairs
-            .clients
-            .iter()
-            .map(|c| c.total_live_work())
-            .max()
-            .unwrap_or(0);
         self.guest.set_backpressure(
             self.downstairs.write_bytes_outstanding(),
-            dsw_max as u64,
+            self.downstairs.jobs_outstanding(),
         );
 
         self.downstairs.set_client_backpressure();

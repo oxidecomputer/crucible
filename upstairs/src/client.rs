@@ -1,6 +1,6 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
-    backpressure::BackpressureBytes, cdt, integrity_hash,
+    backpressure::BackpressureCounters, cdt, integrity_hash,
     live_repair::ExtentInfo, upstairs::UpstairsConfig, upstairs::UpstairsState,
     ClientIOStateCount, ClientId, CrucibleDecoder, CrucibleError, DownstairsIO,
     DsState, EncryptionContext, IOState, IOop, JobId, Message, RawReadResponse,
@@ -120,14 +120,11 @@ pub(crate) struct DownstairsClient {
     /// IO state counters
     pub(crate) io_state_count: ClientIOStateCount,
 
-    /// Bytes in queues for this client
+    /// Jobs, write bytes, and total IO bytes in this client's queue
     ///
-    /// This includes read, write, and write-unwritten jobs, and is used to
-    /// estimate per-client backpressure to keep the 3x downstairs in sync.
-    pub(crate) bytes_outstanding: u64,
-
-    /// Write bytes in this queue, used for global backpressure
-    pub(crate) write_bytes_outstanding: BackpressureBytes,
+    /// These values are used for both global and local (per-client)
+    /// backpressure.
+    pub(crate) backpressure_counters: BackpressureCounters,
 
     /// UUID for this downstairs region
     ///
@@ -232,8 +229,7 @@ impl DownstairsClient {
             region_metadata: None,
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
-            bytes_outstanding: 0,
-            write_bytes_outstanding: BackpressureBytes::new(),
+            backpressure_counters: BackpressureCounters::new(),
             connection_id: ConnectionId(0),
             client_delay_us,
         }
@@ -273,8 +269,7 @@ impl DownstairsClient {
             region_metadata: None,
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
-            bytes_outstanding: 0,
-            write_bytes_outstanding: BackpressureBytes::new(),
+            backpressure_counters: BackpressureCounters::new(),
             connection_id: ConnectionId(0),
             client_delay_us,
         }
@@ -380,16 +375,17 @@ impl DownstairsClient {
 
         // Update our bytes-in-flight counter
         if was_running && !is_running {
-            self.bytes_outstanding = self
-                .bytes_outstanding
-                .checked_sub(job.work.job_bytes())
-                .unwrap();
-            self.write_bytes_outstanding.decrement(job, self.client_id);
+            // Because the job is no longer running, it shouldn't count for
+            // backpressure.  Remove the backpressure guard for this client,
+            // which decrements backpressure counters on drop.
+            job.backpressure_guard.take(&self.client_id);
         } else if is_running && !was_running {
             // This should only happen if a job is replayed, but that still
             // counts!
-            self.bytes_outstanding += job.work.job_bytes();
-            self.write_bytes_outstanding.increment(job, self.client_id);
+            job.backpressure_guard.insert(
+                self.client_id,
+                self.backpressure_counters.increment(&job.work),
+            );
         }
 
         old_state
@@ -940,8 +936,10 @@ impl DownstairsClient {
             }
         };
         if r == IOState::New {
-            self.bytes_outstanding += io.work.job_bytes();
-            self.write_bytes_outstanding.increment(io, self.client_id);
+            io.backpressure_guard.insert(
+                self.client_id,
+                self.backpressure_counters.increment(&io.work),
+            );
         }
         self.io_state_count.incr(&r);
         r
@@ -2230,7 +2228,7 @@ impl DownstairsClient {
     }
 
     pub(crate) fn total_bytes_outstanding(&self) -> usize {
-        self.bytes_outstanding as usize
+        self.backpressure_counters.get_io_bytes() as usize
     }
 
     /// Returns a unique ID for the current connection, or `None`
