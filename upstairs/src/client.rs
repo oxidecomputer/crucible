@@ -379,7 +379,10 @@ impl DownstairsClient {
             // backpressure.  Remove the backpressure guard for this client,
             // which decrements backpressure counters on drop.
             job.backpressure_guard.take(&self.client_id);
-        } else if is_running && !was_running {
+        } else if is_running
+            && !was_running
+            && !job.backpressure_guard.contains(&self.client_id)
+        {
             // This should only happen if a job is replayed, but that still
             // counts!
             job.backpressure_guard.insert(
@@ -935,7 +938,8 @@ impl DownstairsClient {
                 IOState::New
             }
         };
-        if r == IOState::New {
+        if r == IOState::New && !io.backpressure_guard.contains(&self.client_id)
+        {
             io.backpressure_guard.insert(
                 self.client_id,
                 self.backpressure_counters.increment(&io.work),
