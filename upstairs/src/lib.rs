@@ -103,10 +103,14 @@ pub const IO_OUTSTANDING_MAX_JOBS: usize = 10000;
 #[async_trait]
 pub trait BlockIO: Sync {
     async fn activate(&self) -> Result<(), CrucibleError>;
+    async fn activate_with_gen(&self, gen: u64) -> Result<(), CrucibleError>;
 
     async fn deactivate(&self) -> Result<(), CrucibleError>;
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError>;
+
+    async fn query_extent_size(&self) -> Result<Block, CrucibleError>;
+    async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError>;
 
     // Total bytes of Volume
     async fn total_size(&self) -> Result<u64, CrucibleError>;
@@ -214,6 +218,17 @@ pub trait BlockIO: Sync {
         }
 
         self.activate().await
+    }
+    /// Conditional activate if not active.
+    async fn conditional_activate_with_gen(
+        &self,
+        gen: u64,
+    ) -> Result<(), CrucibleError> {
+        if self.query_is_active().await? {
+            return Ok(());
+        }
+
+        self.activate_with_gen(gen).await
     }
 
     /// Checks that the data length is a multiple of block size

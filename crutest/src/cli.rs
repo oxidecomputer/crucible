@@ -223,8 +223,8 @@ enum CliCommand {
  * After verify, we truncate the data to 10 fields and return that so
  * the cli server can send it back to the client for display.
  */
-async fn cli_read(
-    guest: &Arc<Guest>,
+async fn cli_read<T: BlockIO + Send + Sync + 'static>(
+    guest: &Arc<T>,
     ri: &mut RegionInfo,
     block_index: usize,
     size: usize,
@@ -264,8 +264,8 @@ async fn cli_read(
 /*
  * A wrapper around write that just picks a random offset.
  */
-async fn rand_write(
-    guest: &Arc<Guest>,
+async fn rand_write<T: BlockIO + Send + Sync + 'static>(
+    guest: &Arc<T>,
     ri: &mut RegionInfo,
 ) -> Result<(), CrucibleError> {
     /*
@@ -290,8 +290,8 @@ async fn rand_write(
  * Data is generated based on the value in the internal write counter.
  * Update the internal write counter so we have something to compare to.
  */
-async fn cli_write(
-    guest: &Arc<Guest>,
+async fn cli_write<T: BlockIO + Send + Sync + 'static>(
+    guest: &Arc<T>,
     ri: &mut RegionInfo,
     block_index: usize,
     size: usize,
@@ -334,8 +334,8 @@ async fn cli_write(
  * If we do believe the block is written to, then we don't update our
  * internal counter and we don't expect our write to change the contents.
  */
-async fn cli_write_unwritten(
-    guest: &Arc<Guest>,
+async fn cli_write_unwritten<T: BlockIO + Send + Sync + 'static>(
+    guest: &Arc<T>,
     ri: &mut RegionInfo,
     block_index: usize,
 ) -> Result<(), CrucibleError> {
@@ -744,8 +744,8 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
 /**
  * Process a CLI command from the client, we are the server side.
  */
-async fn process_cli_command(
-    guest: &Arc<Guest>,
+async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
+    guest: &Arc<T>,
     fw: &mut FramedWrite<tokio::net::tcp::OwnedWriteHalf, CliEncoder>,
     cmd: protocol::CliMessage,
     ri: &mut RegionInfo,
@@ -1040,14 +1040,14 @@ async fn process_cli_command(
 /*
  * Server for a crucible client CLI.
  * This opens a network port and listens for commands from the cli_client.
- * When it receives one, it translates it into the crucible Guest command
+ * When it receives one, it translates it into the crucible BlockIO command
  * and passes it on to the Upstairs.
  * State is kept here.
  * No checking is done.
  * Wait here if you want.
  */
-pub async fn start_cli_server(
-    guest: &Arc<Guest>,
+pub async fn start_cli_server<T: BlockIO + Send + Sync + 'static>(
+    guest: &Arc<T>,
     address: IpAddr,
     port: u16,
     verify_input: Option<PathBuf>,

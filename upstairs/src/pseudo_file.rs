@@ -221,6 +221,16 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
 
         Ok(())
     }
+    pub async fn activate_with_gen(
+        &self,
+        gen: u64,
+    ) -> Result<(), CrucibleError> {
+        self.block_io.activate_with_gen(gen).await
+    }
+
+    pub async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
+        self.block_io.query_work_queue().await
+    }
 
     pub async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
         self.block_io.show_work().await
