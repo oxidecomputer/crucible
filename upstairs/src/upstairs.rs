@@ -982,8 +982,34 @@ impl Upstairs {
                 self.set_active_request(done);
             }
             BlockOp::GoActiveWithGen { gen, done } => {
-                self.cfg.generation.store(gen, Ordering::Release);
-                self.set_active_request(done);
+                // We allow this if we are not active yet, or we are active
+                // with the requested generation number.
+                match &self.state {
+                    UpstairsState::Active | UpstairsState::GoActive(..) => {
+                        if self.cfg.generation() == gen {
+                            // Okay, we want to activate with what we already
+                            // have, that's valid., let the set_active_request
+                            // handle things.
+                            self.set_active_request(done);
+                        } else {
+                            // Gen's don't match, but we are already active,
+                            // or in progress to activate, so fail this request.
+                            done.send_err(
+                                CrucibleError::GenerationNumberInvalid,
+                            );
+                        }
+                    }
+                    UpstairsState::Deactivating(..) => {
+                        // Don't update gen, return error
+                        done.send_err(CrucibleError::UpstairsDeactivating);
+                    }
+                    UpstairsState::Initializing => {
+                        // This case, we update our generation and then
+                        // let set_active_request handle the rest.
+                        self.cfg.generation.store(gen, Ordering::Release);
+                        self.set_active_request(done);
+                    }
+                }
             }
             BlockOp::QueryGuestIOReady { done } => {
                 done.send_ok(self.guest_io_ready());
@@ -1171,12 +1197,15 @@ impl Upstairs {
                 info!(self.log, "{} active request set", self.cfg.upstairs_id);
             }
             UpstairsState::GoActive(..) => {
+                // We have already been sent a request to go active, but we
+                // are not active yet and will respond (on the original
+                // BlockRes) when we do become active.
                 info!(
                     self.log,
                     "{} request to activate upstairs already going active",
                     self.cfg.upstairs_id
                 );
-                res.send_err(CrucibleError::UpstairsAlreadyActive);
+                res.send_err(CrucibleError::UpstairsActivateInProgress);
                 return;
             }
             UpstairsState::Deactivating(..) => {
@@ -1188,12 +1217,13 @@ impl Upstairs {
                 return;
             }
             UpstairsState::Active => {
+                // We are already active, so go ahead and respond again.
                 info!(
                     self.log,
                     "{} Request to activate upstairs already active",
                     self.cfg.upstairs_id
                 );
-                res.send_err(CrucibleError::UpstairsAlreadyActive);
+                res.send_ok(());
                 return;
             }
         }
@@ -1967,8 +1997,9 @@ impl Upstairs {
                 self.state = UpstairsState::Active;
                 Ok(())
             }
-            UpstairsState::Active | UpstairsState::GoActive(..) => {
-                Err(CrucibleError::UpstairsAlreadyActive)
+            UpstairsState::Active => Ok(()),
+            UpstairsState::GoActive(..) => {
+                Err(CrucibleError::UpstairsActivateInProgress)
             }
             UpstairsState::Deactivating(..) => {
                 /*

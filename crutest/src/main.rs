@@ -806,7 +806,6 @@ async fn main() -> Result<()> {
         }
         _ => slog::Level::Info,
     };
-
     let guest_logger = crucible_common::build_logger_with_level(log_level);
 
     let test_log = guest_logger.new(o!("task" => "crutest".to_string()));
@@ -847,7 +846,7 @@ async fn main() -> Result<()> {
         pr = None;
     }
 
-    let _join_handle = up_main(crucible_opts.clone(), opt.gen, None, io, pr)?;
+    let _join_handle = up_main(crucible_opts, opt.gen, None, io, pr)?;
     println!("Crucible runtime is spawned");
 
     if let Workload::CliServer { listen, port } = opt.workload {
@@ -931,7 +930,7 @@ async fn main() -> Result<()> {
     match opt.workload {
         Workload::Balloon => {
             println!("Run balloon test");
-            balloon_workload(&guest, &mut region_info).await?;
+            balloon_workload(guest.as_ref(), &mut region_info).await?;
         }
         Workload::Big => {
             println!("Run big test");
@@ -978,7 +977,7 @@ async fn main() -> Result<()> {
         Workload::Dirty => {
             println!("Run dirty test");
             let count = opt.count.unwrap_or(10);
-            dirty_workload(&guest, &mut region_info, count).await?;
+            dirty_workload(guest.as_ref(), &mut region_info, count).await?;
 
             /*
              * Saving state here when we have not waited for a flush
@@ -1680,8 +1679,8 @@ fn validate_vec<V: AsRef<[u8]>>(
  * I named it balloon because each loop on a block "balloons" from the
  * minimum IO size to the largest possible IO size.
  */
-async fn balloon_workload<T: BlockIO + Send + Sync + 'static>(
-    guest: &Arc<T>,
+async fn balloon_workload<T: BlockIO>(
+    guest: &T,
     ri: &mut RegionInfo,
 ) -> Result<()> {
     for block_index in 0..ri.total_blocks {
@@ -1826,8 +1825,8 @@ async fn fill_workload<T: BlockIO + Send + Sync + 'static>(
  * Do a single random write to every extent, results in every extent being
  * touched without having to write to every block.
  */
-async fn fill_sparse_workload<T: BlockIO + Send + Sync + 'static>(
-    guest: &Arc<T>,
+async fn fill_sparse_workload<T: BlockIO>(
+    guest: &T,
     ri: &mut RegionInfo,
 ) -> Result<()> {
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
@@ -2127,7 +2126,7 @@ async fn replace_while_reconcile<T: BlockIO + Send + Sync + 'static>(
     info!(log, "Begin replacement while reconciliation test");
     loop {
         info!(log, "[{c}] Touch every extent part 1");
-        fill_sparse_workload(guest, ri).await?;
+        fill_sparse_workload(guest.as_ref(), ri).await?;
 
         info!(log, "[{c}] Stop a downstairs");
         // Stop a downstairs, wait for dsc to confirm it is stopped.
@@ -2141,7 +2140,7 @@ async fn replace_while_reconcile<T: BlockIO + Send + Sync + 'static>(
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
         info!(log, "[{c}] Touch every extent part 2");
-        fill_sparse_workload(guest, ri).await?;
+        fill_sparse_workload(guest.as_ref(), ri).await?;
 
         info!(log, "[{c}] Deactivate");
         guest.deactivate().await.unwrap();
@@ -2318,7 +2317,7 @@ async fn replace_before_active<T: BlockIO + Send + Sync + 'static>(
     let mut new_ds = 3;
     for c in 1.. {
         info!(log, "[{c}] Touch every extent");
-        fill_sparse_workload(guest, ri).await?;
+        fill_sparse_workload(guest.as_ref(), ri).await?;
 
         guest.deactivate().await.unwrap();
         loop {
@@ -2466,7 +2465,7 @@ async fn replace_workload<T: BlockIO + Send + Sync + 'static>(
     assert!(targets.len() == 4);
 
     if fill {
-        fill_sparse_workload(guest, ri).await?;
+        fill_sparse_workload(guest.as_ref(), ri).await?;
     }
     // Make a copy of the stop at counter if one was provided so the
     // IO task and the replace task don't have to share wtq
@@ -2613,8 +2612,8 @@ async fn replace_workload<T: BlockIO + Send + Sync + 'static>(
  * We are trying to leave extents "dirty" so we want to exit before the
  * automatic flush can come through and sync our data.
  */
-async fn dirty_workload<T: BlockIO + Send + Sync + 'static>(
-    guest: &Arc<T>,
+async fn dirty_workload<T: BlockIO>(
+    guest: &T,
     ri: &mut RegionInfo,
     count: usize,
 ) -> Result<()> {

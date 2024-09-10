@@ -211,26 +211,6 @@ pub trait BlockIO: Sync {
             .await
     }
 
-    /// Activate if not active.
-    async fn conditional_activate(&self) -> Result<(), CrucibleError> {
-        if self.query_is_active().await? {
-            return Ok(());
-        }
-
-        self.activate().await
-    }
-    /// Conditional activate if not active.
-    async fn conditional_activate_with_gen(
-        &self,
-        gen: u64,
-    ) -> Result<(), CrucibleError> {
-        if self.query_is_active().await? {
-            return Ok(());
-        }
-
-        self.activate_with_gen(gen).await
-    }
-
     /// Checks that the data length is a multiple of block size
     ///
     /// Returns block size on success, since we have to look it up anyways.

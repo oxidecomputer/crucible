@@ -223,8 +223,8 @@ enum CliCommand {
  * After verify, we truncate the data to 10 fields and return that so
  * the cli server can send it back to the client for display.
  */
-async fn cli_read<T: BlockIO + Send + Sync + 'static>(
-    guest: &Arc<T>,
+async fn cli_read<T: BlockIO>(
+    guest: &T,
     ri: &mut RegionInfo,
     block_index: usize,
     size: usize,
@@ -264,8 +264,8 @@ async fn cli_read<T: BlockIO + Send + Sync + 'static>(
 /*
  * A wrapper around write that just picks a random offset.
  */
-async fn rand_write<T: BlockIO + Send + Sync + 'static>(
-    guest: &Arc<T>,
+async fn rand_write<T: BlockIO>(
+    guest: &T,
     ri: &mut RegionInfo,
 ) -> Result<(), CrucibleError> {
     /*
@@ -290,8 +290,8 @@ async fn rand_write<T: BlockIO + Send + Sync + 'static>(
  * Data is generated based on the value in the internal write counter.
  * Update the internal write counter so we have something to compare to.
  */
-async fn cli_write<T: BlockIO + Send + Sync + 'static>(
-    guest: &Arc<T>,
+async fn cli_write<T: BlockIO>(
+    guest: &T,
     ri: &mut RegionInfo,
     block_index: usize,
     size: usize,
@@ -334,8 +334,8 @@ async fn cli_write<T: BlockIO + Send + Sync + 'static>(
  * If we do believe the block is written to, then we don't update our
  * internal counter and we don't expect our write to change the contents.
  */
-async fn cli_write_unwritten<T: BlockIO + Send + Sync + 'static>(
-    guest: &Arc<T>,
+async fn cli_write_unwritten<T: BlockIO>(
+    guest: &T,
     ri: &mut RegionInfo,
     block_index: usize,
 ) -> Result<(), CrucibleError> {
@@ -945,7 +945,7 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
                 let block_max = ri.total_blocks - size + 1;
                 let offset = rng.gen_range(0..block_max);
 
-                let res = cli_read(guest, ri, offset, size).await;
+                let res = cli_read(guest.as_ref(), ri, offset, size).await;
                 fw.send(CliMessage::ReadResponse(offset, res)).await
             }
         }
@@ -956,7 +956,7 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
                 )))
                 .await
             } else {
-                match rand_write(guest, ri).await {
+                match rand_write(guest.as_ref(), ri).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => fw.send(CliMessage::Error(e)).await,
                 }
@@ -969,7 +969,7 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
                 )))
                 .await
             } else {
-                let res = cli_read(guest, ri, offset, len).await;
+                let res = cli_read(guest.as_ref(), ri, offset, len).await;
                 fw.send(CliMessage::ReadResponse(offset, res)).await
             }
         }
@@ -988,7 +988,7 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
                 )))
                 .await
             } else {
-                match cli_write(guest, ri, offset, len).await {
+                match cli_write(guest.as_ref(), ri, offset, len).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => fw.send(CliMessage::Error(e)).await,
                 }
@@ -1001,7 +1001,7 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
                 )))
                 .await
             } else {
-                match cli_write_unwritten(guest, ri, offset).await {
+                match cli_write_unwritten(guest.as_ref(), ri, offset).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => fw.send(CliMessage::Error(e)).await,
                 }

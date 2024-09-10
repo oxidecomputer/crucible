@@ -594,7 +594,7 @@ impl Volume {
 impl BlockIO for Volume {
     async fn activate(&self) -> Result<(), CrucibleError> {
         for sub_volume in &self.sub_volumes {
-            sub_volume.conditional_activate().await?;
+            sub_volume.activate().await?;
 
             let sub_volume_computed_size = self.block_size
                 * (sub_volume.lba_range.end - sub_volume.lba_range.start);
@@ -605,14 +605,14 @@ impl BlockIO for Volume {
         }
 
         if let Some(ref read_only_parent) = &self.read_only_parent {
-            read_only_parent.conditional_activate().await?;
+            read_only_parent.activate().await?;
         }
 
         Ok(())
     }
     async fn activate_with_gen(&self, gen: u64) -> Result<(), CrucibleError> {
         for sub_volume in &self.sub_volumes {
-            sub_volume.conditional_activate_with_gen(gen).await?;
+            sub_volume.activate_with_gen(gen).await?;
 
             let sub_volume_computed_size = self.block_size
                 * (sub_volume.lba_range.end - sub_volume.lba_range.start);
@@ -623,7 +623,7 @@ impl BlockIO for Volume {
         }
 
         if let Some(ref read_only_parent) = &self.read_only_parent {
-            read_only_parent.conditional_activate_with_gen(gen).await?;
+            read_only_parent.activate_with_gen(gen).await?;
         }
 
         Ok(())
