@@ -3681,9 +3681,9 @@ mod test {
 
     #[tokio::test]
     async fn integration_test_guest_reactivate_same() -> Result<()> {
-        // Verify we fail activate_with_gen() if we are already active
-        // and the generation number we are requesting with does not
-        // match the number that the upstairs is already active with.
+        // Verify activate_with_gen() will work if we are already active
+        // and the new requested generation number matches what we activated
+        // with.
         let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
@@ -3699,7 +3699,7 @@ mod test {
 
     #[tokio::test]
     async fn integration_test_guest_activate_with_gen_1() -> Result<()> {
-        // Verify activate_with_gen() works when we sent it with the
+        // Verify activate_with_gen() works when we send it with the
         // same number that we passed to up_main.
         let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
