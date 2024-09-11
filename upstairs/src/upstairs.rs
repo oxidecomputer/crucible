@@ -737,7 +737,7 @@ impl Upstairs {
                 up_count: self.guest.guest_work.len() as u32,
                 up_counters: self.counters,
                 next_job_id: self.downstairs.peek_next_id(),
-                up_backpressure: self.guest.backpressure_us(),
+                up_backpressure: self.guest.get_backpressure().as_micros(),
                 write_bytes_out: self.downstairs.write_bytes_outstanding(),
                 ds_count: self.downstairs.active_count() as u32,
                 ds_state: self.downstairs.collect_stats(|c| c.state()),
@@ -1469,6 +1469,8 @@ impl Upstairs {
         let impacted_blocks =
             extent_from_offset(&ddef, offset, ddef.bytes_to_blocks(data.len()));
 
+        let guard = self.downstairs.early_write_backpressure(data.len() as u64);
+
         Some(DeferredWrite {
             ddef,
             impacted_blocks,
@@ -1476,6 +1478,7 @@ impl Upstairs {
             res,
             is_write_unwritten,
             cfg: self.cfg.clone(),
+            guard,
         })
     }
 
@@ -1503,6 +1506,7 @@ impl Upstairs {
                     write.impacted_blocks,
                     write.data,
                     write.is_write_unwritten,
+                    write.guard,
                 )
             },
             Some(GuestBlockRes::Other(write.res)),
@@ -2050,16 +2054,9 @@ impl Upstairs {
 
     /// Sets both guest and per-client backpressure
     fn set_backpressure(&self) {
-        let dsw_max = self
-            .downstairs
-            .clients
-            .iter()
-            .map(|c| c.total_live_work())
-            .max()
-            .unwrap_or(0);
         self.guest.set_backpressure(
             self.downstairs.write_bytes_outstanding(),
-            dsw_max as u64,
+            self.downstairs.jobs_outstanding(),
         );
 
         self.downstairs.set_client_backpressure();

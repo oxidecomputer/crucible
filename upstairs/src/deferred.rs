@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use crate::{
-    client::ConnectionId, upstairs::UpstairsConfig, BlockContext, BlockOp,
-    BlockRes, ClientId, ImpactedBlocks, Message, RawWrite, Validation,
+    backpressure::BackpressureGuard, client::ConnectionId,
+    upstairs::UpstairsConfig, BlockContext, BlockOp, BlockRes, ClientData,
+    ClientId, ImpactedBlocks, Message, RawWrite, Validation,
 };
 use bytes::BytesMut;
 use crucible_common::{integrity_hash, CrucibleError, RegionDefinition};
@@ -114,6 +115,7 @@ pub(crate) struct DeferredWrite {
     pub res: BlockRes,
     pub is_write_unwritten: bool,
     pub cfg: Arc<UpstairsConfig>,
+    pub guard: ClientData<BackpressureGuard>,
 }
 
 /// Result of a deferred `BlockOp`
@@ -135,6 +137,7 @@ pub(crate) struct EncryptedWrite {
     pub impacted_blocks: ImpactedBlocks,
     pub res: BlockRes,
     pub is_write_unwritten: bool,
+    pub guard: ClientData<BackpressureGuard>,
 }
 
 impl DeferredWrite {
@@ -183,6 +186,7 @@ impl DeferredWrite {
             impacted_blocks: self.impacted_blocks,
             res: self.res,
             is_write_unwritten: self.is_write_unwritten,
+            guard: self.guard,
         }
     }
 }
