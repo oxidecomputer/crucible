@@ -737,7 +737,7 @@ impl Upstairs {
                 up_count: self.guest.guest_work.len() as u32,
                 up_counters: self.counters,
                 next_job_id: self.downstairs.peek_next_id(),
-                up_backpressure: self.guest.backpressure_us(),
+                up_backpressure: self.guest.get_backpressure().as_micros(),
                 write_bytes_out: self.downstairs.write_bytes_outstanding(),
                 ds_count: self.downstairs.active_count() as u32,
                 ds_state: self.downstairs.collect_stats(|c| c.state()),
@@ -942,7 +942,7 @@ impl Upstairs {
                 self.deferred_ops.push_immediate(DeferredBlockOp::Other(op));
             }
             // Otherwise, we can apply a non-write operation immediately, saving
-            // a trip through the FuturesUnordered
+            // a trip through the DeferredQueue
             _ => {
                 self.apply_guest_request_inner(op);
             }
@@ -1352,6 +1352,26 @@ impl Upstairs {
         cdt::up__to__ds__read__start!(|| (gw_id.0));
     }
 
+    /// Submits a dummy write (without an associated `BlockOp`)
+    ///
+    /// This **does not** go through the deferred-write pipeline
+    #[cfg(test)]
+    pub(crate) fn submit_dummy_write(
+        &mut self,
+        offset: BlockIndex,
+        data: BytesMut,
+        is_write_unwritten: bool,
+    ) {
+        if let Some(w) = self.compute_deferred_write(
+            offset,
+            data,
+            BlockRes::dummy(),
+            is_write_unwritten,
+        ) {
+            self.submit_write(DeferredWrite::run(w))
+        }
+    }
+
     /// Submits a new write job to the upstairs
     ///
     /// This function **defers** the write job submission, because writes
@@ -1364,42 +1384,6 @@ impl Upstairs {
         res: BlockRes,
         is_write_unwritten: bool,
     ) {
-        self.submit_deferred_write_inner(
-            offset,
-            data,
-            Some(res),
-            is_write_unwritten,
-        )
-    }
-
-    /// Submits a dummy write (without an associated `BlockOp`)
-    ///
-    /// This **does not** go through the deferred-write pipeline
-    #[cfg(test)]
-    pub(crate) fn submit_dummy_write(
-        &mut self,
-        offset: BlockIndex,
-        data: BytesMut,
-        is_write_unwritten: bool,
-    ) {
-        if let Some(w) =
-            self.compute_deferred_write(offset, data, None, is_write_unwritten)
-        {
-            self.submit_write(DeferredWrite::run(w))
-        }
-    }
-
-    /// Submits a new write job to the upstairs, optionally without a `BlockRes`
-    ///
-    /// # Panics
-    /// If `res` is `None` and this isn't running in the test suite
-    fn submit_deferred_write_inner(
-        &mut self,
-        offset: BlockIndex,
-        data: BytesMut,
-        res: Option<BlockRes>,
-        is_write_unwritten: bool,
-    ) {
         // It's possible for the write to be invalid out of the gate, in which
         // case `compute_deferred_write` replies to the `res` itself and returns
         // `None`.  Otherwise, we have to store a future to process the write
@@ -1407,7 +1391,7 @@ impl Upstairs {
         if let Some(w) =
             self.compute_deferred_write(offset, data, res, is_write_unwritten)
         {
-            let should_defer = !self.deferred_msgs.is_empty()
+            let should_defer = !self.deferred_ops.is_empty()
                 || w.data.len() > MIN_DEFER_SIZE_BYTES as usize;
             if should_defer {
                 let tx = self.deferred_ops.push_oneshot();
@@ -1426,22 +1410,15 @@ impl Upstairs {
         &mut self,
         offset: BlockIndex,
         data: BytesMut,
-        res: Option<BlockRes>,
+        res: BlockRes,
         is_write_unwritten: bool,
     ) -> Option<DeferredWrite> {
-        #[cfg(not(test))]
-        assert!(res.is_some());
-
         if !self.guest_io_ready() {
-            if let Some(res) = res {
-                res.send_err(CrucibleError::UpstairsInactive);
-            }
+            res.send_err(CrucibleError::UpstairsInactive);
             return None;
         }
         if self.cfg.read_only {
-            if let Some(res) = res {
-                res.send_err(CrucibleError::ModifyingReadOnlyRegion);
-            }
+            res.send_err(CrucibleError::ModifyingReadOnlyRegion);
             return None;
         }
 
@@ -1450,9 +1427,7 @@ impl Upstairs {
          */
         let ddef = self.ddef.get_def().unwrap();
         if let Err(e) = ddef.validate_io(offset, data.len()) {
-            if let Some(res) = res {
-                res.send_err(e);
-            }
+            res.send_err(e);
             return None;
         }
 
@@ -1464,6 +1439,8 @@ impl Upstairs {
         let impacted_blocks =
             extent_from_offset(&ddef, offset, ddef.bytes_to_blocks(data.len()));
 
+        let guard = self.downstairs.early_write_backpressure(data.len() as u64);
+
         Some(DeferredWrite {
             ddef,
             impacted_blocks,
@@ -1471,6 +1448,7 @@ impl Upstairs {
             res,
             is_write_unwritten,
             cfg: self.cfg.clone(),
+            guard,
         })
     }
 
@@ -1498,9 +1476,10 @@ impl Upstairs {
                     write.impacted_blocks,
                     write.data,
                     write.is_write_unwritten,
+                    write.guard,
                 )
             },
-            write.res.map(GuestBlockRes::Other),
+            Some(GuestBlockRes::Other(write.res)),
         );
 
         if write.is_write_unwritten {
@@ -2044,16 +2023,9 @@ impl Upstairs {
 
     /// Sets both guest and per-client backpressure
     fn set_backpressure(&self) {
-        let dsw_max = self
-            .downstairs
-            .clients
-            .iter()
-            .map(|c| c.total_live_work())
-            .max()
-            .unwrap_or(0);
         self.guest.set_backpressure(
             self.downstairs.write_bytes_outstanding(),
-            dsw_max as u64,
+            self.downstairs.jobs_outstanding(),
         );
 
         self.downstairs.set_client_backpressure();
@@ -4229,5 +4201,42 @@ pub(crate) mod test {
             .unwrap();
         assert!(!r.contains("HashMismatch"));
         assert!(r.contains("read hash mismatch"));
+    }
+
+    #[test]
+    fn write_defer() {
+        let mut up = make_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        const NODEFER_SIZE: usize = MIN_DEFER_SIZE_BYTES as usize - 512;
+        const DEFER_SIZE: usize = MIN_DEFER_SIZE_BYTES as usize * 2;
+
+        // Submit a short write, which should not be deferred
+        let mut data = BytesMut::new();
+        data.extend_from_slice(vec![1; NODEFER_SIZE].as_slice());
+        let offset = BlockIndex(7);
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Write { offset, data, done }));
+        assert_eq!(up.deferred_ops.len(), 0);
+
+        // Submit a long write, which should be deferred
+        let mut data = BytesMut::new();
+        data.extend_from_slice(vec![2; DEFER_SIZE].as_slice());
+        let offset = BlockIndex(7);
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Write { offset, data, done }));
+        assert_eq!(up.deferred_ops.len(), 1);
+        assert_eq!(up.deferred_msgs.len(), 0);
+
+        // Submit a short write, which would normally not be deferred, but
+        // there's already a deferred job in the queue
+        let mut data = BytesMut::new();
+        data.extend_from_slice(vec![3; NODEFER_SIZE].as_slice());
+        let offset = BlockIndex(7);
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Write { offset, data, done }));
+        assert_eq!(up.deferred_ops.len(), 2);
+        assert_eq!(up.deferred_msgs.len(), 0);
     }
 }

@@ -815,12 +815,11 @@ async fn process_cli_command(
                 )))
                 .await
             } else if let Some(vo) = verify_output {
-                println!("Exporting write history to {:?}", vo);
-                let cp = history_file(vo.clone());
-                match write_json(&cp, &ri.write_log, true) {
+                println!("Exporting write history to {vo:?}");
+                match write_json(&vo, &ri.write_log, true) {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => {
-                        println!("Failed writing to {:?} with {}", vo, e);
+                        println!("Failed writing to {vo:?} with {e}");
                         fw.send(CliMessage::Error(CrucibleError::GenericError(
                             "Failed writing to file".to_string(),
                         )))

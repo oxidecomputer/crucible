@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU64;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
@@ -297,11 +297,6 @@ pub fn opts() -> Result<Opt> {
     let opt: Opt = Opt::parse();
 
     Ok(opt)
-}
-
-fn history_file<P: AsRef<Path>>(file: P) -> PathBuf {
-    let out = file.as_ref().to_path_buf();
-    out
 }
 
 #[derive(Copy, Clone, Debug, clap::Args)]
@@ -681,16 +676,14 @@ async fn load_write_log(
     /*
      * Fill the write count from a provided file.
      */
-    let cp = history_file(vi);
-    ri.write_log = match read_json(&cp) {
+    ri.write_log = match read_json(&vi) {
         Ok(write_log) => write_log,
-        Err(e) => bail!("Error {:?} reading verify config {:?}", e, cp),
+        Err(e) => bail!("Error {:?} reading verify config {:?}", e, vi),
     };
-    println!("Loading write count information from file {:?}", cp);
+    println!("Loading write count information from file {vi:?}");
     if ri.write_log.len() != ri.total_blocks {
         bail!(
-            "Verify file {:?} blocks:{} does not match regions:{}",
-            cp,
+            "Verify file {vi:?} blocks:{} does not match regions:{}",
             ri.write_log.len(),
             ri.total_blocks
         );
@@ -992,9 +985,8 @@ async fn main() -> Result<()> {
              * things that came after the flush.
              */
             if let Some(vo) = &opt.verify_out {
-                let cp = history_file(vo);
-                write_json(&cp, &region_info.write_log, true)?;
-                println!("Wrote out file {:?}", cp);
+                write_json(vo, &region_info.write_log, true)?;
+                println!("Wrote out file {vo:?}");
             }
             return Ok(());
         }
@@ -1137,9 +1129,8 @@ async fn main() -> Result<()> {
             repair_workload(&guest, count, &mut region_info).await?;
             drop(guest);
             if let Some(vo) = &opt.verify_out {
-                let cp = history_file(vo);
-                write_json(&cp, &region_info.write_log, true)?;
-                println!("Wrote out file {:?}", cp);
+                write_json(vo, &region_info.write_log, true)?;
+                println!("Wrote out file {vo:?}");
             }
             return Ok(());
         }
@@ -1258,9 +1249,8 @@ async fn main() -> Result<()> {
                 bail!("Initial volume verify failed: {:?}", e)
             }
             if let Some(vo) = &opt.verify_out {
-                let cp = history_file(vo);
-                write_json(&cp, &region_info.write_log, true)?;
-                println!("Wrote out file {:?}", cp);
+                write_json(vo, &region_info.write_log, true)?;
+                println!("Wrote out file {vo:?}");
             }
             if opt.quit {
                 println!("Verify test completed");
@@ -1303,9 +1293,8 @@ async fn main() -> Result<()> {
     }
 
     if let Some(vo) = &opt.verify_out {
-        let cp = history_file(vo);
-        write_json(&cp, &region_info.write_log, true)?;
-        println!("Wrote out file {:?}", cp);
+        write_json(vo, &region_info.write_log, true)?;
+        println!("Wrote out file {vo:?}");
     }
 
     println!("CLIENT: Tests done.  All submitted work has been ACK'd");
@@ -3541,9 +3530,8 @@ async fn burst_workload(
          */
         println!();
         if let Some(vo) = &verify_out {
-            let cp = history_file(vo);
-            write_json(&cp, &ri.write_log, true)?;
-            println!("Wrote out file {:?} at this time", cp);
+            write_json(vo, &ri.write_log, true)?;
+            println!("Wrote out file {vo:?} at this time");
         }
         println!(
             "{:>0width$}/{:>0width$}: 2 second pause, then another test loop",

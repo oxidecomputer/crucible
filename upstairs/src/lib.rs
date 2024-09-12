@@ -49,6 +49,7 @@ pub mod block_io;
 pub use block_io::{FileBlockIO, ReqwestBlockIO};
 
 pub(crate) mod backpressure;
+use backpressure::BackpressureGuard;
 
 pub mod block_req;
 pub(crate) use block_req::{BlockOpWaiter, BlockRes};
@@ -426,6 +427,15 @@ impl<T> ClientData<T> {
         std::mem::swap(&mut self[c], &mut v);
         v
     }
+
+    /// Builds a `ClientData` from a builder function
+    pub fn from_fn<F: FnMut(ClientId) -> T>(mut f: F) -> Self {
+        Self([
+            f(ClientId::new(0)),
+            f(ClientId::new(1)),
+            f(ClientId::new(2)),
+        ])
+    }
 }
 
 /// Map of data associated with clients, keyed by `ClientId`
@@ -462,6 +472,12 @@ impl<T> std::ops::Index<ClientId> for ClientMap<T> {
     type Output = T;
     fn index(&self, index: ClientId) -> &Self::Output {
         self.get(&index).unwrap()
+    }
+}
+
+impl<T> From<ClientData<T>> for ClientMap<T> {
+    fn from(c: ClientData<T>) -> Self {
+        Self(ClientData(c.0.map(Option::Some)))
     }
 }
 
@@ -943,8 +959,11 @@ struct DownstairsIO {
     data: Option<RawReadResponse>,
     read_validations: Vec<Validation>,
 
-    /// Number of bytes that this job has contributed to guest backpressure
-    backpressure_bytes: ClientMap<u64>,
+    /// Handle for this job's contribution to guest backpressure
+    ///
+    /// Each of these guard handles will automatically decrement the
+    /// backpressure count for their respective Downstairs when dropped.
+    backpressure_guard: ClientMap<BackpressureGuard>,
 }
 
 impl DownstairsIO {
@@ -1320,6 +1339,16 @@ impl IOop {
             IOop::Read {
                 count, block_size, ..
             } => *block_size * *count,
+            _ => 0,
+        }
+    }
+
+    /// Returns the number of bytes written
+    fn write_bytes(&self) -> u64 {
+        match &self {
+            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
+                data.len() as u64
+            }
             _ => 0,
         }
     }

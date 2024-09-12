@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::{
+    backpressure::BackpressureGuard,
     cdt,
     client::{ClientAction, ClientStopReason, DownstairsClient},
     guest::GuestWork,
@@ -1465,7 +1466,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -1589,7 +1590,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -1730,7 +1731,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -1788,7 +1789,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         };
         self.enqueue(io);
         ds_id
@@ -1822,6 +1823,7 @@ impl Downstairs {
             GuestWorkId(10),
             request,
             is_write_unwritten,
+            ClientData::from_fn(|_| BackpressureGuard::dummy()),
         )
     }
 
@@ -1831,6 +1833,7 @@ impl Downstairs {
         gw_id: GuestWorkId,
         write: RawWrite,
         is_write_unwritten: bool,
+        bp_guard: ClientData<BackpressureGuard>,
     ) -> JobId {
         let ds_id = self.next_id();
         let dependencies = self.ds_active.deps_for_write(ds_id, blocks);
@@ -1872,7 +1875,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: bp_guard.into(),
         };
         self.enqueue(io);
         ds_id
@@ -1903,7 +1906,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -2312,7 +2315,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         };
 
         self.enqueue(fl);
@@ -2439,7 +2442,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         };
 
         self.enqueue(io);
@@ -2453,6 +2456,7 @@ impl Downstairs {
         blocks: ImpactedBlocks,
         write: RawWrite,
         is_write_unwritten: bool,
+        backpressure_guard: ClientData<BackpressureGuard>,
     ) -> JobId {
         // If there is a live-repair in progress that intersects with this read,
         // then reserve job IDs for those jobs.
@@ -2463,6 +2467,7 @@ impl Downstairs {
             guest_id,
             write,
             is_write_unwritten,
+            backpressure_guard,
         )
     }
 
@@ -2902,22 +2907,20 @@ impl Downstairs {
             }
             // Now that we've collected jobs to retire, remove them from the map
             for &id in &retired {
-                let mut job = self.ds_active.remove(&id);
+                let job = self.ds_active.remove(&id);
 
                 // Jobs should have their backpressure contribution removed when
                 // they are completed (in `process_io_completion_inner`),
                 // **not** when they are retired.  We'll do a sanity check here
                 // and print a warning if that's not the case.
                 for c in ClientId::iter() {
-                    if job.backpressure_bytes.contains(&c) {
+                    if job.backpressure_guard.contains(&c) {
                         warn!(
                             self.log,
                             "job {ds_id} had pending backpressure bytes \
                              for client {c}"
                         );
-                        self.clients[c]
-                            .write_bytes_outstanding
-                            .decrement(&mut job, c);
+                        // Backpressure is decremented on drop
                     }
                 }
             }
@@ -3532,7 +3535,16 @@ impl Downstairs {
         self.clients
             .iter()
             .filter(|c| matches!(c.state(), DsState::Active))
-            .map(|c| c.write_bytes_outstanding.get())
+            .map(|c| c.backpressure_counters.get_write_bytes())
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn jobs_outstanding(&self) -> u64 {
+        self.clients
+            .iter()
+            .filter(|c| matches!(c.state(), DsState::Active))
+            .map(|c| c.backpressure_counters.get_jobs())
             .max()
             .unwrap_or(0)
     }
@@ -3667,6 +3679,7 @@ impl Downstairs {
                 data,
             },
             is_write_unwritten,
+            ClientData::from_fn(|_| BackpressureGuard::dummy()),
         )
     }
 
@@ -4414,6 +4427,19 @@ impl Downstairs {
                 }
             }
         });
+    }
+
+    /// Assign the given number of write bytes to the backpressure counters
+    #[must_use]
+    pub(crate) fn early_write_backpressure(
+        &mut self,
+        bytes: u64,
+    ) -> ClientData<BackpressureGuard> {
+        ClientData::from_fn(|i| {
+            self.clients[i]
+                .backpressure_counters
+                .early_write_increment(bytes)
+        })
     }
 }
 
