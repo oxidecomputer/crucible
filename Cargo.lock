@@ -1086,6 +1086,7 @@ dependencies = [
  "usdt",
  "uuid",
  "version_check",
+ "zerocopy 0.7.32",
 ]
 
 [[package]]

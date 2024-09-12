@@ -173,6 +173,7 @@ pub const EXTENT_META_SQLITE: u32 = 1;
 ///
 /// See [`extent_inner_raw::RawInner`] for the implementation.
 pub const EXTENT_META_RAW: u32 = 2;
+pub const EXTENT_META_RAW_V2: u32 = 3;
 
 impl ExtentMeta {
     pub fn new(ext_version: u32) -> ExtentMeta {
@@ -326,6 +327,7 @@ impl Extent {
         def: &RegionDefinition,
         number: ExtentId,
         read_only: bool,
+        recordsize: u64,
         log: &Logger,
     ) -> Result<Extent> {
         /*
@@ -477,6 +479,11 @@ impl Extent {
                             dir, def, number, read_only, log,
                         )?)
                     }
+                    EXTENT_META_RAW_V2 => {
+                        Box::new(extent_inner_raw_v2::RawInnerV2::open(
+                            dir, def, number, read_only, recordsize, log,
+                        )?)
+                    }
                     i => {
                         return Err(CrucibleError::IoError(format!(
                             "raw extent {number} has unknown tag {i}"
@@ -521,6 +528,7 @@ impl Extent {
         def: &RegionDefinition,
         number: ExtentId,
         backend: Backend,
+        recordsize: u64,
     ) -> Result<Extent> {
         /*
          * Store extent data in files within a directory hierarchy so that
@@ -539,8 +547,14 @@ impl Extent {
         remove_copy_cleanup_dir(dir, number)?;
 
         let inner: Box<dyn ExtentInner + Send + Sync> = match backend {
+            #[cfg(any(test, feature = "integration-tests"))]
             Backend::RawFile => {
                 Box::new(extent_inner_raw::RawInner::create(dir, def, number)?)
+            }
+            Backend::RawFileV2 => {
+                Box::new(extent_inner_raw_v2::RawInnerV2::create(
+                    dir, def, number, recordsize,
+                )?)
             }
             #[cfg(any(test, feature = "integration-tests"))]
             Backend::SQLite => Box::new(

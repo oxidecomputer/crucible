@@ -580,6 +580,15 @@ pub enum ReadBlockContext {
     Unencrypted { hash: u64 },
 }
 
+impl From<BlockContext> for ReadBlockContext {
+    fn from(ctx: BlockContext) -> ReadBlockContext {
+        match ctx.encryption_context {
+            Some(ctx) => ReadBlockContext::Encrypted { ctx },
+            None => ReadBlockContext::Unencrypted { hash: ctx.hash },
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub struct ReadResponseHeader {
     pub upstairs_id: Uuid,
