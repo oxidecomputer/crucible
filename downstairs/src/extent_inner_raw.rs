@@ -529,6 +529,7 @@ impl RawInner {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&path)?;
 
         // All 0s are fine for everything except extent version in the metadata
@@ -838,7 +839,7 @@ impl RawInner {
         let mut writes = 0u64;
         for (slot, group) in block_contexts
             .iter()
-            .group_by(|block_context| {
+            .chunk_by(|block_context| {
                 // We'll be writing to the inactive slot
                 !self.active_context[block_context.block as usize]
             })
@@ -911,7 +912,7 @@ impl RawInner {
         let mut out = Vec::with_capacity(count as usize);
         let mut reads = 0u64;
         for (slot, group) in (block..block + count)
-            .group_by(|block| self.active_context[*block as usize])
+            .chunk_by(|block| self.active_context[*block as usize])
             .into_iter()
         {
             let mut group = group.peekable();
@@ -943,7 +944,7 @@ impl RawInner {
         // Perform writes, which may be broken up by skipped blocks
         let block_size = self.extent_size.block_size_in_bytes() as u64;
         for (skip, mut group) in (0..write.block_contexts.len())
-            .group_by(|i| writes_to_skip.contains(i))
+            .chunk_by(|i| writes_to_skip.contains(i))
             .into_iter()
         {
             if skip {

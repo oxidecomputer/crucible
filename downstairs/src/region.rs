@@ -769,10 +769,10 @@ impl Region {
                         integrity_hash(&[
                             &encryption_context.nonce[..],
                             &encryption_context.tag[..],
-                            &block,
+                            block,
                         ])
                     } else {
-                        integrity_hash(&[&block])
+                        integrity_hash(&[block])
                     };
 
                 if computed_hash != ctx.hash {
@@ -1098,6 +1098,7 @@ impl Region {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&copy_path)?;
         Ok(file)
     }
@@ -3492,7 +3493,7 @@ pub(crate) mod test {
         // Offsets are given as blocks; we convert to extents here
         const EXTENT_SIZE: usize = 10; // hard-coded default
         for (eid, mut group) in offsets
-            .group_by(|o| ExtentId((*o / EXTENT_SIZE) as u32))
+            .chunk_by(|o| ExtentId((*o / EXTENT_SIZE) as u32))
             .into_iter()
         {
             let start = group.next().unwrap();

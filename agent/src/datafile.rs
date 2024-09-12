@@ -335,7 +335,7 @@ impl DataFile {
         /*
          * Look for an existing running snapshot.
          */
-        if inner.running_snapshots.get(&request.id).is_none() {
+        if !inner.running_snapshots.contains_key(&request.id) {
             bail!("no running snapshots for region {}", request.id.0);
         }
 

@@ -1,6 +1,4 @@
 // Copyright 2023 Oxide Computer Company
-#![cfg_attr(usdt_need_asm, feature(asm))]
-#![cfg_attr(all(target_os = "macos", usdt_need_asm_sym), feature(asm_sym))]
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;

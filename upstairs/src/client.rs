@@ -1,10 +1,10 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
-    cdt, integrity_hash, live_repair::ExtentInfo, upstairs::UpstairsConfig,
-    upstairs::UpstairsState, ClientIOStateCount, ClientId, CrucibleDecoder,
-    CrucibleError, DownstairsIO, DsState, EncryptionContext, IOState, IOop,
-    JobId, Message, RawReadResponse, ReconcileIO, RegionDefinitionStatus,
-    RegionMetadata, Validation,
+    backpressure::BackpressureBytes, cdt, integrity_hash,
+    live_repair::ExtentInfo, upstairs::UpstairsConfig, upstairs::UpstairsState,
+    ClientIOStateCount, ClientId, CrucibleDecoder, CrucibleError, DownstairsIO,
+    DsState, EncryptionContext, IOState, IOop, JobId, Message, RawReadResponse,
+    ReconcileIO, RegionDefinitionStatus, RegionMetadata, Validation,
 };
 use crucible_common::{
     deadline_secs, verbose_timeout, x509::TLSContext, ExtentId,
@@ -126,6 +126,9 @@ pub(crate) struct DownstairsClient {
     /// estimate per-client backpressure to keep the 3x downstairs in sync.
     pub(crate) bytes_outstanding: u64,
 
+    /// Write bytes in this queue, used for global backpressure
+    pub(crate) write_bytes_outstanding: BackpressureBytes,
+
     /// UUID for this downstairs region
     ///
     /// Unpopulated until provided by `Message::RegionInfo`
@@ -230,6 +233,7 @@ impl DownstairsClient {
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
             bytes_outstanding: 0,
+            write_bytes_outstanding: BackpressureBytes::new(),
             connection_id: ConnectionId(0),
             client_delay_us,
         }
@@ -270,6 +274,7 @@ impl DownstairsClient {
             repair_info: None,
             io_state_count: ClientIOStateCount::new(),
             bytes_outstanding: 0,
+            write_bytes_outstanding: BackpressureBytes::new(),
             connection_id: ConnectionId(0),
             client_delay_us,
         }
@@ -379,10 +384,12 @@ impl DownstairsClient {
                 .bytes_outstanding
                 .checked_sub(job.work.job_bytes())
                 .unwrap();
+            self.write_bytes_outstanding.decrement(job, self.client_id);
         } else if is_running && !was_running {
             // This should only happen if a job is replayed, but that still
             // counts!
             self.bytes_outstanding += job.work.job_bytes();
+            self.write_bytes_outstanding.increment(job, self.client_id);
         }
 
         old_state
@@ -521,14 +528,11 @@ impl DownstairsClient {
     pub(crate) fn on_missing(&mut self) {
         let current = &self.state;
         let new_state = match current {
-            DsState::Active | DsState::Replay | DsState::Offline => {
-                DsState::Offline
-            }
+            DsState::Active | DsState::Offline => DsState::Offline,
 
             DsState::Faulted
             | DsState::LiveRepair
-            | DsState::LiveRepairReady
-            | DsState::Replaced => DsState::Faulted,
+            | DsState::LiveRepairReady => DsState::Faulted,
 
             DsState::New
             | DsState::Deactivated
@@ -541,7 +545,8 @@ impl DownstairsClient {
             | DsState::WaitActive
             | DsState::Disabled => DsState::Disconnected,
 
-            DsState::Replacing => DsState::Replaced,
+            // If we have replaced a downstairs, don't forget that.
+            DsState::Replacing | DsState::Replaced => DsState::Replaced,
 
             DsState::Migrating => panic!(),
         };
@@ -852,7 +857,6 @@ impl DownstairsClient {
     ) {
         let new_state = match self.state {
             DsState::Active => DsState::Offline,
-            DsState::Replay => DsState::Offline,
             DsState::Offline => DsState::Offline,
             DsState::Migrating => DsState::Faulted,
             DsState::Faulted => DsState::Faulted,
@@ -937,6 +941,7 @@ impl DownstairsClient {
         };
         if r == IOState::New {
             self.bytes_outstanding += io.work.job_bytes();
+            self.write_bytes_outstanding.increment(io, self.client_id);
         }
         self.io_state_count.incr(&r);
         r
@@ -1041,8 +1046,7 @@ impl DownstairsClient {
                     | DsState::Reconcile
                     | DsState::LiveRepair
                     | DsState::LiveRepairReady
-                    | DsState::Offline
-                    | DsState::Replay => {} /* Okay */
+                    | DsState::Offline => {} // Okay
                     _ => {
                         panic_invalid();
                     }
@@ -1052,16 +1056,12 @@ impl DownstairsClient {
                 assert!(!matches!(up_state, UpstairsState::Active));
                 assert_eq!(old_state, DsState::WaitQuorum);
             }
-            DsState::Replay => {
-                assert!(matches!(up_state, UpstairsState::Active));
-                assert_eq!(old_state, DsState::Offline);
-            }
             DsState::Active => {
                 match old_state {
                     DsState::WaitQuorum
-                    | DsState::Replay
                     | DsState::Reconcile
-                    | DsState::LiveRepair => {} // Okay
+                    | DsState::LiveRepair
+                    | DsState::Offline => {} // Okay
 
                     DsState::LiveRepairReady if self.cfg.read_only => {} // Okay
 
@@ -1084,7 +1084,6 @@ impl DownstairsClient {
                 // activation.
                 match old_state {
                     DsState::Active
-                    | DsState::Replay
                     | DsState::LiveRepair
                     | DsState::LiveRepairReady
                     | DsState::Offline
@@ -1126,7 +1125,7 @@ impl DownstairsClient {
             }
             DsState::Offline => {
                 match old_state {
-                    DsState::Active | DsState::Replay => {} // Okay
+                    DsState::Active => {} // Okay
                     _ => {
                         panic_invalid();
                     }
@@ -1659,8 +1658,8 @@ impl DownstairsClient {
          *          LastFlush(lf)) --->
          *                         <---  LastFlushAck(lf)
          *
-         * After receiving our last flush, we now move this downstairs state to
-         * Replay and skip ahead to NegotiationState::Done
+         * After receiving our last flush, we now replay all saved jobs for this
+         * Downstairs and skip ahead to NegotiationState::Done
          *
          * NegotiationState::GetExtentVersions
          * (WaitActive and LiveRepairReady come here from WaitForRegionInfo)
@@ -1677,7 +1676,7 @@ impl DownstairsClient {
          * NegotiationState::Done
          * ----------------------
          *    Now the downstairs is ready to receive replay IOs from the
-         *    upstairs. We set the downstairs to DsState::Replay and the while
+         *    upstairs. We set the downstairs to DsState::Active and the while
          *    loop is exited.
          */
         match m {
@@ -2079,13 +2078,6 @@ impl DownstairsClient {
                 );
                 assert_eq!(self.last_flush, last_flush_number);
 
-                // Setting the state to "Replay" here is a formality; we
-                // actually copied over the jobs in `Downstairs::reinitialize`
-                // if the client was coming back from Offline.
-                //
-                // XXX should we remove this state?
-                self.checked_state_transition(up_state, DsState::Replay);
-
                 // Immediately set the state to Active, since we've already
                 // copied over the jobs.
                 self.checked_state_transition(up_state, DsState::Active);
@@ -2416,14 +2408,18 @@ pub(crate) enum ClientRunResult {
     /// The initial connection timed out
     ConnectionTimeout,
     /// We failed to make the initial connection
+    #[allow(dead_code)]
     ConnectionFailed(std::io::Error),
     /// We experienced a timeout after connecting
     Timeout,
     /// A socket write failed
+    #[allow(dead_code)]
     WriteFailed(anyhow::Error),
     /// We received an error while reading from the connection
+    #[allow(dead_code)]
     ReadFailed(anyhow::Error),
     /// The `DownstairsClient` requested that the task stop, so it did
+    #[allow(dead_code)]
     RequestedStop(ClientStopReason),
     /// The socket closed cleanly and the task exited
     Finished,
@@ -3049,27 +3045,6 @@ mod test {
     }
 
     #[test]
-    fn downstairs_transition_replay() {
-        // Verify offline goes to replay
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitActive,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitQuorum,
-        );
-        // Upstairs goes active!
-        client
-            .checked_state_transition(&UpstairsState::Active, DsState::Active);
-        client
-            .checked_state_transition(&UpstairsState::Active, DsState::Offline);
-        client
-            .checked_state_transition(&UpstairsState::Active, DsState::Replay);
-    }
-
-    #[test]
     fn downstairs_transition_deactivate_new() {
         // Verify deactivate goes to new
         let mut client = DownstairsClient::test_default();
@@ -3176,33 +3151,6 @@ mod test {
         client.checked_state_transition(
             &UpstairsState::Initializing,
             DsState::Deactivated,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Active,
-        );
-    }
-
-    #[test]
-    #[should_panic]
-    fn downstairs_transition_offline_no_active() {
-        // Verify no activation from offline
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitActive,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::WaitQuorum,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Active,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Offline,
         );
         client.checked_state_transition(
             &UpstairsState::Initializing,
@@ -3333,17 +3281,6 @@ mod test {
         client.checked_state_transition(
             &UpstairsState::Initializing,
             DsState::WaitQuorum,
-        );
-    }
-
-    #[test]
-    #[should_panic]
-    fn downstairs_transition_bad_replay() {
-        // Verify new goes to replay will fail
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Replay,
         );
     }
 

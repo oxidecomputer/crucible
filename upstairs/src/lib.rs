@@ -1,6 +1,4 @@
 // Copyright 2023 Oxide Computer Company
-#![cfg_attr(usdt_need_asm, feature(asm))]
-#![cfg_attr(all(target_os = "macos", usdt_need_asm_sym), feature(asm_sym))]
 #![allow(clippy::mutex_atomic)]
 
 use std::clone::Clone;
@@ -49,6 +47,8 @@ pub use in_memory::InMemoryBlockIO;
 
 pub mod block_io;
 pub use block_io::{FileBlockIO, ReqwestBlockIO};
+
+pub(crate) mod backpressure;
 
 pub mod block_req;
 pub(crate) use block_req::{BlockOpWaiter, BlockRes};
@@ -450,6 +450,12 @@ impl<T> ClientMap<T> {
     pub fn get(&self, c: &ClientId) -> Option<&T> {
         self.0[*c].as_ref()
     }
+    pub fn contains(&self, c: &ClientId) -> bool {
+        self.0[*c].is_some()
+    }
+    pub fn take(&mut self, c: &ClientId) -> Option<T> {
+        self.0[*c].take()
+    }
 }
 
 impl<T> std::ops::Index<ClientId> for ClientMap<T> {
@@ -714,15 +720,15 @@ pub(crate) struct RawReadResponse {
  *              │     ▼   ▼   ▲    ▲                     ║     │
  *              │     │   │   │    │                     ║     │
  *              │     │   │   │    │                     ║     │
- *              │     │   │   ▲  ┌─┘                     ║     │
- *              │     │   │ ┌─┴──┴──┐                    ║     │
- *              │     │   │ │Replay │                    ║     │
- *              │     │   │ │       ├─►─┐                ║     │
- *              │     │   │ └─┬──┬──┘   │                ║     │
- *              │     │   ▼   ▼  ▲      │                ║     │
- *              │     │   │   │  │      │                ▲     │
- *              │     │ ┌─┴───┴──┴──┐   │   ┌────────────╨──┐  │
- *              │     │ │  Offline  │   └─►─┤   Faulted     │  │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   ▼   ▲    ▲                     ║     │
+ *              │     │   │   │    │                     ▲     │
+ *              │     │ ┌─┴───┴────┴┐       ┌────────────╨──┐  │
+ *              │     │ │  Offline  │       │   Faulted     │  │
  *              │     │ │           ├─────►─┤               │  │
  *              │     │ └───────────┘       └─┬─┬───────┬─┬─┘  │
  *              │     │                       ▲ ▲       ▼ ▲    ▲
@@ -813,11 +819,6 @@ pub enum DsState {
      */
     Offline,
     /*
-     * This downstairs was offline but is now back online and we are
-     * sending it all the I/O it missed when it was unavailable.
-     */
-    Replay,
-    /*
      * A guest requested deactivation, this downstairs has completed all
      * its outstanding work and is now waiting for the upstairs to
      * transition back to initializing.
@@ -883,9 +884,6 @@ impl std::fmt::Display for DsState {
             DsState::Offline => {
                 write!(f, "Offline")
             }
-            DsState::Replay => {
-                write!(f, "Replay")
-            }
             DsState::Deactivated => {
                 write!(f, "Deactivated")
             }
@@ -946,7 +944,7 @@ struct DownstairsIO {
     read_validations: Vec<Validation>,
 
     /// Number of bytes that this job has contributed to guest backpressure
-    backpressure_bytes: Option<u64>,
+    backpressure_bytes: ClientMap<u64>,
 }
 
 impl DownstairsIO {

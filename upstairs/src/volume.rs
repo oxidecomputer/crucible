@@ -378,11 +378,7 @@ impl Volume {
         if let Some(ref read_only_parent) = self.read_only_parent {
             // If requested, setup the pause between IOs as well as an initial
             // waiting period before the scrubber starts.
-            let pause_millis = if let Some(scrub_pause) = scrub_pause {
-                scrub_pause
-            } else {
-                0
-            };
+            let pause_millis = scrub_pause.unwrap_or(0);
 
             if let Some(start_delay) = start_delay {
                 info!(
