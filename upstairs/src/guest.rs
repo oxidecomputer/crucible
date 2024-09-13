@@ -469,6 +469,24 @@ impl BlockIO for Guest {
         Ok(())
     }
 
+    async fn activate_with_gen(&self, gen: u64) -> Result<(), CrucibleError> {
+        let (rx, done) = BlockOpWaiter::pair();
+        self.send(BlockOp::GoActiveWithGen { gen, done }).await;
+        info!(
+            self.log,
+            "The guest has requested activation with gen:{}", gen
+        );
+
+        rx.wait().await?;
+
+        info!(
+            self.log,
+            "The guest has finished waiting for activation with:{}", gen
+        );
+
+        Ok(())
+    }
+
     /// Disable any more IO from this guest and deactivate the downstairs.
     async fn deactivate(&self) -> Result<(), CrucibleError> {
         self.send_and_wait(|done| BlockOp::Deactivate { done })
@@ -477,6 +495,16 @@ impl BlockIO for Guest {
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
         self.send_and_wait(|done| BlockOp::QueryGuestIOReady { done })
+            .await
+    }
+
+    async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
+        self.send_and_wait(|done| BlockOp::QueryWorkQueue { done })
+            .await
+    }
+
+    async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
+        self.send_and_wait(|done| BlockOp::QueryExtentSize { done })
             .await
     }
 

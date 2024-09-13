@@ -201,18 +201,7 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
     }
 
     pub async fn activate(&mut self) -> Result<(), CrucibleError> {
-        if let Err(e) = self.block_io.activate().await {
-            match e {
-                CrucibleError::UpstairsAlreadyActive => {
-                    // underlying block io is already active, but pseudo file
-                    // needs fields below populated
-                }
-                _ => {
-                    return Err(e);
-                }
-            }
-        }
-
+        self.block_io.activate().await?;
         self.sz = self.block_io.total_size().await?;
         self.block_size = self.block_io.get_block_size().await?;
         self.uuid = self.block_io.get_uuid().await?;
@@ -220,6 +209,23 @@ impl<T: BlockIO> CruciblePseudoFile<T> {
         self.active = true;
 
         Ok(())
+    }
+    pub async fn activate_with_gen(
+        &mut self,
+        gen: u64,
+    ) -> Result<(), CrucibleError> {
+        self.block_io.activate_with_gen(gen).await?;
+        self.sz = self.block_io.total_size().await?;
+        self.block_size = self.block_io.get_block_size().await?;
+        self.uuid = self.block_io.get_uuid().await?;
+
+        self.active = true;
+
+        Ok(())
+    }
+
+    pub async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
+        self.block_io.query_work_queue().await
     }
 
     pub async fn show_work(&self) -> Result<WQCounts, CrucibleError> {
