@@ -114,7 +114,7 @@ dof = { version = "0.3", default-features = false, features = ["des"] }
 hyper = { version = "0.14", features = ["full"] }
 mio = { version = "0.8", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustix = { version = "0.38", features = ["fs", "termios"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
 
@@ -130,14 +130,14 @@ spin = { version = "0.9", default-features = false, features = ["once", "spin_mu
 hyper = { version = "0.14", features = ["full"] }
 mio = { version = "0.8", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustix = { version = "0.38", features = ["fs", "termios"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
 hyper = { version = "0.14", features = ["full"] }
 mio = { version = "0.8", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustix = { version = "0.38", features = ["fs", "termios"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 
 [target.x86_64-unknown-illumos.dependencies]
@@ -145,7 +145,7 @@ dof = { version = "0.3", default-features = false, features = ["des"] }
 hyper = { version = "0.14", features = ["full"] }
 mio = { version = "0.8", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustix = { version = "0.38", features = ["fs", "termios"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
 
