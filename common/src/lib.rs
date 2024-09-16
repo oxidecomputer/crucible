@@ -76,8 +76,8 @@ pub enum CrucibleError {
     #[error("Offset past end of extent")]
     OffsetInvalid,
 
-    #[error("Upstairs is already active")]
-    UpstairsAlreadyActive,
+    #[error("Upstairs activation is in progress")]
+    UpstairsActivateInProgress,
 
     #[error("Upstairs is deactivating")]
     UpstairsDeactivating,
@@ -132,6 +132,9 @@ pub enum CrucibleError {
 
     #[error("Generation number is too low: {0}")]
     GenerationNumberTooLow(String),
+
+    #[error("Active with different generation number")]
+    GenerationNumberInvalid,
 
     #[error("No longer active")]
     NoLongerActive,
@@ -389,6 +392,7 @@ impl From<CrucibleError> for dropshot::HttpError {
             | CrucibleError::Disconnect
             | CrucibleError::EncryptionError(_)
             | CrucibleError::GenerationNumberTooLow(_)
+            | CrucibleError::GenerationNumberInvalid
             | CrucibleError::GenericError(_)
             | CrucibleError::HashMismatch
             | CrucibleError::InvalidExtent
@@ -403,7 +407,7 @@ impl From<CrucibleError> for dropshot::HttpError {
             | CrucibleError::RwLockError(_)
             | CrucibleError::SendError(_)
             | CrucibleError::SubvolumeSizeMismatch
-            | CrucibleError::UpstairsAlreadyActive
+            | CrucibleError::UpstairsActivateInProgress
             | CrucibleError::UpstairsDeactivating
             | CrucibleError::UuidMismatch
             | CrucibleError::MissingContextSlot(..)

@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::{
+    backpressure::BackpressureGuard,
     cdt,
     client::{ClientAction, ClientStopReason, DownstairsClient},
     guest::GuestWork,
@@ -73,17 +74,6 @@ pub(crate) struct Downstairs {
     /// The active list of IO for the downstairs.
     pub(crate) ds_active: ActiveJobs,
 
-    /// The number of write bytes that haven't finished yet
-    ///
-    /// This is used to configure backpressure to the host, because writes
-    /// (uniquely) will return before actually being completed by a Downstairs
-    /// and can clog up the queues.
-    ///
-    /// It is stored in the Downstairs because from the perspective of the
-    /// Upstairs, writes complete immediately; only the Downstairs is actually
-    /// tracking the pending jobs.
-    write_bytes_outstanding: BackpressureBytes,
-
     /// The next Job ID this Upstairs should use for downstairs work.
     next_id: JobId,
 
@@ -137,44 +127,6 @@ pub(crate) struct Downstairs {
     /// A reqwest client, to be reused when creating Nexus clients
     #[cfg(feature = "notify-nexus")]
     reqwest_client: reqwest::Client,
-}
-
-/// Helper struct to contain a count of backpressure bytes
-#[derive(Debug)]
-struct BackpressureBytes(u64);
-
-impl BackpressureBytes {
-    fn new() -> Self {
-        BackpressureBytes(0)
-    }
-
-    /// Ensures that the given `DownstairsIO` is counted for backpressure
-    ///
-    /// This is idempotent: if the job has already been counted, indicated by
-    /// the `DownstairsIO::backpressure_bytes` member being `Some(..)`, it will
-    /// not be counted again.
-    fn increment(&mut self, io: &mut DownstairsIO) {
-        match &io.work {
-            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
-                if io.backpressure_bytes.is_none() {
-                    let n = data.len() as u64;
-                    io.backpressure_bytes = Some(n);
-                    self.0 += n;
-                }
-            }
-            _ => (),
-        };
-    }
-
-    /// Remove the given job's contribution to backpressure
-    ///
-    /// This is idempotent: `DownstairsIO::backpressure_bytes` is set to `None`
-    /// by this function call, so it's harmless to call repeatedly.
-    fn decrement(&mut self, io: &mut DownstairsIO) {
-        if let Some(n) = io.backpressure_bytes.take() {
-            self.0 = self.0.checked_sub(n).unwrap();
-        }
-    }
 }
 
 /// State machine for a live-repair operation
@@ -331,7 +283,6 @@ impl Downstairs {
             cfg,
             next_flush: 0,
             ds_active: ActiveJobs::new(),
-            write_bytes_outstanding: BackpressureBytes::new(),
             completed: AllocRingBuffer::new(2048),
             completed_jobs: AllocRingBuffer::new(8),
             next_id: JobId(1000),
@@ -936,10 +887,6 @@ impl Downstairs {
             if self.clients[client_id].replay_job(job) {
                 count += 1;
             }
-
-            // Make sure this job counts for backpressure (this is a no-op if
-            // the job is already counted).
-            self.write_bytes_outstanding.increment(job);
         });
         info!(
             self.log,
@@ -1519,7 +1466,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: None,
+            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -1643,7 +1590,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: None,
+            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -1784,7 +1731,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: None,
+            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -1842,7 +1789,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: None,
+            backpressure_guard: ClientMap::new(),
         };
         self.enqueue(io);
         ds_id
@@ -1876,6 +1823,7 @@ impl Downstairs {
             GuestWorkId(10),
             request,
             is_write_unwritten,
+            ClientData::from_fn(|_| BackpressureGuard::dummy()),
         )
     }
 
@@ -1885,6 +1833,7 @@ impl Downstairs {
         gw_id: GuestWorkId,
         write: RawWrite,
         is_write_unwritten: bool,
+        bp_guard: ClientData<BackpressureGuard>,
     ) -> JobId {
         let ds_id = self.next_id();
         let dependencies = self.ds_active.deps_for_write(ds_id, blocks);
@@ -1926,7 +1875,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: None,
+            backpressure_guard: bp_guard.into(),
         };
         self.enqueue(io);
         ds_id
@@ -1957,7 +1906,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: None,
+            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -2366,7 +2315,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: None,
+            backpressure_guard: ClientMap::new(),
         };
 
         self.enqueue(fl);
@@ -2493,7 +2442,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: None,
+            backpressure_guard: ClientMap::new(),
         };
 
         self.enqueue(io);
@@ -2507,6 +2456,7 @@ impl Downstairs {
         blocks: ImpactedBlocks,
         write: RawWrite,
         is_write_unwritten: bool,
+        backpressure_guard: ClientData<BackpressureGuard>,
     ) -> JobId {
         // If there is a live-repair in progress that intersects with this read,
         // then reserve job IDs for those jobs.
@@ -2517,6 +2467,7 @@ impl Downstairs {
             guest_id,
             write,
             is_write_unwritten,
+            backpressure_guard,
         )
     }
 
@@ -2580,7 +2531,6 @@ impl Downstairs {
         }
 
         // Make sure this job is counted for backpressure
-        self.write_bytes_outstanding.increment(&mut io);
         let is_write = matches!(io.work, IOop::Write { .. });
 
         // Puts the IO onto the downstairs work queue.
@@ -2957,18 +2907,21 @@ impl Downstairs {
             }
             // Now that we've collected jobs to retire, remove them from the map
             for &id in &retired {
-                let mut job = self.ds_active.remove(&id);
+                let job = self.ds_active.remove(&id);
 
                 // Jobs should have their backpressure contribution removed when
                 // they are completed (in `process_io_completion_inner`),
                 // **not** when they are retired.  We'll do a sanity check here
                 // and print a warning if that's not the case.
-                if job.backpressure_bytes.is_some() {
-                    warn!(
-                        self.log,
-                        "job {ds_id} had pending backpressure bytes"
-                    );
-                    self.write_bytes_outstanding.decrement(&mut job);
+                for c in ClientId::iter() {
+                    if job.backpressure_guard.contains(&c) {
+                        warn!(
+                            self.log,
+                            "job {ds_id} had pending backpressure bytes \
+                             for client {c}"
+                        );
+                        // Backpressure is decremented on drop
+                    }
                 }
             }
 
@@ -3366,10 +3319,7 @@ impl Downstairs {
         ds_id: JobId,
         client_id: ClientId,
     ) -> Option<CrucibleError> {
-        let Some(job) = self.ds_active.get(&ds_id) else {
-            return None;
-        };
-
+        let job = self.ds_active.get(&ds_id)?;
         let state = &job.state[client_id];
 
         if let IOState::Error(e) = state {
@@ -3467,14 +3417,6 @@ impl Downstairs {
             self.ackable_work.insert(ds_id);
         }
 
-        // Write bytes no longer count for backpressure once all 3x downstairs
-        // have returned (although they'll continue to be stored until they are
-        // retired by the next flush).
-        let wc = job.state_count();
-        if (wc.error + wc.skipped + wc.done) == 3 {
-            self.write_bytes_outstanding.decrement(job);
-        }
-
         /*
          * If all 3 jobs are done, we can check here to see if we can
          * remove this job from the DS list. If we have completed the ack
@@ -3492,6 +3434,7 @@ impl Downstairs {
             // If we are a write or a flush with one success, then
             // we must switch our state to failed.  This condition is
             // handled when we check the job result.
+            let wc = job.state_count();
             if (wc.error + wc.skipped + wc.done) == 3 {
                 self.ackable_work.insert(ds_id);
                 debug!(self.log, "[{}] Set AckReady {}", client_id, job.ds_id);
@@ -3589,7 +3532,21 @@ impl Downstairs {
     }
 
     pub(crate) fn write_bytes_outstanding(&self) -> u64 {
-        self.write_bytes_outstanding.0
+        self.clients
+            .iter()
+            .filter(|c| matches!(c.state(), DsState::Active))
+            .map(|c| c.backpressure_counters.get_write_bytes())
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn jobs_outstanding(&self) -> u64 {
+        self.clients
+            .iter()
+            .filter(|c| matches!(c.state(), DsState::Active))
+            .map(|c| c.backpressure_counters.get_jobs())
+            .max()
+            .unwrap_or(0)
     }
 
     /// Marks a single job as acked
@@ -3722,6 +3679,7 @@ impl Downstairs {
                 data,
             },
             is_write_unwritten,
+            ClientData::from_fn(|_| BackpressureGuard::dummy()),
         )
     }
 
@@ -4469,6 +4427,19 @@ impl Downstairs {
                 }
             }
         });
+    }
+
+    /// Assign the given number of write bytes to the backpressure counters
+    #[must_use]
+    pub(crate) fn early_write_backpressure(
+        &mut self,
+        bytes: u64,
+    ) -> ClientData<BackpressureGuard> {
+        ClientData::from_fn(|i| {
+            self.clients[i]
+                .backpressure_counters
+                .early_write_increment(bytes)
+        })
     }
 }
 

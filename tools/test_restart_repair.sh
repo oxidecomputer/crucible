@@ -54,6 +54,7 @@ function stop_all_downstairs() {
 }
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
 
 cds="$BINDIR/crucible-downstairs"
@@ -94,6 +95,7 @@ WORK_ROOT=${WORK_ROOT:-/tmp}
 export loop_log="$WORK_ROOT/repair_restart.log"
 export test_log="$WORK_ROOT/repair_restart_test.log"
 export dsc_log="$WORK_ROOT/repair_restart_dsc.log"
+export verify_log="$WORK_ROOT/repair_restart_verify.log"
 REGION_ROOT=${REGION_ROOT:-/var/tmp/test_restart_repair}
 
 echo "" > "$loop_log"
@@ -172,8 +174,8 @@ bring_all_downstairs_online
 # different data in current vs. old region directories.
 echo "$(date) Run a second fill test" >> "$test_log"
 echo "$(date) Run a second fill test" | tee -a "$loop_log"
-echo "$ct" fill "${args[@]}" --stable -g "$gen" --verify-out alan >> "$test_log"
-"$ct" fill "${args[@]}" --stable -g "$gen" --verify-out alan >> "$test_log" 2>&1
+echo "$ct" fill "${args[@]}" --stable -g "$gen" --verify-out "$verify_log" >> "$test_log"
+"$ct" fill "${args[@]}" --stable -g "$gen" --verify-out "$verify_log" >> "$test_log" 2>&1
 if [[ $? -ne 0 ]]; then
     echo "Error in initial fill"
     ctrl_c
@@ -228,8 +230,8 @@ while [[ $count -le $loops ]]; do
 
     echo "$(date) do one IO" >> "$test_log"
     "$ct" one "${args[@]}" \
-            -q -g "$gen" --verify-out alan \
-            --verify-in alan \
+            -q -g "$gen" --verify-out "$verify_log" \
+            --verify-in "$verify_log" \
             --verify-at-start \
             --retry-activate >> "$test_log" 2>&1
     result=$?

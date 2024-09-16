@@ -1,6 +1,4 @@
 // Copyright 2023 Oxide Computer Company
-#![cfg_attr(usdt_need_asm, feature(asm))]
-#![cfg_attr(all(target_os = "macos", usdt_need_asm_sym), feature(asm_sym))]
 
 use futures::lock::Mutex;
 use std::cmp::Ordering;
@@ -741,44 +739,24 @@ pub mod cdt {
     fn submit__writeunwritten__done(_: u64) {}
     fn submit__write__done(_: u64) {}
     fn submit__flush__done(_: u64) {}
-    fn extent__flush__start(job_id: u64, extent_id: u32, extent_size: u64) {}
-    fn extent__flush__done(job_id: u64, extent_id: u32, extent_size: u64) {}
-    fn extent__flush__file__start(
+    fn extent__flush__start(
         job_id: u64,
         extent_id: u32,
-        extent_size: u64,
+        num_dirty_blocks: u64,
     ) {
     }
-    fn extent__flush__file__done(
-        job_id: u64,
-        extent_id: u32,
-        extent_size: u64,
-    ) {
-    }
-    fn extent__flush__collect__hashes__start(
-        job_id: u64,
-        extent_id: u32,
-        num_dirty: u64,
-    ) {
-    }
+    fn extent__flush__done(job_id: u64, extent_id: u32) {}
+    fn extent__flush__file__start(job_id: u64, extent_id: u32) {}
+    fn extent__flush__file__done(job_id: u64, extent_id: u32) {}
+    fn extent__flush__collect__hashes__start(job_id: u64, extent_id: u32) {}
     fn extent__flush__collect__hashes__done(
         job_id: u64,
         extent_id: u32,
         num_rehashed: u64,
     ) {
     }
-    fn extent__flush__sqlite__insert__start(
-        job_id: u64,
-        extent_id: u32,
-        extent_size: u64,
-    ) {
-    }
-    fn extent__flush__sqlite__insert__done(
-        _job_id: u64,
-        _extent_id: u32,
-        extent_size: u64,
-    ) {
-    }
+    fn extent__flush__sqlite__insert__start(job_id: u64, extent_id: u32) {}
+    fn extent__flush__sqlite__insert__done(job_id: u64, extent_id: u32) {}
     fn extent__write__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
     fn extent__write__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
     fn extent__write__get__hashes__start(
@@ -2438,7 +2416,7 @@ impl Downstairs {
                         .unwrap();
 
                     let active_upstairs_connection = self.connection_state
-                        [&active_id]
+                        [active_id]
                         .upstairs_connection()
                         .expect("bad ConnectionId for active connection");
                     warn!(
@@ -2539,7 +2517,7 @@ impl Downstairs {
     fn is_active(&self, connection: UpstairsConnection) -> bool {
         let uuid = connection.upstairs_id;
         if let Some(id) = self.active_upstairs.get(&uuid) {
-            self.connection_state[&id].upstairs_connection() == Some(connection)
+            self.connection_state[id].upstairs_connection() == Some(connection)
         } else {
             false
         }

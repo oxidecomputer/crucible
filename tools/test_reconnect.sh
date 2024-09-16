@@ -17,8 +17,11 @@ function ctrl_c() {
 
 loop_log=/tmp/test_reconnect_summary.log
 test_log=/tmp/test_reconnect.log
+verify_log="/tmp/test_reconnect_verify.log"
+
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
 crucible_test="$BINDIR/crutest"
 dsc="$BINDIR/dsc"
@@ -54,7 +57,7 @@ done
 gen=1
 # Initial seed for verify file
 if ! "$crucible_test" fill "${args[@]}" -q -g "$gen"\
-          --verify-out alan --retry-activate >> "$test_log" 2>&1 ; then
+          --verify-out "$verify_log" --retry-activate >> "$test_log" 2>&1 ; then
     echo Failed on initial verify seed, check "$test_log"
     ${dsc} cmd shutdown
 fi
@@ -80,9 +83,9 @@ do
     echo "" > "$test_log"
     echo "New loop starts now $(date)" >> "$test_log"
     "$crucible_test" generic "${args[@]}" -c 15000 \
-            -q -g "$gen" --verify-out alan \
+            -q -g "$gen" --verify-out "$verify_log" \
             --range \
-            --verify-in alan \
+            --verify-in "$verify_log" \
             --retry-activate >> "$test_log" 2>&1
     result=$?
     if [[ $result -ne 0 ]]; then

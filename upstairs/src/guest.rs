@@ -2,17 +2,16 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
 use crate::{
+    backpressure::{
+        BackpressureAmount, BackpressureConfig, SharedBackpressureAmount,
+    },
     BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, JobId, RawReadResponse,
-    ReplaceResult, UpstairsAction, IO_OUTSTANDING_MAX_BYTES,
-    IO_OUTSTANDING_MAX_JOBS,
+    ReplaceResult, UpstairsAction,
 };
 use crucible_common::{build_logger, Block, BlockIndex, CrucibleError};
 use crucible_protocol::SnapshotDetails;
@@ -20,7 +19,7 @@ use crucible_protocol::SnapshotDetails;
 use async_trait::async_trait;
 use bytes::BytesMut;
 use ringbuffer::{AllocRingBuffer, RingBuffer};
-use slog::{info, warn, Logger};
+use slog::{error, info, warn, Logger};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{instrument, span, Level};
 use uuid::Uuid;
@@ -283,7 +282,7 @@ pub struct Guest {
     ///
     /// It is stored in an `Arc` so that the `GuestIoHandle` can update it from
     /// the IO task.
-    backpressure_us: Arc<AtomicU64>,
+    backpressure: SharedBackpressureAmount,
 
     /// Lock held during backpressure delay
     ///
@@ -295,71 +294,6 @@ pub struct Guest {
 
     /// Logger for the guest
     log: Logger,
-}
-
-/// Configuration for host-side backpressure
-///
-/// Backpressure adds an artificial delay to host write messages (which are
-/// otherwise acked immediately, before actually being complete).  The delay is
-/// varied based on two metrics:
-///
-/// - number of write bytes outstanding (as a fraction of max)
-/// - queue length as a fraction (where 1.0 is full)
-///
-/// These two metrics are used for quadratic backpressure, picking the larger of
-/// the two delays.
-#[derive(Copy, Clone, Debug)]
-struct BackpressureConfig {
-    /// When should backpressure start, in units of bytes
-    bytes_start: u64,
-    /// Maximum number of bytes (i.e. backpressure goes to infinity)
-    bytes_max: u64,
-    /// Scale of bytes-based backpressure
-    bytes_scale: Duration,
-
-    /// When should backpressure start, in units of jobs
-    queue_start: u64,
-    /// Maximum number of jobs (i.e. backpressure goes to infinity)
-    queue_max: u64,
-    /// Scale of queue-based delay
-    queue_scale: Duration,
-}
-
-impl BackpressureConfig {
-    // Our chosen backpressure curve is quadratic for 1/2 of its range, then
-    // goes to infinity in the second half.  This gives C0 + C1 continuity.
-    fn curve(frac: f64, scale: Duration) -> Duration {
-        // Remap from 0-1 to 0-1.5 for ease of calculation
-        let frac = frac * 2.0;
-        let v = if frac < 1.0 {
-            frac
-        } else {
-            1.0 / (1.0 - (frac - 1.0))
-        };
-        scale.mul_f64(v.powi(2))
-    }
-
-    fn get_backpressure_us(&self, bytes: u64, jobs: u64) -> u64 {
-        // Saturate at 1 hour per job, which is basically infinite
-        if bytes >= self.bytes_max || jobs >= self.queue_max {
-            return Duration::from_secs(60 * 60).as_micros() as u64;
-        }
-
-        // These ratios start at 0 (at *_start) and hit 1 when backpressure
-        // should be infinite.
-        let jobs_frac = jobs.saturating_sub(self.queue_start) as f64
-            / (self.queue_max - self.queue_start) as f64;
-        let bytes_frac = bytes.saturating_sub(self.bytes_start) as f64
-            / (self.bytes_max - self.bytes_start) as f64;
-
-        // Delay should be 0 at frac = 0, and infinite at frac = 1
-        let delay_bytes =
-            Self::curve(bytes_frac, self.bytes_scale).as_micros() as u64;
-        let delay_jobs =
-            Self::curve(jobs_frac, self.queue_scale).as_micros() as u64;
-
-        delay_bytes.max(delay_jobs)
-    }
 }
 
 /*
@@ -384,7 +318,7 @@ impl Guest {
         // time spent waiting for the queue versus time spent in Upstairs code).
         let (req_tx, req_rx) = mpsc::channel(500);
 
-        let backpressure_us = Arc::new(AtomicU64::new(0));
+        let backpressure = SharedBackpressureAmount::new();
         let limits = GuestLimits {
             iop_limit: None,
             bw_limit: None,
@@ -403,8 +337,8 @@ impl Guest {
 
             iop_tokens: 0,
             bw_tokens: 0,
-            backpressure_us: backpressure_us.clone(),
-            backpressure_config: Self::default_backpressure_config(),
+            backpressure: backpressure.clone(),
+            backpressure_config: BackpressureConfig::default(),
             log: log.clone(),
         };
         let guest = Guest {
@@ -412,25 +346,11 @@ impl Guest {
 
             block_size: AtomicU64::new(0),
 
-            backpressure_us,
+            backpressure,
             backpressure_lock: Mutex::new(()),
             log,
         };
         (guest, io)
-    }
-
-    fn default_backpressure_config() -> BackpressureConfig {
-        BackpressureConfig {
-            // Byte-based backpressure
-            bytes_start: 50 * 1024u64.pow(2), // 50 MiB
-            bytes_max: IO_OUTSTANDING_MAX_BYTES * 2,
-            bytes_scale: Duration::from_millis(100),
-
-            // Queue-based backpressure
-            queue_start: 500,
-            queue_max: IO_OUTSTANDING_MAX_JOBS as u64 * 2,
-            queue_scale: Duration::from_millis(5),
-        }
     }
 
     /*
@@ -493,13 +413,25 @@ impl Guest {
         Ok(())
     }
 
-    async fn backpressure_sleep(&self) {
-        let bp =
-            Duration::from_micros(self.backpressure_us.load(Ordering::SeqCst));
-        if bp > Duration::ZERO {
-            let _guard = self.backpressure_lock.lock().await;
-            tokio::time::sleep(bp).await;
-            drop(_guard);
+    /// Sleeps for a backpressure-dependent amount, holding the lock
+    ///
+    /// If backpressure is saturated, logs and returns an error.
+    async fn backpressure_sleep(&self) -> Result<(), CrucibleError> {
+        let bp = self.backpressure.load();
+        match bp {
+            BackpressureAmount::Saturated => {
+                let err = "write queue is saturated";
+                error!(self.log, "{err}");
+                Err(CrucibleError::IoError(err.to_owned()))
+            }
+            BackpressureAmount::Duration(d) => {
+                if d > Duration::ZERO {
+                    let _guard = self.backpressure_lock.lock().await;
+                    tokio::time::sleep(d).await;
+                    drop(_guard);
+                }
+                Ok(())
+            }
         }
     }
 
@@ -537,6 +469,24 @@ impl BlockIO for Guest {
         Ok(())
     }
 
+    async fn activate_with_gen(&self, gen: u64) -> Result<(), CrucibleError> {
+        let (rx, done) = BlockOpWaiter::pair();
+        self.send(BlockOp::GoActiveWithGen { gen, done }).await;
+        info!(
+            self.log,
+            "The guest has requested activation with gen:{}", gen
+        );
+
+        rx.wait().await?;
+
+        info!(
+            self.log,
+            "The guest has finished waiting for activation with:{}", gen
+        );
+
+        Ok(())
+    }
+
     /// Disable any more IO from this guest and deactivate the downstairs.
     async fn deactivate(&self) -> Result<(), CrucibleError> {
         self.send_and_wait(|done| BlockOp::Deactivate { done })
@@ -545,6 +495,16 @@ impl BlockIO for Guest {
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
         self.send_and_wait(|done| BlockOp::QueryGuestIOReady { done })
+            .await
+    }
+
+    async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
+        self.send_and_wait(|done| BlockOp::QueryWorkQueue { done })
+            .await
+    }
+
+    async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
+        self.send_and_wait(|done| BlockOp::QueryExtentSize { done })
             .await
     }
 
@@ -667,7 +627,7 @@ impl BlockIO for Guest {
             assert_eq!(buf.len() as u64 % bs, 0);
             let offset_change = buf.len() as u64 / bs;
 
-            self.backpressure_sleep().await;
+            self.backpressure_sleep().await?;
 
             let reply = self
                 .send_and_wait(|done| BlockOp::Write {
@@ -694,7 +654,7 @@ impl BlockIO for Guest {
             return Ok(());
         }
 
-        self.backpressure_sleep().await;
+        self.backpressure_sleep().await?;
         self.send_and_wait(|done| BlockOp::WriteUnwritten {
             offset,
             data,
@@ -799,7 +759,7 @@ pub struct GuestIoHandle {
     iop_tokens: usize,
 
     /// Current backpressure (shared with the `Guest`)
-    backpressure_us: Arc<AtomicU64>,
+    backpressure: SharedBackpressureAmount,
 
     /// Backpressure configuration, as a starting point and max delay
     backpressure_config: BackpressureConfig,
@@ -941,23 +901,23 @@ impl GuestIoHandle {
 
     #[cfg(test)]
     pub fn disable_queue_backpressure(&mut self) {
-        self.backpressure_config.queue_scale = Duration::ZERO;
+        self.backpressure_config.queue.delay_scale = Duration::ZERO;
     }
 
     #[cfg(test)]
     pub fn disable_byte_backpressure(&mut self) {
-        self.backpressure_config.bytes_scale = Duration::ZERO;
+        self.backpressure_config.bytes.delay_scale = Duration::ZERO;
     }
 
     #[cfg(test)]
     pub fn is_queue_backpressure_disabled(&self) -> bool {
-        self.backpressure_config.queue_scale == Duration::ZERO
+        self.backpressure_config.queue.delay_scale == Duration::ZERO
     }
 
-    /// Set `self.backpressure_us` based on outstanding IO ratio
+    /// Set `self.backpressure` based on outstanding IO ratio
     pub fn set_backpressure(&self, bytes: u64, jobs: u64) {
-        let bp_usec = self.backpressure_config.get_backpressure_us(bytes, jobs);
-        self.backpressure_us.store(bp_usec, Ordering::SeqCst);
+        let bp = self.backpressure_config.get_backpressure(bytes, jobs);
+        self.backpressure.store(bp);
     }
 
     pub fn set_iop_limit(&mut self, bytes_per_iop: usize, limit: usize) {
@@ -977,8 +937,8 @@ impl GuestIoHandle {
     }
 
     /// Looks up current backpressure
-    pub fn backpressure_us(&self) -> u64 {
-        self.backpressure_us.load(Ordering::Acquire)
+    pub fn get_backpressure(&self) -> BackpressureAmount {
+        self.backpressure.load()
     }
 
     /// Debug function to dump the guest work structure.
@@ -1459,88 +1419,5 @@ mod test {
         assert_consumed(&mut io).await;
 
         Ok(())
-    }
-
-    /// Confirm that the offline timeout is reasonable
-    #[test]
-    fn check_offline_timeout() {
-        for job_size in
-            [512, 4 * 1024, 16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024]
-        {
-            let mut bytes_in_flight = 0;
-            let mut jobs_in_flight = 0;
-            let mut time_usec: u64 = 0;
-            let cfg = Guest::default_backpressure_config();
-
-            let (t, desc) = loop {
-                let bp_usec =
-                    cfg.get_backpressure_us(bytes_in_flight, jobs_in_flight);
-                time_usec = time_usec.saturating_add(bp_usec);
-
-                if bytes_in_flight >= IO_OUTSTANDING_MAX_BYTES {
-                    break (time_usec, "bytes");
-                }
-
-                if jobs_in_flight >= IO_OUTSTANDING_MAX_JOBS as u64 {
-                    break (time_usec, "jobs");
-                }
-
-                bytes_in_flight += job_size;
-                jobs_in_flight += 1;
-            };
-
-            let timeout = Duration::from_micros(t);
-            assert!(
-                timeout > Duration::from_secs(1),
-                "offline -> faulted transition happens too quickly \
-                 with job size {job_size};  expected > 1 sec, got {}",
-                humantime::format_duration(timeout)
-            );
-            assert!(
-                timeout < Duration::from_secs(180),
-                "offline -> faulted transition happens too slowly \
-                 with job size {job_size};  expected < 3 mins, got {}",
-                humantime::format_duration(timeout)
-            );
-
-            println!(
-                "job size {job_size:>8}:\n    Timeout in {} ({desc})\n",
-                humantime::format_duration(timeout)
-            );
-        }
-    }
-
-    #[test]
-    fn check_max_backpressure() {
-        let cfg = Guest::default_backpressure_config();
-        let t = cfg.get_backpressure_us(
-            IO_OUTSTANDING_MAX_BYTES * 2 - 1024u64.pow(2),
-            0,
-        );
-        let timeout = Duration::from_micros(t);
-        println!(
-            "max byte-based delay: {}",
-            humantime::format_duration(timeout)
-        );
-        assert!(
-            timeout > Duration::from_secs(60 * 60),
-            "max byte-based backpressure delay is too low;
-            expected > 1 hr, got {}",
-            humantime::format_duration(timeout)
-        );
-
-        let t =
-            cfg.get_backpressure_us(0, IO_OUTSTANDING_MAX_JOBS as u64 * 2 - 1);
-        let timeout = Duration::from_micros(t);
-        println!(
-            "max job-based delay: {}",
-            humantime::format_duration(timeout)
-        );
-        assert!(
-            timeout > Duration::from_secs(60 * 60),
-            "max job-based backpressure delay is too low;
-            expected > 1 hr, got {}",
-            humantime::format_duration(timeout)
-        );
     }
 }

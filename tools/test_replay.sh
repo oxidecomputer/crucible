@@ -18,8 +18,10 @@ WORK_ROOT=${WORK_ROOT:-/tmp}
 mkdir -p "$WORK_ROOT"
 
 test_log="$WORK_ROOT/test_replay.log"
+verify_log="$WORK_ROOT/test_replay_verify.log"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
 crucible_test="$BINDIR/crutest"
 dsc="$BINDIR/dsc"
@@ -53,7 +55,8 @@ echo "starting $(date)" | tee "$test_log"
 echo "Tail $test_log for test output"
 
 echo "Creating downstairs regions" | tee -a "$test_log"
-if ! ${dsc} create --cleanup --ds-bin "$downstairs" --extent-count 50 >> "$test_log"; then
+if ! ${dsc} create --cleanup --ds-bin "$downstairs" \
+        --extent-count 50 >> "$test_log"; then
     echo "Failed to create downstairs regions"
     exit 1
 fi
@@ -76,7 +79,7 @@ gen=1
 # Initial seed for verify file
 echo "Running initial fill" | tee -a "$test_log"
 if ! "$crucible_test" fill "${args[@]}" -q -g "$gen"\
-          --verify-out alan --retry-activate >> "$test_log" 2>&1 ; then
+          --verify-out "$verify_log" --retry-activate >> "$test_log" 2>&1 ; then
     echo Failed on initial verify seed, check "$test_log"
     ${dsc} cmd shutdown
     exit 1
@@ -86,8 +89,8 @@ fi
 SECONDS=0
 echo "Replay loop starts now $(date)" | tee -a "$test_log"
 "$crucible_test" replay "${args[@]}" -c "$loops" \
-        --stable -g "$gen" --verify-out alan \
-        --verify-in alan \
+        --stable -g "$gen" --verify-out "$verify_log" \
+        --verify-in "$verify_log" \
         --retry-activate >> "$test_log" 2>&1
 result=$?
 duration=$SECONDS
@@ -101,7 +104,8 @@ else
 
     echo "Do final verify" | tee -a "$test_log"
     if ! "$crucible_test" verify "${args[@]}" -q -g "$gen"\
-              --verify-out alan --verify-in alan >> "$test_log" 2>&1 ; then
+              --verify-out "$verify_log" \
+              --verify-in "$verify_log" >> "$test_log" 2>&1 ; then
         echo Failed on final verify, check "$test_log"
         result=1
     fi

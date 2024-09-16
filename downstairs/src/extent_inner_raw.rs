@@ -387,20 +387,12 @@ impl ExtentInner for RawInner {
         Ok(ExtentReadResponse { data: buf, blocks })
     }
 
-    fn flush(
+    fn pre_flush(
         &mut self,
         new_flush: u64,
         new_gen: u64,
         job_id: JobOrReconciliationId,
     ) -> Result<(), CrucibleError> {
-        if !self.dirty()? {
-            /*
-             * If we have made no writes to this extent since the last flush,
-             * we do not need to update the extent on disk
-             */
-            return Ok(());
-        }
-
         cdt::extent__flush__start!(|| {
             (job_id.get(), self.extent_number.0, 0)
         });
@@ -409,10 +401,17 @@ impl ExtentInner for RawInner {
         // operation atomic.
         self.set_flush_number(new_flush, new_gen)?;
 
+        Ok(())
+    }
+
+    fn flush_inner(
+        &mut self,
+        job_id: JobOrReconciliationId,
+    ) -> Result<(), CrucibleError> {
         // Now, we fsync to ensure data is flushed to disk.  It's okay to crash
         // before this point, because setting the flush number is atomic.
         cdt::extent__flush__file__start!(|| {
-            (job_id.get(), self.extent_number.0, 0)
+            (job_id.get(), self.extent_number.0)
         });
         if let Err(e) = self.file.sync_all() {
             /*
@@ -425,9 +424,17 @@ impl ExtentInner for RawInner {
         }
         self.context_slot_dirty.fill(0);
         cdt::extent__flush__file__done!(|| {
-            (job_id.get(), self.extent_number.0, 0)
+            (job_id.get(), self.extent_number.0)
         });
+        Ok(())
+    }
 
+    fn post_flush(
+        &mut self,
+        _new_flush: u64,
+        _new_gen: u64,
+        job_id: JobOrReconciliationId,
+    ) -> Result<(), CrucibleError> {
         // Check for fragmentation in the context slots leading to worse
         // performance, and defragment if that's the case.
         let extra_syscalls_per_rw = self
@@ -442,9 +449,7 @@ impl ExtentInner for RawInner {
             Ok(())
         };
 
-        cdt::extent__flush__done!(|| {
-            (job_id.get(), self.extent_number.0, 0)
-        });
+        cdt::extent__flush__done!(|| { (job_id.get(), self.extent_number.0) });
 
         r
     }
@@ -529,6 +534,7 @@ impl RawInner {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&path)?;
 
         // All 0s are fine for everything except extent version in the metadata
@@ -838,7 +844,7 @@ impl RawInner {
         let mut writes = 0u64;
         for (slot, group) in block_contexts
             .iter()
-            .group_by(|block_context| {
+            .chunk_by(|block_context| {
                 // We'll be writing to the inactive slot
                 !self.active_context[block_context.block as usize]
             })
@@ -911,7 +917,7 @@ impl RawInner {
         let mut out = Vec::with_capacity(count as usize);
         let mut reads = 0u64;
         for (slot, group) in (block..block + count)
-            .group_by(|block| self.active_context[*block as usize])
+            .chunk_by(|block| self.active_context[*block as usize])
             .into_iter()
         {
             let mut group = group.peekable();
@@ -943,7 +949,7 @@ impl RawInner {
         // Perform writes, which may be broken up by skipped blocks
         let block_size = self.extent_size.block_size_in_bytes() as u64;
         for (skip, mut group) in (0..write.block_contexts.len())
-            .group_by(|i| writes_to_skip.contains(i))
+            .chunk_by(|i| writes_to_skip.contains(i))
             .into_iter()
         {
             if skip {

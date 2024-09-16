@@ -72,8 +72,8 @@ function repair_round() {
     # Do one IO to each block, verify.
     gen=1
     echo "$(date) fill" >> "$test_log"
-    echo "$ct" fill "${args[@]}" --stable -g "$gen" --verify-out alan >> "$test_log"
-    "$ct" fill "${args[@]}" --stable -g "$gen" --verify-out alan >> "$test_log" 2>&1
+    echo "$ct" fill "${args[@]}" --stable -g "$gen" --verify-out "$verify_log" >> "$test_log"
+    "$ct" fill "${args[@]}" --stable -g "$gen" --verify-out "$verify_log" >> "$test_log" 2>&1
     if [[ $? -ne 0 ]]; then
         echo "Error in initial fill"
         stop_test
@@ -138,8 +138,8 @@ function repair_round() {
             SECONDS=0
             echo "$(date) do one IO" >> "$test_log"
             "$ct" one "${args[@]}" \
-                    -q -g "$gen" --verify-out alan \
-                    --verify-in alan \
+                    -q -g "$gen" --verify-out "$verify_log" \
+                    --verify-in "$verify_log" \
                     --verify-at-start \
                     --retry-activate >> "$test_log" 2>&1
             result=$?
@@ -189,6 +189,8 @@ region_three=/var/tmp/dsc/region3
 block_size=4096
 loop_log=/tmp/repair_perf.log
 test_log=/tmp/repair_perf_test.log
+verify_log="/tmp/repair_perf_verify.log"
+
 
 echo "" > ${loop_log}
 echo "starting $0 on $(date)" | tee ${loop_log}

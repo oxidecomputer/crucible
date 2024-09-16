@@ -104,7 +104,6 @@
           "live_repair",
           "migrating",
           "offline",
-          "replay",
           "deactivated",
           "disabled",
           "replacing",

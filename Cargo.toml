@@ -58,7 +58,7 @@ humantime = "2.1.0"
 hyper = { version = "0.14", features = [ "full" ] }
 hyper-staticfile = "0.9.6"
 indicatif = { version = "0.17.8", features = ["rayon"] }
-itertools = "0.12.1"
+itertools = "0.13.0"
 libc = "0.2"
 mime_guess = "2.0.5"
 nbd = "0.3.1"
@@ -72,13 +72,13 @@ opentelemetry = "0.24.0"
 opentelemetry-jaeger = { version = "0.20.0" }
 percent-encoding = "2.3"
 proptest = "1.5.0"
-rayon = "1.9.0"
+rayon = "1.10.0"
 rand = { version = "0.8.5", features = ["min_const_gen", "small_rng"] }
 rand_chacha = "0.3.1"
 reedline = "0.33.0"
 reqwest = { version = "0.11", features = ["default", "blocking", "json", "stream"] }
 ringbuffer = "0.15.0"
-rusqlite = { version = "0.31" }
+rusqlite = { version = "0.32" }
 rustls-pemfile = { version = "1.0.4" }
 schemars = { version = "0.8", features = [ "chrono", "uuid1" ] }
 serde = { version = "1", features = [ "derive" ] }
