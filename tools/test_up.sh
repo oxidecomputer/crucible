@@ -282,7 +282,7 @@ fi
 
 echo ""
 echo ""
-echo "$ct" "$tt" --range -g "$gen" -q "${new_args[@]}"
+echo "$ct" verify --range -g "$gen" -q "${new_args[@]}"
 if ! "$ct" verify --range -g "$gen" -q "${new_args[@]}"; then
     (( res += 1 ))
     echo ""

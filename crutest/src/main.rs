@@ -35,8 +35,10 @@ mod stats;
 pub use stats::*;
 
 use crucible::*;
+use crucible_client_types::RegionExtentInfo;
 use crucible_protocol::CRUCIBLE_MESSAGE_VERSION;
 use dsc_client::{types::DownstairsState, Client};
+use repair_client::Client as repair_client;
 
 /*
  * The various tests this program supports.
@@ -265,6 +267,10 @@ pub struct Opt {
     /// A UUID to use for the upstairs.
     #[clap(long, global = true, action)]
     uuid: Option<Uuid>,
+
+    /// Read in a VCR from a file for use in constructing a volume
+    #[clap(long, global = true, value_name = "VCRFILE", action)]
+    vcr_file: Option<PathBuf>,
 
     /// In addition to any tests, verify the volume on startup.
     /// This only has value if verify_in is also set.
@@ -809,14 +815,6 @@ async fn main() -> Result<()> {
     let guest_logger = crucible_common::build_logger_with_level(log_level);
 
     let test_log = guest_logger.new(o!("task" => "crutest".to_string()));
-    /*
-     * The structure we use to send work from outside crucible into the
-     * Upstairs main task.
-     * We create this here instead of inside up_main() so we can use
-     * the methods provided by guest to interact with Crucible.
-     */
-    let (guest, io) = Guest::new(Some(guest_logger));
-    let guest = Arc::new(guest);
 
     let pr;
     if opt.metrics {
@@ -846,8 +844,79 @@ async fn main() -> Result<()> {
         pr = None;
     }
 
-    let _join_handle = up_main(crucible_opts, opt.gen, None, io, pr)?;
-    println!("Crucible runtime is spawned");
+    // We need to build a Volume for all the tests to use.
+    // If we have received a VCR as input, we can use that.  Otherwise we
+    // have to construct one by asking our downstairs for information that
+    // we need up front.  This will work as long as one of the downstairs
+    // is up already.  If we have a test that requires no downstairs to be
+    // running on startup, then we need to provide a VCR up front.
+    let guest = {
+        if let Some(vcr_file) = opt.vcr_file {
+            let vcr: VolumeConstructionRequest = match read_json(&vcr_file) {
+                Ok(vcr) => vcr,
+                Err(e) => {
+                    bail!("Error {:?} reading VCR from {:?}", e, vcr_file)
+                }
+            };
+            let volume =
+                Volume::construct(vcr, pr, guest_logger).await.unwrap();
+            Arc::new(volume)
+        } else {
+            // We were not provided a VCR, so, we have to make one by using
+            // the repair port on a downstairs to get region information that
+            // we require.  Once we have that information, we can build a VCR
+            // from it.
+
+            // For each sub-volume, we need to know:
+            // block_size, blocks_per_extent, and extent_size.  We can get any
+            // of the target downstairs to give us this info, if they are
+            // running.  We don't care which one responds.  Any mismatch will
+            // be detected later in the process and handled by the upstairs.
+            let mut extent_info_result = None;
+            for target in &crucible_opts.target {
+                let port = target.port() + crucible_common::REPAIR_PORT_OFFSET;
+                println!("look at: http://{}:{} ", target.ip(), port);
+                let repair_url = format!("http://{}:{}", target.ip(), port);
+                let repair_client = repair_client::new(&repair_url);
+                match repair_client.get_region_info().await {
+                    Ok(ri) => {
+                        println!("RI is: {:?}", ri);
+                        extent_info_result = Some(RegionExtentInfo {
+                            block_size: ri.block_size(),
+                            blocks_per_extent: ri.extent_size().value,
+                            extent_count: ri.extent_count(),
+                        });
+                        break;
+                    }
+                    Err(e) => {
+                        println!(
+                            "Failed to get info from {:?} {:?}",
+                            repair_url, e
+                        );
+                    }
+                }
+            }
+            let extent_info = match extent_info_result {
+                Some(ei) => ei,
+                None => {
+                    bail!("Can't determine extent info to build a Volume");
+                }
+            };
+
+            let mut volume = Volume::new(extent_info.block_size, guest_logger);
+            volume
+                .add_subvolume_create_guest(
+                    crucible_opts,
+                    extent_info,
+                    opt.gen,
+                    pr,
+                )
+                .await
+                .unwrap();
+
+            Arc::new(volume)
+        }
+    };
 
     if let Workload::CliServer { listen, port } = opt.workload {
         cli::start_cli_server(
@@ -3443,7 +3512,7 @@ async fn write_flush_read_workload<T: BlockIO + Send + Sync + 'static>(
     for c in 1..=count {
         /*
          * Pick a random size (in blocks) for the IO, up to the size of the
-         * entire region.
+         * max IO we allow.
          */
         let size = rng.gen_range(1..=ri.max_block_io);
 
@@ -3923,7 +3992,7 @@ async fn biggest_io_workload<T: BlockIO + Send + Sync + 'static>(
  * A loop that generates a bunch of random reads and writes, increasing the
  * offset each operation.  After 20 are submitted, we wait for all to finish.
  * Use this test and pass the --lossy flag and upstairs will at random skip
- * sending jobs to the downstairs, creating dependencys that it will
+ * sending jobs to the downstairs, creating dependencies that it will
  * eventually resolve.
  *
  * TODO: Make this test use the global write count, but remember, async.
