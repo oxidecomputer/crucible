@@ -422,7 +422,7 @@ async fn dsc_get_region_info(
         api_context.dsci.get_region_info().await.map_err(|e| {
             HttpError::for_bad_request(
                 None,
-                format!("failed to region info {:#}", e),
+                format!("failed get to region info {:#}", e),
             )
         })?;
 
