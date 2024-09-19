@@ -189,7 +189,7 @@ pub(crate) struct DownstairsClient {
     /// Session ID for a clients connection to a downstairs.
     connection_id: ConnectionId,
 
-    /// Per-client delay, shared with the [`DownstairsClient`]
+    /// Per-client delay, written here and read by the [`ClientIoTask`]
     client_delay_us: Arc<AtomicU64>,
 }
 
@@ -2473,6 +2473,8 @@ struct ClientIoTask {
     recv_task: ClientRxTask,
 
     /// Shared handle to receive per-client backpressure delay
+    ///
+    /// Written by the [`DownstairsClient`] and read by the IO task
     client_delay_us: Arc<AtomicU64>,
 
     log: Logger,
