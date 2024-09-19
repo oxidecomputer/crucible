@@ -496,14 +496,35 @@ impl DscInfo {
         // directory and the port this downstairs will use.
         let mut rs = self.rs.lock().await;
 
-        // If we don't have region info yet, set it now.
-        if rs.region_info.is_none() {
+        if let Some(cur_ri) = &rs.region_info {
+            // Verify the new region info matches what we already have.
+            if cur_ri.block_size != block_size {
+                println!(
+                    "WARNING: block size difference: {} vs. {}",
+                    cur_ri.block_size, block_size
+                );
+            }
+            if cur_ri.blocks_per_extent != extent_size {
+                println!(
+                    "WARNING: extent size difference: {} vs. {}",
+                    cur_ri.blocks_per_extent, extent_size
+                );
+            }
+            if cur_ri.extent_count != extent_count {
+                println!(
+                    "WARNING: extent count difference: {} vs. {}",
+                    cur_ri.extent_count, extent_count
+                );
+            }
+        } else {
+            // If we don't have region info yet, set it now.
             rs.region_info = Some(RegionExtentInfo {
                 block_size,
                 blocks_per_extent: extent_size,
                 extent_count,
             });
         }
+
         // use port to do this, or make a client ID that is port base, etc
         let port = rs.port_base + (ds_id as u32 * rs.port_step);
         let rd = &rs.region_dir[ds_id];
@@ -619,25 +640,43 @@ impl DscInfo {
                 bail!("Can't find region dir {:?}", new_region_dir);
             }
 
-            // Now that we have an expected region config directory and file
-            // where we expect region information to be, we can fill in
-            // the overall region information if we have not already.  We do
-            // expect all regions in a region set to be the same, so we take
-            // the first one we find here.
-            if region_info.is_none() {
-                let cp = config_path::<&Path>(new_region_dir.as_ref());
-                let def: RegionDefinition = match read_json(&cp) {
-                    Ok(def) => def,
-                    Err(e) => {
-                        bail!("Error {:?} opening region config {:?}", e, cp)
-                    }
-                };
-                let ri = RegionExtentInfo {
-                    block_size: def.block_size(),
-                    blocks_per_extent: def.extent_size().value,
-                    extent_count: def.extent_count(),
-                };
-                region_info = Some(ri);
+            // Read the region config information from this region.
+            let cp = config_path::<&Path>(new_region_dir.as_ref());
+            let def: RegionDefinition = match read_json(&cp) {
+                Ok(def) => def,
+                Err(e) => {
+                    bail!("Error {:?} opening region config {:?}", e, cp)
+                }
+            };
+            let new_ri = RegionExtentInfo {
+                block_size: def.block_size(),
+                blocks_per_extent: def.extent_size().value,
+                extent_count: def.extent_count(),
+            };
+
+            // We do expect all regions in a region set to be the same but
+            // we can verify that here and warn if it is not.
+            if let Some(cur_ri) = &region_info {
+                if cur_ri.block_size != new_ri.block_size {
+                    println!(
+                        "WARNING: block size difference: {} vs. {}",
+                        cur_ri.block_size, new_ri.block_size
+                    );
+                }
+                if cur_ri.blocks_per_extent != new_ri.blocks_per_extent {
+                    println!(
+                        "WARNING: extent size difference: {} vs. {}",
+                        cur_ri.blocks_per_extent, new_ri.blocks_per_extent
+                    );
+                }
+                if cur_ri.extent_count != new_ri.extent_count {
+                    println!(
+                        "WARNING: extent count difference: {} vs. {}",
+                        cur_ri.extent_count, new_ri.extent_count
+                    );
+                }
+            } else {
+                region_info = Some(new_ri);
             }
 
             let dsi = DownstairsInfo::new(
@@ -1458,7 +1497,6 @@ fn main() -> Result<()> {
             if cleanup {
                 crate::cleanup(output_dir.clone(), region_dir.clone())?;
             }
-
             let dsci = DscInfo::new(
                 ds_bin,
                 output_dir,
@@ -1506,7 +1544,6 @@ fn main() -> Result<()> {
             region_count,
         } => {
             // Delete any existing region if requested
-
             if cleanup {
                 crate::cleanup(output_dir.clone(), region_dir.clone())?;
             } else if create {
