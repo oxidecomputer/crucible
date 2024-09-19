@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use crate::{
     backpressure::BackpressureGuard, client::ConnectionId,
-    upstairs::UpstairsConfig, BlockContext, BlockOp, BlockRes, ClientData,
-    ClientId, ImpactedBlocks, Message, RawWrite, Validation,
+    upstairs::UpstairsConfig, BlockContext, BlockOp, ClientData, ClientId,
+    ImpactedBlocks, Message, RawWrite, Validation,
 };
 use bytes::BytesMut;
 use crucible_common::{integrity_hash, CrucibleError, RegionDefinition};
@@ -112,20 +112,9 @@ pub(crate) struct DeferredWrite {
     pub ddef: RegionDefinition,
     pub impacted_blocks: ImpactedBlocks,
     pub data: BytesMut,
-    pub res: WriteRes,
+    pub is_write_unwritten: bool,
     pub cfg: Arc<UpstairsConfig>,
     pub guard: ClientData<BackpressureGuard>,
-}
-
-/// Handle to reply to the guest
-///
-/// If this is a `Write` operation, then we replied immediately and this is
-/// `Write` (without a data member); if it's a `WriteUnwritten`, then we reply
-/// after the IO is complete and there's a data member.
-#[derive(Debug)]
-pub(crate) enum WriteRes {
-    Write,
-    WriteUnwritten(BlockRes),
 }
 
 /// Result of a deferred `BlockOp`
@@ -145,14 +134,8 @@ pub(crate) struct EncryptedWrite {
     /// An `RawWrite` containing our encrypted data
     pub data: RawWrite,
     pub impacted_blocks: ImpactedBlocks,
-    pub res: WriteRes,
+    pub is_write_unwritten: bool,
     pub guard: ClientData<BackpressureGuard>,
-}
-
-impl EncryptedWrite {
-    pub fn is_write_unwritten(&self) -> bool {
-        matches!(self.res, WriteRes::WriteUnwritten(..))
-    }
 }
 
 impl DeferredWrite {
@@ -199,7 +182,7 @@ impl DeferredWrite {
         EncryptedWrite {
             data,
             impacted_blocks: self.impacted_blocks,
-            res: self.res,
+            is_write_unwritten: self.is_write_unwritten,
             guard: self.guard,
         }
     }

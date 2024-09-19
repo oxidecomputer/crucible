@@ -1852,28 +1852,22 @@ impl Downstairs {
             extent_id: ExtentId(0),
             block: BlockOffset(0),
         });
-        let (awrite, acked) = if is_write_unwritten {
-            (
-                IOop::WriteUnwritten {
-                    dependencies,
-                    start_eid: start.extent_id,
-                    start_offset: start.block,
-                    data: write.data.freeze(),
-                    blocks: write.blocks,
-                },
-                false,
-            )
+        let awrite = if is_write_unwritten {
+            IOop::WriteUnwritten {
+                dependencies,
+                start_eid: start.extent_id,
+                start_offset: start.block,
+                data: write.data.freeze(),
+                blocks: write.blocks,
+            }
         } else {
-            (
-                IOop::Write {
-                    dependencies,
-                    start_eid: start.extent_id,
-                    start_offset: start.block,
-                    data: write.data.freeze(),
-                    blocks: write.blocks,
-                },
-                true,
-            )
+            IOop::Write {
+                dependencies,
+                start_eid: start.extent_id,
+                start_offset: start.block,
+                data: write.data.freeze(),
+                blocks: write.blocks,
+            }
         };
 
         let io = DownstairsIO {
@@ -1881,7 +1875,7 @@ impl Downstairs {
             guest_id: gw_id,
             work: awrite,
             state: ClientData::new(IOState::New),
-            acked,
+            acked: true,
             replay: false,
             data: None,
             read_validations: Vec::new(),
@@ -2539,7 +2533,8 @@ impl Downstairs {
             }
         }
 
-        let is_write = matches!(io.work, IOop::Write { .. });
+        let is_write =
+            matches!(io.work, IOop::Write { .. } | IOop::WriteUnwritten { .. });
         let ds_id = io.ds_id;
         if skipped == 3 {
             if !is_write {

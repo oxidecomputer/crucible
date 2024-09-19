@@ -7,7 +7,7 @@ use crate::{
     deadline_secs,
     deferred::{
         DeferredBlockOp, DeferredMessage, DeferredQueue, DeferredRead,
-        DeferredWrite, EncryptedWrite, WriteRes,
+        DeferredWrite, EncryptedWrite,
     },
     downstairs::{Downstairs, DownstairsAction},
     extent_from_offset,
@@ -1475,19 +1475,14 @@ impl Upstairs {
 
         let guard = self.downstairs.early_write_backpressure(data.len() as u64);
 
-        // Fast-ack, pretending to be done immediately for Write operations
-        let res = if is_write_unwritten {
-            WriteRes::WriteUnwritten(res)
-        } else {
-            res.send_ok(());
-            WriteRes::Write
-        };
+        // Fast-ack, pretending to be done immediately operations
+        res.send_ok(());
 
         Some(DeferredWrite {
             ddef,
             impacted_blocks,
             data,
-            res,
+            is_write_unwritten,
             cfg: self.cfg.clone(),
             guard,
         })
@@ -1505,10 +1500,9 @@ impl Upstairs {
          * Grab this ID after extent_from_offset: in case of Err we don't
          * want to create a gap in the IDs.
          */
-        let is_write_unwritten = write.is_write_unwritten();
         let (gw_id, _) = self.guest.guest_work.submit_job(
             |gw_id| {
-                if is_write_unwritten {
+                if write.is_write_unwritten {
                     cdt::gw__write__unwritten__start!(|| (gw_id.0));
                 } else {
                     cdt::gw__write__start!(|| (gw_id.0));
@@ -1517,17 +1511,14 @@ impl Upstairs {
                     gw_id,
                     write.impacted_blocks,
                     write.data,
-                    is_write_unwritten,
+                    write.is_write_unwritten,
                     write.guard,
                 )
             },
-            Some(match write.res {
-                WriteRes::Write => GuestBlockRes::Acked,
-                WriteRes::WriteUnwritten(res) => GuestBlockRes::Other(res),
-            }),
+            Some(GuestBlockRes::Acked),
         );
 
-        if is_write_unwritten {
+        if write.is_write_unwritten {
             cdt::up__to__ds__write__unwritten__start!(|| (gw_id.0));
         } else {
             cdt::up__to__ds__write__start!(|| (gw_id.0));
