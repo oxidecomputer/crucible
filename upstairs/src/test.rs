@@ -15,6 +15,7 @@ pub(crate) fn make_upstairs() -> crate::upstairs::Upstairs {
 
     let opts = CrucibleOpts {
         target: vec![],
+        lossy: false,
         key: None,
         ..Default::default()
     };
@@ -30,6 +31,7 @@ pub(crate) fn make_encrypted_upstairs() -> crate::upstairs::Upstairs {
 
     let opts = CrucibleOpts {
         target: vec![],
+        lossy: false,
         key: Some("tCw7zw0hAsPuxMOTWwnPEFYjBK9qJRtYyGdEXKEnrg0=".to_owned()),
         ..Default::default()
     };

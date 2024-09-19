@@ -764,6 +764,7 @@ async fn main() -> Result<()> {
     let crucible_opts = CrucibleOpts {
         id: up_uuid,
         target: opt.target.clone(),
+        lossy: false,
         flush_timeout: opt.flush_timeout,
         key: opt.key,
         cert_pem: opt.cert_pem,

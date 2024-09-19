@@ -374,6 +374,10 @@ impl Upstairs {
         info!(log, "Crucible {} has session id: {}", uuid, session_id);
         info!(log, "Upstairs opts: {}", opt);
 
+        if opt.lossy {
+            warn!(log, "lossy flag no longer changes upstairs behavior");
+        }
+
         let cfg = Arc::new(UpstairsConfig {
             encryption_context,
             upstairs_id: uuid,
@@ -431,6 +435,7 @@ impl Upstairs {
         let opts = CrucibleOpts {
             id: Uuid::new_v4(),
             target: vec![],
+            lossy: false,
             flush_timeout: None,
             key: None,
             cert_pem: None,

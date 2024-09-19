@@ -550,6 +550,7 @@ async fn main() -> Result<()> {
     let opt = opts()?;
     let crucible_opts = CrucibleOpts {
         target: opt.target.clone(),
+        lossy: false,
         flush_timeout: None,
         key: opt.key.clone(),
         cert_pem: opt.cert_pem.clone(),

@@ -1632,6 +1632,15 @@ impl Volume {
             )
         }
 
+        if o_sv_opts.lossy != n_sv_opts.lossy {
+            crucible_bail!(
+                ReplaceRequestInvalid,
+                "sub_volume opts lossy invalid {:?} vs. {:?}",
+                o_sv_opts.lossy,
+                n_sv_opts.lossy
+            )
+        }
+
         if o_sv_opts.flush_timeout != n_sv_opts.flush_timeout {
             crucible_bail!(
                 ReplaceRequestInvalid,
@@ -3345,6 +3354,7 @@ mod test {
                 "127.0.0.1:6666".parse().unwrap(),
                 "127.0.0.1:7777".parse().unwrap(),
             ],
+            lossy: false,
             flush_timeout: None,
             key: Some(key_string),
             cert_pem: None,
@@ -4160,6 +4170,32 @@ mod test {
 
         n_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
         n_opts.id = Uuid::new_v4();
+
+        assert!(test_volume_replace_opts(
+            vol_id,
+            512,
+            blocks_per_extent,
+            extent_count,
+            o_opts,
+            n_opts
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn volume_replace_mismatch_opts_lossy() {
+        // A replacement VCR is provided with one target being
+        // different, but with the replacement volume having a sub_volume
+        // with a different opts.lossy.
+        let vol_id = Uuid::new_v4();
+        let blocks_per_extent = 10;
+        let extent_count = 9;
+
+        let o_opts = generic_crucible_opts(vol_id);
+        let mut n_opts = o_opts.clone();
+
+        n_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
+        n_opts.lossy = true;
 
         assert!(test_volume_replace_opts(
             vol_id,
@@ -5082,6 +5118,7 @@ mod test {
                 opts: CrucibleOpts {
                     id: Uuid::new_v4(),
                     target: vec![],
+                    lossy: false,
                     flush_timeout: None,
                     key: None,
                     cert_pem: None,
@@ -5111,6 +5148,7 @@ mod test {
                     opts: CrucibleOpts {
                         id: Uuid::new_v4(),
                         target: vec![],
+                        lossy: false,
                         flush_timeout: None,
                         key: None,
                         cert_pem: None,
@@ -5128,6 +5166,7 @@ mod test {
                     opts: CrucibleOpts {
                         id: Uuid::new_v4(),
                         target: vec![],
+                        lossy: false,
                         flush_timeout: None,
                         key: None,
                         cert_pem: None,
@@ -5157,6 +5196,7 @@ mod test {
                 opts: CrucibleOpts {
                     id: Uuid::new_v4(),
                     target: vec![],
+                    lossy: false,
                     flush_timeout: None,
                     key: None,
                     cert_pem: None,
@@ -5175,6 +5215,7 @@ mod test {
                     opts: CrucibleOpts {
                         id: Uuid::new_v4(),
                         target: vec![],
+                        lossy: false,
                         flush_timeout: None,
                         key: None,
                         cert_pem: None,
@@ -5203,6 +5244,7 @@ mod test {
                 opts: CrucibleOpts {
                     id: Uuid::new_v4(),
                     target: vec![],
+                    lossy: false,
                     flush_timeout: None,
                     key: None,
                     cert_pem: None,
@@ -5224,6 +5266,7 @@ mod test {
                         opts: CrucibleOpts {
                             id: Uuid::new_v4(),
                             target: vec![],
+                            lossy: false,
                             flush_timeout: None,
                             key: None,
                             cert_pem: None,

@@ -81,6 +81,7 @@ async fn main() -> Result<()> {
     let crucible_opts = CrucibleOpts {
         id: Uuid::new_v4(),
         target: opt.target,
+        lossy: false,
         flush_timeout: None,
         key: opt.key,
         cert_pem: opt.cert_pem,
