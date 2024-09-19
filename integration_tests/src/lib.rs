@@ -9,6 +9,7 @@ mod test {
     use anyhow::*;
     use base64::{engine, Engine};
     use crucible::*;
+    use crucible_client_types::RegionExtentInfo;
     use crucible_client_types::VolumeConstructionRequest;
     use crucible_downstairs::*;
     use crucible_pantry::pantry::Pantry;
@@ -578,7 +579,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
@@ -1342,7 +1343,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
@@ -1418,7 +1419,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
@@ -1497,7 +1498,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
@@ -1592,7 +1593,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
@@ -1685,7 +1686,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
@@ -2065,7 +2066,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
@@ -2123,7 +2124,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -2158,7 +2159,7 @@ mod test {
             volume
                 .add_subvolume_create_guest(
                     test_downstairs_set.opts(),
-                    volume::RegionExtentInfo {
+                    RegionExtentInfo {
                         block_size: BLOCK_SIZE as u64,
                         blocks_per_extent: test_downstairs_set
                             .blocks_per_extent(),
@@ -2285,7 +2286,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -2328,7 +2329,7 @@ mod test {
             volume
                 .add_subvolume_create_guest(
                     test_downstairs_set.opts(),
-                    volume::RegionExtentInfo {
+                    RegionExtentInfo {
                         block_size: BLOCK_SIZE as u64,
                         blocks_per_extent: test_downstairs_set
                             .blocks_per_extent(),
@@ -2460,7 +2461,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -2508,7 +2509,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -2552,7 +2553,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -2612,7 +2613,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 new_opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -2659,7 +2660,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 new_opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -2709,7 +2710,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -2770,7 +2771,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 new_opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3024,7 +3025,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3114,7 +3115,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3147,7 +3148,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3242,7 +3243,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3286,7 +3287,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3325,7 +3326,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3379,7 +3380,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3433,7 +3434,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3506,7 +3507,7 @@ mod test {
         new_volume
             .add_subvolume_create_guest(
                 opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3547,7 +3548,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),

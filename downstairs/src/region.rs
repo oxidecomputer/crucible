@@ -1237,12 +1237,6 @@ pub async fn save_stream_to_file(
     Ok(())
 }
 
-pub fn config_path<P: AsRef<Path>>(dir: P) -> PathBuf {
-    let mut out = dir.as_ref().to_path_buf();
-    out.push("region.json");
-    out
-}
-
 #[cfg(test)]
 pub(crate) mod test {
     use bytes::Bytes;

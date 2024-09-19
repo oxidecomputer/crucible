@@ -10,14 +10,9 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use tokio::time::Instant;
 
+use crucible_client_types::RegionExtentInfo;
 use crucible_client_types::ReplacementRequestCheck;
 use crucible_client_types::VolumeConstructionRequest;
-
-pub struct RegionExtentInfo {
-    pub block_size: u64,
-    pub blocks_per_extent: u64,
-    pub extent_count: u32,
-}
 
 /// Creates a `RegionDefinition` from a set of parameters in a region
 /// construction request.
@@ -882,6 +877,7 @@ impl BlockIO for Volume {
 
             wq_counts.up_count += sub_wq_counts.up_count;
             wq_counts.ds_count += sub_wq_counts.ds_count;
+            wq_counts.active_count += sub_wq_counts.active_count;
         }
 
         if let Some(ref read_only_parent) = &self.read_only_parent {
@@ -889,6 +885,7 @@ impl BlockIO for Volume {
 
             wq_counts.up_count += sub_wq_counts.up_count;
             wq_counts.ds_count += sub_wq_counts.ds_count;
+            wq_counts.active_count += sub_wq_counts.active_count;
         }
 
         Ok(wq_counts)
