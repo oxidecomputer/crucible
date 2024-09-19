@@ -972,7 +972,7 @@ impl DownstairsIO {
 
         for state in self.state.iter() {
             match state {
-                IOState::New | IOState::InProgress => wc.active += 1,
+                IOState::InProgress => wc.active += 1,
                 IOState::Error(_) => wc.error += 1,
                 IOState::Skipped => wc.skipped += 1,
                 IOState::Done => wc.done += 1,
@@ -1102,7 +1102,7 @@ struct WorkSummary {
 struct ReconcileIO {
     id: ReconciliationId,
     op: Message,
-    state: ClientData<IOState>,
+    state: ClientData<ReconcileIOState>,
 }
 
 impl ReconcileIO {
@@ -1110,7 +1110,7 @@ impl ReconcileIO {
         ReconcileIO {
             id,
             op,
-            state: ClientData::new(IOState::New),
+            state: ClientData::new(ReconcileIOState::New),
         }
     }
 }
@@ -1368,14 +1368,9 @@ impl IOop {
     }
 }
 
-/*
- * The various states an IO can be in when it is on the work hashmap.
- * There is a state that is unique to each downstairs task we have and
- * they operate independent of each other.
- */
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub enum IOState {
+pub enum ReconcileIOState {
     // A new IO request.
     New,
     // The request has been sent to this tasks downstairs.
@@ -1385,7 +1380,24 @@ pub enum IOState {
     // The IO request should be ignored. Ex: we could be doing recovery and
     // we only want a specific downstairs to do that work.
     Skipped,
-    // The IO returned an error.
+}
+
+/*
+ * The various states an IO can be in when it is on the work hashmap.
+ * There is a state that is unique to each downstairs task we have and
+ * they operate independent of each other.
+ */
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub enum IOState {
+    /// The request has been sent to this tasks downstairs.
+    InProgress,
+    /// The successful response came back from downstairs.
+    Done,
+    /// The IO request should be ignored. Ex: we could be doing recovery and
+    /// we only want a specific downstairs to do that work.
+    Skipped,
+    /// The IO returned an error.
     Error(CrucibleError),
 }
 
@@ -1393,9 +1405,6 @@ impl fmt::Display for IOState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Make sure to right-align output on 4 characters
         match self {
-            IOState::New => {
-                write!(f, " New")
-            }
             IOState::InProgress => {
                 write!(f, "Sent")
             }
@@ -1442,7 +1451,6 @@ impl ClientIOStateCount {
 
     fn get_mut(&mut self, state: &IOState) -> &mut u32 {
         match state {
-            IOState::New => &mut self.new,
             IOState::InProgress => &mut self.in_progress,
             IOState::Done => &mut self.done,
             IOState::Skipped => &mut self.skipped,
@@ -1463,7 +1471,6 @@ pub struct IOStateCount {
 impl IOStateCount {
     fn show_all(&self) {
         println!("   STATES      DS:0   DS:1   DS:2   TOTAL");
-        self.show(IOState::New);
         self.show(IOState::InProgress);
         self.show(IOState::Done);
         self.show(IOState::Skipped);
@@ -1473,7 +1480,6 @@ impl IOStateCount {
 
     fn get(&self, state: &IOState) -> &ClientData<u32> {
         match state {
-            IOState::New => &self.new,
             IOState::InProgress => &self.in_progress,
             IOState::Done => &self.done,
             IOState::Skipped => &self.skipped,
@@ -1484,9 +1490,6 @@ impl IOStateCount {
     fn show(&self, state: IOState) {
         let state_stat = self.get(&state);
         match state {
-            IOState::New => {
-                print!("    New        ");
-            }
             IOState::InProgress => {
                 print!("    Sent       ");
             }
