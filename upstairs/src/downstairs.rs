@@ -2324,12 +2324,6 @@ impl Downstairs {
         // Puts the IO onto the downstairs work queue.
         self.ds_active.insert(ds_id, io);
 
-        if skipped == 3 || is_write {
-            let job = self.ds_active.get_mut(&ds_id).unwrap();
-            assert!(!job.acked);
-            self.ackable_work.insert(ds_id);
-        }
-
         for cid in ClientId::iter() {
             if needs_send[cid] {
                 self.send(ds_id, cid);
@@ -7414,9 +7408,6 @@ pub(crate) mod test {
         // Create the write that fails on one DS
         let write_id = ds.create_and_enqueue_generic_write_eob(false);
         assert!(ds.ds_active.get(&write_id).unwrap().acked);
-        for i in ClientId::iter() {
-            ds.in_progress(write_id, i);
-        }
 
         // Now, add a read.
         let read_id = ds.create_and_enqueue_generic_read_eob();
