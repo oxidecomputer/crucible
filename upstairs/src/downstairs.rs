@@ -5024,13 +5024,9 @@ pub(crate) mod test {
 
         assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
 
-        // Before the last response, the write should be fast-acked, but
-        // write_unwritten is not.  In either case, there is no ackable work.
-        assert_eq!(ds.ackable_work.len(), 0);
-        assert_eq!(
-            ds.ds_active.get(&next_id).unwrap().acked,
-            !is_write_unwritten
-        );
+        // Jobs should be acked
+        assert!(ds.ackable_work.is_empty());
+        assert!(ds.ds_active.get(&next_id).unwrap().acked);
 
         let response = Ok(Default::default());
         let res = ds.process_ds_completion(
@@ -5041,16 +5037,12 @@ pub(crate) mod test {
             None,
         );
 
-        // If it's write_unwritten, then this should have returned true,
-        // if it's just a write, then it should be false.
-        assert_eq!(res, is_write_unwritten);
+        // The IO should not have been marked as ackable, because it was
+        // fast-acked
+        assert!(!res);
 
-        // After the last response, write_unwritten should be marked as
-        // ackable.  write should not, because it must be fast-acked
-        assert_eq!(
-            ds.ackable_work.len(),
-            if is_write_unwritten { 1 } else { 0 }
-        );
+        // Both write and write_unwritten should be fast-acked
+        assert!(ds.ackable_work.is_empty());
 
         assert!(ds.clients[ClientId::new(0)].stats.downstairs_errors > 0);
         assert!(ds.clients[ClientId::new(1)].stats.downstairs_errors > 0);
@@ -5098,16 +5090,13 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None,
         ));
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                ClientId::new(1),
-                Ok(Default::default()),
-                &UpstairsState::Active,
-                None,
-            ),
-            is_write_unwritten
-        );
+        assert!(!ds.process_ds_completion(
+            id1,
+            ClientId::new(1),
+            Ok(Default::default()),
+            &UpstairsState::Active,
+            None,
+        ));
         assert!(!ds.process_ds_completion(
             id2,
             ClientId::new(0),
@@ -5115,25 +5104,17 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None,
         ));
-        assert_eq!(
-            ds.process_ds_completion(
-                id2,
-                ClientId::new(1),
-                Ok(Default::default()),
-                &UpstairsState::Active,
-                None,
-            ),
-            is_write_unwritten
-        );
+        assert!(!ds.process_ds_completion(
+            id2,
+            ClientId::new(1),
+            Ok(Default::default()),
+            &UpstairsState::Active,
+            None,
+        ));
 
-        // Both writes can now ACK to the guest (or have been fast-acked)
-        if is_write_unwritten {
-            ds.ack(id1);
-            ds.ack(id2);
-        } else {
-            assert!(ds.ds_active.get(&id1).unwrap().acked);
-            assert!(ds.ds_active.get(&id2).unwrap().acked);
-        }
+        // Check that both writes have been fast-acked
+        assert!(ds.ds_active.get(&id1).unwrap().acked);
+        assert!(ds.ds_active.get(&id2).unwrap().acked);
 
         // Work stays on active queue till the flush
         assert!(ds.ackable_work.is_empty());
@@ -5507,16 +5488,13 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                ClientId::new(1),
-                Ok(Default::default()),
-                &UpstairsState::Active,
-                None
-            ),
-            is_write_unwritten
-        );
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            Ok(Default::default()),
+            &UpstairsState::Active,
+            None
+        ));
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
@@ -5525,12 +5503,8 @@ pub(crate) mod test {
             None
         ));
 
-        // Ack the write to the guest, or check that it should be fast-acked
-        if is_write_unwritten {
-            ds.ack(next_id);
-        } else {
-            assert!(ds.ds_active.get(&next_id).unwrap().acked);
-        }
+        // Check that it should be fast-acked
+        assert!(ds.ds_active.get(&next_id).unwrap().acked);
 
         // Work stays on active queue till the flush
         assert!(ds.ackable_work.is_empty());
@@ -5612,16 +5586,13 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                ClientId::new(1),
-                Ok(Default::default()),
-                &UpstairsState::Active,
-                None
-            ),
-            is_write_unwritten
-        );
+        assert!(!ds.process_ds_completion(
+            id1,
+            ClientId::new(1),
+            Ok(Default::default()),
+            &UpstairsState::Active,
+            None
+        ));
         assert!(!ds.process_ds_completion(
             id2,
             ClientId::new(1),
@@ -5629,25 +5600,17 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
-        assert_eq!(
-            ds.process_ds_completion(
-                id2,
-                ClientId::new(2),
-                Ok(Default::default()),
-                &UpstairsState::Active,
-                None
-            ),
-            is_write_unwritten
-        );
+        assert!(!ds.process_ds_completion(
+            id2,
+            ClientId::new(2),
+            Ok(Default::default()),
+            &UpstairsState::Active,
+            None
+        ));
 
-        // Ack the writes to the guest, or check for fast-ack
-        if is_write_unwritten {
-            ds.ack(id1);
-            ds.ack(id2);
-        } else {
-            assert!(ds.ds_active.get(&id1).unwrap().acked);
-            assert!(ds.ds_active.get(&id2).unwrap().acked);
-        }
+        // Verify that this job was fast-acked
+        assert!(ds.ds_active.get(&id1).unwrap().acked);
+        assert!(ds.ds_active.get(&id2).unwrap().acked);
 
         // Work stays on active queue till the flush.
         assert!(ds.ackable_work.is_empty());
@@ -6088,23 +6051,16 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                ClientId::new(1),
-                Ok(Default::default()),
-                &UpstairsState::Active,
-                None
-            ),
-            is_write_unwritten
-        );
+        assert!(!ds.process_ds_completion(
+            id1,
+            ClientId::new(1),
+            Ok(Default::default()),
+            &UpstairsState::Active,
+            None
+        ));
 
-        // Ack this job immediately, or verify that it was fast-acked
-        if is_write_unwritten {
-            ds.ack(id1);
-        } else {
-            assert!(ds.ds_active.get(&id1).unwrap().acked);
-        }
+        // Verify that this job was fast-acked
+        assert!(ds.ds_active.get(&id1).unwrap().acked);
 
         /* Now, take that downstairs offline */
         // Before replay_jobs, the IO is not replay
@@ -6161,27 +6117,16 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                ClientId::new(1),
-                Ok(Default::default()),
-                &UpstairsState::Active,
-                None
-            ),
-            is_write_unwritten
-        );
+        assert!(!ds.process_ds_completion(
+            id1,
+            ClientId::new(1),
+            Ok(Default::default()),
+            &UpstairsState::Active,
+            None
+        ));
 
-        if is_write_unwritten {
-            // Verify it is ackable..
-            assert_eq!(ds.ackable_work.len(), 1);
-
-            // Send the ACK to the guest
-            ds.ack(id1);
-        } else {
-            // Check that it should have been fast-acked
-            assert!(ds.ds_active.get(&id1).unwrap().acked);
-        }
+        // Check that it should have been fast-acked
+        assert!(ds.ds_active.get(&id1).unwrap().acked);
 
         // Verify no more ackable work
         assert!(ds.ackable_work.is_empty());
@@ -6873,24 +6818,10 @@ pub(crate) mod test {
         );
 
         let ack_list = ds.ackable_work().clone();
-        if is_write_unwritten {
-            assert_eq!(ack_list.len(), 1);
-
-            // Simulation of what happens in ack_jobs
-            for ds_id_done in ack_list.iter() {
-                assert_eq!(*ds_id_done, next_id);
-
-                ds.ack(*ds_id_done);
-
-                let done = ds.ds_active.get(ds_id_done).unwrap();
-                assert!(done.result().is_ok());
-            }
-        } else {
-            assert!(ack_list.is_empty());
-            let done = ds.ds_active.get(&next_id).unwrap();
-            assert!(done.acked);
-            assert!(done.result().is_ok());
-        }
+        assert!(ack_list.is_empty());
+        let done = ds.ds_active.get(&next_id).unwrap();
+        assert!(done.acked);
+        assert!(done.result().is_ok());
     }
 
     #[test]
@@ -6934,25 +6865,10 @@ pub(crate) mod test {
             None,
         );
 
-        if is_write_unwritten {
-            let ack_list = ds.ackable_work().clone();
-            assert_eq!(ack_list.len(), 1);
-
-            // Simulation of what happens in ack_jobs
-            for ds_id_done in ack_list.iter() {
-                assert_eq!(*ds_id_done, next_id);
-
-                ds.ack(*ds_id_done);
-
-                let done = ds.ds_active.get(ds_id_done).unwrap();
-                assert!(done.result().is_err());
-            }
-        } else {
-            let done = ds.ds_active.get(&next_id).unwrap();
-            assert!(done.acked);
-            assert!(ds.ackable_work().is_empty());
-            assert!(done.result().is_err());
-        }
+        let done = ds.ds_active.get(&next_id).unwrap();
+        assert!(done.acked);
+        assert!(ds.ackable_work().is_empty());
+        assert!(done.result().is_err());
     }
 
     #[test]
@@ -7004,27 +6920,12 @@ pub(crate) mod test {
             None,
         );
 
-        assert_eq!(res, is_write_unwritten);
+        assert!(!res, "job should already be acked");
 
-        if is_write_unwritten {
-            let ack_list = ds.ackable_work().clone();
-            assert_eq!(ack_list.len(), 1);
-
-            // Simulation of what happens in ack_jobs
-            for ds_id_done in ack_list.iter() {
-                assert_eq!(*ds_id_done, next_id);
-
-                ds.ack(*ds_id_done);
-
-                let done = ds.ds_active.get(ds_id_done).unwrap();
-                assert!(done.result().is_err());
-            }
-        } else {
-            let done = ds.ds_active.get(&next_id).unwrap();
-            assert!(done.acked);
-            assert!(ds.ackable_work().is_empty());
-            assert!(done.result().is_err());
-        }
+        let done = ds.ds_active.get(&next_id).unwrap();
+        assert!(done.acked);
+        assert!(ds.ackable_work().is_empty());
+        assert!(done.result().is_err());
     }
 
     #[test]
