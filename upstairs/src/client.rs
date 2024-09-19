@@ -2791,7 +2791,8 @@ impl ClientIoTask {
         // the global backpressure system and cannot build up an unbounded
         // queue.  This is admittedly quite subtle; see crucible#1167 for
         // discussions and graphs.
-        if !matches!(m, Message::Write { .. }) {
+        if !matches!(m, Message::Write { .. } | Message::WriteUnwritten { .. })
+        {
             let d = self.client_delay_us.load(Ordering::Relaxed);
             if d > 0 {
                 tokio::time::sleep(Duration::from_micros(d)).await;

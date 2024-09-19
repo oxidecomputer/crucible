@@ -2533,8 +2533,7 @@ impl Downstairs {
             }
         }
 
-        let is_write =
-            matches!(io.work, IOop::Write { .. } | IOop::WriteUnwritten { .. });
+        let is_write = io.work.is_write();
         let ds_id = io.ds_id;
         if skipped == 3 {
             if !is_write {
@@ -4504,8 +4503,7 @@ pub(crate) mod test {
             );
         }
         // Writes are fast-acked when first submitted
-        if !matches!(ds.ds_active.get(&ds_id).unwrap().work, IOop::Write { .. })
-        {
+        if !ds.ds_active.get(&ds_id).unwrap().work.is_write() {
             ds.ack(ds_id);
         }
     }
