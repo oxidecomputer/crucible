@@ -144,7 +144,10 @@ pub enum ReplacementRequestCheck {
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub struct RegionExtentInfo {
+    /// Block size in bytes.
     pub block_size: u64,
+    /// Number of blocks in a single extent.
     pub blocks_per_extent: u64,
+    /// Total number of extents that make up this region.
     pub extent_count: u32,
 }

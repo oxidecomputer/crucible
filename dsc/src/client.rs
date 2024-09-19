@@ -107,8 +107,7 @@ pub async fn client_main(server: String, cmd: ClientCommand) -> Result<()> {
             println!("{:?}", res);
         }
         ClientCommand::Port { cid } => {
-            //let res = dsc.dsc_get_port(cid).await.unwrap();
-            let res = cid;
+            let res = dsc.dsc_get_port(cid).await.unwrap();
             println!("{:?}", res);
         }
         ClientCommand::RegionInfo => {

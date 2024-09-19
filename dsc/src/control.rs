@@ -149,7 +149,7 @@ async fn dsc_get_pid(
     let ds_pid = api_context.dsci.get_ds_pid(cid).await.map_err(|e| {
         HttpError::for_bad_request(
             None,
-            format!("failed to state for downstairs {}: {:#}", 0, e),
+            format!("failed to get PID for downstairs {}: {:#}", cid, e),
         )
     })?;
 
@@ -180,7 +180,7 @@ async fn dsc_get_port(
     let ds_port = api_context.dsci.get_ds_port(cid).await.map_err(|e| {
         HttpError::for_bad_request(
             None,
-            format!("failed to state for downstairs {}: {:#}", 0, e),
+            format!("failed to get port for downstairs {}: {:#}", cid, e),
         )
     })?;
 
@@ -211,7 +211,7 @@ async fn dsc_get_ds_state(
     let ds_state = api_context.dsci.get_ds_state(cid).await.map_err(|e| {
         HttpError::for_bad_request(
             None,
-            format!("failed to state for downstairs {}: {:#}", 0, e),
+            format!("failed to get state for downstairs {}: {:#}", cid, e),
         )
     })?;
 
@@ -422,7 +422,7 @@ async fn dsc_get_region_info(
         api_context.dsci.get_region_info().await.map_err(|e| {
             HttpError::for_bad_request(
                 None,
-                format!("failed to state for downstairs {}: {:#}", 0, e),
+                format!("failed get to region info {:#}", e),
             )
         })?;
 
