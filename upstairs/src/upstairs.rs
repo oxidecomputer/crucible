@@ -387,7 +387,7 @@ impl Upstairs {
         });
 
         info!(log, "Crucible stats registered with UUID: {}", uuid);
-        let downstairs = Downstairs::new(
+        let mut downstairs = Downstairs::new(
             cfg.clone(),
             ds_target,
             tls_context,
@@ -395,6 +395,10 @@ impl Upstairs {
         );
         let flush_timeout_secs = opt.flush_timeout.unwrap_or(0.5);
         let (control_tx, control_rx) = tokio::sync::mpsc::channel(500);
+
+        if let Some(ddef) = expected_region_def {
+            downstairs.set_ddef(ddef);
+        }
 
         Upstairs {
             state: UpstairsState::Initializing,
@@ -1374,7 +1378,7 @@ impl Upstairs {
         let (gw_id, _) = self.guest.guest_work.submit_job(
             |gw_id| {
                 cdt::gw__read__start!(|| (gw_id.0));
-                self.downstairs.submit_read(gw_id, impacted_blocks, ddef)
+                self.downstairs.submit_read(gw_id, impacted_blocks)
             },
             res.map(|res| GuestBlockRes::Read(data, res)),
         );
@@ -1680,6 +1684,9 @@ impl Upstairs {
                     Err(e) => self.set_inactive(e),
                     Ok(false) => (),
                     Ok(true) => {
+                        // Copy the region definition into the Downstairs
+                        self.downstairs.set_ddef(self.ddef.get_def().unwrap());
+
                         // Negotiation succeeded for this Downstairs, let's see
                         // what we can do from here
                         match self.downstairs.clients[client_id].state() {

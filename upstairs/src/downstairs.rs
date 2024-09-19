@@ -124,6 +124,9 @@ pub(crate) struct Downstairs {
     /// This must be handled after every event
     ackable_work: BTreeSet<JobId>,
 
+    /// Region definition (copied from the upstairs)
+    ddef: Option<RegionDefinition>,
+
     /// A reqwest client, to be reused when creating Nexus clients
     #[cfg(feature = "notify-nexus")]
     reqwest_client: reqwest::Client,
@@ -295,6 +298,7 @@ impl Downstairs {
             log: log.new(o!("" => "downstairs".to_string())),
             ackable_work: BTreeSet::new(),
             repair: None,
+            ddef: None,
 
             #[cfg(feature = "notify-nexus")]
             reqwest_client: reqwest::ClientBuilder::new()
@@ -2405,7 +2409,6 @@ impl Downstairs {
         &mut self,
         guest_id: GuestWorkId,
         blocks: ImpactedBlocks,
-        ddef: RegionDefinition,
     ) -> JobId {
         // If there is a live-repair in progress that intersects with this read,
         // then reserve job IDs for those jobs.
@@ -2425,6 +2428,7 @@ impl Downstairs {
             extent_id: ExtentId(0),
             block: BlockOffset(0),
         });
+        let ddef = self.ddef.unwrap();
         let aread = IOop::Read {
             dependencies,
             start_eid: start.extent_id,
@@ -3635,7 +3639,7 @@ impl Downstairs {
         );
 
         // Extent size doesn't matter as long as it can contain our write
-        self.submit_test_write(gwid, block.0 + 1, blocks, is_write_unwritten)
+        self.submit_test_write(gwid, blocks, is_write_unwritten)
     }
 
     #[cfg(test)]
@@ -3645,22 +3649,13 @@ impl Downstairs {
     fn submit_test_write(
         &mut self,
         gwid: GuestWorkId,
-        extent_size: u64,
         blocks: ImpactedBlocks,
         is_write_unwritten: bool,
     ) -> JobId {
         use bytes::BytesMut;
-        use crucible_common::Block;
         use crucible_protocol::BlockContext;
 
-        // ddef is used in submit_read for enumerating the individual blocks.
-        // values here dont matter as long as the ddef can contain
-        // all our reads to extend `eid`
-        let mut ddef = RegionDefinition::default();
-        ddef.set_block_size(512);
-        ddef.set_extent_size(Block::new_512(extent_size));
-        ddef.set_extent_count(u32::MAX);
-
+        let ddef = self.ddef.unwrap();
         let write_blocks: Vec<_> = blocks
             .blocks(&ddef)
             .map(|(_eid, _b)| BlockContext {
@@ -3687,7 +3682,7 @@ impl Downstairs {
     /// Submit a read to this downstairs. Use when you don't care about what
     /// the data you're read is, and only care about getting some read-jobs
     /// enqueued. The read will be to a single extent, as specified by eid
-    fn submit_test_read_block(
+    fn submit_read_block(
         &mut self,
         gwid: GuestWorkId,
         eid: ExtentId,
@@ -3705,33 +3700,14 @@ impl Downstairs {
         );
 
         // Use a dummy extent size that can contain our block
-        self.submit_test_read(gwid, block.0 + 1, blocks)
+        self.submit_read(gwid, blocks)
     }
 
-    #[cfg(test)]
-    /// Submit a read to this downstairs. Use when you don't care about what
-    /// the data you're read is, and only care about getting some read-jobs
-    /// enqueued. The read will be to a single extent, as specified by eid
-    fn submit_test_read(
-        &mut self,
-        gwid: GuestWorkId,
-        extent_size: u64,
-        blocks: ImpactedBlocks,
-    ) -> JobId {
-        use crucible_common::Block;
-
-        // ddef is used in submit_read for enumerating the individual blocks.
-        // values here dont matter as long as the ddef can contain
-        // all our reads to extend `eid`
-        let mut ddef = RegionDefinition::default();
-        ddef.set_block_size(512);
-        ddef.set_extent_size(Block::new_512(extent_size));
-        ddef.set_extent_count(u32::MAX);
-        self.submit_read(gwid, blocks, ddef)
-    }
-
-    #[cfg(test)]
     /// Create a test downstairs which has all clients Active
+    ///
+    /// The test downstairs is configured with 512-byte blocks and 3 blocks per
+    /// extent.
+    #[cfg(test)]
     fn repair_test_all_active() -> (GuestWork, Self) {
         let gw = GuestWork::default();
         let mut ds = Self::test_default();
@@ -3750,6 +3726,12 @@ impl Downstairs {
                 DsState::Active,
             );
         }
+
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(crate::Block::new_512(3));
+        ddef.set_extent_count(u32::MAX);
+        ds.ddef = Some(ddef);
 
         (gw, ds)
     }
@@ -4440,6 +4422,10 @@ impl Downstairs {
                 .backpressure_counters
                 .early_write_increment(bytes)
         })
+    }
+
+    pub(crate) fn set_ddef(&mut self, ddef: RegionDefinition) {
+        self.ddef = Some(ddef);
     }
 }
 
@@ -9431,7 +9417,7 @@ pub(crate) mod test {
 
         // Create read operations 0 to 2
         for i in 0..3 {
-            ds.submit_test_read_block(gw.next_gw_id(), eid, BlockOffset(i));
+            ds.submit_read_block(gw.next_gw_id(), eid, BlockOffset(i));
         }
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
@@ -9470,7 +9456,7 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
         let eid = ExtentId(1);
 
-        ds.submit_test_read_block(gw.next_gw_id(), eid, BlockOffset(0));
+        ds.submit_read_block(gw.next_gw_id(), eid, BlockOffset(0));
         ds.submit_test_write_block(gw.next_gw_id(), eid, BlockOffset(1), false);
         ds.submit_flush(gw.next_gw_id(), None);
 
@@ -9569,7 +9555,7 @@ pub(crate) mod test {
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
 
-        ds.submit_test_read_block(gw.next_gw_id(), eid, BlockOffset(0));
+        ds.submit_read_block(gw.next_gw_id(), eid, BlockOffset(0));
 
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
@@ -9630,7 +9616,7 @@ pub(crate) mod test {
             BlockOffset(2),
             false,
         );
-        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(2), BlockOffset(0));
+        ds.submit_read_block(gw.next_gw_id(), ExtentId(2), BlockOffset(0));
         create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
 
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
@@ -9664,7 +9650,7 @@ pub(crate) mod test {
             BlockOffset(2),
             false,
         );
-        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(2), BlockOffset(1));
+        ds.submit_read_block(gw.next_gw_id(), ExtentId(2), BlockOffset(1));
 
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
@@ -9761,7 +9747,6 @@ pub(crate) mod test {
 
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -9801,7 +9786,6 @@ pub(crate) mod test {
 
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -9840,9 +9824,8 @@ pub(crate) mod test {
         //   4 |       | RpRpRp|
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_test_read(
+        ds.submit_read(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -9879,9 +9862,8 @@ pub(crate) mod test {
         //   4 | RpRpRp|       |
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_test_read(
+        ds.submit_read(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -9926,7 +9908,6 @@ pub(crate) mod test {
 
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -9965,9 +9946,8 @@ pub(crate) mod test {
         //   4 |       | RpRpRp|       |
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_test_read(
+        ds.submit_read(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10062,7 +10042,6 @@ pub(crate) mod test {
         // A write of blocks 2,3,4 which spans extent 0 and extent 1.
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10106,9 +10085,8 @@ pub(crate) mod test {
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
 
-        ds.submit_test_read(
+        ds.submit_read(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10146,9 +10124,8 @@ pub(crate) mod test {
         //
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_test_read(
+        ds.submit_read(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10163,7 +10140,6 @@ pub(crate) mod test {
 
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),
@@ -10233,7 +10209,7 @@ pub(crate) mod test {
             false,
         );
 
-        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(2));
+        ds.submit_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(2));
 
         // The second repair command
         create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
@@ -10293,7 +10269,6 @@ pub(crate) mod test {
         // A write of blocks 2,3,4 which spans the extent.
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10307,7 +10282,7 @@ pub(crate) mod test {
             false,
         );
 
-        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(1));
+        ds.submit_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(1));
 
         ds.submit_flush(gw.next_gw_id(), None);
 
@@ -10375,7 +10350,6 @@ pub(crate) mod test {
         // A write of blocks 2,3,4 which spans extents.
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10445,9 +10419,8 @@ pub(crate) mod test {
         });
 
         // A read of blocks 2,3,4 which spans extents.
-        ds.submit_test_read(
+        ds.submit_read(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10568,7 +10541,7 @@ pub(crate) mod test {
             false,
         );
 
-        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(0));
+        ds.submit_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(0));
 
         // WriteUnwritten
         ds.submit_test_write_block(
@@ -10736,7 +10709,6 @@ pub(crate) mod test {
         // Now, put three IOs on the queue
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10751,7 +10723,6 @@ pub(crate) mod test {
         );
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10766,7 +10737,6 @@ pub(crate) mod test {
         );
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),
@@ -10821,7 +10791,6 @@ pub(crate) mod test {
         // Create a write on extent 1 (not yet repaired)
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),
@@ -10849,7 +10818,6 @@ pub(crate) mod test {
         // space for future repair work.
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -11107,7 +11075,6 @@ pub(crate) mod test {
         // A write of blocks 2,3,4 which spans extents 0-1.
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -11212,7 +11179,6 @@ pub(crate) mod test {
         // A write of blocks 3,4,5,6 which spans extents 1-2.
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),
@@ -11230,7 +11196,6 @@ pub(crate) mod test {
         // also trigger a repair.
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -11246,9 +11211,8 @@ pub(crate) mod test {
 
         // A read of block 5-7, which overlaps the previous repair and should
         // also force waiting on a new repair.
-        ds.submit_test_read(
+        ds.submit_read(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),
