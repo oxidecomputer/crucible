@@ -898,7 +898,33 @@ impl DownstairsClient {
         // where some are repaired and some are not, then this IO had
         // better have the dependencies already set to reflect the
         // requirement that a repair IO will need to finish first.
-        let should_send = match self.state {
+        let should_send = self.should_send(io, last_repair_extent);
+
+        // Update our set of skipped jobs if we're not sending this one
+        if !should_send {
+            self.skipped_jobs.insert(ds_id);
+        }
+
+        // Update our backpressure guard if we're going to send this job
+        self.io_state_count.incr(if should_send {
+            &IOState::InProgress
+        } else {
+            &IOState::Skipped
+        });
+        should_send
+    }
+
+    /// Checks whether the given job should be sent or skipped
+    ///
+    /// Returns `true` if the job should be sent and `false` if it should be
+    /// skipped.
+    #[must_use]
+    fn should_send(
+        &self,
+        io: &IOop,
+        last_repair_extent: Option<ExtentId>,
+    ) -> bool {
+        match self.state {
             // We never send jobs if we're in certain inactive states
             DsState::Faulted
             | DsState::Replaced
@@ -938,19 +964,7 @@ impl DownstairsClient {
                 "enqueue should not be called from state {:?}",
                 self.state
             ),
-        };
-        // Update our set of skipped jobs if we're not sending this one
-        if !should_send {
-            self.skipped_jobs.insert(ds_id);
         }
-
-        // Update our backpressure guard if we're going to send this job
-        self.io_state_count.incr(if should_send {
-            &IOState::InProgress
-        } else {
-            &IOState::Skipped
-        });
-        should_send
     }
 
     /// Prepares for a new connection, then restarts the IO task
