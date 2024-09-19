@@ -670,6 +670,7 @@ impl Downstairs {
                 return;
             }
 
+            debug!(self.log, "REPLAYING {ds_id} on {client_id}");
             self.clients[client_id].replay_job(job);
             to_send.push((*ds_id, job.work.clone()));
         });
@@ -1212,7 +1213,7 @@ impl Downstairs {
 
         cdt::gw__noop__start!(|| (gw_noop_id.0));
         gw.insert(gw_noop_id, noop_id);
-        self.enqueue_repair(noop_id, gw_noop_id, nio);
+        self.enqueue(noop_id, gw_noop_id, nio, ClientMap::new());
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1231,7 +1232,7 @@ impl Downstairs {
         cdt::gw__repair__start!(|| (gw_repair_id.0, eid.0));
 
         gw.insert(gw_repair_id, repair_id);
-        self.enqueue_repair(repair_id, gw_repair_id, repair_io);
+        self.enqueue(repair_id, gw_repair_id, repair_io, ClientMap::new());
     }
 
     fn repair_or_noop(
@@ -1450,7 +1451,7 @@ impl Downstairs {
         cdt::gw__reopen__start!(|| (gw_reopen_id.0, eid.0));
 
         gw.insert(gw_reopen_id, reopen_id);
-        self.enqueue_repair(reopen_id, gw_reopen_id, reopen_io);
+        self.enqueue(reopen_id, gw_reopen_id, reopen_io, ClientMap::new());
     }
 
     #[cfg(test)]
@@ -1586,7 +1587,7 @@ impl Downstairs {
 
         cdt::gw__close__start!(|| (gw_close_id.0, eid.0));
         gw.insert(gw_close_id, close_id);
-        self.enqueue_repair(close_id, gw_close_id, close_io);
+        self.enqueue(close_id, gw_close_id, close_io, ClientMap::new());
     }
 
     /// Get the repair IDs and dependencies for this extent.
@@ -2384,73 +2385,6 @@ impl Downstairs {
             }
         };
         self.clients[client_id].send(message)
-    }
-
-    /// Enqueue a new downstairs live repair request. This enqueue variant will
-    /// sneakily bypass [DownstairsClient::enqueue] and insert the job's JobId
-    /// directly into the clients' [DownstairsClient::new_jobs] queues. This is
-    /// necessary because, under [DsState::LiveRepair], the normal
-    /// [DownstairsClient::enqueue] function will skip jobs for any extent which
-    /// hasn't been repaired yet. We need a way to queue up the repair work
-    /// without it being skipped!
-    ///
-    /// That's what this function provides. To ensure this function is only
-    /// used for that purpose, it will panic if [io] is not a repair-related
-    /// operation
-    fn enqueue_repair(
-        &mut self,
-        ds_id: JobId,
-        guest_id: GuestWorkId,
-        io: IOop,
-    ) {
-        let state = ClientData::from_fn(|cid| {
-            let current = self.clients[cid].state();
-            // If a downstairs is faulted, we can move that job directly
-            // to IOState::Skipped.
-            let s = match current {
-                DsState::Faulted
-                | DsState::Replaced
-                | DsState::Replacing
-                | DsState::LiveRepairReady => {
-                    // TODO can we even get here?
-                    self.clients[cid].skipped_jobs.insert(ds_id);
-                    IOState::Skipped
-                }
-                _ => {
-                    self.send(ds_id, io.clone(), cid);
-                    IOState::InProgress
-                }
-            };
-            self.clients[cid].io_state_count.incr(&s);
-            s
-        });
-        assert!(
-            matches!(
-                io,
-                IOop::ExtentLiveReopen { .. }
-                    | IOop::ExtentFlushClose { .. }
-                    | IOop::ExtentLiveRepair { .. }
-                    | IOop::ExtentLiveNoOp { .. }
-            ),
-            "bad IOop: {:?}",
-            io,
-        );
-
-        debug!(self.log, "Enqueue repair job {}", ds_id);
-        self.ds_active.insert(
-            ds_id,
-            DownstairsIO {
-                ds_id,
-                guest_id,
-                work: io,
-                state,
-                acked: false,
-                replay: false,
-                data: None,
-                read_validations: vec![],
-                backpressure_guard: ClientMap::new(),
-            },
-        );
     }
 
     pub(crate) fn replace(

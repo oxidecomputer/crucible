@@ -1306,7 +1306,16 @@ impl IOop {
     // (skipped).
     // Return true if we should send it.
     fn send_io_live_repair(&self, extent_limit: Option<ExtentId>) -> bool {
-        if let Some(extent_limit) = extent_limit {
+        // Always send live-repair IOs
+        if matches!(
+            self,
+            IOop::ExtentLiveReopen { .. }
+                | IOop::ExtentFlushClose { .. }
+                | IOop::ExtentLiveRepair { .. }
+                | IOop::ExtentLiveNoOp { .. }
+        ) {
+            true
+        } else if let Some(extent_limit) = extent_limit {
             // The extent_limit has been set, so we have repair work in
             // progress.  If our IO touches an extent less than or equal
             // to the extent_limit, then we go ahead and send it.
