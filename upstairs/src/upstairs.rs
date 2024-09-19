@@ -1475,11 +1475,13 @@ impl Upstairs {
 
         let guard = self.downstairs.early_write_backpressure(data.len() as u64);
 
+        // Fast-ack, pretending to be done immediately operations
+        res.send_ok(());
+
         Some(DeferredWrite {
             ddef,
             impacted_blocks,
             data,
-            res,
             is_write_unwritten,
             cfg: self.cfg.clone(),
             guard,
@@ -1513,7 +1515,7 @@ impl Upstairs {
                     write.guard,
                 )
             },
-            Some(GuestBlockRes::Other(write.res)),
+            Some(GuestBlockRes::Acked),
         );
 
         if write.is_write_unwritten {

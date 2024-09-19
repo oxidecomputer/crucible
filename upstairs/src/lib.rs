@@ -1213,6 +1213,11 @@ impl IOop {
         )
     }
 
+    /// Returns `true` if the `IOop` is a `Write` or `WriteUnwritten`
+    fn is_write(&self) -> bool {
+        matches!(self, IOop::Write { .. } | IOop::WriteUnwritten { .. })
+    }
+
     /**
      * Take a IOop work operation and just return:
      * A string of the job type.
