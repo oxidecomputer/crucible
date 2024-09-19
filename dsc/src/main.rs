@@ -1497,6 +1497,7 @@ fn main() -> Result<()> {
             if cleanup {
                 crate::cleanup(output_dir.clone(), region_dir.clone())?;
             }
+
             let dsci = DscInfo::new(
                 ds_bin,
                 output_dir,
@@ -1544,6 +1545,7 @@ fn main() -> Result<()> {
             region_count,
         } => {
             // Delete any existing region if requested
+
             if cleanup {
                 crate::cleanup(output_dir.clone(), region_dir.clone())?;
             } else if create {
