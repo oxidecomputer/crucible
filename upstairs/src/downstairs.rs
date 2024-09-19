@@ -464,28 +464,16 @@ impl Downstairs {
         }
     }
 
-    /// Mark this request as in progress for this client, and return the
-    /// relevant [`IOOp`] with updated dependencies.
-    ///
-    /// # Panics
-    /// If the job is not present in `ds_active` or isn't in `IOState::New`
-    fn in_progress(&mut self, ds_id: JobId, client_id: ClientId) -> IOop {
-        let job = self
-            .ds_active
-            .get_mut(&ds_id)
-            .expect("cannot mark unknown job as InProgress");
-        assert_eq!(job.state[client_id], IOState::New);
-
-        self.clients[client_id]
-            .in_progress(job, self.repair.as_ref().map(|r| r.min_id))
-    }
-
     /// Helper function to calculate pruned deps for a given job
     #[cfg(test)]
     fn get_pruned_deps(&self, ds_id: JobId, client_id: ClientId) -> Vec<JobId> {
         let job = self.ds_active.get(&ds_id).unwrap();
         self.clients[client_id]
-            .prune_deps(job, self.repair.as_ref().map(|r| r.min_id))
+            .prune_deps(
+                job.ds_id,
+                job.work.clone(),
+                self.repair.as_ref().map(|r| r.min_id),
+            )
             .deps()
             .clone()
     }
@@ -668,15 +656,15 @@ impl Downstairs {
             }
 
             self.clients[client_id].replay_job(job);
-            to_send.push(*ds_id);
+            to_send.push((*ds_id, job.work.clone()));
         });
         let count = to_send.len();
         info!(
             self.log,
             "[{client_id}] Replayed {count} jobs since flush: {lf}"
         );
-        for ds_id in to_send {
-            self.send(ds_id, client_id);
+        for (ds_id, io) in to_send {
+            self.send(ds_id, io, client_id);
         }
     }
 
@@ -1205,31 +1193,15 @@ impl Downstairs {
         noop_id: JobId,
         gw_noop_id: GuestWorkId,
     ) {
-        let nio = Self::create_noop_io(noop_id, deps, gw_noop_id);
+        let nio = Self::create_noop_io(deps);
 
         cdt::gw__noop__start!(|| (gw_noop_id.0));
         gw.insert(gw_noop_id, noop_id);
-        self.enqueue_repair(nio);
+        self.enqueue_repair(noop_id, gw_noop_id, nio);
     }
 
-    fn create_noop_io(
-        ds_id: JobId,
-        dependencies: Vec<JobId>,
-        gw_id: GuestWorkId,
-    ) -> DownstairsIO {
-        let noop_ioop = IOop::ExtentLiveNoOp { dependencies };
-
-        DownstairsIO {
-            ds_id,
-            guest_id: gw_id,
-            work: noop_ioop,
-            state: ClientData::new(IOState::New),
-            acked: false,
-            replay: false,
-            data: None,
-            read_validations: Vec::new(),
-            backpressure_guard: ClientMap::new(),
-        }
+    fn create_noop_io(dependencies: Vec<JobId>) -> IOop {
+        IOop::ExtentLiveNoOp { dependencies }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1243,30 +1215,21 @@ impl Downstairs {
         source: ClientId,
         repair: &[ClientId],
     ) {
-        let repair_io = self.repair_or_noop(
-            eid,
-            repair_id,
-            deps,
-            gw_repair_id,
-            source,
-            repair,
-        );
+        let repair_io = self.repair_or_noop(eid, deps, source, repair);
 
         cdt::gw__repair__start!(|| (gw_repair_id.0, eid.0));
 
         gw.insert(gw_repair_id, repair_id);
-        self.enqueue_repair(repair_io);
+        self.enqueue_repair(repair_id, gw_repair_id, repair_io);
     }
 
     fn repair_or_noop(
         &mut self,
         extent: ExtentId,
-        repair_id: JobId,
         repair_deps: Vec<JobId>,
-        gw_repair_id: GuestWorkId,
         source: ClientId,
         repair: &[ClientId],
-    ) -> DownstairsIO {
+    ) -> IOop {
         assert!(repair.len() < 3);
 
         let mut need_repair = Vec::new();
@@ -1302,7 +1265,7 @@ impl Downstairs {
             for &cid in repair.iter() {
                 self.clients[cid].stats.extents_confirmed += 1;
             }
-            Self::create_noop_io(repair_id, repair_deps, gw_repair_id)
+            Self::create_noop_io(repair_deps)
         } else {
             info!(
                 self.log,
@@ -1314,9 +1277,7 @@ impl Downstairs {
             let repair_address = self.clients[source].repair_addr.unwrap();
 
             Self::create_repair_io(
-                repair_id,
                 repair_deps,
-                gw_repair_id,
                 extent,
                 repair_address,
                 source,
@@ -1325,34 +1286,19 @@ impl Downstairs {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn create_repair_io(
-        ds_id: JobId,
         dependencies: Vec<JobId>,
-        gw_id: GuestWorkId,
         extent: ExtentId,
         repair_address: SocketAddr,
         source_downstairs: ClientId,
         repair_downstairs: Vec<ClientId>,
-    ) -> DownstairsIO {
-        let repair_ioop = IOop::ExtentLiveRepair {
+    ) -> IOop {
+        IOop::ExtentLiveRepair {
             dependencies,
             extent,
             source_downstairs,
             source_repair_address: repair_address,
             repair_downstairs,
-        };
-
-        DownstairsIO {
-            ds_id,
-            guest_id: gw_id,
-            work: repair_ioop,
-            state: ClientData::new(IOState::New),
-            acked: false,
-            replay: false,
-            data: None,
-            read_validations: Vec::new(),
-            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -1489,28 +1435,11 @@ impl Downstairs {
         };
     }
 
-    /// Creates a [DownstairsIO] job for an [IOop::ExtentLiveReopen]
-    fn create_reopen_io(
-        eid: ExtentId,
-        ds_id: JobId,
-        dependencies: Vec<JobId>,
-        gw_id: GuestWorkId,
-    ) -> DownstairsIO {
-        let reopen_ioop = IOop::ExtentLiveReopen {
+    /// Creates a [IOop] for an [IOop::ExtentLiveReopen]
+    fn create_reopen_io(eid: ExtentId, dependencies: Vec<JobId>) -> IOop {
+        IOop::ExtentLiveReopen {
             dependencies,
             extent: eid,
-        };
-
-        DownstairsIO {
-            ds_id,
-            guest_id: gw_id,
-            work: reopen_ioop,
-            state: ClientData::new(IOState::New),
-            acked: false,
-            replay: false,
-            data: None,
-            read_validations: Vec::new(),
-            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -1524,13 +1453,12 @@ impl Downstairs {
         reopen_id: JobId,
         gw_reopen_id: GuestWorkId,
     ) {
-        let reopen_io =
-            Self::create_reopen_io(eid, reopen_id, deps, gw_reopen_id);
+        let reopen_io = Self::create_reopen_io(eid, deps);
 
         cdt::gw__reopen__start!(|| (gw_reopen_id.0, eid.0));
 
         gw.insert(gw_reopen_id, reopen_id);
-        self.enqueue_repair(reopen_io);
+        self.enqueue_repair(reopen_id, gw_reopen_id, reopen_io);
     }
 
     #[cfg(test)]
@@ -1559,18 +1487,7 @@ impl Downstairs {
             block_size: 512,
         };
 
-        let io = DownstairsIO {
-            ds_id,
-            guest_id: gw_id,
-            work: aread,
-            state: ClientData::new(IOState::New),
-            acked: false,
-            replay: false,
-            data: None,
-            read_validations: Vec::new(),
-            backpressure_guard: ClientMap::new(),
-        };
-        self.enqueue(io);
+        self.enqueue(ds_id, gw_id, aread, ClientMap::new());
         ds_id
     }
 
@@ -1645,47 +1562,22 @@ impl Downstairs {
             }
         };
 
-        let io = DownstairsIO {
-            ds_id,
-            guest_id: gw_id,
-            work: awrite,
-            state: ClientData::new(IOState::New),
-            acked: true,
-            replay: false,
-            data: None,
-            read_validations: Vec::new(),
-            backpressure_guard: bp_guard.into(),
-        };
-        self.enqueue(io);
+        self.enqueue(ds_id, gw_id, awrite, bp_guard.into());
         ds_id
     }
 
     fn create_close_io(
         &mut self,
         eid: ExtentId,
-        ds_id: JobId,
         dependencies: Vec<JobId>,
-        gw_id: GuestWorkId,
         repair: Vec<ClientId>,
-    ) -> DownstairsIO {
-        let close_ioop = IOop::ExtentFlushClose {
+    ) -> IOop {
+        IOop::ExtentFlushClose {
             dependencies,
             extent: eid,
             flush_number: self.next_flush_id(),
             gen_number: self.cfg.generation(),
             repair_downstairs: repair,
-        };
-
-        DownstairsIO {
-            ds_id,
-            guest_id: gw_id,
-            work: close_ioop,
-            state: ClientData::new(IOState::New),
-            acked: false,
-            replay: false,
-            data: None,
-            read_validations: Vec::new(),
-            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -1698,17 +1590,11 @@ impl Downstairs {
         gw_close_id: GuestWorkId,
         repair: &[ClientId],
     ) {
-        let close_io = self.create_close_io(
-            eid,
-            close_id,
-            deps,
-            gw_close_id,
-            repair.to_vec(),
-        );
+        let close_io = self.create_close_io(eid, deps, repair.to_vec());
 
         cdt::gw__close__start!(|| (gw_close_id.0, eid.0));
         gw.insert(gw_close_id, close_id);
-        self.enqueue_repair(close_io);
+        self.enqueue_repair(close_id, gw_close_id, close_io);
     }
 
     /// Get the repair IDs and dependencies for this extent.
@@ -2085,19 +1971,7 @@ impl Downstairs {
             extent_limit: extent_under_repair,
         };
 
-        let fl = DownstairsIO {
-            ds_id: next_id,
-            guest_id: gw_id,
-            work: flush,
-            state: ClientData::new(IOState::New),
-            acked: false,
-            replay: false,
-            data: None,
-            read_validations: Vec::new(),
-            backpressure_guard: ClientMap::new(),
-        };
-
-        self.enqueue(fl);
+        self.enqueue(next_id, gw_id, flush, ClientMap::new());
         next_id
     }
 
@@ -2212,19 +2086,7 @@ impl Downstairs {
             block_size: ddef.block_size(),
         };
 
-        let io = DownstairsIO {
-            ds_id,
-            guest_id,
-            work: aread,
-            state: ClientData::new(IOState::New),
-            acked: false,
-            replay: false,
-            data: None,
-            read_validations: Vec::new(),
-            backpressure_guard: ClientMap::new(),
-        };
-
-        self.enqueue(io);
+        self.enqueue(ds_id, guest_id, aread, ClientMap::new());
 
         ds_id
     }
@@ -2286,7 +2148,7 @@ impl Downstairs {
         }
     }
 
-    /// Enqueue a [DownstairsIO] job:
+    /// Enqueue a [IOop] job:
     ///
     /// - enqueue the job in each of [Self::clients] (clients may skip the job)
     /// - add the job to [Self::ds_active]
@@ -2294,49 +2156,68 @@ impl Downstairs {
     /// - Check that the job was already acked if it's a write (the "fast ack"
     ///   optimization, which is performed elsewhere)
     /// - Send the job to each downstairs client task (if not skipped)
-    fn enqueue(&mut self, mut io: DownstairsIO) {
+    fn enqueue(
+        &mut self,
+        ds_id: JobId,
+        guest_id: GuestWorkId,
+        io: IOop,
+        mut bp_guard: ClientMap<BackpressureGuard>,
+    ) {
         let mut skipped = 0;
         let last_repair_extent = self.last_repair_extent();
 
         // Send the job to each client!
-        let mut needs_send = ClientData::new(false);
-        for cid in ClientId::iter() {
-            let job_state =
-                self.clients[cid].enqueue(&mut io, last_repair_extent);
-            if matches!(job_state, IOState::Skipped) {
-                skipped += 1;
+        let state = ClientData::from_fn(|cid| {
+            let client = &mut self.clients[cid];
+            if client.enqueue(ds_id, &io, last_repair_extent) {
+                // Update the per-client backpressure guard
+                if !bp_guard.contains(&cid) {
+                    let g = client.backpressure_counters.increment(&io);
+                    bp_guard.insert(cid, g);
+                }
+                self.send(ds_id, io.clone(), cid);
+                IOState::InProgress
             } else {
-                assert_eq!(job_state, IOState::New);
-                needs_send[cid] = true;
+                skipped += 1;
+                IOState::Skipped
             }
-        }
+        });
 
-        let is_write = io.work.is_write();
-        let ds_id = io.ds_id;
+        let is_write = io.is_write();
         if skipped == 3 {
             if !is_write {
                 self.ackable_work.insert(ds_id);
             }
             warn!(self.log, "job {} skipped on all downstairs", &ds_id);
         }
-        assert_eq!(is_write, io.acked);
 
         // Puts the IO onto the downstairs work queue.
-        self.ds_active.insert(ds_id, io);
-
-        for cid in ClientId::iter() {
-            if needs_send[cid] {
-                self.send(ds_id, cid);
-            }
-        }
+        self.ds_active.insert(
+            ds_id,
+            DownstairsIO {
+                ds_id,
+                guest_id,
+                work: io,
+                state,
+                acked: is_write,
+                replay: false,
+                data: None,
+                read_validations: vec![],
+                backpressure_guard: bp_guard,
+            },
+        );
     }
 
     /// Marks the given job as in-progress for this client, then sends it
-    fn send(&mut self, ds_id: JobId, client_id: ClientId) {
+    fn send(&mut self, ds_id: JobId, io: IOop, client_id: ClientId) {
         let def = self.ddef.unwrap();
         let blocks_per_extent = def.extent_size().value;
 
-        let job = self.in_progress(ds_id, client_id);
+        let job = self.clients[client_id].prune_deps(
+            ds_id,
+            io,
+            self.repair.as_ref().map(|r| r.min_id),
+        );
         let message = match job {
             IOop::Write {
                 dependencies,
@@ -2524,50 +2405,60 @@ impl Downstairs {
     /// That's what this function provides. To ensure this function is only
     /// used for that purpose, it will panic if [io] is not a repair-related
     /// operation
-    fn enqueue_repair(&mut self, mut io: DownstairsIO) {
-        let mut needs_send = ClientData::new(false);
-        for cid in ClientId::iter() {
-            assert_eq!(io.state[cid], IOState::New);
-
+    fn enqueue_repair(
+        &mut self,
+        ds_id: JobId,
+        guest_id: GuestWorkId,
+        io: IOop,
+    ) {
+        let state = ClientData::from_fn(|cid| {
             let current = self.clients[cid].state();
             // If a downstairs is faulted, we can move that job directly
             // to IOState::Skipped.
-            match current {
+            let s = match current {
                 DsState::Faulted
                 | DsState::Replaced
                 | DsState::Replacing
                 | DsState::LiveRepairReady => {
                     // TODO can we even get here?
-                    io.state.insert(cid, IOState::Skipped);
-                    self.clients[cid].io_state_count.incr(&IOState::Skipped);
-                    self.clients[cid].skipped_jobs.insert(io.ds_id);
+                    self.clients[cid].skipped_jobs.insert(ds_id);
+                    IOState::Skipped
                 }
                 _ => {
-                    self.clients[cid].io_state_count.incr(&IOState::New);
-                    needs_send[cid] = true;
+                    self.send(ds_id, io.clone(), cid);
+                    IOState::InProgress
                 }
-            }
-        }
+            };
+            self.clients[cid].io_state_count.incr(&s);
+            s
+        });
         assert!(
             matches!(
-                io.work,
+                io,
                 IOop::ExtentLiveReopen { .. }
                     | IOop::ExtentFlushClose { .. }
                     | IOop::ExtentLiveRepair { .. }
                     | IOop::ExtentLiveNoOp { .. }
             ),
-            "bad IO work: {:?}",
-            io.work
+            "bad IOop: {:?}",
+            io,
         );
 
-        let ds_id = io.ds_id;
         debug!(self.log, "Enqueue repair job {}", ds_id);
-        self.ds_active.insert(ds_id, io);
-        for cid in ClientId::iter() {
-            if needs_send[cid] {
-                self.send(ds_id, cid);
-            }
-        }
+        self.ds_active.insert(
+            ds_id,
+            DownstairsIO {
+                ds_id,
+                guest_id,
+                work: io,
+                state,
+                acked: false,
+                replay: false,
+                data: None,
+                read_validations: vec![],
+                backpressure_guard: ClientMap::new(),
+            },
+        );
     }
 
     pub(crate) fn replace(
@@ -4443,8 +4334,8 @@ pub(crate) mod test {
         guest::GuestWork,
         live_repair::ExtentInfo,
         upstairs::UpstairsState,
-        ClientId, CrucibleError, DownstairsIO, DsState, ExtentFix, GuestWorkId,
-        IOState, IOop, ImpactedAddr, ImpactedBlocks, JobId, RawReadResponse,
+        ClientId, CrucibleError, DownstairsIO, DsState, ExtentFix, IOState,
+        IOop, ImpactedAddr, ImpactedBlocks, JobId, RawReadResponse,
         ReconcileIO, ReconciliationId, SnapshotDetails,
     };
 
@@ -8235,26 +8126,22 @@ pub(crate) mod test {
                 vec![ClientId::new(0), ClientId::new(1)]
             };
             let eid = ExtentId(0);
-            let (repair_ids, deps) = ds.get_repair_ids(eid);
+            let (_repair_ids, deps) = ds.get_repair_ids(eid);
 
             let repair_op = ds.repair_or_noop(
-                eid,                  // Extent
-                repair_ids.repair_id, // ds_id
-                deps,                 // Vec<u64>
-                GuestWorkId(1),       // gw_id
-                source,               // Source extent
-                &repair_extent,       // Repair extent
+                eid,            // Extent
+                deps,           // Vec<u64>
+                source,         // Source extent
+                &repair_extent, // Repair extent
             );
 
             println!("repair op: {:?}", repair_op);
-            match repair_op.work {
+            match repair_op {
                 IOop::ExtentLiveNoOp { dependencies: _ } => {}
                 x => {
                     panic!("Incorrect work type returned: {:?}", x);
                 }
             }
-            assert_eq!(repair_op.ds_id, repair_ids.repair_id);
-            assert_eq!(repair_op.guest_id, GuestWorkId(1));
             println!("Passed for source {}", source);
         }
     }
@@ -8272,19 +8159,17 @@ pub(crate) mod test {
         source: ClientId,
         repair: Vec<ClientId>,
     ) {
-        let (repair_ids, deps) = ds.get_repair_ids(ExtentId(0));
+        let (_repair_ids, deps) = ds.get_repair_ids(ExtentId(0));
         let repair_op = ds.repair_or_noop(
-            ExtentId(0),         // Extent
-            repair_ids.close_id, // ds_id
-            deps,                // Vec<u64>
-            GuestWorkId(1),      // gw_id
+            ExtentId(0), // Extent
+            deps,        // Vec<u64>
             source,
             &repair,
         );
 
         println!("repair op: {:?}", repair_op);
 
-        match repair_op.work {
+        match repair_op {
             IOop::ExtentLiveRepair {
                 dependencies: _,
                 extent,
@@ -8300,8 +8185,6 @@ pub(crate) mod test {
                 panic!("Incorrect work type returned: {:?}", x);
             }
         }
-        assert_eq!(repair_op.ds_id, repair_ids.close_id);
-        assert_eq!(repair_op.guest_id, GuestWorkId(1));
     }
 
     // Given a good ExtentInfo, and a bad ExtentInfo, generate all the

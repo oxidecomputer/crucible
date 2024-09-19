@@ -373,20 +373,6 @@ impl DownstairsClient {
         old_state
     }
 
-    /// Mark the given job as in-progress for this client
-    ///
-    /// Returns an `IOop` with modified dependencies
-    pub(crate) fn in_progress(
-        &mut self,
-        job: &mut DownstairsIO,
-        repair_min_id: Option<JobId>,
-    ) -> IOop {
-        let old_state = self.set_job_state(job, IOState::InProgress);
-        assert_eq!(old_state, IOState::New);
-
-        self.prune_deps(job, repair_min_id)
-    }
-
     /// Returns a client-specialized copy of the job's `IOop`
     ///
     /// Dependencies are pruned if we're in live-repair, and the `extent_limit`
@@ -396,12 +382,12 @@ impl DownstairsClient {
     /// generally not be called from general-purpose code.
     pub(crate) fn prune_deps(
         &self,
-        job: &DownstairsIO,
+        ds_id: JobId,
+        mut job: IOop,
         repair_min_id: Option<JobId>,
     ) -> IOop {
-        let mut out = job.work.clone();
         if self.dependencies_need_cleanup() {
-            match &mut out {
+            match &mut job {
                 IOop::Write { dependencies, .. }
                 | IOop::WriteUnwritten { dependencies, .. }
                 | IOop::Flush { dependencies, .. }
@@ -412,7 +398,7 @@ impl DownstairsClient {
                 | IOop::ExtentLiveNoOp { dependencies } => {
                     self.remove_dep_if_live_repair(
                         dependencies,
-                        job.ds_id,
+                        ds_id,
                         repair_min_id.expect("must have repair_min_id"),
                     );
                 }
@@ -420,12 +406,12 @@ impl DownstairsClient {
         }
         // If our downstairs is under repair, then include any extent limit sent
         // in the IOop; otherwise, clear it out
-        if let IOop::Flush { extent_limit, .. } = &mut out {
+        if let IOop::Flush { extent_limit, .. } = &mut job {
             if !matches!(self.state, DsState::LiveRepair) {
                 *extent_limit = None;
             }
         }
-        out
+        job
     }
 
     /// Ensures that the given job is in the job queue and in `IOState::New`
@@ -892,13 +878,19 @@ impl DownstairsClient {
         self.state = DsState::Active;
     }
 
+    /// Checks whether the given job should be sent
+    ///
+    /// Returns `true` if it should be sent and `false` otherwise
+    ///
+    /// If the job should be skipped, then it is added to `self.skipped_jobs`.
+    /// `self.io_state_count` is updated with the incoming job state.
+    #[must_use]
     pub(crate) fn enqueue(
         &mut self,
-        io: &mut DownstairsIO,
+        ds_id: JobId,
+        io: &IOop,
         last_repair_extent: Option<ExtentId>,
-    ) -> IOState {
-        assert_eq!(io.state[self.client_id], IOState::New);
-
+    ) -> bool {
         // If a downstairs is faulted or ready for repair, we can move
         // that job directly to IOState::Skipped
         // If a downstairs is in repair, then we need to see if this
@@ -906,43 +898,42 @@ impl DownstairsClient {
         // where some are repaired and some are not, then this IO had
         // better have the dependencies already set to reflect the
         // requirement that a repair IO will need to finish first.
-        let r = match self.state {
+        let should_send = match self.state {
+            // We never send jobs if we're in certain inactive states
             DsState::Faulted
             | DsState::Replaced
             | DsState::Replacing
-            | DsState::LiveRepairReady => {
-                io.state.insert(self.client_id, IOState::Skipped);
-                self.skipped_jobs.insert(io.ds_id);
-                IOState::Skipped
-            }
+            | DsState::LiveRepairReady => false,
+
+            // We conditionally send jobs if we're in live-repair, depending on
+            // the current extent.
             DsState::LiveRepair => {
                 // Pick the latest repair limit that's relevant for this
                 // downstairs.  This is either the extent under repair (if
                 // there are no reserved repair jobs), or the last extent
                 // for which we have reserved a repair job ID; either way, the
                 // caller has provided it to us.
-                if io.work.send_io_live_repair(last_repair_extent) {
-                    // Leave this IO as New, the downstairs will receive it.
-                    IOState::New
-                } else {
-                    // Move this IO to skipped, we are not ready for
-                    // the downstairs to receive it.
-                    io.state.insert(self.client_id, IOState::Skipped);
-                    self.skipped_jobs.insert(io.ds_id);
-                    IOState::Skipped
-                }
+                io.send_io_live_repair(last_repair_extent)
             }
-            _ => IOState::New,
+
+            // Otherwise, we always send jobs!
+            //
+            // XXX should we be pickier here? e.g. if we're somehow in
+            // `DsState::BadVersion`, we probably don't want to send jobs.
+            _ => true,
         };
-        if r == IOState::New && !io.backpressure_guard.contains(&self.client_id)
-        {
-            io.backpressure_guard.insert(
-                self.client_id,
-                self.backpressure_counters.increment(&io.work),
-            );
+        // Update our set of skipped jobs if we're not sending this one
+        if !should_send {
+            self.skipped_jobs.insert(ds_id);
         }
-        self.io_state_count.incr(&r);
-        r
+
+        // Update our backpressure guard if we're going to send this job
+        self.io_state_count.incr(if should_send {
+            &IOState::InProgress
+        } else {
+            &IOState::Skipped
+        });
+        should_send
     }
 
     /// Prepares for a new connection, then restarts the IO task
