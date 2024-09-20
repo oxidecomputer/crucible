@@ -424,7 +424,7 @@ impl DownstairsClient {
             panic!("[{}] This job was not acked: {:?}", self.client_id, job);
         }
 
-        let old_state = self.set_job_state(job, IOState::New);
+        let old_state = self.set_job_state(job, IOState::InProgress);
         job.replay = true;
         assert_ne!(
             old_state,
