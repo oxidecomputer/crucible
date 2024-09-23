@@ -113,37 +113,42 @@ zerocopy = { version = "0.7", features = ["derive", "simd"] }
 bitflags-dff4ba8e3ae991db = { package = "bitflags", version = "1" }
 dof = { version = "0.3", default-features = false, features = ["des"] }
 hyper = { version = "0.14", features = ["full"] }
+mio = { version = "1", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustix = { version = "0.38", features = ["fs", "termios"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
 
 [target.x86_64-unknown-linux-gnu.build-dependencies]
 dof = { version = "0.3", default-features = false, features = ["des"] }
 hyper = { version = "0.14", features = ["full"] }
+mio = { version = "1", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustix = { version = "0.38", features = ["fs", "termios"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
 
 [target.aarch64-apple-darwin.dependencies]
 hyper = { version = "0.14", features = ["full"] }
+mio = { version = "1", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustix = { version = "0.38", features = ["fs", "termios"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
 hyper = { version = "0.14", features = ["full"] }
+mio = { version = "1", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustix = { version = "0.38", features = ["fs", "termios"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 
 [target.x86_64-unknown-illumos.dependencies]
 bitflags-dff4ba8e3ae991db = { package = "bitflags", version = "1" }
 dof = { version = "0.3", default-features = false, features = ["des"] }
 hyper = { version = "0.14", features = ["full"] }
+mio = { version = "1", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustix = { version = "0.38", features = ["fs", "termios"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
 toml_edit = { version = "0.19", features = ["serde"] }
@@ -151,8 +156,9 @@ toml_edit = { version = "0.19", features = ["serde"] }
 [target.x86_64-unknown-illumos.build-dependencies]
 dof = { version = "0.3", default-features = false, features = ["des"] }
 hyper = { version = "0.14", features = ["full"] }
+mio = { version = "1", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustix = { version = "0.38", features = ["fs", "termios"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
 toml_edit = { version = "0.19", features = ["serde"] }
