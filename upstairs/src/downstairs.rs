@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::{
+    backpressure::BackpressureGuard,
     cdt,
     client::{ClientAction, ClientStopReason, DownstairsClient},
     guest::GuestWork,
@@ -122,6 +123,9 @@ pub(crate) struct Downstairs {
     ///
     /// This must be handled after every event
     ackable_work: BTreeSet<JobId>,
+
+    /// Region definition (copied from the upstairs)
+    ddef: Option<RegionDefinition>,
 
     /// A reqwest client, to be reused when creating Nexus clients
     #[cfg(feature = "notify-nexus")]
@@ -294,6 +298,7 @@ impl Downstairs {
             log: log.new(o!("" => "downstairs".to_string())),
             ackable_work: BTreeSet::new(),
             repair: None,
+            ddef: None,
 
             #[cfg(feature = "notify-nexus")]
             reqwest_client: reqwest::ClientBuilder::new()
@@ -1465,7 +1470,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -1589,7 +1594,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -1730,7 +1735,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -1788,7 +1793,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         };
         self.enqueue(io);
         ds_id
@@ -1822,6 +1827,7 @@ impl Downstairs {
             GuestWorkId(10),
             request,
             is_write_unwritten,
+            ClientData::from_fn(|_| BackpressureGuard::dummy()),
         )
     }
 
@@ -1831,6 +1837,7 @@ impl Downstairs {
         gw_id: GuestWorkId,
         write: RawWrite,
         is_write_unwritten: bool,
+        bp_guard: ClientData<BackpressureGuard>,
     ) -> JobId {
         let ds_id = self.next_id();
         let dependencies = self.ds_active.deps_for_write(ds_id, blocks);
@@ -1868,11 +1875,11 @@ impl Downstairs {
             guest_id: gw_id,
             work: awrite,
             state: ClientData::new(IOState::New),
-            acked: false,
+            acked: true,
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: bp_guard.into(),
         };
         self.enqueue(io);
         ds_id
@@ -1903,7 +1910,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         }
     }
 
@@ -2312,7 +2319,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         };
 
         self.enqueue(fl);
@@ -2402,7 +2409,6 @@ impl Downstairs {
         &mut self,
         guest_id: GuestWorkId,
         blocks: ImpactedBlocks,
-        ddef: RegionDefinition,
     ) -> JobId {
         // If there is a live-repair in progress that intersects with this read,
         // then reserve job IDs for those jobs.
@@ -2422,6 +2428,7 @@ impl Downstairs {
             extent_id: ExtentId(0),
             block: BlockOffset(0),
         });
+        let ddef = self.ddef.unwrap();
         let aread = IOop::Read {
             dependencies,
             start_eid: start.extent_id,
@@ -2439,7 +2446,7 @@ impl Downstairs {
             replay: false,
             data: None,
             read_validations: Vec::new(),
-            backpressure_bytes: ClientMap::new(),
+            backpressure_guard: ClientMap::new(),
         };
 
         self.enqueue(io);
@@ -2453,6 +2460,7 @@ impl Downstairs {
         blocks: ImpactedBlocks,
         write: RawWrite,
         is_write_unwritten: bool,
+        backpressure_guard: ClientData<BackpressureGuard>,
     ) -> JobId {
         // If there is a live-repair in progress that intersects with this read,
         // then reserve job IDs for those jobs.
@@ -2463,6 +2471,7 @@ impl Downstairs {
             guest_id,
             write,
             is_write_unwritten,
+            backpressure_guard,
         )
     }
 
@@ -2506,10 +2515,9 @@ impl Downstairs {
     ///
     /// - enqueue the job in each of [Self::clients] (clients may skip the job)
     /// - add the job to [Self::ds_active]
-    /// - Mark the job as ackable if it's a write (fast-ack) or was skipped by
-    ///   all downstairs
-    /// - for Write/WriteUnwritten ops, add their size to the write byte
-    ///   counter for backpressure calculations
+    /// - Mark the job as ackable if it was skipped by all downstairs
+    /// - Check that the job was already acked if it's a write (the "fast ack"
+    ///   optimization, which is performed elsewhere)
     fn enqueue(&mut self, mut io: DownstairsIO) {
         let mut skipped = 0;
         let last_repair_extent = self.last_repair_extent();
@@ -2525,22 +2533,18 @@ impl Downstairs {
             }
         }
 
-        // Make sure this job is counted for backpressure
-        let is_write = matches!(io.work, IOop::Write { .. });
-
-        // Puts the IO onto the downstairs work queue.
+        let is_write = io.work.is_write();
         let ds_id = io.ds_id;
-        self.ds_active.insert(ds_id, io);
-
         if skipped == 3 {
+            if !is_write {
+                self.ackable_work.insert(ds_id);
+            }
             warn!(self.log, "job {} skipped on all downstairs", &ds_id);
         }
+        assert_eq!(is_write, io.acked);
 
-        if skipped == 3 || is_write {
-            let job = self.ds_active.get_mut(&ds_id).unwrap();
-            assert!(!job.acked);
-            self.ackable_work.insert(ds_id);
-        }
+        // Puts the IO onto the downstairs work queue.
+        self.ds_active.insert(ds_id, io);
     }
 
     /// Enqueue a new downstairs live repair request. This enqueue variant will
@@ -2902,22 +2906,20 @@ impl Downstairs {
             }
             // Now that we've collected jobs to retire, remove them from the map
             for &id in &retired {
-                let mut job = self.ds_active.remove(&id);
+                let job = self.ds_active.remove(&id);
 
                 // Jobs should have their backpressure contribution removed when
                 // they are completed (in `process_io_completion_inner`),
                 // **not** when they are retired.  We'll do a sanity check here
                 // and print a warning if that's not the case.
                 for c in ClientId::iter() {
-                    if job.backpressure_bytes.contains(&c) {
+                    if job.backpressure_guard.contains(&c) {
                         warn!(
                             self.log,
                             "job {ds_id} had pending backpressure bytes \
                              for client {c}"
                         );
-                        self.clients[c]
-                            .write_bytes_outstanding
-                            .decrement(&mut job, c);
+                        // Backpressure is decremented on drop
                     }
                 }
             }
@@ -3532,7 +3534,16 @@ impl Downstairs {
         self.clients
             .iter()
             .filter(|c| matches!(c.state(), DsState::Active))
-            .map(|c| c.write_bytes_outstanding.get())
+            .map(|c| c.backpressure_counters.get_write_bytes())
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn jobs_outstanding(&self) -> u64 {
+        self.clients
+            .iter()
+            .filter(|c| matches!(c.state(), DsState::Active))
+            .map(|c| c.backpressure_counters.get_jobs())
             .max()
             .unwrap_or(0)
     }
@@ -3623,7 +3634,7 @@ impl Downstairs {
         );
 
         // Extent size doesn't matter as long as it can contain our write
-        self.submit_test_write(gwid, block.0 + 1, blocks, is_write_unwritten)
+        self.submit_test_write(gwid, blocks, is_write_unwritten)
     }
 
     #[cfg(test)]
@@ -3633,22 +3644,13 @@ impl Downstairs {
     fn submit_test_write(
         &mut self,
         gwid: GuestWorkId,
-        extent_size: u64,
         blocks: ImpactedBlocks,
         is_write_unwritten: bool,
     ) -> JobId {
         use bytes::BytesMut;
-        use crucible_common::Block;
         use crucible_protocol::BlockContext;
 
-        // ddef is used in submit_read for enumerating the individual blocks.
-        // values here dont matter as long as the ddef can contain
-        // all our reads to extend `eid`
-        let mut ddef = RegionDefinition::default();
-        ddef.set_block_size(512);
-        ddef.set_extent_size(Block::new_512(extent_size));
-        ddef.set_extent_count(u32::MAX);
-
+        let ddef = self.ddef.unwrap();
         let write_blocks: Vec<_> = blocks
             .blocks(&ddef)
             .map(|(_eid, _b)| BlockContext {
@@ -3667,6 +3669,7 @@ impl Downstairs {
                 data,
             },
             is_write_unwritten,
+            ClientData::from_fn(|_| BackpressureGuard::dummy()),
         )
     }
 
@@ -3674,7 +3677,7 @@ impl Downstairs {
     /// Submit a read to this downstairs. Use when you don't care about what
     /// the data you're read is, and only care about getting some read-jobs
     /// enqueued. The read will be to a single extent, as specified by eid
-    fn submit_test_read_block(
+    fn submit_read_block(
         &mut self,
         gwid: GuestWorkId,
         eid: ExtentId,
@@ -3692,33 +3695,14 @@ impl Downstairs {
         );
 
         // Use a dummy extent size that can contain our block
-        self.submit_test_read(gwid, block.0 + 1, blocks)
+        self.submit_read(gwid, blocks)
     }
 
-    #[cfg(test)]
-    /// Submit a read to this downstairs. Use when you don't care about what
-    /// the data you're read is, and only care about getting some read-jobs
-    /// enqueued. The read will be to a single extent, as specified by eid
-    fn submit_test_read(
-        &mut self,
-        gwid: GuestWorkId,
-        extent_size: u64,
-        blocks: ImpactedBlocks,
-    ) -> JobId {
-        use crucible_common::Block;
-
-        // ddef is used in submit_read for enumerating the individual blocks.
-        // values here dont matter as long as the ddef can contain
-        // all our reads to extend `eid`
-        let mut ddef = RegionDefinition::default();
-        ddef.set_block_size(512);
-        ddef.set_extent_size(Block::new_512(extent_size));
-        ddef.set_extent_count(u32::MAX);
-        self.submit_read(gwid, blocks, ddef)
-    }
-
-    #[cfg(test)]
     /// Create a test downstairs which has all clients Active
+    ///
+    /// The test downstairs is configured with 512-byte blocks and 3 blocks per
+    /// extent.
+    #[cfg(test)]
     fn repair_test_all_active() -> (GuestWork, Self) {
         let gw = GuestWork::default();
         let mut ds = Self::test_default();
@@ -3737,6 +3721,12 @@ impl Downstairs {
                 DsState::Active,
             );
         }
+
+        let mut ddef = RegionDefinition::default();
+        ddef.set_block_size(512);
+        ddef.set_extent_size(crate::Block::new_512(3));
+        ddef.set_extent_count(u32::MAX);
+        ds.ddef = Some(ddef);
 
         (gw, ds)
     }
@@ -4415,6 +4405,23 @@ impl Downstairs {
             }
         });
     }
+
+    /// Assign the given number of write bytes to the backpressure counters
+    #[must_use]
+    pub(crate) fn early_write_backpressure(
+        &mut self,
+        bytes: u64,
+    ) -> ClientData<BackpressureGuard> {
+        ClientData::from_fn(|i| {
+            self.clients[i]
+                .backpressure_counters
+                .early_write_increment(bytes)
+        })
+    }
+
+    pub(crate) fn set_ddef(&mut self, ddef: RegionDefinition) {
+        self.ddef = Some(ddef);
+    }
 }
 
 /// Configuration for per-client backpressure
@@ -4495,8 +4502,10 @@ pub(crate) mod test {
                 None,
             );
         }
-
-        ds.ack(ds_id);
+        // Writes are fast-acked when first submitted
+        if !ds.ds_active.get(&ds_id).unwrap().work.is_write() {
+            ds.ack(ds_id);
+        }
     }
 
     fn set_all_reconcile(ds: &mut Downstairs) {
@@ -5013,9 +5022,9 @@ pub(crate) mod test {
 
         assert!(ds.ds_active.get(&next_id).unwrap().data.is_none());
 
-        // Before the last response, the write is marked as ackable, but
-        // write_unwritten is not.
-        assert_eq!(ds.ackable_work.len(), !is_write_unwritten as usize);
+        // Jobs should be acked
+        assert!(ds.ackable_work.is_empty());
+        assert!(ds.ds_active.get(&next_id).unwrap().acked);
 
         let response = Ok(Default::default());
         let res = ds.process_ds_completion(
@@ -5026,13 +5035,12 @@ pub(crate) mod test {
             None,
         );
 
-        // If it's write_unwritten, then this should have returned true,
-        // if it's just a write, then it should be false.
-        assert_eq!(res, is_write_unwritten);
+        // The IO should not have been marked as ackable, because it was
+        // fast-acked
+        assert!(!res);
 
-        // After the last response, both write and write_unwritten should be
-        // marked as ackable.
-        assert_eq!(ds.ackable_work.len(), 1);
+        // Both write and write_unwritten should be fast-acked
+        assert!(ds.ackable_work.is_empty());
 
         assert!(ds.clients[ClientId::new(0)].stats.downstairs_errors > 0);
         assert!(ds.clients[ClientId::new(1)].stats.downstairs_errors > 0);
@@ -5080,16 +5088,13 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None,
         ));
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                ClientId::new(1),
-                Ok(Default::default()),
-                &UpstairsState::Active,
-                None,
-            ),
-            is_write_unwritten
-        );
+        assert!(!ds.process_ds_completion(
+            id1,
+            ClientId::new(1),
+            Ok(Default::default()),
+            &UpstairsState::Active,
+            None,
+        ));
         assert!(!ds.process_ds_completion(
             id2,
             ClientId::new(0),
@@ -5097,20 +5102,17 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None,
         ));
-        assert_eq!(
-            ds.process_ds_completion(
-                id2,
-                ClientId::new(1),
-                Ok(Default::default()),
-                &UpstairsState::Active,
-                None,
-            ),
-            is_write_unwritten
-        );
+        assert!(!ds.process_ds_completion(
+            id2,
+            ClientId::new(1),
+            Ok(Default::default()),
+            &UpstairsState::Active,
+            None,
+        ));
 
-        // Both writes can now ACK to the guest.
-        ds.ack(id1);
-        ds.ack(id2);
+        // Check that both writes have been fast-acked
+        assert!(ds.ds_active.get(&id1).unwrap().acked);
+        assert!(ds.ds_active.get(&id2).unwrap().acked);
 
         // Work stays on active queue till the flush
         assert!(ds.ackable_work.is_empty());
@@ -5484,16 +5486,13 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
-        assert_eq!(
-            ds.process_ds_completion(
-                next_id,
-                ClientId::new(1),
-                Ok(Default::default()),
-                &UpstairsState::Active,
-                None
-            ),
-            is_write_unwritten
-        );
+        assert!(!ds.process_ds_completion(
+            next_id,
+            ClientId::new(1),
+            Ok(Default::default()),
+            &UpstairsState::Active,
+            None
+        ));
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
@@ -5502,8 +5501,8 @@ pub(crate) mod test {
             None
         ));
 
-        // Ack the write to the guest
-        ds.ack(next_id);
+        // Check that it should be fast-acked
+        assert!(ds.ds_active.get(&next_id).unwrap().acked);
 
         // Work stays on active queue till the flush
         assert!(ds.ackable_work.is_empty());
@@ -5585,16 +5584,13 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                ClientId::new(1),
-                Ok(Default::default()),
-                &UpstairsState::Active,
-                None
-            ),
-            is_write_unwritten
-        );
+        assert!(!ds.process_ds_completion(
+            id1,
+            ClientId::new(1),
+            Ok(Default::default()),
+            &UpstairsState::Active,
+            None
+        ));
         assert!(!ds.process_ds_completion(
             id2,
             ClientId::new(1),
@@ -5602,20 +5598,17 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
-        assert_eq!(
-            ds.process_ds_completion(
-                id2,
-                ClientId::new(2),
-                Ok(Default::default()),
-                &UpstairsState::Active,
-                None
-            ),
-            is_write_unwritten
-        );
+        assert!(!ds.process_ds_completion(
+            id2,
+            ClientId::new(2),
+            Ok(Default::default()),
+            &UpstairsState::Active,
+            None
+        ));
 
-        // Ack the writes to the guest.
-        ds.ack(id1);
-        ds.ack(id2);
+        // Verify that this job was fast-acked
+        assert!(ds.ds_active.get(&id1).unwrap().acked);
+        assert!(ds.ds_active.get(&id2).unwrap().acked);
 
         // Work stays on active queue till the flush.
         assert!(ds.ackable_work.is_empty());
@@ -6056,19 +6049,16 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                ClientId::new(1),
-                Ok(Default::default()),
-                &UpstairsState::Active,
-                None
-            ),
-            is_write_unwritten
-        );
+        assert!(!ds.process_ds_completion(
+            id1,
+            ClientId::new(1),
+            Ok(Default::default()),
+            &UpstairsState::Active,
+            None
+        ));
 
-        // Ack this job immediately
-        ds.ack(id1);
+        // Verify that this job was fast-acked
+        assert!(ds.ds_active.get(&id1).unwrap().acked);
 
         /* Now, take that downstairs offline */
         // Before replay_jobs, the IO is not replay
@@ -6125,22 +6115,16 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
-        assert_eq!(
-            ds.process_ds_completion(
-                id1,
-                ClientId::new(1),
-                Ok(Default::default()),
-                &UpstairsState::Active,
-                None
-            ),
-            is_write_unwritten
-        );
+        assert!(!ds.process_ds_completion(
+            id1,
+            ClientId::new(1),
+            Ok(Default::default()),
+            &UpstairsState::Active,
+            None
+        ));
 
-        // Verify it is ackable..
-        assert_eq!(ds.ackable_work.len(), 1);
-
-        // Send the ACK to the guest
-        ds.ack(id1);
+        // Check that it should have been fast-acked
+        assert!(ds.ds_active.get(&id1).unwrap().acked);
 
         // Verify no more ackable work
         assert!(ds.ackable_work.is_empty());
@@ -6832,17 +6816,10 @@ pub(crate) mod test {
         );
 
         let ack_list = ds.ackable_work().clone();
-        assert_eq!(ack_list.len(), 1);
-
-        // Simulation of what happens in ack_jobs
-        for ds_id_done in ack_list.iter() {
-            assert_eq!(*ds_id_done, next_id);
-
-            ds.ack(*ds_id_done);
-
-            let done = ds.ds_active.get(ds_id_done).unwrap();
-            assert!(done.result().is_ok());
-        }
+        assert!(ack_list.is_empty());
+        let done = ds.ds_active.get(&next_id).unwrap();
+        assert!(done.acked);
+        assert!(done.result().is_ok());
     }
 
     #[test]
@@ -6886,18 +6863,10 @@ pub(crate) mod test {
             None,
         );
 
-        let ack_list = ds.ackable_work().clone();
-        assert_eq!(ack_list.len(), 1);
-
-        // Simulation of what happens in ack_jobs
-        for ds_id_done in ack_list.iter() {
-            assert_eq!(*ds_id_done, next_id);
-
-            ds.ack(*ds_id_done);
-
-            let done = ds.ds_active.get(ds_id_done).unwrap();
-            assert!(done.result().is_err());
-        }
+        let done = ds.ds_active.get(&next_id).unwrap();
+        assert!(done.acked);
+        assert!(ds.ackable_work().is_empty());
+        assert!(done.result().is_err());
     }
 
     #[test]
@@ -6949,20 +6918,12 @@ pub(crate) mod test {
             None,
         );
 
-        assert_eq!(res, is_write_unwritten);
+        assert!(!res, "job should already be acked");
 
-        let ack_list = ds.ackable_work().clone();
-        assert_eq!(ack_list.len(), 1);
-
-        // Simulation of what happens in up_ds_listen
-        for ds_id_done in ack_list.iter() {
-            assert_eq!(*ds_id_done, next_id);
-
-            ds.ack(*ds_id_done);
-
-            let done = ds.ds_active.get(ds_id_done).unwrap();
-            assert!(done.result().is_err());
-        }
+        let done = ds.ds_active.get(&next_id).unwrap();
+        assert!(done.acked);
+        assert!(ds.ackable_work().is_empty());
+        assert!(done.result().is_err());
     }
 
     #[test]
@@ -7160,8 +7121,9 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Faulted);
 
-        // Verify we can still ack this (failed) work
-        assert_eq!(ds.ackable_work().len(), 1);
+        // Verify that this work should have been fast-acked
+        assert_eq!(ds.ackable_work().len(), 0);
+        assert!(ds.ds_active.get(&next_id).unwrap().acked);
     }
 
     #[test]
@@ -7221,9 +7183,9 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Active);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
-        // Verify we can ack this work, then ack it.
-        assert_eq!(ds.ackable_work().len(), 1);
-        ds.ack(next_id);
+        // Verify we should have fast-ack this work
+        let write_job = ds.ds_active.get(&next_id).unwrap();
+        assert!(write_job.acked);
 
         // Now, do a read.
 
@@ -7356,7 +7318,7 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
         let ok_response = Ok(Default::default());
-        // Because we ACK writes, this op will always return false
+        // Because we fast-ACK writes, this op will always return false
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
@@ -7368,8 +7330,9 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
-        // Verify we can ack this work
-        assert_eq!(ds.ackable_work().len(), 1);
+        // Verify we should have fast-ackd this work
+        let write_job = ds.ds_active.get(&next_id).unwrap();
+        assert!(write_job.acked);
 
         // Now, do a read.
         let next_id = ds.create_and_enqueue_generic_read_eob();
@@ -7453,10 +7416,9 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 0);
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
 
-        // Verify we can ack this work
-        assert_eq!(ds.ackable_work().len(), 1);
-
-        let first_id = next_id;
+        // Verify this work should have been fast-acked
+        assert!(ds.ds_active.get(&next_id).unwrap().acked);
+        assert_eq!(ds.ackable_work().len(), 0);
 
         // Now, do another write.
         let next_id = ds.create_and_enqueue_generic_write_eob(false);
@@ -7483,8 +7445,9 @@ pub(crate) mod test {
             &UpstairsState::Active,
             None
         ));
-        // Verify we can ack this work, the total is now 2 jobs to ack
-        assert_eq!(ds.ackable_work().len(), 2);
+        // Verify we should have fast-acked this work too
+        assert!(ds.ds_active.get(&next_id).unwrap().acked);
+        assert_eq!(ds.ackable_work().len(), 0);
 
         // One downstairs should have a skipped job on its list.
         assert_eq!(ds.clients[ClientId::new(0)].skipped_jobs.len(), 0);
@@ -7522,9 +7485,8 @@ pub(crate) mod test {
         ));
 
         // ACK all the jobs and let retire_check move things along.
-        assert_eq!(ds.ackable_work().len(), 3);
-        ds.ack(first_id);
-        ds.ack(next_id);
+        assert_eq!(ds.ackable_work().len(), 1);
+        // first two writes should have been fast-acked
         ds.ack(flush_id);
         ds.retire_check(flush_id);
 
@@ -7604,8 +7566,8 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
-        // Verify we can ack this work
-        assert_eq!(ds.ackable_work().len(), 1);
+        // This job was immediately acked
+        assert_eq!(ds.ackable_work().len(), 0);
 
         // Verify the read switched from new to skipped
         let job = ds.ds_active.get(&read_id).unwrap();
@@ -7629,6 +7591,7 @@ pub(crate) mod test {
 
         // Create the write that fails on one DS
         let write_id = ds.create_and_enqueue_generic_write_eob(false);
+        assert!(ds.ds_active.get(&write_id).unwrap().acked);
         for i in ClientId::iter() {
             ds.in_progress(write_id, i);
         }
@@ -7677,8 +7640,8 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Active);
 
-        // Verify we can ack this work
-        assert_eq!(ds.ackable_work().len(), 1);
+        // The write was fast-acked, and the read is still going
+        assert!(ds.ackable_work().is_empty());
 
         // Verify the read switched from new to skipped
 
@@ -7711,6 +7674,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
         set_all_active(&mut ds);
         let write_one = ds.create_and_enqueue_generic_write_eob(false);
+        assert!(ds.ds_active.get(&write_one).unwrap().acked);
         for i in ClientId::iter() {
             ds.in_progress(write_one, i);
         }
@@ -7741,8 +7705,8 @@ pub(crate) mod test {
             );
         }
 
-        // Verify two jobs can be acked.
-        assert_eq!(ds.ackable_work().len(), 2);
+        // The write has been fast-acked; the read is ackable
+        assert_eq!(ds.ackable_work().len(), 1);
 
         // Verify all IOs are done
 
@@ -7793,8 +7757,8 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Active);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Faulted);
 
-        // Verify we can ack this work plus the previous two
-        assert_eq!(ds.ackable_work().len(), 3);
+        // Only the first read remains ackable
+        assert_eq!(ds.ackable_work().len(), 1);
 
         // Verify all IOs are done
 
@@ -7832,6 +7796,7 @@ pub(crate) mod test {
         for i in ClientId::iter() {
             ds.in_progress(write_one, i);
         }
+        assert!(ds.ds_active.get(&write_one).unwrap().acked);
 
         // Now, add a read.
         let read_one = ds.create_and_enqueue_generic_read_eob();
@@ -7859,8 +7824,8 @@ pub(crate) mod test {
             );
         }
 
-        // Verify two jobs can be acked.
-        assert_eq!(ds.ackable_work().len(), 2);
+        // Verify the read can be acked (the write was fast-acked)
+        assert_eq!(ds.ackable_work().len(), 1);
 
         // Verify all IOs are done
 
@@ -7873,6 +7838,7 @@ pub(crate) mod test {
 
         // Create a New write, this one will fail on one downstairs
         let write_fail = ds.create_and_enqueue_generic_write_eob(false);
+        assert!(ds.ds_active.get(&write_fail).unwrap().acked);
         for i in ClientId::iter() {
             ds.in_progress(write_fail, i);
         }
@@ -7915,8 +7881,8 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Active);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::Faulted);
 
-        // Verify we can ack this work plus the previous two
-        assert_eq!(ds.ackable_work().len(), 3);
+        // The first read remains the only ackable work
+        assert_eq!(ds.ackable_work().len(), 1);
 
         // Verify all IOs are done
 
@@ -8087,8 +8053,9 @@ pub(crate) mod test {
             None,
         );
 
-        // Verify three jobs can be acked.
-        assert_eq!(ds.ackable_work().len(), 3);
+        // Verify three jobs can be acked (or should have been fast-acked)
+        assert!(ds.ds_active.get(&write_one).unwrap().acked);
+        assert_eq!(ds.ackable_work().len(), 2);
 
         // Verify all IOs are done
 
@@ -8103,7 +8070,7 @@ pub(crate) mod test {
         assert_eq!(job.state[ClientId::new(2)], IOState::Done);
 
         ds.ack(read_one);
-        ds.ack(write_one);
+        // write has already been fast-acked
         ds.ack(flush_one);
         ds.retire_check(flush_one);
 
@@ -8200,8 +8167,9 @@ pub(crate) mod test {
             None,
         );
 
-        // Verify three jobs can be acked.
-        assert_eq!(ds.ackable_work().len(), 3);
+        // Verify the write should be fast-acked and the others are ackable
+        assert!(ds.ds_active.get(&write_one).unwrap().acked);
+        assert_eq!(ds.ackable_work().len(), 2);
 
         // Verify all IOs are done
 
@@ -8213,7 +8181,7 @@ pub(crate) mod test {
         assert_eq!(job.state[ClientId::new(1)], IOState::Done);
 
         ds.ack(read_one);
-        ds.ack(write_one);
+        // write should be fast-acked
         ds.ack(flush_one);
         ds.retire_check(flush_one);
 
@@ -8299,6 +8267,7 @@ pub(crate) mod test {
         assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
         assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
         assert_eq!(job.state[ClientId::new(2)], IOState::Skipped);
+        assert!(job.acked, "job should be fast-acked");
 
         // Making the jobs in-progress shouldn't change anything
         for i in ClientId::iter() {
@@ -8313,14 +8282,9 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(1)].skipped_jobs.len(), 1);
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 1);
 
-        // Verify jobs can be acked.
-        assert_eq!(ds.ackable_work().len(), 1);
-
         // Verify all IOs are done
         // We are simulating what would happen here by the up_ds_listen
         // task, after it receives a notification from the ds_done_tx.
-
-        ds.ack(write_one);
 
         ds.retire_check(write_one);
         // No flush, no change in skipped jobs.
@@ -8403,8 +8367,10 @@ pub(crate) mod test {
 
         let flush_one = ds.create_and_enqueue_generic_flush(None);
 
-        // Verify all jobs can be acked.
-        assert_eq!(ds.ackable_work().len(), 3);
+        // Verify all jobs can be acked (or should have been fast-acked)
+        let write_job = ds.ds_active.get(&write_one).unwrap();
+        assert!(write_job.acked);
+        assert_eq!(ds.ackable_work().len(), 2);
 
         // Skipped jobs are not yet cleared.
         for cid in ClientId::iter() {
@@ -8418,7 +8384,7 @@ pub(crate) mod test {
         // We are simulating what would happen here by the up_ds_listen
         // task, after it receives a notification from the ds_done_tx.
         ds.ack(read_one);
-        ds.ack(write_one);
+        // write has already been fast-acked
         ds.ack(flush_one);
 
         // Don't bother with retire check for read/write, just flush
@@ -8487,12 +8453,12 @@ pub(crate) mod test {
             assert_eq!(ds.clients[cid].skipped_jobs.len(), 6);
         }
 
-        // Ack the first 3 jobs
+        // Ack the read and flush, and confirm that the write was fast-acked
         ds.ack(read_one);
-        ds.ack(write_one);
+        assert!(ds.ds_active.get(&write_one).unwrap().acked);
         ds.ack(flush_one);
 
-        assert_eq!(ds.ackable_work().len(), 3);
+        assert_eq!(ds.ackable_work().len(), 2);
         // Don't bother with retire check for read/write, just flush
         ds.retire_check(flush_one);
 
@@ -9405,7 +9371,7 @@ pub(crate) mod test {
 
         // Create read operations 0 to 2
         for i in 0..3 {
-            ds.submit_test_read_block(gw.next_gw_id(), eid, BlockOffset(i));
+            ds.submit_read_block(gw.next_gw_id(), eid, BlockOffset(i));
         }
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
@@ -9444,7 +9410,7 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
         let eid = ExtentId(1);
 
-        ds.submit_test_read_block(gw.next_gw_id(), eid, BlockOffset(0));
+        ds.submit_read_block(gw.next_gw_id(), eid, BlockOffset(0));
         ds.submit_test_write_block(gw.next_gw_id(), eid, BlockOffset(1), false);
         ds.submit_flush(gw.next_gw_id(), None);
 
@@ -9543,7 +9509,7 @@ pub(crate) mod test {
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
 
-        ds.submit_test_read_block(gw.next_gw_id(), eid, BlockOffset(0));
+        ds.submit_read_block(gw.next_gw_id(), eid, BlockOffset(0));
 
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
@@ -9604,7 +9570,7 @@ pub(crate) mod test {
             BlockOffset(2),
             false,
         );
-        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(2), BlockOffset(0));
+        ds.submit_read_block(gw.next_gw_id(), ExtentId(2), BlockOffset(0));
         create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
 
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
@@ -9638,7 +9604,7 @@ pub(crate) mod test {
             BlockOffset(2),
             false,
         );
-        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(2), BlockOffset(1));
+        ds.submit_read_block(gw.next_gw_id(), ExtentId(2), BlockOffset(1));
 
         let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
 
@@ -9735,7 +9701,6 @@ pub(crate) mod test {
 
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -9775,7 +9740,6 @@ pub(crate) mod test {
 
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -9814,9 +9778,8 @@ pub(crate) mod test {
         //   4 |       | RpRpRp|
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_test_read(
+        ds.submit_read(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -9853,9 +9816,8 @@ pub(crate) mod test {
         //   4 | RpRpRp|       |
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_test_read(
+        ds.submit_read(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -9900,7 +9862,6 @@ pub(crate) mod test {
 
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -9939,9 +9900,8 @@ pub(crate) mod test {
         //   4 |       | RpRpRp|       |
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_test_read(
+        ds.submit_read(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10036,7 +9996,6 @@ pub(crate) mod test {
         // A write of blocks 2,3,4 which spans extent 0 and extent 1.
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10080,9 +10039,8 @@ pub(crate) mod test {
 
         create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
 
-        ds.submit_test_read(
+        ds.submit_read(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10120,9 +10078,8 @@ pub(crate) mod test {
         //
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_test_read(
+        ds.submit_read(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10137,7 +10094,6 @@ pub(crate) mod test {
 
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),
@@ -10207,7 +10163,7 @@ pub(crate) mod test {
             false,
         );
 
-        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(2));
+        ds.submit_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(2));
 
         // The second repair command
         create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
@@ -10267,7 +10223,6 @@ pub(crate) mod test {
         // A write of blocks 2,3,4 which spans the extent.
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10281,7 +10236,7 @@ pub(crate) mod test {
             false,
         );
 
-        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(1));
+        ds.submit_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(1));
 
         ds.submit_flush(gw.next_gw_id(), None);
 
@@ -10349,7 +10304,6 @@ pub(crate) mod test {
         // A write of blocks 2,3,4 which spans extents.
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10419,9 +10373,8 @@ pub(crate) mod test {
         });
 
         // A read of blocks 2,3,4 which spans extents.
-        ds.submit_test_read(
+        ds.submit_read(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10542,7 +10495,7 @@ pub(crate) mod test {
             false,
         );
 
-        ds.submit_test_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(0));
+        ds.submit_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(0));
 
         // WriteUnwritten
         ds.submit_test_write_block(
@@ -10710,7 +10663,6 @@ pub(crate) mod test {
         // Now, put three IOs on the queue
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10725,7 +10677,6 @@ pub(crate) mod test {
         );
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10740,7 +10691,6 @@ pub(crate) mod test {
         );
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),
@@ -10795,7 +10745,6 @@ pub(crate) mod test {
         // Create a write on extent 1 (not yet repaired)
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),
@@ -10823,7 +10772,6 @@ pub(crate) mod test {
         // space for future repair work.
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -11081,7 +11029,6 @@ pub(crate) mod test {
         // A write of blocks 2,3,4 which spans extents 0-1.
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -11186,7 +11133,6 @@ pub(crate) mod test {
         // A write of blocks 3,4,5,6 which spans extents 1-2.
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),
@@ -11204,7 +11150,6 @@ pub(crate) mod test {
         // also trigger a repair.
         ds.submit_test_write(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -11220,9 +11165,8 @@ pub(crate) mod test {
 
         // A read of block 5-7, which overlaps the previous repair and should
         // also force waiting on a new repair.
-        ds.submit_test_read(
+        ds.submit_read(
             gw.next_gw_id(),
-            3,
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),

@@ -2,16 +2,16 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
 use crate::{
-    backpressure::BackpressureConfig, BlockIO, BlockOp, BlockOpWaiter,
-    BlockRes, Buffer, JobId, RawReadResponse, ReplaceResult, UpstairsAction,
+    backpressure::{
+        BackpressureAmount, BackpressureConfig, SharedBackpressureAmount,
+    },
+    BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, JobId, RawReadResponse,
+    ReplaceResult, UpstairsAction,
 };
 use crucible_common::{build_logger, Block, BlockIndex, CrucibleError};
 use crucible_protocol::SnapshotDetails;
@@ -19,7 +19,7 @@ use crucible_protocol::SnapshotDetails;
 use async_trait::async_trait;
 use bytes::BytesMut;
 use ringbuffer::{AllocRingBuffer, RingBuffer};
-use slog::{info, warn, Logger};
+use slog::{error, info, warn, Logger};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{instrument, span, Level};
 use uuid::Uuid;
@@ -59,6 +59,9 @@ pub(crate) enum GuestBlockRes {
 
     /// Other operations send an empty tuple to indicate completion
     Other(BlockRes),
+
+    /// The given job has already been acked
+    Acked,
 }
 
 impl GtoS {
@@ -118,6 +121,7 @@ impl GtoS {
                 // Should we panic if someone provided downstairs_responses?
                 res.send_result(result)
             }
+            Some(GuestBlockRes::Acked) => (),
             None => (),
         }
     }
@@ -175,7 +179,11 @@ impl GuestWork {
         let gw_id = self.next_gw_id();
         let ds_id = f(gw_id);
 
-        self.active.insert(gw_id, GtoS::new(ds_id, res));
+        if matches!(res, Some(GuestBlockRes::Acked)) {
+            self.completed.push(gw_id);
+        } else {
+            self.active.insert(gw_id, GtoS::new(ds_id, res));
+        }
         (gw_id, ds_id)
     }
 
@@ -282,7 +290,7 @@ pub struct Guest {
     ///
     /// It is stored in an `Arc` so that the `GuestIoHandle` can update it from
     /// the IO task.
-    backpressure_us: Arc<AtomicU64>,
+    backpressure: SharedBackpressureAmount,
 
     /// Lock held during backpressure delay
     ///
@@ -318,7 +326,7 @@ impl Guest {
         // time spent waiting for the queue versus time spent in Upstairs code).
         let (req_tx, req_rx) = mpsc::channel(500);
 
-        let backpressure_us = Arc::new(AtomicU64::new(0));
+        let backpressure = SharedBackpressureAmount::new();
         let limits = GuestLimits {
             iop_limit: None,
             bw_limit: None,
@@ -337,7 +345,7 @@ impl Guest {
 
             iop_tokens: 0,
             bw_tokens: 0,
-            backpressure_us: backpressure_us.clone(),
+            backpressure: backpressure.clone(),
             backpressure_config: BackpressureConfig::default(),
             log: log.clone(),
         };
@@ -346,7 +354,7 @@ impl Guest {
 
             block_size: AtomicU64::new(0),
 
-            backpressure_us,
+            backpressure,
             backpressure_lock: Mutex::new(()),
             log,
         };
@@ -413,13 +421,25 @@ impl Guest {
         Ok(())
     }
 
-    async fn backpressure_sleep(&self) {
-        let bp =
-            Duration::from_micros(self.backpressure_us.load(Ordering::SeqCst));
-        if bp > Duration::ZERO {
-            let _guard = self.backpressure_lock.lock().await;
-            tokio::time::sleep(bp).await;
-            drop(_guard);
+    /// Sleeps for a backpressure-dependent amount, holding the lock
+    ///
+    /// If backpressure is saturated, logs and returns an error.
+    async fn backpressure_sleep(&self) -> Result<(), CrucibleError> {
+        let bp = self.backpressure.load();
+        match bp {
+            BackpressureAmount::Saturated => {
+                let err = "write queue is saturated";
+                error!(self.log, "{err}");
+                Err(CrucibleError::IoError(err.to_owned()))
+            }
+            BackpressureAmount::Duration(d) => {
+                if d > Duration::ZERO {
+                    let _guard = self.backpressure_lock.lock().await;
+                    tokio::time::sleep(d).await;
+                    drop(_guard);
+                }
+                Ok(())
+            }
         }
     }
 
@@ -457,6 +477,24 @@ impl BlockIO for Guest {
         Ok(())
     }
 
+    async fn activate_with_gen(&self, gen: u64) -> Result<(), CrucibleError> {
+        let (rx, done) = BlockOpWaiter::pair();
+        self.send(BlockOp::GoActiveWithGen { gen, done }).await;
+        info!(
+            self.log,
+            "The guest has requested activation with gen:{}", gen
+        );
+
+        rx.wait().await?;
+
+        info!(
+            self.log,
+            "The guest has finished waiting for activation with:{}", gen
+        );
+
+        Ok(())
+    }
+
     /// Disable any more IO from this guest and deactivate the downstairs.
     async fn deactivate(&self) -> Result<(), CrucibleError> {
         self.send_and_wait(|done| BlockOp::Deactivate { done })
@@ -465,6 +503,16 @@ impl BlockIO for Guest {
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
         self.send_and_wait(|done| BlockOp::QueryGuestIOReady { done })
+            .await
+    }
+
+    async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
+        self.send_and_wait(|done| BlockOp::QueryWorkQueue { done })
+            .await
+    }
+
+    async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
+        self.send_and_wait(|done| BlockOp::QueryExtentSize { done })
             .await
     }
 
@@ -587,7 +635,7 @@ impl BlockIO for Guest {
             assert_eq!(buf.len() as u64 % bs, 0);
             let offset_change = buf.len() as u64 / bs;
 
-            self.backpressure_sleep().await;
+            self.backpressure_sleep().await?;
 
             let reply = self
                 .send_and_wait(|done| BlockOp::Write {
@@ -614,7 +662,7 @@ impl BlockIO for Guest {
             return Ok(());
         }
 
-        self.backpressure_sleep().await;
+        self.backpressure_sleep().await?;
         self.send_and_wait(|done| BlockOp::WriteUnwritten {
             offset,
             data,
@@ -719,7 +767,7 @@ pub struct GuestIoHandle {
     iop_tokens: usize,
 
     /// Current backpressure (shared with the `Guest`)
-    backpressure_us: Arc<AtomicU64>,
+    backpressure: SharedBackpressureAmount,
 
     /// Backpressure configuration, as a starting point and max delay
     backpressure_config: BackpressureConfig,
@@ -861,23 +909,23 @@ impl GuestIoHandle {
 
     #[cfg(test)]
     pub fn disable_queue_backpressure(&mut self) {
-        self.backpressure_config.queue.scale = Duration::ZERO;
+        self.backpressure_config.queue.delay_scale = Duration::ZERO;
     }
 
     #[cfg(test)]
     pub fn disable_byte_backpressure(&mut self) {
-        self.backpressure_config.bytes.scale = Duration::ZERO;
+        self.backpressure_config.bytes.delay_scale = Duration::ZERO;
     }
 
     #[cfg(test)]
     pub fn is_queue_backpressure_disabled(&self) -> bool {
-        self.backpressure_config.queue.scale == Duration::ZERO
+        self.backpressure_config.queue.delay_scale == Duration::ZERO
     }
 
-    /// Set `self.backpressure_us` based on outstanding IO ratio
+    /// Set `self.backpressure` based on outstanding IO ratio
     pub fn set_backpressure(&self, bytes: u64, jobs: u64) {
-        let bp_usec = self.backpressure_config.get_backpressure_us(bytes, jobs);
-        self.backpressure_us.store(bp_usec, Ordering::SeqCst);
+        let bp = self.backpressure_config.get_backpressure(bytes, jobs);
+        self.backpressure.store(bp);
     }
 
     pub fn set_iop_limit(&mut self, bytes_per_iop: usize, limit: usize) {
@@ -897,8 +945,8 @@ impl GuestIoHandle {
     }
 
     /// Looks up current backpressure
-    pub fn backpressure_us(&self) -> u64 {
-        self.backpressure_us.load(Ordering::Acquire)
+    pub fn get_backpressure(&self) -> BackpressureAmount {
+        self.backpressure.load()
     }
 
     /// Debug function to dump the guest work structure.

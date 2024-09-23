@@ -387,7 +387,7 @@ impl Upstairs {
         });
 
         info!(log, "Crucible stats registered with UUID: {}", uuid);
-        let downstairs = Downstairs::new(
+        let mut downstairs = Downstairs::new(
             cfg.clone(),
             ds_target,
             tls_context,
@@ -395,6 +395,10 @@ impl Upstairs {
         );
         let flush_timeout_secs = opt.flush_timeout.unwrap_or(0.5);
         let (control_tx, control_rx) = tokio::sync::mpsc::channel(500);
+
+        if let Some(ddef) = expected_region_def {
+            downstairs.set_ddef(ddef);
+        }
 
         Upstairs {
             state: UpstairsState::Initializing,
@@ -737,7 +741,7 @@ impl Upstairs {
                 up_count: self.guest.guest_work.len() as u32,
                 up_counters: self.counters,
                 next_job_id: self.downstairs.peek_next_id(),
-                up_backpressure: self.guest.backpressure_us(),
+                up_backpressure: self.guest.get_backpressure().as_micros(),
                 write_bytes_out: self.downstairs.write_bytes_outstanding(),
                 ds_count: self.downstairs.active_count() as u32,
                 ds_state: self.downstairs.collect_stats(|c| c.state()),
@@ -942,7 +946,7 @@ impl Upstairs {
                 self.deferred_ops.push_immediate(DeferredBlockOp::Other(op));
             }
             // Otherwise, we can apply a non-write operation immediately, saving
-            // a trip through the FuturesUnordered
+            // a trip through the DeferredQueue
             _ => {
                 self.apply_guest_request_inner(op);
             }
@@ -982,8 +986,34 @@ impl Upstairs {
                 self.set_active_request(done);
             }
             BlockOp::GoActiveWithGen { gen, done } => {
-                self.cfg.generation.store(gen, Ordering::Release);
-                self.set_active_request(done);
+                // We allow this if we are not active yet, or we are active
+                // with the requested generation number.
+                match &self.state {
+                    UpstairsState::Active | UpstairsState::GoActive(..) => {
+                        if self.cfg.generation() == gen {
+                            // Okay, we want to activate with what we already
+                            // have, that's valid., let the set_active_request
+                            // handle things.
+                            self.set_active_request(done);
+                        } else {
+                            // Gen's don't match, but we are already active,
+                            // or in progress to activate, so fail this request.
+                            done.send_err(
+                                CrucibleError::GenerationNumberInvalid,
+                            );
+                        }
+                    }
+                    UpstairsState::Deactivating(..) => {
+                        // Don't update gen, return error
+                        done.send_err(CrucibleError::UpstairsDeactivating);
+                    }
+                    UpstairsState::Initializing => {
+                        // This case, we update our generation and then
+                        // let set_active_request handle the rest.
+                        self.cfg.generation.store(gen, Ordering::Release);
+                        self.set_active_request(done);
+                    }
+                }
             }
             BlockOp::QueryGuestIOReady { done } => {
                 done.send_ok(self.guest_io_ready());
@@ -1171,12 +1201,15 @@ impl Upstairs {
                 info!(self.log, "{} active request set", self.cfg.upstairs_id);
             }
             UpstairsState::GoActive(..) => {
+                // We have already been sent a request to go active, but we
+                // are not active yet and will respond (on the original
+                // BlockRes) when we do become active.
                 info!(
                     self.log,
                     "{} request to activate upstairs already going active",
                     self.cfg.upstairs_id
                 );
-                res.send_err(CrucibleError::UpstairsAlreadyActive);
+                res.send_err(CrucibleError::UpstairsActivateInProgress);
                 return;
             }
             UpstairsState::Deactivating(..) => {
@@ -1188,12 +1221,13 @@ impl Upstairs {
                 return;
             }
             UpstairsState::Active => {
+                // We are already active, so go ahead and respond again.
                 info!(
                     self.log,
                     "{} Request to activate upstairs already active",
                     self.cfg.upstairs_id
                 );
-                res.send_err(CrucibleError::UpstairsAlreadyActive);
+                res.send_ok(());
                 return;
             }
         }
@@ -1344,7 +1378,7 @@ impl Upstairs {
         let (gw_id, _) = self.guest.guest_work.submit_job(
             |gw_id| {
                 cdt::gw__read__start!(|| (gw_id.0));
-                self.downstairs.submit_read(gw_id, impacted_blocks, ddef)
+                self.downstairs.submit_read(gw_id, impacted_blocks)
             },
             res.map(|res| GuestBlockRes::Read(data, res)),
         );
@@ -1391,7 +1425,7 @@ impl Upstairs {
         if let Some(w) =
             self.compute_deferred_write(offset, data, res, is_write_unwritten)
         {
-            let should_defer = !self.deferred_msgs.is_empty()
+            let should_defer = !self.deferred_ops.is_empty()
                 || w.data.len() > MIN_DEFER_SIZE_BYTES as usize;
             if should_defer {
                 let tx = self.deferred_ops.push_oneshot();
@@ -1439,13 +1473,18 @@ impl Upstairs {
         let impacted_blocks =
             extent_from_offset(&ddef, offset, ddef.bytes_to_blocks(data.len()));
 
+        let guard = self.downstairs.early_write_backpressure(data.len() as u64);
+
+        // Fast-ack, pretending to be done immediately operations
+        res.send_ok(());
+
         Some(DeferredWrite {
             ddef,
             impacted_blocks,
             data,
-            res,
             is_write_unwritten,
             cfg: self.cfg.clone(),
+            guard,
         })
     }
 
@@ -1473,9 +1512,10 @@ impl Upstairs {
                     write.impacted_blocks,
                     write.data,
                     write.is_write_unwritten,
+                    write.guard,
                 )
             },
-            Some(GuestBlockRes::Other(write.res)),
+            Some(GuestBlockRes::Acked),
         );
 
         if write.is_write_unwritten {
@@ -1646,6 +1686,9 @@ impl Upstairs {
                     Err(e) => self.set_inactive(e),
                     Ok(false) => (),
                     Ok(true) => {
+                        // Copy the region definition into the Downstairs
+                        self.downstairs.set_ddef(self.ddef.get_def().unwrap());
+
                         // Negotiation succeeded for this Downstairs, let's see
                         // what we can do from here
                         match self.downstairs.clients[client_id].state() {
@@ -1967,8 +2010,9 @@ impl Upstairs {
                 self.state = UpstairsState::Active;
                 Ok(())
             }
-            UpstairsState::Active | UpstairsState::GoActive(..) => {
-                Err(CrucibleError::UpstairsAlreadyActive)
+            UpstairsState::Active => Ok(()),
+            UpstairsState::GoActive(..) => {
+                Err(CrucibleError::UpstairsActivateInProgress)
             }
             UpstairsState::Deactivating(..) => {
                 /*
@@ -2019,16 +2063,9 @@ impl Upstairs {
 
     /// Sets both guest and per-client backpressure
     fn set_backpressure(&self) {
-        let dsw_max = self
-            .downstairs
-            .clients
-            .iter()
-            .map(|c| c.total_live_work())
-            .max()
-            .unwrap_or(0);
         self.guest.set_backpressure(
             self.downstairs.write_bytes_outstanding(),
-            dsw_max as u64,
+            self.downstairs.jobs_outstanding(),
         );
 
         self.downstairs.set_client_backpressure();
@@ -4204,5 +4241,42 @@ pub(crate) mod test {
             .unwrap();
         assert!(!r.contains("HashMismatch"));
         assert!(r.contains("read hash mismatch"));
+    }
+
+    #[test]
+    fn write_defer() {
+        let mut up = make_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        const NODEFER_SIZE: usize = MIN_DEFER_SIZE_BYTES as usize - 512;
+        const DEFER_SIZE: usize = MIN_DEFER_SIZE_BYTES as usize * 2;
+
+        // Submit a short write, which should not be deferred
+        let mut data = BytesMut::new();
+        data.extend_from_slice(vec![1; NODEFER_SIZE].as_slice());
+        let offset = BlockIndex(7);
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Write { offset, data, done }));
+        assert_eq!(up.deferred_ops.len(), 0);
+
+        // Submit a long write, which should be deferred
+        let mut data = BytesMut::new();
+        data.extend_from_slice(vec![2; DEFER_SIZE].as_slice());
+        let offset = BlockIndex(7);
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Write { offset, data, done }));
+        assert_eq!(up.deferred_ops.len(), 1);
+        assert_eq!(up.deferred_msgs.len(), 0);
+
+        // Submit a short write, which would normally not be deferred, but
+        // there's already a deferred job in the queue
+        let mut data = BytesMut::new();
+        data.extend_from_slice(vec![3; NODEFER_SIZE].as_slice());
+        let offset = BlockIndex(7);
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Write { offset, data, done }));
+        assert_eq!(up.deferred_ops.len(), 2);
+        assert_eq!(up.deferred_msgs.len(), 0);
     }
 }

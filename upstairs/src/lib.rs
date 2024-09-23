@@ -49,6 +49,7 @@ pub mod block_io;
 pub use block_io::{FileBlockIO, ReqwestBlockIO};
 
 pub(crate) mod backpressure;
+use backpressure::BackpressureGuard;
 
 pub mod block_req;
 pub(crate) use block_req::{BlockOpWaiter, BlockRes};
@@ -103,10 +104,14 @@ pub const IO_OUTSTANDING_MAX_JOBS: usize = 10000;
 #[async_trait]
 pub trait BlockIO: Sync {
     async fn activate(&self) -> Result<(), CrucibleError>;
+    async fn activate_with_gen(&self, gen: u64) -> Result<(), CrucibleError>;
 
     async fn deactivate(&self) -> Result<(), CrucibleError>;
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError>;
+
+    async fn query_extent_size(&self) -> Result<Block, CrucibleError>;
+    async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError>;
 
     // Total bytes of Volume
     async fn total_size(&self) -> Result<u64, CrucibleError>;
@@ -205,15 +210,6 @@ pub trait BlockIO: Sync {
 
         self.write(self.byte_offset_to_block(offset).await?, data)
             .await
-    }
-
-    /// Activate if not active.
-    async fn conditional_activate(&self) -> Result<(), CrucibleError> {
-        if self.query_is_active().await? {
-            return Ok(());
-        }
-
-        self.activate().await
     }
 
     /// Checks that the data length is a multiple of block size
@@ -426,6 +422,15 @@ impl<T> ClientData<T> {
         std::mem::swap(&mut self[c], &mut v);
         v
     }
+
+    /// Builds a `ClientData` from a builder function
+    pub fn from_fn<F: FnMut(ClientId) -> T>(mut f: F) -> Self {
+        Self([
+            f(ClientId::new(0)),
+            f(ClientId::new(1)),
+            f(ClientId::new(2)),
+        ])
+    }
 }
 
 /// Map of data associated with clients, keyed by `ClientId`
@@ -462,6 +467,12 @@ impl<T> std::ops::Index<ClientId> for ClientMap<T> {
     type Output = T;
     fn index(&self, index: ClientId) -> &Self::Output {
         self.get(&index).unwrap()
+    }
+}
+
+impl<T> From<ClientData<T>> for ClientMap<T> {
+    fn from(c: ClientData<T>) -> Self {
+        Self(ClientData(c.0.map(Option::Some)))
     }
 }
 
@@ -943,8 +954,11 @@ struct DownstairsIO {
     data: Option<RawReadResponse>,
     read_validations: Vec<Validation>,
 
-    /// Number of bytes that this job has contributed to guest backpressure
-    backpressure_bytes: ClientMap<u64>,
+    /// Handle for this job's contribution to guest backpressure
+    ///
+    /// Each of these guard handles will automatically decrement the
+    /// backpressure count for their respective Downstairs when dropped.
+    backpressure_guard: ClientMap<BackpressureGuard>,
 }
 
 impl DownstairsIO {
@@ -1199,6 +1213,11 @@ impl IOop {
         )
     }
 
+    /// Returns `true` if the `IOop` is a `Write` or `WriteUnwritten`
+    fn is_write(&self) -> bool {
+        matches!(self, IOop::Write { .. } | IOop::WriteUnwritten { .. })
+    }
+
     /**
      * Take a IOop work operation and just return:
      * A string of the job type.
@@ -1320,6 +1339,16 @@ impl IOop {
             IOop::Read {
                 count, block_size, ..
             } => *block_size * *count,
+            _ => 0,
+        }
+    }
+
+    /// Returns the number of bytes written
+    fn write_bytes(&self) -> u64 {
+        match &self {
+            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
+                data.len() as u64
+            }
             _ => 0,
         }
     }

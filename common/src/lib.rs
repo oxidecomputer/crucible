@@ -16,9 +16,9 @@ use tokio::time::{Duration, Instant};
 
 mod region;
 pub use region::{
-    Block, BlockIndex, BlockOffset, ExtentId, RegionDefinition, RegionOptions,
-    DATABASE_READ_VERSION, DATABASE_WRITE_VERSION, MAX_BLOCK_SIZE, MAX_SHIFT,
-    MIN_BLOCK_SIZE, MIN_SHIFT,
+    config_path, Block, BlockIndex, BlockOffset, ExtentId, RegionDefinition,
+    RegionOptions, DATABASE_READ_VERSION, DATABASE_WRITE_VERSION,
+    MAX_BLOCK_SIZE, MAX_SHIFT, MIN_BLOCK_SIZE, MIN_SHIFT,
 };
 
 pub mod impacted_blocks;
@@ -76,8 +76,8 @@ pub enum CrucibleError {
     #[error("Offset past end of extent")]
     OffsetInvalid,
 
-    #[error("Upstairs is already active")]
-    UpstairsAlreadyActive,
+    #[error("Upstairs activation is in progress")]
+    UpstairsActivateInProgress,
 
     #[error("Upstairs is deactivating")]
     UpstairsDeactivating,
@@ -132,6 +132,9 @@ pub enum CrucibleError {
 
     #[error("Generation number is too low: {0}")]
     GenerationNumberTooLow(String),
+
+    #[error("Active with different generation number")]
+    GenerationNumberInvalid,
 
     #[error("No longer active")]
     NoLongerActive,
@@ -389,6 +392,7 @@ impl From<CrucibleError> for dropshot::HttpError {
             | CrucibleError::Disconnect
             | CrucibleError::EncryptionError(_)
             | CrucibleError::GenerationNumberTooLow(_)
+            | CrucibleError::GenerationNumberInvalid
             | CrucibleError::GenericError(_)
             | CrucibleError::HashMismatch
             | CrucibleError::InvalidExtent
@@ -403,7 +407,7 @@ impl From<CrucibleError> for dropshot::HttpError {
             | CrucibleError::RwLockError(_)
             | CrucibleError::SendError(_)
             | CrucibleError::SubvolumeSizeMismatch
-            | CrucibleError::UpstairsAlreadyActive
+            | CrucibleError::UpstairsActivateInProgress
             | CrucibleError::UpstairsDeactivating
             | CrucibleError::UuidMismatch
             | CrucibleError::MissingContextSlot(..)

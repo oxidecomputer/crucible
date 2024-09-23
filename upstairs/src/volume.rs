@@ -10,14 +10,9 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use tokio::time::Instant;
 
+use crucible_client_types::RegionExtentInfo;
 use crucible_client_types::ReplacementRequestCheck;
 use crucible_client_types::VolumeConstructionRequest;
-
-pub struct RegionExtentInfo {
-    pub block_size: u64,
-    pub blocks_per_extent: u64,
-    pub extent_count: u32,
-}
 
 /// Creates a `RegionDefinition` from a set of parameters in a region
 /// construction request.
@@ -594,7 +589,7 @@ impl Volume {
 impl BlockIO for Volume {
     async fn activate(&self) -> Result<(), CrucibleError> {
         for sub_volume in &self.sub_volumes {
-            sub_volume.conditional_activate().await?;
+            sub_volume.activate().await?;
 
             let sub_volume_computed_size = self.block_size
                 * (sub_volume.lba_range.end - sub_volume.lba_range.start);
@@ -605,10 +600,76 @@ impl BlockIO for Volume {
         }
 
         if let Some(ref read_only_parent) = &self.read_only_parent {
-            read_only_parent.conditional_activate().await?;
+            read_only_parent.activate().await?;
         }
 
         Ok(())
+    }
+    async fn activate_with_gen(&self, gen: u64) -> Result<(), CrucibleError> {
+        for sub_volume in &self.sub_volumes {
+            sub_volume.activate_with_gen(gen).await?;
+
+            let sub_volume_computed_size = self.block_size
+                * (sub_volume.lba_range.end - sub_volume.lba_range.start);
+
+            if sub_volume.total_size().await? != sub_volume_computed_size {
+                crucible_bail!(SubvolumeSizeMismatch);
+            }
+        }
+
+        if let Some(ref read_only_parent) = &self.read_only_parent {
+            read_only_parent.activate_with_gen(gen).await?;
+        }
+
+        Ok(())
+    }
+
+    // Return a vec of these?
+    // Placeholder for first round of crutest changes.
+    // I think this should return some sort of VolumeInfo struct with an
+    // SV/ROP structure where the SV is a Vec<WQC>  and the ROP is Option<WQC>
+    async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
+        let mut all_wq = WQCounts {
+            up_count: 0,
+            ds_count: 0,
+            active_count: 0,
+        };
+
+        for sub_volume in &self.sub_volumes {
+            let sv_wq = sub_volume.query_work_queue().await?;
+            all_wq.up_count += sv_wq.up_count;
+            all_wq.ds_count += sv_wq.ds_count;
+            all_wq.active_count += sv_wq.active_count;
+        }
+
+        if let Some(ref read_only_parent) = &self.read_only_parent {
+            let rop_wq = read_only_parent.query_work_queue().await?;
+            all_wq.up_count += rop_wq.up_count;
+            all_wq.ds_count += rop_wq.ds_count;
+            all_wq.active_count += rop_wq.active_count;
+        }
+
+        Ok(all_wq)
+    }
+
+    // Return a vec of these?
+    // Return a struct with a vec for SV and Some/None for ROP?
+    async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
+        // ZZZ this needs more info, what if ROP and SV differ?
+        for sub_volume in &self.sub_volumes {
+            match sub_volume.query_extent_size().await {
+                Ok(es) => {
+                    return Ok(es);
+                }
+                _ => {
+                    continue;
+                }
+            }
+        }
+        if let Some(ref read_only_parent) = &self.read_only_parent {
+            return read_only_parent.query_extent_size().await;
+        }
+        crucible_bail!(IoError, "Cannot determine extent size");
     }
 
     async fn deactivate(&self) -> Result<(), CrucibleError> {
@@ -816,6 +877,7 @@ impl BlockIO for Volume {
 
             wq_counts.up_count += sub_wq_counts.up_count;
             wq_counts.ds_count += sub_wq_counts.ds_count;
+            wq_counts.active_count += sub_wq_counts.active_count;
         }
 
         if let Some(ref read_only_parent) = &self.read_only_parent {
@@ -823,6 +885,7 @@ impl BlockIO for Volume {
 
             wq_counts.up_count += sub_wq_counts.up_count;
             wq_counts.ds_count += sub_wq_counts.ds_count;
+            wq_counts.active_count += sub_wq_counts.active_count;
         }
 
         Ok(wq_counts)
@@ -963,6 +1026,15 @@ impl SubVolume {
 impl BlockIO for SubVolume {
     async fn activate(&self) -> Result<(), CrucibleError> {
         self.block_io.activate().await
+    }
+    async fn activate_with_gen(&self, gen: u64) -> Result<(), CrucibleError> {
+        self.block_io.activate_with_gen(gen).await
+    }
+    async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
+        self.block_io.query_work_queue().await
+    }
+    async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
+        self.block_io.query_extent_size().await
     }
 
     async fn deactivate(&self) -> Result<(), CrucibleError> {

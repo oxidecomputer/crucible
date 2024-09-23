@@ -137,6 +137,45 @@
         }
       }
     },
+    "/port/cid/{cid}": {
+      "get": {
+        "summary": "Fetch the port for the requested client_id",
+        "operationId": "dsc_get_port",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "uint32",
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/randomstop/disable": {
       "post": {
         "summary": "Disable the random stopping of a downstairs",
@@ -219,6 +258,30 @@
         "responses": {
           "204": {
             "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/regioninfo": {
+      "get": {
+        "summary": "Fetch the region info for our downstairs",
+        "operationId": "dsc_get_region_info",
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegionExtentInfo"
+                }
+              }
+            }
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -424,6 +487,35 @@
         "required": [
           "message",
           "request_id"
+        ]
+      },
+      "RegionExtentInfo": {
+        "description": "Extent information about a region.",
+        "type": "object",
+        "properties": {
+          "block_size": {
+            "description": "Block size in bytes.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "blocks_per_extent": {
+            "description": "Number of blocks in a single extent.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "extent_count": {
+            "description": "Total number of extents that make up this region.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "block_size",
+          "blocks_per_extent",
+          "extent_count"
         ]
       }
     },
