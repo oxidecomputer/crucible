@@ -622,13 +622,10 @@ impl Upstairs {
         //
         // This must be called before acking jobs, because it looks in
         // `Downstairs::ackable_jobs` to see which jobs are done.
-        if let Some(job_id) = self.downstairs.check_live_repair() {
-            self.downstairs.continue_live_repair(
-                job_id,
-                &mut self.guest.guest_work,
-                &self.state,
-            );
-        }
+        self.downstairs.check_and_continue_live_repair(
+            &mut self.guest.guest_work,
+            &self.state,
+        );
 
         // Send jobs downstairs as they become available.  This must be called
         // after `continue_live_repair`, which may enqueue jobs.

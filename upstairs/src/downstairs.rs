@@ -1174,7 +1174,7 @@ impl Downstairs {
     ///
     /// This must be called before `Downstairs::ack_jobs`, because it looks for
     /// the repair job in `self.ackable_work` to decide if it's done.
-    pub(crate) fn check_live_repair(&mut self) -> Option<JobId> {
+    fn get_live_repair_job(&mut self) -> Option<JobId> {
         if let Some(repair) = &self.repair {
             let ds_id = repair.state.active_job_id();
             if self.ackable_work.contains(&ds_id) {
@@ -1192,33 +1192,24 @@ impl Downstairs {
         }
     }
 
-    /// Pushes live-repair forward, starting at the given job
+    /// Pushes live-repair forward, if possible
     ///
-    /// `self.repair` must be waiting on the job given by `ds_id`, and that job
-    /// must be (1) in `self.ackable_work` and (2) not yet acked.
-    ///
-    /// As such, this function should only be called after
-    /// `self.check_live_repair` provides the value for `ds_id`; they're broken
-    /// into separate functions to avoid locking the `GuestWork` structure if
-    /// live-repair can't continue.
-    ///
-    /// It's possible that handling this job will make subsequent live-repair
-    /// jobs ackable immediately (`test_repair_extent_fail_noop_out_of_order`
-    /// exercises this case).  As such, this function will continue running
-    /// until the next live-repair job is not ready.
-    pub(crate) fn continue_live_repair(
+    /// It's possible that handling the current live-repair job will make
+    /// subsequent live-repair jobs ackable immediately
+    /// (`test_repair_extent_fail_noop_out_of_order` exercises this case).  As
+    /// such, this function will continue running until the next live-repair job
+    /// is not ready.
+    pub(crate) fn check_and_continue_live_repair(
         &mut self,
-        ds_id: JobId,
         gw: &mut GuestWork,
         up_state: &UpstairsState,
     ) {
-        self.continue_live_repair_inner(ds_id, gw, up_state);
-        while let Some(ds_id) = self.check_live_repair() {
-            self.continue_live_repair_inner(ds_id, gw, up_state);
+        while let Some(ds_id) = self.get_live_repair_job() {
+            self.continue_live_repair(ds_id, gw, up_state);
         }
     }
 
-    fn continue_live_repair_inner(
+    fn continue_live_repair(
         &mut self,
         ds_id: JobId,
         gw: &mut GuestWork,
