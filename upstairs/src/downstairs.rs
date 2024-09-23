@@ -1199,7 +1199,7 @@ impl Downstairs {
     /// (`test_repair_extent_fail_noop_out_of_order` exercises this case).  As
     /// such, this function will continue running until the next live-repair job
     /// is not ready.
-    pub(crate) fn check_live_repair(
+    pub(crate) fn check_and_continue_live_repair(
         &mut self,
         gw: &mut GuestWork,
         up_state: &UpstairsState,
