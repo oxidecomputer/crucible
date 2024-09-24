@@ -413,10 +413,11 @@ impl DownstairsClient {
         job
     }
 
-    /// Ensures that the given job is in the job queue
+    /// Sets the given job's state to [`IOState::InProgress`]
+    ///
+    /// # Panics
+    /// If the job's state is [`IOState::Done`] but the job has not been acked
     pub(crate) fn replay_job(&mut self, job: &mut DownstairsIO) {
-        // If the job is InProgress, then we can just go back to New and no
-        // extra work is required.
         // If it's Done, then by definition it has been acked; test that here
         // to double-check.
         if IOState::Done == job.state[self.client_id] && !job.acked {
@@ -430,7 +431,7 @@ impl DownstairsClient {
     /// Sets this job as skipped and moves it to `skipped_jobs`
     ///
     /// # Panics
-    /// If the job is not new or in-progress
+    /// If the job's state is not [`IOState::InProgress`]
     pub(crate) fn skip_job(&mut self, job: &mut DownstairsIO) {
         let prev_state = self.set_job_state(job, IOState::Skipped);
         assert!(matches!(prev_state, IOState::InProgress));
