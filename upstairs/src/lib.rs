@@ -1058,7 +1058,7 @@ impl DownstairsIO {
         let wc = self.state_count();
 
         let bad_job = match &self.work {
-            IOop::Read { .. } => wc.error == 3,
+            IOop::Read { .. } => wc.done == 0,
             IOop::Write { .. }
             | IOop::WriteUnwritten { .. }
             | IOop::Flush { .. } => wc.skipped + wc.error > 1,
