@@ -2208,7 +2208,7 @@ impl Downstairs {
         );
     }
 
-    /// Marks the given job as in-progress for this client, then sends it
+    /// Sends the given job to the given client
     fn send(&mut self, ds_id: JobId, io: IOop, client_id: ClientId) {
         let def = self.ddef.unwrap();
         let blocks_per_extent = def.extent_size().value;
@@ -7881,7 +7881,7 @@ pub(crate) mod test {
             );
         }
 
-        // Create a write and make them in-progress
+        // Create a write and send it to the downstairs clients
         let write_one = ds.create_and_enqueue_generic_write_eob(false);
 
         let job = ds.ds_active.get(&write_one).unwrap();
