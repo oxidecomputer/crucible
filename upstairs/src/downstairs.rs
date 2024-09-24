@@ -422,9 +422,7 @@ impl Downstairs {
 
         let done = self.ds_active.get_mut(&ds_id).unwrap();
         assert!(!done.acked);
-
         let gw_id = done.guest_id;
-        assert_eq!(done.ds_id, ds_id);
 
         let data = done.data.take();
 
@@ -485,12 +483,12 @@ impl Downstairs {
         let job = self.ds_active.get(&ds_id).unwrap();
         self.clients[client_id]
             .prune_deps(
-                job.ds_id,
+                ds_id,
                 job.work.clone(),
                 self.repair.as_ref().map(|r| r.min_id),
             )
             .deps()
-            .clone()
+            .to_vec()
     }
 
     /// Reinitialize the given client
@@ -2188,7 +2186,6 @@ impl Downstairs {
         self.ds_active.insert(
             ds_id,
             DownstairsIO {
-                ds_id,
                 guest_id,
                 work: io,
                 state,
@@ -2532,7 +2529,7 @@ impl Downstairs {
             let state = &job.state[client_id];
 
             if matches!(state, IOState::InProgress) {
-                self.clients[client_id].skip_job(job);
+                self.clients[client_id].skip_job(*ds_id, job);
                 number_jobs_skipped += 1;
 
                 // Check to see if this being skipped means we can ACK
@@ -2667,7 +2664,7 @@ impl Downstairs {
                     warn!(
                         self.log,
                         "[rc] leave job {} on the queue when removing {} {:?}",
-                        job.ds_id,
+                        id,
                         ds_id,
                         wc,
                     );
@@ -2678,11 +2675,10 @@ impl Downstairs {
                 assert_eq!(wc.error + wc.skipped + wc.done, 3);
                 assert!(!self.completed.contains(&id));
                 assert!(job.acked);
-                assert_eq!(job.ds_id, id);
 
-                retired.push(job.ds_id);
+                retired.push(id);
                 self.completed.push(id);
-                let summary = job.io_summarize();
+                let summary = job.io_summarize(id);
                 self.completed_jobs.push(summary);
                 for cid in ClientId::iter() {
                     let old_state = &job.state[cid];
@@ -3191,6 +3187,7 @@ impl Downstairs {
         }
 
         if self.clients[client_id].process_io_completion(
+            ds_id,
             job,
             responses,
             read_validations,
@@ -3220,7 +3217,7 @@ impl Downstairs {
             let wc = job.state_count();
             if (wc.error + wc.skipped + wc.done) == 3 {
                 self.ackable_work.insert(ds_id);
-                debug!(self.log, "[{}] Set AckReady {}", client_id, job.ds_id);
+                debug!(self.log, "[{}] Set AckReady {}", client_id, ds_id);
             }
         }
 
@@ -3307,7 +3304,7 @@ impl Downstairs {
         let mut jobs = Vec::new();
         for id in kvec.iter() {
             let job = self.ds_active.get(id).unwrap();
-            let work_summary = job.io_summarize();
+            let work_summary = job.io_summarize(*id);
             jobs.push(work_summary);
         }
         let completed = self.completed_jobs.to_vec();
@@ -3361,9 +3358,9 @@ impl Downstairs {
     ///
     /// This function is used in unit tests for the Upstairs
     #[cfg(test)]
-    pub(crate) fn get_all_jobs(&self) -> Vec<&DownstairsIO> {
+    pub(crate) fn get_all_jobs(&self) -> Vec<JobId> {
         // This is a BTreeMap, so it's already sorted
-        self.ds_active.values().collect()
+        self.ds_active.keys().cloned().collect()
     }
 
     /// Return the extent range covered by the given job
@@ -3371,8 +3368,8 @@ impl Downstairs {
     /// # Panics
     /// If the job is not stored in our `Downstairs`
     #[cfg(test)]
-    pub fn get_extents_for(&self, job: &DownstairsIO) -> ImpactedBlocks {
-        self.ds_active.get_extents_for(job.ds_id)
+    pub fn get_extents_for(&self, ds_id: JobId) -> ImpactedBlocks {
+        self.ds_active.get_extents_for(ds_id)
     }
 
     #[cfg(test)]
@@ -3396,9 +3393,14 @@ impl Downstairs {
     }
 
     #[cfg(test)]
+    pub(crate) fn get_deps(&self, ds_id: JobId) -> &[JobId] {
+        self.get_job(&ds_id).unwrap().work.deps()
+    }
+
     /// Submit a write to this downstairs. Use when you don't care about what
     /// the data you're writing is, and only care about getting some write-jobs
     /// enqueued. The write will be to a single extent, as specified by eid
+    #[cfg(test)]
     fn submit_test_write_block(
         &mut self,
         gwid: GuestWorkId,
@@ -3421,10 +3423,10 @@ impl Downstairs {
         self.submit_test_write(gwid, blocks, is_write_unwritten)
     }
 
-    #[cfg(test)]
     /// Submit a write to this downstairs. Use when you don't care about what
     /// the data you're writing is, and only care about getting some write-jobs
     /// enqueued. The write will be to a single extent, as specified by eid
+    #[cfg(test)]
     fn submit_test_write(
         &mut self,
         gwid: GuestWorkId,
@@ -4214,8 +4216,8 @@ impl Downstairs {
     /// # Panics
     /// If the job isn't present in `ds_active`
     #[cfg(test)]
-    fn job_state(&self, ds_id: JobId, cid: ClientId) -> IOState {
-        self.ds_active.get(&ds_id).unwrap().state[cid].clone()
+    fn job_state(&self, ds_id: JobId, cid: u8) -> IOState {
+        self.ds_active.get(&ds_id).unwrap().state[ClientId::new(cid)].clone()
     }
 
     #[cfg(test)]
@@ -4259,7 +4261,7 @@ pub(crate) mod test {
         guest::GuestWork,
         live_repair::ExtentInfo,
         upstairs::UpstairsState,
-        ClientId, CrucibleError, DownstairsIO, DsState, ExtentFix, IOState,
+        ClientId, CrucibleError, DsState, ExtentFix, ExtentRepairIDs, IOState,
         IOop, ImpactedAddr, ImpactedBlocks, JobId, RawReadResponse,
         ReconcileIO, ReconcileIOState, ReconciliationId, SnapshotDetails,
     };
@@ -5464,10 +5466,7 @@ pub(crate) mod test {
         assert!(ds.ds_active.get(&next_id).unwrap().acked);
 
         // Redo the read on DS 0, IO should remain acked
-        assert_eq!(
-            ds.job_state(next_id, ClientId::new(0)),
-            IOState::InProgress
-        );
+        assert_eq!(ds.job_state(next_id, 0), IOState::InProgress);
 
         let response = Ok(build_read_response(&[]));
         assert!(!ds.process_ds_completion(
@@ -5516,10 +5515,7 @@ pub(crate) mod test {
 
         // Acked IO should remain so, but should be newly InProgress
         assert!(ds.ds_active.get(&next_id).unwrap().acked);
-        assert_eq!(
-            ds.job_state(next_id, ClientId::new(0)),
-            IOState::InProgress
-        );
+        assert_eq!(ds.job_state(next_id, 0), IOState::InProgress);
 
         // Redo on DS 0, IO should remain acked.
         let response = Ok(build_read_response(&[]));
@@ -5586,10 +5582,7 @@ pub(crate) mod test {
         ds.replay_jobs(ClientId::new(0));
         // Now the IO should be replay
         assert!(ds.ds_active.get(&next_id).unwrap().replay);
-        assert_eq!(
-            ds.job_state(next_id, ClientId::new(0)),
-            IOState::InProgress
-        );
+        assert_eq!(ds.job_state(next_id, 0), IOState::InProgress);
 
         // Now, create a new response that has different data, and will
         // produce a different hash.
@@ -5675,10 +5668,7 @@ pub(crate) mod test {
         assert!(ds.ds_active.get(&next_id).unwrap().replay);
 
         // The job should be newly InProgress
-        assert_eq!(
-            ds.job_state(next_id, ClientId::new(1)),
-            IOState::InProgress
-        );
+        assert_eq!(ds.job_state(next_id, 1), IOState::InProgress);
 
         // Now, create a new response that has different data, and will
         // produce a different hash.
@@ -5751,7 +5741,7 @@ pub(crate) mod test {
         assert!(ds.ds_active.get(&id1).unwrap().acked);
 
         // Re-submit and complete the write
-        assert_eq!(ds.job_state(id1, ClientId::new(1)), IOState::InProgress);
+        assert_eq!(ds.job_state(id1, 1), IOState::InProgress);
         assert!(!ds.process_ds_completion(
             id1,
             ClientId::new(1),
@@ -8775,7 +8765,7 @@ pub(crate) mod test {
         gw: &mut GuestWork,
         ds: &mut Downstairs,
         eid: ExtentId,
-    ) {
+    ) -> ExtentRepairIDs {
         let (extent_repair_ids, deps) = ds.get_repair_ids(eid);
 
         let gw_close_id = gw.next_gw_id();
@@ -8831,6 +8821,8 @@ pub(crate) mod test {
             extent_repair_ids.reopen_id,
             gw_reopen_id,
         );
+
+        extent_repair_ids
     }
 
     // The next section of tests verify repair dependencies are honored.
@@ -8860,32 +8852,29 @@ pub(crate) mod test {
         let eid = ExtentId(1);
 
         // Write operations 0 to 2
+        let mut ids = vec![];
         for i in 0..3 {
-            ds.submit_test_write_block(
+            let ds_id = ds.submit_test_write_block(
                 gw.next_gw_id(),
                 eid,
                 BlockOffset(i),
                 false,
             );
+            ids.push(ds_id);
         }
 
         // Repair IO functions assume you have the locks
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
+        let repair_ids = create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
-
-        assert_eq!(jobs.len(), 7);
+        assert_eq!(ds.ds_active.len(), 7);
 
         // The three writes don't depend on anything
-        assert!(jobs[0].work.deps().is_empty());
-        assert!(jobs[1].work.deps().is_empty());
-        assert!(jobs[2].work.deps().is_empty());
+        assert!(ds.get_deps(ids[0]).is_empty());
+        assert!(ds.get_deps(ids[1]).is_empty());
+        assert!(ds.get_deps(ids[2]).is_empty());
         // The repair will have all the previous jobs, as they all are on the
         // same extent.
-        assert_eq!(
-            jobs[3].work.deps(),
-            &[jobs[0].ds_id, jobs[1].ds_id, jobs[2].ds_id]
-        );
+        assert_eq!(ds.get_deps(repair_ids.close_id), &ids);
     }
 
     #[test]
@@ -8908,26 +8897,26 @@ pub(crate) mod test {
         let eid = ExtentId(1);
 
         // Create read operations 0 to 2
+        let mut ids = vec![];
         for i in 0..3 {
-            ds.submit_read_block(gw.next_gw_id(), eid, BlockOffset(i));
+            ids.push(ds.submit_read_block(
+                gw.next_gw_id(),
+                eid,
+                BlockOffset(i),
+            ));
         }
 
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
+        let repair_ids = create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
-
-        assert_eq!(jobs.len(), 7);
+        assert_eq!(ds.ds_active.len(), 7);
 
         // The three reads don't depend on anything
-        assert!(jobs[0].work.deps().is_empty());
-        assert!(jobs[1].work.deps().is_empty());
-        assert!(jobs[2].work.deps().is_empty());
+        assert!(ds.get_deps(ids[0]).is_empty());
+        assert!(ds.get_deps(ids[1]).is_empty());
+        assert!(ds.get_deps(ids[2]).is_empty());
         // The repair will have all the previous jobs, as they all are on the
         // same extent.
-        assert_eq!(
-            jobs[3].work.deps(),
-            &[jobs[0].ds_id, jobs[1].ds_id, jobs[2].ds_id]
-        );
+        assert_eq!(ds.get_deps(repair_ids.close_id), ids);
     }
 
     #[test]
@@ -8948,23 +8937,27 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
         let eid = ExtentId(1);
 
-        ds.submit_read_block(gw.next_gw_id(), eid, BlockOffset(0));
-        ds.submit_test_write_block(gw.next_gw_id(), eid, BlockOffset(1), false);
-        ds.submit_flush(gw.next_gw_id(), None);
+        let read_id =
+            ds.submit_read_block(gw.next_gw_id(), eid, BlockOffset(0));
+        let write_id = ds.submit_test_write_block(
+            gw.next_gw_id(),
+            eid,
+            BlockOffset(1),
+            false,
+        );
+        let flush_id = ds.submit_flush(gw.next_gw_id(), None);
 
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
+        let repair_ids = create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
-
-        assert_eq!(jobs.len(), 7);
+        assert_eq!(ds.ds_active.len(), 7);
 
         // The read and the write don't depend on anything
-        assert!(jobs[0].work.deps().is_empty());
-        assert!(jobs[1].work.deps().is_empty());
+        assert!(ds.get_deps(read_id).is_empty());
+        assert!(ds.get_deps(write_id).is_empty());
         // The flush requires the read and the write
-        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id, jobs[1].ds_id]);
+        assert_eq!(ds.get_deps(flush_id), &[read_id, write_id]);
         // The repair will have just the flush
-        assert_eq!(jobs[3].work.deps(), &[jobs[2].ds_id]);
+        assert_eq!(ds.get_deps(repair_ids.close_id), &[flush_id]);
     }
 
     #[test]
@@ -8985,20 +8978,18 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
         let eid = ExtentId(1);
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
+        let ids = create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        assert_eq!(ds.ds_active.len(), 4);
 
-        assert_eq!(jobs.len(), 4);
-
-        assert_eq!(jobs[0].ds_id, JobId(1000));
-        assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[1].ds_id, JobId(1001));
-        assert_eq!(jobs[1].work.deps(), &[JobId(1000)]);
-        assert_eq!(jobs[2].ds_id, JobId(1002));
-        assert_eq!(jobs[2].work.deps(), &[JobId(1001)]);
-        assert_eq!(jobs[3].ds_id, JobId(1003));
-        assert_eq!(jobs[3].work.deps(), &[JobId(1002)]);
+        assert_eq!(ids.close_id, JobId(1000));
+        assert!(ds.get_deps(ids.close_id).is_empty());
+        assert_eq!(ids.repair_id, JobId(1001));
+        assert_eq!(ds.get_deps(ids.repair_id), &[JobId(1000)]);
+        assert_eq!(ids.noop_id, JobId(1002));
+        assert_eq!(ds.get_deps(ids.noop_id), &[JobId(1001)]);
+        assert_eq!(ids.reopen_id, JobId(1003));
+        assert_eq!(ds.get_deps(ids.reopen_id), &[JobId(1002)]);
     }
 
     #[test]
@@ -9016,19 +9007,22 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
         let eid = ExtentId(1);
 
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
+        let repair_ids = create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
 
-        ds.submit_test_write_block(gw.next_gw_id(), eid, BlockOffset(2), false);
+        let write_id = ds.submit_test_write_block(
+            gw.next_gw_id(),
+            eid,
+            BlockOffset(2),
+            false,
+        );
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        assert_eq!(ds.ds_active.len(), 5);
 
-        assert_eq!(jobs.len(), 5);
+        assert_eq!(repair_ids.close_id, JobId(1000));
+        assert!(ds.get_deps(repair_ids.close_id).is_empty());
 
-        assert_eq!(jobs[0].ds_id, JobId(1000));
-        assert!(jobs[0].work.deps().is_empty());
-
-        assert_eq!(jobs[4].ds_id, JobId(1004));
-        assert_eq!(jobs[4].work.deps(), &[JobId(1003)]);
+        assert_eq!(write_id, JobId(1004));
+        assert_eq!(ds.get_deps(write_id), &[repair_ids.reopen_id]);
     }
 
     #[test]
@@ -9045,19 +9039,18 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
         let eid = ExtentId(1);
 
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
+        let repair_ids = create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
 
-        ds.submit_read_block(gw.next_gw_id(), eid, BlockOffset(0));
+        let read_id =
+            ds.submit_read_block(gw.next_gw_id(), eid, BlockOffset(0));
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        assert_eq!(ds.ds_active.len(), 5);
 
-        assert_eq!(jobs.len(), 5);
-
-        assert_eq!(jobs[0].ds_id, JobId(1000));
-        assert!(jobs[0].work.deps().is_empty());
+        assert_eq!(repair_ids.close_id, JobId(1000));
+        assert!(ds.get_deps(repair_ids.close_id).is_empty());
         // The read depends on the last item of the repair
-        assert_eq!(jobs[4].ds_id, JobId(1004));
-        assert_eq!(jobs[4].work.deps(), &[JobId(1003)]);
+        assert_eq!(read_id, JobId(1004));
+        assert_eq!(ds.get_deps(read_id), &[repair_ids.reopen_id]);
     }
 
     #[test]
@@ -9074,18 +9067,16 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
         let eid = ExtentId(1);
 
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
-        ds.submit_flush(gw.next_gw_id(), None);
+        let repair_ids = create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
+        let flush_id = ds.submit_flush(gw.next_gw_id(), None);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        assert_eq!(ds.ds_active.len(), 5);
 
-        assert_eq!(jobs.len(), 5);
-
-        assert_eq!(jobs[0].ds_id, JobId(1000));
-        assert!(jobs[0].work.deps().is_empty());
+        assert_eq!(repair_ids.close_id, JobId(1000));
+        assert!(ds.get_deps(repair_ids.close_id).is_empty());
         // The flush depends on the repair close operation
-        assert_eq!(jobs[4].ds_id, JobId(1004));
-        assert_eq!(jobs[4].work.deps(), &[JobId(1003)]);
+        assert_eq!(flush_id, JobId(1004));
+        assert_eq!(ds.get_deps(flush_id), &[repair_ids.reopen_id]);
     }
 
     #[test]
@@ -9102,23 +9093,23 @@ pub(crate) mod test {
         //   5 |       | RpRpRp|       |
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_test_write_block(
+        let write_id = ds.submit_test_write_block(
             gw.next_gw_id(),
             ExtentId(0),
             BlockOffset(2),
             false,
         );
-        ds.submit_read_block(gw.next_gw_id(), ExtentId(2), BlockOffset(0));
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
+        let read_id =
+            ds.submit_read_block(gw.next_gw_id(), ExtentId(2), BlockOffset(0));
+        let repair_ids =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
-
-        assert_eq!(jobs.len(), 6);
+        assert_eq!(ds.ds_active.len(), 6);
 
         // The read and the write don't depend on anything
-        assert!(jobs[0].work.deps().is_empty());
-        assert!(jobs[1].work.deps().is_empty());
-        assert!(jobs[2].work.deps().is_empty());
+        assert!(ds.get_deps(write_id).is_empty());
+        assert!(ds.get_deps(read_id).is_empty());
+        assert!(ds.get_deps(repair_ids.close_id).is_empty());
     }
 
     #[test]
@@ -9135,23 +9126,23 @@ pub(crate) mod test {
         //   5 |     W |       |       |
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
-        ds.submit_test_write_block(
+        let repair_ids =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
+        let write_id = ds.submit_test_write_block(
             gw.next_gw_id(),
             ExtentId(0),
             BlockOffset(2),
             false,
         );
-        ds.submit_read_block(gw.next_gw_id(), ExtentId(2), BlockOffset(1));
+        let read_id =
+            ds.submit_read_block(gw.next_gw_id(), ExtentId(2), BlockOffset(1));
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
-
-        assert_eq!(jobs.len(), 6);
+        assert_eq!(ds.ds_active.len(), 6);
 
         // The read and the write don't depend on anything
-        assert!(jobs[0].work.deps().is_empty());
-        assert!(jobs[4].work.deps().is_empty());
-        assert!(jobs[5].work.deps().is_empty());
+        assert!(ds.get_deps(repair_ids.close_id).is_empty());
+        assert!(ds.get_deps(write_id).is_empty());
+        assert!(ds.get_deps(read_id).is_empty());
     }
 
     #[test]
@@ -9169,24 +9160,21 @@ pub(crate) mod test {
 
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_flush(gw.next_gw_id(), None);
+        let flush_id1 = ds.submit_flush(gw.next_gw_id(), None);
+        let repair_ids =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
+        let flush_id2 = ds.submit_flush(gw.next_gw_id(), None);
 
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
+        assert_eq!(ds.ds_active.len(), 6);
 
-        ds.submit_flush(gw.next_gw_id(), None);
+        assert_eq!(flush_id1, JobId(1000));
+        assert!(ds.get_deps(flush_id1).is_empty());
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        assert_eq!(repair_ids.close_id, JobId(1001));
+        assert_eq!(ds.get_deps(repair_ids.close_id), &[JobId(1000)]);
 
-        assert_eq!(jobs.len(), 6);
-
-        assert_eq!(jobs[0].ds_id, JobId(1000));
-        assert!(jobs[0].work.deps().is_empty());
-
-        assert_eq!(jobs[1].ds_id, JobId(1001));
-        assert_eq!(jobs[1].work.deps(), &[JobId(1000)]);
-
-        assert_eq!(jobs[5].ds_id, JobId(1005));
-        assert_eq!(jobs[5].work.deps(), &[JobId(1000), JobId(1004)]);
+        assert_eq!(flush_id2, JobId(1005));
+        assert_eq!(ds.get_deps(flush_id2), &[JobId(1000), JobId(1004)]);
     }
 
     #[test]
@@ -9206,22 +9194,22 @@ pub(crate) mod test {
         //   8 |       | RpRpRp|
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(0));
+        let repair_ids1 =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(0));
 
-        ds.submit_flush(gw.next_gw_id(), None);
+        let flush_id = ds.submit_flush(gw.next_gw_id(), None);
 
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
+        let repair_ids2 =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        assert_eq!(ds.ds_active.len(), 9);
 
-        assert_eq!(jobs.len(), 9);
-
-        assert_eq!(jobs[0].ds_id, JobId(1000));
-        assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[4].ds_id, JobId(1004));
-        assert_eq!(jobs[4].work.deps(), &[JobId(1003)]);
-        assert_eq!(jobs[5].ds_id, JobId(1005));
-        assert_eq!(jobs[5].work.deps(), &[JobId(1004)]);
+        assert_eq!(repair_ids1.close_id, JobId(1000));
+        assert!(ds.get_deps(repair_ids1.close_id).is_empty());
+        assert_eq!(flush_id, JobId(1004));
+        assert_eq!(ds.get_deps(flush_id), &[JobId(1003)]);
+        assert_eq!(repair_ids2.close_id, JobId(1005));
+        assert_eq!(ds.get_deps(repair_ids2.close_id), &[JobId(1004)]);
     }
 
     #[test]
@@ -9237,7 +9225,7 @@ pub(crate) mod test {
         //   4 |       | RpRpRp| 0
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_test_write(
+        let write_id = ds.submit_test_write(
             gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
@@ -9252,14 +9240,13 @@ pub(crate) mod test {
             false,
         );
 
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
+        let repair_ids =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        assert_eq!(ds.ds_active.len(), 5);
 
-        assert_eq!(jobs.len(), 5);
-
-        assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
+        assert!(ds.get_deps(write_id).is_empty());
+        assert_eq!(ds.get_deps(repair_ids.close_id), &[write_id]);
     }
 
     #[test]
@@ -9276,7 +9263,7 @@ pub(crate) mod test {
         //
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_test_write(
+        let write_id = ds.submit_test_write(
             gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
@@ -9291,14 +9278,13 @@ pub(crate) mod test {
             false,
         );
 
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(0));
+        let repair_ids =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(0));
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        assert_eq!(ds.ds_active.len(), 5);
 
-        assert_eq!(jobs.len(), 5);
-
-        assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
+        assert!(ds.get_deps(write_id).is_empty());
+        assert_eq!(ds.get_deps(repair_ids.close_id), &[write_id]);
     }
 
     #[test]
@@ -9316,7 +9302,7 @@ pub(crate) mod test {
         //   4 |       | RpRpRp|
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_read(
+        let read_id = ds.submit_read(
             gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
@@ -9330,14 +9316,13 @@ pub(crate) mod test {
             ),
         );
 
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
+        let repair_ids =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        assert_eq!(ds.ds_active.len(), 5);
 
-        assert_eq!(jobs.len(), 5);
-
-        assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
+        assert!(ds.get_deps(read_id).is_empty());
+        assert_eq!(ds.get_deps(repair_ids.close_id), &[read_id]);
     }
 
     #[test]
@@ -9354,7 +9339,7 @@ pub(crate) mod test {
         //   4 | RpRpRp|       |
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_read(
+        let read_id = ds.submit_read(
             gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
@@ -9368,14 +9353,13 @@ pub(crate) mod test {
             ),
         );
 
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(0));
+        let repair_ids =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(0));
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        assert_eq!(ds.ds_active.len(), 5);
 
-        assert_eq!(jobs.len(), 5);
-
-        assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
+        assert!(ds.get_deps(read_id).is_empty());
+        assert_eq!(ds.get_deps(repair_ids.close_id), &[read_id]);
     }
 
     #[test]
@@ -9398,7 +9382,7 @@ pub(crate) mod test {
         //   8 |       | RpRpRp| 6
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_test_write(
+        let write_id = ds.submit_test_write(
             gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
@@ -9413,16 +9397,16 @@ pub(crate) mod test {
             false,
         );
 
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(0));
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
+        let repair_ids1 =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(0));
+        let repair_ids2 =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        assert_eq!(ds.ds_active.len(), 9);
 
-        assert_eq!(jobs.len(), 9);
-
-        assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
-        assert_eq!(jobs[5].work.deps(), &[jobs[0].ds_id]);
+        assert!(ds.get_deps(write_id).is_empty());
+        assert_eq!(ds.get_deps(repair_ids1.close_id), &[write_id]);
+        assert_eq!(ds.get_deps(repair_ids2.close_id), &[write_id]);
     }
 
     #[test]
@@ -9438,7 +9422,7 @@ pub(crate) mod test {
         //   4 |       | RpRpRp|       |
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_read(
+        let read_id = ds.submit_read(
             gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
@@ -9452,14 +9436,13 @@ pub(crate) mod test {
             ),
         );
 
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
+        let repair_ids =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        assert_eq!(ds.ds_active.len(), 5);
 
-        assert_eq!(jobs.len(), 5);
-
-        assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
+        assert!(ds.get_deps(read_id).is_empty());
+        assert_eq!(ds.get_deps(repair_ids.close_id), &[read_id]);
     }
 
     #[test]
@@ -9511,10 +9494,11 @@ pub(crate) mod test {
         // downstairs has `repair` set to Some sensible value, so we populate it
         // with what things would look like at the start of the repair. But, we
         // enqueue jobs ourselves.
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(0));
+        let repair_ids =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(0));
 
         // A write of blocks 2,3,4 which spans extent 0 and extent 1.
-        ds.submit_test_write(
+        let write_id = ds.submit_test_write(
             gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
@@ -9529,19 +9513,15 @@ pub(crate) mod test {
             false,
         );
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
-
-        assert_eq!(jobs.len(), 5);
-        assert!(jobs[0].work.deps().is_empty());
+        assert_eq!(ds.ds_active.len(), 5);
+        assert!(ds.get_deps(repair_ids.close_id).is_empty());
 
         // We know our first repair job will reserve 4 ids: 1000, 1001,
         // 1002, and 1003. The write to a spanning extent will go
-        // and create 4 more job IDs, but will not enqueue them, so the write
-        // will have job ID 1008 but will be at position 3 in the list
-
-        assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[4].ds_id, JobId(1008));
-        assert_eq!(jobs[4].work.deps(), &[JobId(1003), JobId(1007)]);
+        // and create 4 more job IDs, but will not enqueue them yet.
+        assert!(ds.get_deps(repair_ids.close_id).is_empty());
+        assert_eq!(write_id, JobId(1008));
+        assert_eq!(ds.get_deps(write_id), &[repair_ids.reopen_id, JobId(1007)]);
     }
 
     #[test]
@@ -9557,9 +9537,10 @@ pub(crate) mod test {
         //   4 |   R R | R     | 3
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
+        let repair_ids =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
 
-        ds.submit_read(
+        let read_id = ds.submit_read(
             gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
@@ -9573,14 +9554,12 @@ pub(crate) mod test {
             ),
         );
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        assert_eq!(ds.ds_active.len(), 5);
 
-        assert_eq!(jobs.len(), 5);
-
-        assert_eq!(jobs[0].ds_id, JobId(1000));
-        assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[4].ds_id, JobId(1004));
-        assert_eq!(jobs[4].work.deps(), &[JobId(1003)]);
+        assert_eq!(repair_ids.close_id, JobId(1000));
+        assert!(ds.get_deps(repair_ids.close_id).is_empty());
+        assert_eq!(read_id, JobId(1004));
+        assert_eq!(ds.get_deps(read_id), &[repair_ids.reopen_id]);
     }
 
     #[test]
@@ -9598,7 +9577,7 @@ pub(crate) mod test {
         //
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_read(
+        let read_id = ds.submit_read(
             gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
@@ -9612,7 +9591,7 @@ pub(crate) mod test {
             ),
         );
 
-        ds.submit_test_write(
+        let write_id = ds.submit_test_write(
             gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
@@ -9628,15 +9607,14 @@ pub(crate) mod test {
         );
 
         // The final repair command
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
+        let repair_ids =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        assert_eq!(ds.ds_active.len(), 6);
 
-        assert_eq!(jobs.len(), 6);
-
-        assert!(jobs[0].work.deps().is_empty());
-        assert!(jobs[1].work.deps().is_empty());
-        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id, jobs[1].ds_id]);
+        assert!(ds.get_deps(read_id).is_empty());
+        assert!(ds.get_deps(write_id).is_empty());
+        assert_eq!(ds.get_deps(repair_ids.close_id), &[read_id, write_id]);
     }
 
     #[test]
@@ -9666,7 +9644,7 @@ pub(crate) mod test {
         //  15 |       |       | RpRpRp| 14
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        ds.submit_test_write_block(
+        let write_id1 = ds.submit_test_write_block(
             gw.next_gw_id(),
             ExtentId(2),
             BlockOffset(1),
@@ -9674,21 +9652,24 @@ pub(crate) mod test {
         );
 
         // The first repair command
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(0));
+        let repair_ids1 =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(0));
 
-        ds.submit_test_write_block(
+        let write_id2 = ds.submit_test_write_block(
             gw.next_gw_id(),
             ExtentId(1),
             BlockOffset(1),
             false,
         );
 
-        ds.submit_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(2));
+        let read_id =
+            ds.submit_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(2));
 
         // The second repair command
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
+        let repair_ids2 =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
 
-        ds.submit_test_write_block(
+        let write_id3 = ds.submit_test_write_block(
             gw.next_gw_id(),
             ExtentId(1),
             BlockOffset(2),
@@ -9696,32 +9677,31 @@ pub(crate) mod test {
         );
 
         // The third repair command
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(2));
+        let repair_ids3 =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(2));
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        assert_eq!(ds.ds_active.len(), 16);
 
-        assert_eq!(jobs.len(), 16);
+        assert_eq!(write_id1, JobId(1000));
+        assert!(ds.get_deps(write_id1).is_empty());
 
-        assert_eq!(jobs[0].ds_id, JobId(1000));
-        assert!(jobs[0].work.deps().is_empty());
+        assert_eq!(repair_ids1.close_id, JobId(1001));
+        assert!(ds.get_deps(repair_ids1.close_id).is_empty());
 
-        assert_eq!(jobs[1].ds_id, JobId(1001));
-        assert!(jobs[1].work.deps().is_empty());
+        assert_eq!(write_id2, JobId(1005));
+        assert!(ds.get_deps(write_id2).is_empty());
 
-        assert_eq!(jobs[5].ds_id, JobId(1005));
-        assert!(jobs[5].work.deps().is_empty());
+        assert_eq!(read_id, JobId(1006));
+        assert_eq!(ds.get_deps(read_id), &[repair_ids1.reopen_id]);
 
-        assert_eq!(jobs[6].ds_id, JobId(1006));
-        assert_eq!(jobs[6].work.deps(), &[JobId(1004)]);
+        assert_eq!(repair_ids2.close_id, JobId(1007));
+        assert_eq!(ds.get_deps(repair_ids2.close_id), &[write_id2]);
 
-        assert_eq!(jobs[7].ds_id, JobId(1007));
-        assert_eq!(jobs[7].work.deps(), &[JobId(1005)]);
+        assert_eq!(write_id3, JobId(1011));
+        assert_eq!(ds.get_deps(write_id3), &[repair_ids2.reopen_id]);
 
-        assert_eq!(jobs[11].ds_id, JobId(1011));
-        assert_eq!(jobs[11].work.deps(), &[JobId(1010)]);
-
-        assert_eq!(jobs[12].ds_id, JobId(1012));
-        assert_eq!(jobs[12].work.deps(), &[JobId(1000)]);
+        assert_eq!(repair_ids3.close_id, JobId(1012));
+        assert_eq!(ds.get_deps(repair_ids3.close_id), &[write_id1]);
     }
 
     #[test]
@@ -9741,7 +9721,7 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
         // A write of blocks 2,3,4 which spans the extent.
-        ds.submit_test_write(
+        let write_id = ds.submit_test_write(
             gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
@@ -9756,21 +9736,20 @@ pub(crate) mod test {
             false,
         );
 
-        ds.submit_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(1));
+        let read_id =
+            ds.submit_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(1));
 
-        ds.submit_flush(gw.next_gw_id(), None);
+        let flush_id = ds.submit_flush(gw.next_gw_id(), None);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        assert_eq!(ds.ds_active.len(), 3);
 
-        assert_eq!(jobs.len(), 3);
-
-        assert!(jobs[0].work.deps().is_empty());
-        assert!(jobs[1].work.deps().is_empty());
-        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id, jobs[1].ds_id]);
+        assert!(ds.get_deps(write_id).is_empty());
+        assert!(ds.get_deps(read_id).is_empty());
+        assert_eq!(ds.get_deps(flush_id), &[write_id, read_id]);
         // Check that the IOs were skipped on downstairs 1.
-        assert_eq!(jobs[0].state[ClientId::new(1)], IOState::Skipped);
-        assert_eq!(jobs[1].state[ClientId::new(1)], IOState::Skipped);
-        assert_eq!(jobs[2].state[ClientId::new(1)], IOState::Skipped);
+        assert_eq!(ds.job_state(write_id, 1), IOState::Skipped);
+        assert_eq!(ds.job_state(read_id, 1), IOState::Skipped);
+        assert_eq!(ds.job_state(flush_id, 1), IOState::Skipped);
     }
 
     #[test]
@@ -9822,7 +9801,7 @@ pub(crate) mod test {
         });
 
         // A write of blocks 2,3,4 which spans extents.
-        ds.submit_test_write(
+        let write_id = ds.submit_test_write(
             gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
@@ -9836,12 +9815,10 @@ pub(crate) mod test {
             ),
             false,
         );
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
+        assert_eq!(ds.ds_active.len(), 1);
 
-        assert_eq!(jobs.len(), 1);
-
-        assert_eq!(jobs[0].ds_id, JobId(1004));
-        assert_eq!(jobs[0].work.deps(), &[JobId(1003)]);
+        assert_eq!(write_id, JobId(1004));
+        assert_eq!(ds.get_deps(write_id), &[JobId(1003)]);
     }
 
     #[test]
@@ -9893,7 +9870,7 @@ pub(crate) mod test {
         });
 
         // A read of blocks 2,3,4 which spans extents.
-        ds.submit_read(
+        let read_id = ds.submit_read(
             gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
@@ -9909,18 +9886,17 @@ pub(crate) mod test {
 
         // Now enqueue the repair on extent 1, it should populate one of the
         // empty job slots.
-        create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
-
-        assert_eq!(jobs.len(), 5);
+        let repair_ids =
+            create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
+        assert_eq!(ds.ds_active.len(), 5);
 
         // The close job is the first one in the job list
-        assert_eq!(jobs[0].ds_id, JobId(1000));
+        assert_eq!(repair_ids.close_id, JobId(1000));
         // The repair job should have no dependencies.
-        assert!(jobs[0].work.deps().is_empty());
+        assert!(ds.get_deps(repair_ids.close_id).is_empty());
         // Our read should be ID 1004, and depends on the last repair job
-        assert_eq!(jobs[4].ds_id, JobId(1004));
-        assert_eq!(jobs[4].work.deps(), &[JobId(1003)]);
+        assert_eq!(read_id, JobId(1004));
+        assert_eq!(ds.get_deps(read_id), &[repair_ids.reopen_id]);
     }
 
     #[test]
@@ -9961,12 +9937,10 @@ pub(crate) mod test {
             },
         });
 
-        ds.submit_flush(gw.next_gw_id(), None);
+        let flush_id = ds.submit_flush(gw.next_gw_id(), None);
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
-
-        assert_eq!(jobs.len(), 1);
-        assert!(jobs[0].work.deps().is_empty());
+        assert_eq!(ds.ds_active.len(), 1);
+        assert!(ds.get_deps(flush_id).is_empty());
     }
 
     #[test]
@@ -10003,7 +9977,7 @@ pub(crate) mod test {
         );
 
         for cid in ClientId::iter() {
-            assert_eq!(ds.job_state(job_id, cid), IOState::InProgress);
+            assert_eq!(ds.job_state(job_id, cid.get()), IOState::InProgress);
         }
     }
 
@@ -10122,13 +10096,13 @@ pub(crate) mod test {
         // updated for our downstairs under repair, but will still include
         // the jobs that came after the repair.
         let job = ds.ds_active.get(&JobId(1006)).unwrap();
-        let current_deps = job.work.deps().clone();
+        let current_deps = job.work.deps();
 
         assert_eq!(current_deps, &[JobId(1005)]);
         assert_eq!(ds.get_pruned_deps(JobId(1006), ClientId::new(1)), []);
 
         let job = ds.ds_active.get(&JobId(1007)).unwrap();
-        let current_deps = job.work.deps().clone();
+        let current_deps = job.work.deps();
 
         assert_eq!(current_deps, &[JobId(1006)]);
         assert_eq!(
@@ -10137,7 +10111,7 @@ pub(crate) mod test {
         );
 
         let job = ds.ds_active.get(&JobId(1008)).unwrap();
-        let current_deps = job.work.deps().clone();
+        let current_deps = job.work.deps();
 
         assert_eq!(current_deps, &[JobId(1007)]);
         assert_eq!(
@@ -10309,14 +10283,11 @@ pub(crate) mod test {
         assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
         assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
 
-        let current_deps = job.work.deps().clone();
+        let current_deps = job.work.deps();
         assert_eq!(current_deps, &[JobId(1002)]);
 
         // Verify that the Skipped job is Skipped
-        assert_eq!(
-            ds.job_state(JobId(1007), ClientId::new(1)),
-            IOState::Skipped
-        );
+        assert_eq!(ds.job_state(JobId(1007), 1), IOState::Skipped);
 
         // This second write after starting a repair should require job 6 (i.e.
         // the final job of the repair) on both the Active and LiveRepair
@@ -10326,7 +10297,7 @@ pub(crate) mod test {
         assert_eq!(job.state[ClientId::new(1)], IOState::InProgress);
         assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
 
-        let current_deps = job.work.deps().clone();
+        let current_deps = job.work.deps();
         assert_eq!(current_deps, &[JobId(1006)]);
 
         // LiveRepair downstairs won't see past the repair.
@@ -10346,7 +10317,7 @@ pub(crate) mod test {
         // 1) the final operation on the repair of extent 0
         // 2) the write operation (8) on extent 0
         // 3) a new repair operation on extent 1
-        let current_deps = job.work.deps().clone();
+        let current_deps = job.work.deps();
         assert_eq!(current_deps, &[JobId(1006), JobId(1008), JobId(1012)]);
 
         assert_eq!(
@@ -10529,7 +10500,7 @@ pub(crate) mod test {
         });
 
         // A write of blocks 2,3,4 which spans extents 0-1.
-        ds.submit_test_write(
+        let write_id1 = ds.submit_test_write(
             gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
@@ -10546,29 +10517,27 @@ pub(crate) mod test {
 
         // A write of block 5 which is on extent 1, but does not
         // overlap with the previous write
-        ds.submit_test_write_block(
+        let write_id2 = ds.submit_test_write_block(
             gw.next_gw_id(),
             ExtentId(1),
             BlockOffset(2),
             false,
         );
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
-
-        assert_eq!(jobs.len(), 2);
+        assert_eq!(ds.ds_active.len(), 2);
 
         // The first job, should have the dependences for the new repair work
-        assert_eq!(jobs[0].ds_id, JobId(1004));
-        assert_eq!(jobs[0].work.deps(), &[JobId(1003)]);
-        assert_eq!(jobs[0].state[ClientId::new(0)], IOState::InProgress);
-        assert_eq!(jobs[0].state[ClientId::new(1)], IOState::InProgress);
-        assert_eq!(jobs[0].state[ClientId::new(2)], IOState::InProgress);
+        assert_eq!(write_id1, JobId(1004));
+        assert_eq!(ds.get_deps(write_id1), &[JobId(1003)]);
+        assert_eq!(ds.job_state(write_id1, 0), IOState::InProgress);
+        assert_eq!(ds.job_state(write_id1, 1), IOState::InProgress);
+        assert_eq!(ds.job_state(write_id1, 2), IOState::InProgress);
 
         // The 2nd job should also have the dependences for the new repair work
-        assert_eq!(jobs[1].work.deps(), &[JobId(1003)]);
-        assert_eq!(jobs[1].state[ClientId::new(0)], IOState::InProgress);
-        assert_eq!(jobs[1].state[ClientId::new(1)], IOState::InProgress);
-        assert_eq!(jobs[1].state[ClientId::new(2)], IOState::InProgress);
+        assert_eq!(ds.get_deps(write_id2), &[JobId(1003)]);
+        assert_eq!(ds.job_state(write_id2, 0), IOState::InProgress);
+        assert_eq!(ds.job_state(write_id2, 1), IOState::InProgress);
+        assert_eq!(ds.job_state(write_id2, 2), IOState::InProgress);
     }
 
     #[test]
@@ -10633,7 +10602,7 @@ pub(crate) mod test {
         });
 
         // A write of blocks 3,4,5,6 which spans extents 1-2.
-        ds.submit_test_write(
+        let write_id1 = ds.submit_test_write(
             gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
@@ -10650,7 +10619,7 @@ pub(crate) mod test {
 
         // A write of block 2-3, which overlaps the previous write and should
         // also trigger a repair.
-        ds.submit_test_write(
+        let write_id2 = ds.submit_test_write(
             gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
@@ -10667,7 +10636,7 @@ pub(crate) mod test {
 
         // A read of block 5-7, which overlaps the previous repair and should
         // also force waiting on a new repair.
-        ds.submit_read(
+        let read_id = ds.submit_read(
             gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
@@ -10681,27 +10650,25 @@ pub(crate) mod test {
             ),
         );
 
-        let jobs: Vec<&DownstairsIO> = ds.ds_active.values().collect();
-
-        assert_eq!(jobs.len(), 3);
+        assert_eq!(ds.ds_active.len(), 3);
 
         // The first job should have no dependencies
-        assert_eq!(jobs[0].ds_id, JobId(1000));
-        assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[0].state[ClientId::new(0)], IOState::InProgress);
-        assert_eq!(jobs[0].state[ClientId::new(1)], IOState::Skipped);
-        assert_eq!(jobs[0].state[ClientId::new(2)], IOState::InProgress);
+        assert_eq!(write_id1, JobId(1000));
+        assert!(ds.get_deps(write_id1).is_empty());
+        assert_eq!(ds.job_state(write_id1, 0), IOState::InProgress);
+        assert_eq!(ds.job_state(write_id1, 1), IOState::Skipped);
+        assert_eq!(ds.job_state(write_id1, 2), IOState::InProgress);
 
-        assert_eq!(jobs[1].ds_id, JobId(1005));
-        assert_eq!(jobs[1].work.deps(), &[JobId(1004)]);
-        assert_eq!(jobs[1].state[ClientId::new(0)], IOState::InProgress);
-        assert_eq!(jobs[1].state[ClientId::new(1)], IOState::InProgress);
-        assert_eq!(jobs[1].state[ClientId::new(2)], IOState::InProgress);
+        assert_eq!(write_id2, JobId(1005));
+        assert_eq!(ds.get_deps(write_id2), &[JobId(1004)]);
+        assert_eq!(ds.job_state(write_id2, 0), IOState::InProgress);
+        assert_eq!(ds.job_state(write_id2, 1), IOState::InProgress);
+        assert_eq!(ds.job_state(write_id2, 2), IOState::InProgress);
 
-        assert_eq!(jobs[2].ds_id, JobId(1010));
-        assert_eq!(jobs[2].work.deps(), &[JobId(1004), JobId(1009)]);
-        assert_eq!(jobs[2].state[ClientId::new(0)], IOState::InProgress);
-        assert_eq!(jobs[2].state[ClientId::new(1)], IOState::InProgress);
-        assert_eq!(jobs[2].state[ClientId::new(2)], IOState::InProgress);
+        assert_eq!(read_id, JobId(1010));
+        assert_eq!(ds.get_deps(read_id), &[JobId(1004), JobId(1009)]);
+        assert_eq!(ds.job_state(read_id, 0), IOState::InProgress);
+        assert_eq!(ds.job_state(read_id, 1), IOState::InProgress);
+        assert_eq!(ds.job_state(read_id, 2), IOState::InProgress);
     }
 }

@@ -930,8 +930,6 @@ pub(crate) enum Validation {
  */
 #[derive(Debug)]
 struct DownstairsIO {
-    ds_id: JobId, // This MUST match our hashmap index
-
     guest_id: GuestWorkId, // The hashmap ID from the parent guest work.
     work: IOop,
 
@@ -1005,7 +1003,7 @@ impl DownstairsIO {
     /*
      * Return a summary of this job in the form of the WorkSummary struct.
      */
-    pub fn io_summarize(&self) -> WorkSummary {
+    pub fn io_summarize(&self, id: JobId) -> WorkSummary {
         let (job_type, num_blocks, deps) = self.work.ioop_summary();
 
         let mut state = Vec::with_capacity(3);
@@ -1023,7 +1021,7 @@ impl DownstairsIO {
         }
 
         WorkSummary {
-            id: self.ds_id,
+            id,
             replay: self.replay,
             job_type,
             num_blocks,
@@ -1190,7 +1188,7 @@ enum IOop {
 
 impl IOop {
     #[cfg(test)]
-    fn deps(&self) -> &Vec<JobId> {
+    fn deps(&self) -> &[JobId] {
         match &self {
             IOop::Write { dependencies, .. }
             | IOop::Flush { dependencies, .. }
