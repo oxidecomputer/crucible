@@ -339,6 +339,21 @@ impl Downstairs {
         ds
     }
 
+    /// Helper function to set all 3x clients as active, legally
+    #[cfg(test)]
+    pub fn force_active(&mut self) {
+        for cid in ClientId::iter() {
+            for state in
+                [DsState::WaitActive, DsState::WaitQuorum, DsState::Active]
+            {
+                self.clients[cid].checked_state_transition(
+                    &UpstairsState::Initializing,
+                    state,
+                );
+            }
+        }
+    }
+
     /// Choose which `DownstairsAction` to apply
     ///
     /// This function is called from within a top-level `select!`, so not only
@@ -4399,27 +4414,10 @@ pub(crate) mod test {
         }
     }
 
-    /// Helper function to set all 3x clients as active, legally
-    pub(crate) fn set_all_active(ds: &mut Downstairs) {
-        for i in ClientId::iter() {
-            ds.clients[i].checked_state_transition(
-                &UpstairsState::Initializing,
-                DsState::WaitActive,
-            );
-            ds.clients[i].checked_state_transition(
-                &UpstairsState::Initializing,
-                DsState::WaitQuorum,
-            );
-            ds.clients[i].checked_state_transition(
-                &UpstairsState::Initializing,
-                DsState::Active,
-            );
-        }
-    }
-
     #[test]
     fn work_flush_three_ok() {
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         let next_id = ds.create_and_enqueue_generic_flush(None);
 
@@ -4461,6 +4459,7 @@ pub(crate) mod test {
     #[test]
     fn work_flush_snapshot_needs_three() {
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         let next_id =
             ds.create_and_enqueue_generic_flush(Some(SnapshotDetails {
@@ -4508,7 +4507,7 @@ pub(crate) mod test {
     #[test]
     fn work_flush_one_error_then_ok() {
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
 
         let next_id = ds.create_and_enqueue_generic_flush(None);
 
@@ -4554,7 +4553,7 @@ pub(crate) mod test {
     #[test]
     fn work_flush_two_errors_equals_fail() {
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
 
         let next_id = ds.create_and_enqueue_generic_flush(None);
 
@@ -4596,6 +4595,7 @@ pub(crate) mod test {
     #[test]
     fn work_read_one_ok() {
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         let next_id = ds.create_and_enqueue_generic_read_eob();
 
@@ -4642,6 +4642,7 @@ pub(crate) mod test {
     #[test]
     fn work_read_one_bad_two_ok() {
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         let next_id = ds.create_and_enqueue_generic_read_eob();
 
@@ -4687,6 +4688,7 @@ pub(crate) mod test {
     #[test]
     fn work_read_two_bad_one_ok() {
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         let next_id = ds.create_and_enqueue_generic_read_eob();
 
@@ -4732,6 +4734,7 @@ pub(crate) mod test {
     #[test]
     fn work_read_three_bad() {
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         let next_id = ds.create_and_enqueue_generic_read_eob();
 
@@ -4775,6 +4778,7 @@ pub(crate) mod test {
     fn work_read_two_ok_one_bad() {
         // Test that missing data on the 2nd read response will panic
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         let next_id = ds.create_and_enqueue_generic_read_eob();
 
@@ -4829,7 +4833,7 @@ pub(crate) mod test {
     // that takes write_unwritten as an arg.
     fn work_errors_are_counted(is_write_unwritten: bool) {
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
 
         // send a write, and clients 0 and 1 will return errors
 
@@ -4898,6 +4902,7 @@ pub(crate) mod test {
         // the 3rd IO and the flush, which then allows the work to be
         // completed.
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         // Create two writes and send them to the downstairs
         let id1 = ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
@@ -5018,6 +5023,7 @@ pub(crate) mod test {
     #[test]
     fn work_assert_reads_do_not_cause_failure_state_transition() {
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         // send a read, and clients 0 and 1 will return errors
 
@@ -5112,6 +5118,7 @@ pub(crate) mod test {
         // Verify that a read remains on the active queue until a flush
         // comes through and clears it.
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         // Build our read, put it into the work queue
         let next_id = ds.create_and_enqueue_generic_read_eob();
@@ -5201,6 +5208,7 @@ pub(crate) mod test {
         // Verify that a read not ACKED remains on the active queue even
         // if a flush comes through after it.
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         // Build our read, put it into the work queue
         let next_id = ds.create_and_enqueue_generic_read_eob();
@@ -5264,6 +5272,7 @@ pub(crate) mod test {
         // Verify that a write or write_unwritten remains on the active
         // queue until a flush comes through and clears it.
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         // Build our write IO.
         let next_id =
@@ -5351,6 +5360,7 @@ pub(crate) mod test {
         // 3rd IO and the flush, which then allows the work to be completed.
         // Also, we mix up which client finishes which job first.
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         // Build two writes, put them on the work queue.
         let id1 = ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
@@ -5467,6 +5477,7 @@ pub(crate) mod test {
     fn work_completed_read_replay() {
         // Verify that a single read will replay
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         // Build our read IO and submit it to the work queue.
         let next_id = ds.create_and_enqueue_generic_read_eob();
@@ -5505,6 +5516,7 @@ pub(crate) mod test {
         // Verify that a read will replay and acks are handled correctly if
         // there is more than one done read.
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         // Build a read and put it on the work queue.
         let next_id = ds.create_and_enqueue_generic_read_eob();
@@ -5564,6 +5576,7 @@ pub(crate) mod test {
         // Verify that a read we Acked will still replay if that downstairs
         // goes away. Make sure everything still finishes ok.
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         // Create the read and submit it to the three Downstairs queues
         let next_id = ds.create_and_enqueue_generic_read_eob();
@@ -5635,6 +5648,7 @@ pub(crate) mod test {
         // can just change the "data" we fill the response with like we
         // received different data than the original read.
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         // Create the read and submit to the three Downstairs
         let next_id = ds.create_and_enqueue_generic_read_eob();
@@ -5709,6 +5723,7 @@ pub(crate) mod test {
         // can just change the "data" we fill the response with like we
         // received different data than the original read.
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         // Create the read and submit it to the three downstairs
         let next_id = ds.create_and_enqueue_generic_read_eob();
@@ -5791,6 +5806,7 @@ pub(crate) mod test {
         // write_unwritten will change state from AckReady back to NotAcked.
         // If we then redo the work, it should go back to AckReady.
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         // Create the write and put it on the work queue.
         let id1 = ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
@@ -5853,6 +5869,7 @@ pub(crate) mod test {
         // Verify that a replay when we have acked a write or write_unwritten
         // will not undo that ack.
         let mut ds = Downstairs::test_default();
+        ds.force_active();
 
         // Create the write and put it on the work queue.
         let id1 = ds.create_and_enqueue_generic_write_eob(is_write_unwritten);
@@ -6528,7 +6545,7 @@ pub(crate) mod test {
         // A single downstairs skip won't prevent us from acking back OK to the
         // guest for write operations
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
 
         // Mark client 1 as faulted
         ds.clients[ClientId::new(1)]
@@ -6582,7 +6599,7 @@ pub(crate) mod test {
         // A single downstairs skip won't prevent us from acking back OK to the
         // guest for write operations
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
 
         // Mark client 1 as faulted
         ds.clients[ClientId::new(1)]
@@ -6626,7 +6643,7 @@ pub(crate) mod test {
         // up_ds_listen test, a fail plus a skip on a write or write_unwritten
         // will result in an error back to the guest.
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
         ds.clients[ClientId::new(2)]
             .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
 
@@ -6668,7 +6685,7 @@ pub(crate) mod test {
         // up_ds_listen test, a single downstairs skip won't prevent us
         // from acking back OK for a flush to the guest.
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
         ds.clients[ClientId::new(1)]
             .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
 
@@ -6712,7 +6729,7 @@ pub(crate) mod test {
         // up_ds_listen test, a double skip on a flush will result in an error
         // back to the guest.
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
         ds.clients[ClientId::new(1)]
             .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
         ds.clients[ClientId::new(2)]
@@ -6748,7 +6765,7 @@ pub(crate) mod test {
         // up_ds_listen test, a fail plus a skip on a flush will result in an
         // error back to the guest.
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
         ds.clients[ClientId::new(0)]
             .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
 
@@ -6797,7 +6814,7 @@ pub(crate) mod test {
         // This test also makes sure proper mutex behavior is used in
         // process_ds_operation.
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
 
         let next_id = ds.create_and_enqueue_generic_write_eob(false);
 
@@ -6856,7 +6873,7 @@ pub(crate) mod test {
         // Verify after acking IOs, we can then send a flush and
         // clear the jobs (some now failed/skipped) from the work queue.
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
 
         // Create the write that fails on one DS
         let next_id = ds.create_and_enqueue_generic_write_eob(false);
@@ -6995,7 +7012,7 @@ pub(crate) mod test {
     fn read_after_two_write_fail_is_alright() {
         // Verify that if two writes fail, a read can still be acked.
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
 
         // Create the write that fails on two DS
         let next_id = ds.create_and_enqueue_generic_write_eob(false);
@@ -7078,7 +7095,7 @@ pub(crate) mod test {
         // write can still be acked.
         // Then, send a flush and verify the work queue is cleared.
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
 
         // Create the write that fails on one DS
         let next_id = ds.create_and_enqueue_generic_write_eob(false);
@@ -7222,7 +7239,7 @@ pub(crate) mod test {
         // IOState::Skipped.  This also verifies that the list of skipped jobs
         // for each downstairs has the inflight job added to it.
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
 
         // Create the write that fails on one DS
         let write_id = ds.create_and_enqueue_generic_write_eob(false);
@@ -7294,7 +7311,7 @@ pub(crate) mod test {
         // work that was IOState::InProgress for that downstairs will change
         // to IOState::Skipped.
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
 
         // Create the write that fails on one DS
         let write_id = ds.create_and_enqueue_generic_write_eob(false);
@@ -7373,7 +7390,7 @@ pub(crate) mod test {
         // Make sure that older jobs are still okay, and failed job was
         // skipped.
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
         let write_one = ds.create_and_enqueue_generic_write_eob(false);
         assert!(ds.ds_active.get(&write_one).unwrap().acked);
 
@@ -7481,7 +7498,7 @@ pub(crate) mod test {
         // and jobs not yet started on the faulted downstairs have
         // transitioned to skipped.
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
 
         // Create a write
         let write_one = ds.create_and_enqueue_generic_write_eob(false);
@@ -7600,7 +7617,7 @@ pub(crate) mod test {
         // Verify work can progress through the work queue even when one
         // downstairs has failed. One write, one read, and one flush.
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
         ds.clients[ClientId::new(0)]
             .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
 
@@ -7724,7 +7741,7 @@ pub(crate) mod test {
         // Verify we can still read (and clear the work queue) with only
         // one downstairs.
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
         ds.clients[ClientId::new(0)]
             .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
         ds.clients[ClientId::new(2)]
@@ -7830,7 +7847,7 @@ pub(crate) mod test {
         // When three downstairs are faulted, verify that enqueue will move
         // work through the queue for us.
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
         for cid in ClientId::iter() {
             ds.clients[cid].checked_state_transition(
                 &UpstairsState::Active,
@@ -7873,7 +7890,7 @@ pub(crate) mod test {
         // When three downstairs are faulted, verify that enqueue will move
         // work through the queue for us.
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
         for cid in ClientId::iter() {
             ds.clients[cid].checked_state_transition(
                 &UpstairsState::Active,
@@ -7912,7 +7929,7 @@ pub(crate) mod test {
         // When three downstairs are faulted, verify that enqueue will move
         // work through the queue for us.
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
         for cid in ClientId::iter() {
             ds.clients[cid].checked_state_transition(
                 &UpstairsState::Active,
@@ -7960,7 +7977,7 @@ pub(crate) mod test {
         // work through the queue for us. Several jobs are submitted and
         // a final flush should clean them out.
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
         for cid in ClientId::iter() {
             ds.clients[cid].checked_state_transition(
                 &UpstairsState::Active,
@@ -8024,7 +8041,7 @@ pub(crate) mod test {
         // stay on the ds_skipped_jobs list.
 
         let mut ds = Downstairs::test_default();
-        set_all_active(&mut ds);
+        ds.force_active();
         for cid in ClientId::iter() {
             ds.clients[cid].checked_state_transition(
                 &UpstairsState::Active,

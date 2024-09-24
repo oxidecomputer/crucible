@@ -916,11 +916,28 @@ impl DownstairsClient {
                 io.send_io_live_repair(last_repair_extent)
             }
 
-            // Otherwise, we always send jobs!
+            // Send jobs if the client is active or offline
             //
-            // XXX should we be pickier here? e.g. if we're somehow in
-            // `DsState::BadVersion`, we probably don't want to send jobs.
-            _ => true,
+            // Sending jobs to an offline client seems counter-intuitive, but it
+            // means that those jobs are marked as InProgress, so they aren't
+            // cleared out by a subsequent flush (so we'll be able to bring that
+            // client back into compliance by replaying jobs).
+            DsState::Active | DsState::Offline => true,
+
+            DsState::New
+            | DsState::BadVersion
+            | DsState::WaitActive
+            | DsState::WaitQuorum
+            | DsState::BadRegion
+            | DsState::Disconnected
+            | DsState::Reconcile
+            | DsState::FailedReconcile
+            | DsState::Deactivated
+            | DsState::Disabled
+            | DsState::Migrating => panic!(
+                "enqueue should not be called from state {:?}",
+                self.state
+            ),
         };
         // Update our set of skipped jobs if we're not sending this one
         if !should_send {
