@@ -4276,4 +4276,41 @@ pub(crate) mod test {
         assert_eq!(up.deferred_ops.len(), 2);
         assert_eq!(up.deferred_msgs.len(), 0);
     }
+
+    /// What happens when a guest submits a read after three downstairs have
+    /// faulted?
+    #[tokio::test]
+    async fn three_faulted_downstairs_read() {
+        let mut up = make_upstairs();
+        up.force_active().unwrap();
+        set_all_active(&mut up.downstairs);
+
+        up.downstairs.clients[ClientId::new(0)]
+            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+        up.downstairs.clients[ClientId::new(1)]
+            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+        up.downstairs.clients[ClientId::new(2)]
+            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+
+        let data = Buffer::new(1, 512);
+        let offset = BlockIndex(7);
+        let (res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+
+        let reply = res.wait_raw().await.unwrap();
+        match reply {
+            // Alan says "If none of the reads returned, then the guest had
+            // better get an error."
+            Err((_, _)) => {
+                // ok!
+            }
+
+            Ok(_) => {
+                // Alan says "If we return OK, then what data are we giving the
+                // guest?"
+                eprintln!("{reply:?}");
+                panic!("returned Ok!");
+            }
+        }
+    }
 }
