@@ -533,8 +533,8 @@ impl Downstairs {
             self.abort_reconciliation(up_state);
         }
 
-        // If this client is coming back from being offline, then replay all of
-        // its jobs.
+        // If this client is coming back from being offline, then mark that its
+        // jobs must be replayed when it completes negotiation.
         if self.clients[client_id].state() == DsState::Offline {
             self.clients[client_id].needs_replay();
         }
@@ -671,13 +671,13 @@ impl Downstairs {
             to_send.push(*ds_id);
         });
         let count = to_send.len();
+        info!(
+            self.log,
+            "[{client_id}] Replayed {count} jobs since flush: {lf}"
+        );
         for ds_id in to_send {
             self.send(ds_id, client_id);
         }
-        info!(
-            self.log,
-            "[{client_id}] Marked {count} jobs for replay since flush: {lf}"
-        );
     }
 
     /// Compare downstairs region metadata and based on the results:
@@ -1358,9 +1358,9 @@ impl Downstairs {
 
     /// Begins live-repair for the given extent
     ///
-    /// Claims initial IDs and submits submits initial jobs.  If `extent_count`
-    /// is set, then we also set `self.repair` here; otherwise, we update
-    /// the current state (`self.repair.as_mut().unwrap().state`).
+    /// Claims initial IDs and submits initial jobs.  If `extent_count` is set,
+    /// then we also set `self.repair` here; otherwise, we update the current
+    /// state (`self.repair.as_mut().unwrap().state`).
     ///
     /// If `aborting` is true, then all of the submitted jobs are no-ops.
     ///
@@ -7339,7 +7339,7 @@ pub(crate) mod test {
         // Now, add a read.
         let read_id = ds.create_and_enqueue_generic_read_eob();
 
-        // Verify the read is all new still
+        // Verify the read is all InProgress
         let job = ds.ds_active.get(&read_id).unwrap();
 
         assert_eq!(job.state[ClientId::new(0)], IOState::InProgress);
