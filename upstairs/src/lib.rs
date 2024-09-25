@@ -63,8 +63,8 @@ pub use mend::{DownstairsMend, ExtentFix, RegionMetadata};
 pub use pseudo_file::CruciblePseudoFile;
 
 pub(crate) mod guest;
+use guest::GuestIoHandle;
 pub use guest::{Guest, WQCounts};
-use guest::{GuestIoHandle, GuestWorkId};
 
 mod stats;
 
@@ -253,10 +253,8 @@ pub type CrucibleBlockIOFuture<'a> = Pin<
 /// IO request and has started work on it.
 ///
 /// gw__*__start: This is when the upstairs has taken work from the
-/// `guest` structure and created a new `gw_id` used to track this IO
-/// through the system.  At the point of this probe, we have already
-/// taken two locks, so it's not the very beginning of an IO, but it is
-/// as close as we get after the `gw_id` is created.
+/// `guest` structure and created a new `ds_id` used to track this IO
+/// through the system.  This should be as early as possible.
 ///
 /// up__to__ds_*_start: (Upstairs__to__Downstairs) At this point we have
 /// created the structures to track this IO through the Upstairs and added
@@ -930,7 +928,6 @@ pub(crate) enum Validation {
  */
 #[derive(Debug)]
 struct DownstairsIO {
-    guest_id: GuestWorkId, // The hashmap ID from the parent guest work.
     work: IOop,
 
     /// Map of work status, tracked on a per-client basis

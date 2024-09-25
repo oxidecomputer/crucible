@@ -1275,18 +1275,16 @@ impl Upstairs {
          * ID and the next_id are connected here, in that all future writes
          * should be flushed at the next flush ID.
          */
-        let (gw_id, _) = self.guest.guest_work.submit_job(
-            |gw_id| {
-                cdt::gw__flush__start!(|| (gw_id.0));
-                if snapshot_details.is_some() {
-                    info!(self.log, "flush with snap requested");
-                }
-                self.downstairs.submit_flush(gw_id, snapshot_details)
-            },
-            res.map(GuestBlockRes::Other),
-        );
 
-        cdt::up__to__ds__flush__start!(|| (gw_id.0));
+        if snapshot_details.is_some() {
+            info!(self.log, "flush with snap requested");
+        }
+        let ds_id = self.downstairs.submit_flush(snapshot_details);
+        self.guest
+            .guest_work
+            .submit_job(ds_id, res.map(GuestBlockRes::Other));
+
+        cdt::up__to__ds__flush__start!(|| (ds_id.0));
     }
 
     /// Submits a read job to the downstairs
@@ -1363,15 +1361,12 @@ impl Upstairs {
          * Grab this ID after extent_from_offset: in case of Err we don't
          * want to create a gap in the IDs.
          */
-        let (gw_id, _) = self.guest.guest_work.submit_job(
-            |gw_id| {
-                cdt::gw__read__start!(|| (gw_id.0));
-                self.downstairs.submit_read(gw_id, impacted_blocks)
-            },
-            res.map(|res| GuestBlockRes::Read(data, res)),
-        );
+        let ds_id = self.downstairs.submit_read(impacted_blocks);
+        self.guest
+            .guest_work
+            .submit_job(ds_id, res.map(|res| GuestBlockRes::Read(data, res)));
 
-        cdt::up__to__ds__read__start!(|| (gw_id.0));
+        cdt::up__to__ds__read__start!(|| (ds_id.0));
     }
 
     /// Submits a dummy write (without an associated `BlockOp`)
@@ -1488,28 +1483,20 @@ impl Upstairs {
          * Grab this ID after extent_from_offset: in case of Err we don't
          * want to create a gap in the IDs.
          */
-        let (gw_id, _) = self.guest.guest_work.submit_job(
-            |gw_id| {
-                if write.is_write_unwritten {
-                    cdt::gw__write__unwritten__start!(|| (gw_id.0));
-                } else {
-                    cdt::gw__write__start!(|| (gw_id.0));
-                }
-                self.downstairs.submit_write(
-                    gw_id,
-                    write.impacted_blocks,
-                    write.data,
-                    write.is_write_unwritten,
-                    write.guard,
-                )
-            },
-            Some(GuestBlockRes::Acked),
+        let ds_id = self.downstairs.submit_write(
+            write.impacted_blocks,
+            write.data,
+            write.is_write_unwritten,
+            write.guard,
         );
+        self.guest
+            .guest_work
+            .submit_job(ds_id, Some(GuestBlockRes::Acked));
 
         if write.is_write_unwritten {
-            cdt::up__to__ds__write__unwritten__start!(|| (gw_id.0));
+            cdt::up__to__ds__write__unwritten__start!(|| (ds_id.0));
         } else {
-            cdt::up__to__ds__write__start!(|| (gw_id.0));
+            cdt::up__to__ds__write__start!(|| (ds_id.0));
         }
     }
 

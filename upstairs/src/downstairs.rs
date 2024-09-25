@@ -16,10 +16,9 @@ use crate::{
     upstairs::{UpstairsConfig, UpstairsState},
     AckStatus, ActiveJobs, AllocRingBuffer, ClientData, ClientIOStateCount,
     ClientId, ClientMap, CrucibleError, DownstairsIO, DownstairsMend, DsState,
-    ExtentFix, ExtentRepairIDs, GuestWorkId, IOState, IOStateCount, IOop,
-    ImpactedBlocks, JobId, Message, RawReadResponse, RawWrite, ReconcileIO,
-    ReconciliationId, RegionDefinition, ReplaceResult, SnapshotDetails,
-    Validation, WorkSummary,
+    ExtentFix, ExtentRepairIDs, IOState, IOStateCount, IOop, ImpactedBlocks,
+    JobId, Message, RawReadResponse, RawWrite, ReconcileIO, ReconciliationId,
+    RegionDefinition, ReplaceResult, SnapshotDetails, Validation, WorkSummary,
 };
 use crucible_common::{
     impacted_blocks::ImpactedAddr, BlockIndex, BlockOffset, ExtentId,
@@ -147,16 +146,11 @@ pub(crate) enum LiveRepairState {
         repair_id: JobId,
         noop_id: JobId,
         reopen_id: JobId,
-
-        gw_repair_id: GuestWorkId,
-        gw_noop_id: GuestWorkId,
     },
     Repairing {
         repair_id: JobId,
         noop_id: JobId,
         reopen_id: JobId,
-
-        gw_noop_id: GuestWorkId,
     },
     Noop {
         noop_id: JobId,
@@ -422,56 +416,54 @@ impl Downstairs {
 
         let done = self.ds_active.get_mut(&ds_id).unwrap();
         assert!(!done.acked);
-        let gw_id = done.guest_id;
 
         let data = done.data.take();
 
         done.acked = true;
         let r = done.result();
-        Self::cdt_gw_work_done(done, up_stats);
-        debug!(self.log, "[A] ack job {}:{}", ds_id, gw_id);
+        Self::cdt_gw_work_done(ds_id, done, up_stats);
+        debug!(self.log, "[A] ack job {}", ds_id);
 
-        gw.gw_ds_complete(gw_id, ds_id, data, r);
+        gw.gw_ds_complete(ds_id, data, r);
 
         self.retire_check(ds_id);
     }
 
     /// Match on the `IOop` type, update stats, and fire DTrace probes
-    fn cdt_gw_work_done(job: &DownstairsIO, stats: &UpStatOuter) {
-        let gw_id = job.guest_id;
+    fn cdt_gw_work_done(ds_id: JobId, job: &DownstairsIO, stats: &UpStatOuter) {
         let io_size = job.io_size();
         match &job.work {
             IOop::Read { .. } => {
-                cdt::gw__read__done!(|| (gw_id.0));
+                cdt::gw__read__done!(|| (ds_id.0));
                 stats.add_read(io_size as i64);
             }
             IOop::Write { .. } => {
-                cdt::gw__write__done!(|| (gw_id.0));
+                cdt::gw__write__done!(|| (ds_id.0));
                 stats.add_write(io_size as i64);
             }
             IOop::WriteUnwritten { .. } => {
-                cdt::gw__write__unwritten__done!(|| (gw_id.0));
+                cdt::gw__write__unwritten__done!(|| (ds_id.0));
                 // We don't include WriteUnwritten operation in the
                 // metrics for this guest.
             }
             IOop::Flush { .. } => {
-                cdt::gw__flush__done!(|| (gw_id.0));
+                cdt::gw__flush__done!(|| (ds_id.0));
                 stats.add_flush();
             }
             IOop::ExtentFlushClose { extent, .. } => {
-                cdt::gw__close__done!(|| (gw_id.0, extent.0));
+                cdt::gw__close__done!(|| (ds_id.0, extent.0));
                 stats.add_flush_close();
             }
             IOop::ExtentLiveRepair { extent, .. } => {
-                cdt::gw__repair__done!(|| (gw_id.0, extent.0));
+                cdt::gw__repair__done!(|| (ds_id.0, extent.0));
                 stats.add_extent_repair();
             }
             IOop::ExtentLiveNoOp { .. } => {
-                cdt::gw__noop__done!(|| (gw_id.0));
+                cdt::gw__noop__done!(|| (ds_id.0));
                 stats.add_extent_noop();
             }
             IOop::ExtentLiveReopen { extent, .. } => {
-                cdt::gw__reopen__done!(|| (gw_id.0, extent.0));
+                cdt::gw__reopen__done!(|| (ds_id.0, extent.0));
                 stats.add_extent_reopen();
             }
         }
@@ -1039,30 +1031,23 @@ impl Downstairs {
                 repair_id,
                 noop_id,
                 reopen_id,
-
-                gw_repair_id,
-                gw_noop_id,
             } => {
                 info!(
                     self.log,
-                    "RE:{} Wait for result from repair command {}:{}",
+                    "RE:{} Wait for result from repair command {}",
                     repair.active_extent,
                     repair_id,
-                    gw_repair_id
                 );
                 repair.state = LiveRepairState::Repairing {
                     repair_id,
                     noop_id,
                     reopen_id,
-
-                    gw_noop_id,
                 };
                 if repair.aborting_repair {
                     self.create_and_enqueue_noop_io(
                         gw,
                         vec![close_id],
                         repair_id,
-                        gw_repair_id,
                     );
                 } else {
                     let repair_downstairs = repair.repair_downstairs.clone();
@@ -1073,7 +1058,6 @@ impl Downstairs {
                         active_extent,
                         vec![close_id],
                         repair_id,
-                        gw_repair_id,
                         source_downstairs,
                         &repair_downstairs,
                     );
@@ -1083,22 +1067,15 @@ impl Downstairs {
                 repair_id,
                 noop_id,
                 reopen_id,
-                gw_noop_id,
             } => {
                 info!(
                     self.log,
-                    "RE:{} Wait for result from NoOp command {}:{}",
+                    "RE:{} Wait for result from NoOp command {}",
                     repair.active_extent,
                     noop_id,
-                    gw_noop_id
                 );
                 repair.state = LiveRepairState::Noop { noop_id, reopen_id };
-                self.create_and_enqueue_noop_io(
-                    gw,
-                    vec![repair_id],
-                    noop_id,
-                    gw_noop_id,
-                );
+                self.create_and_enqueue_noop_io(gw, vec![repair_id], noop_id);
             }
             LiveRepairState::Noop {
                 noop_id: _,
@@ -1129,15 +1106,11 @@ impl Downstairs {
                 // reassignment is handled below.
                 if finished || (repair.aborting_repair && !have_reserved_jobs) {
                     // We're done, submit a final flush!
-                    let (gw_id, flush_id) = gw.submit_job(
-                        |gw_id| {
-                            cdt::gw__flush__start!(|| (gw_id.0));
-                            self.submit_flush(gw_id, None)
-                        },
-                        None,
-                    );
+                    let flush_id = self.submit_flush(None);
+                    gw.submit_job(flush_id, None);
+
                     info!(self.log, "LiveRepair final flush submitted");
-                    cdt::up__to__ds__flush__start!(|| (gw_id.0));
+                    cdt::up__to__ds__flush__start!(|| (flush_id.0));
 
                     // The borrow was dropped earlier, so reborrow `self.repair`
                     self.repair.as_mut().unwrap().state =
@@ -1205,13 +1178,12 @@ impl Downstairs {
         gw: &mut GuestWork,
         deps: Vec<JobId>,
         noop_id: JobId,
-        gw_noop_id: GuestWorkId,
     ) {
         let nio = IOop::ExtentLiveNoOp { dependencies: deps };
 
-        cdt::gw__noop__start!(|| (gw_noop_id.0));
-        gw.insert(gw_noop_id, noop_id);
-        self.enqueue(noop_id, gw_noop_id, nio, ClientMap::new());
+        cdt::gw__noop__start!(|| (noop_id.0));
+        gw.insert(noop_id);
+        self.enqueue(noop_id, nio, ClientMap::new())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1221,16 +1193,15 @@ impl Downstairs {
         eid: ExtentId,
         deps: Vec<JobId>,
         repair_id: JobId,
-        gw_repair_id: GuestWorkId,
         source: ClientId,
         repair: &[ClientId],
     ) {
         let repair_io = self.repair_or_noop(eid, deps, source, repair);
 
-        cdt::gw__repair__start!(|| (gw_repair_id.0, eid.0));
+        cdt::gw__repair__start!(|| (repair_id.0, eid.0));
 
-        gw.insert(gw_repair_id, repair_id);
-        self.enqueue(repair_id, gw_repair_id, repair_io, ClientMap::new());
+        gw.insert(repair_id);
+        self.enqueue(repair_id, repair_io, ClientMap::new())
     }
 
     fn repair_or_noop(
@@ -1340,11 +1311,6 @@ impl Downstairs {
             }
         }
 
-        let gw_close_id = gw.next_gw_id();
-        let gw_repair_id = gw.next_gw_id();
-        let gw_noop_id = gw.next_gw_id();
-        let gw_reopen_id = gw.next_gw_id();
-
         // The work IDs for the downstairs side of things.
         let (extent_repair_ids, close_deps) = self.get_repair_ids(extent);
         let close_id = extent_repair_ids.close_id;
@@ -1375,9 +1341,6 @@ impl Downstairs {
             repair_id,
             reopen_id,
             noop_id,
-
-            gw_noop_id,
-            gw_repair_id,
         };
         if let Some(extent_count) = extent_count {
             self.repair = Some(LiveRepairData {
@@ -1396,36 +1359,24 @@ impl Downstairs {
         }
 
         if aborting {
-            self.create_and_enqueue_noop_io(
-                gw,
-                vec![noop_id],
-                reopen_id,
-                gw_reopen_id,
-            )
+            self.create_and_enqueue_noop_io(gw, vec![noop_id], reopen_id)
         } else {
             self.create_and_enqueue_reopen_io(
                 gw,
                 extent,
                 vec![noop_id],
                 reopen_id,
-                gw_reopen_id,
-            )
+            );
         };
 
         if aborting {
-            self.create_and_enqueue_noop_io(
-                gw,
-                close_deps,
-                close_id,
-                gw_close_id,
-            )
+            self.create_and_enqueue_noop_io(gw, close_deps, close_id)
         } else {
             self.create_and_enqueue_close_io(
                 gw,
                 extent,
                 close_deps,
                 close_id,
-                gw_close_id,
                 repair_downstairs,
             )
         };
@@ -1439,17 +1390,16 @@ impl Downstairs {
         eid: ExtentId,
         deps: Vec<JobId>,
         reopen_id: JobId,
-        gw_reopen_id: GuestWorkId,
     ) {
         let reopen_io = IOop::ExtentLiveReopen {
             dependencies: deps,
             extent: eid,
         };
 
-        cdt::gw__reopen__start!(|| (gw_reopen_id.0, eid.0));
+        cdt::gw__reopen__start!(|| (reopen_id.0, eid.0));
 
-        gw.insert(gw_reopen_id, reopen_id);
-        self.enqueue(reopen_id, gw_reopen_id, reopen_io, ClientMap::new());
+        gw.insert(reopen_id);
+        self.enqueue(reopen_id, reopen_io, ClientMap::new())
     }
 
     #[cfg(test)]
@@ -1464,7 +1414,6 @@ impl Downstairs {
                 block: BlockOffset(7),
             },
         );
-        let gw_id = GuestWorkId(10);
 
         let ds_id = self.next_id();
         let dependencies = self.ds_active.deps_for_read(ds_id, iblocks);
@@ -1478,7 +1427,7 @@ impl Downstairs {
             block_size: 512,
         };
 
-        self.enqueue(ds_id, gw_id, aread, ClientMap::new());
+        self.enqueue(ds_id, aread, ClientMap::new());
         ds_id
     }
 
@@ -1507,7 +1456,6 @@ impl Downstairs {
         );
         self.create_and_enqueue_write_eob(
             iblocks,
-            GuestWorkId(10),
             request,
             is_write_unwritten,
             ClientData::from_fn(|_| BackpressureGuard::dummy()),
@@ -1517,12 +1465,17 @@ impl Downstairs {
     fn create_and_enqueue_write_eob(
         &mut self,
         blocks: ImpactedBlocks,
-        gw_id: GuestWorkId,
         write: RawWrite,
         is_write_unwritten: bool,
         bp_guard: ClientData<BackpressureGuard>,
     ) -> JobId {
         let ds_id = self.next_id();
+        if is_write_unwritten {
+            cdt::gw__write__unwritten__start!(|| (ds_id.0));
+        } else {
+            cdt::gw__write__start!(|| (ds_id.0));
+        }
+
         let dependencies = self.ds_active.deps_for_write(ds_id, blocks);
         cdt::gw__write__deps!(|| (
             self.ds_active.len() as u64,
@@ -1553,7 +1506,7 @@ impl Downstairs {
             }
         };
 
-        self.enqueue(ds_id, gw_id, awrite, bp_guard.into());
+        self.enqueue(ds_id, awrite, bp_guard.into());
         ds_id
     }
 
@@ -1578,14 +1531,13 @@ impl Downstairs {
         eid: ExtentId,
         deps: Vec<JobId>,
         close_id: JobId,
-        gw_close_id: GuestWorkId,
         repair: &[ClientId],
     ) {
         let close_io = self.create_close_io(eid, deps, repair.to_vec());
 
-        cdt::gw__close__start!(|| (gw_close_id.0, eid.0));
-        gw.insert(gw_close_id, close_id);
-        self.enqueue(close_id, gw_close_id, close_io, ClientMap::new());
+        cdt::gw__close__start!(|| (close_id.0, eid.0));
+        gw.insert(close_id);
+        self.enqueue(close_id, close_io, ClientMap::new())
     }
 
     /// Get the repair IDs and dependencies for this extent.
@@ -1934,10 +1886,11 @@ impl Downstairs {
 
     pub(crate) fn submit_flush(
         &mut self,
-        gw_id: GuestWorkId,
         snapshot_details: Option<SnapshotDetails>,
     ) -> JobId {
         let next_id = self.next_id();
+        cdt::gw__flush__start!(|| (next_id.0));
+
         let flush_id = self.next_flush_id();
         let dep = self.ds_active.deps_for_flush(next_id);
         debug!(self.log, "IO Flush {} has deps {:?}", next_id, dep);
@@ -1962,17 +1915,8 @@ impl Downstairs {
             extent_limit: extent_under_repair,
         };
 
-        self.enqueue(next_id, gw_id, flush, ClientMap::new());
+        self.enqueue(next_id, flush, ClientMap::new());
         next_id
-    }
-
-    /// Submits a generic flush for use in testing
-    #[cfg(test)]
-    fn create_and_enqueue_generic_flush(
-        &mut self,
-        snap: Option<SnapshotDetails>,
-    ) -> JobId {
-        self.submit_flush(GuestWorkId(0), snap)
     }
 
     /// Reserves repair IDs if impacted blocks overlap our extent under repair
@@ -2045,20 +1989,16 @@ impl Downstairs {
     }
 
     /// Create and submit a read job to the three clients
-    pub(crate) fn submit_read(
-        &mut self,
-        guest_id: GuestWorkId,
-        blocks: ImpactedBlocks,
-    ) -> JobId {
+    pub(crate) fn submit_read(&mut self, blocks: ImpactedBlocks) -> JobId {
         // If there is a live-repair in progress that intersects with this read,
-        // then reserve job IDs for those jobs.
+        // then reserve job IDs for those jobs.  We must do this before
+        // reserving the job ID for the read, to keep jobs ordered!
         self.check_repair_ids_for_range(blocks);
 
-        /*
-         * Create the tracking info for downstairs request numbers (ds_id) we
-         * will create on behalf of this guest job.
-         */
+        // Create the tracking info for downstairs request numbers (ds_id) we
+        // will create on behalf of this guest job.
         let ds_id = self.next_id();
+        cdt::gw__read__start!(|| ds_id.0);
 
         let dependencies = self.ds_active.deps_for_read(ds_id, blocks);
         debug!(self.log, "IO Read  {} has deps {:?}", ds_id, dependencies);
@@ -2077,14 +2017,13 @@ impl Downstairs {
             block_size: ddef.block_size(),
         };
 
-        self.enqueue(ds_id, guest_id, aread, ClientMap::new());
+        self.enqueue(ds_id, aread, ClientMap::new());
 
         ds_id
     }
 
     pub(crate) fn submit_write(
         &mut self,
-        guest_id: GuestWorkId,
         blocks: ImpactedBlocks,
         write: RawWrite,
         is_write_unwritten: bool,
@@ -2096,7 +2035,6 @@ impl Downstairs {
 
         self.create_and_enqueue_write_eob(
             blocks,
-            guest_id,
             write,
             is_write_unwritten,
             backpressure_guard,
@@ -2150,7 +2088,6 @@ impl Downstairs {
     fn enqueue(
         &mut self,
         ds_id: JobId,
-        guest_id: GuestWorkId,
         io: IOop,
         mut bp_guard: ClientMap<BackpressureGuard>,
     ) {
@@ -2186,7 +2123,6 @@ impl Downstairs {
         self.ds_active.insert(
             ds_id,
             DownstairsIO {
-                guest_id,
                 work: io,
                 state,
                 acked: is_write,
@@ -2726,16 +2662,8 @@ impl Downstairs {
         }
         println!();
         println!(
-            "{0:>5} {1:>8} {2:>5} {3:>7} {4:>7} {5:>5} {6:>5} {7:>5} {8:>7}",
-            "GW_ID",
-            "ACK",
-            "DSID",
-            "TYPE",
-            "BKS/EXT",
-            "DS:0",
-            "DS:1",
-            "DS:2",
-            "REPLAY",
+            "{0:>5} {1:>8} {2:>7} {3:>7} {4:>5} {5:>5} {6:>5} {7:>7}",
+            "JOBID", "ACK", "TYPE", "BKS/EXT", "DS:0", "DS:1", "DS:2", "REPLAY",
         );
 
         for (id, job) in &self.ds_active {
@@ -2782,8 +2710,8 @@ impl Downstairs {
             };
 
             print!(
-                "{0:>5} {1:>8} {2:>5} {3:>7} {4:>7}",
-                job.guest_id, ack, id, job_type, blocks_or_extent
+                "{0:>5} {1:>8} {2:>7} {3:>7}",
+                id, ack, job_type, blocks_or_extent
             );
 
             for cid in ClientId::iter() {
@@ -3403,7 +3331,6 @@ impl Downstairs {
     #[cfg(test)]
     fn submit_test_write_block(
         &mut self,
-        gwid: GuestWorkId,
         eid: ExtentId,
         block: BlockOffset,
         is_write_unwritten: bool,
@@ -3420,7 +3347,7 @@ impl Downstairs {
         );
 
         // Extent size doesn't matter as long as it can contain our write
-        self.submit_test_write(gwid, blocks, is_write_unwritten)
+        self.submit_test_write(blocks, is_write_unwritten)
     }
 
     /// Submit a write to this downstairs. Use when you don't care about what
@@ -3429,7 +3356,6 @@ impl Downstairs {
     #[cfg(test)]
     fn submit_test_write(
         &mut self,
-        gwid: GuestWorkId,
         blocks: ImpactedBlocks,
         is_write_unwritten: bool,
     ) -> JobId {
@@ -3448,7 +3374,6 @@ impl Downstairs {
             BytesMut::from(vec![0xff; 512 * write_blocks.len()].as_slice());
 
         self.submit_write(
-            gwid,
             blocks,
             RawWrite {
                 blocks: write_blocks,
@@ -3465,7 +3390,6 @@ impl Downstairs {
     /// enqueued. The read will be to a single extent, as specified by eid
     fn submit_read_block(
         &mut self,
-        gwid: GuestWorkId,
         eid: ExtentId,
         block: BlockOffset,
     ) -> JobId {
@@ -3481,7 +3405,7 @@ impl Downstairs {
         );
 
         // Use a dummy extent size that can contain our block
-        self.submit_read(gwid, blocks)
+        self.submit_read(blocks)
     }
 
     /// Create a test downstairs which has all clients Active
@@ -4331,7 +4255,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
         ds.force_active();
 
-        let next_id = ds.create_and_enqueue_generic_flush(None);
+        let next_id = ds.submit_flush(None);
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -4373,10 +4297,9 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
         ds.force_active();
 
-        let next_id =
-            ds.create_and_enqueue_generic_flush(Some(SnapshotDetails {
-                snapshot_name: String::from("snap"),
-            }));
+        let next_id = ds.submit_flush(Some(SnapshotDetails {
+            snapshot_name: String::from("snap"),
+        }));
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -4421,7 +4344,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
         ds.force_active();
 
-        let next_id = ds.create_and_enqueue_generic_flush(None);
+        let next_id = ds.submit_flush(None);
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -4467,7 +4390,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
         ds.force_active();
 
-        let next_id = ds.create_and_enqueue_generic_flush(None);
+        let next_id = ds.submit_flush(None);
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -4863,7 +4786,7 @@ pub(crate) mod test {
         assert!(ds.completed.is_empty());
 
         // Create the flush and send it to the downstairs
-        let flush_id = ds.create_and_enqueue_generic_flush(None);
+        let flush_id = ds.submit_flush(None);
 
         // Simulate completing the flush to downstairs 0 and 1
         assert!(!ds.process_ds_completion(
@@ -5079,7 +5002,7 @@ pub(crate) mod test {
 
         // A flush is required to move work to completed
         // Create the flush then send it to all downstairs.
-        let next_id = ds.create_and_enqueue_generic_flush(None);
+        let next_id = ds.submit_flush(None);
 
         // Complete the Flush at each downstairs.
         assert!(!ds.process_ds_completion(
@@ -5145,7 +5068,7 @@ pub(crate) mod test {
 
         // A flush is required to move work to completed
         // Create the flush then send it to all downstairs.
-        let next_id = ds.create_and_enqueue_generic_flush(None);
+        let next_id = ds.submit_flush(None);
 
         // Send and complete the Flush at each downstairs.
         for cid in ClientId::iter() {
@@ -5222,7 +5145,7 @@ pub(crate) mod test {
         assert!(ds.completed.is_empty());
 
         // Create the flush IO
-        let next_id = ds.create_and_enqueue_generic_flush(None);
+        let next_id = ds.submit_flush(None);
 
         // Complete the flush on all three downstairs.
         assert!(!ds.process_ds_completion(
@@ -5317,7 +5240,7 @@ pub(crate) mod test {
         assert!(ds.completed.is_empty());
 
         // Create and send the flush.
-        let flush_id = ds.create_and_enqueue_generic_flush(None);
+        let flush_id = ds.submit_flush(None);
 
         // Complete the flush on those downstairs.
         assert!(!ds.process_ds_completion(
@@ -6591,7 +6514,7 @@ pub(crate) mod test {
 
         // Create a flush, enqueue it on both the downstairs
         // and the guest work queues.
-        let next_id = ds.create_and_enqueue_generic_flush(None);
+        let next_id = ds.submit_flush(None);
 
         let response = || Ok(Default::default());
         ds.process_ds_completion(
@@ -6637,14 +6560,14 @@ pub(crate) mod test {
 
         // Create a flush, enqueue it on both the downstairs
         // and the guest work queues.
-        let next_id = ds.create_and_enqueue_generic_flush(None);
-        ds.process_ds_completion(
+        let next_id = ds.submit_flush(None);
+        assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(0),
             Ok(Default::default()),
             &UpstairsState::Active,
             None,
-        );
+        ));
 
         let ack_list = ds.ackable_work().clone();
         assert_eq!(ack_list.len(), 1);
@@ -6671,7 +6594,7 @@ pub(crate) mod test {
 
         // Create a flush, enqueue it on both the downstairs
         // and the guest work queues.
-        let next_id = ds.create_and_enqueue_generic_flush(None);
+        let next_id = ds.submit_flush(None);
 
         // DS 1 has a failure, and this won't return true as we don't
         // have enough success yet to ACK to the guest.
@@ -6859,7 +6782,7 @@ pub(crate) mod test {
 
         // Perform the flush.
         let next_id = {
-            let next_id = ds.create_and_enqueue_generic_flush(None);
+            let next_id = ds.submit_flush(None);
 
             // As this DS is failed, it should have been skipped
             assert_eq!(
@@ -7086,7 +7009,7 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
 
         // Enqueue the flush.
-        let flush_id = ds.create_and_enqueue_generic_flush(None);
+        let flush_id = ds.submit_flush(None);
 
         assert_eq!(
             ds.job_states(flush_id),
@@ -7528,7 +7451,7 @@ pub(crate) mod test {
         let read_one = ds.create_and_enqueue_generic_read_eob();
 
         // Finally, add a flush
-        let flush_one = ds.create_and_enqueue_generic_flush(None);
+        let flush_one = ds.submit_flush(None);
 
         let job = ds.ds_active.get(&write_one).unwrap();
         assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
@@ -7654,7 +7577,7 @@ pub(crate) mod test {
         let read_one = ds.create_and_enqueue_generic_read_eob();
 
         // Finally, add a flush
-        let flush_one = ds.create_and_enqueue_generic_flush(None);
+        let flush_one = ds.submit_flush(None);
 
         let job = ds.ds_active.get(&write_one).unwrap();
         assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
@@ -7838,8 +7761,7 @@ pub(crate) mod test {
         }
 
         // Create a flush.
-        let flush_one = ds.create_and_enqueue_generic_flush(None);
-
+        let flush_one = ds.submit_flush(None);
         let job = ds.ds_active.get(&flush_one).unwrap();
         assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
         assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
@@ -7892,8 +7814,7 @@ pub(crate) mod test {
         let write_one = ds.create_and_enqueue_generic_write_eob(false);
 
         // Create a flush
-        let flush_one = ds.create_and_enqueue_generic_flush(None);
-
+        let flush_one = ds.submit_flush(None);
         // Verify all jobs can be acked (or should have been fast-acked)
         let write_job = ds.ds_active.get(&write_one).unwrap();
         assert!(write_job.acked);
@@ -7952,12 +7873,12 @@ pub(crate) mod test {
         // Create a read, write, flush
         let read_one = ds.create_and_enqueue_generic_read_eob();
         let write_one = ds.create_and_enqueue_generic_write_eob(false);
-        let flush_one = ds.create_and_enqueue_generic_flush(None);
+        let flush_one = ds.submit_flush(None);
 
         // Create more IOs.
         let _read_two = ds.create_and_enqueue_generic_read_eob();
         let _write_two = ds.create_and_enqueue_generic_write_eob(false);
-        let _flush_two = ds.create_and_enqueue_generic_flush(None);
+        let _flush_two = ds.submit_flush(None);
 
         // Six jobs have been skipped.
         for cid in ClientId::iter() {
@@ -8474,7 +8395,6 @@ pub(crate) mod test {
         let eid = ExtentId(0);
 
         // Upstairs "guest" work IDs.
-        let gw_reopen_id = gw.next_gw_id();
         let (repair_ids, mut deps) = ds.get_repair_ids(eid);
         assert!(deps.is_empty());
 
@@ -8492,7 +8412,6 @@ pub(crate) mod test {
             eid,
             deps,
             repair_ids.reopen_id,
-            gw_reopen_id,
         );
 
         let job = ds.ds_active.get(&repair_ids.reopen_id).unwrap();
@@ -8528,7 +8447,6 @@ pub(crate) mod test {
         let eid = ExtentId(0);
 
         // Upstairs "guest" work IDs.
-        let gw_close_id = gw.next_gw_id();
         let (repair_ids, mut deps) = ds.get_repair_ids(eid);
         assert!(deps.is_empty());
 
@@ -8550,7 +8468,6 @@ pub(crate) mod test {
             eid,
             deps,
             repair_ids.close_id,
-            gw_close_id,
             &repair,
         );
 
@@ -8599,8 +8516,7 @@ pub(crate) mod test {
 
         let eid = ExtentId(0);
 
-        // Upstairs "guest" work IDs.
-        let gw_repair_id = gw.next_gw_id();
+        // Reserved job IDs
         let (repair_ids, mut deps) = ds.get_repair_ids(eid);
         assert!(deps.is_empty());
 
@@ -8626,7 +8542,6 @@ pub(crate) mod test {
             eid,
             deps,
             repair_ids.repair_id,
-            gw_repair_id,
             source,
             &repair,
         );
@@ -8664,8 +8579,7 @@ pub(crate) mod test {
 
         let eid = ExtentId(0);
 
-        // Upstairs "guest" work IDs.
-        let gw_repair_id = gw.next_gw_id();
+        // Reserved work IDs.
         let (repair_ids, mut deps) = ds.get_repair_ids(eid);
         assert!(deps.is_empty());
 
@@ -8701,7 +8615,6 @@ pub(crate) mod test {
             eid,
             deps,
             repair_ids.repair_id,
-            gw_repair_id,
             source,
             &repair,
         );
@@ -8768,11 +8681,6 @@ pub(crate) mod test {
     ) -> ExtentRepairIDs {
         let (extent_repair_ids, deps) = ds.get_repair_ids(eid);
 
-        let gw_close_id = gw.next_gw_id();
-        let gw_repair_id = gw.next_gw_id();
-        let gw_noop_id = gw.next_gw_id();
-        let gw_reopen_id = gw.next_gw_id();
-
         if ds.repair.is_none() {
             ds.repair = Some(LiveRepairData {
                 id: Uuid::new_v4(),
@@ -8788,8 +8696,6 @@ pub(crate) mod test {
                     repair_id: extent_repair_ids.repair_id,
                     noop_id: extent_repair_ids.noop_id,
                     reopen_id: extent_repair_ids.reopen_id,
-                    gw_repair_id,
-                    gw_noop_id,
                 },
             });
         }
@@ -8799,27 +8705,23 @@ pub(crate) mod test {
             eid,
             deps,
             extent_repair_ids.close_id,
-            gw_close_id,
             &[ClientId::new(1)], // repair downstairs
         );
         ds.create_and_enqueue_noop_io(
             gw,
             vec![extent_repair_ids.close_id],
             extent_repair_ids.repair_id,
-            gw_repair_id,
         );
         ds.create_and_enqueue_noop_io(
             gw,
             vec![extent_repair_ids.repair_id],
             extent_repair_ids.noop_id,
-            gw_noop_id,
         );
         ds.create_and_enqueue_reopen_io(
             gw,
             eid,
             vec![extent_repair_ids.noop_id],
             extent_repair_ids.reopen_id,
-            gw_reopen_id,
         );
 
         extent_repair_ids
@@ -8854,12 +8756,7 @@ pub(crate) mod test {
         // Write operations 0 to 2
         let mut ids = vec![];
         for i in 0..3 {
-            let ds_id = ds.submit_test_write_block(
-                gw.next_gw_id(),
-                eid,
-                BlockOffset(i),
-                false,
-            );
+            let ds_id = ds.submit_test_write_block(eid, BlockOffset(i), false);
             ids.push(ds_id);
         }
 
@@ -8899,11 +8796,7 @@ pub(crate) mod test {
         // Create read operations 0 to 2
         let mut ids = vec![];
         for i in 0..3 {
-            ids.push(ds.submit_read_block(
-                gw.next_gw_id(),
-                eid,
-                BlockOffset(i),
-            ));
+            ids.push(ds.submit_read_block(eid, BlockOffset(i)));
         }
 
         let repair_ids = create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
@@ -8937,15 +8830,9 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
         let eid = ExtentId(1);
 
-        let read_id =
-            ds.submit_read_block(gw.next_gw_id(), eid, BlockOffset(0));
-        let write_id = ds.submit_test_write_block(
-            gw.next_gw_id(),
-            eid,
-            BlockOffset(1),
-            false,
-        );
-        let flush_id = ds.submit_flush(gw.next_gw_id(), None);
+        let read_id = ds.submit_read_block(eid, BlockOffset(0));
+        let write_id = ds.submit_test_write_block(eid, BlockOffset(1), false);
+        let flush_id = ds.submit_flush(None);
 
         let repair_ids = create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
 
@@ -9009,12 +8896,7 @@ pub(crate) mod test {
 
         let repair_ids = create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
 
-        let write_id = ds.submit_test_write_block(
-            gw.next_gw_id(),
-            eid,
-            BlockOffset(2),
-            false,
-        );
+        let write_id = ds.submit_test_write_block(eid, BlockOffset(2), false);
 
         assert_eq!(ds.ds_active.len(), 5);
 
@@ -9041,8 +8923,7 @@ pub(crate) mod test {
 
         let repair_ids = create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
 
-        let read_id =
-            ds.submit_read_block(gw.next_gw_id(), eid, BlockOffset(0));
+        let read_id = ds.submit_read_block(eid, BlockOffset(0));
 
         assert_eq!(ds.ds_active.len(), 5);
 
@@ -9068,7 +8949,7 @@ pub(crate) mod test {
         let eid = ExtentId(1);
 
         let repair_ids = create_and_enqueue_repair_ops(&mut gw, &mut ds, eid);
-        let flush_id = ds.submit_flush(gw.next_gw_id(), None);
+        let flush_id = ds.submit_flush(None);
 
         assert_eq!(ds.ds_active.len(), 5);
 
@@ -9093,14 +8974,9 @@ pub(crate) mod test {
         //   5 |       | RpRpRp|       |
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        let write_id = ds.submit_test_write_block(
-            gw.next_gw_id(),
-            ExtentId(0),
-            BlockOffset(2),
-            false,
-        );
-        let read_id =
-            ds.submit_read_block(gw.next_gw_id(), ExtentId(2), BlockOffset(0));
+        let write_id =
+            ds.submit_test_write_block(ExtentId(0), BlockOffset(2), false);
+        let read_id = ds.submit_read_block(ExtentId(2), BlockOffset(0));
         let repair_ids =
             create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
 
@@ -9128,14 +9004,9 @@ pub(crate) mod test {
 
         let repair_ids =
             create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
-        let write_id = ds.submit_test_write_block(
-            gw.next_gw_id(),
-            ExtentId(0),
-            BlockOffset(2),
-            false,
-        );
-        let read_id =
-            ds.submit_read_block(gw.next_gw_id(), ExtentId(2), BlockOffset(1));
+        let write_id =
+            ds.submit_test_write_block(ExtentId(0), BlockOffset(2), false);
+        let read_id = ds.submit_read_block(ExtentId(2), BlockOffset(1));
 
         assert_eq!(ds.ds_active.len(), 6);
 
@@ -9160,10 +9031,10 @@ pub(crate) mod test {
 
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        let flush_id1 = ds.submit_flush(gw.next_gw_id(), None);
+        let flush_id1 = ds.submit_flush(None);
         let repair_ids =
             create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
-        let flush_id2 = ds.submit_flush(gw.next_gw_id(), None);
+        let flush_id2 = ds.submit_flush(None);
 
         assert_eq!(ds.ds_active.len(), 6);
 
@@ -9197,7 +9068,7 @@ pub(crate) mod test {
         let repair_ids1 =
             create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(0));
 
-        let flush_id = ds.submit_flush(gw.next_gw_id(), None);
+        let flush_id = ds.submit_flush(None);
 
         let repair_ids2 =
             create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
@@ -9226,7 +9097,6 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
         let write_id = ds.submit_test_write(
-            gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -9264,7 +9134,6 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
         let write_id = ds.submit_test_write(
-            gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -9302,19 +9171,16 @@ pub(crate) mod test {
         //   4 |       | RpRpRp|
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        let read_id = ds.submit_read(
-            gw.next_gw_id(),
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(0),
-                    block: BlockOffset(1),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(0),
-                },
-            ),
-        );
+        let read_id = ds.submit_read(ImpactedBlocks::new(
+            ImpactedAddr {
+                extent_id: ExtentId(0),
+                block: BlockOffset(1),
+            },
+            ImpactedAddr {
+                extent_id: ExtentId(1),
+                block: BlockOffset(0),
+            },
+        ));
 
         let repair_ids =
             create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
@@ -9339,19 +9205,16 @@ pub(crate) mod test {
         //   4 | RpRpRp|       |
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        let read_id = ds.submit_read(
-            gw.next_gw_id(),
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(0),
-                    block: BlockOffset(2),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(1),
-                },
-            ),
-        );
+        let read_id = ds.submit_read(ImpactedBlocks::new(
+            ImpactedAddr {
+                extent_id: ExtentId(0),
+                block: BlockOffset(2),
+            },
+            ImpactedAddr {
+                extent_id: ExtentId(1),
+                block: BlockOffset(1),
+            },
+        ));
 
         let repair_ids =
             create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(0));
@@ -9383,7 +9246,6 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
         let write_id = ds.submit_test_write(
-            gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -9422,19 +9284,16 @@ pub(crate) mod test {
         //   4 |       | RpRpRp|       |
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        let read_id = ds.submit_read(
-            gw.next_gw_id(),
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(0),
-                    block: BlockOffset(0),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(2),
-                    block: BlockOffset(2),
-                },
-            ),
-        );
+        let read_id = ds.submit_read(ImpactedBlocks::new(
+            ImpactedAddr {
+                extent_id: ExtentId(0),
+                block: BlockOffset(0),
+            },
+            ImpactedAddr {
+                extent_id: ExtentId(2),
+                block: BlockOffset(2),
+            },
+        ));
 
         let repair_ids =
             create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
@@ -9499,7 +9358,6 @@ pub(crate) mod test {
 
         // A write of blocks 2,3,4 which spans extent 0 and extent 1.
         let write_id = ds.submit_test_write(
-            gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -9540,19 +9398,16 @@ pub(crate) mod test {
         let repair_ids =
             create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
 
-        let read_id = ds.submit_read(
-            gw.next_gw_id(),
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(0),
-                    block: BlockOffset(1),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(0),
-                },
-            ),
-        );
+        let read_id = ds.submit_read(ImpactedBlocks::new(
+            ImpactedAddr {
+                extent_id: ExtentId(0),
+                block: BlockOffset(1),
+            },
+            ImpactedAddr {
+                extent_id: ExtentId(1),
+                block: BlockOffset(0),
+            },
+        ));
 
         assert_eq!(ds.ds_active.len(), 5);
 
@@ -9577,22 +9432,18 @@ pub(crate) mod test {
         //
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        let read_id = ds.submit_read(
-            gw.next_gw_id(),
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(0),
-                    block: BlockOffset(0),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(0),
-                },
-            ),
-        );
+        let read_id = ds.submit_read(ImpactedBlocks::new(
+            ImpactedAddr {
+                extent_id: ExtentId(0),
+                block: BlockOffset(0),
+            },
+            ImpactedAddr {
+                extent_id: ExtentId(1),
+                block: BlockOffset(0),
+            },
+        ));
 
         let write_id = ds.submit_test_write(
-            gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),
@@ -9644,37 +9495,24 @@ pub(crate) mod test {
         //  15 |       |       | RpRpRp| 14
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
-        let write_id1 = ds.submit_test_write_block(
-            gw.next_gw_id(),
-            ExtentId(2),
-            BlockOffset(1),
-            false,
-        );
+        let write_id1 =
+            ds.submit_test_write_block(ExtentId(2), BlockOffset(1), false);
 
         // The first repair command
         let repair_ids1 =
             create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(0));
 
-        let write_id2 = ds.submit_test_write_block(
-            gw.next_gw_id(),
-            ExtentId(1),
-            BlockOffset(1),
-            false,
-        );
+        let write_id2 =
+            ds.submit_test_write_block(ExtentId(1), BlockOffset(1), false);
 
-        let read_id =
-            ds.submit_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(2));
+        let read_id = ds.submit_read_block(ExtentId(0), BlockOffset(2));
 
         // The second repair command
         let repair_ids2 =
             create_and_enqueue_repair_ops(&mut gw, &mut ds, ExtentId(1));
 
-        let write_id3 = ds.submit_test_write_block(
-            gw.next_gw_id(),
-            ExtentId(1),
-            BlockOffset(2),
-            false,
-        );
+        let write_id3 =
+            ds.submit_test_write_block(ExtentId(1), BlockOffset(2), false);
 
         // The third repair command
         let repair_ids3 =
@@ -9718,11 +9556,10 @@ pub(crate) mod test {
         //   0 |     W | W W   |
         //   0 |   R   |       |
         //   0 | F F F | F F F | 0,1
-        let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
+        let (_gw, mut ds) = Downstairs::repair_test_one_repair();
 
         // A write of blocks 2,3,4 which spans the extent.
         let write_id = ds.submit_test_write(
-            gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -9736,10 +9573,9 @@ pub(crate) mod test {
             false,
         );
 
-        let read_id =
-            ds.submit_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(1));
+        let read_id = ds.submit_read_block(ExtentId(0), BlockOffset(1));
 
-        let flush_id = ds.submit_flush(gw.next_gw_id(), None);
+        let flush_id = ds.submit_flush(None);
 
         assert_eq!(ds.ds_active.len(), 3);
 
@@ -9779,7 +9615,7 @@ pub(crate) mod test {
         //   2 |       | RpRpRp|
         //   3 |       | RpRpRp|
         //   4 |     W | W W   | 3
-        let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
+        let (_gw, mut ds) = Downstairs::repair_test_one_repair();
 
         ds.repair = Some(LiveRepairData {
             id: Uuid::new_v4(),
@@ -9795,14 +9631,11 @@ pub(crate) mod test {
                 repair_id: JobId(1001),
                 noop_id: JobId(1002),
                 reopen_id: JobId(1003),
-                gw_repair_id: gw.next_gw_id(),
-                gw_noop_id: gw.next_gw_id(),
             },
         });
 
         // A write of blocks 2,3,4 which spans extents.
         let write_id = ds.submit_test_write(
-            gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -9864,25 +9697,20 @@ pub(crate) mod test {
                 repair_id: JobId(1001),
                 noop_id: JobId(1002),
                 reopen_id: JobId(1003),
-                gw_repair_id: gw.next_gw_id(),
-                gw_noop_id: gw.next_gw_id(),
             },
         });
 
         // A read of blocks 2,3,4 which spans extents.
-        let read_id = ds.submit_read(
-            gw.next_gw_id(),
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(0),
-                    block: BlockOffset(2),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(1),
-                },
-            ),
-        );
+        let read_id = ds.submit_read(ImpactedBlocks::new(
+            ImpactedAddr {
+                extent_id: ExtentId(0),
+                block: BlockOffset(2),
+            },
+            ImpactedAddr {
+                extent_id: ExtentId(1),
+                block: BlockOffset(1),
+            },
+        ));
 
         // Now enqueue the repair on extent 1, it should populate one of the
         // empty job slots.
@@ -9916,7 +9744,7 @@ pub(crate) mod test {
         // op# | 0 1 2 | 3 4 5 | deps
         // ----|-------|-------|-----
         //   0 | F F F | F F F |
-        let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
+        let (_gw, mut ds) = Downstairs::repair_test_one_repair();
 
         ds.repair = Some(LiveRepairData {
             id: Uuid::new_v4(),
@@ -9932,12 +9760,10 @@ pub(crate) mod test {
                 repair_id: JobId(1001),
                 noop_id: JobId(1002),
                 reopen_id: JobId(1003),
-                gw_repair_id: gw.next_gw_id(),
-                gw_noop_id: gw.next_gw_id(),
             },
         });
 
-        let flush_id = ds.submit_flush(gw.next_gw_id(), None);
+        let flush_id = ds.submit_flush(None);
 
         assert_eq!(ds.ds_active.len(), 1);
         assert!(ds.get_deps(flush_id).is_empty());
@@ -9947,7 +9773,7 @@ pub(crate) mod test {
     fn test_live_repair_send_io_write_below() {
         // Verify that we will send a write during LiveRepair when
         // the IO is an extent that is already repaired.
-        let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
+        let (_gw, mut ds) = Downstairs::repair_test_one_repair();
 
         ds.repair = Some(LiveRepairData {
             id: Uuid::new_v4(),
@@ -9963,41 +9789,24 @@ pub(crate) mod test {
                 repair_id: JobId(1005),
                 noop_id: JobId(1006),
                 reopen_id: JobId(1007),
-                gw_repair_id: gw.next_gw_id(),
-                gw_noop_id: gw.next_gw_id(),
             },
         });
 
         // A write of block 1 extents 0 (already repaired).
-        let job_id = ds.submit_test_write_block(
-            gw.next_gw_id(),
-            ExtentId(0),
-            BlockOffset(1),
-            false,
-        );
+        let job_id =
+            ds.submit_test_write_block(ExtentId(0), BlockOffset(1), false);
 
         for cid in ClientId::iter() {
             assert_eq!(ds.job_state(job_id, cid.get()), IOState::InProgress);
         }
     }
 
-    fn submit_three_ios(gw: &mut GuestWork, ds: &mut Downstairs) {
-        ds.submit_test_write_block(
-            gw.next_gw_id(),
-            ExtentId(0),
-            BlockOffset(0),
-            false,
-        );
-
-        ds.submit_read_block(gw.next_gw_id(), ExtentId(0), BlockOffset(0));
+    fn submit_three_ios(ds: &mut Downstairs) {
+        ds.submit_test_write_block(ExtentId(0), BlockOffset(0), false);
+        ds.submit_read_block(ExtentId(0), BlockOffset(0));
 
         // WriteUnwritten
-        ds.submit_test_write_block(
-            gw.next_gw_id(),
-            ExtentId(0),
-            BlockOffset(0),
-            true,
-        );
+        ds.submit_test_write_block(ExtentId(0), BlockOffset(0), true);
     }
 
     #[test]
@@ -10009,11 +9818,11 @@ pub(crate) mod test {
         // happened after the repair has started and should be allowed
         // through.  This test builds on the previous test, so some things
         // are not checked here.
-        let (mut gw, mut ds) = Downstairs::repair_test_all_active();
+        let (_gw, mut ds) = Downstairs::repair_test_all_active();
 
         // Channels we want to appear to be working
         // Now, send some IOs.
-        submit_three_ios(&mut gw, &mut ds);
+        submit_three_ios(&mut ds);
 
         // Fault the downstairs
         let to_repair = ClientId::new(1);
@@ -10044,13 +9853,11 @@ pub(crate) mod test {
                 repair_id: JobId(next_id + 1),
                 noop_id: JobId(next_id + 2),
                 reopen_id: JobId(next_id + 3),
-                gw_repair_id: gw.next_gw_id(),
-                gw_noop_id: gw.next_gw_id(),
             },
         });
 
         // New jobs will go -> Skipped for the downstairs in repair.
-        submit_three_ios(&mut gw, &mut ds);
+        submit_three_ios(&mut ds);
 
         // Same as the last repair assignment but active_extent is 1 now
         let next_id = ds.peek_next_id().0;
@@ -10068,13 +9875,11 @@ pub(crate) mod test {
                 repair_id: JobId(next_id + 1),
                 noop_id: JobId(next_id + 2),
                 reopen_id: JobId(next_id + 3),
-                gw_repair_id: gw.next_gw_id(),
-                gw_noop_id: gw.next_gw_id(),
             },
         });
 
         // New jobs will go -> Skipped for the downstairs in repair.
-        submit_three_ios(&mut gw, &mut ds);
+        submit_three_ios(&mut ds);
 
         // Good downstairs don't need changes
         assert!(!ds.clients[ClientId::new(0)].dependencies_need_cleanup());
@@ -10147,7 +9952,6 @@ pub(crate) mod test {
 
         // Now, put three IOs on the queue
         ds.submit_test_write(
-            gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10161,7 +9965,6 @@ pub(crate) mod test {
             false,
         );
         ds.submit_test_write(
-            gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10175,7 +9978,6 @@ pub(crate) mod test {
             false,
         );
         ds.submit_test_write(
-            gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),
@@ -10219,8 +10021,6 @@ pub(crate) mod test {
                 repair_id: JobId(next_id + 1),
                 noop_id: JobId(next_id + 2),
                 reopen_id: JobId(next_id + 3),
-                gw_repair_id: gw.next_gw_id(),
-                gw_noop_id: gw.next_gw_id(),
             },
         });
 
@@ -10229,7 +10029,6 @@ pub(crate) mod test {
 
         // Create a write on extent 1 (not yet repaired)
         ds.submit_test_write(
-            gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),
@@ -10245,18 +10044,12 @@ pub(crate) mod test {
 
         // Now, submit another write, this one will be on the extent
         // that is under repair.
-        ds.submit_test_write_block(
-            gw.next_gw_id(),
-            ExtentId(0),
-            BlockOffset(1),
-            false,
-        );
+        ds.submit_test_write_block(ExtentId(0), BlockOffset(1), false);
 
         // Submit a final write.  This has a shadow that covers every
         // IO submitted so far, and will also require creation of
         // space for future repair work.
         ds.submit_test_write(
-            gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10350,12 +10143,7 @@ pub(crate) mod test {
         let (mut gw, mut ds) = Downstairs::repair_test_all_active();
 
         // Put the first write on the queue
-        ds.submit_test_write_block(
-            gw.next_gw_id(),
-            ExtentId(0),
-            BlockOffset(1),
-            false,
-        );
+        ds.submit_test_write_block(ExtentId(0), BlockOffset(1), false);
 
         // Fault the downstairs
         let to_repair = ClientId::new(1);
@@ -10372,12 +10160,7 @@ pub(crate) mod test {
         assert!(ds.start_live_repair(&UpstairsState::Active, &mut gw, 3));
 
         // Submit a write.
-        ds.submit_test_write_block(
-            gw.next_gw_id(),
-            ExtentId(0),
-            BlockOffset(1),
-            false,
-        );
+        ds.submit_test_write_block(ExtentId(0), BlockOffset(1), false);
 
         let flushclose_jobid = 1001;
         let flushclose_job =
@@ -10477,7 +10260,7 @@ pub(crate) mod test {
         //
 
         // Downstairs 1 is in LiveRepair already from repair_test_default()
-        let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
+        let (_gw, mut ds) = Downstairs::repair_test_one_repair();
 
         // Make sure we're in the repair on extent 0
         ds.repair = Some(LiveRepairData {
@@ -10494,14 +10277,11 @@ pub(crate) mod test {
                 repair_id: JobId(1001),
                 noop_id: JobId(1002),
                 reopen_id: JobId(1003),
-                gw_repair_id: gw.next_gw_id(),
-                gw_noop_id: gw.next_gw_id(),
             },
         });
 
         // A write of blocks 2,3,4 which spans extents 0-1.
         let write_id1 = ds.submit_test_write(
-            gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10517,12 +10297,8 @@ pub(crate) mod test {
 
         // A write of block 5 which is on extent 1, but does not
         // overlap with the previous write
-        let write_id2 = ds.submit_test_write_block(
-            gw.next_gw_id(),
-            ExtentId(1),
-            BlockOffset(2),
-            false,
-        );
+        let write_id2 =
+            ds.submit_test_write_block(ExtentId(1), BlockOffset(2), false);
 
         assert_eq!(ds.ds_active.len(), 2);
 
@@ -10579,7 +10355,7 @@ pub(crate) mod test {
         // every extent that it touches.
 
         // Downstairs 1 is in LiveRepair already from repair_test_default()
-        let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
+        let (_gw, mut ds) = Downstairs::repair_test_one_repair();
 
         // Make sure we're in the repair on extent 0
         ds.repair = Some(LiveRepairData {
@@ -10596,14 +10372,11 @@ pub(crate) mod test {
                 repair_id: JobId(1001),
                 noop_id: JobId(1002),
                 reopen_id: JobId(1003),
-                gw_repair_id: gw.next_gw_id(),
-                gw_noop_id: gw.next_gw_id(),
             },
         });
 
         // A write of blocks 3,4,5,6 which spans extents 1-2.
         let write_id1 = ds.submit_test_write(
-            gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(1),
@@ -10620,7 +10393,6 @@ pub(crate) mod test {
         // A write of block 2-3, which overlaps the previous write and should
         // also trigger a repair.
         let write_id2 = ds.submit_test_write(
-            gw.next_gw_id(),
             ImpactedBlocks::new(
                 ImpactedAddr {
                     extent_id: ExtentId(0),
@@ -10636,19 +10408,16 @@ pub(crate) mod test {
 
         // A read of block 5-7, which overlaps the previous repair and should
         // also force waiting on a new repair.
-        let read_id = ds.submit_read(
-            gw.next_gw_id(),
-            ImpactedBlocks::new(
-                ImpactedAddr {
-                    extent_id: ExtentId(1),
-                    block: BlockOffset(2),
-                },
-                ImpactedAddr {
-                    extent_id: ExtentId(2),
-                    block: BlockOffset(1),
-                },
-            ),
-        );
+        let read_id = ds.submit_read(ImpactedBlocks::new(
+            ImpactedAddr {
+                extent_id: ExtentId(1),
+                block: BlockOffset(2),
+            },
+            ImpactedAddr {
+                extent_id: ExtentId(2),
+                block: BlockOffset(1),
+            },
+        ));
 
         assert_eq!(ds.ds_active.len(), 3);
 
