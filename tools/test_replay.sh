@@ -70,15 +70,11 @@ if ! ps -p $dsc_pid > /dev/null; then
     exit 1
 fi
 
-args=()
-args+=( -t "127.0.0.1:8810" )
-args+=( -t "127.0.0.1:8820" )
-args+=( -t "127.0.0.1:8830" )
-
 gen=1
 # Initial seed for verify file
 echo "Running initial fill" | tee -a "$test_log"
-if ! "$crucible_test" fill "${args[@]}" -q -g "$gen"\
+if ! "$crucible_test" fill -q -g "$gen"\
+          --dsc 127.0.0.1:9998 \
           --verify-out "$verify_log" --retry-activate >> "$test_log" 2>&1 ; then
     echo Failed on initial verify seed, check "$test_log"
     ${dsc} cmd shutdown
@@ -88,9 +84,10 @@ fi
 
 SECONDS=0
 echo "Replay loop starts now $(date)" | tee -a "$test_log"
-"$crucible_test" replay "${args[@]}" -c "$loops" \
+"$crucible_test" replay -c "$loops" \
         --stable -g "$gen" --verify-out "$verify_log" \
         --verify-in "$verify_log" \
+        --dsc 127.0.0.1:9998 \
         --retry-activate >> "$test_log" 2>&1
 result=$?
 duration=$SECONDS
@@ -103,7 +100,8 @@ else
       "$loops" $((duration / 60)) $((duration % 60)) | tee -a "$test_log"
 
     echo "Do final verify" | tee -a "$test_log"
-    if ! "$crucible_test" verify "${args[@]}" -q -g "$gen"\
+    if ! "$crucible_test" verify -q -g "$gen"\
+              --dsc 127.0.0.1:9998 \
               --verify-out "$verify_log" \
               --verify-in "$verify_log" >> "$test_log" 2>&1 ; then
         echo Failed on final verify, check "$test_log"

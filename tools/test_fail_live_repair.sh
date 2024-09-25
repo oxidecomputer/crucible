@@ -95,8 +95,7 @@ fi
 echo "starting $(date)" | tee ${loop_log}
 echo "Tail $test_log for test output"
 
-# Make enough extents that we can be sure to catch in while it
-# is repairing.
+# Make enough extents that we can be sure to catch it while it is repairing.
 if ! ${dsc} create --cleanup \
   --ds-bin "$cds" \
   --extent-count 400 \

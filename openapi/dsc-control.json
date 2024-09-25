@@ -5,6 +5,31 @@
     "version": "0.0.0"
   },
   "paths": {
+    "/allrunning": {
+      "get": {
+        "summary": "Return true if all downstairs are running",
+        "operationId": "dsc_all_running",
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Boolean",
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/disablerestart/all": {
       "post": {
         "summary": "Disable automatic restart on all downstairs",
@@ -268,6 +293,33 @@
         }
       }
     },
+    "/regioncount": {
+      "get": {
+        "summary": "Get the count of regions.",
+        "operationId": "dsc_get_region_count",
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "uint",
+                  "type": "integer",
+                  "format": "uint",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/regioninfo": {
       "get": {
         "summary": "Fetch the region info for our downstairs",
@@ -444,6 +496,44 @@
         "responses": {
           "204": {
             "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/uuid/cid/{cid}": {
+      "get": {
+        "summary": "Fetch the UUID for the requested client_id",
+        "operationId": "dsc_get_uuid",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Uuid",
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            }
           },
           "4XX": {
             "$ref": "#/components/responses/Error"

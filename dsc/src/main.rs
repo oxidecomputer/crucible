@@ -20,6 +20,7 @@ use tokio::process::{Child, Command};
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::sleep_until;
+use uuid::Uuid;
 
 pub mod client;
 pub mod control;
@@ -145,7 +146,7 @@ enum Action {
         )]
         region_dir: Vec<PathBuf>,
     },
-    /// Start a downstairs region set
+    /// Start the requested downstairs regions
     /// This requires the region is already created, unless you include
     /// the --create option.
     Start {
@@ -228,6 +229,7 @@ struct DownstairsInfo {
     ds_bin: String,
     region_dir: String,
     port: u32,
+    uuid: Uuid,
     _create_output: String,
     output_file: PathBuf,
     client_id: usize,
@@ -235,10 +237,12 @@ struct DownstairsInfo {
 }
 
 impl DownstairsInfo {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         ds_bin: String,
         region_dir: String,
         port: u32,
+        uuid: Uuid,
         _create_output: String,
         output_file: PathBuf,
         client_id: usize,
@@ -248,6 +252,7 @@ impl DownstairsInfo {
             ds_bin,
             region_dir,
             port,
+            uuid,
             _create_output,
             output_file,
             client_id,
@@ -295,9 +300,9 @@ impl DownstairsInfo {
     }
 }
 
-// Describing the downstairs that together make a region.
+// Describing all the downstairs regions we know about.
 #[derive(Debug)]
-struct RegionSet {
+struct Regions {
     ds: Vec<Arc<DownstairsInfo>>,
     ds_bin: String,
     region_dir: Vec<String>,
@@ -313,8 +318,8 @@ struct RegionSet {
 pub struct DscInfo {
     /// The directory location where output files are
     output_dir: PathBuf,
-    /// The region set that make our downstairs
-    rs: Mutex<RegionSet>,
+    /// The regions this dsc knows about
+    rs: Mutex<Regions>,
     /// Work for the dsc to do, what downstairs to start/stop/etc
     work: Mutex<DscWork>,
     /// If the downstairs are started read only
@@ -427,7 +432,7 @@ impl DscInfo {
         };
 
         assert_eq!(rv.len(), region_count);
-        let rs = RegionSet {
+        let rs = Regions {
             ds: Vec::new(),
             ds_bin: downstairs_bin,
             region_dir: rv,
@@ -452,9 +457,9 @@ impl DscInfo {
     }
 
     /*
-     * Create a default region set.  Attach it to our dsc info struct
+     * Create the requested set of regions.  Attach it to our dsc info struct
      */
-    async fn create_region_set(
+    async fn create_regions(
         &self,
         extent_size: u64,
         extent_count: u32,
@@ -475,13 +480,12 @@ impl DscInfo {
                 .await
                 .unwrap();
         }
-        println!("Region set with {region_count} regions was created");
+        println!("Created {region_count} regions");
         Ok(())
     }
 
     /**
-     * Create a region as part of the region set at the given port with
-     * the provided extent size and extent_count.
+     * Create a region with the provided extent size and extent_count.
      */
     async fn create_ds_region(
         &self,
@@ -524,8 +528,7 @@ impl DscInfo {
                 extent_count,
             });
         }
-
-        // use port to do this, or make a client ID that is port base, etc
+        // The port is determined by ds_id and the port step value.
         let port = rs.port_base + (ds_id as u32 * rs.port_step);
         let rd = &rs.region_dir[ds_id];
         let new_region_dir = port_to_region(rd.clone(), port)?;
@@ -533,6 +536,7 @@ impl DscInfo {
         let extent_count = format!("{}", extent_count);
         let block_size = format!("{}", block_size);
         let uuid = format!("12345678-0000-0000-0000-{:012}", port);
+        let ds_uuid = Uuid::parse_str(&uuid).unwrap();
         let start = std::time::Instant::now();
         let mut cmd_args = vec![
             "create",
@@ -589,6 +593,7 @@ impl DscInfo {
             rs.ds_bin.clone(),
             new_region_dir,
             port,
+            ds_uuid,
             String::from_utf8(output.stdout).unwrap(),
             output_path,
             ds_id,
@@ -615,8 +620,8 @@ impl DscInfo {
     }
 
     /*
-     * Generate a region set using the starting port and region
-     * directories.  Return error if any of them don't already exist.
+     * Generate regions using the starting port and region directories.
+     * Return error if any of them don't already exist.
      * TODO: This is assuming a fair amount of stuff.
      * Make fewer assumptions...
      */
@@ -624,8 +629,8 @@ impl DscInfo {
         let mut rs = self.rs.lock().await;
         let mut port = rs.port_base;
 
-        // If we are generating our region set, then we don't know any
-        // information yet about the region.
+        // Since we are generating our regions, we must create the required
+        // directories and files.
         let mut region_info: Option<RegionExtentInfo> = None;
         for ds_id in 0..region_count {
             let rd = rs.region_dir[ds_id].clone();
@@ -683,6 +688,7 @@ impl DscInfo {
                 rs.ds_bin.clone(),
                 new_region_dir,
                 port,
+                def.uuid(),
                 "/dev/null".to_string(),
                 output_path,
                 ds_id,
@@ -697,6 +703,16 @@ impl DscInfo {
         rs.region_info = region_info;
 
         Ok(())
+    }
+
+    async fn all_running(&self) -> bool {
+        let rs = self.rs.lock().await;
+        for state in rs.ds_state.iter() {
+            if *state != DownstairsState::Running {
+                return false;
+            }
+        }
+        true
     }
 
     async fn get_ds_state(&self, client_id: usize) -> Result<DownstairsState> {
@@ -723,6 +739,14 @@ impl DscInfo {
         Ok(rs.ds[client_id].port)
     }
 
+    async fn get_ds_uuid(&self, client_id: usize) -> Result<Uuid> {
+        let rs = self.rs.lock().await;
+        if rs.ds.len() <= client_id {
+            bail!("Invalid client ID: {}", client_id);
+        }
+        Ok(rs.ds[client_id].uuid)
+    }
+
     async fn get_region_info(&self) -> Result<RegionExtentInfo> {
         let rs = self.rs.lock().await;
         if let Some(ri) = &rs.region_info {
@@ -730,6 +754,11 @@ impl DscInfo {
         } else {
             bail!("No region info found");
         }
+    }
+
+    async fn get_region_count(&self) -> usize {
+        let rs = self.rs.lock().await;
+        rs.ds.len()
     }
 }
 
@@ -917,6 +946,32 @@ async fn start_dsc(
     drop(tx);
     drop(rs);
 
+    // Wait here for all downstairs to start
+    let mut running = 0;
+    loop {
+        let res = rx.recv().await;
+        if let Some(mi) = res {
+            println!(
+                "[{}][{}] initial start wait reports {:?}",
+                mi.port, mi.client_id, mi.state
+            );
+            let mut rs = dsci.rs.lock().await;
+            if mi.state == DownstairsState::Running {
+                running += 1;
+            }
+
+            rs.ds_state[mi.client_id] = mi.state;
+            rs.ds_pid[mi.client_id] = mi.pid;
+
+            if running == rs.ds_state.len() {
+                println!("All downstairs are running");
+                break;
+            }
+        } else {
+            println!("rx.recv got None");
+        }
+    }
+
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
     let mut timeout_deadline = deadline_secs(5);
     let mut shutdown_sent = false;
@@ -1055,7 +1110,7 @@ struct MonitorInfo {
 }
 
 /// State of a downstairs.
-#[derive(Debug, Copy, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Copy, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum DownstairsState {
     Stopped,
@@ -1509,7 +1564,7 @@ fn main() -> Result<()> {
                 false,
             )?;
 
-            runtime.block_on(dsci.create_region_set(
+            runtime.block_on(dsci.create_regions(
                 extent_size,
                 extent_count,
                 block_size,
@@ -1569,7 +1624,7 @@ fn main() -> Result<()> {
             )?;
 
             if create {
-                runtime.block_on(dsci.create_region_set(
+                runtime.block_on(dsci.create_regions(
                     extent_size,
                     extent_count,
                     block_size,
