@@ -431,6 +431,11 @@ impl<T> ClientData<T> {
             f(ClientId::new(2)),
         ])
     }
+
+    #[cfg(test)]
+    pub fn get(&self) -> &[T; 3] {
+        &self.0
+    }
 }
 
 /// Map of data associated with clients, keyed by `ClientId`

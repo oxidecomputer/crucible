@@ -2369,21 +2369,32 @@ async fn test_error_during_live_repair_no_halt() {
 
     // After this, another repair task will start from the beginning, and
     // send a bunch of work to ds1 again.
-    assert!(matches!(
-        harness.ds1().recv().await.unwrap(),
-        Message::ExtentLiveClose {
-            extent_id: ExtentId(0),
-            ..
-        },
-    ));
 
-    assert!(matches!(
-        harness.ds1().recv().await.unwrap(),
-        Message::ExtentLiveReopen {
-            extent_id: ExtentId(0),
-            ..
-        },
-    ));
+    // ExtentLiveReopen will be sent first, because it acts as a gate for future
+    // operations (which include it as a dependency)
+    let msg = harness.ds1().recv().await.unwrap();
+    assert!(
+        matches!(
+            msg,
+            Message::ExtentLiveReopen {
+                extent_id: ExtentId(0),
+                ..
+            },
+        ),
+        "expected ExtentLiveReopen, got {msg:?}"
+    );
+
+    let msg = harness.ds1().recv().await.unwrap();
+    assert!(
+        matches!(
+            msg,
+            Message::ExtentLiveClose {
+                extent_id: ExtentId(0),
+                ..
+            },
+        ),
+        "expected ExtentLiveClose, got {msg:?}"
+    );
 }
 
 /// Test that after giving up on a downstairs, setting it to faulted, and

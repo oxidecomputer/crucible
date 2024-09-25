@@ -305,9 +305,6 @@ pub(crate) struct UpstairsConfig {
     ///
     /// This is `Some(..)` if a key is provided in the `CrucibleOpts`
     pub encryption_context: Option<EncryptionContext>,
-
-    /// Does this Upstairs throw random errors?
-    pub lossy: bool,
 }
 
 impl UpstairsConfig {
@@ -377,13 +374,16 @@ impl Upstairs {
         info!(log, "Crucible {} has session id: {}", uuid, session_id);
         info!(log, "Upstairs opts: {}", opt);
 
+        if opt.lossy {
+            warn!(log, "lossy flag no longer changes upstairs behavior");
+        }
+
         let cfg = Arc::new(UpstairsConfig {
             encryption_context,
             upstairs_id: uuid,
             session_id,
             generation: AtomicU64::new(gen),
             read_only: opt.read_only,
-            lossy: opt.lossy,
         });
 
         info!(log, "Crucible stats registered with UUID: {}", uuid);
@@ -626,15 +626,6 @@ impl Upstairs {
             &mut self.guest.guest_work,
             &self.state,
         );
-
-        // Send jobs downstairs as they become available.  This must be called
-        // after `continue_live_repair`, which may enqueue jobs.
-        for i in ClientId::iter() {
-            if self.downstairs.clients[i].should_do_more_work() {
-                let ddef = self.ddef.get_def().unwrap();
-                self.downstairs.io_send(i, &ddef);
-            }
-        }
 
         // Handle any jobs that have become ready for acks
         if self.downstairs.has_ackable_jobs() {
@@ -1685,6 +1676,11 @@ impl Upstairs {
                     Ok(true) => {
                         // Copy the region definition into the Downstairs
                         self.downstairs.set_ddef(self.ddef.get_def().unwrap());
+
+                        // Check to see whether we want to replay jobs (if the
+                        // Downstairs is coming back from being Offline)
+                        // TODO should we only do this in certain new states?
+                        self.downstairs.check_replay(client_id);
 
                         // Negotiation succeeded for this Downstairs, let's see
                         // what we can do from here

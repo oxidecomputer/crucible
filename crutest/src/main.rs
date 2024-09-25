@@ -199,15 +199,6 @@ pub struct Opt {
     #[clap(long, action)]
     key_pem: Option<String>,
 
-    /// This allows the Upstairs to run in a mode where it will not
-    /// always submit new work to downstairs when it first receives
-    /// it.  This is for testing dependencies and should not be
-    /// used in production.  Passing args like this to the upstairs
-    /// may not be the best way to test, but until we have something
-    /// better... XXX
-    #[clap(long, global = true, action)]
-    lossy: bool,
-
     /// Spin up a dropshot endpoint and serve metrics from it.
     /// This will use the values in metric-register and metric-collect
     #[clap(long, global = true, action)]
@@ -773,7 +764,7 @@ async fn main() -> Result<()> {
     let crucible_opts = CrucibleOpts {
         id: up_uuid,
         target: opt.target.clone(),
-        lossy: opt.lossy,
+        lossy: false,
         flush_timeout: opt.flush_timeout,
         key: opt.key,
         cert_pem: opt.cert_pem,
@@ -1040,9 +1031,6 @@ async fn main() -> Result<()> {
         Workload::Demo => {
             println!("Run Demo test");
             let count = opt.count.unwrap_or(300);
-            /*
-             * Set lossy on a downstairs otherwise it will probably keep up.
-             */
             demo_workload(&block_io, count, &mut region_info).await?;
         }
         Workload::Dep => {
@@ -4006,9 +3994,6 @@ async fn biggest_io_workload<T: BlockIO + Send + Sync + 'static>(
 /*
  * A loop that generates a bunch of random reads and writes, increasing the
  * offset each operation.  After 20 are submitted, we wait for all to finish.
- * Use this test and pass the --lossy flag and upstairs will at random skip
- * sending jobs to the downstairs, creating dependencies that it will
- * eventually resolve.
  *
  * TODO: Make this test use the global write count, but remember, async.
  */
