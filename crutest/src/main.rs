@@ -820,6 +820,9 @@ async fn make_a_volume(
 
         let res = dsc_client.dsc_get_region_count().await.unwrap();
         let regions = res.into_inner();
+        if regions < 3 {
+            bail!("Found {regions} regions.  We need at least 3");
+        }
 
         let sv_count = regions / 3;
         let region_remainder = regions % 3;
@@ -881,12 +884,12 @@ async fn make_a_volume(
         let mut extent_info_result = None;
         for target in &crucible_opts.target {
             let port = target.port() + crucible_common::REPAIR_PORT_OFFSET;
-            println!("look at: http://{}:{} ", target.ip(), port);
+            info!(test_log, "look at: http://{}:{} ", target.ip(), port);
             let repair_url = format!("http://{}:{}", target.ip(), port);
             let repair_client = repair_client::new(&repair_url);
             match repair_client.get_region_info().await {
                 Ok(ri) => {
-                    println!("RI is: {:?}", ri);
+                    info!(test_log, "RI is: {:?}", ri);
                     extent_info_result = Some(RegionExtentInfo {
                         block_size: ri.block_size(),
                         blocks_per_extent: ri.extent_size().value,
@@ -895,9 +898,9 @@ async fn make_a_volume(
                     break;
                 }
                 Err(e) => {
-                    println!(
-                        "Failed to get info from {:?} {:?}",
-                        repair_url, e
+                    warn!(
+                        test_log,
+                        "Failed to get info from {:?} {:?}", repair_url, e
                     );
                 }
             }

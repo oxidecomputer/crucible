@@ -445,18 +445,13 @@ async fn handle_dsc(
                 println!("Got res: {:?}", res);
             }
         }
+    } else if let DscCommand::Connect { server } = dsc_cmd {
+        let url = format!("http://{}", server).to_string();
+        println!("Connecting to {:?}", url);
+        let rs = Client::new(&url);
+        *dsc_client = Some(rs);
     } else {
-        match dsc_cmd {
-            DscCommand::Connect { server } => {
-                let url = format!("http://{}", server).to_string();
-                println!("Connecting to {:?}", url);
-                let rs = Client::new(&url);
-                *dsc_client = Some(rs);
-            }
-            _ => {
-                println!("dsc: Need to be connected first");
-            }
-        }
+        println!("dsc: Need to be connected first");
     }
 }
 /*
