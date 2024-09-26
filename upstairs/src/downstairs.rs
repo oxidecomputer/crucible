@@ -1208,15 +1208,11 @@ impl Downstairs {
         noop_id: JobId,
         gw_noop_id: GuestWorkId,
     ) {
-        let nio = Self::create_noop_io(deps);
+        let nio = IOop::ExtentLiveNoOp { dependencies: deps };
 
         cdt::gw__noop__start!(|| (gw_noop_id.0));
         gw.insert(gw_noop_id, noop_id);
         self.enqueue_repair(noop_id, gw_noop_id, nio);
-    }
-
-    fn create_noop_io(dependencies: Vec<JobId>) -> IOop {
-        IOop::ExtentLiveNoOp { dependencies }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1280,7 +1276,9 @@ impl Downstairs {
             for &cid in repair.iter() {
                 self.clients[cid].stats.extents_confirmed += 1;
             }
-            Self::create_noop_io(repair_deps)
+            IOop::ExtentLiveNoOp {
+                dependencies: repair_deps,
+            }
         } else {
             info!(
                 self.log,
@@ -1291,29 +1289,13 @@ impl Downstairs {
             }
             let repair_address = self.clients[source].repair_addr.unwrap();
 
-            Self::create_repair_io(
-                repair_deps,
+            IOop::ExtentLiveRepair {
+                dependencies: repair_deps,
                 extent,
-                repair_address,
-                source,
-                need_repair,
-            )
-        }
-    }
-
-    fn create_repair_io(
-        dependencies: Vec<JobId>,
-        extent: ExtentId,
-        repair_address: SocketAddr,
-        source_downstairs: ClientId,
-        repair_downstairs: Vec<ClientId>,
-    ) -> IOop {
-        IOop::ExtentLiveRepair {
-            dependencies,
-            extent,
-            source_downstairs,
-            source_repair_address: repair_address,
-            repair_downstairs,
+                source_downstairs: source,
+                source_repair_address: repair_address,
+                repair_downstairs: need_repair,
+            }
         }
     }
 
@@ -1450,14 +1432,6 @@ impl Downstairs {
         };
     }
 
-    /// Creates a [IOop] for an [IOop::ExtentLiveReopen]
-    fn create_reopen_io(eid: ExtentId, dependencies: Vec<JobId>) -> IOop {
-        IOop::ExtentLiveReopen {
-            dependencies,
-            extent: eid,
-        }
-    }
-
     /// Creates a [DownstairsIO] job for an [IOop::ExtentLiveReopen], and
     /// adds it to the work queue.
     fn create_and_enqueue_reopen_io(
@@ -1468,7 +1442,10 @@ impl Downstairs {
         reopen_id: JobId,
         gw_reopen_id: GuestWorkId,
     ) {
-        let reopen_io = Self::create_reopen_io(eid, deps);
+        let reopen_io = IOop::ExtentLiveReopen {
+            dependencies: deps,
+            extent: eid,
+        };
 
         cdt::gw__reopen__start!(|| (gw_reopen_id.0, eid.0));
 
@@ -8568,8 +8545,7 @@ pub(crate) mod test {
     #[test]
     fn test_live_repair_enqueue_reopen() {
         // Make sure the create_and_enqueue_reopen_io() function does
-        // what we expect it to do, which also tests create_reopen_io()
-        // function as well.
+        // what we expect it to do
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
         let eid = ExtentId(0);
@@ -8692,10 +8668,9 @@ pub(crate) mod test {
 
     #[test]
     fn test_live_repair_enqueue_repair_noop() {
-        // Make sure the create_and_enqueue_repair_io() function does
-        // what we expect it to do, which also tests create_repair_io()
-        // function as well.  In this case we expect the job created to
-        // be a no-op job.
+        // Make sure the create_and_enqueue_repair_io() function does what we
+        // expect it to do.  In this case we expect the job created to be a
+        // no-op job.
 
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
@@ -8761,8 +8736,7 @@ pub(crate) mod test {
     #[test]
     fn test_live_repair_enqueue_repair_repair() {
         // Make sure the create_and_enqueue_repair_io() function does
-        // what we expect it to do, which also tests create_repair_io()
-        // function as well.
+        // what we expect it to do.
         let (mut gw, mut ds) = Downstairs::repair_test_one_repair();
 
         let eid = ExtentId(0);
