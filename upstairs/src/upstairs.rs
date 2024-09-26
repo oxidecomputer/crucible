@@ -305,9 +305,6 @@ pub(crate) struct UpstairsConfig {
     ///
     /// This is `Some(..)` if a key is provided in the `CrucibleOpts`
     pub encryption_context: Option<EncryptionContext>,
-
-    /// Does this Upstairs throw random errors?
-    pub lossy: bool,
 }
 
 impl UpstairsConfig {
@@ -377,13 +374,16 @@ impl Upstairs {
         info!(log, "Crucible {} has session id: {}", uuid, session_id);
         info!(log, "Upstairs opts: {}", opt);
 
+        if opt.lossy {
+            warn!(log, "lossy flag no longer changes upstairs behavior");
+        }
+
         let cfg = Arc::new(UpstairsConfig {
             encryption_context,
             upstairs_id: uuid,
             session_id,
             generation: AtomicU64::new(gen),
             read_only: opt.read_only,
-            lossy: opt.lossy,
         });
 
         info!(log, "Crucible stats registered with UUID: {}", uuid);
@@ -626,15 +626,6 @@ impl Upstairs {
             &mut self.guest.guest_work,
             &self.state,
         );
-
-        // Send jobs downstairs as they become available.  This must be called
-        // after `continue_live_repair`, which may enqueue jobs.
-        for i in ClientId::iter() {
-            if self.downstairs.clients[i].should_do_more_work() {
-                let ddef = self.ddef.get_def().unwrap();
-                self.downstairs.io_send(i, &ddef);
-            }
-        }
 
         // Handle any jobs that have become ready for acks
         if self.downstairs.has_ackable_jobs() {
@@ -1686,6 +1677,11 @@ impl Upstairs {
                         // Copy the region definition into the Downstairs
                         self.downstairs.set_ddef(self.ddef.get_def().unwrap());
 
+                        // Check to see whether we want to replay jobs (if the
+                        // Downstairs is coming back from being Offline)
+                        // TODO should we only do this in certain new states?
+                        self.downstairs.check_replay(client_id);
+
                         // Negotiation succeeded for this Downstairs, let's see
                         // what we can do from here
                         match self.downstairs.clients[client_id].state() {
@@ -1996,7 +1992,10 @@ impl Upstairs {
         self.set_inactive(CrucibleError::UuidMismatch);
     }
 
-    /// Forces the upstairs state to `UpstairsState::Active`
+    /// Forces the upstairs and downstairs into active states
+    ///
+    /// The upstairs state is set to `UpstairsState::Active`; the Downstairs is
+    /// set to `DsState::Active` for each client.
     ///
     /// This means that we haven't gone through negotiation, so behavior may be
     /// wonky or unexpected; this is only allowed during unit tests.
@@ -2004,6 +2003,7 @@ impl Upstairs {
     pub(crate) fn force_active(&mut self) -> Result<(), CrucibleError> {
         match &self.state {
             UpstairsState::Initializing => {
+                self.downstairs.force_active();
                 self.state = UpstairsState::Active;
                 Ok(())
             }
@@ -2101,7 +2101,6 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         client::ClientStopReason,
-        downstairs::test::set_all_active,
         test::{make_encrypted_upstairs, make_upstairs},
         Block, BlockOp, BlockOpWaiter, DsState, JobId,
     };
@@ -2118,7 +2117,6 @@ pub(crate) mod test {
         ddef.set_extent_count(4);
 
         let mut up = Upstairs::test_default(Some(ddef));
-        set_all_active(&mut up.downstairs);
         for c in up.downstairs.clients.iter_mut() {
             // Give all downstairs a repair address
             c.repair_addr = Some("0.0.0.0:1".parse().unwrap());
@@ -2192,7 +2190,8 @@ pub(crate) mod test {
         let reply = ds_done_brw.wait().await;
         assert!(reply.is_err());
 
-        up.force_active().unwrap();
+        // Make the Upstairs Active while leaving the Downstairs as New
+        up.state = UpstairsState::Active;
 
         let (ds_done_brw, ds_done_res) = BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Deactivate {
@@ -2220,7 +2219,6 @@ pub(crate) mod test {
 
         let mut up = Upstairs::test_default(None);
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         // The deactivate message should happen immediately
         let (ds_done_brw, ds_done_res) = BlockOpWaiter::pair();
@@ -3396,7 +3394,6 @@ pub(crate) mod test {
         assert!(!up.downstairs.live_repair_in_progress());
 
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         // No need to repair or check for future repairs here either
         up.on_repair_check();
@@ -3420,7 +3417,6 @@ pub(crate) mod test {
 
         let mut up = Upstairs::test_default(Some(ddef));
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         // Force client 1 into LiveRepairReady
         up.ds_transition(ClientId::new(1), DsState::Faulted);
@@ -3442,7 +3438,6 @@ pub(crate) mod test {
 
         let mut up = Upstairs::test_default(Some(ddef));
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         for i in [1, 2].into_iter().map(ClientId::new) {
             // Force client 1 into LiveRepairReady
@@ -3469,7 +3464,6 @@ pub(crate) mod test {
 
         let mut up = Upstairs::test_default(Some(ddef));
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
         up.ds_transition(ClientId::new(1), DsState::Faulted);
         up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
         up.ds_transition(ClientId::new(1), DsState::LiveRepair);
@@ -3499,7 +3493,6 @@ pub(crate) mod test {
 
         let mut up = Upstairs::test_default(Some(ddef));
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
         up.ds_transition(ClientId::new(1), DsState::Faulted);
         up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
 
@@ -3531,7 +3524,6 @@ pub(crate) mod test {
 
         let mut up = make_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         // Build a write, put it on the work queue.
         let offset = BlockIndex(7);
@@ -3649,7 +3641,6 @@ pub(crate) mod test {
     fn good_decryption() {
         let mut up = make_encrypted_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
@@ -3697,7 +3688,6 @@ pub(crate) mod test {
     async fn good_deferred_decryption() {
         let mut up = make_encrypted_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let blocks = 16384 / 512;
         let data = Buffer::new(blocks, 512);
@@ -3756,7 +3746,6 @@ pub(crate) mod test {
     async fn bad_deferred_decryption_means_panic() {
         let mut up = make_encrypted_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let blocks = 16384 / 512;
         let data = Buffer::new(blocks, 512);
@@ -3834,7 +3823,6 @@ pub(crate) mod test {
     fn bad_decryption_means_panic() {
         let mut up = make_encrypted_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
@@ -3898,7 +3886,6 @@ pub(crate) mod test {
     fn bad_read_hash_makes_panic() {
         let mut up = make_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
@@ -3944,7 +3931,6 @@ pub(crate) mod test {
     fn work_read_hash_mismatch() {
         let mut up = make_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
@@ -4006,7 +3992,6 @@ pub(crate) mod test {
         // Test that a hash mismatch on the third response will trigger a panic.
         let mut up = make_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
@@ -4070,7 +4055,6 @@ pub(crate) mod test {
         // Test that a hash length mismatch will panic
         let mut up = make_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
@@ -4131,7 +4115,6 @@ pub(crate) mod test {
         // hash mismatch panic.
         let mut up = make_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
@@ -4188,7 +4171,6 @@ pub(crate) mod test {
         // Test that missing data on the 2nd read response will panic
         let mut up = make_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
@@ -4244,7 +4226,6 @@ pub(crate) mod test {
     fn write_defer() {
         let mut up = make_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         const NODEFER_SIZE: usize = MIN_DEFER_SIZE_BYTES as usize - 512;
         const DEFER_SIZE: usize = MIN_DEFER_SIZE_BYTES as usize * 2;
@@ -4283,7 +4264,6 @@ pub(crate) mod test {
     async fn three_faulted_downstairs_read() {
         let mut up = make_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         up.downstairs.clients[ClientId::new(0)]
             .checked_state_transition(&UpstairsState::Active, DsState::Faulted);

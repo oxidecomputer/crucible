@@ -23,7 +23,6 @@ tick-1s
     printf("%17s %17s %17s", "DS STATE 0", "DS STATE 1", "DS STATE 2");
     printf("  %5s %5s %9s %5s", "UPW", "DSW", "JOBID", "BAKPR");
     printf(" %10s", "WRITE_BO");
-    printf("  %5s %5s %5s", "NEW0", "NEW1", "NEW2");
     printf("  %5s %5s %5s", "IP0", "IP1", "IP2");
     printf("  %5s %5s %5s", "D0", "D1", "D2");
     printf("  %5s %5s %5s", "S0", "S1", "S2");
@@ -55,14 +54,6 @@ crucible_upstairs*:::up-status
     printf(" %9s", json(copyinstr(arg1), "ok.next_job_id"));
     printf(" %5s", json(copyinstr(arg1), "ok.up_backpressure"));
     printf(" %10s", json(copyinstr(arg1), "ok.write_bytes_out"));
-
-    /*
-     * New jobs on the work list for each downstairs
-     */
-    printf(" ");
-    printf(" %5s", json(copyinstr(arg1), "ok.ds_io_count.new[0]"));
-    printf(" %5s", json(copyinstr(arg1), "ok.ds_io_count.new[1]"));
-    printf(" %5s", json(copyinstr(arg1), "ok.ds_io_count.new[2]"));
 
     /*
      * In progress jobs on the work list for each downstairs

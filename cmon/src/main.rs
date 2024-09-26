@@ -206,7 +206,6 @@ fn print_dtrace_header(dd: &[DtraceDisplay]) {
                 print!(" {:>5}", "DSW");
             }
             DtraceDisplay::IoCount | DtraceDisplay::IoSummary => {
-                print!(" {:>5} {:>5} {:>5}", "NEW0", "NEW1", "NEW2");
                 print!(" {:>5} {:>5} {:>5}", "IP0", "IP1", "IP2");
                 print!(" {:>5} {:>5} {:>5}", "D0", "D1", "D2");
                 print!(" {:>5} {:>5} {:>5}", "S0", "S1", "S2");
@@ -272,12 +271,6 @@ fn print_dtrace_row(d_out: Arg, dd: &[DtraceDisplay], last_job_id: &mut u64) {
                 print!(" {:5}", d_out.ds_count);
             }
             DtraceDisplay::IoCount | DtraceDisplay::IoSummary => {
-                print!(
-                    " {:5} {:5} {:5}",
-                    d_out.ds_io_count.new[ClientId::new(0)],
-                    d_out.ds_io_count.new[ClientId::new(1)],
-                    d_out.ds_io_count.new[ClientId::new(2)],
-                );
                 print!(
                     " {:5} {:5} {:5}",
                     d_out.ds_io_count.in_progress[ClientId::new(0)],
