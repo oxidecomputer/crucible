@@ -4,7 +4,8 @@ use crate::{
     live_repair::ExtentInfo, upstairs::UpstairsConfig, upstairs::UpstairsState,
     ClientIOStateCount, ClientId, CrucibleDecoder, CrucibleError, DownstairsIO,
     DsState, EncryptionContext, IOState, IOop, JobId, Message, RawReadResponse,
-    ReconcileIO, RegionDefinitionStatus, RegionMetadata, Validation,
+    ReconcileIO, ReconcileIOState, RegionDefinitionStatus, RegionMetadata,
+    Validation,
 };
 use crucible_common::{
     deadline_secs, verbose_timeout, x509::TLSContext, ExtentId,
@@ -344,12 +345,10 @@ impl DownstairsClient {
         job: &mut DownstairsIO,
         new_state: IOState,
     ) -> IOState {
-        let is_running =
-            matches!(new_state, IOState::New | IOState::InProgress);
+        let is_running = matches!(new_state, IOState::InProgress);
         self.io_state_count.incr(&new_state);
         let old_state = job.state.insert(self.client_id, new_state);
-        let was_running =
-            matches!(old_state, IOState::New | IOState::InProgress);
+        let was_running = matches!(old_state, IOState::InProgress);
         self.io_state_count.decr(&old_state);
 
         // Update our bytes-in-flight counter
@@ -414,32 +413,28 @@ impl DownstairsClient {
         job
     }
 
-    /// Ensures that the given job is in the job queue and in `IOState::New`
+    /// Sets the given job's state to [`IOState::InProgress`]
+    ///
+    /// # Panics
+    /// If the job's state is [`IOState::Done`] but the job has not been acked
     pub(crate) fn replay_job(&mut self, job: &mut DownstairsIO) {
-        // If the job is InProgress, then we can just go back to New and no
-        // extra work is required.
         // If it's Done, then by definition it has been acked; test that here
         // to double-check.
         if IOState::Done == job.state[self.client_id] && !job.acked {
             panic!("[{}] This job was not acked: {:?}", self.client_id, job);
         }
 
-        let old_state = self.set_job_state(job, IOState::InProgress);
+        self.set_job_state(job, IOState::InProgress);
         job.replay = true;
-        assert_ne!(
-            old_state,
-            IOState::New,
-            "IOState::New is transitory and should not be seen"
-        );
     }
 
     /// Sets this job as skipped and moves it to `skipped_jobs`
     ///
     /// # Panics
-    /// If the job is not new or in-progress
+    /// If the job's state is not [`IOState::InProgress`]
     pub(crate) fn skip_job(&mut self, job: &mut DownstairsIO) {
         let prev_state = self.set_job_state(job, IOState::Skipped);
-        assert!(matches!(prev_state, IOState::New | IOState::InProgress));
+        assert!(matches!(prev_state, IOState::InProgress));
         self.skipped_jobs.insert(job.ds_id);
     }
 
@@ -2172,8 +2167,10 @@ impl DownstairsClient {
         if self.state != DsState::Reconcile {
             panic!("[{}] should still be in reconcile", self.client_id);
         }
-        let prev_state = job.state.insert(self.client_id, IOState::InProgress);
-        assert_eq!(prev_state, IOState::New);
+        let prev_state = job
+            .state
+            .insert(self.client_id, ReconcileIOState::InProgress);
+        assert_eq!(prev_state, ReconcileIOState::New);
 
         // Some reconciliation messages need to be adjusted on a per-client
         // basis, e.g. not sending ExtentRepair to clients that aren't being
@@ -2191,9 +2188,10 @@ impl DownstairsClient {
                 } else {
                     // Skip this job for this Downstairs, since only the target
                     // clients need to do the reconcile.
-                    let prev_state =
-                        job.state.insert(self.client_id, IOState::Skipped);
-                    assert_eq!(prev_state, IOState::InProgress);
+                    let prev_state = job
+                        .state
+                        .insert(self.client_id, ReconcileIOState::Skipped);
+                    assert_eq!(prev_state, ReconcileIOState::InProgress);
                     debug!(self.log, "no action needed request {repair_id:?}");
                 }
             }
@@ -2209,9 +2207,10 @@ impl DownstairsClient {
                     debug!(self.log, "skipping flush request {repair_id:?}");
                     // Skip this job for this Downstairs, since it's narrowly
                     // aimed at a different client.
-                    let prev_state =
-                        job.state.insert(self.client_id, IOState::Skipped);
-                    assert_eq!(prev_state, IOState::InProgress);
+                    let prev_state = job
+                        .state
+                        .insert(self.client_id, ReconcileIOState::Skipped);
+                    assert_eq!(prev_state, ReconcileIOState::InProgress);
                 }
             }
             Message::ExtentReopen { .. } | Message::ExtentClose { .. } => {
@@ -2230,12 +2229,13 @@ impl DownstairsClient {
         reconcile_id: ReconciliationId,
         job: &mut ReconcileIO,
     ) -> bool {
-        let old_state = job.state.insert(self.client_id, IOState::Done);
-        assert_eq!(old_state, IOState::InProgress);
+        let old_state =
+            job.state.insert(self.client_id, ReconcileIOState::Done);
+        assert_eq!(old_state, ReconcileIOState::InProgress);
         assert_eq!(job.id, reconcile_id);
-        job.state
-            .iter()
-            .all(|s| matches!(s, IOState::Done | IOState::Skipped))
+        job.state.iter().all(|s| {
+            matches!(s, ReconcileIOState::Done | ReconcileIOState::Skipped)
+        })
     }
 
     pub(crate) fn total_live_work(&self) -> usize {

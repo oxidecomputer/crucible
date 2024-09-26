@@ -610,7 +610,7 @@ impl Downstairs {
          */
         for (id, job) in &self.ds_active {
             let state = &job.state[client_id];
-            if state == &IOState::New || state == &IOState::InProgress {
+            if state == &IOState::InProgress {
                 info!(
                     self.log,
                     "[{}] cannot deactivate, job {} in state {:?}",
@@ -2531,7 +2531,7 @@ impl Downstairs {
         self.ds_active.for_each(|ds_id, job| {
             let state = &job.state[client_id];
 
-            if matches!(state, IOState::InProgress | IOState::New) {
+            if matches!(state, IOState::InProgress) {
                 self.clients[client_id].skip_job(job);
                 number_jobs_skipped += 1;
 
@@ -4262,7 +4262,7 @@ pub(crate) mod test {
         upstairs::UpstairsState,
         ClientId, CrucibleError, DownstairsIO, DsState, ExtentFix, IOState,
         IOop, ImpactedAddr, ImpactedBlocks, JobId, RawReadResponse,
-        ReconcileIO, ReconciliationId, SnapshotDetails,
+        ReconcileIO, ReconcileIOState, ReconciliationId, SnapshotDetails,
     };
 
     use bytes::BytesMut;
@@ -5877,9 +5877,9 @@ pub(crate) mod test {
                 panic!("{:?} not ExtentFlush()", m);
             }
         }
-        assert_eq!(IOState::New, rio.state[ClientId::new(0)]);
-        assert_eq!(IOState::New, rio.state[ClientId::new(1)]);
-        assert_eq!(IOState::New, rio.state[ClientId::new(2)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(0)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(1)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(2)]);
 
         // Second task, close extent
         let rio = ds.reconcile_task_list.pop_front().unwrap();
@@ -5896,9 +5896,9 @@ pub(crate) mod test {
                 panic!("{:?} not ExtentClose()", m);
             }
         }
-        assert_eq!(IOState::New, rio.state[ClientId::new(0)]);
-        assert_eq!(IOState::New, rio.state[ClientId::new(1)]);
-        assert_eq!(IOState::New, rio.state[ClientId::new(2)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(0)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(1)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(2)]);
 
         // Third task, repair extent
         let rio = ds.reconcile_task_list.pop_front().unwrap();
@@ -5924,9 +5924,9 @@ pub(crate) mod test {
                 panic!("{:?} not ExtentRepair", m);
             }
         }
-        assert_eq!(IOState::New, rio.state[ClientId::new(0)]);
-        assert_eq!(IOState::New, rio.state[ClientId::new(1)]);
-        assert_eq!(IOState::New, rio.state[ClientId::new(2)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(0)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(1)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(2)]);
 
         // Third task, close extent
         let rio = ds.reconcile_task_list.pop_front().unwrap();
@@ -5943,9 +5943,9 @@ pub(crate) mod test {
                 panic!("{:?} not ExtentClose()", m);
             }
         }
-        assert_eq!(IOState::New, rio.state[ClientId::new(0)]);
-        assert_eq!(IOState::New, rio.state[ClientId::new(1)]);
-        assert_eq!(IOState::New, rio.state[ClientId::new(2)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(0)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(1)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(2)]);
     }
 
     #[test]
@@ -5996,9 +5996,9 @@ pub(crate) mod test {
                 panic!("{:?} not ExtentFlush()", m);
             }
         }
-        assert_eq!(IOState::New, rio.state[ClientId::new(0)]);
-        assert_eq!(IOState::New, rio.state[ClientId::new(1)]);
-        assert_eq!(IOState::New, rio.state[ClientId::new(2)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(0)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(1)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(2)]);
 
         // Second task, close extent
         let rio = ds.reconcile_task_list.pop_front().unwrap();
@@ -6015,9 +6015,9 @@ pub(crate) mod test {
                 panic!("{:?} not ExtentClose()", m);
             }
         }
-        assert_eq!(IOState::New, rio.state[ClientId::new(0)]);
-        assert_eq!(IOState::New, rio.state[ClientId::new(1)]);
-        assert_eq!(IOState::New, rio.state[ClientId::new(2)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(0)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(1)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(2)]);
 
         // Third task, repair extent
         let rio = ds.reconcile_task_list.pop_front().unwrap();
@@ -6043,9 +6043,9 @@ pub(crate) mod test {
                 panic!("{:?} not ExtentRepair", m);
             }
         }
-        assert_eq!(IOState::New, rio.state[ClientId::new(0)]);
-        assert_eq!(IOState::New, rio.state[ClientId::new(1)]);
-        assert_eq!(IOState::New, rio.state[ClientId::new(2)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(0)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(1)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(2)]);
 
         // Third task, close extent
         let rio = ds.reconcile_task_list.pop_front().unwrap();
@@ -6062,9 +6062,9 @@ pub(crate) mod test {
                 panic!("{:?} not ExtentClose()", m);
             }
         }
-        assert_eq!(IOState::New, rio.state[ClientId::new(0)]);
-        assert_eq!(IOState::New, rio.state[ClientId::new(1)]);
-        assert_eq!(IOState::New, rio.state[ClientId::new(2)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(0)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(1)]);
+        assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(2)]);
     }
 
     // Tests for reconciliation
@@ -6333,9 +6333,9 @@ pub(crate) mod test {
         let Some(job) = &ds.reconcile_current_work else {
             panic!("failed to find current work");
         };
-        assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
-        assert_eq!(job.state[ClientId::new(1)], IOState::InProgress);
-        assert_eq!(job.state[ClientId::new(2)], IOState::InProgress);
+        assert_eq!(job.state[ClientId::new(0)], ReconcileIOState::Skipped);
+        assert_eq!(job.state[ClientId::new(1)], ReconcileIOState::InProgress);
+        assert_eq!(job.state[ClientId::new(2)], ReconcileIOState::InProgress);
 
         let msg = Message::RepairAckId { repair_id: rep_id };
         assert!(!ds.on_reconciliation_ack(
