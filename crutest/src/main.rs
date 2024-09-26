@@ -760,7 +760,7 @@ async fn make_a_volume(
     let mut crucible_opts = CrucibleOpts {
         id: up_uuid,
         target: opt.target.clone(),
-        lossy: opt.lossy,
+        lossy: false,
         flush_timeout: opt.flush_timeout,
         key: opt.key.clone(),
         cert_pem: opt.cert_pem.clone(),
@@ -940,21 +940,6 @@ async fn main() -> Result<()> {
     if matches!(opt.workload, Workload::Verify) && opt.verify_in.is_none() {
         bail!("Verify requires verify_in file");
     }
-
-    let up_uuid = opt.uuid.unwrap_or_else(Uuid::new_v4);
-
-    let crucible_opts = CrucibleOpts {
-        id: up_uuid,
-        target: opt.target.clone(),
-        lossy: false,
-        flush_timeout: opt.flush_timeout,
-        key: opt.key,
-        cert_pem: opt.cert_pem,
-        key_pem: opt.key_pem,
-        root_cert_pem: opt.root_cert_pem,
-        control: opt.control,
-        read_only: opt.read_only,
-    };
 
     // If just want the cli, then start that after our runtime.  The cli
     // does not need upstairs started, as that should happen in the
