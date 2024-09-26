@@ -25,17 +25,23 @@ function ctrl_c() {
 
 # Bring all downstairs online.
 function bring_all_downstairs_online() {
-    # dsc start all downstairs
-    if ! "$dsc" cmd start-all; then
-        echo "dsc: Failed to stop all downstairs"
+    # dsc turn on automatic restart
+    if ! "$dsc" cmd enable-restart-all; then
+        echo "dsc: Failed to enable automatic restart"
         exit 1
     fi
 
-    # dsc turn on automatic restart
-    if ! "$dsc" cmd enable-restart-all; then
-        echo "dsc: Failed to disable automatic restart"
+    # dsc start all downstairs
+    if ! "$dsc" cmd start-all; then
+        echo "dsc: Failed to start all downstairs"
         exit 1
     fi
+    ready=$("$dsc" cmd all-running)
+    while [[ "$ready" != "true" ]]; do
+        echo "Waiting for all downstairs to come online" >> "$test_log"
+        sleep 5
+        ready=$("$dsc" cmd all-running)
+    done
 }
 
 # Stop all downstairs.

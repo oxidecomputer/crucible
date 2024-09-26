@@ -25,8 +25,9 @@ pub struct CliAction {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Parser, PartialEq)]
 pub enum DscCommand {
-    /// Connect to the default DSC server (http://127.0.0.1:9998)
-    Connect,
+    /// IP:Port for a dsc server
+    ///  #[clap(long, global = true, default_value = "127.0.0.1:9998", action)]
+    Connect { server: SocketAddr },
     /// Disable random stopping of downstairs
     DisableRandomStop,
     /// Disable auto restart on the given downstairs client ID
@@ -380,7 +381,7 @@ async fn handle_dsc(
 ) {
     if let Some(dsc_client) = dsc_client {
         match dsc_cmd {
-            DscCommand::Connect => {
+            DscCommand::Connect { .. } => {
                 println!("Already connected");
             }
             DscCommand::DisableRandomStop => {
@@ -444,9 +445,9 @@ async fn handle_dsc(
                 println!("Got res: {:?}", res);
             }
         }
-    } else if dsc_cmd == DscCommand::Connect {
-        let url = "http://127.0.0.1:9998".to_string();
-        println!("Connect to {:?}", url);
+    } else if let DscCommand::Connect { server } = dsc_cmd {
+        let url = format!("http://{}", server).to_string();
+        println!("Connecting to {:?}", url);
         let rs = Client::new(&url);
         *dsc_client = Some(rs);
     } else {

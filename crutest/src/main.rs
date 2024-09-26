@@ -18,6 +18,7 @@ use futures::stream::FuturesOrdered;
 use futures::StreamExt;
 use human_bytes::human_bytes;
 use indicatif::{ProgressBar, ProgressStyle};
+use oximeter::types::ProducerRegistry;
 use rand::prelude::*;
 use rand_chacha::rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
@@ -117,11 +118,8 @@ enum Workload {
     /// Test the downstairs replay path.
     /// Stop a downstairs, then run some IO, then start that downstairs back
     /// up.  Verify all IO to all downstairs finishes.
-    Replay {
-        /// URL location of the running dsc server
-        #[clap(long, default_value = "http://127.0.0.1:9998", action)]
-        dsc: String,
-    },
+    /// This test requires a dsc server to control the downstairs.
+    Replay,
     /// Test the downstairs replacement path.
     /// Run IO to the upstairs, then replace a downstairs, then run
     /// more IO and verify it all works as expected.
@@ -139,7 +137,7 @@ enum Workload {
     ReplaceBeforeActive {
         /// URL location of the running dsc server
         #[clap(long, default_value = "http://127.0.0.1:9998", action)]
-        dsc: String,
+        dsc_str: String,
 
         /// The address:port of a running downstairs for replacement
         #[clap(long, action)]
@@ -149,7 +147,7 @@ enum Workload {
     ReplaceReconcile {
         /// URL location of the running dsc server
         #[clap(long, default_value = "http://127.0.0.1:9998", action)]
-        dsc: String,
+        dsc_str: String,
 
         /// The address:port of a running downstairs for replacement
         #[clap(long, action)]
@@ -183,6 +181,12 @@ pub struct Opt {
     /// of loops the test should do.
     #[clap(short, long, global = true, action)]
     count: Option<usize>,
+
+    /// IP:Port for a dsc server.
+    /// Some tests require a dsc enpoint to control the downstairs.
+    /// A dsc endpoint can also be used to construct the initial Volume.
+    #[clap(long, global = true, action)]
+    dsc: Option<SocketAddr>,
 
     /// How long to wait before the auto flush check fires
     #[clap(long, global = true, action)]
@@ -246,13 +250,7 @@ pub struct Opt {
     stable: bool,
 
     /// The IP:Port where each downstairs is listening.
-    #[clap(
-        short,
-        long,
-        global = true,
-        default_value = "127.0.0.1:9000",
-        action
-    )]
+    #[clap(short, long, global = true, action)]
     target: Vec<SocketAddr>,
 
     /// A UUID to use for the upstairs.
@@ -735,9 +733,193 @@ async fn handle_signals(
     }
 }
 
+// Construct a volume for use by the tests.
+// Our choice of how to construct the volume depends on what options we
+// have been given.
+//
+// If we have been provided a vcr file, this will get first priority and all
+// other options will be ignored.
+//
+// Second choice is if we are provided the address for a dsc server.  We can
+// use the dsc server to determine part of what we need to create a Volume.
+// The rest of what we need we can gather from the CrucibleOpts, which are
+// built from options provided on the command line, or their defaults.
+//
+// For the final choice we have to construct a Volume by asking our downstairs
+// for information that we need up front, which we then combine with
+// CrucibleOpts.  This will work as long as one of the downstairs is up
+// already.  If we have a test that requires no downstairs to be running on
+// startup, then we need to provide a VCR file, or use the dsc server.
+async fn make_a_volume(
+    opt: &Opt,
+    block_io_logger: Logger,
+    test_log: &Logger,
+    pr: Option<ProducerRegistry>,
+) -> Result<Arc<Volume>> {
+    let up_uuid = opt.uuid.unwrap_or_else(Uuid::new_v4);
+    let mut crucible_opts = CrucibleOpts {
+        id: up_uuid,
+        target: opt.target.clone(),
+        lossy: false,
+        flush_timeout: opt.flush_timeout,
+        key: opt.key.clone(),
+        cert_pem: opt.cert_pem.clone(),
+        key_pem: opt.key_pem.clone(),
+        root_cert_pem: opt.root_cert_pem.clone(),
+        control: opt.control,
+        read_only: opt.read_only,
+    };
+
+    if let Some(vcr_file) = &opt.vcr_file {
+        let vcr: VolumeConstructionRequest = match read_json(vcr_file) {
+            Ok(vcr) => vcr,
+            Err(e) => {
+                bail!("Error {:?} reading VCR from {:?}", e, vcr_file)
+            }
+        };
+        info!(test_log, "Using VCR: {:?}", vcr);
+
+        if opt.gen != 0 {
+            warn!(test_log, "gen option is ignored when VCR is provided");
+        }
+        if !opt.target.is_empty() {
+            warn!(test_log, "targets are ignored when VCR is provided");
+        }
+        let volume = Volume::construct(vcr, pr, block_io_logger).await.unwrap();
+        Ok(Arc::new(volume))
+    } else if opt.dsc.is_some() {
+        // We were given a dsc endpoint, use that to create a VCR that
+        // represents our Volume.
+        if !opt.target.is_empty() {
+            warn!(test_log, "targets are ignored when dsc option is provided");
+        }
+        let dsc = opt.dsc.unwrap();
+        let dsc_url = format!("http://{}", dsc);
+        let dsc_client = Client::new(&dsc_url);
+        let ri = match dsc_client.dsc_get_region_info().await {
+            Ok(res) => res.into_inner(),
+            Err(e) => {
+                bail!("Failed to get region info from {:?}: {}", dsc_url, e);
+            }
+        };
+        info!(test_log, "use region info: {:?}", ri);
+        let extent_info = RegionExtentInfo {
+            block_size: ri.block_size,
+            blocks_per_extent: ri.blocks_per_extent,
+            extent_count: ri.extent_count,
+        };
+
+        let res = dsc_client.dsc_get_region_count().await.unwrap();
+        let regions = res.into_inner();
+        if regions < 3 {
+            bail!("Found {regions} regions.  We need at least 3");
+        }
+
+        let sv_count = regions / 3;
+        let region_remainder = regions % 3;
+        info!(
+            test_log,
+            "dsc has {} regions.  This means {} sub_volumes", regions, sv_count
+        );
+        if region_remainder != 0 {
+            warn!(
+                test_log,
+                "{} regions from dsc will not be part of any sub_volume",
+                region_remainder,
+            );
+        }
+
+        // We start by creating the overall volume.
+        let mut volume = Volume::new(extent_info.block_size, block_io_logger);
+
+        // Now, loop over regions we found from dsc and make a
+        // sub_volume at every three.
+        let mut cid = 0;
+        for sv in 0..sv_count {
+            let mut targets = Vec::new();
+            for _ in 0..3 {
+                let port = dsc_client.dsc_get_port(cid).await.unwrap();
+                let tar: SocketAddr =
+                    format!("{}:{}", dsc.ip(), port.into_inner())
+                        .parse()
+                        .unwrap();
+                targets.push(tar);
+                cid += 1;
+            }
+            info!(test_log, "SV {:?} has targets: {:?}", sv, targets);
+            crucible_opts.target = targets;
+
+            volume
+                .add_subvolume_create_guest(
+                    crucible_opts.clone(),
+                    extent_info.clone(),
+                    opt.gen,
+                    pr.clone(),
+                )
+                .await
+                .unwrap();
+        }
+
+        Ok(Arc::new(volume))
+    } else {
+        // We were not provided a VCR, so, we have to make one by using
+        // the repair port on a downstairs to get region information that
+        // we require.  Once we have that information, we can build a VCR
+        // from it.
+
+        // For each sub-volume, we need to know:
+        // block_size, blocks_per_extent, and extent_size.  We can get any
+        // of the target downstairs to give us this info, if they are
+        // running.  We don't care which one responds.  Any mismatch will
+        // be detected later in the process and handled by the upstairs.
+        let mut extent_info_result = None;
+        for target in &crucible_opts.target {
+            let port = target.port() + crucible_common::REPAIR_PORT_OFFSET;
+            info!(test_log, "look at: http://{}:{} ", target.ip(), port);
+            let repair_url = format!("http://{}:{}", target.ip(), port);
+            let repair_client = repair_client::new(&repair_url);
+            match repair_client.get_region_info().await {
+                Ok(ri) => {
+                    info!(test_log, "RI is: {:?}", ri);
+                    extent_info_result = Some(RegionExtentInfo {
+                        block_size: ri.block_size(),
+                        blocks_per_extent: ri.extent_size().value,
+                        extent_count: ri.extent_count(),
+                    });
+                    break;
+                }
+                Err(e) => {
+                    warn!(
+                        test_log,
+                        "Failed to get info from {:?} {:?}", repair_url, e
+                    );
+                }
+            }
+        }
+        let extent_info = match extent_info_result {
+            Some(ei) => ei,
+            None => {
+                bail!("Can't determine extent info to build a Volume");
+            }
+        };
+
+        let mut volume = Volume::new(extent_info.block_size, block_io_logger);
+        volume
+            .add_subvolume_create_guest(
+                crucible_opts.clone(),
+                extent_info,
+                opt.gen,
+                pr,
+            )
+            .await
+            .unwrap();
+
+        Ok(Arc::new(volume))
+    }
+}
+
 /**
- * This is an example Crucible client.
- * Here we make use of the interfaces that Crucible exposes.
+ * A test program that makes use use of the interfaces that Crucible exposes.
  */
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -759,26 +941,9 @@ async fn main() -> Result<()> {
         bail!("Verify requires verify_in file");
     }
 
-    let up_uuid = opt.uuid.unwrap_or_else(Uuid::new_v4);
-
-    let crucible_opts = CrucibleOpts {
-        id: up_uuid,
-        target: opt.target.clone(),
-        lossy: false,
-        flush_timeout: opt.flush_timeout,
-        key: opt.key,
-        cert_pem: opt.cert_pem,
-        key_pem: opt.key_pem,
-        root_cert_pem: opt.root_cert_pem,
-        control: opt.control,
-        read_only: opt.read_only,
-    };
-
-    /*
-     * If just want the cli, then start that after our runtime.  The cli
-     * does not need upstairs started, as that should happen in the
-     * cli-server code.
-     */
+    // If just want the cli, then start that after our runtime.  The cli
+    // does not need upstairs started, as that should happen in the
+    // cli-server code.
     if let Workload::Cli { attach } = opt.workload {
         cli::start_cli_client(attach).await?;
         return Ok(());
@@ -835,80 +1000,9 @@ async fn main() -> Result<()> {
         pr = None;
     }
 
-    // We need to build a Volume for all the tests to use.
-    // If we have received a VCR as input, we can use that.  Otherwise we
-    // have to construct one by asking our downstairs for information that
-    // we need up front.  This will work as long as one of the downstairs
-    // is up already.  If we have a test that requires no downstairs to be
-    // running on startup, then we need to provide a VCR up front.
-    let block_io = {
-        if let Some(vcr_file) = opt.vcr_file {
-            let vcr: VolumeConstructionRequest = match read_json(&vcr_file) {
-                Ok(vcr) => vcr,
-                Err(e) => {
-                    bail!("Error {:?} reading VCR from {:?}", e, vcr_file)
-                }
-            };
-            let volume =
-                Volume::construct(vcr, pr, block_io_logger).await.unwrap();
-            Arc::new(volume)
-        } else {
-            // We were not provided a VCR, so, we have to make one by using
-            // the repair port on a downstairs to get region information that
-            // we require.  Once we have that information, we can build a VCR
-            // from it.
-
-            // For each sub-volume, we need to know:
-            // block_size, blocks_per_extent, and extent_size.  We can get any
-            // of the target downstairs to give us this info, if they are
-            // running.  We don't care which one responds.  Any mismatch will
-            // be detected later in the process and handled by the upstairs.
-            let mut extent_info_result = None;
-            for target in &crucible_opts.target {
-                let port = target.port() + crucible_common::REPAIR_PORT_OFFSET;
-                println!("look at: http://{}:{} ", target.ip(), port);
-                let repair_url = format!("http://{}:{}", target.ip(), port);
-                let repair_client = repair_client::new(&repair_url);
-                match repair_client.get_region_info().await {
-                    Ok(ri) => {
-                        println!("RI is: {:?}", ri);
-                        extent_info_result = Some(RegionExtentInfo {
-                            block_size: ri.block_size(),
-                            blocks_per_extent: ri.extent_size().value,
-                            extent_count: ri.extent_count(),
-                        });
-                        break;
-                    }
-                    Err(e) => {
-                        println!(
-                            "Failed to get info from {:?} {:?}",
-                            repair_url, e
-                        );
-                    }
-                }
-            }
-            let extent_info = match extent_info_result {
-                Some(ei) => ei,
-                None => {
-                    bail!("Can't determine extent info to build a Volume");
-                }
-            };
-
-            let mut volume =
-                Volume::new(extent_info.block_size, block_io_logger);
-            volume
-                .add_subvolume_create_guest(
-                    crucible_opts,
-                    extent_info,
-                    opt.gen,
-                    pr,
-                )
-                .await
-                .unwrap();
-
-            Arc::new(volume)
-        }
-    };
+    // Build a Volume for all the tests to use.
+    let block_io =
+        make_a_volume(&opt, block_io_logger.clone(), &test_log, pr).await?;
 
     if let Workload::CliServer { listen, port } = opt.workload {
         cli::start_cli_server(
@@ -1200,7 +1294,7 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
-        Workload::Replay { dsc } => {
+        Workload::Replay => {
             // Either we have a count, or we run until we get a signal.
             let mut wtq = {
                 if opt.continuous {
@@ -1210,8 +1304,15 @@ async fn main() -> Result<()> {
                     WhenToQuit::Count { count }
                 }
             };
-
-            let dsc_client = Client::new(&dsc);
+            let dsc_client = match opt.dsc {
+                Some(dsc_addr) => {
+                    let dsc_url = format!("http://{}", dsc_addr);
+                    Client::new(&dsc_url)
+                }
+                None => {
+                    bail!("Replay workload requires a dsc endpoint");
+                }
+            };
             replay_workload(&block_io, &mut wtq, &mut region_info, dsc_client)
                 .await?;
         }
@@ -1243,8 +1344,11 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Workload::ReplaceBeforeActive { dsc, replacement } => {
-            let dsc_client = Client::new(&dsc);
+        Workload::ReplaceBeforeActive {
+            dsc_str,
+            replacement,
+        } => {
+            let dsc_client = Client::new(&dsc_str);
             // Either we have a count, or we run until we get a signal.
             let wtq = {
                 if opt.continuous {
@@ -1271,8 +1375,11 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Workload::ReplaceReconcile { dsc, replacement } => {
-            let dsc_client = Client::new(&dsc);
+        Workload::ReplaceReconcile {
+            dsc_str,
+            replacement,
+        } => {
+            let dsc_client = Client::new(&dsc_str);
             // Either we have a count, or we run until we get a signal.
             let wtq = {
                 if opt.continuous {
@@ -2133,8 +2240,8 @@ async fn replay_workload<T: BlockIO + Send + Sync + 'static>(
                 "CLIENT: Up:{} ds:{} act:{}",
                 wc.up_count, wc.ds_count, wc.active_count
             );
-            if wc.up_count + wc.ds_count == 0 && wc.active_count == 3 {
-                println!("Replay: All jobs finished, all DS active.");
+            if wc.up_count + wc.ds_count == 0 {
+                println!("Replay: All jobs finished");
                 break;
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
