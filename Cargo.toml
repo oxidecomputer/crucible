@@ -112,14 +112,14 @@ usdt = "0.5.0"
 uuid = { version = "1", features = [ "serde", "v4" ] }
 
 # git
-dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main", features = [ "usdt-probes" ] }
-omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "hyper-v1" }
-nexus-client = { git = "https://github.com/oxidecomputer/omicron", branch = "hyper-v1" }
-internal-dns = { git = "https://github.com/oxidecomputer/omicron", branch = "hyper-v1" }
-omicron-uuid-kinds = { git = "https://github.com/oxidecomputer/omicron", branch = "hyper-v1" }
+dropshot = { version = "0.12.0", features = [ "usdt-probes" ] }
+omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
+nexus-client = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
+internal-dns = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
+omicron-uuid-kinds = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
-oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "hyper-v1" }
-oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "hyper-v1" }
+oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
+oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 progenitor = "0.8.0"
 progenitor-client = "0.8.0"
 
