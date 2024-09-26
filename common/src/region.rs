@@ -2,6 +2,7 @@
 use anyhow::{bail, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 use super::*;
@@ -403,6 +404,13 @@ impl Default for RegionOptions {
             encrypted: false,
         }
     }
+}
+
+/// Append the region description file to the end of a provided path.
+pub fn config_path<P: AsRef<Path>>(dir: P) -> PathBuf {
+    let mut out = dir.as_ref().to_path_buf();
+    out.push("region.json");
+    out
 }
 
 /// Wrapper type for a particular extent

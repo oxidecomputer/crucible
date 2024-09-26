@@ -21,6 +21,8 @@ pub(crate) fn build_api() -> ApiDescription<Arc<DownstairsControl>> {
     let mut api = ApiDescription::new();
     api.register(dsc_get_ds_state).unwrap();
     api.register(dsc_get_pid).unwrap();
+    api.register(dsc_get_port).unwrap();
+    api.register(dsc_get_region_info).unwrap();
     api.register(dsc_stop).unwrap();
     api.register(dsc_stop_all).unwrap();
     api.register(dsc_stop_rand).unwrap();
@@ -147,11 +149,42 @@ async fn dsc_get_pid(
     let ds_pid = api_context.dsci.get_ds_pid(cid).await.map_err(|e| {
         HttpError::for_bad_request(
             None,
-            format!("failed to state for downstairs {}: {:#}", 0, e),
+            format!("failed to get PID for downstairs {}: {:#}", cid, e),
         )
     })?;
 
     Ok(HttpResponseOk(ds_pid))
+}
+
+/**
+ * Fetch the port for the requested client_id
+ */
+#[endpoint {
+    method = GET,
+    path = "/port/cid/{cid}",
+}]
+async fn dsc_get_port(
+    rqctx: RequestContext<Arc<DownstairsControl>>,
+    path: Path<Cid>,
+) -> Result<HttpResponseOk<u32>, HttpError> {
+    let path = path.into_inner();
+    let cid = path.cid;
+    let api_context = rqctx.context();
+
+    if cid_bad(&api_context.dsci, cid).await {
+        return Err(HttpError::for_bad_request(
+            Some(String::from("BadInput")),
+            format!("Invalid client id: {}", cid),
+        ));
+    }
+    let ds_port = api_context.dsci.get_ds_port(cid).await.map_err(|e| {
+        HttpError::for_bad_request(
+            None,
+            format!("failed to get port for downstairs {}: {:#}", cid, e),
+        )
+    })?;
+
+    Ok(HttpResponseOk(ds_port))
 }
 
 /**
@@ -178,7 +211,7 @@ async fn dsc_get_ds_state(
     let ds_state = api_context.dsci.get_ds_state(cid).await.map_err(|e| {
         HttpError::for_bad_request(
             None,
-            format!("failed to state for downstairs {}: {:#}", 0, e),
+            format!("failed to get state for downstairs {}: {:#}", cid, e),
         )
     })?;
 
@@ -371,6 +404,29 @@ async fn dsc_enable_restart_all(
     let mut dsc_work = api_context.dsci.work.lock().await;
     dsc_work.add_cmd(DscCmd::EnableRestartAll);
     Ok(HttpResponseUpdatedNoContent())
+}
+
+/**
+ * Fetch the region info for our downstairs
+ */
+#[endpoint {
+    method = GET,
+    path = "/regioninfo",
+}]
+async fn dsc_get_region_info(
+    rqctx: RequestContext<Arc<DownstairsControl>>,
+) -> Result<HttpResponseOk<RegionExtentInfo>, HttpError> {
+    let api_context = rqctx.context();
+
+    let region_info =
+        api_context.dsci.get_region_info().await.map_err(|e| {
+            HttpError::for_bad_request(
+                None,
+                format!("failed get to region info {:#}", e),
+            )
+        })?;
+
+    Ok(HttpResponseOk(region_info))
 }
 
 /**

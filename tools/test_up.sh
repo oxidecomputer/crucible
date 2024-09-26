@@ -38,15 +38,17 @@ function ctrl_c() {
     exit 1
 }
 
+# Use the id of the current user to make a unique path
+user=$(id -u -n)
 # Downstairs regions go in this directory
-testdir="/var/tmp/test_up"
+testdir="/var/tmp/test_up-$user"
 if [[ -d ${testdir} ]]; then
     rm -rf ${testdir}
 fi
 
 # Store log files we want to keep in /tmp/test_up/.txt as this is what
 # buildomat will look for and archive
-test_output_dir="/tmp/test_up"
+test_output_dir="/tmp/test_up-$user"
 rm -rf ${test_output_dir} 2> /dev/null
 mkdir -p ${test_output_dir}
 
@@ -282,7 +284,7 @@ fi
 
 echo ""
 echo ""
-echo "$ct" "$tt" --range -g "$gen" -q "${new_args[@]}"
+echo "$ct" verify --range -g "$gen" -q "${new_args[@]}"
 if ! "$ct" verify --range -g "$gen" -q "${new_args[@]}"; then
     (( res += 1 ))
     echo ""

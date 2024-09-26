@@ -59,6 +59,9 @@ pub(crate) enum GuestBlockRes {
 
     /// Other operations send an empty tuple to indicate completion
     Other(BlockRes),
+
+    /// The given job has already been acked
+    Acked,
 }
 
 impl GtoS {
@@ -118,6 +121,7 @@ impl GtoS {
                 // Should we panic if someone provided downstairs_responses?
                 res.send_result(result)
             }
+            Some(GuestBlockRes::Acked) => (),
             None => (),
         }
     }
@@ -175,7 +179,11 @@ impl GuestWork {
         let gw_id = self.next_gw_id();
         let ds_id = f(gw_id);
 
-        self.active.insert(gw_id, GtoS::new(ds_id, res));
+        if matches!(res, Some(GuestBlockRes::Acked)) {
+            self.completed.push(gw_id);
+        } else {
+            self.active.insert(gw_id, GtoS::new(ds_id, res));
+        }
         (gw_id, ds_id)
     }
 
@@ -469,6 +477,24 @@ impl BlockIO for Guest {
         Ok(())
     }
 
+    async fn activate_with_gen(&self, gen: u64) -> Result<(), CrucibleError> {
+        let (rx, done) = BlockOpWaiter::pair();
+        self.send(BlockOp::GoActiveWithGen { gen, done }).await;
+        info!(
+            self.log,
+            "The guest has requested activation with gen:{}", gen
+        );
+
+        rx.wait().await?;
+
+        info!(
+            self.log,
+            "The guest has finished waiting for activation with:{}", gen
+        );
+
+        Ok(())
+    }
+
     /// Disable any more IO from this guest and deactivate the downstairs.
     async fn deactivate(&self) -> Result<(), CrucibleError> {
         self.send_and_wait(|done| BlockOp::Deactivate { done })
@@ -477,6 +503,16 @@ impl BlockIO for Guest {
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
         self.send_and_wait(|done| BlockOp::QueryGuestIOReady { done })
+            .await
+    }
+
+    async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
+        self.send_and_wait(|done| BlockOp::QueryWorkQueue { done })
+            .await
+    }
+
+    async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
+        self.send_and_wait(|done| BlockOp::QueryExtentSize { done })
             .await
     }
 

@@ -43,7 +43,9 @@ openapiv3 = { version = "2", default-features = false, features = ["skip_seriali
 phf_shared = { version = "0.11" }
 rand = { version = "0.8", features = ["min_const_gen", "small_rng"] }
 rand_chacha = { version = "0.3" }
-reqwest = { version = "0.11", features = ["json", "rustls-tls", "stream"] }
+regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "dfa-search", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
+regex-syntax = { version = "0.8" }
+reqwest = { version = "0.11", features = ["blocking", "json", "rustls-tls", "stream"] }
 schemars = { version = "0.8", features = ["bytes", "chrono", "uuid1"] }
 scopeguard = { version = "1" }
 semver = { version = "1", features = ["serde"] }
@@ -91,7 +93,9 @@ openapiv3 = { version = "2", default-features = false, features = ["skip_seriali
 phf_shared = { version = "0.11" }
 rand = { version = "0.8", features = ["min_const_gen", "small_rng"] }
 rand_chacha = { version = "0.3" }
-reqwest = { version = "0.11", features = ["json", "rustls-tls", "stream"] }
+regex-automata = { version = "0.4", default-features = false, features = ["dfa-onepass", "dfa-search", "hybrid", "meta", "nfa-backtrack", "perf-inline", "perf-literal", "unicode"] }
+regex-syntax = { version = "0.8" }
+reqwest = { version = "0.11", features = ["blocking", "json", "rustls-tls", "stream"] }
 schemars = { version = "0.8", features = ["bytes", "chrono", "uuid1"] }
 scopeguard = { version = "1" }
 semver = { version = "1", features = ["serde"] }
@@ -117,8 +121,9 @@ dof = { version = "0.3", default-features = false, features = ["des"] }
 hyper-582f2526e08bb6a0 = { package = "hyper", version = "0.14", features = ["full"] }
 hyper-dff4ba8e3ae991db = { package = "hyper", version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
+mio = { version = "1", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustix = { version = "0.38", features = ["fs", "termios"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
@@ -126,8 +131,9 @@ spin = { version = "0.9", default-features = false, features = ["once", "spin_mu
 [target.x86_64-unknown-linux-gnu.build-dependencies]
 dof = { version = "0.3", default-features = false, features = ["des"] }
 hyper-582f2526e08bb6a0 = { package = "hyper", version = "0.14", features = ["full"] }
+mio = { version = "1", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustix = { version = "0.38", features = ["fs", "termios"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
@@ -136,15 +142,17 @@ spin = { version = "0.9", default-features = false, features = ["once", "spin_mu
 hyper-582f2526e08bb6a0 = { package = "hyper", version = "0.14", features = ["full"] }
 hyper-dff4ba8e3ae991db = { package = "hyper", version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
+mio = { version = "1", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustix = { version = "0.38", features = ["fs", "termios"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 
 [target.aarch64-apple-darwin.build-dependencies]
 hyper-582f2526e08bb6a0 = { package = "hyper", version = "0.14", features = ["full"] }
+mio = { version = "1", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustix = { version = "0.38", features = ["fs", "termios"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 
@@ -154,8 +162,9 @@ dof = { version = "0.3", default-features = false, features = ["des"] }
 hyper-582f2526e08bb6a0 = { package = "hyper", version = "0.14", features = ["full"] }
 hyper-dff4ba8e3ae991db = { package = "hyper", version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
+mio = { version = "1", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustix = { version = "0.38", features = ["fs", "termios"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }
@@ -164,8 +173,9 @@ toml_edit = { version = "0.19", features = ["serde"] }
 [target.x86_64-unknown-illumos.build-dependencies]
 dof = { version = "0.3", default-features = false, features = ["des"] }
 hyper-582f2526e08bb6a0 = { package = "hyper", version = "0.14", features = ["full"] }
+mio = { version = "1", features = ["net", "os-ext"] }
 once_cell = { version = "1", features = ["unstable"] }
-rustix = { version = "0.38", features = ["fs", "termios"] }
+rustix = { version = "0.38", features = ["fs", "stdio", "termios"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 spin = { version = "0.9", default-features = false, features = ["once", "spin_mutex"] }

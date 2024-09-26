@@ -9,6 +9,7 @@ mod test {
     use anyhow::*;
     use base64::{engine, Engine};
     use crucible::*;
+    use crucible_client_types::RegionExtentInfo;
     use crucible_client_types::VolumeConstructionRequest;
     use crucible_downstairs::*;
     use crucible_pantry::pantry::Pantry;
@@ -578,7 +579,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
@@ -1342,7 +1343,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
@@ -1418,7 +1419,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
@@ -1497,7 +1498,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
@@ -1592,7 +1593,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
@@ -1685,7 +1686,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
@@ -2065,7 +2066,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: tds.blocks_per_extent(),
                     extent_count: tds.extent_count(),
@@ -2123,7 +2124,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -2158,7 +2159,7 @@ mod test {
             volume
                 .add_subvolume_create_guest(
                     test_downstairs_set.opts(),
-                    volume::RegionExtentInfo {
+                    RegionExtentInfo {
                         block_size: BLOCK_SIZE as u64,
                         blocks_per_extent: test_downstairs_set
                             .blocks_per_extent(),
@@ -2285,7 +2286,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -2328,7 +2329,7 @@ mod test {
             volume
                 .add_subvolume_create_guest(
                     test_downstairs_set.opts(),
-                    volume::RegionExtentInfo {
+                    RegionExtentInfo {
                         block_size: BLOCK_SIZE as u64,
                         blocks_per_extent: test_downstairs_set
                             .blocks_per_extent(),
@@ -2460,7 +2461,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -2508,7 +2509,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -2552,7 +2553,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -2612,7 +2613,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 new_opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -2659,7 +2660,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 new_opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -2709,7 +2710,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -2770,7 +2771,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 new_opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3024,7 +3025,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3114,7 +3115,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3147,7 +3148,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3242,7 +3243,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3286,7 +3287,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3325,7 +3326,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3379,7 +3380,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3433,7 +3434,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3506,7 +3507,7 @@ mod test {
         new_volume
             .add_subvolume_create_guest(
                 opts,
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3547,7 +3548,7 @@ mod test {
         volume
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
-                volume::RegionExtentInfo {
+                RegionExtentInfo {
                     block_size: BLOCK_SIZE as u64,
                     blocks_per_extent: test_downstairs_set.blocks_per_extent(),
                     extent_count: test_downstairs_set.extent_count(),
@@ -3604,8 +3605,6 @@ mod test {
     // layers above (in general) will eventually call a BlockIO trait
     // on a guest layer.
 
-    // ZZZ Make a test of guest.activate_with_gen both fail and pass.
-    // Maybe in a different place?  We need downstairs to do this.
     #[tokio::test]
     async fn integration_test_guest_downstairs() -> Result<()> {
         // Test using the guest layer to verify a new region is
@@ -3643,6 +3642,94 @@ mod test {
 
         assert_eq!(vec![0x55_u8; BLOCK_SIZE * 10], &buffer[..]);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_guest_activate_twice() -> Result<()> {
+        // Verify multiple activations don't return error
+        let tds = TestDownstairsSet::small(false).await?;
+        let opts = tds.opts();
+
+        let (guest, io) = Guest::new(None);
+
+        let _join_handle = up_main(opts, 1, None, io, None)?;
+
+        guest.activate().await?;
+        guest.activate().await?;
+        guest.query_work_queue().await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_guest_reactivate_diff() -> Result<()> {
+        // Verify we fail activate_with_gen() if we are already active
+        // and the generation number we are requesting with does not
+        // match the number that the upstairs is already active with.
+        let tds = TestDownstairsSet::small(false).await?;
+        let opts = tds.opts();
+
+        let (guest, io) = Guest::new(None);
+
+        let _join_handle = up_main(opts, 1, None, io, None)?;
+
+        guest.activate().await?;
+        assert!(guest.activate_with_gen(3).await.is_err());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_guest_reactivate_same() -> Result<()> {
+        // Verify activate_with_gen() will work if we are already active
+        // and the new requested generation number matches what we activated
+        // with.
+        let tds = TestDownstairsSet::small(false).await?;
+        let opts = tds.opts();
+
+        let (guest, io) = Guest::new(None);
+
+        let _join_handle = up_main(opts, 1, None, io, None)?;
+
+        guest.activate().await?;
+        guest.activate_with_gen(1).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_guest_activate_with_gen_1() -> Result<()> {
+        // Verify activate_with_gen() works when we send it with the
+        // same number that we passed to up_main.
+        let tds = TestDownstairsSet::small(false).await?;
+        let opts = tds.opts();
+
+        let (guest, io) = Guest::new(None);
+
+        let _join_handle = up_main(opts, 1, None, io, None)?;
+
+        guest.activate_with_gen(1).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn integration_test_guest_activate_with_gen_2() -> Result<()> {
+        // Verify activate_with_gen() works if we are not active yet and
+        // the requested generation number is higher than what we sent
+        // to up_main.
+        let tds = TestDownstairsSet::small(false).await?;
+        let opts = tds.opts();
+
+        let (guest, io) = Guest::new(None);
+
+        let _join_handle = up_main(opts, 1, None, io, None)?;
+
+        guest.activate_with_gen(2).await?;
+
+        // Bonus double activate test
+        guest.activate().await?;
         Ok(())
     }
 

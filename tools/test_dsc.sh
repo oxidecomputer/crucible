@@ -271,11 +271,11 @@ for cid in {0..2}; do
     # Loop until we find exit, or have exhausted our retry count
 	while :; do
 		state=$(curl -s "${dsc_url}"state/cid/0 | tr -d \")
-		if [[ "$state" == "Exit" ]]; then
+		if [[ "$state" == "exit" ]]; then
 			echo "cid $cid in $state after $retry attempt(s)"
 			break;
 		fi
-		echo "cid $cid Failed to stop: $state, retry" | tee -a "$fail_log"
+		echo "cid $cid Failed to stop: $state, try:$retry" | tee -a "$fail_log"
 		if [[ "$retry" -ge 10 ]]; then
 			echo "cid $cid Failed to stop: $state, abort" | tee -a "$fail_log"
 			(( res += 1 ))
@@ -303,7 +303,7 @@ echo "Verify ds 1 is now running"
 retry=1
 while :; do
 	state=$(curl -s "${dsc_url}"state/cid/1 | tr -d \")
-	if [[ "$state" == "Running" ]]; then
+	if [[ "$state" == "running" ]]; then
 		echo "cid 1 restart: $state after $retry attempt(s)"
 		break;
     fi
@@ -327,11 +327,11 @@ fi
 
 sleep 2
 state=$(curl -s "${dsc_url}"state/cid/1 | tr -d \")
-if [[ "$state" != "Exit" ]]; then
+if [[ "$state" != "exit" ]]; then
     echo "cid 1 Failed to stop after stop/all then start, retry" | tee -a "$fail_log"
 	sleep 4
 	state=$(curl -s "${dsc_url}"state/cid/1 | tr -d \")
-	if [[ "$state" != "Exit" ]]; then
+	if [[ "$state" != "exit" ]]; then
 		echo "cid 1 Failed to stop after stop/all then start" | tee -a "$fail_log"
 		(( res += 1 ))
 	fi
