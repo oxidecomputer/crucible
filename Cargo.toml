@@ -76,7 +76,7 @@ rayon = "1.10.0"
 rand = { version = "0.8.5", features = ["min_const_gen", "small_rng"] }
 rand_chacha = "0.3.1"
 reedline = "0.33.0"
-# reqwest = { version = "0.11", features = ["default", "blocking", "json", "stream"] }
+reqwest11 = { package = "reqwest", version = "0.11", features = ["default", "blocking", "json", "stream"] }
 reqwest = { version = "0.12", features = ["default", "blocking", "json", "stream"] }
 ringbuffer = "0.15.0"
 rusqlite = { version = "0.32" }

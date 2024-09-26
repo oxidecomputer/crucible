@@ -126,7 +126,7 @@ pub(crate) struct Downstairs {
 
     /// A reqwest client, to be reused when creating Nexus clients
     #[cfg(feature = "notify-nexus")]
-    reqwest_client: reqwest::Client,
+    reqwest_client: reqwest11::Client,
 }
 
 /// State machine for a live-repair operation
@@ -297,7 +297,7 @@ impl Downstairs {
             repair: None,
 
             #[cfg(feature = "notify-nexus")]
-            reqwest_client: reqwest::ClientBuilder::new()
+            reqwest_client: reqwest11::ClientBuilder::new()
                 .connect_timeout(std::time::Duration::from_secs(15))
                 .timeout(std::time::Duration::from_secs(15))
                 .build()
