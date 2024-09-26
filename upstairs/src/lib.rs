@@ -1461,7 +1461,6 @@ impl ClientIOStateCount {
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub struct IOStateCount {
-    pub new: ClientData<u32>,
     pub in_progress: ClientData<u32>,
     pub done: ClientData<u32>,
     pub skipped: ClientData<u32>,

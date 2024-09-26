@@ -2826,7 +2826,6 @@ impl Downstairs {
             ClientData([g(d[0]), g(d[1]), g(d[2])])
         };
         IOStateCount {
-            new: f(|d| d.new),
             in_progress: f(|d| d.in_progress),
             done: f(|d| d.done),
             skipped: f(|d| d.skipped),
