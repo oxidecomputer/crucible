@@ -121,8 +121,8 @@ omicron-uuid-kinds = { git = "https://github.com/oxidecomputer/omicron", branch 
 openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
 oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "hyper-v1" }
 oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "hyper-v1" }
-progenitor = { git = "https://github.com/oxidecomputer/progenitor", branch = "main" }
-progenitor-client = { git = "https://github.com/oxidecomputer/progenitor", branch = "main" }
+progenitor = "0.8.0"
+progenitor-client = "0.8.0"
 
 # local path
 crucible = { path = "./upstairs" }

@@ -355,7 +355,7 @@ checksum = "8c3c1a368f70d6cf7302d78f8f7093da241fb8e8807c05cc9e51a125895a6d5b"
 [[package]]
 name = "bhyve_api"
 version = "0.0.0"
-source = "git+https://github.com/oxidecomputer/propolis?branch=hyper-v1#305d83abd979528515d782747e46b16413c97e66"
+source = "git+https://github.com/oxidecomputer/propolis?branch=hyper-v1#5b65dc6923420c2bfe0863825be7bcbee895ca09"
 dependencies = [
  "bhyve_api_sys",
  "libc",
@@ -365,7 +365,7 @@ dependencies = [
 [[package]]
 name = "bhyve_api_sys"
 version = "0.0.0"
-source = "git+https://github.com/oxidecomputer/propolis?branch=hyper-v1#305d83abd979528515d782747e46b16413c97e66"
+source = "git+https://github.com/oxidecomputer/propolis?branch=hyper-v1#5b65dc6923420c2bfe0863825be7bcbee895ca09"
 dependencies = [
  "libc",
  "strum",
@@ -956,12 +956,11 @@ dependencies = [
  "openapiv3",
  "oximeter",
  "oximeter-producer",
- "progenitor-client",
+ "progenitor-client 0.8.0",
  "proptest",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rayon",
- "reqwest 0.11.27",
  "reqwest 0.12.5",
  "ringbuffer",
  "schemars",
@@ -1021,7 +1020,7 @@ dependencies = [
  "chrono",
  "crucible-workspace-hack",
  "percent-encoding",
- "progenitor",
+ "progenitor 0.8.0",
  "reqwest 0.12.5",
  "schemars",
  "serde",
@@ -1078,7 +1077,7 @@ dependencies = [
  "anyhow",
  "crucible-workspace-hack",
  "percent-encoding",
- "progenitor",
+ "progenitor 0.8.0",
  "reqwest 0.12.5",
  "schemars",
  "serde",
@@ -1272,7 +1271,7 @@ dependencies = [
  "chrono",
  "crucible-workspace-hack",
  "percent-encoding",
- "progenitor",
+ "progenitor 0.8.0",
  "reqwest 0.12.5",
  "schemars",
  "serde",
@@ -1312,7 +1311,7 @@ dependencies = [
 [[package]]
 name = "crucible-smf"
 version = "0.0.0"
-source = "git+https://github.com/oxidecomputer/crucible?branch=hyper-v1#8aad504c8e08d4f2c67413e1b7dac672c37bc37f"
+source = "git+https://github.com/oxidecomputer/crucible?branch=hyper-v1#cdf51d5fef183e7d0a6e278d2eaffbab46331f90"
 dependencies = [
  "crucible-workspace-hack",
  "libc",
@@ -1694,7 +1693,7 @@ dependencies = [
  "expectorate",
  "http 1.1.0",
  "omicron-workspace-hack",
- "progenitor",
+ "progenitor 0.7.0",
  "reqwest 0.12.5",
  "schemars",
  "serde",
@@ -1809,7 +1808,7 @@ dependencies = [
  "anyhow",
  "crucible-workspace-hack",
  "percent-encoding",
- "progenitor",
+ "progenitor 0.8.0",
  "reqwest 0.12.5",
  "schemars",
  "serde",
@@ -2135,7 +2134,7 @@ dependencies = [
  "chrono",
  "gateway-messages",
  "omicron-workspace-hack",
- "progenitor",
+ "progenitor 0.7.0",
  "rand 0.8.5",
  "reqwest 0.12.5",
  "schemars",
@@ -3181,7 +3180,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "percent-encoding",
- "progenitor",
+ "progenitor 0.7.0",
  "reqwest 0.12.5",
  "schemars",
  "serde",
@@ -3332,7 +3331,7 @@ dependencies = [
  "omicron-uuid-kinds",
  "omicron-workspace-hack",
  "oxnet",
- "progenitor",
+ "progenitor 0.7.0",
  "regress 0.9.1",
  "reqwest 0.12.5",
  "schemars",
@@ -3699,8 +3698,8 @@ dependencies = [
  "once_cell",
  "oxnet",
  "parse-display",
- "progenitor",
- "progenitor-client",
+ "progenitor 0.7.0",
+ "progenitor-client 0.7.0",
  "rand 0.8.5",
  "regress 0.9.1",
  "reqwest 0.12.5",
@@ -4481,15 +4480,41 @@ name = "progenitor"
 version = "0.7.0"
 source = "git+https://github.com/oxidecomputer/progenitor?branch=main#ab69e4e7f5147f0f12deb84d03aa145e144d9e53"
 dependencies = [
- "progenitor-client",
- "progenitor-impl",
- "progenitor-macro",
+ "progenitor-client 0.7.0",
+ "progenitor-impl 0.7.0",
+ "progenitor-macro 0.7.0",
+]
+
+[[package]]
+name = "progenitor"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "293df5b79211fbf0c1ebad6513ba451d267e9c15f5f19ee5d3da775e2dd27331"
+dependencies = [
+ "progenitor-client 0.8.0",
+ "progenitor-impl 0.8.0",
+ "progenitor-macro 0.8.0",
 ]
 
 [[package]]
 name = "progenitor-client"
 version = "0.7.0"
 source = "git+https://github.com/oxidecomputer/progenitor?branch=main#ab69e4e7f5147f0f12deb84d03aa145e144d9e53"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "percent-encoding",
+ "reqwest 0.12.5",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+]
+
+[[package]]
+name = "progenitor-client"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4a5db54eac3cae7007a0785854bc3e89fd418cca7dfc2207b99b43979154c1b"
 dependencies = [
  "bytes",
  "futures-core",
@@ -4517,7 +4542,29 @@ dependencies = [
  "serde_json",
  "syn 2.0.77",
  "thiserror",
- "typify",
+ "typify 0.1.0",
+ "unicode-ident",
+]
+
+[[package]]
+name = "progenitor-impl"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d85934a440963a69f9f04f48507ff6e7aa2952a5b2d8f96cc37fa3dd5c270f66"
+dependencies = [
+ "heck 0.5.0",
+ "http 1.1.0",
+ "indexmap 2.5.0",
+ "openapiv3",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "syn 2.0.77",
+ "thiserror",
+ "typify 0.2.0",
  "unicode-ident",
 ]
 
@@ -4528,7 +4575,25 @@ source = "git+https://github.com/oxidecomputer/progenitor?branch=main#ab69e4e7f5
 dependencies = [
  "openapiv3",
  "proc-macro2",
- "progenitor-impl",
+ "progenitor-impl 0.7.0",
+ "quote",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_tokenstream",
+ "serde_yaml",
+ "syn 2.0.77",
+]
+
+[[package]]
+name = "progenitor-macro"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d99a5a259e2d65a4933054aa51717c70b6aba0522695731ac354a522124efc9b"
+dependencies = [
+ "openapiv3",
+ "proc-macro2",
+ "progenitor-impl 0.8.0",
  "quote",
  "schemars",
  "serde",
@@ -4946,7 +5011,7 @@ dependencies = [
  "crucible-common",
  "crucible-workspace-hack",
  "percent-encoding",
- "progenitor",
+ "progenitor 0.8.0",
  "reqwest 0.12.5",
  "schemars",
  "serde",
@@ -6577,14 +6642,44 @@ name = "typify"
 version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/typify#0ef24964a92b600a82f07a980067d8dac5600e40"
 dependencies = [
- "typify-impl",
- "typify-macro",
+ "typify-impl 0.1.0",
+ "typify-macro 0.1.0",
+]
+
+[[package]]
+name = "typify"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4c644dda9862f0fef3a570d8ddb3c2cfb1d5ac824a1f2ddfa7bc8f071a5ad8a"
+dependencies = [
+ "typify-impl 0.2.0",
+ "typify-macro 0.2.0",
 ]
 
 [[package]]
 name = "typify-impl"
 version = "0.1.0"
 source = "git+https://github.com/oxidecomputer/typify#0ef24964a92b600a82f07a980067d8dac5600e40"
+dependencies = [
+ "heck 0.5.0",
+ "log",
+ "proc-macro2",
+ "quote",
+ "regress 0.10.1",
+ "schemars",
+ "semver 1.0.23",
+ "serde",
+ "serde_json",
+ "syn 2.0.77",
+ "thiserror",
+ "unicode-ident",
+]
+
+[[package]]
+name = "typify-impl"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d59ab345b6c0d8ae9500b9ff334a4c7c0d316c1c628dc55726b95887eb8dbd11"
 dependencies = [
  "heck 0.5.0",
  "log",
@@ -6613,7 +6708,24 @@ dependencies = [
  "serde_json",
  "serde_tokenstream",
  "syn 2.0.77",
- "typify-impl",
+ "typify-impl 0.1.0",
+]
+
+[[package]]
+name = "typify-macro"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "785e2cdcef0df8160fdd762ed548a637aaec1e83704fdbc14da0df66013ee8d0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "schemars",
+ "semver 1.0.23",
+ "serde",
+ "serde_json",
+ "serde_tokenstream",
+ "syn 2.0.77",
+ "typify-impl 0.2.0",
 ]
 
 [[package]]
