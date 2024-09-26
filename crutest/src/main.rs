@@ -135,20 +135,12 @@ enum Workload {
     },
     /// Test that we can replace a downstairs when the upstairs is not active.
     ReplaceBeforeActive {
-        /// URL location of the running dsc server
-        #[clap(long, default_value = "http://127.0.0.1:9998", action)]
-        dsc_str: String,
-
         /// The address:port of a running downstairs for replacement
         #[clap(long, action)]
         replacement: SocketAddr,
     },
     /// Test replacement of a downstairs while doing the initial reconciliation.
     ReplaceReconcile {
-        /// URL location of the running dsc server
-        #[clap(long, default_value = "http://127.0.0.1:9998", action)]
-        dsc_str: String,
-
         /// The address:port of a running downstairs for replacement
         #[clap(long, action)]
         replacement: SocketAddr,
@@ -359,7 +351,6 @@ enum RandReadWriteMode {
 #[derive(Copy, Clone, Debug)]
 struct RandReadWriteConfig {
     mode: RandReadWriteMode,
-    encrypted: bool,
     io_depth: usize,
     blocks_per_io: usize,
 
@@ -375,13 +366,8 @@ struct RandReadWriteConfig {
 }
 
 impl RandReadWriteConfig {
-    fn new(
-        cfg: RandReadWriteWorkload,
-        encrypted: bool,
-        mode: RandReadWriteMode,
-    ) -> Self {
+    fn new(cfg: RandReadWriteWorkload, mode: RandReadWriteMode) -> Self {
         RandReadWriteConfig {
-            encrypted,
             io_depth: cfg.io_depth,
             blocks_per_io: cfg.io_size,
             time_secs: cfg.time,
@@ -397,16 +383,14 @@ impl RandReadWriteConfig {
 /// Configuration for `bufferbloat_workload`
 #[derive(Copy, Clone, Debug)]
 struct BufferbloatConfig {
-    encrypted: bool,
     io_depth: usize,
     blocks_per_io: usize,
     time_secs: u64,
 }
 
 impl BufferbloatConfig {
-    fn new(cfg: BufferbloatWorkload, encrypted: bool) -> Self {
+    fn new(cfg: BufferbloatWorkload) -> Self {
         BufferbloatConfig {
-            encrypted,
             io_depth: cfg.io_depth,
             blocks_per_io: cfg.io_size,
             time_secs: cfg.time,
@@ -422,7 +406,7 @@ impl BufferbloatConfig {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RegionInfo {
     block_size: u64,
-    extent_size: Block,
+    sub_volume_info: Vec<ExtentInfo>,
     total_size: u64,
     total_blocks: usize,
     write_log: WriteLog,
@@ -434,13 +418,14 @@ pub struct RegionInfo {
  */
 async fn get_region_info<T: BlockIO + Send + Sync + 'static>(
     block_io: &Arc<T>,
+    is_encrypted: bool,
 ) -> Result<RegionInfo, CrucibleError> {
     /*
      * These query requests have the side effect of preventing the test from
      * starting before the upstairs is ready.
      */
     let block_size = block_io.get_block_size().await?;
-    let extent_size = block_io.query_extent_size().await?;
+    let extent_info_vec = block_io.query_extent_info().await?;
     let total_size = block_io.total_size().await?;
     let total_blocks = (total_size / block_size) as usize;
 
@@ -454,31 +439,23 @@ async fn get_region_info<T: BlockIO + Send + Sync + 'static>(
         max_block_io = total_blocks;
     }
 
-    println!(
-        "Region: es:{} ec:{} bs:{}  ts:{}  tb:{}  max_io:{} or {}",
-        extent_size.value,
-        total_blocks as u64 / extent_size.value,
-        block_size,
-        total_size,
-        total_blocks,
-        max_block_io,
-        (max_block_io as u64 * block_size),
-    );
-
     /*
      * Create the write log that tracks the number of writes to each block,
      * so we can know what to expect for reads.
      */
     let write_log = WriteLog::new(total_blocks);
 
-    Ok(RegionInfo {
+    let ri = RegionInfo {
         block_size,
-        extent_size,
+        sub_volume_info: extent_info_vec,
         total_size,
         total_blocks,
         write_log,
         max_block_io,
-    })
+    };
+    print_region_description(&ri, is_encrypted);
+
+    Ok(ri)
 }
 
 /**
@@ -755,7 +732,7 @@ async fn make_a_volume(
     block_io_logger: Logger,
     test_log: &Logger,
     pr: Option<ProducerRegistry>,
-) -> Result<Arc<Volume>> {
+) -> Result<(Arc<Volume>, Vec<SocketAddr>)> {
     let up_uuid = opt.uuid.unwrap_or_else(Uuid::new_v4);
     let mut crucible_opts = CrucibleOpts {
         id: up_uuid,
@@ -785,8 +762,10 @@ async fn make_a_volume(
         if !opt.target.is_empty() {
             warn!(test_log, "targets are ignored when VCR is provided");
         }
+        let targets = vcr.targets();
+
         let volume = Volume::construct(vcr, pr, block_io_logger).await.unwrap();
-        Ok(Arc::new(volume))
+        Ok((Arc::new(volume), targets))
     } else if opt.dsc.is_some() {
         // We were given a dsc endpoint, use that to create a VCR that
         // represents our Volume.
@@ -834,20 +813,22 @@ async fn make_a_volume(
 
         // Now, loop over regions we found from dsc and make a
         // sub_volume at every three.
+        let mut targets = Vec::new();
         let mut cid = 0;
         for sv in 0..sv_count {
-            let mut targets = Vec::new();
+            let mut sv_targets = Vec::new();
             for _ in 0..3 {
                 let port = dsc_client.dsc_get_port(cid).await.unwrap();
                 let tar: SocketAddr =
                     format!("{}:{}", dsc.ip(), port.into_inner())
                         .parse()
                         .unwrap();
+                sv_targets.push(tar);
                 targets.push(tar);
                 cid += 1;
             }
-            info!(test_log, "SV {:?} has targets: {:?}", sv, targets);
-            crucible_opts.target = targets;
+            info!(test_log, "SV {:?} has targets: {:?}", sv, sv_targets);
+            crucible_opts.target = sv_targets;
 
             volume
                 .add_subvolume_create_guest(
@@ -860,7 +841,7 @@ async fn make_a_volume(
                 .unwrap();
         }
 
-        Ok(Arc::new(volume))
+        Ok((Arc::new(volume), targets))
     } else {
         // We were not provided a VCR, so, we have to make one by using
         // the repair port on a downstairs to get region information that
@@ -873,7 +854,9 @@ async fn make_a_volume(
         // running.  We don't care which one responds.  Any mismatch will
         // be detected later in the process and handled by the upstairs.
         let mut extent_info_result = None;
+        let mut targets = Vec::new();
         for target in &crucible_opts.target {
+            targets.push(*target);
             let port = target.port() + crucible_common::REPAIR_PORT_OFFSET;
             info!(test_log, "look at: http://{}:{} ", target.ip(), port);
             let repair_url = format!("http://{}:{}", target.ip(), port);
@@ -914,7 +897,7 @@ async fn make_a_volume(
             .await
             .unwrap();
 
-        Ok(Arc::new(volume))
+        Ok((Arc::new(volume), targets))
     }
 }
 
@@ -1001,7 +984,10 @@ async fn main() -> Result<()> {
     }
 
     // Build a Volume for all the tests to use.
-    let block_io =
+    // While we build the volume, collect the list of targets that some tests
+    // need to use.  We won't have the list of targets available after we have
+    // constructed a volume from a dsc endpoint or a VCR file.
+    let (block_io, mut targets) =
         make_a_volume(&opt, block_io_logger.clone(), &test_log, pr).await?;
 
     if let Workload::CliServer { listen, port } = opt.workload {
@@ -1045,7 +1031,7 @@ async fn main() -> Result<()> {
      * Build the region info struct that all the tests will use.
      * This includes importing and verifying from a write log, if requested.
      */
-    let mut region_info = match get_region_info(&block_io).await {
+    let mut region_info = match get_region_info(&block_io, is_encrypted).await {
         Ok(region_info) => region_info,
         Err(e) => bail!("failed to get region info: {:?}", e),
     };
@@ -1094,6 +1080,17 @@ async fn main() -> Result<()> {
         Workload::Biggest => {
             println!("Run biggest IO test");
             biggest_io_workload(&block_io, &mut region_info).await?;
+        }
+        Workload::Bufferbloat { cfg } => {
+            bufferbloat_workload(
+                &block_io,
+                &mut region_info,
+                BufferbloatConfig::new(cfg),
+            )
+            .await?;
+            if opt.quit {
+                return Ok(());
+            }
         }
         Workload::Burst => {
             println!("Run burst test (demo in a loop)");
@@ -1233,11 +1230,7 @@ async fn main() -> Result<()> {
             rand_read_write_workload(
                 &block_io,
                 &mut region_info,
-                RandReadWriteConfig::new(
-                    cfg,
-                    is_encrypted,
-                    RandReadWriteMode::Read,
-                ),
+                RandReadWriteConfig::new(cfg, RandReadWriteMode::Read),
             )
             .await?;
             if opt.quit {
@@ -1248,22 +1241,7 @@ async fn main() -> Result<()> {
             rand_read_write_workload(
                 &block_io,
                 &mut region_info,
-                RandReadWriteConfig::new(
-                    cfg,
-                    is_encrypted,
-                    RandReadWriteMode::Write,
-                ),
-            )
-            .await?;
-            if opt.quit {
-                return Ok(());
-            }
-        }
-        Workload::Bufferbloat { cfg } => {
-            bufferbloat_workload(
-                &block_io,
-                &mut region_info,
-                BufferbloatConfig::new(cfg, is_encrypted),
+                RandReadWriteConfig::new(cfg, RandReadWriteMode::Write),
             )
             .await?;
             if opt.quit {
@@ -1330,10 +1308,8 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // Build the list of targets we use during the replace test.
-            // The first three are provided in the crucible opts, and the
-            // final one (the replacement) is a test specific arg.
-            let mut targets = opt.target.clone();
+            // Add to the list of targets for our volume the replacement
+            // target provided on the command line
             targets.push(replacement);
             replace_workload(
                 &block_io,
@@ -1344,11 +1320,16 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Workload::ReplaceBeforeActive {
-            dsc_str,
-            replacement,
-        } => {
-            let dsc_client = Client::new(&dsc_str);
+        Workload::ReplaceBeforeActive { replacement } => {
+            let dsc_client = match opt.dsc {
+                Some(dsc_addr) => {
+                    let dsc_url = format!("http://{}", dsc_addr);
+                    Client::new(&dsc_url)
+                }
+                None => {
+                    bail!("Replace before active requires a dsc endpoint");
+                }
+            };
             // Either we have a count, or we run until we get a signal.
             let wtq = {
                 if opt.continuous {
@@ -1359,10 +1340,8 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // Build the list of targets we use during the replace test.
-            // The first three are provided in the crucible opts, and the
-            // final one (the replacement) is a test specific arg.
-            let mut targets = opt.target.clone();
+            // Add to the list of targets for our volume the replacement
+            // target provided on the command line
             targets.push(replacement);
             replace_before_active(
                 &block_io,
@@ -1375,11 +1354,16 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Workload::ReplaceReconcile {
-            dsc_str,
-            replacement,
-        } => {
-            let dsc_client = Client::new(&dsc_str);
+        Workload::ReplaceReconcile { replacement } => {
+            let dsc_client = match opt.dsc {
+                Some(dsc_addr) => {
+                    let dsc_url = format!("http://{}", dsc_addr);
+                    Client::new(&dsc_url)
+                }
+                None => {
+                    bail!("Replace reconcile requires a dsc endpoint");
+                }
+            };
             // Either we have a count, or we run until we get a signal.
             let wtq = {
                 if opt.continuous {
@@ -1390,10 +1374,8 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // Build the list of targets we use during the replace test.
-            // The first three are provided in the crucible opts, and the
-            // final one (the replacement) is a test specific arg.
-            let mut targets = opt.target.clone();
+            // Add to the list of targets for our volume the replacement
+            // target provided on the command line
             targets.push(replacement);
             replace_while_reconcile(
                 &block_io,
@@ -2005,24 +1987,32 @@ async fn fill_sparse_workload<T: BlockIO>(
 ) -> Result<()> {
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
-    // Figure out how many extents we have
-    let extents = ri.total_blocks / (ri.extent_size.value as usize);
-    let extent_size = ri.extent_size.value as usize;
+    // It's possible that sub-volumes have a different extent size
+    // and extent count.
+    let mut sv_base = 0;
+    for (index, sv) in ri.sub_volume_info.iter().enumerate() {
+        // Figure out how many extents we have in this sub_volume
+        let extents = sv.extent_count as usize;
+        let extent_size = sv.extent_size.value as usize;
 
-    // Do one write to each extent.
-    for extent in 0..extents {
-        let mut block_index: usize = extent * extent_size;
-        let random_offset: usize = rng.gen_range(0..extent_size);
-        block_index += random_offset;
+        // Do one write to each extent.
+        for extent in 0..extents {
+            let mut block_index: usize = sv_base + (extent * extent_size);
+            let random_offset: usize = rng.gen_range(0..extent_size);
+            block_index += random_offset;
 
-        let offset = BlockIndex(block_index as u64);
+            let offset = BlockIndex(block_index as u64);
 
-        ri.write_log.update_wc(block_index);
+            ri.write_log.update_wc(block_index);
 
-        let data = fill_vec(block_index, 1, &ri.write_log, ri.block_size);
+            let data = fill_vec(block_index, 1, &ri.write_log, ri.block_size);
 
-        println!("[{extent}/{extents}] Write to block {}", block_index);
-        block_io.write(offset, data).await?;
+            println!(
+                "[{index}/{extent}/{extents}] Write to block {block_index}"
+            );
+            block_io.write(offset, data).await?;
+        }
+        sv_base += extents * extent_size;
     }
 
     block_io.flush(None).await?;
@@ -3017,6 +3007,11 @@ async fn perf_workload<T: BlockIO + Send + Sync + 'static>(
     write_loop: usize,
     read_loop: usize,
 ) -> Result<()> {
+    // If we have more than one sub-volume, this performance test will
+    // not compute extent size properly.
+    if ri.sub_volume_info.len() > 1 {
+        println!("WARNING: Multiple Sub_Volumes seen in perf test");
+    }
     // Before we start, make sure the work queues are empty.
     loop {
         let wc = block_io.query_work_queue().await?;
@@ -3044,7 +3039,7 @@ async fn perf_workload<T: BlockIO + Send + Sync + 'static>(
         .map(|_| Buffer::new(blocks_per_io, ri.block_size as usize))
         .collect();
 
-    let es = ri.extent_size.value;
+    let es = ri.sub_volume_info[0].extent_size.value;
     let ec = ri.total_blocks as u64 / es;
 
     // To make a random block offset, we take the total block count and subtract
@@ -3167,20 +3162,29 @@ async fn perf_workload<T: BlockIO + Send + Sync + 'static>(
 /// Prints a pleasant summary of the given region
 fn print_region_description(ri: &RegionInfo, encrypted: bool) {
     println!("region info:");
-    println!("  block size:      {} bytes", ri.block_size);
-    println!("  blocks / extent: {}", ri.extent_size.value);
+    println!("  block size:                   {} bytes", ri.block_size);
+    for (index, sv) in ri.sub_volume_info.iter().enumerate() {
+        println!(
+            "  sub_volume {} blocks / extent: {}",
+            index, sv.extent_size.value
+        );
+        println!(
+            "  sub_volume {} extent size:     {}",
+            index,
+            human_bytes((ri.block_size * sv.extent_size.value) as f64)
+        );
+        println!(
+            "  sub_volume {} extent count:    {}",
+            index, sv.extent_count
+        );
+    }
+    println!("  total blocks:                 {}", ri.total_blocks);
     println!(
-        "  extent size:     {}",
-        human_bytes((ri.block_size * ri.extent_size.value) as f64)
+        "  total size:                   {}",
+        human_bytes(ri.total_size as f64)
     );
     println!(
-        "  extent count:    {}",
-        ri.total_blocks as u64 / ri.extent_size.value
-    );
-    println!("  total blocks:    {}", ri.total_blocks);
-    println!("  total size:      {}", human_bytes(ri.total_size as f64));
-    println!(
-        "  encryption:      {}",
+        "  encryption:                   {}",
         if encrypted { "yes" } else { "no" }
     );
 }
@@ -3220,7 +3224,6 @@ async fn rand_read_write_workload<T: BlockIO + Send + Sync + 'static>(
         cfg.blocks_per_io,
         if cfg.blocks_per_io > 1 { "s" } else { "" },
     );
-    print_region_description(ri, cfg.encrypted);
     println!("----------------------------------------------");
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -3386,7 +3389,6 @@ async fn bufferbloat_workload<T: BlockIO + Send + Sync + 'static>(
         cfg.blocks_per_io,
         if cfg.blocks_per_io > 1 { "s" } else { "" },
     );
-    print_region_description(ri, cfg.encrypted);
     println!("----------------------------------------------");
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -3954,38 +3956,43 @@ async fn span_workload<T: BlockIO + Send + Sync + 'static>(
     block_io: &Arc<T>,
     ri: &mut RegionInfo,
 ) -> Result<()> {
-    /*
-     * Pick the last block in the first extent
-     */
-    let block_index = (ri.extent_size.value - 1) as usize;
+    for (index, sv) in ri.sub_volume_info.iter().enumerate() {
+        // Pick the last block in the first extent
+        let block_index = (sv.extent_size.value - 1) as usize;
 
-    /*
-     * Update the counter for the blocks we are about to write.
-     */
-    ri.write_log.update_wc(block_index);
-    ri.write_log.update_wc(block_index + 1);
+        /*
+         * Update the counter for the blocks we are about to write.
+         */
+        ri.write_log.update_wc(block_index);
+        ri.write_log.update_wc(block_index + 1);
 
-    let offset = BlockIndex(block_index as u64);
-    let data = fill_vec(block_index, 2, &ri.write_log, ri.block_size);
+        let offset = BlockIndex(block_index as u64);
+        let data = fill_vec(block_index, 2, &ri.write_log, ri.block_size);
 
-    println!("Sending a write spanning two extents");
-    block_io.write(offset, data).await?;
+        println!("sub_volume {index} Sending a write spanning two extents");
+        block_io.write(offset, data).await?;
 
-    println!("Sending a flush");
-    block_io.flush(None).await?;
+        println!("sub_volume {index} Sending a flush");
+        block_io.flush(None).await?;
 
-    let mut data = crucible::Buffer::repeat(99, 2, ri.block_size as usize);
+        let mut data = crucible::Buffer::repeat(99, 2, ri.block_size as usize);
 
-    println!("Sending a read spanning two extents");
-    block_io.read(offset, &mut data).await?;
+        println!("sub_volume {index} Sending a read spanning two extents");
+        block_io.read(offset, &mut data).await?;
 
-    let dl = data.into_bytes();
-    match validate_vec(dl, block_index, &mut ri.write_log, ri.block_size, false)
-    {
-        ValidateStatus::Bad | ValidateStatus::InRange => {
-            bail!("Span read verify failed");
+        let dl = data.into_bytes();
+        match validate_vec(
+            dl,
+            block_index,
+            &mut ri.write_log,
+            ri.block_size,
+            false,
+        ) {
+            ValidateStatus::Bad | ValidateStatus::InRange => {
+                bail!("sub_volume {index} Span read verify failed");
+            }
+            ValidateStatus::Good => {}
         }
-        ValidateStatus::Good => {}
     }
     Ok(())
 }

@@ -406,6 +406,13 @@ impl Default for RegionOptions {
     }
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// Info about extents in a region.
+pub struct ExtentInfo {
+    pub extent_size: Block,
+    pub extent_count: u32,
+}
+
 /// Append the region description file to the end of a provided path.
 pub fn config_path<P: AsRef<Path>>(dir: P) -> PathBuf {
     let mut out = dir.as_ref().to_path_buf();

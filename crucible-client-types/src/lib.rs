@@ -38,6 +38,41 @@ pub enum VolumeConstructionRequest {
     },
 }
 
+impl VolumeConstructionRequest {
+    /// Return all the targets that are part of this VCR.
+    pub fn targets(&self) -> Vec<SocketAddr> {
+        let mut targets = Vec::new();
+        match self {
+            VolumeConstructionRequest::Volume {
+                id: _,
+                block_size: _,
+                sub_volumes,
+                read_only_parent: _,
+            } => {
+                for subreq in sub_volumes {
+                    let new_targets = subreq.targets();
+                    for nt in new_targets {
+                        targets.push(nt);
+                    }
+                }
+            }
+            VolumeConstructionRequest::Region {
+                block_size: _,
+                blocks_per_extent: _,
+                extent_count: _,
+                opts,
+                gen: _,
+            } => {
+                for nt in &opts.target {
+                    targets.push(*nt);
+                }
+            }
+            _ => {}
+        }
+        targets
+    }
+}
+
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(
     Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq,

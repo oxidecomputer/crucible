@@ -652,22 +652,32 @@ impl BlockIO for Volume {
         Ok(all_wq)
     }
 
-    // Return a vec of these?
-    // Return a struct with a vec for SV and Some/None for ROP?
-    async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
-        // ZZZ this needs more info, what if ROP and SV differ?
+    // Return a single Vec that contains all the extent_info from the
+    // sub-volumes we have, or if none, then whatever the read only parent
+    // has.  We don't currently support returning extent info if we have both
+    // sub_volumes and a read_only_parent, but as we are the only consumer of
+    // this interface, we can add that if it becomes a requirement.
+    async fn query_extent_info(
+        &self,
+    ) -> Result<Vec<ExtentInfo>, CrucibleError> {
+        let mut extent_info = Vec::new();
         for sub_volume in &self.sub_volumes {
-            match sub_volume.query_extent_size().await {
-                Ok(es) => {
-                    return Ok(es);
+            match sub_volume.query_extent_info().await {
+                Ok(ei) => {
+                    for sv_ei in ei.iter() {
+                        extent_info.push(*sv_ei);
+                    }
                 }
                 _ => {
                     continue;
                 }
             }
         }
+        if !extent_info.is_empty() {
+            return Ok(extent_info);
+        }
         if let Some(ref read_only_parent) = &self.read_only_parent {
-            return read_only_parent.query_extent_size().await;
+            return read_only_parent.query_extent_info().await;
         }
         crucible_bail!(IoError, "Cannot determine extent size");
     }
@@ -1033,8 +1043,10 @@ impl BlockIO for SubVolume {
     async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
         self.block_io.query_work_queue().await
     }
-    async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
-        self.block_io.query_extent_size().await
+    async fn query_extent_info(
+        &self,
+    ) -> Result<Vec<ExtentInfo>, CrucibleError> {
+        self.block_io.query_extent_info().await
     }
 
     async fn deactivate(&self) -> Result<(), CrucibleError> {
