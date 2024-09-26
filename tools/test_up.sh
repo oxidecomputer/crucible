@@ -145,7 +145,6 @@ gen=1
 # Keep deactivate test last, and add 15 to the generation number so
 # tests that follow will be able to activate.
 test_list="span big dep balloon deactivate"
-test_list="span"
 for tt in ${test_list}; do
     # Add a blank line in the output file as all the output follows.
     echo "" >> "${log_prefix}_out.txt"
