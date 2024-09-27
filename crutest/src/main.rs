@@ -859,9 +859,7 @@ async fn make_a_volume(
         // running.  We don't care which one responds.  Any mismatch will
         // be detected later in the process and handled by the upstairs.
         let mut extent_info_result = None;
-        let mut targets = Vec::new();
         for target in &crucible_opts.target {
-            targets.push(*target);
             let port = target.port() + crucible_common::REPAIR_PORT_OFFSET;
             info!(test_log, "look at: http://{}:{} ", target.ip(), port);
             let repair_url = format!("http://{}:{}", target.ip(), port);
@@ -890,6 +888,7 @@ async fn make_a_volume(
                 bail!("Can't determine extent info to build a Volume");
             }
         };
+        let targets = crucible_opts.target.clone().into_iter().collect();
 
         let mut volume = Volume::new(extent_info.block_size, block_io_logger);
         volume
