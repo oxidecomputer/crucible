@@ -710,7 +710,7 @@ async fn handle_signals(
     }
 }
 
-// Construct a volume for use by the tests.
+// Construct a volume and a list of targets for use by the tests.
 // Our choice of how to construct the volume depends on what options we
 // have been given.
 //
@@ -727,6 +727,11 @@ async fn handle_signals(
 // CrucibleOpts.  This will work as long as one of the downstairs is up
 // already.  If we have a test that requires no downstairs to be running on
 // startup, then we need to provide a VCR file, or use the dsc server.
+//
+// While making our volume, we also record the targets that become part of
+// the volume in a separate Vec.  In some cases we no longer have access to
+// the target information after the volume is constructed, and some tests also
+// want the specific targets, so we make and return that list here.
 async fn make_a_volume(
     opt: &Opt,
     block_io_logger: Logger,

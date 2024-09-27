@@ -64,10 +64,10 @@ echo "starting $(date)" | tee "$loop_log"
 echo "Tail $test_log for test output"
 
 # NOTE: we are creating a single region set here plus one more region to be
-# used by the replacement., and with the assumption that
-# the default ports will be used (8810, 8820, 8830).  The test relies on that
-# because we use the fourth region-dir for our "replacement".  If you change
-# the number of regions, you must also adjust the replacement below.
+# used by the replacement, and with the assumption that # the default ports
+# will be used (8810, 8820, 8830).  The test relies on that # because we use
+# the fourth region-dir for our "replacement".  If you change # the number of
+# regions, you must also adjust the replacement below.
 if ! ${dsc} create --cleanup \
   --region-dir "$REGION_ROOT" \
   --region-count 4 \
