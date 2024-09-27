@@ -55,8 +55,8 @@ http = "0.2.12"
 httptest = "0.16.1"
 human_bytes = "0.4.3"
 humantime = "2.1.0"
-hyper = { version = "0.14", features = [ "full" ] }
-hyper-staticfile = "0.9.6"
+hyper = { version = "1", features = [ "full" ] }
+hyper-staticfile = "0.10.0"
 indicatif = { version = "0.17.8", features = ["rayon"] }
 itertools = "0.13.0"
 libc = "0.2"
@@ -76,7 +76,8 @@ rayon = "1.10.0"
 rand = { version = "0.8.5", features = ["min_const_gen", "small_rng"] }
 rand_chacha = "0.3.1"
 reedline = "0.33.0"
-reqwest = { version = "0.11", features = ["default", "blocking", "json", "stream"] }
+reqwest = { version = "0.12", features = ["default", "blocking", "json", "stream"] }
+reqwest11 = { package = "reqwest", version = "0.11", features = ["default", "blocking", "json", "stream"] }
 ringbuffer = "0.15.0"
 rusqlite = { version = "0.32" }
 rustls-pemfile = { version = "1.0.4" }
@@ -112,7 +113,7 @@ usdt = "0.5.0"
 uuid = { version = "1", features = [ "serde", "v4" ] }
 
 # git
-dropshot = { git = "https://github.com/oxidecomputer/dropshot", branch = "main", features = [ "usdt-probes" ] }
+dropshot = { version = "0.12.0", features = [ "usdt-probes" ] }
 omicron-common = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 nexus-client = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 internal-dns = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
@@ -120,8 +121,8 @@ omicron-uuid-kinds = { git = "https://github.com/oxidecomputer/omicron", branch 
 openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch = "main" }
 oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
-progenitor = { git = "https://github.com/oxidecomputer/progenitor", branch = "main" }
-progenitor-client = { git = "https://github.com/oxidecomputer/progenitor", branch = "main" }
+progenitor = "0.8.0"
+progenitor-client = "0.8.0"
 
 # local path
 crucible = { path = "./upstairs" }
