@@ -1366,7 +1366,6 @@ async fn main() -> Result<()> {
 
             // Add to the list of targets for our volume the replacement
             // target provided on the command line
-            let mut targets = opt.target.clone();
             targets.push(replacement);
             replace_before_active(
                 &volume,
@@ -1401,7 +1400,6 @@ async fn main() -> Result<()> {
 
             // Add to the list of targets for our volume the replacement
             // target provided on the command line
-            let mut targets = opt.target.clone();
             targets.push(replacement);
             replace_while_reconcile(
                 &volume,
