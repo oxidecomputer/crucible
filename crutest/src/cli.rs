@@ -213,7 +213,7 @@ enum CliCommand {
 }
 
 /*
- * Generate a read for the block_io with the given offset/length.
+ * Generate a read for the volume with the given offset/length.
  * Wait for the IO to return.
  * Verify the data is as we expect using the client based validation.
  * Note that if you have not written to a block yet and you are not
@@ -224,8 +224,8 @@ enum CliCommand {
  * After verify, we truncate the data to 10 fields and return that so
  * the cli server can send it back to the client for display.
  */
-async fn cli_read<T: BlockIO>(
-    block_io: &T,
+async fn cli_read(
+    volume: &Volume,
     ri: &mut RegionInfo,
     block_index: usize,
     size: usize,
@@ -237,7 +237,7 @@ async fn cli_read<T: BlockIO>(
     let mut data = crucible::Buffer::repeat(255, size, ri.block_size as usize);
 
     println!("Read  at block {:5}, len:{:7}", offset.0, data.len());
-    block_io.read(offset, &mut data).await?;
+    volume.read(offset, &mut data).await?;
 
     let mut dl = data.into_bytes();
     match validate_vec(
@@ -265,8 +265,8 @@ async fn cli_read<T: BlockIO>(
 /*
  * A wrapper around write that just picks a random offset.
  */
-async fn rand_write<T: BlockIO>(
-    block_io: &T,
+async fn rand_write(
+    volume: &Volume,
     ri: &mut RegionInfo,
 ) -> Result<(), CrucibleError> {
     /*
@@ -283,16 +283,16 @@ async fn rand_write<T: BlockIO>(
     let block_max = ri.total_blocks - size + 1;
     let block_index = rng.gen_range(0..block_max);
 
-    cli_write(block_io, ri, block_index, size).await
+    cli_write(volume, ri, block_index, size).await
 }
 
 /*
- * Issue a write to the block_io at the given offset/len.
+ * Issue a write to the volume at the given offset/len.
  * Data is generated based on the value in the internal write counter.
  * Update the internal write counter so we have something to compare to.
  */
-async fn cli_write<T: BlockIO>(
-    block_io: &T,
+async fn cli_write(
+    volume: &Volume,
     ri: &mut RegionInfo,
     block_index: usize,
     size: usize,
@@ -322,21 +322,21 @@ async fn cli_write<T: BlockIO>(
 
     println!("Write at block {:5}, len:{:7}", offset.0, data.len());
 
-    block_io.write(offset, data).await?;
+    volume.write(offset, data).await?;
 
     Ok(())
 }
 
 /*
- * Issue a write_unwritten to the block_io at the given offset.
+ * Issue a write_unwritten to the volume at the given offset.
  * We first check our internal write counter.
  * If we believe the block has not been written to, then we update our
  * internal counter and we will expect the write to change the block.
  * If we do believe the block is written to, then we don't update our
  * internal counter and we don't expect our write to change the contents.
  */
-async fn cli_write_unwritten<T: BlockIO>(
-    block_io: &T,
+async fn cli_write_unwritten(
+    volume: &Volume,
     ri: &mut RegionInfo,
     block_index: usize,
 ) -> Result<(), CrucibleError> {
@@ -369,7 +369,7 @@ async fn cli_write_unwritten<T: BlockIO>(
         data.len(),
     );
 
-    block_io.write_unwritten(offset, data).await?;
+    volume.write_unwritten(offset, data).await?;
 
     Ok(())
 }
@@ -745,8 +745,8 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
 /**
  * Process a CLI command from the client, we are the server side.
  */
-async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
-    block_io: &Arc<T>,
+async fn process_cli_command(
+    volume: &Arc<Volume>,
     fw: &mut FramedWrite<tokio::net::tcp::OwnedWriteHalf, CliEncoder>,
     cmd: protocol::CliMessage,
     ri: &mut RegionInfo,
@@ -756,13 +756,13 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
 ) -> Result<()> {
     match cmd {
         CliMessage::Activate(gen) => {
-            match block_io.activate_with_gen(gen).await {
+            match volume.activate_with_gen(gen).await {
                 Ok(_) => fw.send(CliMessage::DoneOk).await,
                 Err(e) => fw.send(CliMessage::Error(e)).await,
             }
         }
         CliMessage::ActivateRequest(gen) => {
-            let gc = block_io.clone();
+            let gc = volume.clone();
             let _handle = tokio::spawn(async move {
                 match gc.activate_with_gen(gen).await {
                     Ok(_) => {
@@ -778,7 +778,7 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
             // activation has completed.
             fw.send(CliMessage::DoneOk).await
         }
-        CliMessage::Deactivate => match block_io.deactivate().await {
+        CliMessage::Deactivate => match volume.deactivate().await {
             Ok(_) => fw.send(CliMessage::DoneOk).await,
             Err(e) => fw.send(CliMessage::Error(e)).await,
         },
@@ -844,7 +844,7 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
                 .await
             } else {
                 let mut wtq = WhenToQuit::Count { count };
-                match generic_workload(block_io, &mut wtq, ri, quiet).await {
+                match generic_workload(volume, &mut wtq, ri, quiet).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => {
                         let msg = format!("{}", e);
@@ -861,7 +861,7 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
                 )))
                 .await
             } else {
-                match fill_workload(block_io, ri, skip_verify).await {
+                match fill_workload(volume, ri, skip_verify).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => {
                         let msg = format!("Fill/Verify failed with {}", e);
@@ -873,17 +873,17 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
         }
         CliMessage::Flush => {
             println!("Flush");
-            match block_io.flush(None).await {
+            match volume.flush(None).await {
                 Ok(_) => fw.send(CliMessage::DoneOk).await,
                 Err(e) => fw.send(CliMessage::Error(e)).await,
             }
         }
-        CliMessage::IsActive => match block_io.query_is_active().await {
+        CliMessage::IsActive => match volume.query_is_active().await {
             Ok(a) => fw.send(CliMessage::ActiveIs(a)).await,
             Err(e) => fw.send(CliMessage::Error(e)).await,
         },
         CliMessage::InfoPlease => {
-            let new_ri = get_region_info(block_io).await;
+            let new_ri = get_region_info(volume).await;
             match new_ri {
                 Ok(new_ri) => {
                     let bs = new_ri.block_size;
@@ -898,7 +898,7 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
                      */
                     if !*wc_filled {
                         if let Some(vi) = verify_input {
-                            load_write_log(block_io, ri, vi, false).await?;
+                            load_write_log(volume, ri, vi, false).await?;
                             *wc_filled = true;
                         }
                     }
@@ -916,7 +916,7 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
             } else {
                 perf_header();
                 match perf_workload(
-                    block_io,
+                    volume,
                     ri,
                     None,
                     count,
@@ -948,7 +948,7 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
                 let block_max = ri.total_blocks - size + 1;
                 let offset = rng.gen_range(0..block_max);
 
-                let res = cli_read(block_io.as_ref(), ri, offset, size).await;
+                let res = cli_read(volume.as_ref(), ri, offset, size).await;
                 fw.send(CliMessage::ReadResponse(offset, res)).await
             }
         }
@@ -959,7 +959,7 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
                 )))
                 .await
             } else {
-                match rand_write(block_io.as_ref(), ri).await {
+                match rand_write(volume.as_ref(), ri).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => fw.send(CliMessage::Error(e)).await,
                 }
@@ -972,16 +972,15 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
                 )))
                 .await
             } else {
-                let res = cli_read(block_io.as_ref(), ri, offset, len).await;
+                let res = cli_read(volume.as_ref(), ri, offset, len).await;
                 fw.send(CliMessage::ReadResponse(offset, res)).await
             }
         }
         CliMessage::Replace(old, new) => {
-            let res =
-                block_io.replace_downstairs(Uuid::new_v4(), old, new).await;
+            let res = volume.replace_downstairs(Uuid::new_v4(), old, new).await;
             fw.send(CliMessage::ReplaceResult(res)).await
         }
-        CliMessage::ShowWork => match block_io.show_work().await {
+        CliMessage::ShowWork => match volume.show_work().await {
             Ok(_) => fw.send(CliMessage::DoneOk).await,
             Err(e) => fw.send(CliMessage::Error(e)).await,
         },
@@ -992,7 +991,7 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
                 )))
                 .await
             } else {
-                match cli_write(block_io.as_ref(), ri, offset, len).await {
+                match cli_write(volume.as_ref(), ri, offset, len).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => fw.send(CliMessage::Error(e)).await,
                 }
@@ -1005,14 +1004,14 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
                 )))
                 .await
             } else {
-                match cli_write_unwritten(block_io.as_ref(), ri, offset).await {
+                match cli_write_unwritten(volume.as_ref(), ri, offset).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => fw.send(CliMessage::Error(e)).await,
                 }
             }
         }
         CliMessage::Uuid => {
-            let uuid = block_io.get_uuid().await?;
+            let uuid = volume.get_uuid().await?;
             fw.send(CliMessage::MyUuid(uuid)).await
         }
         CliMessage::Verify => {
@@ -1022,7 +1021,7 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
                 )))
                 .await
             } else {
-                match verify_volume(block_io, ri, false).await {
+                match verify_volume(volume, ri, false).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => {
                         println!("Verify failed with {:?}", e);
@@ -1044,14 +1043,14 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
 /*
  * Server for a crucible client CLI.
  * This opens a network port and listens for commands from the cli_client.
- * When it receives one, it translates it into the crucible BlockIO command
+ * When it receives one, it translates it into the crucible Volume command
  * and passes it on to the Upstairs.
  * State is kept here.
  * No checking is done.
  * Wait here if you want.
  */
-pub async fn start_cli_server<T: BlockIO + Send + Sync + 'static>(
-    block_io: &Arc<T>,
+pub async fn start_cli_server(
+    volume: &Arc<Volume>,
     address: IpAddr,
     port: u16,
     verify_input: Option<PathBuf>,
@@ -1108,7 +1107,7 @@ pub async fn start_cli_server<T: BlockIO + Send + Sync + 'static>(
                         },
                         Some(cmd) => {
                             process_cli_command(
-                                block_io,
+                                volume,
                                 &mut fw,
                                 cmd,
                                 &mut ri,
