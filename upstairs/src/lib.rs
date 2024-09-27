@@ -110,7 +110,8 @@ pub trait BlockIO: Sync {
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError>;
 
-    async fn query_extent_size(&self) -> Result<Block, CrucibleError>;
+    async fn query_extent_info(&self)
+        -> Result<Vec<ExtentInfo>, CrucibleError>;
     async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError>;
 
     // Total bytes of Volume
@@ -1596,8 +1597,8 @@ pub(crate) enum BlockOp {
         done: BlockRes<Uuid>,
     },
     // Begin testing options.
-    QueryExtentSize {
-        done: BlockRes<Block>,
+    QueryExtentInfo {
+        done: BlockRes<ExtentInfo>,
     },
     QueryWorkQueue {
         done: BlockRes<WQCounts>,

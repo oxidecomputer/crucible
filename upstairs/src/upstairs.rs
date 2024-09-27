@@ -14,7 +14,7 @@ use crate::{
     guest::GuestBlockRes,
     stats::UpStatOuter,
     BlockOp, BlockRes, Buffer, ClientId, ClientMap, CrucibleOpts, DsState,
-    EncryptionContext, GuestIoHandle, Message, RegionDefinition,
+    EncryptionContext, ExtentInfo, GuestIoHandle, Message, RegionDefinition,
     RegionDefinitionStatus, SnapshotDetails, WQCounts,
 };
 use crucible_common::{BlockIndex, CrucibleError};
@@ -1049,11 +1049,15 @@ impl Upstairs {
                 };
             }
             // Testing options
-            BlockOp::QueryExtentSize { done } => {
+            BlockOp::QueryExtentInfo { done } => {
                 // Yes, test only
                 match self.ddef.get_def() {
                     Some(rd) => {
-                        done.send_ok(rd.extent_size());
+                        let ei = ExtentInfo {
+                            extent_size: rd.extent_size(),
+                            extent_count: rd.extent_count(),
+                        };
+                        done.send_ok(ei);
                     }
                     None => {
                         warn!(

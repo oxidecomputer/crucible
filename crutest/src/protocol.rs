@@ -34,9 +34,11 @@ pub enum CliMessage {
     Export,
     // Run the fill test.
     Fill(bool),
+    // Run the sparse fill workload.
+    FillSparse,
     Flush,
     Generic(usize, bool),
-    Info(u64, u64, u64),
+    Info(RegionInfo),
     InfoPlease,
     IsActive,
     MyUuid(Uuid),
@@ -219,7 +221,15 @@ mod tests {
 
     #[test]
     fn rt_info() -> Result<()> {
-        let input = CliMessage::Info(1, 2, 99);
+        let ri = RegionInfo {
+            block_size: 512,
+            sub_volume_info: Vec::new(),
+            total_size: 100,
+            total_blocks: 5,
+            write_log: WriteLog::new(0),
+            max_block_io: 45,
+        };
+        let input = CliMessage::Info(ri);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }

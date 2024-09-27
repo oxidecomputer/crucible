@@ -128,6 +128,8 @@ enum CliCommand {
         #[clap(long, action)]
         skip_verify: bool,
     },
+    /// Run the sparse fill workload, no verify
+    FillSparse,
     /// Flush
     Flush,
     /// Run Generic workload
@@ -499,6 +501,9 @@ async fn cmd_to_msg(
         CliCommand::Fill { skip_verify } => {
             fw.send(CliMessage::Fill(skip_verify)).await?;
         }
+        CliCommand::FillSparse => {
+            fw.send(CliMessage::FillSparse).await?;
+        }
         CliCommand::Flush => {
             fw.send(CliMessage::Flush).await?;
         }
@@ -571,8 +576,8 @@ async fn cmd_to_msg(
         Some(CliMessage::MyUuid(uuid)) => {
             println!("uuid: {}", uuid);
         }
-        Some(CliMessage::Info(es, bs, bl)) => {
-            println!("Got info: {} {} {}", es, bs, bl);
+        Some(CliMessage::Info(ri)) => {
+            println!("Got info: {:?}", ri);
         }
         Some(CliMessage::DoneOk) => {
             println!("Ok");
@@ -871,6 +876,23 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
                 }
             }
         }
+        CliMessage::FillSparse => {
+            if ri.write_log.is_empty() {
+                fw.send(CliMessage::Error(CrucibleError::GenericError(
+                    "Info not initialized".to_string(),
+                )))
+                .await
+            } else {
+                match fill_sparse_workload(block_io.as_ref(), ri).await {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => {
+                        let msg = format!("FillSparse failed with {}", e);
+                        let e = CrucibleError::GenericError(msg);
+                        fw.send(CliMessage::Error(e)).await
+                    }
+                }
+            }
+        }
         CliMessage::Flush => {
             println!("Flush");
             match block_io.flush(None).await {
@@ -883,13 +905,10 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
             Err(e) => fw.send(CliMessage::Error(e)).await,
         },
         CliMessage::InfoPlease => {
-            let new_ri = get_region_info(block_io).await;
+            let new_ri = get_region_info(block_io, false).await;
             match new_ri {
                 Ok(new_ri) => {
-                    let bs = new_ri.block_size;
-                    let es = new_ri.extent_size.value;
-                    let ts = new_ri.total_size;
-                    *ri = new_ri;
+                    *ri = new_ri.clone();
                     /*
                      * We may only want to read input from the file once.
                      * Maybe make a command to specifically do it, but it
@@ -902,7 +921,7 @@ async fn process_cli_command<T: BlockIO + Send + Sync + 'static>(
                             *wc_filled = true;
                         }
                     }
-                    fw.send(CliMessage::Info(bs, es, ts)).await
+                    fw.send(CliMessage::Info(new_ri)).await
                 }
                 Err(e) => fw.send(CliMessage::Error(e)).await,
             }
@@ -1074,7 +1093,7 @@ pub async fn start_cli_server<T: BlockIO + Send + Sync + 'static>(
      */
     let mut ri: RegionInfo = RegionInfo {
         block_size: 0,
-        extent_size: Block::new_512(0),
+        sub_volume_info: Vec::new(),
         total_size: 0,
         total_blocks: 0,
         write_log: WriteLog::new(0),

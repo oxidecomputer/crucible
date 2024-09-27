@@ -57,6 +57,7 @@ fail_log="${log_prefix}_fail.txt"
 rm -f "$fail_log"
 
 args=()
+hammer_args=()
 dsc_args=()
 dsc_create_args=()
 dump_args=()
@@ -86,12 +87,15 @@ case ${1} in
         upstairs_key=$(openssl rand -base64 32)
         echo "Upstairs using key: $upstairs_key"
         args+=( --key "$upstairs_key" )
+        hammer_args+=( --key "$upstairs_key" )
         dsc_create_args+=( --encrypted )
         ;;
     *)
         usage
         ;;
 esac
+
+args+=( --dsc "127.0.0.1:9998" )
 
 dsc_output_dir="${test_output_dir}/dsc"
 mkdir -p ${dsc_output_dir}
@@ -100,16 +104,6 @@ dsc_output="${test_output_dir}/dsc-out.txt"
 dsc_create_args+=( --cleanup )
 dsc_args+=( --output-dir "$dsc_output_dir" )
 dsc_args+=( --ds-bin "$cds" )
-
-# Note, this should match the default for DSC
-port_base=8810
-# Build the upstairs args
-for (( i = 0; i < 3; i++ )); do
-    (( port_step = i * 10 ))
-    (( port = port_base + port_step ))
-    args+=( -t "127.0.0.1:$port" )
-done
-
 dsc_args+=( --region-dir "$testdir" )
 echo "dsc output goes to $dsc_output"
 
@@ -176,8 +170,11 @@ done
 
 echo "" >> "${log_prefix}_out.txt"
 echo "Running hammer" | tee -a "${log_prefix}_out.txt"
-echo "$ch" -g "$gen" "${args[@]}" >> "${log_prefix}_out.txt"
-if ! "$ch" -g "$gen" "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
+hammer_args+=( -t "127.0.0.1:8810")
+hammer_args+=( -t "127.0.0.1:8820")
+hammer_args+=( -t "127.0.0.1:8830")
+echo "$ch" -g "$gen" "${hammer_args[@]}" >> "${log_prefix}_out.txt"
+if ! "$ch" -g "$gen" "${hammer_args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
     echo "Failed hammer test"
     echo "Failed hammer test" >> "$fail_log"
     (( res += 1 ))
@@ -208,8 +205,8 @@ else
 fi
 (( gen += 1 ))
 
-echo "Copy the $port file" | tee -a "${log_prefix}_out.txt"
-
+port=8830
+echo "Copy the region for ${testdir}/$port" | tee -a "${log_prefix}_out.txt"
 
 echo cp -r "${testdir}/${port}" "${testdir}/previous"
 cp -r "${testdir}/${port}" "${testdir}/previous"
@@ -265,6 +262,9 @@ fi
 # Put a dump test in the middle of the repair test, so we
 # can see both a mismatch and that dump works.
 # The dump args look different than other downstairs commands
+# This port base comes from the default for dsc.  If that changes, then this
+# needs to change as well.
+port_base=8810
 for (( i = 0; i < 30; i += 10 )); do
     (( port = port_base + i ))
     dir="${testdir}/$port"

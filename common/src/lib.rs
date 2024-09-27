@@ -16,9 +16,10 @@ use tokio::time::{Duration, Instant};
 
 mod region;
 pub use region::{
-    config_path, Block, BlockIndex, BlockOffset, ExtentId, RegionDefinition,
-    RegionOptions, DATABASE_READ_VERSION, DATABASE_WRITE_VERSION,
-    MAX_BLOCK_SIZE, MAX_SHIFT, MIN_BLOCK_SIZE, MIN_SHIFT,
+    config_path, Block, BlockIndex, BlockOffset, ExtentId, ExtentInfo,
+    RegionDefinition, RegionOptions, DATABASE_READ_VERSION,
+    DATABASE_WRITE_VERSION, MAX_BLOCK_SIZE, MAX_SHIFT, MIN_BLOCK_SIZE,
+    MIN_SHIFT,
 };
 
 pub mod impacted_blocks;
