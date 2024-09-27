@@ -66,6 +66,11 @@ echo "" > "$test_log"
 echo "starting $(date)" | tee "$loop_log"
 echo "Tail $test_log for test output"
 
+# NOTE: we are creating a single region set here plus one more region to be
+# used by the replacement, and with the assumption that # the default ports
+# will be used (8810, 8820, 8830).  The test relies on that because we use the
+# fourth region-dir for our "replacement".  If you change # the number of
+# regions, you must also adjust the replacement below.
 if ! ${dsc} create --cleanup \
   --region-dir "$REGION_ROOT" \
   --region-count 4 \
@@ -85,14 +90,9 @@ if ! ps -p $dsc_pid > /dev/null; then
     exit 1
 fi
 
-args=()
-args+=( -t "127.0.0.1:8810" )
-args+=( -t "127.0.0.1:8820" )
-args+=( -t "127.0.0.1:8830" )
-
 gen=1
 # Initial seed for verify file
-if ! "$crucible_test" fill "${args[@]}" -q -g "$gen"\
+if ! "$crucible_test" fill --dsc 127.0.0.1:9998 -q -g "$gen"\
           --verify-out "$verify_log" >> "$test_log" 2>&1 ; then
     echo Failed on initial verify seed, check "$test_log"
     ${dsc} cmd shutdown
@@ -107,7 +107,8 @@ while [[ $count -le $loops ]]; do
     cp "$test_log" "$test_log".last
     echo "" > "$test_log"
     echo "New loop, $count starts now $(date)" >> "$test_log"
-    "$crucible_test" replace "${args[@]}" -c 5 \
+    "$crucible_test" replace -c 5 \
+            --dsc 127.0.0.1:9998 \
             --replacement 127.0.0.1:8840 \
             --stable -g "$gen" --verify-out "$verify_log" \
             --verify-at-start \

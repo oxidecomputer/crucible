@@ -135,20 +135,12 @@ enum Workload {
     },
     /// Test that we can replace a downstairs when the upstairs is not active.
     ReplaceBeforeActive {
-        /// URL location of the running dsc server
-        #[clap(long, default_value = "http://127.0.0.1:9998", action)]
-        dsc_str: String,
-
         /// The address:port of a running downstairs for replacement
         #[clap(long, action)]
         replacement: SocketAddr,
     },
     /// Test replacement of a downstairs while doing the initial reconciliation.
     ReplaceReconcile {
-        /// URL location of the running dsc server
-        #[clap(long, default_value = "http://127.0.0.1:9998", action)]
-        dsc_str: String,
-
         /// The address:port of a running downstairs for replacement
         #[clap(long, action)]
         replacement: SocketAddr,
@@ -733,7 +725,7 @@ async fn handle_signals(
     }
 }
 
-// Construct a volume for use by the tests.
+// Construct a volume and a list of targets for use by the tests.
 // Our choice of how to construct the volume depends on what options we
 // have been given.
 //
@@ -750,12 +742,17 @@ async fn handle_signals(
 // CrucibleOpts.  This will work as long as one of the downstairs is up
 // already.  If we have a test that requires no downstairs to be running on
 // startup, then we need to provide a VCR file, or use the dsc server.
+//
+// While making our volume, we also record the targets that become part of
+// the volume in a separate Vec.  In some cases we no longer have access to
+// the target information after the volume is constructed, and some tests also
+// want the specific targets, so we make and return that list here.
 async fn make_a_volume(
     opt: &Opt,
     block_io_logger: Logger,
     test_log: &Logger,
     pr: Option<ProducerRegistry>,
-) -> Result<Arc<Volume>> {
+) -> Result<(Arc<Volume>, Vec<SocketAddr>)> {
     let up_uuid = opt.uuid.unwrap_or_else(Uuid::new_v4);
     let mut crucible_opts = CrucibleOpts {
         id: up_uuid,
@@ -785,8 +782,10 @@ async fn make_a_volume(
         if !opt.target.is_empty() {
             warn!(test_log, "targets are ignored when VCR is provided");
         }
+        let targets = vcr.targets();
+
         let volume = Volume::construct(vcr, pr, block_io_logger).await.unwrap();
-        Ok(Arc::new(volume))
+        Ok((Arc::new(volume), targets))
     } else if opt.dsc.is_some() {
         // We were given a dsc endpoint, use that to create a VCR that
         // represents our Volume.
@@ -834,20 +833,22 @@ async fn make_a_volume(
 
         // Now, loop over regions we found from dsc and make a
         // sub_volume at every three.
+        let mut targets = Vec::new();
         let mut cid = 0;
         for sv in 0..sv_count {
-            let mut targets = Vec::new();
+            let mut sv_targets = Vec::new();
             for _ in 0..3 {
                 let port = dsc_client.dsc_get_port(cid).await.unwrap();
                 let tar: SocketAddr =
                     format!("{}:{}", dsc.ip(), port.into_inner())
                         .parse()
                         .unwrap();
+                sv_targets.push(tar);
                 targets.push(tar);
                 cid += 1;
             }
-            info!(test_log, "SV {:?} has targets: {:?}", sv, targets);
-            crucible_opts.target = targets;
+            info!(test_log, "SV {:?} has targets: {:?}", sv, sv_targets);
+            crucible_opts.target = sv_targets;
 
             volume
                 .add_subvolume_create_guest(
@@ -860,7 +861,7 @@ async fn make_a_volume(
                 .unwrap();
         }
 
-        Ok(Arc::new(volume))
+        Ok((Arc::new(volume), targets))
     } else {
         // We were not provided a VCR, so, we have to make one by using
         // the repair port on a downstairs to get region information that
@@ -902,6 +903,7 @@ async fn make_a_volume(
                 bail!("Can't determine extent info to build a Volume");
             }
         };
+        let targets = crucible_opts.target.clone();
 
         let mut volume = Volume::new(extent_info.block_size, block_io_logger);
         volume
@@ -914,7 +916,7 @@ async fn make_a_volume(
             .await
             .unwrap();
 
-        Ok(Arc::new(volume))
+        Ok((Arc::new(volume), targets))
     }
 }
 
@@ -1001,7 +1003,7 @@ async fn main() -> Result<()> {
     }
 
     // Build a Volume for all the tests to use.
-    let block_io =
+    let (block_io, mut targets) =
         make_a_volume(&opt, block_io_logger.clone(), &test_log, pr).await?;
 
     if let Workload::CliServer { listen, port } = opt.workload {
@@ -1330,10 +1332,8 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // Build the list of targets we use during the replace test.
-            // The first three are provided in the crucible opts, and the
-            // final one (the replacement) is a test specific arg.
-            let mut targets = opt.target.clone();
+            // Add to the list of targets for our volume the replacement
+            // target provided on the command line
             targets.push(replacement);
             replace_workload(
                 &block_io,
@@ -1344,11 +1344,16 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Workload::ReplaceBeforeActive {
-            dsc_str,
-            replacement,
-        } => {
-            let dsc_client = Client::new(&dsc_str);
+        Workload::ReplaceBeforeActive { replacement } => {
+            let dsc_client = match opt.dsc {
+                Some(dsc_addr) => {
+                    let dsc_url = format!("http://{}", dsc_addr);
+                    Client::new(&dsc_url)
+                }
+                None => {
+                    bail!("Replace before active requires a dsc endpoint");
+                }
+            };
             // Either we have a count, or we run until we get a signal.
             let wtq = {
                 if opt.continuous {
@@ -1359,9 +1364,8 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // Build the list of targets we use during the replace test.
-            // The first three are provided in the crucible opts, and the
-            // final one (the replacement) is a test specific arg.
+            // Add to the list of targets for our volume the replacement
+            // target provided on the command line
             let mut targets = opt.target.clone();
             targets.push(replacement);
             replace_before_active(
@@ -1375,11 +1379,16 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Workload::ReplaceReconcile {
-            dsc_str,
-            replacement,
-        } => {
-            let dsc_client = Client::new(&dsc_str);
+        Workload::ReplaceReconcile { replacement } => {
+            let dsc_client = match opt.dsc {
+                Some(dsc_addr) => {
+                    let dsc_url = format!("http://{}", dsc_addr);
+                    Client::new(&dsc_url)
+                }
+                None => {
+                    bail!("Replace reconcile requires a dsc endpoint");
+                }
+            };
             // Either we have a count, or we run until we get a signal.
             let wtq = {
                 if opt.continuous {
@@ -1390,9 +1399,8 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // Build the list of targets we use during the replace test.
-            // The first three are provided in the crucible opts, and the
-            // final one (the replacement) is a test specific arg.
+            // Add to the list of targets for our volume the replacement
+            // target provided on the command line
             let mut targets = opt.target.clone();
             targets.push(replacement);
             replace_while_reconcile(

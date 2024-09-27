@@ -38,6 +38,27 @@ pub enum VolumeConstructionRequest {
     },
 }
 
+impl VolumeConstructionRequest {
+    pub fn targets(&self) -> Vec<SocketAddr> {
+        match self {
+            VolumeConstructionRequest::Volume {
+                id: _,
+                block_size: _,
+                sub_volumes,
+                read_only_parent: _,
+            } => sub_volumes.iter().flat_map(|s| s.targets()).collect(),
+            VolumeConstructionRequest::Region {
+                block_size: _,
+                blocks_per_extent: _,
+                extent_count: _,
+                opts,
+                gen: _,
+            } => opts.target.clone(),
+            _ => vec![],
+        }
+    }
+}
+
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(
     Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq,
