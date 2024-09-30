@@ -213,18 +213,20 @@ impl DownstairsHandle {
         }
     }
 
-    pub async fn negotiate_step_last_flush(
+    pub async fn negotiate_step_last_barrier(
         &mut self,
-        last_flush_number: JobId,
+        last_barrier_number: JobId,
     ) {
         let packet = self.recv().await.unwrap();
-        if let Message::LastFlush { .. } = &packet {
+        if let Message::LastBarrier { .. } = &packet {
             info!(self.log, "negotiate packet {:?}", packet);
 
-            self.send(Message::LastFlushAck { last_flush_number })
-                .unwrap();
+            self.send(Message::LastBarrierAck {
+                last_barrier_number,
+            })
+            .unwrap();
         } else {
-            panic!("wrong packet: {packet:?}, expected LastFlush");
+            panic!("wrong packet: {packet:?}, expected LastBarrier");
         }
     }
 
@@ -660,7 +662,7 @@ async fn test_replay_occurs() {
     harness.restart_ds1().await;
 
     harness.ds1().negotiate_start().await;
-    harness.ds1().negotiate_step_last_flush(JobId(0)).await;
+    harness.ds1().negotiate_step_last_barrier(JobId(0)).await;
 
     let mut ds1_message_second_time = None;
 
@@ -2638,7 +2640,7 @@ async fn test_write_replay() {
     harness.restart_ds1().await;
 
     harness.ds1().negotiate_start().await;
-    harness.ds1().negotiate_step_last_flush(JobId(0)).await;
+    harness.ds1().negotiate_step_last_barrier(JobId(0)).await;
 
     // Ensure that we get the same Write
     // Send a reply, which is the second time this Write operation completes

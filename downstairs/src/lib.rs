@@ -80,6 +80,9 @@ enum IOop {
         snapshot_details: Option<SnapshotDetails>,
         extent_limit: Option<ExtentId>,
     },
+    WaitFor {
+        dependencies: Vec<JobId>, // Jobs that must finish before this
+    },
     /*
      * These operations are for repairing a bad downstairs
      */
@@ -112,6 +115,7 @@ impl IOop {
         match &self {
             IOop::Write { dependencies, .. }
             | IOop::Flush { dependencies, .. }
+            | IOop::WaitFor { dependencies, .. }
             | IOop::Read { dependencies, .. }
             | IOop::WriteUnwritten { dependencies, .. }
             | IOop::ExtentClose { dependencies, .. }
@@ -685,6 +689,9 @@ pub fn show_work(ds: &mut Downstairs) {
                     IOop::Read { dependencies, .. } => ("Read", dependencies),
                     IOop::Write { dependencies, .. } => ("Write", dependencies),
                     IOop::Flush { dependencies, .. } => ("Flush", dependencies),
+                    IOop::WaitFor { dependencies, .. } => {
+                        ("WaitFor", dependencies)
+                    }
                     IOop::WriteUnwritten { dependencies, .. } => {
                         ("WriteU", dependencies)
                     }
@@ -709,7 +716,7 @@ pub fn show_work(ds: &mut Downstairs) {
         }
 
         info!(ds.log, "Completed work {:?}", work.completed);
-        info!(ds.log, "Last flush: {:?}", work.last_flush);
+        info!(ds.log, "Last barrier: {:?}", work.last_barrier);
     }
 }
 
@@ -720,6 +727,7 @@ pub mod cdt {
     fn submit__writeunwritten__start(_: u64) {}
     fn submit__write__start(_: u64) {}
     fn submit__flush__start(_: u64) {}
+    fn submit__wait_for__start(_: u64) {}
     fn submit__el__close__start(_: u64) {}
     fn submit__el__flush__close__start(_: u64) {}
     fn submit__el__repair__start(_: u64) {}
@@ -739,6 +747,7 @@ pub mod cdt {
     fn submit__writeunwritten__done(_: u64) {}
     fn submit__write__done(_: u64) {}
     fn submit__flush__done(_: u64) {}
+    fn submit__wait_for__done(_: u64) {}
     fn extent__flush__start(
         job_id: u64,
         extent_id: u32,
@@ -975,6 +984,11 @@ impl ActiveConnection {
                 session_id,
                 ..
             }
+            | Message::WaitFor {
+                upstairs_id,
+                session_id,
+                ..
+            }
             | Message::ReadRequest {
                 upstairs_id,
                 session_id,
@@ -1137,6 +1151,25 @@ impl ActiveConnection {
                 self.do_work_if_ready(
                     job_id,
                     new_flush,
+                    flags,
+                    reqwest_client,
+                    dss,
+                    region,
+                )
+                .await?
+            }
+            Message::WaitFor {
+                job_id,
+                dependencies,
+                ..
+            } => {
+                cdt::submit__wait_for__start!(|| job_id.0);
+
+                let new_barrier = IOop::WaitFor { dependencies };
+
+                self.do_work_if_ready(
+                    job_id,
+                    new_barrier,
                     flags,
                     reqwest_client,
                     dss,
@@ -1565,12 +1598,15 @@ impl ActiveConnection {
 
             // Notify the upstairs before completing work, which
             // consumes the message (so we'll check whether it's
-            // a FlushAck beforehand)
-            let is_flush = matches!(m, Message::FlushAck { .. });
+            // a FlushAck / WaitForAck beforehand)
+            let is_flush_or_barrier = matches!(
+                m,
+                Message::FlushAck { .. } | Message::WaitForAck { .. }
+            );
             self.reply(m)?;
 
-            if is_flush {
-                self.work.last_flush = new_id;
+            if is_flush_or_barrier {
+                self.work.last_barrier = new_id;
                 self.work.completed = Vec::with_capacity(32);
             } else {
                 self.work.completed.push(new_id);
@@ -1716,6 +1752,19 @@ impl ActiveConnection {
                     session_id: upstairs_connection.session_id,
                     job_id,
                     result,
+                }
+            }
+            IOop::WaitFor { dependencies } => {
+                debug!(
+                    self.log,
+                    "WaitFor     :{} deps:{:?}", job_id, dependencies,
+                );
+
+                Message::WaitForAck {
+                    upstairs_id: upstairs_connection.upstairs_id,
+                    session_id: upstairs_connection.session_id,
+                    job_id,
+                    result: Ok(()),
                 }
             }
             IOop::ExtentClose {
@@ -2671,7 +2720,7 @@ impl Downstairs {
     /// upstairs side) that describes how this negotiation takes place.
     ///
     /// The final step in negotiation (as dictated by the upstairs) is
-    /// either LastFlush, or ExtentVersionsPlease.  Once we respond to
+    /// either LastBarrier, or ExtentVersionsPlease.  Once we respond to
     /// that message, we can move forward and start receiving IO from
     /// the upstairs.
     fn on_negotiation_step(
@@ -2900,17 +2949,19 @@ impl Downstairs {
                     bail!("Failed sending RegionInfo: {}", e);
                 }
             }
-            Message::LastFlush { last_flush_number } => {
+            Message::LastBarrier {
+                last_barrier_number,
+            } => {
                 let ConnectionState::Negotiating {
                     negotiated,
                     upstairs_connection,
                     data,
                 } = state
                 else {
-                    bail!("Received LastFlush while not negotiating");
+                    bail!("Received LastBarrier while not negotiating");
                 };
                 if *negotiated != NegotiationState::SentRegionInfo {
-                    bail!("Received LastFlush out of order {:?}", negotiated);
+                    bail!("Received LastBarrier out of order {:?}", negotiated);
                 }
 
                 let data = std::mem::replace(data, ConnectionData::dummy());
@@ -2922,14 +2973,14 @@ impl Downstairs {
                 ));
 
                 let work = self.work_mut(conn_id);
-                work.last_flush = last_flush_number;
-                info!(self.log, "Set last flush {}", last_flush_number);
+                work.last_barrier = last_barrier_number;
+                info!(self.log, "Set last barrier {}", last_barrier_number);
 
                 let state = &self.connection_state[&conn_id]; // reborrow
-                if let Err(e) =
-                    state.reply(Message::LastFlushAck { last_flush_number })
-                {
-                    bail!("Failed sending LastFlushAck: {}", e);
+                if let Err(e) = state.reply(Message::LastBarrierAck {
+                    last_barrier_number,
+                }) {
+                    bail!("Failed sending LastBarrierAck: {}", e);
                 }
 
                 /*
@@ -3137,7 +3188,7 @@ impl Downstairs {
             // Note: in the future, differentiate between new upstairs
             // connecting vs same upstairs reconnecting here.
             //
-            // Clear out active jobs, the last flush, and completed
+            // Clear out active jobs, the last barrier, and completed
             // information, as that will not be valid any longer.
             //
             // TODO: Really work through this error case
@@ -3248,13 +3299,12 @@ pub struct Work {
     /// given job.
     outstanding_deps: HashMap<JobId, usize>,
 
-    /*
-     * We have to keep track of all IOs that have been issued since
-     * our last flush, as that is how we make sure dependencies are
-     * respected. The last_flush is the downstairs job ID number (ds_id
-     * typically) for the most recent flush.
-     */
-    last_flush: JobId,
+    /// We have to keep track of all IOs that have been issued since
+    /// our last barrier, as that is how we make sure dependencies are
+    /// respected. The last_barrier is the downstairs job ID number (ds_id
+    /// typically) for the most recent barrier operation, which may be a `Flush`
+    /// or a `WaitFor`.
+    last_barrier: JobId,
     completed: Vec<JobId>,
 
     log: Logger,
@@ -3265,7 +3315,7 @@ impl Work {
         Work {
             dep_wait: HashMap::new(),
             outstanding_deps: HashMap::new(),
-            last_flush: JobId(0), // TODO(matt) make this an Option?
+            last_barrier: JobId(0), // TODO(matt) make this an Option?
             completed: Vec::with_capacity(32),
             log,
         }
@@ -3302,12 +3352,12 @@ impl Work {
         // there is one and make sure all dependencies are completed.
         //
         // The Downstairs currently assumes that all jobs previous to the last
-        // flush have completed, hence this early out.
+        // flush or barrier have completed, hence this early out.
         //
         // Currently `work.completed` is cleared out when
         // `ActiveConnection::do_ready_work` (or `complete` in mod test) is
-        // called with a `FlushAck`, so this early out cannot be removed unless
-        // that is changed too.
+        // called with a `FlushAck` or `WaitForAck`, so this early out cannot be
+        // removed unless that is changed too.
         //
         // XXX Make this better/faster by removing the ones that are met, so
         // next lap we don't have to check again?  There may be some debug value
@@ -3317,7 +3367,7 @@ impl Work {
             .deps()
             .iter()
             .filter(|&dep| {
-                *dep > self.last_flush && !self.completed.contains(dep)
+                *dep > self.last_barrier && !self.completed.contains(dep)
             })
             .count();
 
@@ -3339,6 +3389,7 @@ impl Work {
                         IOop::Write { .. } => "Write",
                         IOop::WriteUnwritten { .. } => "WriteUnwritten",
                         IOop::Flush { .. } => "Flush",
+                        IOop::WaitFor { .. } => "WaitFor",
                         IOop::Read { .. } => "Read",
                         IOop::ExtentClose { .. } => "ECLose",
                         IOop::ExtentFlushClose { .. } => "EFlushCLose",
@@ -3679,30 +3730,21 @@ mod test {
     }
 
     fn complete(work: &mut Work, ds_id: JobId, job: IOop) {
-        let is_flush = {
+        let is_flush_or_barrier = {
             // validate that deps are done
             let dep_list = job.deps();
             for dep in dep_list {
-                let last_flush_satisfied = dep <= &work.last_flush;
+                let last_barrier_satisfied = dep <= &work.last_barrier;
                 let complete_satisfied = work.completed.contains(dep);
 
-                assert!(last_flush_satisfied || complete_satisfied);
+                assert!(last_barrier_satisfied || complete_satisfied);
             }
 
-            matches!(
-                job,
-                IOop::Flush {
-                    dependencies: _,
-                    flush_number: _,
-                    gen_number: _,
-                    snapshot_details: _,
-                    extent_limit: _,
-                }
-            )
+            matches!(job, IOop::Flush { .. } | IOop::WaitFor { .. })
         };
 
-        if is_flush {
-            work.last_flush = ds_id;
+        if is_flush_or_barrier {
+            work.last_barrier = ds_id;
             work.completed = Vec::with_capacity(32);
         } else {
             work.completed.push(ds_id);
@@ -4786,7 +4828,7 @@ mod test {
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush, JobId(1000));
+        assert_eq!(work.last_barrier, JobId(1000));
         assert!(work.completed.is_empty());
         let next_jobs = test_push_next_jobs(&mut work);
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001)]);
@@ -4794,7 +4836,7 @@ mod test {
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush, JobId(1000));
+        assert_eq!(work.last_barrier, JobId(1000));
         assert_eq!(work.completed, vec![JobId(1001)]);
         let next_jobs = test_push_next_jobs(&mut work);
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
@@ -4802,7 +4844,7 @@ mod test {
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush, JobId(1000));
+        assert_eq!(work.last_barrier, JobId(1000));
         assert_eq!(work.completed, vec![JobId(1001), JobId(1002)]);
     }
 
@@ -4842,7 +4884,7 @@ mod test {
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush, JobId(1001));
+        assert_eq!(work.last_barrier, JobId(1001));
         assert!(work.completed.is_empty());
         let next_jobs = test_push_next_jobs(&mut work);
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
@@ -4850,7 +4892,7 @@ mod test {
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush, JobId(1001));
+        assert_eq!(work.last_barrier, JobId(1001));
         assert_eq!(work.completed, vec![JobId(1002)]);
     }
 
@@ -4876,7 +4918,7 @@ mod test {
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush, JobId(1002));
+        assert_eq!(work.last_barrier, JobId(1002));
         assert!(work.completed.is_empty());
 
         // Upstairs sends a job with these three in deps, not knowing Downstairs
@@ -4902,7 +4944,7 @@ mod test {
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1004)]);
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush, JobId(1002));
+        assert_eq!(work.last_barrier, JobId(1002));
         assert_eq!(work.completed, vec![JobId(1003), JobId(1004)]);
     }
 
@@ -4930,7 +4972,7 @@ mod test {
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush, JobId(1002));
+        assert_eq!(work.last_barrier, JobId(1002));
         assert!(work.completed.is_empty());
 
         assert_eq!(work.new_work(), vec![JobId(1003)]);
@@ -4973,7 +5015,7 @@ mod test {
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002), JobId(2002)]);
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush, JobId(2002));
+        assert_eq!(work.last_barrier, JobId(2002));
         assert!(work.completed.is_empty());
     }
 

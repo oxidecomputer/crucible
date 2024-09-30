@@ -153,11 +153,14 @@ pub(crate) struct DownstairsClient {
     /// State of the downstairs connection
     state: DsState,
 
-    /// The `JobId` of the last flush that this downstairs has acked
+    /// The `JobId` of the last barrier operation that this downstairs has acked
+    ///
+    /// This may either be a `WaitFor` or `Flush` message, and is used during
+    /// replay to determine where we start sending jobs.
     ///
     /// Note that this is a job ID, not a downstairs flush index (contrast with
     /// [`Downstairs::next_flush`], which is a flush index).
-    pub(crate) last_flush: JobId,
+    pub(crate) last_barrier: JobId,
 
     /// Jobs that have been skipped
     pub(crate) skipped_jobs: BTreeSet<JobId>,
@@ -224,7 +227,7 @@ impl DownstairsClient {
             target_addr,
             repair_addr: None,
             state: DsState::New,
-            last_flush: JobId(0),
+            last_barrier: JobId(0),
             stats: DownstairsStats::default(),
             skipped_jobs: BTreeSet::new(),
             region_metadata: None,
@@ -263,7 +266,7 @@ impl DownstairsClient {
             target_addr: None,
             repair_addr: None,
             state: DsState::New,
-            last_flush: JobId(0),
+            last_barrier: JobId(0),
             stats: DownstairsStats::default(),
             skipped_jobs: BTreeSet::new(),
             region_metadata: None,
@@ -390,6 +393,7 @@ impl DownstairsClient {
                 IOop::Write { dependencies, .. }
                 | IOop::WriteUnwritten { dependencies, .. }
                 | IOop::Flush { dependencies, .. }
+                | IOop::WaitFor { dependencies, .. }
                 | IOop::Read { dependencies, .. }
                 | IOop::ExtentFlushClose { dependencies, .. }
                 | IOop::ExtentLiveRepair { dependencies, .. }
@@ -599,9 +603,9 @@ impl DownstairsClient {
         std::mem::take(&mut self.needs_replay)
     }
 
-    /// Returns the last flush ID handled by this client
-    pub(crate) fn last_flush(&self) -> JobId {
-        self.last_flush
+    /// Returns the last flush or barrier job ID handled by this client
+    pub(crate) fn last_barrier(&self) -> JobId {
+        self.last_barrier
     }
 
     /// Starts a client IO task, saving the handle in `self.client_task`
@@ -1300,7 +1304,8 @@ impl DownstairsClient {
                         // XXX: Errors should be reported to nexus
                         IOop::Write { .. }
                         | IOop::WriteUnwritten { .. }
-                        | IOop::Flush { .. } => {
+                        | IOop::Flush { .. }
+                        | IOop::WaitFor { .. } => {
                             self.stats.downstairs_errors += 1;
                         }
 
@@ -1348,14 +1353,12 @@ impl DownstairsClient {
             }
         } else if job.acked {
             assert_eq!(new_state, IOState::Done);
-            /*
-             * If this job is already acked, then we don't have much
-             * more to do here.  If it's a flush, then we want to be
-             * sure to update the last flush for this client.
-             */
+            // If this job is already acked, then we don't have much more to do
+            // here.  If it's a Flush or WaitFor, then we want to be sure to
+            // update the last barrier for this client.
             match &job.work {
-                IOop::Flush { .. } => {
-                    self.last_flush = ds_id;
+                IOop::Flush { .. } | IOop::WaitFor { .. } => {
+                    self.last_barrier = ds_id;
                 }
                 IOop::Read {
                     start_eid,
@@ -1504,7 +1507,10 @@ impl DownstairsClient {
                             debug!(self.log, "deactivate flush {ds_id} done");
                         }
                     }
-                    self.last_flush = ds_id;
+                    self.last_barrier = ds_id;
+                }
+                IOop::WaitFor { .. } => {
+                    self.last_barrier = ds_id;
                 }
                 IOop::ExtentFlushClose { .. } => {
                     assert!(read_data.blocks.is_empty());
@@ -1639,32 +1645,33 @@ impl DownstairsClient {
          * currently in.  It will be WaitActive, Faulted, or Offline.
          *
          * Depending on which state, we will either choose
-         * NegotiationState::GetLastFlush or NegotiationState::GetExtentVersions
-         * next.
+         * NegotiationState::GetLastBarrier or
+         * NegotiationState::GetExtentVersions next.
          *
          * For the Offline state, the downstairs was connected and verified
          * and some point after that, the connection was lost.  To handle this
-         * condition we want to know the last flush this downstairs had ACKd
+         * condition we want to know the last barrier this downstairs had ACKd
          * so we can give it whatever work it missed.
          *
          * For WaitActive, it means this downstairs never was "Active" and we
          * have to go through the full compare of this downstairs with other
          * downstairs and make sure they are consistent.  To do that, we will
-         * request extent versions and skip over NegotiationState::GetLastFlush.
+         * request extent versions and skip over
+         * NegotiationState::GetLastBarrier.
          *
          * For Faulted, we don't know the condition of the data on the
          * Downstairs, so we transition this downstairs to LiveRepairReady.  We
          * also request extent versions and will have to repair this
-         * downstairs, skipping over NegotiationState::GetLastFlush as well.
+         * downstairs, skipping over NegotiationState::GetLastBarrier as well.
          *
-         * NegotiationState::GetLastFlush (offline only)
+         * NegotiationState::GetLastBarrier (offline only)
          * ------------------------------
-         *          Upstairs             Downstairs
-         *          LastFlush(lf)) --->
-         *                         <---  LastFlushAck(lf)
+         *          Upstairs              Downstairs
+         *          LastBarrier(lb)) --->
+         *                           <--- LastBarrierAck(lb)
          *
-         * After receiving our last flush, we now replay all saved jobs for this
-         * Downstairs and skip ahead to NegotiationState::Done
+         * After receiving our last barrier, we now replay all saved jobs for
+         * this Downstairs and skip ahead to NegotiationState::Done
          *
          * NegotiationState::GetExtentVersions
          * (WaitActive and LiveRepairReady come here from WaitForRegionInfo)
@@ -2007,18 +2014,20 @@ impl DownstairsClient {
                          * recovery/repair mode. If we have verified that the
                          * UUID and region info is the same, we can reconnect
                          * and let any outstanding work be replayed to catch us
-                         * up.  We do need to tell the downstairs the last flush
-                         * ID it had ACKd to us.
+                         * up.  We do need to tell the downstairs the last
+                         * barrier ID it had ACKd to us, which may be a Flush or
+                         * Barrier operation.
                          */
-                        let lf = self.last_flush;
+                        let lb = self.last_barrier;
                         info!(
                             self.log,
-                            "send last flush ID to this DS: {}", lf
+                            "send last barrier ID to this DS: {lb}"
                         );
-                        self.negotiation_state = NegotiationState::GetLastFlush;
+                        self.negotiation_state =
+                            NegotiationState::GetLastBarrier;
 
-                        self.send(Message::LastFlush {
-                            last_flush_number: lf,
+                        self.send(Message::LastBarrier {
+                            last_barrier_number: lb,
                         });
                     }
                     DsState::WaitActive
@@ -2052,9 +2061,11 @@ impl DownstairsClient {
                     }
                 }
             }
-            Message::LastFlushAck { last_flush_number } => {
-                if self.negotiation_state != NegotiationState::GetLastFlush {
-                    error!(self.log, "Received LastFlushAck out of order!");
+            Message::LastBarrierAck {
+                last_barrier_number,
+            } => {
+                if self.negotiation_state != NegotiationState::GetLastBarrier {
+                    error!(self.log, "Received LastBarrierAck out of order!");
                     self.restart_connection(
                         up_state,
                         ClientStopReason::BadNegotiationOrder,
@@ -2065,7 +2076,7 @@ impl DownstairsClient {
                     DsState::Replacing => {
                         error!(
                             self.log,
-                            "exiting negotiation due to LastFlushAck \
+                            "exiting negotiation due to LastBarrierAck \
                              while replacing"
                         );
                         self.restart_connection(
@@ -2075,13 +2086,13 @@ impl DownstairsClient {
                         return Ok(false); // TODO should we trigger set_inactive?
                     }
                     DsState::Offline => (),
-                    s => panic!("got LastFlushAck in bad state {s:?}"),
+                    s => panic!("got LastBarrierAck in bad state {s:?}"),
                 }
                 info!(
                     self.log,
-                    "Replied this last flush ID: {last_flush_number}"
+                    "Replied this last barrier ID: {last_barrier_number}"
                 );
-                assert_eq!(self.last_flush, last_flush_number);
+                assert_eq!(self.last_barrier, last_barrier_number);
 
                 // Immediately set the state to Active, since we've already
                 // copied over the jobs.
@@ -2286,7 +2297,7 @@ enum NegotiationState {
     Start,
     WaitForPromote,
     WaitForRegionInfo,
-    GetLastFlush,
+    GetLastBarrier,
     GetExtentVersions,
     Done,
 }
@@ -2903,6 +2914,9 @@ fn update_net_start_probes(m: &Message, cid: ClientId) {
         Message::Flush { job_id, .. } => {
             cdt::ds__flush__net__start!(|| (job_id.0, cid.get()));
         }
+        Message::WaitFor { job_id, .. } => {
+            cdt::ds__wait_for__net__start!(|| (job_id.0, cid.get()));
+        }
         _ => {}
     }
 }
@@ -2919,6 +2933,9 @@ fn update_net_done_probes(m: &Message, cid: ClientId) {
         }
         Message::FlushAck { job_id, .. } => {
             cdt::ds__flush__net__done!(|| (job_id.0, cid.get()));
+        }
+        Message::WaitForAck { job_id, .. } => {
+            cdt::ds__wait_for__net__done!(|| (job_id.0, cid.get()));
         }
         _ => {}
     }

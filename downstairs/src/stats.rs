@@ -107,6 +107,10 @@ impl DsStatOuter {
                 cdt::submit__flush__done!(|| job_id.0);
                 self.add_flush();
             }
+            Message::WaitForAck { job_id, .. } => {
+                cdt::submit__wait_for__done!(|| job_id.0);
+                // TODO count barriers in stats?
+            }
             Message::WriteAck { job_id, .. } => {
                 cdt::submit__write__done!(|| job_id.0);
                 self.add_write();

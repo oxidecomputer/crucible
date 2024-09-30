@@ -162,6 +162,10 @@ pub struct SnapshotDetails {
 #[repr(u32)]
 #[derive(IntoPrimitive)]
 pub enum MessageVersion {
+    /// Add `WaitFor` message; rename `LastFlush` and `LastFlushAck` to
+    /// `LastBarrier` / `LastBarrierAck`
+    V12 = 12,
+
     /// Use `ReadBlockContext` instead of `Option<BlockContext>`
     V11 = 11,
 
@@ -207,7 +211,7 @@ pub enum MessageVersion {
 }
 impl MessageVersion {
     pub const fn current() -> Self {
-        Self::V11
+        Self::V12
     }
 }
 
@@ -216,7 +220,7 @@ impl MessageVersion {
  * This, along with the MessageVersion enum above should be updated whenever
  * changes are made to the Message enum below.
  */
-pub const CRUCIBLE_MESSAGE_VERSION: u32 = 11;
+pub const CRUCIBLE_MESSAGE_VERSION: u32 = MessageVersion::current() as u32;
 
 /*
  * If you add or change the Message enum, you must also increment the
@@ -465,11 +469,12 @@ pub enum Message {
         dirty_bits: Vec<bool>,
     },
 
-    LastFlush {
-        last_flush_number: JobId,
+    LastBarrier {
+        last_barrier_number: JobId,
     },
-    LastFlushAck {
-        last_flush_number: JobId,
+    LastBarrierAck {
+        /// Returns the same value provided in the `LastBarrier` request
+        last_barrier_number: JobId,
     },
 
     /*
@@ -501,6 +506,20 @@ pub enum Message {
         extent_limit: Option<ExtentId>,
     },
     FlushAck {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: JobId,
+        result: Result<(), CrucibleError>,
+    },
+
+    /// Wait for the given dependencies to complete, doing no work
+    WaitFor {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: JobId,
+        dependencies: Vec<JobId>,
+    },
+    WaitForAck {
         upstairs_id: Uuid,
         session_id: Uuid,
         job_id: JobId,
@@ -592,53 +611,57 @@ impl Message {
     /// Return true if this message contains an Error result
     pub fn err(&self) -> Option<&CrucibleError> {
         match self {
-            Message::HereIAm { .. } => None,
-            Message::YesItsMe { .. } => None,
-            Message::VersionMismatch { .. } => None,
-            Message::ReadOnlyMismatch { .. } => None,
-            Message::EncryptedMismatch { .. } => None,
-            Message::PromoteToActive { .. } => None,
-            Message::YouAreNowActive { .. } => None,
-            Message::YouAreNoLongerActive { .. } => None,
-            Message::UuidMismatch { .. } => None,
-            Message::Ruok { .. } => None,
-            Message::Imok { .. } => None,
-            Message::ExtentClose { .. } => None,
-            Message::ExtentReopen { .. } => None,
-            Message::ExtentFlush { .. } => None,
-            Message::ExtentRepair { .. } => None,
-            Message::RepairAckId { .. } => None,
-            Message::RegionInfoPlease { .. } => None,
-            Message::RegionInfo { .. } => None,
-            Message::ExtentVersionsPlease { .. } => None,
-            Message::ExtentVersions { .. } => None,
-            Message::LastFlush { .. } => None,
-            Message::LastFlushAck { .. } => None,
-            Message::Write { .. } => None,
-            Message::ExtentLiveClose { .. } => None,
-            Message::ExtentLiveFlushClose { .. } => None,
-            Message::ExtentLiveRepair { .. } => None,
-            Message::ExtentLiveReopen { .. } => None,
-            Message::ExtentLiveNoOp { .. } => None,
-            Message::Flush { .. } => None,
-            Message::ReadRequest { .. } => None,
-            Message::WriteUnwritten { .. } => None,
-            Message::Unknown(..) => None,
+            Message::HereIAm { .. }
+            | Message::YesItsMe { .. }
+            | Message::VersionMismatch { .. }
+            | Message::ReadOnlyMismatch { .. }
+            | Message::EncryptedMismatch { .. }
+            | Message::PromoteToActive { .. }
+            | Message::YouAreNowActive { .. }
+            | Message::YouAreNoLongerActive { .. }
+            | Message::UuidMismatch { .. }
+            | Message::Ruok { .. }
+            | Message::Imok { .. }
+            | Message::ExtentClose { .. }
+            | Message::ExtentReopen { .. }
+            | Message::ExtentFlush { .. }
+            | Message::ExtentRepair { .. }
+            | Message::RepairAckId { .. }
+            | Message::RegionInfoPlease { .. }
+            | Message::RegionInfo { .. }
+            | Message::ExtentVersionsPlease { .. }
+            | Message::ExtentVersions { .. }
+            | Message::LastBarrier { .. }
+            | Message::LastBarrierAck { .. }
+            | Message::Write { .. }
+            | Message::ExtentLiveClose { .. }
+            | Message::ExtentLiveFlushClose { .. }
+            | Message::ExtentLiveRepair { .. }
+            | Message::ExtentLiveReopen { .. }
+            | Message::ExtentLiveNoOp { .. }
+            | Message::Flush { .. }
+            | Message::WaitFor { .. }
+            | Message::ReadRequest { .. }
+            | Message::WriteUnwritten { .. }
+            | Message::Unknown(..) => None,
 
-            Message::ExtentError { error, .. } => Some(error),
-            Message::ErrorReport { error, .. } => Some(error),
+            Message::ExtentError { error, .. }
+            | Message::ErrorReport { error, .. } => Some(error),
 
             Message::ExtentLiveCloseAck { result, .. } => result.as_ref().err(),
-            Message::ExtentLiveRepairAckId { result, .. } => {
+
+            Message::ExtentLiveRepairAckId { result, .. }
+            | Message::ExtentLiveAckId { result, .. }
+            | Message::WriteAck { result, .. }
+            | Message::FlushAck { result, .. }
+            | Message::WaitForAck { result, .. }
+            | Message::WriteUnwrittenAck { result, .. } => {
                 result.as_ref().err()
             }
-            Message::ExtentLiveAckId { result, .. } => result.as_ref().err(),
-            Message::WriteAck { result, .. } => result.as_ref().err(),
-            Message::FlushAck { result, .. } => result.as_ref().err(),
+
             Message::ReadResponse { header, .. } => {
                 header.blocks.as_ref().err()
             }
-            Message::WriteUnwrittenAck { result, .. } => result.as_ref().err(),
         }
     }
 }

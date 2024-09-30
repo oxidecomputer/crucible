@@ -450,6 +450,10 @@ impl Downstairs {
                 cdt::gw__flush__done!(|| (ds_id.0));
                 stats.add_flush();
             }
+            IOop::WaitFor { .. } => {
+                cdt::gw__wait_for__done!(|| (ds_id.0));
+                // TODO stats?
+            }
             IOop::ExtentFlushClose { extent, .. } => {
                 cdt::gw__close__done!(|| (ds_id.0, extent.0));
                 stats.add_flush_close();
@@ -644,11 +648,11 @@ impl Downstairs {
     ///
     /// Jobs are pending if they have not yet been flushed by this client.
     fn replay_jobs(&mut self, client_id: ClientId) {
-        let lf = self.clients[client_id].last_flush();
+        let lf = self.clients[client_id].last_barrier();
 
         info!(
             self.log,
-            "[{client_id}] client re-new {} jobs since flush {lf}",
+            "[{client_id}] client re-new {} jobs since barrier {lf}",
             self.ds_active.len(),
         );
 
@@ -1919,6 +1923,19 @@ impl Downstairs {
         next_id
     }
 
+    pub(crate) fn submit_barrier(&mut self) -> JobId {
+        let next_id = self.next_id();
+        cdt::gw__wait_for__start!(|| (next_id.0));
+
+        let dep = self.ds_active.deps_for_flush(next_id);
+        debug!(self.log, "IO WaitFor {} has deps {:?}", next_id, dep);
+
+        let barrier = IOop::WaitFor { dependencies: dep };
+
+        self.enqueue(next_id, barrier, ClientMap::new());
+        next_id
+    }
+
     /// Reserves repair IDs if impacted blocks overlap our extent under repair
     fn check_repair_ids_for_range(&mut self, impacted_blocks: ImpactedBlocks) {
         let Some(eur) = self.get_extent_under_repair() else {
@@ -2211,6 +2228,18 @@ impl Downstairs {
                     gen_number,
                     snapshot_details,
                     extent_limit,
+                }
+            }
+            IOop::WaitFor { dependencies } => {
+                cdt::ds__wait_for__client__start!(|| (
+                    ds_id.0,
+                    client_id.get()
+                ));
+                Message::WaitFor {
+                    upstairs_id: self.cfg.upstairs_id,
+                    session_id: self.cfg.session_id,
+                    job_id: ds_id,
+                    dependencies,
                 }
             }
             IOop::Read {
@@ -2691,6 +2720,10 @@ impl Downstairs {
                     let job_type = "Flush".to_string();
                     (job_type, 0)
                 }
+                IOop::WaitFor { .. } => {
+                    let job_type = "WaitFor".to_string();
+                    (job_type, 0)
+                }
                 IOop::ExtentFlushClose { extent, .. } => {
                     let job_type = "FClose".to_string();
                     (job_type, extent.0 as usize)
@@ -2725,9 +2758,9 @@ impl Downstairs {
             println!();
         }
         self.io_state_count().show_all();
-        print!("Last Flush: ");
+        print!("Last WaitFor: ");
         for c in self.clients.iter() {
-            print!("{} ", c.last_flush());
+            print!("{} ", c.last_barrier());
         }
         println!();
     }
@@ -2815,6 +2848,24 @@ impl Downstairs {
                 result,
             } => {
                 cdt::ds__flush__client__done!(|| (job_id.0, client_id.get()));
+                (
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    result.map(|_| Default::default()),
+                    None,
+                )
+            }
+            Message::WaitForAck {
+                upstairs_id,
+                session_id,
+                job_id,
+                result,
+            } => {
+                cdt::ds__wait_for__client__done!(|| (
+                    job_id.0,
+                    client_id.get()
+                ));
                 (
                     upstairs_id,
                     session_id,
@@ -4807,11 +4858,11 @@ pub(crate) mod test {
         // Ack the flush back to the guest
         ds.ack(flush_id);
 
-        // Make sure downstairs 0 and 1 update their last flush id and
+        // Make sure downstairs 0 and 1 update their last barrier id and
         // that downstairs 2 does not.
-        assert_eq!(ds.clients[ClientId::new(0)].last_flush, flush_id);
-        assert_eq!(ds.clients[ClientId::new(1)].last_flush, flush_id);
-        assert_eq!(ds.clients[ClientId::new(2)].last_flush, JobId(0));
+        assert_eq!(ds.clients[ClientId::new(0)].last_barrier, flush_id);
+        assert_eq!(ds.clients[ClientId::new(1)].last_barrier, flush_id);
+        assert_eq!(ds.clients[ClientId::new(2)].last_barrier, JobId(0));
 
         // Should not retire yet.
         ds.retire_check(flush_id);
@@ -4851,8 +4902,8 @@ pub(crate) mod test {
 
         // All three jobs should now move to completed
         assert_eq!(ds.completed.len(), 3);
-        // Downstairs 2 should update the last flush it just did.
-        assert_eq!(ds.clients[ClientId::new(2)].last_flush, flush_id);
+        // Downstairs 2 should update the last barrier it just did.
+        assert_eq!(ds.clients[ClientId::new(2)].last_barrier, flush_id);
     }
 
     #[test]
@@ -5268,10 +5319,10 @@ pub(crate) mod test {
         // Not done yet, until all clients do the work.
         assert!(ds.completed.is_empty());
 
-        // Verify who has updated their last flush.
-        assert_eq!(ds.clients[ClientId::new(0)].last_flush, flush_id);
-        assert_eq!(ds.clients[ClientId::new(1)].last_flush, JobId(0));
-        assert_eq!(ds.clients[ClientId::new(2)].last_flush, flush_id);
+        // Verify who has updated their last barrier.
+        assert_eq!(ds.clients[ClientId::new(0)].last_barrier, flush_id);
+        assert_eq!(ds.clients[ClientId::new(1)].last_barrier, JobId(0));
+        assert_eq!(ds.clients[ClientId::new(2)].last_barrier, flush_id);
 
         // Now, complete the writes
         assert!(!ds.process_ds_completion(
@@ -5305,7 +5356,7 @@ pub(crate) mod test {
         assert_eq!(ds.completed.len(), 3);
 
         // downstairs 1 should now have that flush
-        assert_eq!(ds.clients[ClientId::new(1)].last_flush, flush_id);
+        assert_eq!(ds.clients[ClientId::new(1)].last_barrier, flush_id);
     }
 
     #[test]
