@@ -42,15 +42,15 @@ function ctrl_c() {
 user=$(id -u -n)
 # Downstairs regions go in this directory
 testdir="/var/tmp/test_up-$user"
-if [[ -d ${testdir} ]]; then
-    rm -rf ${testdir}
+if [[ -d "$testdir" ]]; then
+    rm -rf "$testdir"
 fi
 
 # Store log files we want to keep in /tmp/test_up/.txt as this is what
 # buildomat will look for and archive
 test_output_dir="/tmp/test_up-$user"
-rm -rf ${test_output_dir} 2> /dev/null
-mkdir -p ${test_output_dir}
+rm -rf "$test_output_dir" 2> /dev/null
+mkdir -p "$test_output_dir"
 
 log_prefix="${test_output_dir}/test_up"
 fail_log="${log_prefix}_fail.txt"
@@ -61,19 +61,25 @@ hammer_args=()
 dsc_args=()
 dsc_create_args=()
 dump_args=()
+region_sets=1
 
 function usage {
-    echo "Usage: $0 [-N] encrypted|unencrypted"
-    echo "N:  Don't dump color output"
+    echo "Usage: $0 [-N] [-r #] encrypted|unencrypted"
+    echo "N:    Don't dump color output"
+    echo "r: #  Number of region sets to create (default: 1)"
     echo "    encrypted or unencrypted must be provided"
     exit 1
 }
 
-while getopts 'N' opt; do
+while getopts 'Nr:' opt; do
     case "$opt" in
         N) echo "Turn off color for downstairs dump"
             dump_args+=("--no-color")
             shift
+            ;;
+        r) region_sets=$OPTARG
+            echo "Using $region_sets region sets"
+            shift 2
             ;;
         *) usage
             ;;
@@ -91,14 +97,16 @@ case ${1} in
         dsc_create_args+=( --encrypted )
         ;;
     *)
+        echo "Unsupported option: $1"
         usage
         ;;
 esac
 
+((region_count=region_sets*3))
 args+=( --dsc "127.0.0.1:9998" )
 
 dsc_output_dir="${test_output_dir}/dsc"
-mkdir -p ${dsc_output_dir}
+mkdir -p "$dsc_output_dir"
 dsc_output="${test_output_dir}/dsc-out.txt"
 
 dsc_create_args+=( --cleanup )
@@ -107,13 +115,13 @@ dsc_args+=( --ds-bin "$cds" )
 dsc_args+=( --region-dir "$testdir" )
 echo "dsc output goes to $dsc_output"
 
-echo "Creating three downstairs regions"
-echo "${dsc}" create "${dsc_create_args[@]}" --extent-size 10 --extent-count 5 "${dsc_args[@]}" > "$dsc_output"
-"${dsc}" create "${dsc_create_args[@]}" --extent-size 10 --extent-count 5 "${dsc_args[@]}" >> "$dsc_output" 2>&1
+echo "Creating $region_count downstairs regions"
+echo "${dsc}" create "${dsc_create_args[@]}" --region-count $region_count --extent-size 10 --extent-count 5 "${dsc_args[@]}" > "$dsc_output"
+"${dsc}" create "${dsc_create_args[@]}" --region-count $region_count --extent-size 10 --extent-count 5 "${dsc_args[@]}" >> "$dsc_output" 2>&1
 
-echo "Starting three downstairs"
-echo "${dsc}" start "${dsc_args[@]}" >> "$dsc_output"
-"${dsc}" start "${dsc_args[@]}" >> "$dsc_output" 2>&1 &
+echo "Starting $region_count downstairs"
+echo "${dsc}" start "${dsc_args[@]}" --region-count $region_count >> "$dsc_output"
+"${dsc}" start "${dsc_args[@]}" --region-count $region_count >> "$dsc_output" 2>&1 &
 dsc_pid=$!
 
 sleep 5
@@ -168,6 +176,7 @@ for tt in ${test_list}; do
 done
 (( gen += 10 ))
 
+# Hammer tests only uses three downstairs.
 echo "" >> "${log_prefix}_out.txt"
 echo "Running hammer" | tee -a "${log_prefix}_out.txt"
 hammer_args+=( -t "127.0.0.1:8810")
@@ -354,14 +363,16 @@ done
 
 echo "Begin replace reconcile test" >> "${log_prefix}_out.txt"
 
-# Create a larger region size for these tests.
-echo "Creating four larger downstairs regions"
-echo "${dsc}" create "${dsc_create_args[@]}" --region-count 4 --extent-count 300 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output"
-"${dsc}" create "${dsc_create_args[@]}" --region-count 4 --extent-count 100 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output" 2>&1
+# Create a larger region size for these tests, and add an additional
+# region so we have one to use for replacement.
+((region_count+=1))
+echo "Creating $region_count larger downstairs regions"
+echo "${dsc}" create "${dsc_create_args[@]}" --region-count "$region_count" --extent-count 300 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output"
+"${dsc}" create "${dsc_create_args[@]}" --region-count "$region_count" --extent-count 100 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output" 2>&1
 
-echo "Starting four downstairs"
-echo "${dsc}" start --region-count 4 "${dsc_args[@]}" >> "$dsc_output"
-"${dsc}" start --region-count 4 "${dsc_args[@]}" >> "$dsc_output" 2>&1 &
+echo "Starting $region_count downstairs"
+echo "${dsc}" start --region-count $region_count "${dsc_args[@]}" >> "$dsc_output"
+"${dsc}" start --region-count "$region_count" "${dsc_args[@]}" >> "$dsc_output" 2>&1 &
 dsc_pid=$!
 
 sleep 5
@@ -373,8 +384,13 @@ echo "" >> "${log_prefix}_out.txt"
 
 echo "Now do the replace-reconcile test"
 
-echo "$ct" replace-reconcile --replacement 127.0.0.1:8840 -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt"
-if ! "$ct" replace-reconcile --replacement 127.0.0.1:8840 -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
+# Get the port number for the last client, that is our replacement.
+((last_client = region_count - 1))
+last_port=$("$dsc" cmd port -c "$last_client")
+echo "Using $last_port for the replacement port"
+
+echo "$ct" replace-reconcile --replacement 127.0.0.1:"$last_port" -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt"
+if ! "$ct" replace-reconcile --replacement 127.0.0.1:"$last_port" -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
     (( res += 1 ))
     echo ""
     echo "Failed crutest replace-reconcile test"
@@ -387,8 +403,8 @@ fi
 
 ((gen += 20))
 echo "Now do the replace-before-active test"
-echo "$ct" replace-before-active --replacement 127.0.0.1:8840 -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt"
-if ! "$ct" replace-before-active --replacement 127.0.0.1:8840 -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
+echo "$ct" replace-before-active --replacement 127.0.0.1:"$last_port" -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt"
+if ! "$ct" replace-before-active --replacement 127.0.0.1:"$last_port" -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
     (( res += 1 ))
     echo ""
     echo "Failed crutest replace-before-active"
