@@ -382,8 +382,7 @@ mod cdt {
 }
 
 /// Array of data associated with three clients, indexed by `ClientId`
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(transparent)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct ClientData<T>([T; 3]);
 
 impl<T> std::ops::Index<ClientId> for ClientData<T> {
@@ -439,8 +438,7 @@ impl<T> ClientData<T> {
 }
 
 /// Map of data associated with clients, keyed by `ClientId`
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(transparent)]
+#[derive(Copy, Clone, Debug)]
 pub struct ClientMap<T>(ClientData<Option<T>>);
 
 impl<T> ClientMap<T> {
@@ -1369,7 +1367,7 @@ impl IOop {
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ReconcileIOState {
     // A new IO request.
     New,
@@ -1388,7 +1386,7 @@ pub enum ReconcileIOState {
  * they operate independent of each other.
  */
 #[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum IOState {
     /// The request has been sent to this tasks downstairs.
     InProgress,
