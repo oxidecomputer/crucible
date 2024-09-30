@@ -4,8 +4,8 @@
 #: variety = "basic"
 #: target = "helios-2.0"
 #: output_rules = [
-#:	"%/tmp/test_up/*.txt",
-#:	"%/tmp/test_up/dsc/*.txt",
+#:	"%/tmp/test_up*/*.txt",
+#:	"%/tmp/test_up*/dsc/*.txt",
 #:	"%/tmp/debug/*",
 #:	"/tmp/core.*",
 #: ]
