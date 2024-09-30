@@ -1,6 +1,6 @@
 #!/bin/bash
 #:
-#: name = "test-up-encrypted"
+#: name = "test-up-2region-encrypted"
 #: variety = "basic"
 #: target = "helios-2.0"
 #: output_rules = [
