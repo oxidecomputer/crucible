@@ -87,6 +87,7 @@ pub struct UpCounters {
     action_deferred_message: u64,
     action_leak_check: u64,
     action_flush_check: u64,
+    action_barrier_check: u64,
     action_stat_check: u64,
     action_repair_check: u64,
     action_control_check: u64,
@@ -103,6 +104,7 @@ impl UpCounters {
             action_deferred_message: 0,
             action_leak_check: 0,
             action_flush_check: 0,
+            action_barrier_check: 0,
             action_stat_check: 0,
             action_repair_check: 0,
             action_control_check: 0,
@@ -204,13 +206,20 @@ pub(crate) struct Upstairs {
 
     /// Marks whether a flush is needed
     ///
-    /// The Upstairs keeps all IOs in memory until a flush is ACK'd back from
-    /// all three downstairs.  If there are IOs we have accepted into the work
-    /// queue that don't end with a flush, then we set this to indicate that the
-    /// upstairs may need to issue a flush of its own to be sure that data is
-    /// pushed to disk.  Note that this is not an indication of an ACK'd flush,
-    /// just that the last IO command we put on the work queue was not a flush.
+    /// If there are IOs we have accepted into the work queue that don't end
+    /// with a flush, then we set this to indicate that the upstairs may need to
+    /// issue a flush of its own to be sure that data is pushed to disk.  Note
+    /// that this is not an indication of an ACK'd flush, just that the last IO
+    /// command we put on the work queue was not a flush.
     need_flush: bool,
+
+    /// Marks whether a barrier is needed
+    ///
+    /// The Upstairs keeps all IOs in memory until a flush or barrier is ACK'd
+    /// back from all three downstairs.  This flag indicates that we have sent
+    /// IOs and have not sent a flush or barrier; we should send a flush or
+    /// barrier periodically to keep the dependency list down.
+    need_barrier: bool,
 
     /// Statistics for this upstairs
     ///
@@ -231,6 +240,9 @@ pub(crate) struct Upstairs {
 
     /// Next time to leak IOP / bandwidth tokens from the Guest
     leak_deadline: Instant,
+
+    /// Next time to trigger a dependency barrier
+    barrier_deadline: Instant,
 
     /// Next time to trigger an automatic flush
     flush_deadline: Instant,
@@ -273,6 +285,7 @@ pub(crate) enum UpstairsAction {
 
     LeakCheck,
     FlushCheck,
+    BarrierCheck,
     StatUpdate,
     RepairCheck,
     Control(ControlRequest),
@@ -405,6 +418,7 @@ impl Upstairs {
             cfg,
             repair_check_interval: None,
             leak_deadline: deadline_secs(1.0),
+            barrier_deadline: deadline_secs(flush_timeout_secs),
             flush_deadline: deadline_secs(flush_timeout_secs),
             stat_deadline: deadline_secs(STAT_INTERVAL_SECS),
             flush_timeout_secs,
@@ -412,6 +426,7 @@ impl Upstairs {
             guest_dropped: false,
             ddef: rd_status,
             need_flush: false,
+            need_barrier: false,
             stats,
             counters,
             log,
@@ -518,6 +533,9 @@ impl Upstairs {
             _ = sleep_until(self.leak_deadline) => {
                 UpstairsAction::LeakCheck
             }
+            _ = sleep_until(self.barrier_deadline) => {
+                UpstairsAction::BarrierCheck
+            }
             _ = sleep_until(self.flush_deadline) => {
                 UpstairsAction::FlushCheck
             }
@@ -585,6 +603,22 @@ impl Upstairs {
                     self.submit_flush(None, None);
                 }
                 self.flush_deadline = deadline_secs(self.flush_timeout_secs);
+                self.barrier_deadline = deadline_secs(self.flush_timeout_secs);
+            }
+            UpstairsAction::BarrierCheck => {
+                self.counters.action_barrier_check += 1;
+                cdt::up__action_barrier_check!(|| (self
+                    .counters
+                    .action_barrier_check));
+                // Upgrade from a Barrier to a Flush if eligible
+                if self.need_flush && !self.downstairs.has_live_jobs() {
+                    self.submit_flush(None, None);
+                    self.flush_deadline =
+                        deadline_secs(self.flush_timeout_secs);
+                } else if self.need_barrier {
+                    self.submit_barrier();
+                }
+                self.barrier_deadline = deadline_secs(self.flush_timeout_secs);
             }
             UpstairsAction::StatUpdate => {
                 self.counters.action_stat_check += 1;
@@ -617,6 +651,12 @@ impl Upstairs {
         // Check whether we need to mark an offline Downstairs as faulted
         // because too many jobs have piled up.
         self.gone_too_long();
+
+        // Only send automatic flushes if the downstairs is fully idle;
+        // otherwise, keep delaying the flush deadline.
+        if self.downstairs.has_live_jobs() {
+            self.flush_deadline = deadline_secs(self.flush_timeout_secs);
+        }
 
         // Check to see whether live-repair can continue
         //
@@ -1269,6 +1309,7 @@ impl Upstairs {
         // BlockOp::Flush level above.
 
         self.need_flush = false;
+        self.need_barrier = false; // flushes also serve as a barrier
 
         /*
          * Get the next ID for our new guest work job. Note that the flush
@@ -1287,13 +1328,12 @@ impl Upstairs {
         cdt::up__to__ds__flush__start!(|| (ds_id.0));
     }
 
-    #[allow(dead_code)] // XXX this will be used soon!
     fn submit_barrier(&mut self) {
         // Notice that unlike submit_read and submit_write, we do not check for
         // guest_io_ready here. The upstairs itself calls submit_barrier
         // without the guest being involved; indeed the guest is not allowed to
         // call it!
-
+        self.need_barrier = false;
         let ds_id = self.downstairs.submit_barrier();
         self.guest.guest_work.submit_job(ds_id, None);
 
@@ -1358,6 +1398,7 @@ impl Upstairs {
         }
 
         self.need_flush = true;
+        self.need_barrier = true;
 
         /*
          * Given the offset and buffer size, figure out what extent and
@@ -1491,6 +1532,7 @@ impl Upstairs {
          * handles the operation(s) on the storage side.
          */
         self.need_flush = true;
+        self.need_barrier = true;
 
         /*
          * Grab this ID after extent_from_offset: in case of Err we don't

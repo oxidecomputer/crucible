@@ -306,6 +306,7 @@ mod cdt {
     fn up__action_deferred_message(_: u64) {}
     fn up__action_leak_check(_: u64) {}
     fn up__action_flush_check(_: u64) {}
+    fn up__action_barrier_check(_: u64) {}
     fn up__action_stat_check(_: u64) {}
     fn up__action_repair_check(_: u64) {}
     fn up__action_control_check(_: u64) {}
