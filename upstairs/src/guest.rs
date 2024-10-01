@@ -29,7 +29,7 @@ use uuid::Uuid;
  * that map to a single Guest IO request. G to S stands for Guest
  * to Storage.
  *
- * The submitted hashmap is indexed by the request number (ds_id) for the
+ * The submitted hashmap is indexed by the request number (JobId) for the
  * downstairs requests issued on behalf of this request.
  */
 #[derive(Debug)]
