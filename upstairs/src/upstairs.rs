@@ -2320,8 +2320,8 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 2);
 
-        assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty());
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]);
     }
 
     #[test]
@@ -2362,9 +2362,9 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
 
-        assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id],);
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty());
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]);
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]);
     }
 
     #[test]
@@ -2401,9 +2401,9 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
 
-        assert!(jobs[0].work.deps().is_empty()); // write (op 0)
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // flush (op 1)
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // write (op 2)
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // write (op 0)
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // flush (op 1)
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]); // write (op 2)
     }
 
     #[test]
@@ -2448,18 +2448,15 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 7);
 
-        assert!(jobs[0].work.deps().is_empty()); // write @ 0
-        assert!(jobs[1].work.deps().is_empty()); // write @ 1
-        assert!(jobs[2].work.deps().is_empty()); // write @ 2
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // write @ 0
+        assert!(upstairs.downstairs.get_deps(jobs[1]).is_empty()); // write @ 1
+        assert!(upstairs.downstairs.get_deps(jobs[2]).is_empty()); // write @ 2
 
-        assert_eq!(
-            jobs[3].work.deps(), // flush
-            &[jobs[0].ds_id, jobs[1].ds_id, jobs[2].ds_id],
-        );
+        assert_eq!(upstairs.downstairs.get_deps(jobs[3]), &jobs[0..3],); // flush
 
-        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // write @ 3
-        assert_eq!(jobs[5].work.deps(), &[jobs[3].ds_id]); // write @ 4
-        assert_eq!(jobs[6].work.deps(), &[jobs[3].ds_id]); // write @ 5
+        assert_eq!(upstairs.downstairs.get_deps(jobs[4]), &[jobs[3]]); // write @ 3
+        assert_eq!(upstairs.downstairs.get_deps(jobs[5]), &[jobs[3]]); // write @ 4
+        assert_eq!(upstairs.downstairs.get_deps(jobs[6]), &[jobs[3]]); // write @ 5
     }
 
     #[test]
@@ -2496,11 +2493,11 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 4);
 
-        assert!(jobs[0].work.deps().is_empty()); // write @ 0,1,2
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // write @ 0,1,2
 
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // write @ 0
-        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id]); // write @ 1
-        assert_eq!(jobs[3].work.deps(), &[jobs[0].ds_id]); // write @ 2
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // write @ 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[0]]); // write @ 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[3]), &[jobs[0]]); // write @ 2
     }
 
     #[test]
@@ -2549,23 +2546,23 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 7);
 
-        assert!(jobs[0].work.deps().is_empty()); // write @ 0,1,2
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // write @ 0,1,2
 
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // write @ 0
-        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id]); // write @ 1
-        assert_eq!(jobs[3].work.deps(), &[jobs[0].ds_id]); // write @ 2
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // write @ 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[0]]); // write @ 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[3]), &[jobs[0]]); // write @ 2
 
         assert_eq!(
-            jobs[4].work.deps(), // second write @ 0
-            &[jobs[1].ds_id],
+            upstairs.downstairs.get_deps(jobs[4]), // second write @ 0
+            &[jobs[1]],
         );
         assert_eq!(
-            jobs[5].work.deps(), // second write @ 1
-            &[jobs[2].ds_id],
+            upstairs.downstairs.get_deps(jobs[5]), // second write @ 1
+            &[jobs[2]],
         );
         assert_eq!(
-            jobs[6].work.deps(), // second write @ 2
-            &[jobs[3].ds_id],
+            upstairs.downstairs.get_deps(jobs[6]), // second write @ 2
+            &[jobs[3]],
         );
     }
 
@@ -2603,13 +2600,13 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 4);
 
-        assert!(jobs[0].work.deps().is_empty()); // write @ 0
-        assert!(jobs[1].work.deps().is_empty()); // write @ 1
-        assert!(jobs[2].work.deps().is_empty()); // write @ 2
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // write @ 0
+        assert!(upstairs.downstairs.get_deps(jobs[1]).is_empty()); // write @ 1
+        assert!(upstairs.downstairs.get_deps(jobs[2]).is_empty()); // write @ 2
 
         assert_eq!(
-            jobs[3].work.deps(), // write @ 0,1,2
-            &[jobs[0].ds_id, jobs[1].ds_id, jobs[2].ds_id],
+            upstairs.downstairs.get_deps(jobs[3]), // write @ 0,1,2
+            &[jobs[0], jobs[1], jobs[2]],
         );
     }
 
@@ -2639,8 +2636,8 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 2);
 
-        assert!(jobs[0].work.deps().is_empty()); // write @ 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // read @ 0
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // write @ 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // read @ 0
     }
 
     #[test]
@@ -2673,13 +2670,13 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 4);
 
-        assert!(jobs[0].work.deps().is_empty()); // write @ 0
-        assert!(jobs[1].work.deps().is_empty()); // write @ 1
-        assert!(jobs[2].work.deps().is_empty()); // write @ 2
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // write @ 0
+        assert!(upstairs.downstairs.get_deps(jobs[1]).is_empty()); // write @ 1
+        assert!(upstairs.downstairs.get_deps(jobs[2]).is_empty()); // write @ 2
 
         assert_eq!(
-            jobs[3].work.deps(), // read @ 0,1
-            &[jobs[0].ds_id, jobs[1].ds_id],
+            upstairs.downstairs.get_deps(jobs[3]), // read @ 0,1
+            &[jobs[0], jobs[1]],
         );
     }
 
@@ -2707,8 +2704,8 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 2);
 
-        assert!(jobs[0].work.deps().is_empty()); // read @ 0
-        assert!(jobs[1].work.deps().is_empty()); // read @ 0
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // read @ 0
+        assert!(upstairs.downstairs.get_deps(jobs[1]).is_empty()); // read @ 0
     }
 
     #[test]
@@ -2741,9 +2738,9 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
 
-        assert!(jobs[0].work.deps().is_empty()); // write @ 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // read @ 0
-        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id]); // read @ 0
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // write @ 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // read @ 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[0]]); // read @ 0
     }
 
     #[test]
@@ -2776,9 +2773,9 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
 
-        assert!(jobs[0].work.deps().is_empty()); // write @ 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // flush
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // read @ 0
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // write @ 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // flush
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]); // read @ 0
     }
 
     #[test]
@@ -2804,9 +2801,9 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
 
-        assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]);
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty());
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]);
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]);
     }
 
     #[test]
@@ -2858,23 +2855,23 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 8);
 
-        assert!(jobs[0].work.deps().is_empty()); // flush (op 0)
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // flush (op 0)
 
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // write (op 1)
-        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id]); // write (op 2)
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // write (op 1)
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[0]]); // write (op 2)
 
         assert_eq!(
-            jobs[3].work.deps(),
-            &[jobs[0].ds_id, jobs[1].ds_id, jobs[2].ds_id],
+            upstairs.downstairs.get_deps(jobs[3]),
+            &[jobs[0], jobs[1], jobs[2]],
         ); // flush (op 3)
 
-        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // write (op 4)
-        assert_eq!(jobs[5].work.deps(), &[jobs[3].ds_id]); // write (op 5)
-        assert_eq!(jobs[6].work.deps(), &[jobs[3].ds_id]); // write (op 6)
+        assert_eq!(upstairs.downstairs.get_deps(jobs[4]), &[jobs[3]]); // write (op 4)
+        assert_eq!(upstairs.downstairs.get_deps(jobs[5]), &[jobs[3]]); // write (op 5)
+        assert_eq!(upstairs.downstairs.get_deps(jobs[6]), &[jobs[3]]); // write (op 6)
 
         assert_eq!(
-            jobs[7].work.deps(), // flush (op 7)
-            &[jobs[3].ds_id, jobs[4].ds_id, jobs[5].ds_id, jobs[6].ds_id],
+            upstairs.downstairs.get_deps(jobs[7]), // flush (op 7)
+            &[jobs[3], jobs[4], jobs[5], jobs[6]],
         );
     }
 
@@ -2904,8 +2901,8 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 2);
 
-        assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // op 1
     }
 
     #[test]
@@ -2938,9 +2935,9 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
 
-        assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // op 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]); // op 2
     }
 
     #[test]
@@ -2993,14 +2990,14 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 6);
 
-        assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // op 1
 
-        assert!(jobs[2].work.deps().is_empty()); // op 2
-        assert_eq!(jobs[3].work.deps(), &[jobs[2].ds_id]); // op 3
+        assert!(upstairs.downstairs.get_deps(jobs[2]).is_empty()); // op 2
+        assert_eq!(upstairs.downstairs.get_deps(jobs[3]), &[jobs[2]]); // op 3
 
-        assert!(jobs[4].work.deps().is_empty()); // op 4
-        assert_eq!(jobs[5].work.deps(), &[jobs[4].ds_id]); // op 5
+        assert!(upstairs.downstairs.get_deps(jobs[4]).is_empty()); // op 4
+        assert_eq!(upstairs.downstairs.get_deps(jobs[5]), &[jobs[4]]); // op 5
     }
 
     #[test]
@@ -3031,11 +3028,11 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 5);
 
-        assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
-        assert_eq!(jobs[3].work.deps(), &[jobs[2].ds_id]); // op 3
-        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // op 4
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // op 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]); // op 2
+        assert_eq!(upstairs.downstairs.get_deps(jobs[3]), &[jobs[2]]); // op 3
+        assert_eq!(upstairs.downstairs.get_deps(jobs[4]), &[jobs[3]]); // op 4
     }
 
     #[test]
@@ -3066,11 +3063,11 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 5);
 
-        assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
-        assert_eq!(jobs[3].work.deps(), &[jobs[2].ds_id]); // op 3
-        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // op 4
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // op 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]); // op 2
+        assert_eq!(upstairs.downstairs.get_deps(jobs[3]), &[jobs[2]]); // op 3
+        assert_eq!(upstairs.downstairs.get_deps(jobs[4]), &[jobs[3]]); // op 4
     }
 
     #[test]
@@ -3113,9 +3110,10 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
 
-        assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert!(jobs[1].work.deps().is_empty()); // op 1
-        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id, jobs[1].ds_id],); // op 2
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
+        assert!(upstairs.downstairs.get_deps(jobs[1]).is_empty()); // op 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[0], jobs[1]],);
+        // op 2
     }
 
     #[test]
@@ -3154,7 +3152,7 @@ pub(crate) mod test {
         );
 
         let ds = &upstairs.downstairs;
-        let jobs = ds.get_all_jobs();
+        let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
 
         // confirm which extents are impacted (in case make_upstairs changes)
@@ -3164,9 +3162,9 @@ pub(crate) mod test {
         assert_ne!(ds.get_extents_for(jobs[0]), ds.get_extents_for(jobs[2]));
 
         // confirm deps
-        assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // op 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]); // op 2
     }
 
     #[test]
@@ -3217,7 +3215,7 @@ pub(crate) mod test {
         upstairs.submit_dummy_read(BlockIndex(99), Buffer::new(1, 512));
 
         let ds = &upstairs.downstairs;
-        let jobs = ds.get_all_jobs();
+        let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 5);
 
         // confirm which extents are impacted (in case make_upstairs changes)
@@ -3230,11 +3228,11 @@ pub(crate) mod test {
         assert_ne!(ds.get_extents_for(jobs[0]), ds.get_extents_for(jobs[2]));
         assert_ne!(ds.get_extents_for(jobs[4]), ds.get_extents_for(jobs[2]));
 
-        assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
-        assert_eq!(jobs[3].work.deps(), &[jobs[1].ds_id, jobs[2].ds_id]); // op 3
-        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // op 4
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // op 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]); // op 2
+        assert_eq!(upstairs.downstairs.get_deps(jobs[3]), &[jobs[1], jobs[2]]); // op 3
+        assert_eq!(upstairs.downstairs.get_deps(jobs[4]), &[jobs[3]]); // op 4
     }
 
     #[test]
@@ -3273,7 +3271,7 @@ pub(crate) mod test {
         );
 
         let ds = &upstairs.downstairs;
-        let jobs = ds.get_all_jobs();
+        let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
 
         // confirm which extents are impacted (in case make_upstairs changes)
@@ -3283,9 +3281,9 @@ pub(crate) mod test {
 
         assert_ne!(ds.get_extents_for(jobs[0]), ds.get_extents_for(jobs[1]));
 
-        assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert!(jobs[1].work.deps().is_empty()); // op 1
-        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id, jobs[1].ds_id]); // op 2
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
+        assert!(upstairs.downstairs.get_deps(jobs[1]).is_empty()); // op 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[0], jobs[1]]); // op 2
     }
 
     #[test]
@@ -3319,13 +3317,13 @@ pub(crate) mod test {
         assert_eq!(jobs.len(), 3);
 
         // assert read has no deps
-        assert!(jobs[0].work.deps().is_empty()); // op 0
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
 
         // assert flush depends on the read
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // op 1
 
         // assert write depends on just the flush
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]); // op 2
     }
 
     #[test]
@@ -3346,13 +3344,11 @@ pub(crate) mod test {
         );
 
         {
+            let jobs = upstairs.downstairs.get_all_jobs();
             let ds = &mut upstairs.downstairs;
-            let jobs = ds.get_all_jobs();
             assert_eq!(jobs.len(), 1);
 
-            let ds_id = jobs[0].ds_id;
-
-            crate::downstairs::test::finish_job(ds, ds_id);
+            crate::downstairs::test::finish_job(ds, jobs[0]);
         }
 
         // submit an overlapping write
@@ -3364,14 +3360,12 @@ pub(crate) mod test {
         );
 
         {
-            let ds = &upstairs.downstairs;
-            let jobs = ds.get_all_jobs();
-
             // retire_check not run yet, so there's two active jobs
+            let jobs = upstairs.downstairs.get_all_jobs();
             assert_eq!(jobs.len(), 2);
 
             // the second write should still depend on the first write!
-            assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
+            assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]);
         }
     }
 

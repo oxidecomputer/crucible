@@ -432,10 +432,10 @@ impl DownstairsClient {
     ///
     /// # Panics
     /// If the job's state is not [`IOState::InProgress`]
-    pub(crate) fn skip_job(&mut self, job: &mut DownstairsIO) {
+    pub(crate) fn skip_job(&mut self, ds_id: JobId, job: &mut DownstairsIO) {
         let prev_state = self.set_job_state(job, IOState::Skipped);
         assert!(matches!(prev_state, IOState::InProgress));
-        self.skipped_jobs.insert(job.ds_id);
+        self.skipped_jobs.insert(ds_id);
     }
 
     /// Returns true if it's possible that we need to clean job dependencies
@@ -1235,13 +1235,13 @@ impl DownstairsClient {
     /// `read_validations`).
     pub(crate) fn process_io_completion(
         &mut self,
+        ds_id: JobId,
         job: &mut DownstairsIO,
         responses: Result<RawReadResponse, CrucibleError>,
         read_validations: Vec<Validation>,
         deactivate: bool,
         extent_info: Option<ExtentInfo>,
     ) -> bool {
-        let ds_id = job.ds_id;
         if job.state[self.client_id] == IOState::Skipped {
             // This job was already marked as skipped, and at that time
             // all required action was taken on it.  We can drop any more
@@ -1432,7 +1432,7 @@ impl DownstairsClient {
                         job.read_validations = read_validations;
                         assert!(!job.acked);
                         ackable = true;
-                        debug!(self.log, "Read AckReady {}", job.ds_id.0);
+                        debug!(self.log, "Read AckReady {}", ds_id.0);
                         cdt::up__to__ds__read__done!(|| job.guest_id.0);
                     } else {
                         /*

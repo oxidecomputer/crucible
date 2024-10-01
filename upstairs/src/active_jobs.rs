@@ -117,15 +117,6 @@ impl ActiveJobs {
         self.jobs.keys()
     }
 
-    /// Returns an iterator over job values
-    #[cfg(test)]
-    #[inline]
-    pub fn values(
-        &self,
-    ) -> std::collections::btree_map::Values<JobId, DownstairsIO> {
-        self.jobs.values()
-    }
-
     pub fn deps_for_flush(&mut self, flush_id: JobId) -> Vec<JobId> {
         let blocks = ImpactedBlocks::InclusiveRange(
             ImpactedAddr {
