@@ -547,7 +547,11 @@ impl DownstairsClient {
     ///
     /// # Panics
     /// If `self.client_task` is not `None`, or `self.target_addr` is `None`
-    pub(crate) fn reinitialize(&mut self, up_state: &UpstairsState) {
+    pub(crate) fn reinitialize(
+        &mut self,
+        up_state: &UpstairsState,
+        can_replay: bool,
+    ) {
         // Clear this Downstair's repair address, and let the YesItsMe set it.
         // This works if this Downstairs is new, reconnecting, or was replaced
         // entirely; the repair address could have changed in any of these
@@ -570,6 +574,9 @@ impl DownstairsClient {
 
         let current = &self.state;
         let new_state = match current {
+            DsState::Active | DsState::Offline if !can_replay => {
+                Some(DsState::Faulted)
+            }
             DsState::Active => Some(DsState::Offline),
             DsState::LiveRepair | DsState::LiveRepairReady => {
                 Some(DsState::Faulted)
@@ -840,8 +847,12 @@ impl DownstairsClient {
         reason: ClientStopReason,
     ) {
         let new_state = match self.state {
-            DsState::Active => DsState::Offline,
-            DsState::Offline => DsState::Offline,
+            DsState::Active | DsState::Offline
+                if matches!(reason, ClientStopReason::IneligibleForReplay) =>
+            {
+                DsState::Faulted
+            }
+            DsState::Active | DsState::Offline => DsState::Offline,
             DsState::Faulted => DsState::Faulted,
             DsState::Deactivated => DsState::New,
             DsState::Reconcile => DsState::New,
@@ -2408,6 +2419,9 @@ pub(crate) enum ClientStopReason {
 
     /// The upstairs has requested that we deactivate when we were offline
     OfflineDeactivated,
+
+    /// The Upstairs has dropped jobs that would be needed for replay
+    IneligibleForReplay,
 }
 
 /// Response received from the I/O task

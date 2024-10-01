@@ -206,12 +206,11 @@ pub(crate) struct Upstairs {
 
     /// Marks whether a flush is needed
     ///
-    /// The Upstairs keeps all IOs in memory until a flush is ACK'd back from
-    /// all three downstairs.  If there are IOs we have accepted into the work
-    /// queue that don't end with a flush, then we set this to indicate that the
-    /// upstairs may need to issue a flush of its own to be sure that data is
-    /// pushed to disk.  Note that this is not an indication of an ACK'd flush,
-    /// just that the last IO command we put on the work queue was not a flush.
+    /// If there are IOs we have accepted into the work queue that don't end
+    /// with a flush, then we set this to indicate that the upstairs may need to
+    /// issue a flush of its own to be sure that data is pushed to disk.  Note
+    /// that this is not an indication of an ACK'd flush, just that the last IO
+    /// command we put on the work queue was not a flush.
     need_flush: bool,
 
     /// Statistics for this upstairs
@@ -531,6 +530,10 @@ impl Upstairs {
 
     /// Apply an action returned from [`Upstairs::select`]
     pub(crate) fn apply(&mut self, action: UpstairsAction) {
+        // Check whether the downstairs has live jobs before performing the
+        // action, because the action may cause it to retire live jobs.
+        let has_jobs = self.downstairs.has_live_jobs();
+
         match action {
             UpstairsAction::Downstairs(d) => {
                 self.counters.action_downstairs += 1;
@@ -603,6 +606,12 @@ impl Upstairs {
         // because too many jobs have piled up.
         self.gone_too_long();
 
+        // Check whether we need to send a Barrier operation to clean out
+        // complete-but-unflushed jobs.
+        if self.downstairs.needs_barrier() {
+            self.submit_barrier()
+        }
+
         // Check to see whether live-repair can continue
         //
         // This must be called before acking jobs, because it looks in
@@ -653,6 +662,13 @@ impl Upstairs {
         // For now, check backpressure after every event.  We may want to make
         // this more nuanced in the future.
         self.set_backpressure();
+
+        // We do this last because some of the code above can be slow
+        // (especially during debug builds), and we don't want to set our flush
+        // deadline such that it fires immediately.
+        if has_jobs {
+            self.flush_deadline = Instant::now() + self.flush_interval;
+        }
     }
 
     /// Helper function to await all deferred block requests
@@ -1271,13 +1287,11 @@ impl Upstairs {
         cdt::up__to__ds__flush__start!(|| (ds_id.0));
     }
 
-    #[allow(dead_code)] // XXX this will be used soon!
     fn submit_barrier(&mut self) {
         // Notice that unlike submit_read and submit_write, we do not check for
         // guest_io_ready here. The upstairs itself calls submit_barrier
         // without the guest being involved; indeed the guest is not allowed to
         // call it!
-
         let ds_id = self.downstairs.submit_barrier();
 
         cdt::up__to__ds__barrier__start!(|| (ds_id.0));
