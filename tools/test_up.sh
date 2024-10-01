@@ -132,10 +132,10 @@ if ! pgrep -P $dsc_pid > /dev/null; then
     echo dsc:
     ps -ef | grep dsc
     echo files:
-    ls -l /tmp/test_up
-    ls -l /tmp/test_up/dsc
+    ls -l "$test_output_dir"
+    ls -l "$dsc_output_dir"
     echo cat:
-    cat /tmp/test_up/dsc-out.txt
+    cat "$dsc_output"
     exit 1
 fi
 
