@@ -263,23 +263,26 @@ impl DownstairsHandle {
     /// # Panics
     /// If a non-flush message arrives
     pub async fn ack_flush(&mut self) -> u64 {
-        let Message::Flush {
-            job_id,
-            flush_number,
-            upstairs_id,
-            ..
-        } = self.recv().await.unwrap()
-        else {
-            panic!("saw non flush!");
-        };
-        self.send(Message::FlushAck {
-            upstairs_id,
-            session_id: self.upstairs_session_id.unwrap(),
-            job_id,
-            result: Ok(()),
-        })
-        .unwrap();
-        flush_number
+        match self.recv().await.unwrap() {
+            Message::Flush {
+                job_id,
+                flush_number,
+                upstairs_id,
+                ..
+            } => {
+                self.send(Message::FlushAck {
+                    upstairs_id,
+                    session_id: self.upstairs_session_id.unwrap(),
+                    job_id,
+                    result: Ok(()),
+                })
+                .unwrap();
+                flush_number
+            }
+            m => {
+                panic!("saw non flush {m:?}");
+            }
+        }
     }
 
     /// Awaits a `Message::Write { .. }` and sends a `WriteAck`
@@ -300,6 +303,42 @@ impl DownstairsHandle {
         })
         .unwrap();
         header.job_id
+    }
+
+    /// Awaits and acks a `Message::Write { .. }` or `Message::Barrier { .. }`
+    ///
+    /// Returns the job ID for further checks.
+    ///
+    /// # Panics
+    /// If a non-write message arrives
+    pub async fn ack_write_or_barrier(&mut self) -> bool {
+        let (r, was_barrier) = match self.recv().await.unwrap() {
+            Message::Write { header, .. } => (
+                Message::WriteAck {
+                    upstairs_id: header.upstairs_id,
+                    session_id: self.upstairs_session_id.unwrap(),
+                    job_id: header.job_id,
+                    result: Ok(()),
+                },
+                false,
+            ),
+            Message::Barrier {
+                upstairs_id,
+                job_id,
+                ..
+            } => (
+                Message::BarrierAck {
+                    upstairs_id,
+                    session_id: self.upstairs_session_id.unwrap(),
+                    job_id,
+                    result: Ok(()),
+                },
+                true,
+            ),
+            m => panic!("saw unexpected message {m:?}"),
+        };
+        self.send(r).unwrap();
+        was_barrier
     }
 
     /// Awaits a `Message::Read` and sends a blank `ReadResponse`
@@ -470,14 +509,31 @@ pub struct TestHarness {
 
 /// Number of extents in `TestHarness::default_config`
 const DEFAULT_EXTENT_COUNT: u32 = 25;
+const DEFAULT_BLOCK_COUNT: u64 = 10;
+
+struct TestOpts {
+    flush_timeout: f32,
+    read_only: bool,
+    disable_backpressure: bool,
+}
 
 impl TestHarness {
     pub async fn new() -> TestHarness {
-        Self::new_(false).await
+        Self::new_with_opts(TestOpts {
+            flush_timeout: 86400.0,
+            read_only: false,
+            disable_backpressure: true,
+        })
+        .await
     }
 
     pub async fn new_ro() -> TestHarness {
-        Self::new_(true).await
+        Self::new_with_opts(TestOpts {
+            flush_timeout: 86400.0,
+            read_only: true,
+            disable_backpressure: true,
+        })
+        .await
     }
 
     pub fn ds1(&mut self) -> &mut DownstairsHandle {
@@ -493,7 +549,7 @@ impl TestHarness {
             // IO_OUTSTANDING_MAX_BYTES in less than IO_OUTSTANDING_MAX_JOBS,
             // i.e. letting us test both byte and job fault conditions.
             extent_count: DEFAULT_EXTENT_COUNT,
-            extent_size: Block::new_512(10),
+            extent_size: Block::new_512(DEFAULT_BLOCK_COUNT),
 
             gen_numbers: vec![0u64; DEFAULT_EXTENT_COUNT as usize],
             flush_numbers: vec![0u64; DEFAULT_EXTENT_COUNT as usize],
@@ -501,10 +557,10 @@ impl TestHarness {
         }
     }
 
-    async fn new_(read_only: bool) -> TestHarness {
+    async fn new_with_opts(opts: TestOpts) -> TestHarness {
         let log = csl();
 
-        let cfg = Self::default_config(read_only);
+        let cfg = Self::default_config(opts.read_only);
 
         let ds1 = cfg.clone().start(log.new(o!("downstairs" => 1))).await;
         let ds2 = cfg.clone().start(log.new(o!("downstairs" => 2))).await;
@@ -513,15 +569,17 @@ impl TestHarness {
         // Configure our guest without backpressure, to speed up tests which
         // require triggering a timeout
         let (g, mut io) = Guest::new(Some(log.clone()));
-        io.disable_queue_backpressure();
-        io.disable_byte_backpressure();
+        if opts.disable_backpressure {
+            io.disable_queue_backpressure();
+            io.disable_byte_backpressure();
+        }
         let guest = Arc::new(g);
 
         let crucible_opts = CrucibleOpts {
             id: Uuid::new_v4(),
             target: vec![ds1.local_addr, ds2.local_addr, ds3.local_addr],
-            flush_timeout: Some(86400.0),
-            read_only,
+            flush_timeout: Some(opts.flush_timeout),
+            read_only: opts.read_only,
 
             ..Default::default()
         };
@@ -2645,4 +2703,53 @@ async fn test_write_replay() {
     // Check that the guest hasn't panicked by sending it a message that
     // requires going to the worker thread.
     harness.guest.get_uuid().await.unwrap();
+}
+
+/// Test that barrier operations are sent periodically
+#[tokio::test]
+async fn test_periodic_barrier() {
+    let mut harness = TestHarness::new_with_opts(TestOpts {
+        flush_timeout: 0.5,
+        read_only: false,
+        disable_backpressure: false,
+    })
+    .await;
+
+    let start_time = std::time::Instant::now();
+    let expected_time = std::time::Duration::from_secs(1);
+
+    loop {
+        // Send a write, which will succeed
+        let write_handle = harness.spawn(|guest| async move {
+            let mut data = BytesMut::new();
+            data.resize(512, 1u8);
+            guest.write(BlockIndex(0), data).await.unwrap();
+        });
+
+        // Ensure that all three clients got the write request
+        let b1 = harness.ds1().ack_write_or_barrier().await;
+        let b2 = harness.ds2.ack_write_or_barrier().await;
+        let b3 = harness.ds3.ack_write_or_barrier().await;
+        assert_eq!(b1, b2);
+        assert_eq!(b2, b3);
+
+        if b1 {
+            harness.ds1().ack_write().await;
+            harness.ds2.ack_write().await;
+            harness.ds3.ack_write().await;
+            write_handle.await.unwrap();
+
+            break;
+        }
+
+        write_handle.await.unwrap();
+
+        if start_time.elapsed() > expected_time {
+            panic!("expected a barrier");
+        }
+    }
+    // We should also automatically send a flush here
+    harness.ds1().ack_flush().await;
+    harness.ds2.ack_flush().await;
+    harness.ds3.ack_flush().await;
 }

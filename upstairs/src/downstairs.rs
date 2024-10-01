@@ -88,6 +88,12 @@ pub(crate) struct Downstairs {
     /// (including automatic flushes).
     next_flush: u64,
 
+    /// Indicates whether we are eligible for replay
+    ///
+    /// We are only eligible for replay if all jobs since the last flush are
+    /// buffered (i.e. none have been retired by a `Barrier` operation).
+    can_replay: bool,
+
     /// Ringbuf of recently acked job IDs.
     acked_ids: AllocRingBuffer<JobId>,
 
@@ -291,6 +297,7 @@ impl Downstairs {
             },
             cfg,
             next_flush: 0,
+            can_replay: true,
             ds_active: ActiveJobs::new(),
             gw_active: HashSet::new(),
             acked_ids: AllocRingBuffer::new(2048),
@@ -513,7 +520,7 @@ impl Downstairs {
         // If the connection goes down here, we need to know what state we were
         // in to decide what state to transition to.  The on_missing method will
         // do that for us!
-        self.clients[client_id].on_missing();
+        self.clients[client_id].on_missing(self.can_replay);
 
         // If the IO task stops on its own, then under certain circumstances,
         // we want to skip all of its jobs.  (If we requested that the IO task
@@ -2452,11 +2459,17 @@ impl Downstairs {
         Ok(ReplaceResult::Started)
     }
 
+    /// Checks whether the given client state should go from Offline -> Faulted
+    ///
+    /// # Panics
+    /// If the given client is not in the `Offline` state
     pub(crate) fn check_gone_too_long(
         &mut self,
         client_id: ClientId,
         up_state: &UpstairsState,
     ) {
+        assert_eq!(self.clients[client_id].state(), DsState::Offline);
+
         let byte_count = self.clients[client_id].total_bytes_outstanding();
         let work_count = self.clients[client_id].total_live_work();
         let failed = if work_count > crate::IO_OUTSTANDING_MAX_JOBS {
@@ -2471,6 +2484,13 @@ impl Downstairs {
                 "downstairs failed, too many outstanding bytes {byte_count}"
             );
             Some(ClientStopReason::TooManyOutstandingBytes)
+        } else if !self.can_replay {
+            // XXX can this actually happen?
+            warn!(
+                self.log,
+                "downstairs became ineligible for replay while offline"
+            );
+            Some(ClientStopReason::IneligibleForReplay)
         } else {
             None
         };
@@ -2602,9 +2622,12 @@ impl Downstairs {
     /// writes and if they aren't included in replay then the write will
     /// never start.
     fn retire_check(&mut self, ds_id: JobId) {
-        if !self.is_flush(ds_id) {
-            return;
-        }
+        let job = self.ds_active.get(&ds_id).expect("checked missing job");
+        let can_replay = match job.work {
+            IOop::Flush { .. } => true,
+            IOop::Barrier { .. } => false,
+            _ => return,
+        };
 
         // Only a completed flush will remove jobs from the active queue -
         // currently we have to keep everything around for use during replay
@@ -2679,6 +2702,9 @@ impl Downstairs {
             for cid in ClientId::iter() {
                 self.clients[cid].skipped_jobs.retain(|&x| x >= ds_id);
             }
+
+            // Update the flag indicating whether replay is allowed
+            self.can_replay = can_replay;
         }
     }
 
@@ -4205,6 +4231,13 @@ impl Downstairs {
 
     pub(crate) fn set_ddef(&mut self, ddef: RegionDefinition) {
         self.ddef = Some(ddef);
+    }
+
+    /// Checks whether there are any in-progress jobs present
+    pub(crate) fn has_live_jobs(&self) -> bool {
+        self.clients
+            .iter()
+            .any(|c| c.backpressure_counters.get_jobs() > 0)
     }
 
     /// Returns the per-client state for the given job
