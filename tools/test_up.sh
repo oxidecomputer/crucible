@@ -221,8 +221,8 @@ echo cp -r "${testdir}/${port}" "${testdir}/previous"
 cp -r "${testdir}/${port}" "${testdir}/previous"
 
 new_args+=( --verify-in "${testdir}/verify_file" )
-echo "$ct" repair -g "$gen" -q "${new_args[@]}"
-if ! "$ct" repair -g "$gen" -q "${new_args[@]}"; then
+echo "$ct" fill -g "$gen" -q "${new_args[@]}"
+if ! "$ct" fill -g "$gen" -q "${new_args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed repair test part 1"

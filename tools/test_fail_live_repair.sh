@@ -6,11 +6,11 @@
 #  `pstop` or kill the downstairs process
 #  wait for missing downstairs to be faulted
 #  `pstart` or restart the downstairs
-#  Let the repair start.
+#  Let the live repair start.
 #  `pstop` or kill the same downstairs again.
 #  wait for missing downstairs to be faulted again
 #  `pstart` or restart the downstairs again
-#  Let the upstairs repair start over and finish.
+#  Let the upstairs live repair start over and finish.
 #  Stop crutest, then restart and verify the whole disk.
 
 err=0
