@@ -29,16 +29,11 @@ use uuid::Uuid;
  * that map to a single Guest IO request. G to S stands for Guest
  * to Storage.
  *
- * The submitted hashmap is indexed by the request number (ds_id) for the
+ * The submitted hashmap is indexed by the request number (JobId) for the
  * downstairs requests issued on behalf of this request.
  */
 #[derive(Debug)]
 struct GtoS {
-    /*
-     * Job we sent on to the downstairs.
-     */
-    ds_id: JobId,
-
     /*
      * Handle to notify the guest when we're done
      *
@@ -67,8 +62,8 @@ pub(crate) enum GuestBlockRes {
 impl GtoS {
     /// Create a new GtoS object where one Guest IO request maps to one
     /// downstairs operation.
-    pub fn new(ds_id: JobId, res: Option<GuestBlockRes>) -> GtoS {
-        GtoS { ds_id, res }
+    pub fn new(res: Option<GuestBlockRes>) -> GtoS {
+        GtoS { res }
     }
 
     /*
@@ -127,38 +122,23 @@ impl GtoS {
     }
 }
 
-/// Strongly-typed ID for guest work (stored in the [`GuestWork`] map)
-#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
-pub(crate) struct GuestWorkId(pub u64);
-
-impl std::fmt::Display for GuestWorkId {
-    fn fmt(
-        &self,
-        f: &mut std::fmt::Formatter<'_>,
-    ) -> Result<(), std::fmt::Error> {
-        std::fmt::Display::fmt(&self.0, f)
-    }
-}
-
 /**
  * This structure keeps track of work that Crucible has accepted from the
  * "Guest", aka, Propolis.
  *
  * The active is a hashmap of GtoS structures for all I/Os that are
- * outstanding. Either just created or in progress operations. The key
- * for a new job comes from next_gw_id and should always increment.
+ * outstanding. Either just created or in progress operations.
  *
  * Once we have decided enough downstairs requests are finished, we remove
- * the entry from the active and add the gw_id to the completed vec.
+ * the entry from the active and add the job ID to the completed vec.
  *
  * TODO: The completed needs to implement some notify back to the Guest, and
  * it should probably be a ring buffer.
  */
 #[derive(Debug)]
 pub struct GuestWork {
-    active: HashMap<GuestWorkId, GtoS>,
-    next_gw_id: u64,
-    completed: AllocRingBuffer<GuestWorkId>,
+    active: HashMap<JobId, GtoS>,
+    completed: AllocRingBuffer<JobId>,
 }
 
 impl GuestWork {
@@ -171,31 +151,16 @@ impl GuestWork {
     }
 
     /// Helper function to install new work into the map
-    pub(crate) fn submit_job<F: FnOnce(GuestWorkId) -> JobId>(
+    pub(crate) fn submit_job(
         &mut self,
-        f: F,
+        ds_id: JobId,
         res: Option<GuestBlockRes>,
-    ) -> (GuestWorkId, JobId) {
-        let gw_id = self.next_gw_id();
-        let ds_id = f(gw_id);
-
+    ) {
         if matches!(res, Some(GuestBlockRes::Acked)) {
-            self.completed.push(gw_id);
+            self.completed.push(ds_id);
         } else {
-            self.active.insert(gw_id, GtoS::new(ds_id, res));
+            self.active.insert(ds_id, GtoS::new(res));
         }
-        (gw_id, ds_id)
-    }
-
-    /// Low-level function to get next guest work ID
-    ///
-    /// Normally, `submit_job` should be called instead; this function should
-    /// only be used to reserve `GuestWorkId`s in advance of submitting the
-    /// jobs.
-    pub(crate) fn next_gw_id(&mut self) -> GuestWorkId {
-        let id = self.next_gw_id;
-        self.next_gw_id += 1;
-        GuestWorkId(id)
     }
 
     /// Low-level function to insert work into the map
@@ -203,48 +168,39 @@ impl GuestWork {
     /// Normally, `submit_job` should be called instead; this function should
     /// only be used if we have reserved the `GuestWorkId` and `JobId` in
     /// advance.
-    pub(crate) fn insert(&mut self, gw_id: GuestWorkId, ds_id: JobId) {
-        let new_gtos = GtoS::new(ds_id, None);
-        self.active.insert(gw_id, new_gtos);
+    pub(crate) fn insert(&mut self, ds_id: JobId) {
+        let new_gtos = GtoS::new(None);
+        self.active.insert(ds_id, new_gtos);
     }
 
     /*
      * When the required number of completions for a downstairs
      * ds_id have arrived, we call this method on the parent GuestWork
-     * that requested them and include the Option<Bytes> from the IO.
+     * that requested them and include the Option<RawReadResponse> from the IO.
      *
      * If this operation was a read, then we attach the Bytes read to the
      * GtoS struct for later transfer.
-     *
-     * A single GtoS job may have multiple downstairs jobs it created, so
-     * we may not be done yet. When the required number of completions have
-     * arrived from all the downstairs jobs we created, then we
-     * can move forward with finishing up the guest work operation.
-     * This may include moving data buffers from completed reads.
      */
     #[instrument]
     pub(crate) fn gw_ds_complete(
         &mut self,
-        gw_id: GuestWorkId,
         ds_id: JobId,
         data: Option<RawReadResponse>,
         result: Result<(), CrucibleError>,
     ) {
-        if let Some(gtos_job) = self.active.remove(&gw_id) {
-            assert_eq!(gtos_job.ds_id, ds_id);
-
+        if let Some(gtos_job) = self.active.remove(&ds_id) {
             /*
              * Copy (if present) read data back to the guest buffer they
              * provided to us, and notify any waiters.
              */
             gtos_job.transfer_and_notify(data, result);
 
-            self.completed.push(gw_id);
+            self.completed.push(ds_id);
         } else {
             /*
              * XXX This is just so I can see if ever does happen.
              */
-            panic!("gw_id {} for job {} not on active list", gw_id, ds_id);
+            panic!("job {ds_id} not on active list");
         }
     }
 
@@ -260,7 +216,6 @@ impl Default for GuestWork {
     fn default() -> Self {
         Self {
             active: HashMap::new(), // GtoS
-            next_gw_id: 1,
             completed: AllocRingBuffer::new(2048),
         }
     }
@@ -339,7 +294,6 @@ impl Guest {
 
             guest_work: GuestWork {
                 active: HashMap::new(), // GtoS
-                next_gw_id: 1,
                 completed: AllocRingBuffer::new(2048),
             },
 
@@ -778,11 +732,9 @@ pub struct GuestIoHandle {
     /// Active work from the guest
     ///
     /// When the crucible listening task has noticed a new IO request, it
-    /// will pull it from the reqs queue and create an GuestWork struct
+    /// will pull it from the reqs queue and create an `GtoS` struct
     /// as well as convert the new IO request into the matching
-    /// downstairs request(s). Each new GuestWork request will get a
-    /// unique gw_id, which is also the index for that operation into the
-    /// hashmap.
+    /// downstairs request(s).
     ///
     /// It is during this process that data will encrypted. For a read, the
     /// data is decrypted back to the guest provided buffer after all the
@@ -960,11 +912,10 @@ impl GuestIoHandle {
         let mut kvec: Vec<_> = gw.active.keys().cloned().collect();
         kvec.sort_unstable();
         for id in kvec.iter() {
-            let job = gw.active.get(id).unwrap();
-            println!("GW_JOB active:[{:04}] D:{:?} ", id, job.ds_id);
+            println!("JOB active:[{id:?}]");
         }
         let done = gw.completed.to_vec();
-        println!("GW_JOB completed count:{:?} ", done.len());
+        println!("JOB completed count:{:?} ", done.len());
         kvec.len()
     }
 }

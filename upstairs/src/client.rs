@@ -1376,13 +1376,12 @@ impl DownstairsClient {
                             "[{}] read hash mismatch on id {}\n\
                             Expected {:x?}\n\
                             Computed {:x?}\n\
-                            guest_id:{} start eid:{:?} start offset:{:?}\n\
+                            start eid:{:?} start offset:{:?}\n\
                             job state:{:?}",
                             self.client_id,
                             ds_id,
                             job.read_validations,
                             read_validations,
-                            job.guest_id,
                             start_eid,
                             start_offset,
                             job.state,
@@ -1433,7 +1432,7 @@ impl DownstairsClient {
                         assert!(!job.acked);
                         ackable = true;
                         debug!(self.log, "Read AckReady {}", ds_id.0);
-                        cdt::up__to__ds__read__done!(|| job.guest_id.0);
+                        cdt::up__to__ds__read__done!(|| ds_id.0);
                     } else {
                         /*
                          * If another job has finished already, we can
@@ -1465,7 +1464,7 @@ impl DownstairsClient {
                     assert!(extent_info.is_none());
                     if jobs_completed_ok == 2 {
                         ackable = true;
-                        cdt::up__to__ds__write__done!(|| job.guest_id.0);
+                        cdt::up__to__ds__write__done!(|| ds_id.0);
                     }
                 }
                 IOop::WriteUnwritten { .. } => {
@@ -1474,9 +1473,7 @@ impl DownstairsClient {
                     assert!(extent_info.is_none());
                     if jobs_completed_ok == 2 {
                         ackable = true;
-                        cdt::up__to__ds__write__unwritten__done!(|| job
-                            .guest_id
-                            .0);
+                        cdt::up__to__ds__write__unwritten__done!(|| ds_id.0);
                     }
                 }
                 IOop::Flush {
@@ -1502,7 +1499,7 @@ impl DownstairsClient {
 
                     if jobs_completed_ok == ack_at_num_jobs {
                         ackable = true;
-                        cdt::up__to__ds__flush__done!(|| job.guest_id.0);
+                        cdt::up__to__ds__flush__done!(|| ds_id.0);
                         if deactivate {
                             debug!(self.log, "deactivate flush {ds_id} done");
                         }
