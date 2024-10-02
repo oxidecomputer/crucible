@@ -2472,7 +2472,7 @@ async fn replace_while_reconcile(
                 wc.active_count
             );
             if wc.up_count + wc.ds_count == 0 && wc.active_count == ds_total {
-                info!(log, "[{c}] Replay: All jobs finished, all DS active.");
+                info!(log, "[{c}] All jobs finished, all DS active.");
                 break;
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
@@ -2528,6 +2528,12 @@ async fn replace_before_active(
     assert!(targets.len() % 3 == 1);
 
     info!(log, "Begin replacement before activation test");
+    // We need to start from a known state and be sure that all three of the
+    // current downstairs are consistent with each other. To guarantee this
+    // we write to every block, then flush, then read.  This way we know
+    // that the initial downstairs are all synced up on the same flush and
+    // generation numbers.
+    fill_workload(volume, ri, true).await?;
     let ds_total = targets.len() - 1;
     let mut old_ds = 0;
     let mut new_ds = targets.len() - 1;
@@ -2628,7 +2634,7 @@ async fn replace_before_active(
                 wc.active_count
             );
             if wc.up_count + wc.ds_count == 0 && wc.active_count == ds_total {
-                info!(log, "[{c}] Replay: All jobs finished, all DS active.");
+                info!(log, "[{c}] All jobs finished, all DS active.");
                 break;
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;

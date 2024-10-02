@@ -1380,8 +1380,8 @@ impl DownstairsClient {
                             guest_id:{} start eid:{:?} start offset:{:?}\n\
                             job state:{:?}",
                             self.client_id,
-                            self.cfg.session_id,
                             ds_id,
+                            self.cfg.session_id,
                             job.read_validations,
                             read_validations,
                             job.guest_id,
