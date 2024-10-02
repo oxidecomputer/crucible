@@ -71,20 +71,22 @@ function usage {
     exit 1
 }
 
+shift_count=0
 while getopts 'Nr:' opt; do
     case "$opt" in
         N) echo "Turn off color for downstairs dump"
             dump_args+=("--no-color")
-            shift
+            ((shift_count+=1))
             ;;
         r) region_sets=$OPTARG
             echo "Using $region_sets region sets"
-            shift 2
+            ((shift_count+=2))
             ;;
         *) usage
             ;;
     esac
 done
+shift "$shift_count"
 
 case ${1} in
     "unencrypted")
