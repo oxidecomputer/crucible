@@ -320,6 +320,7 @@ mod cdt {
     fn gw__write__unwritten__start(_: u64) {}
     fn gw__write__deps(_: u64, _: u64) {}
     fn gw__flush__start(_: u64) {}
+    fn gw__barrier__start(_: u64) {}
     fn gw__close__start(_: u64, _: u32) {}
     fn gw__repair__start(_: u64, _: u32) {}
     fn gw__noop__start(_: u64) {}
@@ -328,11 +329,13 @@ mod cdt {
     fn up__to__ds__write__start(_: u64) {}
     fn up__to__ds__write__unwritten__start(_: u64) {}
     fn up__to__ds__flush__start(_: u64) {}
+    fn up__to__ds__barrier__start(_: u64) {}
     fn up__block__req__dropped() {}
     fn ds__read__client__start(_: u64, _: u8) {}
     fn ds__write__client__start(_: u64, _: u8) {}
     fn ds__write__unwritten__client__start(_: u64, _: u8) {}
     fn ds__flush__client__start(_: u64, _: u8) {}
+    fn ds__barrier__client__start(_: u64, _: u8) {}
     fn ds__close__start(_: u64, _: u8, _: u32) {}
     fn ds__repair__start(_: u64, _: u8, _: u32) {}
     fn ds__noop__start(_: u64, _: u8) {}
@@ -354,6 +357,7 @@ mod cdt {
     fn ds__write__client__done(_: u64, _: u8) {}
     fn ds__write__unwritten__client__done(_: u64, _: u8) {}
     fn ds__flush__client__done(_: u64, _: u8) {}
+    fn ds__barrier__client__done(_: u64, _: u8) {}
     fn ds__close__done(_: u64, _: u8) {}
     fn ds__repair__done(_: u64, _: u8) {}
     fn ds__noop__done(_: u64, _: u8) {}
@@ -362,10 +366,12 @@ mod cdt {
     fn up__to__ds__write__done(_: u64) {}
     fn up__to__ds__write__unwritten__done(_: u64) {}
     fn up__to__ds__flush__done(_: u64) {}
+    fn up__to__ds__barrier__done(_: u64) {}
     fn gw__read__done(_: u64) {}
     fn gw__write__done(_: u64) {}
     fn gw__write__unwritten__done(_: u64) {}
     fn gw__flush__done(_: u64) {}
+    fn gw__barrier__done(_: u64) {}
     fn gw__close__done(_: u64, _: u32) {}
     fn gw__repair__done(_: u64, _: u32) {}
     fn gw__noop__done(_: u64) {}
@@ -990,6 +996,7 @@ impl DownstairsIO {
                 count, block_size, ..
             } => (*count * *block_size) as usize,
             IOop::Flush { .. }
+            | IOop::Barrier { .. }
             | IOop::ExtentFlushClose { .. }
             | IOop::ExtentLiveRepair { .. }
             | IOop::ExtentLiveReopen { .. }
@@ -1059,7 +1066,8 @@ impl DownstairsIO {
             IOop::Read { .. } => wc.done == 0,
             IOop::Write { .. }
             | IOop::WriteUnwritten { .. }
-            | IOop::Flush { .. } => wc.skipped + wc.error > 1,
+            | IOop::Flush { .. }
+            | IOop::Barrier { .. } => wc.skipped + wc.error > 1,
             IOop::ExtentFlushClose { .. }
             | IOop::ExtentLiveRepair { .. }
             | IOop::ExtentLiveReopen { .. }
@@ -1157,6 +1165,9 @@ enum IOop {
         snapshot_details: Option<SnapshotDetails>,
         extent_limit: Option<ExtentId>,
     },
+    Barrier {
+        dependencies: Vec<JobId>, // Jobs that must finish before this
+    },
     /*
      * These operations are for repairing a bad downstairs
      */
@@ -1189,6 +1200,7 @@ impl IOop {
         match &self {
             IOop::Write { dependencies, .. }
             | IOop::Flush { dependencies, .. }
+            | IOop::Barrier { dependencies, .. }
             | IOop::Read { dependencies, .. }
             | IOop::WriteUnwritten { dependencies, .. }
             | IOop::ExtentFlushClose { dependencies, .. }
@@ -1250,6 +1262,10 @@ impl IOop {
             }
             IOop::Flush { dependencies, .. } => {
                 let job_type = "Flush".to_string();
+                (job_type, 0, dependencies.clone())
+            }
+            IOop::Barrier { dependencies, .. } => {
+                let job_type = "Barrier".to_string();
                 (job_type, 0, dependencies.clone())
             }
             IOop::ExtentFlushClose {

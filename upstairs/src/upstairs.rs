@@ -1288,6 +1288,19 @@ impl Upstairs {
         cdt::up__to__ds__flush__start!(|| (ds_id.0));
     }
 
+    #[allow(dead_code)] // XXX this will be used soon!
+    fn submit_barrier(&mut self) {
+        // Notice that unlike submit_read and submit_write, we do not check for
+        // guest_io_ready here. The upstairs itself calls submit_barrier
+        // without the guest being involved; indeed the guest is not allowed to
+        // call it!
+
+        let ds_id = self.downstairs.submit_barrier();
+        self.guest.guest_work.submit_job(ds_id, None);
+
+        cdt::up__to__ds__barrier__start!(|| (ds_id.0));
+    }
+
     /// Submits a read job to the downstairs
     fn submit_read(
         &mut self,
@@ -1625,6 +1638,7 @@ impl Upstairs {
             Message::WriteAck { .. }
             | Message::WriteUnwrittenAck { .. }
             | Message::FlushAck { .. }
+            | Message::BarrierAck { .. }
             | Message::ReadResponse { .. }
             | Message::ExtentLiveCloseAck { .. }
             | Message::ExtentLiveAckId { .. }
@@ -1726,6 +1740,7 @@ impl Upstairs {
             Message::HereIAm { .. }
             | Message::Ruok
             | Message::Flush { .. }
+            | Message::Barrier { .. }
             | Message::LastFlush { .. }
             | Message::Write { .. }
             | Message::WriteUnwritten { .. }

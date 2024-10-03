@@ -82,6 +82,9 @@ enum IOop {
         snapshot_details: Option<SnapshotDetails>,
         extent_limit: Option<ExtentId>,
     },
+    Barrier {
+        dependencies: Vec<JobId>, // Jobs that must finish before this
+    },
     /*
      * These operations are for repairing a bad downstairs
      */
@@ -114,6 +117,7 @@ impl IOop {
         match &self {
             IOop::Write { dependencies, .. }
             | IOop::Flush { dependencies, .. }
+            | IOop::Barrier { dependencies, .. }
             | IOop::Read { dependencies, .. }
             | IOop::WriteUnwritten { dependencies, .. }
             | IOop::ExtentClose { dependencies, .. }
@@ -687,6 +691,9 @@ pub fn show_work(ds: &mut Downstairs) {
                     IOop::Read { dependencies, .. } => ("Read", dependencies),
                     IOop::Write { dependencies, .. } => ("Write", dependencies),
                     IOop::Flush { dependencies, .. } => ("Flush", dependencies),
+                    IOop::Barrier { dependencies, .. } => {
+                        ("Barrier", dependencies)
+                    }
                     IOop::WriteUnwritten { dependencies, .. } => {
                         ("WriteU", dependencies)
                     }
@@ -721,6 +728,7 @@ pub mod cdt {
     fn submit__writeunwritten__start(_: u64) {}
     fn submit__write__start(_: u64) {}
     fn submit__flush__start(_: u64) {}
+    fn submit__barrier__start(_: u64) {}
     fn submit__el__close__start(_: u64) {}
     fn submit__el__flush__close__start(_: u64) {}
     fn submit__el__repair__start(_: u64) {}
@@ -977,6 +985,11 @@ impl ActiveConnection {
                 session_id,
                 ..
             }
+            | Message::Barrier {
+                upstairs_id,
+                session_id,
+                ..
+            }
             | Message::ReadRequest {
                 upstairs_id,
                 session_id,
@@ -1139,6 +1152,25 @@ impl ActiveConnection {
                 self.do_work_if_ready(
                     job_id,
                     new_flush,
+                    flags,
+                    reqwest_client,
+                    dss,
+                    region,
+                )
+                .await?
+            }
+            Message::Barrier {
+                job_id,
+                dependencies,
+                ..
+            } => {
+                cdt::submit__barrier__start!(|| job_id.0);
+
+                let new_barrier = IOop::Barrier { dependencies };
+
+                self.do_work_if_ready(
+                    job_id,
+                    new_barrier,
                     flags,
                     reqwest_client,
                     dss,
@@ -1717,6 +1749,18 @@ impl ActiveConnection {
                     session_id: upstairs_connection.session_id,
                     job_id,
                     result,
+                }
+            }
+            IOop::Barrier { dependencies } => {
+                debug!(self.log, "Barrier     :{job_id} deps:{dependencies:?}",);
+
+                // No work is actually done here; the barrier just lets us drop
+                // older dependencies (because it waits for all of them).
+                Message::BarrierAck {
+                    upstairs_id: upstairs_connection.upstairs_id,
+                    session_id: upstairs_connection.session_id,
+                    job_id,
+                    result: Ok(()),
                 }
             }
             IOop::ExtentClose {
@@ -3328,6 +3372,7 @@ impl Work {
                         IOop::Write { .. } => "Write",
                         IOop::WriteUnwritten { .. } => "WriteUnwritten",
                         IOop::Flush { .. } => "Flush",
+                        IOop::Barrier { .. } => "Barrier",
                         IOop::Read { .. } => "Read",
                         IOop::ExtentClose { .. } => "ECLose",
                         IOop::ExtentFlushClose { .. } => "EFlushCLose",
@@ -3674,7 +3719,10 @@ mod test {
             .iter()
             .all(|dep| work.completed.is_complete(*dep)));
 
-        if matches!(job, IOop::Flush { .. }) {
+        // Flushes and barriers both guarantee that no future jobs will depend
+        // on jobs that preceded them, so we reset the completed jobs list to
+        // only include their job id.
+        if matches!(job, IOop::Flush { .. } | IOop::Barrier { .. }) {
             work.completed.reset(ds_id);
         } else {
             work.completed.push(ds_id);

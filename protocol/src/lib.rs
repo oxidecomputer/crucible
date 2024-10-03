@@ -162,6 +162,9 @@ pub struct SnapshotDetails {
 #[repr(u32)]
 #[derive(IntoPrimitive)]
 pub enum MessageVersion {
+    /// Add `Barrier` and `BarrierAck`
+    V12 = 12,
+
     /// Use `ReadBlockContext` instead of `Option<BlockContext>`
     V11 = 11,
 
@@ -207,7 +210,7 @@ pub enum MessageVersion {
 }
 impl MessageVersion {
     pub const fn current() -> Self {
-        Self::V11
+        Self::V12
     }
 }
 
@@ -216,7 +219,7 @@ impl MessageVersion {
  * This, along with the MessageVersion enum above should be updated whenever
  * changes are made to the Message enum below.
  */
-pub const CRUCIBLE_MESSAGE_VERSION: u32 = 11;
+pub const CRUCIBLE_MESSAGE_VERSION: u32 = MessageVersion::current() as u32;
 
 /*
  * If you add or change the Message enum, you must also increment the
@@ -506,6 +509,18 @@ pub enum Message {
         job_id: JobId,
         result: Result<(), CrucibleError>,
     },
+    Barrier {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: JobId,
+        dependencies: Vec<JobId>,
+    },
+    BarrierAck {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: JobId,
+        result: Result<(), CrucibleError>,
+    },
 
     ReadRequest {
         upstairs_id: Uuid,
@@ -621,6 +636,7 @@ impl Message {
             | Message::ExtentLiveReopen { .. }
             | Message::ExtentLiveNoOp { .. }
             | Message::Flush { .. }
+            | Message::Barrier { .. }
             | Message::ReadRequest { .. }
             | Message::WriteUnwritten { .. }
             | Message::Unknown(..) => None,
@@ -634,6 +650,7 @@ impl Message {
             | Message::ExtentLiveAckId { result, .. }
             | Message::WriteAck { result, .. }
             | Message::FlushAck { result, .. }
+            | Message::BarrierAck { result, .. }
             | Message::WriteUnwrittenAck { result, .. } => {
                 result.as_ref().err()
             }
