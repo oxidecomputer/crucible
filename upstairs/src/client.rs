@@ -390,6 +390,7 @@ impl DownstairsClient {
                 IOop::Write { dependencies, .. }
                 | IOop::WriteUnwritten { dependencies, .. }
                 | IOop::Flush { dependencies, .. }
+                | IOop::Barrier { dependencies, .. }
                 | IOop::Read { dependencies, .. }
                 | IOop::ExtentFlushClose { dependencies, .. }
                 | IOop::ExtentLiveRepair { dependencies, .. }
@@ -1300,7 +1301,8 @@ impl DownstairsClient {
                         // XXX: Errors should be reported to nexus
                         IOop::Write { .. }
                         | IOop::WriteUnwritten { .. }
-                        | IOop::Flush { .. } => {
+                        | IOop::Flush { .. }
+                        | IOop::Barrier { .. } => {
                             self.stats.downstairs_errors += 1;
                         }
 
@@ -1401,7 +1403,9 @@ impl DownstairsClient {
                  * as those jobs should never be acked before all three
                  * are done.
                  */
-                IOop::Write { .. } | IOop::WriteUnwritten { .. } => {}
+                IOop::Write { .. }
+                | IOop::WriteUnwritten { .. }
+                | IOop::Barrier { .. } => {}
                 IOop::ExtentFlushClose { .. }
                 | IOop::ExtentLiveRepair { .. }
                 | IOop::ExtentLiveReopen { .. }
@@ -1507,6 +1511,16 @@ impl DownstairsClient {
                         }
                     }
                     self.last_flush = ds_id;
+                }
+                IOop::Barrier { .. } => {
+                    assert!(read_data.blocks.is_empty());
+                    assert!(read_data.data.is_empty());
+                    assert!(extent_info.is_none());
+
+                    if jobs_completed_ok == 2 {
+                        ackable = true;
+                        cdt::up__to__ds__barrier__done!(|| ds_id.0);
+                    }
                 }
                 IOop::ExtentFlushClose { .. } => {
                     assert!(read_data.blocks.is_empty());
