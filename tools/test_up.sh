@@ -141,6 +141,7 @@ if ! pgrep -P $dsc_pid > /dev/null; then
     exit 1
 fi
 
+echo "dsc started at PID: $dsc_pid"
 # We don't want auto-restart of downstairs, so be sure that is not enabled.
 echo "Disable automatic restart on all downstairs"
 if ! "${dsc}" cmd disable-restart-all; then
@@ -344,7 +345,7 @@ else
 fi
 
 # Tests done, shut down the downstairs.
-echo "Upstairs tests have completed, stopping all downstairs"
+echo "Initial upstairs tests have completed, stopping all downstairs"
 if ! "$dsc" cmd shutdown; then
     (( res += 1 ))
     echo ""
@@ -360,6 +361,7 @@ while : ; do
         break
     fi
     echo "dsc at $dsc_pid has not yet stopped, waiting"
+    "$dsc" cmd shutdown
     sleep 5
 done
 
@@ -384,6 +386,7 @@ if ! pgrep -P $dsc_pid > /dev/null; then
 fi
 echo "" >> "${log_prefix}_out.txt"
 
+echo "dsc restarted at PID: $dsc_pid"
 echo "Now do the replace-reconcile test"
 
 # Get the port number for the last client, that is our replacement.
@@ -418,7 +421,7 @@ else
 fi
 
 # Tests done, shut down the downstairs.
-echo "Tests have completed, stopping all downstairs"
+echo "All tests have completed, stopping all downstairs"
 if ! "$dsc" cmd shutdown; then
     (( res += 1 ))
     echo ""
