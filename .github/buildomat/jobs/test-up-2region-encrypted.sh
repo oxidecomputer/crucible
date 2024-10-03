@@ -42,8 +42,8 @@ done
 
 export BINDIR=/var/tmp/bins
 
-# Give this test two hours to finish
-jobpid=$$; (sleep $(( 120 * 60 )); banner fail-timeout; ps -ef; zfs list;kill $jobpid) &
+# Give this test one hour to finish
+jobpid=$$; (sleep $(( 60 * 60 )); banner fail-timeout; ps -ef; zfs list;kill $jobpid) &
 
 echo "Setup debug logging"
 mkdir /tmp/debug
