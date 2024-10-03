@@ -131,13 +131,7 @@ impl DownstairsHandle {
     pub async fn negotiate_start(&mut self) {
         let packet = self.recv().await.unwrap();
         if let Message::HereIAm {
-            version,
-            upstairs_id: _,
-            session_id: _,
-            gen: _,
-            read_only,
-            encrypted: _,
-            alternate_versions: _,
+            version, read_only, ..
         } = &packet
         {
             info!(

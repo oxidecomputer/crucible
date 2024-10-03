@@ -1248,22 +1248,14 @@ impl IOop {
                 let job_type = "WriteU".to_string();
                 (job_type, blocks.len(), dependencies.clone())
             }
-            IOop::Flush {
-                dependencies,
-                flush_number: _flush_number,
-                gen_number: _gen_number,
-                snapshot_details: _,
-                extent_limit: _,
-            } => {
+            IOop::Flush { dependencies, .. } => {
                 let job_type = "Flush".to_string();
                 (job_type, 0, dependencies.clone())
             }
             IOop::ExtentFlushClose {
                 dependencies,
                 extent,
-                flush_number: _,
-                gen_number: _,
-                repair_downstairs: _,
+                ..
             } => {
                 let job_type = "FClose".to_string();
                 (job_type, extent.0 as usize, dependencies.clone())
@@ -1271,9 +1263,7 @@ impl IOop {
             IOop::ExtentLiveRepair {
                 dependencies,
                 extent,
-                source_downstairs: _,
-                source_repair_address: _,
-                repair_downstairs: _,
+                ..
             } => {
                 let job_type = "Repair".to_string();
                 (job_type, extent.0 as usize, dependencies.clone())

@@ -1316,9 +1316,9 @@ impl ActiveConnection {
             Message::ExtentFlush {
                 repair_id,
                 extent_id,
-                client_id: _,
                 flush_number,
                 gen_number,
+                ..
             } => {
                 let msg = {
                     debug!(
@@ -3680,16 +3680,7 @@ mod test {
                 assert!(work.completed.is_complete(dep));
             }
 
-            matches!(
-                job,
-                IOop::Flush {
-                    dependencies: _,
-                    flush_number: _,
-                    gen_number: _,
-                    snapshot_details: _,
-                    extent_limit: _,
-                }
-            )
+            matches!(job, IOop::Flush { .. })
         };
 
         if is_flush {
