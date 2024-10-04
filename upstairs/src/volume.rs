@@ -1335,10 +1335,7 @@ impl Volume {
         // Beyond this point zero or one target changes where found
 
         match &compare_result {
-            CompareResult::Volume {
-                sub_compares,
-                read_only_parent_compare: _,
-            } => {
+            CompareResult::Volume { sub_compares, .. } => {
                 // Walk the cases. As some deltas are okay for a read only
                 // parent that are not for a sub_volume, we need to look at all
                 // the possible permutations Nexus supports.

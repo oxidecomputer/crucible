@@ -1077,10 +1077,7 @@ impl Downstairs {
                 repair.state = LiveRepairState::Noop { noop_id, reopen_id };
                 self.create_and_enqueue_noop_io(gw, vec![repair_id], noop_id);
             }
-            LiveRepairState::Noop {
-                noop_id: _,
-                reopen_id,
-            } => {
+            LiveRepairState::Noop { reopen_id, .. } => {
                 info!(
                     self.log,
                     "RE:{} Wait for result from reopen command {}",
@@ -7975,7 +7972,7 @@ pub(crate) mod test {
 
             println!("repair op: {:?}", repair_op);
             match repair_op {
-                IOop::ExtentLiveNoOp { dependencies: _ } => {}
+                IOop::ExtentLiveNoOp { .. } => {}
                 x => {
                     panic!("Incorrect work type returned: {:?}", x);
                 }
@@ -8009,11 +8006,10 @@ pub(crate) mod test {
 
         match repair_op {
             IOop::ExtentLiveRepair {
-                dependencies: _,
                 extent,
                 source_downstairs,
-                source_repair_address: _,
                 repair_downstairs,
+                ..
             } => {
                 assert_eq!(extent, ExtentId(0));
                 assert_eq!(source_downstairs, source);
