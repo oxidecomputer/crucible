@@ -105,22 +105,34 @@ impl CompareResult {
 }
 
 #[derive(Debug, Clone)]
-pub struct Volume {
+pub struct Volume(Arc<VolumeInner>);
+
+impl std::ops::Deref for Volume {
+    type Target = VolumeInner;
+    fn deref(&self) -> &Self::Target {
+        self.0.deref()
+    }
+}
+
+pub struct VolumeBuilder(VolumeInner);
+
+#[derive(Debug)]
+pub struct VolumeInner {
     uuid: Uuid,
 
     sub_volumes: Vec<SubVolume>,
-    read_only_parent: Option<Arc<SubVolume>>,
+    read_only_parent: Option<SubVolume>,
 
     /*
      * The block below which the scrubber has written
      */
-    scrub_point: Arc<AtomicU64>,
+    scrub_point: AtomicU64,
 
     /*
      * Each sub volume should be the same block size (unit is bytes)
      */
     block_size: u64,
-    count: Arc<AtomicU32>,
+    count: AtomicU32,
 
     log: Logger,
 }
@@ -139,71 +151,21 @@ impl Debug for SubVolume {
     }
 }
 
-impl Volume {
-    pub fn new_with_id(block_size: u64, uuid: Uuid, log: Logger) -> Volume {
-        Self {
+impl VolumeBuilder {
+    pub fn new_with_id(block_size: u64, uuid: Uuid, log: Logger) -> Self {
+        Self(VolumeInner {
             uuid,
             sub_volumes: vec![],
             read_only_parent: None,
-            scrub_point: Arc::new(AtomicU64::new(0)),
+            scrub_point: AtomicU64::new(0),
             block_size,
-            count: Arc::new(AtomicU32::new(0)),
-            log,
-        }
-    }
-
-    pub fn new(block_size: u64, log: Logger) -> Volume {
-        Volume::new_with_id(block_size, Uuid::new_v4(), log)
-    }
-
-    // Increment the counter to allow all IOs to have a unique number
-    // for dtrace probes.
-    pub fn next_count(&self) -> u32 {
-        self.count.fetch_add(1, Ordering::Relaxed)
-    }
-
-    // Create a simple Volume from a single BlockIO
-    pub async fn from_block_io(
-        block_io: Arc<dyn BlockIO + Sync + Send>,
-        log: Logger,
-    ) -> Result<Volume, CrucibleError> {
-        let block_size = block_io.get_block_size().await?;
-        let uuid = block_io.get_uuid().await?;
-
-        let sub_volume = SubVolume {
-            lba_range: Range {
-                start: 0,
-                end: block_io.total_size().await? / block_size,
-            },
-            block_io,
-        };
-
-        Ok(Self {
-            uuid,
-            sub_volumes: vec![sub_volume],
-            read_only_parent: None,
-            scrub_point: Arc::new(AtomicU64::new(0)),
-            block_size,
-            count: Arc::new(AtomicU32::new(0)),
+            count: AtomicU32::new(0),
             log,
         })
     }
 
-    fn compute_next_lba_range(&self, number_of_blocks: u64) -> Range<u64> {
-        if self.sub_volumes.is_empty() {
-            Range {
-                start: 0,
-                end: number_of_blocks,
-            }
-        } else {
-            let last_sub_volume_end =
-                self.sub_volumes.last().unwrap().lba_range.end;
-
-            Range {
-                start: last_sub_volume_end,
-                end: last_sub_volume_end + number_of_blocks,
-            }
-        }
+    pub fn new(block_size: u64, log: Logger) -> Self {
+        Self::new_with_id(block_size, Uuid::new_v4(), log)
     }
 
     pub async fn add_subvolume(
@@ -212,14 +174,14 @@ impl Volume {
     ) -> Result<(), CrucibleError> {
         let block_size = block_io.get_block_size().await?;
 
-        if block_size != self.block_size {
+        if block_size != self.0.block_size {
             crucible_bail!(BlockSizeMismatch);
         }
 
         let number_of_blocks = block_io.total_size().await? / block_size;
 
-        self.sub_volumes.push(SubVolume {
-            lba_range: self.compute_next_lba_range(number_of_blocks),
+        self.0.sub_volumes.push(SubVolume {
+            lba_range: self.0.compute_next_lba_range(number_of_blocks),
             block_io,
         });
 
@@ -234,7 +196,7 @@ impl Volume {
         producer_registry: Option<ProducerRegistry>,
     ) -> Result<(), CrucibleError> {
         let region_def = build_region_definition(&extent_info, &opts)?;
-        let (guest, io) = Guest::new(Some(self.log.clone()));
+        let (guest, io) = Guest::new(Some(self.0.log.clone()));
 
         let _join_handle =
             up_main(opts, gen, Some(region_def), io, producer_registry)?;
@@ -263,7 +225,7 @@ impl Volume {
     ) -> Result<(), CrucibleError> {
         let block_size = block_io.get_block_size().await?;
 
-        if block_size != self.block_size {
+        if block_size != self.0.block_size {
             crucible_bail!(BlockSizeMismatch);
         }
 
@@ -273,16 +235,80 @@ impl Volume {
         // None when done - read block by block, don't overwrite if owned by sub
         // volume
 
-        self.read_only_parent = Some(Arc::new(SubVolume {
+        self.0.read_only_parent = Some(SubVolume {
             // Read only parent LBA range always starts from 0
             lba_range: Range {
                 start: 0,
                 end: number_of_blocks,
             },
             block_io,
-        }));
+        });
 
         Ok(())
+    }
+}
+
+impl From<VolumeInner> for Volume {
+    fn from(v: VolumeInner) -> Volume {
+        Volume(v.into())
+    }
+}
+
+impl From<VolumeBuilder> for Volume {
+    fn from(v: VolumeBuilder) -> Volume {
+        Volume(v.0.into())
+    }
+}
+
+impl VolumeInner {
+    // Increment the counter to allow all IOs to have a unique number
+    // for dtrace probes.
+    pub fn next_count(&self) -> u32 {
+        self.count.fetch_add(1, Ordering::Relaxed)
+    }
+
+    // Create a simple Volume from a single BlockIO
+    pub async fn from_block_io(
+        block_io: Arc<dyn BlockIO + Sync + Send>,
+        log: Logger,
+    ) -> Result<Self, CrucibleError> {
+        let block_size = block_io.get_block_size().await?;
+        let uuid = block_io.get_uuid().await?;
+
+        let sub_volume = SubVolume {
+            lba_range: Range {
+                start: 0,
+                end: block_io.total_size().await? / block_size,
+            },
+            block_io,
+        };
+
+        Ok(Self {
+            uuid,
+            sub_volumes: vec![sub_volume],
+            read_only_parent: None,
+            scrub_point: AtomicU64::new(0),
+            block_size,
+            count: AtomicU32::new(0),
+            log,
+        })
+    }
+
+    fn compute_next_lba_range(&self, number_of_blocks: u64) -> Range<u64> {
+        if self.sub_volumes.is_empty() {
+            Range {
+                start: 0,
+                end: number_of_blocks,
+            }
+        } else {
+            let last_sub_volume_end =
+                self.sub_volumes.last().unwrap().lba_range.end;
+
+            Range {
+                start: last_sub_volume_end,
+                end: last_sub_volume_end + number_of_blocks,
+            }
+        }
     }
 
     // Check to see if this volume has a read only parent
@@ -353,7 +379,9 @@ impl Volume {
             None
         }
     }
+}
 
+impl Volume {
     // Scrub a volume.
     // If a volume has a read only parent, we do the work to read from
     // the read only side, and write_unwritten to the LBA of the SubVolume
@@ -1116,7 +1144,8 @@ impl Volume {
                 sub_volumes,
                 read_only_parent,
             } => {
-                let mut vol = Volume::new_with_id(block_size, id, log.clone());
+                let mut vol =
+                    VolumeBuilder::new_with_id(block_size, id, log.clone());
 
                 for subreq in sub_volumes {
                     vol.add_subvolume(Arc::new(
@@ -1142,7 +1171,7 @@ impl Volume {
                     .await?;
                 }
 
-                Ok(vol)
+                Ok(vol.into())
             }
 
             VolumeConstructionRequest::Url {
@@ -1150,12 +1179,12 @@ impl Volume {
                 block_size,
                 url,
             } => {
-                let mut vol = Volume::new(block_size, log.clone());
+                let mut vol = VolumeBuilder::new(block_size, log.clone());
                 vol.add_subvolume(Arc::new(
                     ReqwestBlockIO::new(id, block_size, url).await?,
                 ))
                 .await?;
-                Ok(vol)
+                Ok(vol.into())
             }
 
             VolumeConstructionRequest::Region {
@@ -1165,7 +1194,7 @@ impl Volume {
                 opts,
                 gen,
             } => {
-                let mut vol = Volume::new(block_size, log.clone());
+                let mut vol = VolumeBuilder::new(block_size, log.clone());
                 vol.add_subvolume_create_guest(
                     opts,
                     RegionExtentInfo {
@@ -1177,7 +1206,7 @@ impl Volume {
                     producer_registry,
                 )
                 .await?;
-                Ok(vol)
+                Ok(vol.into())
             }
 
             VolumeConstructionRequest::File {
@@ -1185,14 +1214,23 @@ impl Volume {
                 block_size,
                 path,
             } => {
-                let mut vol = Volume::new(block_size, log.clone());
+                let mut vol = VolumeBuilder::new(block_size, log.clone());
                 vol.add_subvolume(Arc::new(FileBlockIO::new(
                     id, block_size, path,
                 )?))
                 .await?;
-                Ok(vol)
+                Ok(vol.into())
             }
         }
+    }
+
+    /// Attempts to deconstruct the volume back into a `VolumeBuilder`
+    ///
+    /// This will only succeed if the `Volume` has a single strong reference,
+    /// and will return `None` otherwise.  This function should only be used in
+    /// unit and integration tests, to do Weird Things to volumes.
+    pub fn deconstruct(self) -> Option<VolumeBuilder> {
+        Arc::try_unwrap(self.0).ok().map(VolumeBuilder)
     }
 
     // We compare two VolumeConstructionRequests to see if the second one
@@ -1917,7 +1955,7 @@ mod test {
 
     #[tokio::test]
     async fn test_volume_size() -> Result<()> {
-        let volume = Volume {
+        let volume: Volume = VolumeInner {
             uuid: Uuid::new_v4(),
             sub_volumes: vec![
                 SubVolume {
@@ -1941,11 +1979,12 @@ mod test {
                 },
             ],
             read_only_parent: None,
-            scrub_point: Arc::new(AtomicU64::new(0)),
+            scrub_point: AtomicU64::new(0),
             block_size: 512,
-            count: Arc::new(AtomicU32::new(0)),
+            count: AtomicU32::new(0),
             log: csl(),
-        };
+        }
+        .into();
 
         assert_eq!(volume.total_size().await?, 512 * 1024);
 
@@ -1958,7 +1997,7 @@ mod test {
         //               0        512      1024
         //
         // each sub volume LBA coverage is 512 blocks
-        let volume = Volume {
+        let volume: Volume = VolumeInner {
             uuid: Uuid::new_v4(),
             sub_volumes: vec![
                 SubVolume {
@@ -1993,11 +2032,12 @@ mod test {
                 },
             ],
             read_only_parent: None,
-            scrub_point: Arc::new(AtomicU64::new(0)),
+            scrub_point: AtomicU64::new(0),
             block_size: 512,
-            count: Arc::new(AtomicU32::new(0)),
+            count: AtomicU32::new(0),
             log: csl(),
-        };
+        }
+        .into();
 
         // volume:       |--------|--------|--------|
         // request:      |----|
@@ -2051,7 +2091,7 @@ mod test {
     #[test]
     fn test_no_read_only_parent_for_lba_range() -> Result<()> {
         // sub volume:  |-------------------|
-        let volume = Volume {
+        let volume: Volume = VolumeInner {
             uuid: Uuid::new_v4(),
             sub_volumes: vec![SubVolume {
                 lba_range: Range { start: 0, end: 512 },
@@ -2062,11 +2102,12 @@ mod test {
                 )),
             }],
             read_only_parent: None,
-            scrub_point: Arc::new(AtomicU64::new(0)),
+            scrub_point: AtomicU64::new(0),
             block_size: 512,
-            count: Arc::new(AtomicU32::new(0)),
+            count: AtomicU32::new(0),
             log: csl(),
-        };
+        }
+        .into();
 
         assert!(volume.read_only_parent_for_lba_range(0, 512).is_none());
 
@@ -2077,7 +2118,7 @@ mod test {
     fn test_read_only_parent_for_lba_range() -> Result<()> {
         // sub volume:  |-------------------|
         // parent:      |xxxxxxxxx|
-        let volume = Volume {
+        let volume: Volume = VolumeInner {
             uuid: Uuid::new_v4(),
             sub_volumes: vec![SubVolume {
                 lba_range: Range { start: 0, end: 512 },
@@ -2087,19 +2128,20 @@ mod test {
                     512 * 512,
                 )),
             }],
-            read_only_parent: Some(Arc::new(SubVolume {
+            read_only_parent: Some(SubVolume {
                 lba_range: Range { start: 0, end: 256 },
                 block_io: Arc::new(InMemoryBlockIO::new(
                     Uuid::new_v4(),
                     512,
                     256 * 512,
                 )),
-            })),
-            scrub_point: Arc::new(AtomicU64::new(0)),
+            }),
+            scrub_point: AtomicU64::new(0),
             block_size: 512,
-            count: Arc::new(AtomicU32::new(0)),
+            count: AtomicU32::new(0),
             log: csl(),
-        };
+        }
+        .into();
 
         assert!(volume.read_only_parent_for_lba_range(0, 512).is_some());
 
@@ -2194,7 +2236,7 @@ mod test {
     async fn test_parent_read_only_region(
         block_size: u64,
         parent: Arc<dyn BlockIO + Send + Sync>,
-        mut volume: Volume,
+        volume: Volume,
         read_only_parent_init_value: u8,
     ) -> Result<()> {
         volume.activate().await?;
@@ -2328,7 +2370,9 @@ mod test {
 
         // If the parent goes away, then the sub volume data should still be
         // readable.
+        let mut volume = Arc::try_unwrap(volume.0).unwrap();
         volume.read_only_parent = None;
+        let volume = Volume::from(volume);
 
         // Read whole volume and verify
         let mut buffer = Buffer::new(8, 512);
@@ -2384,9 +2428,10 @@ mod test {
             //
             // the total volume size is 4096b
 
-            let mut volume = Volume::new(BLOCK_SIZE, csl());
-            volume.add_subvolume(disk).await?;
-            volume.add_read_only_parent(parent.clone()).await?;
+            let mut builder = VolumeBuilder::new(BLOCK_SIZE, csl());
+            builder.add_subvolume(disk).await?;
+            builder.add_read_only_parent(parent.clone()).await?;
+            let volume = Volume::from(builder);
 
             test_parent_read_only_region(BLOCK_SIZE, parent, volume, i).await?;
         }
@@ -2431,9 +2476,10 @@ mod test {
         let disk =
             Arc::new(InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 4096));
 
-        let mut volume = Volume::new(BLOCK_SIZE, csl());
-        volume.add_subvolume(disk).await?;
-        volume.add_read_only_parent(parent.clone()).await?;
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE, csl());
+        builder.add_subvolume(disk).await?;
+        builder.add_read_only_parent(parent.clone()).await?;
+        let volume = Volume::from(builder);
 
         // So is it?
 
@@ -2464,12 +2510,13 @@ mod test {
         //
         // the total volume size is 4096b
 
-        let mut volume = Volume::new(BLOCK_SIZE, csl());
-        assert!(!volume.has_read_only_parent());
-        volume.add_subvolume(disk).await?;
-        assert!(!volume.has_read_only_parent());
-        volume.add_read_only_parent(parent.clone()).await?;
-        assert!(volume.has_read_only_parent());
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE, csl());
+        assert!(!builder.0.has_read_only_parent());
+        builder.add_subvolume(disk).await?;
+        assert!(!builder.0.has_read_only_parent());
+        builder.add_read_only_parent(parent.clone()).await?;
+        assert!(builder.0.has_read_only_parent());
+        let volume = Volume::from(builder);
 
         test_parent_read_only_region(BLOCK_SIZE, parent, volume, 0x00).await?;
 
@@ -2511,10 +2558,11 @@ mod test {
             //
             // the total volume size is the same as the previous test: 4096b
 
-            let mut volume = Volume::new(BLOCK_SIZE, csl());
-            volume.add_subvolume(subdisk1).await?;
-            volume.add_subvolume(subdisk2).await?;
-            volume.add_read_only_parent(parent.clone()).await?;
+            let mut builder = VolumeBuilder::new(BLOCK_SIZE, csl());
+            builder.add_subvolume(subdisk1).await?;
+            builder.add_subvolume(subdisk2).await?;
+            builder.add_read_only_parent(parent.clone()).await?;
+            let volume = Volume::from(builder);
 
             test_parent_read_only_region(BLOCK_SIZE, parent, volume, i).await?;
         }
@@ -2542,10 +2590,11 @@ mod test {
         //
         // the total volume size is the same as the previous test: 4096b
 
-        let mut volume = Volume::new(BLOCK_SIZE, csl());
-        volume.add_subvolume(subdisk1).await?;
-        volume.add_subvolume(subdisk2).await?;
-        volume.add_read_only_parent(parent.clone()).await?;
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE, csl());
+        builder.add_subvolume(subdisk1).await?;
+        builder.add_subvolume(subdisk2).await?;
+        builder.add_read_only_parent(parent.clone()).await?;
+        let volume = Volume::from(builder);
 
         test_parent_read_only_region(BLOCK_SIZE, parent, volume, 0x00).await?;
 
@@ -2587,10 +2636,11 @@ mod test {
             //
             // the total volume size is the same as the previous test: 4096b
 
-            let mut volume = Volume::new(BLOCK_SIZE, csl());
-            volume.add_subvolume(subdisk1).await?;
-            volume.add_subvolume(subdisk2).await?;
-            volume.add_read_only_parent(parent.clone()).await?;
+            let mut builder = VolumeBuilder::new(BLOCK_SIZE, csl());
+            builder.add_subvolume(subdisk1).await?;
+            builder.add_subvolume(subdisk2).await?;
+            builder.add_read_only_parent(parent.clone()).await?;
+            let volume = Volume::from(builder);
 
             test_parent_read_only_region(BLOCK_SIZE, parent, volume, i).await?;
         }
@@ -2619,10 +2669,11 @@ mod test {
         //
         // the total volume size is the same as the previous test: 4096b
 
-        let mut volume = Volume::new(BLOCK_SIZE, csl());
-        volume.add_subvolume(subdisk1).await?;
-        volume.add_subvolume(subdisk2).await?;
-        volume.add_read_only_parent(parent.clone()).await?;
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE, csl());
+        builder.add_subvolume(subdisk1).await?;
+        builder.add_subvolume(subdisk2).await?;
+        builder.add_read_only_parent(parent.clone()).await?;
+        let volume = Volume::from(builder);
 
         test_parent_read_only_region(BLOCK_SIZE, parent, volume, 0x00).await?;
 
@@ -2643,21 +2694,22 @@ mod test {
             .write(BlockIndex(0), BytesMut::from(vec![128; 2048].as_slice()))
             .await?;
 
-        let volume = Volume {
+        let volume: Volume = VolumeInner {
             uuid: Uuid::new_v4(),
             sub_volumes: vec![],
-            read_only_parent: Some(Arc::new(SubVolume {
+            read_only_parent: Some(SubVolume {
                 lba_range: Range {
                     start: 0,
                     end: parent.total_size().await? / BLOCK_SIZE,
                 },
                 block_io: parent.clone(),
-            })),
-            scrub_point: Arc::new(AtomicU64::new(0)),
+            }),
+            scrub_point: AtomicU64::new(0),
             block_size: BLOCK_SIZE,
-            count: Arc::new(AtomicU32::new(0)),
+            count: AtomicU32::new(0),
             log: csl(),
-        };
+        }
+        .into();
 
         volume.activate().await?;
 
@@ -2681,21 +2733,22 @@ mod test {
         let parent =
             Arc::new(InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 2048));
 
-        let volume = Volume {
+        let volume: Volume = VolumeInner {
             uuid: Uuid::new_v4(),
             sub_volumes: vec![],
-            read_only_parent: Some(Arc::new(SubVolume {
+            read_only_parent: Some(SubVolume {
                 lba_range: Range {
                     start: 0,
                     end: parent.total_size().await.unwrap() / BLOCK_SIZE,
                 },
                 block_io: parent.clone(),
-            })),
-            scrub_point: Arc::new(AtomicU64::new(0)),
+            }),
+            scrub_point: AtomicU64::new(0),
             block_size: BLOCK_SIZE,
-            count: Arc::new(AtomicU32::new(0)),
+            count: AtomicU32::new(0),
             log: csl(),
-        };
+        }
+        .into();
 
         volume.activate().await.unwrap();
 
@@ -2713,21 +2766,22 @@ mod test {
         let parent =
             Arc::new(InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 2048));
 
-        let volume = Volume {
+        let volume: Volume = VolumeInner {
             uuid: Uuid::new_v4(),
             sub_volumes: vec![],
-            read_only_parent: Some(Arc::new(SubVolume {
+            read_only_parent: Some(SubVolume {
                 lba_range: Range {
                     start: 0,
                     end: parent.total_size().await.unwrap() / BLOCK_SIZE,
                 },
                 block_io: parent.clone(),
-            })),
-            scrub_point: Arc::new(AtomicU64::new(0)),
+            }),
+            scrub_point: AtomicU64::new(0),
             block_size: BLOCK_SIZE,
-            count: Arc::new(AtomicU32::new(0)),
+            count: AtomicU32::new(0),
             log: csl(),
-        };
+        }
+        .into();
 
         volume.activate().await.unwrap();
 
@@ -2768,9 +2822,10 @@ mod test {
         {
             // Make a volume, verify orignal data, write new data to it, then
             // let it fall out of scope
-            let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-            volume.add_subvolume(overlay.clone()).await?;
-            volume.add_read_only_parent(parent.clone()).await?;
+            let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+            builder.add_subvolume(overlay.clone()).await?;
+            builder.add_read_only_parent(parent.clone()).await?;
+            let volume = Volume::from(builder);
 
             let mut buffer = Buffer::new(10, BLOCK_SIZE);
             volume.read(BlockIndex(0), &mut buffer).await?;
@@ -2792,9 +2847,10 @@ mod test {
 
         // Create the same volume, verify data was written
         // Note that add function order is reversed, it shouldn't matter
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume.add_read_only_parent(parent).await?;
-        volume.add_subvolume(overlay).await?;
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder.add_read_only_parent(parent).await?;
+        builder.add_subvolume(overlay).await?;
+        let volume = Volume::from(builder);
 
         let mut buffer = Buffer::new(10, BLOCK_SIZE);
         volume.read(BlockIndex(0), &mut buffer).await?;
@@ -2827,8 +2883,9 @@ mod test {
 
         assert_eq!(vec![0x55; BLOCK_SIZE * 10], buffer.into_vec());
 
-        let mut parent_volume = Volume::new(BLOCK_SIZE as u64, csl());
-        parent_volume.add_subvolume(parent).await?;
+        let mut parent_builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        parent_builder.add_subvolume(parent).await?;
+        let parent_volume = Volume::from(parent_builder);
 
         let overlay = Arc::new(InMemoryBlockIO::new(
             Uuid::new_v4(),
@@ -2836,9 +2893,12 @@ mod test {
             BLOCK_SIZE * 10,
         ));
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume.add_subvolume(overlay).await?;
-        volume.add_read_only_parent(Arc::new(parent_volume)).await?;
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder.add_subvolume(overlay).await?;
+        builder
+            .add_read_only_parent(Arc::new(parent_volume))
+            .await?;
+        let volume = Volume::from(builder);
 
         // Now:
         //
@@ -2938,13 +2998,14 @@ mod test {
         assert_eq!(vec![11; block_size * 5], buffer.into_vec());
 
         // Create a volume out of this parent and the argument subvolume parts
-        let mut volume = Volume::new(block_size as u64, csl());
+        let mut builder = VolumeBuilder::new(block_size as u64, csl());
 
         for subvolume in subvolumes {
-            volume.add_subvolume(subvolume.clone()).await?;
+            builder.add_subvolume(subvolume.clone()).await?;
         }
 
-        volume.add_read_only_parent(parent).await?;
+        builder.add_read_only_parent(parent).await?;
+        let volume = Volume::from(builder);
 
         volume.activate().await?;
 
@@ -3202,7 +3263,7 @@ mod test {
         subvol_sizes: &[usize],
     ) -> Result<()> {
         // Create a volume
-        let mut volume = Volume::new(block_size as u64, csl());
+        let mut builder = VolumeBuilder::new(block_size as u64, csl());
 
         // Create the subvolume(s) of the requested size(s)
         for size in subvol_sizes {
@@ -3211,7 +3272,7 @@ mod test {
                 block_size as u64,
                 block_size * size,
             ));
-            volume.add_subvolume(subvolume.clone()).await?;
+            builder.add_subvolume(subvolume.clone()).await?;
         }
 
         // Create the read only parent
@@ -3221,7 +3282,8 @@ mod test {
             block_size * parent_blocks,
         ));
 
-        volume.add_read_only_parent(parent.clone()).await?;
+        builder.add_read_only_parent(parent.clone()).await?;
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         // The total blocks in our volume
@@ -3295,7 +3357,7 @@ mod test {
         let parent =
             Arc::new(InMemoryBlockIO::new(Uuid::new_v4(), BLOCK_SIZE, 2048));
 
-        let volume = Volume {
+        let volume: Volume = VolumeInner {
             uuid: Uuid::new_v4(),
             sub_volumes: vec![SubVolume {
                 lba_range: Range {
@@ -3305,11 +3367,12 @@ mod test {
                 block_io: parent.clone(),
             }],
             read_only_parent: None,
-            scrub_point: Arc::new(AtomicU64::new(0)),
+            scrub_point: AtomicU64::new(0),
             block_size: BLOCK_SIZE,
-            count: Arc::new(AtomicU32::new(0)),
+            count: AtomicU32::new(0),
             log: csl(),
-        };
+        }
+        .into();
 
         volume.activate().await.unwrap();
 

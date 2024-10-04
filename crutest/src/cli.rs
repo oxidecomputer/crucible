@@ -746,7 +746,7 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
  * Process a CLI command from the client, we are the server side.
  */
 async fn process_cli_command(
-    volume: &Arc<Volume>,
+    volume: &Volume,
     fw: &mut FramedWrite<tokio::net::tcp::OwnedWriteHalf, CliEncoder>,
     cmd: protocol::CliMessage,
     ri: &mut RegionInfo,
@@ -948,7 +948,7 @@ async fn process_cli_command(
                 let block_max = ri.total_blocks - size + 1;
                 let offset = rng.gen_range(0..block_max);
 
-                let res = cli_read(volume.as_ref(), ri, offset, size).await;
+                let res = cli_read(volume, ri, offset, size).await;
                 fw.send(CliMessage::ReadResponse(offset, res)).await
             }
         }
@@ -959,7 +959,7 @@ async fn process_cli_command(
                 )))
                 .await
             } else {
-                match rand_write(volume.as_ref(), ri).await {
+                match rand_write(volume, ri).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => fw.send(CliMessage::Error(e)).await,
                 }
@@ -972,7 +972,7 @@ async fn process_cli_command(
                 )))
                 .await
             } else {
-                let res = cli_read(volume.as_ref(), ri, offset, len).await;
+                let res = cli_read(volume, ri, offset, len).await;
                 fw.send(CliMessage::ReadResponse(offset, res)).await
             }
         }
@@ -991,7 +991,7 @@ async fn process_cli_command(
                 )))
                 .await
             } else {
-                match cli_write(volume.as_ref(), ri, offset, len).await {
+                match cli_write(volume, ri, offset, len).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => fw.send(CliMessage::Error(e)).await,
                 }
@@ -1004,7 +1004,7 @@ async fn process_cli_command(
                 )))
                 .await
             } else {
-                match cli_write_unwritten(volume.as_ref(), ri, offset).await {
+                match cli_write_unwritten(volume, ri, offset).await {
                     Ok(_) => fw.send(CliMessage::DoneOk).await,
                     Err(e) => fw.send(CliMessage::Error(e)).await,
                 }
@@ -1050,7 +1050,7 @@ async fn process_cli_command(
  * Wait here if you want.
  */
 pub async fn start_cli_server(
-    volume: &Arc<Volume>,
+    volume: &Volume,
     address: IpAddr,
     port: u16,
     verify_input: Option<PathBuf>,

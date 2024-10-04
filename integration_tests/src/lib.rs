@@ -8,6 +8,7 @@ mod test {
 
     use anyhow::*;
     use base64::{engine, Engine};
+    use crucible::volume::VolumeBuilder;
     use crucible::*;
     use crucible_client_types::RegionExtentInfo;
     use crucible_client_types::VolumeConstructionRequest;
@@ -415,7 +416,7 @@ mod test {
             read_only_parent: None,
         };
 
-        let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
+        let volume = Volume::construct(vcr, None, csl()).await?;
 
         volume.activate().await?;
 
@@ -464,7 +465,7 @@ mod test {
             read_only_parent: None,
         };
 
-        let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
+        let volume = Volume::construct(vcr, None, csl()).await?;
 
         volume.activate().await?;
 
@@ -520,7 +521,7 @@ mod test {
             read_only_parent: None,
         };
 
-        let volume = Arc::new(Volume::construct(vcr, None, csl()).await?);
+        let volume = Volume::construct(vcr, None, csl()).await?;
 
         volume.activate().await?;
 
@@ -575,8 +576,8 @@ mod test {
 
         assert_eq!(vec![11; BLOCK_SIZE * 10], &buffer[..]);
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 opts,
                 RegionExtentInfo {
@@ -588,8 +589,9 @@ mod test {
                 None,
             )
             .await?;
-        volume.add_read_only_parent(in_memory_data.clone()).await?;
+        builder.add_read_only_parent(in_memory_data.clone()).await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         // Verify contents are 11 on init
@@ -671,15 +673,18 @@ mod test {
         };
 
         let log = csl();
-        let mut volume = Volume::construct(vcr, None, log.clone()).await?;
+        let volume = Volume::construct(vcr, None, log.clone()).await?;
+        let mut builder = volume.deconstruct().unwrap();
 
-        volume
+        builder
             .add_read_only_parent({
-                let mut volume = Volume::new(BLOCK_SIZE as u64, log.clone());
-                volume.add_subvolume(in_memory_data.clone()).await?;
-                Arc::new(volume)
+                let mut builder =
+                    VolumeBuilder::new(BLOCK_SIZE as u64, log.clone());
+                builder.add_subvolume(in_memory_data.clone()).await?;
+                Arc::new(Volume::from(builder))
             })
             .await?;
+        let volume = Volume::from(builder);
 
         volume.activate().await?;
 
@@ -1339,8 +1344,8 @@ mod test {
 
         assert_eq!(vec![11; BLOCK_SIZE * 5], &buffer[..]);
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 opts,
                 RegionExtentInfo {
@@ -1352,7 +1357,8 @@ mod test {
                 None,
             )
             .await?;
-        volume.add_read_only_parent(in_memory_data).await?;
+        builder.add_read_only_parent(in_memory_data).await?;
+        let volume = Volume::from(builder);
 
         volume.activate().await?;
 
@@ -1415,8 +1421,8 @@ mod test {
             )
             .await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 opts,
                 RegionExtentInfo {
@@ -1428,8 +1434,9 @@ mod test {
                 None,
             )
             .await?;
-        volume.add_read_only_parent(in_memory_data).await?;
+        builder.add_read_only_parent(in_memory_data).await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         // Verify contents are 11 at startup
@@ -1494,8 +1501,8 @@ mod test {
             )
             .await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 opts,
                 RegionExtentInfo {
@@ -1507,8 +1514,9 @@ mod test {
                 None,
             )
             .await?;
-        volume.add_read_only_parent(in_memory_data).await?;
+        builder.add_read_only_parent(in_memory_data).await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         // Verify contents of RO parent are 1s at startup
@@ -1589,8 +1597,8 @@ mod test {
             )
             .await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 opts,
                 RegionExtentInfo {
@@ -1602,8 +1610,9 @@ mod test {
                 None,
             )
             .await?;
-        volume.add_read_only_parent(in_memory_data).await?;
+        builder.add_read_only_parent(in_memory_data).await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         // SV: |--2-------|
@@ -1682,8 +1691,8 @@ mod test {
             )
             .await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 opts,
                 RegionExtentInfo {
@@ -1695,8 +1704,9 @@ mod test {
                 None,
             )
             .await?;
-        volume.add_read_only_parent(in_memory_data).await?;
+        builder.add_read_only_parent(in_memory_data).await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         // Verify contents are 11 at startup
@@ -1789,16 +1799,19 @@ mod test {
         };
 
         let log = csl();
-        let mut volume = Volume::construct(vcr, None, log.clone()).await?;
+        let volume = Volume::construct(vcr, None, log.clone()).await?;
+        let mut builder = volume.deconstruct().unwrap();
 
-        volume
+        builder
             .add_read_only_parent({
-                let mut volume = Volume::new(BLOCK_SIZE as u64, log.clone());
-                volume.add_subvolume(in_memory_data).await?;
-                Arc::new(volume)
+                let mut builder =
+                    VolumeBuilder::new(BLOCK_SIZE as u64, log.clone());
+                builder.add_subvolume(in_memory_data).await?;
+                Arc::new(Volume::from(builder))
             })
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         // Write data to last block of first vol, and first block of
@@ -1910,16 +1923,19 @@ mod test {
         };
 
         let log = csl();
-        let mut volume = Volume::construct(vcr, None, log.clone()).await?;
+        let volume = Volume::construct(vcr, None, log.clone()).await?;
+        let mut builder = volume.deconstruct().unwrap();
 
-        volume
+        builder
             .add_read_only_parent({
-                let mut volume = Volume::new(BLOCK_SIZE as u64, log.clone());
-                volume.add_subvolume(in_memory_data).await?;
-                Arc::new(volume)
+                let mut builder =
+                    VolumeBuilder::new(BLOCK_SIZE as u64, log.clone());
+                builder.add_subvolume(in_memory_data).await?;
+                Arc::new(Volume::from(builder))
             })
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         // Write data to last block of first vol, and first block of
@@ -2062,8 +2078,8 @@ mod test {
         let tds = TestDownstairsSet::small(false).await?;
         let opts = tds.opts();
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 opts,
                 RegionExtentInfo {
@@ -2076,6 +2092,7 @@ mod test {
             )
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         // Verify contents are 00 at startup
@@ -2120,8 +2137,8 @@ mod test {
         // read-only.
         let mut test_downstairs_set = TestDownstairsSet::small(false).await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
                 RegionExtentInfo {
@@ -2134,6 +2151,7 @@ mod test {
             )
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         let random_buffer = {
@@ -2155,8 +2173,8 @@ mod test {
 
         // Validate that this now accepts reads and flushes, but rejects writes
         {
-            let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-            volume
+            let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+            builder
                 .add_subvolume_create_guest(
                     test_downstairs_set.opts(),
                     RegionExtentInfo {
@@ -2170,6 +2188,7 @@ mod test {
                 )
                 .await?;
 
+            let volume = Volume::from(builder);
             volume.activate().await?;
 
             let volume_size = volume.total_size().await? as usize;
@@ -2282,8 +2301,8 @@ mod test {
             .join("00/000/000.db")
             .exists());
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
                 RegionExtentInfo {
@@ -2296,6 +2315,7 @@ mod test {
             )
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         let random_buffer = {
@@ -2325,8 +2345,8 @@ mod test {
 
         // Validate that this now accepts reads and flushes, but rejects writes
         {
-            let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-            volume
+            let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+            builder
                 .add_subvolume_create_guest(
                     test_downstairs_set.opts(),
                     RegionExtentInfo {
@@ -2340,6 +2360,7 @@ mod test {
                 )
                 .await?;
 
+            let volume = Volume::from(builder);
             volume.activate().await?;
 
             let volume_size = volume.total_size().await? as usize;
@@ -2457,8 +2478,8 @@ mod test {
             .join("00/000/000.db")
             .exists());
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
                 RegionExtentInfo {
@@ -2471,6 +2492,7 @@ mod test {
             )
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         let random_buffer = {
@@ -2505,8 +2527,8 @@ mod test {
             .join("00/000/000.db")
             .exists());
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
                 RegionExtentInfo {
@@ -2519,6 +2541,7 @@ mod test {
             )
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
         // Validate that source blocks are the same
         let volume_size = volume.total_size().await? as usize;
@@ -2549,8 +2572,8 @@ mod test {
         // read-only.
         let mut test_downstairs_set = TestDownstairsSet::small(false).await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
                 RegionExtentInfo {
@@ -2563,6 +2586,7 @@ mod test {
             )
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         let random_buffer = {
@@ -2609,8 +2633,8 @@ mod test {
         let mut new_opts = test_downstairs_set.opts();
         new_opts.target[0] = new_target;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 new_opts,
                 RegionExtentInfo {
@@ -2623,6 +2647,7 @@ mod test {
             )
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         // Verify our volume still has the random data we wrote.
@@ -2656,8 +2681,8 @@ mod test {
         let mut new_opts = test_downstairs_set.opts();
         new_opts.target[0] = new_target;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 new_opts,
                 RegionExtentInfo {
@@ -2670,6 +2695,7 @@ mod test {
             )
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         // Verify our volume still has the random data we wrote.
@@ -2706,8 +2732,8 @@ mod test {
             .join("00/000/000.db")
             .exists());
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
                 RegionExtentInfo {
@@ -2720,6 +2746,7 @@ mod test {
             )
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         let random_buffer = {
@@ -2767,8 +2794,8 @@ mod test {
         let mut new_opts = test_downstairs_set.opts();
         new_opts.target[0] = new_target;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 new_opts,
                 RegionExtentInfo {
@@ -2781,6 +2808,7 @@ mod test {
             )
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         // Verify our volume still has the random data we wrote.
@@ -3021,8 +3049,8 @@ mod test {
         // boot three downstairs, write some data to them
         let test_downstairs_set = TestDownstairsSet::small(false).await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
                 RegionExtentInfo {
@@ -3035,6 +3063,7 @@ mod test {
             )
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         let random_buffer = {
@@ -3111,8 +3140,8 @@ mod test {
         // read-only.
         let mut test_downstairs_set = TestDownstairsSet::small(false).await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
                 RegionExtentInfo {
@@ -3125,6 +3154,7 @@ mod test {
             )
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         let random_buffer = {
@@ -3144,8 +3174,8 @@ mod test {
         test_downstairs_set.reboot_read_only().await?;
 
         // Restart our volume with the restarted read-only downstairs.
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
                 RegionExtentInfo {
@@ -3158,6 +3188,7 @@ mod test {
             )
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         // Make the new downstairs, but don't start it
@@ -3239,8 +3270,8 @@ mod test {
         // Create three downstairs.
         let test_downstairs_set = TestDownstairsSet::small(false).await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
                 RegionExtentInfo {
@@ -3253,6 +3284,7 @@ mod test {
             )
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         // Create two new downstairs
@@ -3283,8 +3315,8 @@ mod test {
         // Create three downstairs.
         let test_downstairs_set = TestDownstairsSet::small(false).await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
                 RegionExtentInfo {
@@ -3296,6 +3328,7 @@ mod test {
                 None,
             )
             .await?;
+        let volume = Volume::from(builder);
 
         // Create new downstairs
         let new_downstairs = test_downstairs_set.new_downstairs().await?;
@@ -3322,8 +3355,8 @@ mod test {
         // Create three downstairs.
         let test_downstairs_set = TestDownstairsSet::small(false).await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
                 RegionExtentInfo {
@@ -3336,6 +3369,7 @@ mod test {
             )
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
         // Create new downstairs
         let new_downstairs = test_downstairs_set.new_downstairs().await?;
@@ -3376,8 +3410,8 @@ mod test {
         // Create three downstairs.
         let test_downstairs_set = TestDownstairsSet::small(false).await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
                 RegionExtentInfo {
@@ -3390,6 +3424,7 @@ mod test {
             )
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         // Replace a downstairs with another active downstairs.
@@ -3430,8 +3465,8 @@ mod test {
         // boot three downstairs, write some data to them
         let test_downstairs_set = TestDownstairsSet::big(false).await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
                 RegionExtentInfo {
@@ -3444,6 +3479,7 @@ mod test {
             )
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         let random_buffer = {
@@ -3503,8 +3539,8 @@ mod test {
             test_downstairs_set.downstairs3_address(),
         ];
 
-        let mut new_volume = Volume::new(BLOCK_SIZE as u64, csl());
-        new_volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 opts,
                 RegionExtentInfo {
@@ -3517,6 +3553,7 @@ mod test {
             )
             .await?;
 
+        let new_volume = Volume::from(builder);
         new_volume.activate().await?;
 
         while !new_volume.query_is_active().await? {
@@ -3544,8 +3581,8 @@ mod test {
         // Create three problematic downstairs.
         let test_downstairs_set = TestDownstairsSet::problem().await?;
 
-        let mut volume = Volume::new(BLOCK_SIZE as u64, csl());
-        volume
+        let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
+        builder
             .add_subvolume_create_guest(
                 test_downstairs_set.opts(),
                 RegionExtentInfo {
@@ -3558,6 +3595,7 @@ mod test {
             )
             .await?;
 
+        let volume = Volume::from(builder);
         volume.activate().await?;
 
         // Write three times, read three times, for a total of 150M
