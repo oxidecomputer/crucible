@@ -7,15 +7,13 @@ use crate::JobId;
 /// to have completed.
 #[derive(Debug)]
 pub struct CompletedJobs {
-    last_flush: Option<JobId>,
     completed: Vec<JobId>,
 }
 
 impl CompletedJobs {
     pub fn new(last_flush: Option<JobId>) -> Self {
         Self {
-            last_flush,
-            completed: vec![],
+            completed: last_flush.into_iter().collect(),
         }
     }
 
@@ -30,26 +28,20 @@ impl CompletedJobs {
 
     /// Resets the data structure given a new barrier operation
     pub fn reset(&mut self, id: JobId) {
-        self.last_flush = Some(id);
         self.completed.clear();
+        self.completed.push(id);
     }
 
     /// Checks whether the given job is complete
     ///
-    /// A job is complete if it precedes our last barrier operation or is listed
-    /// in the set of complete jobs.
+    /// A job is complete if it is listed in the set of complete jobs.
     pub fn is_complete(&self, id: JobId) -> bool {
         // We deliberately reverse the `completed` list because new jobs are at
         // the back and are more likely to be what we care about
-        self.last_flush.map(|b| id <= b).unwrap_or(false)
-            || self.completed.iter().rev().any(|j| *j == id)
+        self.completed.iter().rev().any(|j| *j == id)
     }
 
     pub fn completed(&self) -> &[JobId] {
         &self.completed
-    }
-
-    pub fn last_flush(&self) -> Option<JobId> {
-        self.last_flush
     }
 }

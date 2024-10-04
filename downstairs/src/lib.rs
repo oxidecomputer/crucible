@@ -711,7 +711,6 @@ pub fn show_work(ds: &mut Downstairs) {
         }
 
         info!(ds.log, "Completed work {:?}", work.completed());
-        info!(ds.log, "Last flush: {:?}", work.last_flush());
     }
 }
 
@@ -3263,10 +3262,6 @@ impl Work {
         self.completed.completed()
     }
 
-    fn last_flush(&self) -> Option<JobId> {
-        self.completed.last_flush()
-    }
-
     fn jobs(&self) -> usize {
         self.dep_wait.len()
     }
@@ -4138,14 +4133,14 @@ mod test {
         let writes = create_generic_test_write(eid);
 
         let rio = IOop::Write {
-            dependencies: vec![JobId(1000), JobId(1001)],
+            dependencies: vec![JobId(1001)],
             writes,
         };
         ds.active_mut(conn_id).add_work(JobId(1002), rio);
 
         // Now close the extent
         let rio = IOop::ExtentClose {
-            dependencies: vec![JobId(1000), JobId(1001), JobId(1002)],
+            dependencies: vec![JobId(1001), JobId(1002)],
             extent: eid,
         };
         ds.active_mut(conn_id).add_work(JobId(1003), rio);
@@ -4770,24 +4765,21 @@ mod test {
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush(), Some(JobId(1000)));
-        assert!(work.completed.is_empty());
+        assert_eq!(work.completed(), vec![JobId(1000)]);
         let next_jobs = test_push_next_jobs(&mut work);
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001)]);
         assert_eq!(work.new_work(), vec![JobId(1002)]);
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush(), Some(JobId(1000)));
-        assert_eq!(work.completed(), [JobId(1001)]);
+        assert_eq!(work.completed(), vec![JobId(1000), JobId(1001)]);
         let next_jobs = test_push_next_jobs(&mut work);
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         assert!(work.new_work().is_empty());
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush(), Some(JobId(1000)));
-        assert_eq!(work.completed(), [JobId(1001), JobId(1002)]);
+        assert_eq!(work.completed(), [JobId(1000), JobId(1001), JobId(1002)]);
     }
 
     #[test]
@@ -4797,12 +4789,7 @@ mod test {
         // Add three jobs all blocked on each other in a chain, second is flush
         add_work(&mut work, JobId(1000), vec![], false);
         add_work(&mut work, JobId(1001), vec![JobId(1000)], true);
-        add_work(
-            &mut work,
-            JobId(1002),
-            vec![JobId(1000), JobId(1001)],
-            false,
-        );
+        add_work(&mut work, JobId(1002), vec![JobId(1001)], false);
 
         // new_work returns all new or dep wait jobs
         assert_eq!(
@@ -4826,16 +4813,14 @@ mod test {
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush(), Some(JobId(1001)));
-        assert!(work.completed.is_empty());
+        assert_eq!(work.completed(), vec![JobId(1001)]);
         let next_jobs = test_push_next_jobs(&mut work);
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         assert!(work.new_work().is_empty());
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush(), Some(JobId(1001)));
-        assert_eq!(work.completed(), [JobId(1002)]);
+        assert_eq!(work.completed(), [JobId(1001), JobId(1002)]);
     }
 
     #[test]
@@ -4860,21 +4845,15 @@ mod test {
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush(), Some(JobId(1002)));
-        assert!(work.completed.is_empty());
+        assert_eq!(work.completed(), vec![JobId(1002)]);
 
-        // Upstairs sends a job with these three in deps, not knowing Downstairs
+        // Upstairs sends a job with the flush in deps, not knowing Downstairs
         // has done the jobs already
-        add_work(
-            &mut work,
-            JobId(1003),
-            vec![JobId(1000), JobId(1001), JobId(1002)],
-            false,
-        );
+        add_work(&mut work, JobId(1003), vec![JobId(1002)], false);
         add_work(
             &mut work,
             JobId(1004),
-            vec![JobId(1000), JobId(1001), JobId(1002), JobId(1003)],
+            vec![JobId(1002), JobId(1003)],
             false,
         );
 
@@ -4886,8 +4865,7 @@ mod test {
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1004)]);
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush(), Some(JobId(1002)));
-        assert_eq!(work.completed(), [JobId(1003), JobId(1004)]);
+        assert_eq!(work.completed(), [JobId(1002), JobId(1003), JobId(1004)]);
     }
 
     #[test]
@@ -4914,8 +4892,7 @@ mod test {
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush(), Some(JobId(1002)));
-        assert!(work.completed.is_empty());
+        assert_eq!(work.completed(), vec![JobId(1002)]);
 
         assert_eq!(work.new_work(), vec![JobId(1003)]);
     }
@@ -4957,8 +4934,7 @@ mod test {
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002), JobId(2002)]);
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush(), Some(JobId(2002)));
-        assert!(work.completed.is_empty());
+        assert_eq!(work.completed(), vec![JobId(2002)]);
     }
 
     #[test]
