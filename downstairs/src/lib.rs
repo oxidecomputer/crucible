@@ -3668,17 +3668,13 @@ mod test {
     }
 
     fn complete(work: &mut Work, ds_id: JobId, job: IOop) {
-        let is_flush = {
-            // validate that deps are done
-            let dep_list = job.deps();
-            for &dep in dep_list {
-                assert!(work.completed.is_complete(dep));
-            }
+        // validate that deps are done
+        assert!(job
+            .deps()
+            .iter()
+            .all(|dep| work.completed.is_complete(*dep)));
 
-            matches!(job, IOop::Flush { .. })
-        };
-
-        if is_flush {
+        if matches!(job, IOop::Flush { .. }) {
             work.completed.reset(ds_id);
         } else {
             work.completed.push(ds_id);
