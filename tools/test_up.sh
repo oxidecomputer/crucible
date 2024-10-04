@@ -242,23 +242,29 @@ echo Kill the current downstairs
 if ! "$dsc" cmd disable-restart-all; then
     (( res += 1 ))
     echo ""
-    echo "Failed repair test part 1, disable auto restart"
-    echo "Failed repair test part 1, disable auto restart" >> "$fail_log"
+    echo "Failed repair test part 1, disable auto restart" | tee -a "$fail_log"
     echo
 fi
 
 if ! "$dsc" cmd stop -c 2; then
     (( res += 1 ))
     echo ""
-    echo "Failed repair test part 1, stopping downstairs 2"
-    echo "Failed repair test part 1, stopping downstairs 2" >> "$fail_log"
+    echo "Failed repair test part 1, stopping downstairs 2" | tee -a "$fail_log"
     echo
 fi
 
-echo rm -rf "${testdir:?}/${port:?}"
+state=$(./target/release/dsc cmd state -c 2)
+if [[ "$state" != "Exit" ]]; then
+    (( res += 1 ))
+    echo "Failed to stop downstairs 2" | tee -a "$fail_log"
+else
+    echo "Downstairs 2 stopped"
+fi
+
+echo mv "${testdir}/${port}" "${testdir}/new"
+mv "${testdir}/${port}" "${testdir}/new"
 echo "Now put back the original so we have a mismatch"
 echo mv "${testdir}/previous" "${testdir}/${port}"
-rm -rf "${testdir:?}/${port:?}"
 mv "${testdir}/previous" "${testdir}/${port}"
 
 echo "Restart downstairs with old directory"
