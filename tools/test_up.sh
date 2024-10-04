@@ -125,6 +125,7 @@ echo "Starting $region_count downstairs"
 echo "${dsc}" start "${dsc_args[@]}" --region-count $region_count >> "$dsc_output"
 "${dsc}" start "${dsc_args[@]}" --region-count $region_count >> "$dsc_output" 2>&1 &
 dsc_pid=$!
+echo "dsc started at PID: $dsc_pid"
 
 sleep 5
 if ! pgrep -P $dsc_pid > /dev/null; then
@@ -141,7 +142,19 @@ if ! pgrep -P $dsc_pid > /dev/null; then
     exit 1
 fi
 
-echo "dsc started at PID: $dsc_pid"
+# Wait for all clients to be running.
+cid=0
+while [[ "$cid" -lt "$region_count" ]]; do
+    state=$("$dsc" cmd state -c "$cid")
+    if [[ "$state" != "Running" ]]; then
+        echo "Downstairs client $cid not running, waiting for it"
+        sleep 5
+        continue
+    fi
+    ((cid += 1))
+done
+
+
 # We don't want auto-restart of downstairs, so be sure that is not enabled.
 echo "Disable automatic restart on all downstairs"
 if ! "${dsc}" cmd disable-restart-all; then
@@ -253,11 +266,11 @@ if ! "$dsc" cmd stop -c 2; then
     echo
 fi
 
-state=$(./target/release/dsc cmd state -c 2)
+state=$("$dsc" cmd state -c 2)
 while [[ "$state" != "Exit" ]]; do
     echo "downstairs 2 not stopped yet, waiting"
     sleep 5
-    state=$(./target/release/dsc cmd state -c 2)
+    state=$("$dsc" cmd state -c 2)
 done
 echo "Downstairs 2 stopped"
 
@@ -393,6 +406,19 @@ fi
 echo "" >> "${log_prefix}_out.txt"
 
 echo "dsc restarted at PID: $dsc_pid"
+
+# Wait for all clients to be running.
+cid=0
+while [[ "$cid" -lt "$region_count" ]]; do
+    state=$("$dsc" cmd state -c "$cid")
+    if [[ "$state" != "Running" ]]; then
+        echo "Downstairs client $cid not running, waiting for it"
+        sleep 5
+        continue
+    fi
+    ((cid += 1))
+done
+
 echo "Now do the replace-reconcile test"
 
 # Get the port number for the last client, that is our replacement.
