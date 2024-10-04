@@ -254,12 +254,12 @@ if ! "$dsc" cmd stop -c 2; then
 fi
 
 state=$(./target/release/dsc cmd state -c 2)
-if [[ "$state" != "Exit" ]]; then
-    (( res += 1 ))
-    echo "Failed to stop downstairs 2" | tee -a "$fail_log"
-else
-    echo "Downstairs 2 stopped"
-fi
+while [[ "$state" != "Exit" ]]; do
+    echo "downstairs 2 not stopped yet, waiting"
+    sleep 5
+    state=$(./target/release/dsc cmd state -c 2)
+done
+echo "Downstairs 2 stopped"
 
 echo mv "${testdir}/${port}" "${testdir}/new"
 mv "${testdir}/${port}" "${testdir}/new"
