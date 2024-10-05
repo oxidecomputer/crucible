@@ -1,6 +1,6 @@
 #!/bin/bash
 #:
-#: name = "test-up-encrypted"
+#: name = "test-up-2region-encrypted"
 #: variety = "basic"
 #: target = "helios-2.0"
 #: output_rules = [
@@ -57,6 +57,6 @@ pfexec dtrace -Z -s $input/scripts/perf-downstairs-tick.d > /tmp/debug/dtrace.tx
 pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/debug/upstairs-info.txt 2>&1 &
 
 banner test_up_encrypted
-ptime -m bash "$input/scripts/test_up.sh" -N encrypted
+ptime -m bash "$input/scripts/test_up.sh" -r 2 encrypted
 
-echo "test-up-encrypted ends"
+echo "test-up-2region-encrypted ends"

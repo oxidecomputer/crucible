@@ -1322,8 +1322,8 @@ impl DownstairsClient {
                             match e {
                                 CrucibleError::HashMismatch => {
                                     panic!(
-                                        "[{}] {} read hash mismatch {:?} {:?}",
-                                        self.client_id, ds_id, e, job
+                                        "{} [{}] {} read hash mismatch {:?} {:?}",
+                                        self.cfg.session_id, self.client_id, ds_id, e, job
                                     );
                                 }
                                 CrucibleError::DecryptionError => {
@@ -1374,12 +1374,14 @@ impl DownstairsClient {
                         // to stop and refuse to restart" mode.
                         let msg = format!(
                             "[{}] read hash mismatch on id {}\n\
+                            session: {:?}\n\
                             Expected {:x?}\n\
                             Computed {:x?}\n\
                             start eid:{:?} start offset:{:?}\n\
                             job state:{:?}",
                             self.client_id,
                             ds_id,
+                            self.cfg.session_id,
                             job.read_validations,
                             read_validations,
                             start_eid,

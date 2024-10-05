@@ -114,6 +114,10 @@ enum Workload {
         #[clap(flatten)]
         cfg: RandReadWriteWorkload,
     },
+    /// Run IO, and as soon as we get a final ACK, drop the volume to
+    /// see if we can leave IOs outstanding on one of the downstairs.
+    /// This test works best if one of the downstairs is running with
+    /// lossy option set, which will make it go slower than the others.
     Repair,
     /// Test the downstairs replay path.
     /// Stop a downstairs, then run some IO, then start that downstairs back
@@ -1006,6 +1010,9 @@ async fn main() -> Result<()> {
     let (volume, mut targets) =
         make_a_volume(&opt, volume_logger.clone(), &test_log, pr).await?;
 
+    let downstairs_in_volume = targets.len() - (targets.len() % 3);
+    info!(test_log, "Downstairs in volume = {downstairs_in_volume}");
+
     if let Workload::CliServer { listen, port } = opt.workload {
         cli::start_cli_server(
             &volume,
@@ -1315,8 +1322,14 @@ async fn main() -> Result<()> {
                     bail!("Replay workload requires a dsc endpoint");
                 }
             };
-            replay_workload(&volume, &mut wtq, &mut region_info, dsc_client)
-                .await?;
+            replay_workload(
+                &volume,
+                &mut wtq,
+                &mut region_info,
+                dsc_client,
+                downstairs_in_volume as u32,
+            )
+            .await?;
         }
         Workload::Replace {
             fast_fill,
@@ -1367,6 +1380,18 @@ async fn main() -> Result<()> {
             // Add to the list of targets for our volume the replacement
             // target provided on the command line
             targets.push(replacement);
+
+            // Verify the number of targets dsc has matches what the number
+            // of targets we found.
+            let res = dsc_client.dsc_get_region_count().await.unwrap();
+            let region_count = res.into_inner();
+            if region_count != targets.len() as u32 {
+                bail!(
+                    "Downstairs targets:{} does not match dsc targets: {}",
+                    region_count,
+                    targets.len(),
+                );
+            }
             replace_before_active(
                 &volume,
                 wtq,
@@ -1401,6 +1426,18 @@ async fn main() -> Result<()> {
             // Add to the list of targets for our volume the replacement
             // target provided on the command line
             targets.push(replacement);
+
+            // Verify the number of targets dsc has matches what the number
+            // of targets we found.
+            let res = dsc_client.dsc_get_region_count().await.unwrap();
+            let region_count = res.into_inner();
+            if region_count != targets.len() as u32 {
+                bail!(
+                    "Downstairs targets:{} does not match dsc targets: {}",
+                    region_count,
+                    targets.len(),
+                );
+            }
             replace_while_reconcile(
                 &volume,
                 wtq,
@@ -1489,7 +1526,7 @@ async fn main() -> Result<()> {
             return Ok(());
         } else if opt.stable
             && wc.up_count + wc.ds_count == 0
-            && wc.active_count == 3
+            && wc.active_count == downstairs_in_volume
         {
             println!("CLIENT: All jobs finished, all DS active.");
             return Ok(());
@@ -2211,13 +2248,14 @@ async fn replay_workload(
     wtq: &mut WhenToQuit,
     ri: &mut RegionInfo,
     dsc_client: Client,
+    ds_count: u32,
 ) -> Result<()> {
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
     let mut generic_wtq = WhenToQuit::Count { count: 300 };
 
     for c in 1.. {
         // Pick a DS at random
-        let stopped_ds = rng.gen_range(0..3);
+        let stopped_ds = rng.gen_range(0..ds_count);
         dsc_client.dsc_stop(stopped_ds).await.unwrap();
         loop {
             let res = dsc_client.dsc_get_ds_state(stopped_ds).await.unwrap();
@@ -2290,10 +2328,12 @@ async fn replace_while_reconcile(
     mut gen: u64,
     log: Logger,
 ) -> Result<()> {
-    assert!(targets.len() == 4);
+    assert!(targets.len() % 3 == 1);
 
+    // The total number of downstairs we have that are part of the Volume.
+    let ds_total = targets.len() - 1;
     let mut old_ds = 0;
-    let mut new_ds = 3;
+    let mut new_ds = targets.len() - 1;
     let mut c = 1;
     // How long we wait for reconcile to start before we replace
     let mut active_wait = 6;
@@ -2431,15 +2471,15 @@ async fn replace_while_reconcile(
                 wc.ds_count,
                 wc.active_count
             );
-            if wc.up_count + wc.ds_count == 0 && wc.active_count == 3 {
-                info!(log, "[{c}] Replay: All jobs finished, all DS active.");
+            if wc.up_count + wc.ds_count == 0 && wc.active_count == ds_total {
+                info!(log, "[{c}] All jobs finished, all DS active.");
                 break;
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
 
-        old_ds = (old_ds + 1) % 4;
-        new_ds = (new_ds + 1) % 4;
+        old_ds = (old_ds + 1) % (ds_total as u32 + 1);
+        new_ds = (new_ds + 1) % (ds_total + 1);
 
         c += 1;
         match wtq {
@@ -2485,11 +2525,18 @@ async fn replace_before_active(
     mut gen: u64,
     log: Logger,
 ) -> Result<()> {
-    assert!(targets.len() == 4);
+    assert!(targets.len() % 3 == 1);
 
     info!(log, "Begin replacement before activation test");
+    // We need to start from a known state and be sure that all three of the
+    // current downstairs are consistent with each other. To guarantee this
+    // we write to every block, then flush, then read.  This way we know
+    // that the initial downstairs are all synced up on the same flush and
+    // generation numbers.
+    fill_workload(volume, ri, true).await?;
+    let ds_total = targets.len() - 1;
     let mut old_ds = 0;
-    let mut new_ds = 3;
+    let mut new_ds = targets.len() - 1;
     for c in 1.. {
         info!(log, "[{c}] Touch every extent");
         fill_sparse_workload(volume.as_ref(), ri).await?;
@@ -2586,15 +2633,15 @@ async fn replace_before_active(
                 wc.ds_count,
                 wc.active_count
             );
-            if wc.up_count + wc.ds_count == 0 && wc.active_count == 3 {
-                info!(log, "[{c}] Replay: All jobs finished, all DS active.");
+            if wc.up_count + wc.ds_count == 0 && wc.active_count == ds_total {
+                info!(log, "[{c}] All jobs finished, all DS active.");
                 break;
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
 
-        old_ds = (old_ds + 1) % 4;
-        new_ds = (new_ds + 1) % 4;
+        old_ds = (old_ds + 1) % (ds_total as u32 + 1);
+        new_ds = (new_ds + 1) % (ds_total + 1);
 
         match wtq {
             WhenToQuit::Count { count } => {
@@ -2637,7 +2684,10 @@ async fn replace_workload(
     targets: Vec<SocketAddr>,
     fill: bool,
 ) -> Result<()> {
-    assert!(targets.len() == 4);
+    assert!(targets.len() % 3 == 1);
+
+    // The total number of downstairs we have that are part of the Volume.
+    let ds_total = targets.len() - 1;
 
     if fill {
         fill_sparse_workload(volume.as_ref(), ri).await?;
@@ -2656,7 +2706,7 @@ async fn replace_workload(
     let volume_c = volume.clone();
     let handle = tokio::spawn(async move {
         let mut old_ds = 0;
-        let mut new_ds = 3;
+        let mut new_ds = ds_total;
         let mut c = 1;
         loop {
             println!(
@@ -2678,7 +2728,7 @@ async fn replace_workload(
             }
             // Wait for the replacement to be reflected in the downstairs status.
             let mut wc = volume_c.show_work().await?;
-            while wc.active_count == 3 {
+            while wc.active_count == ds_total {
                 // Wait for one of the DS to start repair
                 println!(
                     "[{c}] Waiting for replace to start: up:{} ds:{} act:{}",
@@ -2689,7 +2739,7 @@ async fn replace_workload(
             }
 
             // We have started live repair, now wait for it to finish.
-            while wc.active_count != 3 {
+            while wc.active_count != ds_total {
                 println!(
                     "[{c}] Waiting for replace to finish: up:{} ds:{} act:{}",
                     wc.up_count, wc.ds_count, wc.active_count
@@ -2714,8 +2764,8 @@ async fn replace_workload(
             }
 
             // No stopping yet, let's do another loop.
-            old_ds = (old_ds + 1) % 4;
-            new_ds = (new_ds + 1) % 4;
+            old_ds = (old_ds + 1) % (ds_total + 1);
+            new_ds = (new_ds + 1) % (ds_total + 1);
             c += 1;
         }
         println!("Replace tasks ends after {c} loops");
@@ -2771,7 +2821,7 @@ async fn replace_workload(
             "Replace test done: up:{} ds:{} act:{}",
             wc.up_count, wc.ds_count, wc.active_count
         );
-        if wc.up_count + wc.ds_count == 0 && wc.active_count == 3 {
+        if wc.up_count + wc.ds_count == 0 && wc.active_count == ds_total {
             println!("Replace: All jobs finished, all DS active.");
             break;
         }
