@@ -12,6 +12,7 @@ trap ctrl_c INT
 function ctrl_c() {
     echo "Stopping at your request"
     ${dsc} cmd shutdown
+    exit 1
 }
 
 WORK_ROOT=${WORK_ROOT:-/tmp}
@@ -33,15 +34,21 @@ if [[ ! -f "$crucible_test" ]] || [[ ! -f "$dsc" ]] || [[ ! -f "$downstairs" ]];
 fi
 
 loops=30
+region_sets=1
 
 usage () {
     echo "Usage: $0 [-l #]]" >&2
-    echo " -l loops   Number of times to cause a replay." >&2
+    echo " -l loops     Number of times to cause a replay." >&2
+    echo " -r regions   Number of region sets to create (default 1)" >&2
 }
 
-while getopts 'l:' opt; do
+while getopts 'l:r:' opt; do
     case "$opt" in
         l)  loops=$OPTARG
+            echo "Set loops"
+            ;;
+        r)  region_sets=$OPTARG
+            echo "Set region sets"
             ;;
         *)  echo "Invalid option"
             usage
@@ -50,19 +57,20 @@ while getopts 'l:' opt; do
     esac
 done
 
+((region_count=region_sets*3))
 echo "" > "$test_log"
 echo "starting $(date)" | tee "$test_log"
 echo "Tail $test_log for test output"
 
-echo "Creating downstairs regions" | tee -a "$test_log"
+echo "Creating $region_count downstairs regions" | tee -a "$test_log"
 if ! ${dsc} create --cleanup --ds-bin "$downstairs" \
-        --extent-count 50 >> "$test_log"; then
+        --extent-count 50 --region-count "$region_count" >> "$test_log"; then
     echo "Failed to create downstairs regions"
     exit 1
 fi
 
-echo "Starting downstairs" | tee -a "$test_log"
-${dsc} start --ds-bin "$downstairs" >> "$test_log" 2>&1 &
+echo "Starting $region_count downstairs" | tee -a "$test_log"
+${dsc} start --ds-bin "$downstairs" --region-count "$region_count" >> "$test_log" 2>&1 &
 dsc_pid=$!
 sleep 5
 if ! ps -p $dsc_pid > /dev/null; then
