@@ -827,7 +827,7 @@ async fn make_a_volume(
             );
         }
 
-        // We start by creating the overall volume.
+        // We start by creating the volume builder
         let mut builder =
             VolumeBuilder::new(extent_info.block_size, volume_logger);
 
