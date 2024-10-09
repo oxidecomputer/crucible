@@ -43,7 +43,7 @@ done
 export BINDIR=/var/tmp/bins
 
 # Give this test one hour to finish
-jobpid=$$; (sleep $(( 60 * 60 )); banner fail-timeout; ps -ef; zfs list; pstack $(ps -ef | grep "dsc start" | grep -v grep | awk '{print $2}') ;kill $jobpid) &
+jobpid=$$; (sleep $(( 60 * 60 )); banner fail-timeout; ps -ef; zfs list; pstack $(ps -ef | grep "dsc start" | grep -v grep | awk '{print $2}') | demangle ;kill $jobpid) &
 
 echo "Setup debug logging"
 mkdir /tmp/debug
