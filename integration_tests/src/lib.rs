@@ -681,7 +681,7 @@ mod test {
                 let mut builder =
                     VolumeBuilder::new(BLOCK_SIZE as u64, log.clone());
                 builder.add_subvolume(in_memory_data.clone()).await?;
-                Arc::new(Volume::from(builder))
+                Volume::from(builder).as_blockio()
             })
             .await?;
         let volume = Volume::from(builder);
@@ -1807,7 +1807,7 @@ mod test {
                 let mut builder =
                     VolumeBuilder::new(BLOCK_SIZE as u64, log.clone());
                 builder.add_subvolume(in_memory_data).await?;
-                Arc::new(Volume::from(builder))
+                Volume::from(builder).as_blockio()
             })
             .await?;
 
@@ -1931,7 +1931,7 @@ mod test {
                 let mut builder =
                     VolumeBuilder::new(BLOCK_SIZE as u64, log.clone());
                 builder.add_subvolume(in_memory_data).await?;
-                Arc::new(Volume::from(builder))
+                Volume::from(builder).as_blockio()
             })
             .await?;
 

@@ -379,6 +379,71 @@ impl VolumeInner {
             None
         }
     }
+
+    // This method is called by both write and write_unwritten and
+    // provides a single place so both can share common code.
+    async fn volume_write_op(
+        &self,
+        offset: BlockIndex,
+        mut data: BytesMut,
+        is_write_unwritten: bool,
+    ) -> Result<(), CrucibleError> {
+        // In the case that this volume only has a read only parent,
+        // return an error.
+        if self.sub_volumes.is_empty() {
+            crucible_bail!(CannotReceiveBlocks, "No sub volumes!");
+        }
+        let cc = self.next_count();
+        if is_write_unwritten {
+            cdt::volume__writeunwritten__start!(|| (cc, self.uuid));
+        } else {
+            cdt::volume__write__start!(|| (cc, self.uuid));
+        }
+
+        if data.is_empty() {
+            if is_write_unwritten {
+                cdt::volume__writeunwritten__done!(|| (cc, self.uuid));
+            } else {
+                cdt::volume__write__done!(|| (cc, self.uuid));
+            }
+            return Ok(());
+        }
+
+        self.check_data_size(data.len()).await?;
+
+        let affected_sub_volumes = self.sub_volumes_for_lba_range(
+            offset.0,
+            data.len() as u64 / self.block_size,
+        );
+
+        if affected_sub_volumes.is_empty() {
+            crucible_bail!(OffsetInvalid);
+        }
+
+        // TODO parallel dispatch!
+        for (coverage, sub_volume) in affected_sub_volumes {
+            let sub_offset =
+                BlockIndex(sub_volume.compute_sub_volume_lba(coverage.start));
+            let sz = (coverage.end - coverage.start) as usize
+                * self.block_size as usize;
+            let slice = data.split_to(sz);
+
+            // Take the write or write_unwritten path here.
+            if is_write_unwritten {
+                sub_volume.write_unwritten(sub_offset, slice).await?;
+            } else {
+                sub_volume.write(sub_offset, slice).await?;
+            }
+        }
+
+        if is_write_unwritten {
+            cdt::volume__writeunwritten__done!(|| (cc, self.uuid));
+        } else {
+            cdt::volume__write__done!(|| (cc, self.uuid));
+        }
+
+        Ok(())
+    }
 }
 
 impl Volume {
@@ -546,75 +611,10 @@ impl Volume {
 
         Ok(())
     }
-
-    // This method is called by both write and write_unwritten and
-    // provides a single place so both can share common code.
-    async fn volume_write_op(
-        &self,
-        offset: BlockIndex,
-        mut data: BytesMut,
-        is_write_unwritten: bool,
-    ) -> Result<(), CrucibleError> {
-        // In the case that this volume only has a read only parent,
-        // return an error.
-        if self.sub_volumes.is_empty() {
-            crucible_bail!(CannotReceiveBlocks, "No sub volumes!");
-        }
-        let cc = self.next_count();
-        if is_write_unwritten {
-            cdt::volume__writeunwritten__start!(|| (cc, self.uuid));
-        } else {
-            cdt::volume__write__start!(|| (cc, self.uuid));
-        }
-
-        if data.is_empty() {
-            if is_write_unwritten {
-                cdt::volume__writeunwritten__done!(|| (cc, self.uuid));
-            } else {
-                cdt::volume__write__done!(|| (cc, self.uuid));
-            }
-            return Ok(());
-        }
-
-        self.check_data_size(data.len()).await?;
-
-        let affected_sub_volumes = self.sub_volumes_for_lba_range(
-            offset.0,
-            data.len() as u64 / self.block_size,
-        );
-
-        if affected_sub_volumes.is_empty() {
-            crucible_bail!(OffsetInvalid);
-        }
-
-        // TODO parallel dispatch!
-        for (coverage, sub_volume) in affected_sub_volumes {
-            let sub_offset =
-                BlockIndex(sub_volume.compute_sub_volume_lba(coverage.start));
-            let sz = (coverage.end - coverage.start) as usize
-                * self.block_size as usize;
-            let slice = data.split_to(sz);
-
-            // Take the write or write_unwritten path here.
-            if is_write_unwritten {
-                sub_volume.write_unwritten(sub_offset, slice).await?;
-            } else {
-                sub_volume.write(sub_offset, slice).await?;
-            }
-        }
-
-        if is_write_unwritten {
-            cdt::volume__writeunwritten__done!(|| (cc, self.uuid));
-        } else {
-            cdt::volume__write__done!(|| (cc, self.uuid));
-        }
-
-        Ok(())
-    }
 }
 
 #[async_trait]
-impl BlockIO for Volume {
+impl BlockIO for VolumeInner {
     async fn activate(&self) -> Result<(), CrucibleError> {
         for sub_volume in &self.sub_volumes {
             sub_volume.activate().await?;
@@ -1131,6 +1131,10 @@ impl BlockIO for SubVolume {
 }
 
 impl Volume {
+    pub fn as_blockio(&self) -> Arc<dyn BlockIO + Send + Sync> {
+        self.0.clone()
+    }
+
     #[async_recursion]
     pub async fn construct(
         request: VolumeConstructionRequest,
@@ -1148,26 +1152,28 @@ impl Volume {
                     VolumeBuilder::new_with_id(block_size, id, log.clone());
 
                 for subreq in sub_volumes {
-                    vol.add_subvolume(Arc::new(
+                    vol.add_subvolume(
                         Volume::construct(
                             subreq,
                             producer_registry.clone(),
                             log.clone(),
                         )
-                        .await?,
-                    ))
+                        .await?
+                        .as_blockio(),
+                    )
                     .await?;
                 }
 
                 if let Some(read_only_parent) = read_only_parent {
-                    vol.add_read_only_parent(Arc::new(
+                    vol.add_read_only_parent(
                         Volume::construct(
                             *read_only_parent,
                             producer_registry,
                             log,
                         )
-                        .await?,
-                    ))
+                        .await?
+                        .as_blockio(),
+                    )
                     .await?;
                 }
 
@@ -2893,7 +2899,7 @@ mod test {
         let mut builder = VolumeBuilder::new(BLOCK_SIZE as u64, csl());
         builder.add_subvolume(overlay).await?;
         builder
-            .add_read_only_parent(Arc::new(parent_volume))
+            .add_read_only_parent(parent_volume.as_blockio())
             .await?;
         let volume = Volume::from(builder);
 
