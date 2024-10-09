@@ -40,7 +40,7 @@ mod dummy_downstairs_tests;
 mod pseudo_file;
 
 pub mod volume;
-pub use volume::Volume;
+pub use volume::{Volume, VolumeBuilder};
 
 pub mod in_memory;
 pub use in_memory::InMemoryBlockIO;
