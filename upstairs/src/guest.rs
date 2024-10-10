@@ -205,7 +205,6 @@ impl GuestWork {
     }
 
     pub fn print_last_completed(&self, n: usize) {
-        print!("Upstairs last five completed:  ");
         for j in self.completed.iter().rev().take(n) {
             print!(" {:4}", j);
         }
