@@ -11,7 +11,6 @@ use crate::{
     },
     downstairs::{Downstairs, DownstairsAction},
     extent_from_offset,
-    guest::GuestBlockRes,
     stats::UpStatOuter,
     BlockOp, BlockRes, Buffer, ClientId, ClientMap, CrucibleOpts, DsState,
     EncryptionContext, GuestIoHandle, Message, RegionDefinition,
@@ -1280,10 +1279,8 @@ impl Upstairs {
         if snapshot_details.is_some() {
             info!(self.log, "flush with snap requested");
         }
-        let ds_id = self.downstairs.submit_flush(snapshot_details);
-        self.guest
-            .guest_work
-            .submit_job(ds_id, res.map(GuestBlockRes::Other));
+        let ds_id = self.downstairs.submit_flush(snapshot_details, res);
+        self.guest.guest_work.submit_job(ds_id, false);
 
         cdt::up__to__ds__flush__start!(|| (ds_id.0));
     }
@@ -1296,48 +1293,32 @@ impl Upstairs {
         // call it!
 
         let ds_id = self.downstairs.submit_barrier();
-        self.guest.guest_work.submit_job(ds_id, None);
+        self.guest.guest_work.submit_job(ds_id, false);
 
         cdt::up__to__ds__barrier__start!(|| (ds_id.0));
     }
 
     /// Submits a read job to the downstairs
-    fn submit_read(
-        &mut self,
-        offset: BlockIndex,
-        data: Buffer,
-        res: BlockRes<Buffer, (Buffer, CrucibleError)>,
-    ) {
-        self.submit_read_inner(offset, data, Some(res))
-    }
-
-    /// Submits a dummy read (without associated `BlockOp`)
+    /// Submits a dummy read (building a fake `BlockRes`)
     #[cfg(test)]
     pub(crate) fn submit_dummy_read(
         &mut self,
         offset: BlockIndex,
         data: Buffer,
     ) {
-        self.submit_read_inner(offset, data, None)
+        let br = BlockRes::dummy();
+        self.submit_read(offset, data, br)
     }
 
-    /// Submit a read job to the downstairs, optionally without a `BlockOp`
-    ///
-    /// # Panics
-    /// If `res` is `None` and this isn't the test suite
-    fn submit_read_inner(
+    /// Submit a read job to the downstairs
+    fn submit_read(
         &mut self,
         offset: BlockIndex,
         data: Buffer,
-        res: Option<BlockRes<Buffer, (Buffer, CrucibleError)>>,
+        res: BlockRes<Buffer, (Buffer, CrucibleError)>,
     ) {
-        #[cfg(not(test))]
-        assert!(res.is_some());
-
         if !self.guest_io_ready() {
-            if let Some(res) = res {
-                res.send_err((data, CrucibleError::UpstairsInactive));
-            }
+            res.send_err((data, CrucibleError::UpstairsInactive));
             return;
         }
 
@@ -1352,9 +1333,7 @@ impl Upstairs {
          * Verify IO is in range for our region
          */
         if let Err(e) = ddef.validate_io(offset, data.len()) {
-            if let Some(res) = res {
-                res.send_err((data, e));
-            }
+            res.send_err((data, e));
             return;
         }
 
@@ -1375,10 +1354,8 @@ impl Upstairs {
          * Grab this ID after extent_from_offset: in case of Err we don't
          * want to create a gap in the IDs.
          */
-        let ds_id = self.downstairs.submit_read(impacted_blocks);
-        self.guest
-            .guest_work
-            .submit_job(ds_id, res.map(|res| GuestBlockRes::Read(data, res)));
+        let ds_id = self.downstairs.submit_read(impacted_blocks, data, res);
+        self.guest.guest_work.submit_job(ds_id, false);
 
         cdt::up__to__ds__read__start!(|| (ds_id.0));
     }
@@ -1503,9 +1480,7 @@ impl Upstairs {
             write.is_write_unwritten,
             write.guard,
         );
-        self.guest
-            .guest_work
-            .submit_job(ds_id, Some(GuestBlockRes::Acked));
+        self.guest.guest_work.submit_job(ds_id, true);
 
         if write.is_write_unwritten {
             cdt::up__to__ds__write__unwritten__start!(|| (ds_id.0));

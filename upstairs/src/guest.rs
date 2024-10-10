@@ -1,6 +1,6 @@
 // Copyright 2024 Oxide Computer Company
 use std::{
-    collections::HashMap,
+    collections::HashSet,
     net::SocketAddr,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
@@ -24,29 +24,6 @@ use tokio::sync::{mpsc, Mutex};
 use tracing::{instrument, span, Level};
 use uuid::Uuid;
 
-/*
- * This structure is for tracking the underlying storage side operations
- * that map to a single Guest IO request. G to S stands for Guest
- * to Storage.
- *
- * The submitted hashmap is indexed by the request number (JobId) for the
- * downstairs requests issued on behalf of this request.
- */
-#[derive(Debug)]
-struct GtoS {
-    /*
-     * Handle to notify the guest when we're done
-     *
-     * This is an Option for the case where we want to send an IO on behalf
-     * of the Upstairs (not guest driven). Right now the only case where we
-     * need that is to flush data to downstairs when the guest has not sent
-     * us a flush in some time.  This allows us to free internal buffers.
-     * If the sender is None, we know it's a request from the Upstairs and
-     * we don't have to ACK it to anyone.
-     */
-    res: Option<GuestBlockRes>,
-}
-
 #[derive(Debug)]
 pub(crate) enum GuestBlockRes {
     /// Reads must go into a buffer, and will return that buffer
@@ -59,13 +36,7 @@ pub(crate) enum GuestBlockRes {
     Acked,
 }
 
-impl GtoS {
-    /// Create a new GtoS object where one Guest IO request maps to one
-    /// downstairs operation.
-    pub fn new(res: Option<GuestBlockRes>) -> GtoS {
-        GtoS { res }
-    }
-
+impl GuestBlockRes {
     /*
      * When all downstairs jobs have completed, and all buffers have been
      * attached to the GtoS struct, we can do the final copy of the data
@@ -73,7 +44,7 @@ impl GtoS {
      * BlockOpWaiter if required
      */
     #[instrument]
-    fn transfer_and_notify(
+    pub(crate) fn transfer_and_notify(
         self,
         downstairs_response: Option<RawReadResponse>,
         result: Result<(), CrucibleError>,
@@ -88,8 +59,8 @@ impl GtoS {
          * given up because an IO took too long, or other possible
          * guest side reasons.
          */
-        match self.res {
-            Some(GuestBlockRes::Read(mut buffer, res)) => {
+        match self {
+            GuestBlockRes::Read(mut buffer, res) => {
                 if let Some(downstairs_response) = downstairs_response {
                     // XXX don't do if result.is_err()?
                     // Copy over into guest memory.
@@ -112,32 +83,23 @@ impl GtoS {
                     Err(e) => res.send_err((buffer, e)),
                 }
             }
-            Some(GuestBlockRes::Other(res)) => {
+            GuestBlockRes::Other(res) => {
                 // Should we panic if someone provided downstairs_responses?
                 res.send_result(result)
             }
-            Some(GuestBlockRes::Acked) => (),
-            None => (),
+            GuestBlockRes::Acked => (),
         }
     }
 }
 
-/**
- * This structure keeps track of work that Crucible has accepted from the
- * "Guest", aka, Propolis.
- *
- * The active is a hashmap of GtoS structures for all I/Os that are
- * outstanding. Either just created or in progress operations.
- *
- * Once we have decided enough downstairs requests are finished, we remove
- * the entry from the active and add the job ID to the completed vec.
- *
- * TODO: The completed needs to implement some notify back to the Guest, and
- * it should probably be a ring buffer.
- */
+/// This structure keeps track of work that Crucible has accepted from the
+/// "guest" (Propolis, `crutest`, etc)
+///
+/// We store a set of `JobId` for all I/O that has not yet been acknowledged to
+/// the guest, and a ring buffer of the last _N_ acked jobs.
 #[derive(Debug)]
 pub struct GuestWork {
-    active: HashMap<JobId, GtoS>,
+    active: HashSet<JobId>,
     completed: AllocRingBuffer<JobId>,
 }
 
@@ -151,50 +113,21 @@ impl GuestWork {
     }
 
     /// Helper function to install new work into the map
-    pub(crate) fn submit_job(
-        &mut self,
-        ds_id: JobId,
-        res: Option<GuestBlockRes>,
-    ) {
-        if matches!(res, Some(GuestBlockRes::Acked)) {
+    pub(crate) fn submit_job(&mut self, ds_id: JobId, acked: bool) {
+        if acked {
             self.completed.push(ds_id);
         } else {
-            self.active.insert(ds_id, GtoS::new(res));
+            self.active.insert(ds_id);
         }
     }
 
-    /// Low-level function to insert work into the map
+    /// Move the given job from active to complete
     ///
-    /// Normally, `submit_job` should be called instead; this function should
-    /// only be used if we have reserved the `GuestWorkId` and `JobId` in
-    /// advance.
-    pub(crate) fn insert(&mut self, ds_id: JobId) {
-        let new_gtos = GtoS::new(None);
-        self.active.insert(ds_id, new_gtos);
-    }
-
-    /*
-     * When the required number of completions for a downstairs
-     * ds_id have arrived, we call this method on the parent GuestWork
-     * that requested them and include the Option<RawReadResponse> from the IO.
-     *
-     * If this operation was a read, then we attach the Bytes read to the
-     * GtoS struct for later transfer.
-     */
+    /// # Panics
+    /// If the job is not in our active set
     #[instrument]
-    pub(crate) fn gw_ds_complete(
-        &mut self,
-        ds_id: JobId,
-        data: Option<RawReadResponse>,
-        result: Result<(), CrucibleError>,
-    ) {
-        if let Some(gtos_job) = self.active.remove(&ds_id) {
-            /*
-             * Copy (if present) read data back to the guest buffer they
-             * provided to us, and notify any waiters.
-             */
-            gtos_job.transfer_and_notify(data, result);
-
+    pub(crate) fn gw_ds_complete(&mut self, ds_id: JobId) {
+        if self.active.remove(&ds_id) {
             self.completed.push(ds_id);
         } else {
             /*
@@ -214,13 +147,13 @@ impl GuestWork {
 impl Default for GuestWork {
     fn default() -> Self {
         Self {
-            active: HashMap::new(), // GtoS
+            active: HashSet::new(),
             completed: AllocRingBuffer::new(2048),
         }
     }
 }
 
-/// IO handles used by the guest uses to pass work into Crucible proper
+/// IO handles used by the guest to pass work into Crucible proper
 ///
 /// This data structure is the counterpart to the [`GuestIoHandle`], which
 /// receives work from the guest and is exclusively owned by the
@@ -291,10 +224,7 @@ impl Guest {
             req_limited: false,
             limits,
 
-            guest_work: GuestWork {
-                active: HashMap::new(), // GtoS
-                completed: AllocRingBuffer::new(2048),
-            },
+            guest_work: GuestWork::default(),
 
             iop_tokens: 0,
             bw_tokens: 0,
@@ -908,13 +838,12 @@ impl GuestIoHandle {
     pub(crate) fn show_work(&self) -> usize {
         println!("Guest work:  Active and Completed Jobs:");
         let gw = &self.guest_work;
-        let mut kvec: Vec<_> = gw.active.keys().cloned().collect();
+        let mut kvec: Vec<_> = gw.active.iter().cloned().collect();
         kvec.sort_unstable();
         for id in kvec.iter() {
             println!("JOB active:[{id:?}]");
         }
-        let done = gw.completed.to_vec();
-        println!("JOB completed count:{:?} ", done.len());
+        println!("JOB completed count:{:?} ", gw.completed.len());
         kvec.len()
     }
 }
