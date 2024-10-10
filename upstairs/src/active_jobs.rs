@@ -69,6 +69,7 @@ impl ActiveJobs {
         // tracker have been recorded.
         match &io.work {
             IOop::Flush { .. }
+            | IOop::Barrier { .. }
             | IOop::Write { .. }
             | IOop::WriteUnwritten { .. }
             | IOop::Read { .. }
