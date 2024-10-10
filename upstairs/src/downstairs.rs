@@ -2756,10 +2756,7 @@ impl Downstairs {
 
     /// Prints the last `n` completed jobs to `stdout`
     pub(crate) fn print_last_completed(&self, n: usize) {
-        // TODO this is a ringbuffer, why are we turning it to a Vec to look at
-        // the last five items?
-        let done = self.completed.to_vec();
-        for j in done.iter().rev().take(n) {
+        for j in self.completed.iter().rev().take(n) {
             print!(" {:4}", j);
         }
     }

@@ -1171,6 +1171,7 @@ impl Upstairs {
             .filter(|c| c.state() == DsState::Active)
             .count();
 
+        print!("Upstairs last five completed:  ");
         self.guest.guest_work.print_last_completed(5);
         println!();
 
