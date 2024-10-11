@@ -843,10 +843,10 @@ async fn make_a_volume(
             let mut sv_targets = Vec::new();
             for _ in 0..3 {
                 let port = dsc_client.dsc_get_port(cid).await.unwrap();
-                let tar: SocketAddr =
-                    format!("{}:{}", dsc.ip(), port.into_inner())
-                        .parse()
-                        .unwrap();
+                let tar = SocketAddr::new(
+                    dsc.ip(),
+                    port.into_inner().try_into().unwrap(),
+                );
                 sv_targets.push(tar);
                 targets.push(tar);
                 cid += 1;
@@ -880,8 +880,9 @@ async fn make_a_volume(
         let mut extent_info_result = None;
         for target in &crucible_opts.target {
             let port = target.port() + crucible_common::REPAIR_PORT_OFFSET;
-            info!(test_log, "look at: http://{}:{} ", target.ip(), port);
-            let repair_url = format!("http://{}:{}", target.ip(), port);
+            let addr = SocketAddr::new(target.ip(), port);
+            let repair_url = format!("http://{addr}");
+            info!(test_log, "look at: {repair_url}");
             let repair_client = repair_client::new(&repair_url);
             match repair_client.get_region_info().await {
                 Ok(ri) => {
