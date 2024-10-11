@@ -1,10 +1,6 @@
 use crate::JobId;
 
-/// Stores a flush operation and a set of complete jobs
-///
-/// The flush operation is not included in the list of complete jobs, but acts
-/// as a lower bound for dependencies; any job older than the flush is assumed
-/// to have completed.
+/// Stores a set of complete jobs
 #[derive(Debug)]
 pub struct CompletedJobs {
     completed: Vec<JobId>,
@@ -17,6 +13,7 @@ impl CompletedJobs {
         }
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.completed.is_empty()
     }
@@ -26,7 +23,10 @@ impl CompletedJobs {
         self.completed.push(id);
     }
 
-    /// Resets the data structure given a new barrier operation
+    /// Resets the data structure, given a new barrier operation
+    ///
+    /// All older jobs are forgotten, and the provided operation becomes the
+    /// oldest complete job.
     pub fn reset(&mut self, id: JobId) {
         self.completed.clear();
         self.completed.push(id);
@@ -41,6 +41,7 @@ impl CompletedJobs {
         self.completed.iter().rev().any(|j| *j == id)
     }
 
+    /// Returns the list of completed jobs
     pub fn completed(&self) -> &[JobId] {
         &self.completed
     }
