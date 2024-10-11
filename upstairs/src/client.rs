@@ -1517,7 +1517,7 @@ impl DownstairsClient {
                     assert!(read_data.data.is_empty());
                     assert!(extent_info.is_none());
 
-                    if jobs_completed_ok == 2 {
+                    if jobs_completed_ok == 3 {
                         ackable = true;
                         cdt::up__to__ds__barrier__done!(|| ds_id.0);
                     }
