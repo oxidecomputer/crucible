@@ -450,6 +450,10 @@ impl Downstairs {
                 cdt::gw__flush__done!(|| (ds_id.0));
                 stats.add_flush();
             }
+            IOop::Barrier { .. } => {
+                cdt::gw__barrier__done!(|| (ds_id.0));
+                stats.add_barrier();
+            }
             IOop::ExtentFlushClose { extent, .. } => {
                 cdt::gw__close__done!(|| (ds_id.0, extent.0));
                 stats.add_flush_close();
@@ -1916,6 +1920,20 @@ impl Downstairs {
         next_id
     }
 
+    pub(crate) fn submit_barrier(&mut self) -> JobId {
+        let next_id = self.next_id();
+        cdt::gw__barrier__start!(|| (next_id.0));
+
+        // A barrier has the same deps as a flush (namely, it depends on all
+        // previous jobs and acts as the only dependency for all subsequent
+        // jobs)
+        let dependencies = self.ds_active.deps_for_flush(next_id);
+        debug!(self.log, "IO Barrier {next_id} has deps {dependencies:?}");
+
+        self.enqueue(next_id, IOop::Barrier { dependencies }, ClientMap::new());
+        next_id
+    }
+
     /// Reserves repair IDs if impacted blocks overlap our extent under repair
     fn check_repair_ids_for_range(&mut self, impacted_blocks: ImpactedBlocks) {
         let Some(eur) = self.get_extent_under_repair() else {
@@ -2208,6 +2226,15 @@ impl Downstairs {
                     gen_number,
                     snapshot_details,
                     extent_limit,
+                }
+            }
+            IOop::Barrier { dependencies } => {
+                cdt::ds__barrier__client__start!(|| (ds_id.0, client_id.get()));
+                Message::Barrier {
+                    upstairs_id: self.cfg.upstairs_id,
+                    session_id: self.cfg.session_id,
+                    job_id: ds_id,
+                    dependencies,
                 }
             }
             IOop::Read {
@@ -2688,6 +2715,10 @@ impl Downstairs {
                     let job_type = "Flush".to_string();
                     (job_type, 0)
                 }
+                IOop::Barrier { .. } => {
+                    let job_type = "Barrier".to_string();
+                    (job_type, 0)
+                }
                 IOop::ExtentFlushClose { extent, .. } => {
                     let job_type = "FClose".to_string();
                     (job_type, extent.0 as usize)
@@ -2809,6 +2840,21 @@ impl Downstairs {
                 result,
             } => {
                 cdt::ds__flush__client__done!(|| (job_id.0, client_id.get()));
+                (
+                    upstairs_id,
+                    session_id,
+                    job_id,
+                    result.map(|_| Default::default()),
+                    None,
+                )
+            }
+            Message::BarrierAck {
+                upstairs_id,
+                session_id,
+                job_id,
+                result,
+            } => {
+                cdt::ds__barrier__client__done!(|| (job_id.0, client_id.get()));
                 (
                     upstairs_id,
                     session_id,
@@ -3180,6 +3226,7 @@ impl Downstairs {
                     job.work,
                     IOop::Write { .. }
                         | IOop::Flush { .. }
+                        | IOop::Barrier { .. }
                         | IOop::WriteUnwritten { .. }
                         | IOop::ExtentFlushClose { .. }
                         | IOop::ExtentLiveRepair { .. }

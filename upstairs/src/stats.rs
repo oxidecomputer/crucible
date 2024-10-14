@@ -49,6 +49,12 @@ pub struct Flush {
     pub count: Cumulative<i64>,
 }
 #[derive(Debug, Default, Copy, Clone, Metric)]
+pub struct Barrier {
+    /// Count of region barriers this upstairs has completed
+    #[datum]
+    pub count: Cumulative<i64>,
+}
+#[derive(Debug, Default, Copy, Clone, Metric)]
 pub struct FlushClose {
     /// Count of extent flush close operations this upstairs has completed
     #[datum]
@@ -83,6 +89,7 @@ pub struct UpCountStat {
     read_count: Read,
     read_bytes: ReadBytes,
     flush_count: Flush,
+    barrier_count: Barrier,
     flush_close_count: FlushClose,
     extent_repair_count: ExtentRepair,
     extent_noop_count: ExtentNoOp,
@@ -99,6 +106,7 @@ impl UpCountStat {
             read_count: Default::default(),
             read_bytes: Default::default(),
             flush_count: Default::default(),
+            barrier_count: Default::default(),
             flush_close_count: Default::default(),
             extent_repair_count: Default::default(),
             extent_noop_count: Default::default(),
@@ -147,6 +155,11 @@ impl UpStatOuter {
     pub fn add_flush(&self) {
         let mut ups = self.up_stat_wrap.lock().unwrap();
         let datum = ups.flush_count.datum_mut();
+        *datum += 1;
+    }
+    pub fn add_barrier(&self) {
+        let mut ups = self.up_stat_wrap.lock().unwrap();
+        let datum = ups.barrier_count.datum_mut();
         *datum += 1;
     }
     pub fn add_flush_close(&self) {
