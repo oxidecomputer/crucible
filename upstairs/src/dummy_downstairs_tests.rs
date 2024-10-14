@@ -307,10 +307,10 @@ impl DownstairsHandle {
 
     /// Awaits and acks a `Message::Write { .. }` or `Message::Barrier { .. }`
     ///
-    /// Returns the job ID for further checks.
+    /// Returns `true` if the message was a barrier, `false` otherwise
     ///
     /// # Panics
-    /// If a non-write message arrives
+    /// If a message other than `Write` or `Barrier` arrives
     pub async fn ack_write_or_barrier(&mut self) -> bool {
         let (r, was_barrier) = match self.recv().await.unwrap() {
             Message::Write { header, .. } => (

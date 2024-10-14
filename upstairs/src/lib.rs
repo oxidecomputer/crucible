@@ -1323,6 +1323,11 @@ impl IOop {
                     // the downstairs to act based on that.
                     true
                 }
+                IOop::Barrier { .. } => {
+                    // The Barrier IOop doesn't actually touch any extents; it's
+                    // purely for dependency management.
+                    true
+                }
                 _ => {
                     panic!("Unsupported IO check {:?}", self);
                 }
