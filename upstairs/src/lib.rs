@@ -86,6 +86,8 @@ mod downstairs;
 mod upstairs;
 use upstairs::{UpCounters, UpstairsAction};
 
+mod io_limits;
+
 /// Max number of write bytes between the upstairs and an offline downstairs
 ///
 /// If we exceed this value, the upstairs will give
