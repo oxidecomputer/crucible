@@ -9,7 +9,8 @@ use crate::{
     backpressure::{
         BackpressureAmount, BackpressureConfig, SharedBackpressureAmount,
     },
-    BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, RawReadResponse,
+    io_limits::{IOLimitView, IOLimits},
+    BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, JobId, RawReadResponse,
     ReplaceResult, UpstairsAction,
 };
 use crucible_common::{build_logger, Block, BlockIndex, CrucibleError};
@@ -116,6 +117,9 @@ pub struct Guest {
     /// the IO task.
     backpressure: SharedBackpressureAmount,
 
+    /// View into global IO limits
+    io_limits: IOLimitView,
+
     /// Lock held during backpressure delay
     ///
     /// Without this lock, multiple tasks could submit jobs to the upstairs and
@@ -151,8 +155,20 @@ impl Guest {
         let (req_tx, req_rx) = mpsc::channel(500);
 
         let backpressure = SharedBackpressureAmount::new();
+
+        // We have to set limits above `IO_OUTSTANDING_MAX_JOBS/BYTES`:
+        // an `Offline` downstairs must hit that threshold to transition to
+        // `Faulted`, so we can't be IO-limited before that point.
+        let io_limits = IOLimits::new(
+            crate::IO_OUTSTANDING_MAX_JOBS * 3 / 2,
+            crate::IO_OUTSTANDING_MAX_BYTES as usize * 3 / 2,
+        );
+        let io_limits_view = io_limits.view();
+
         let io = GuestIoHandle {
             req_rx,
+
+            io_limits,
 
             backpressure: backpressure.clone(),
             backpressure_config: BackpressureConfig::default(),
@@ -162,6 +178,7 @@ impl Guest {
             req_tx,
 
             block_size: AtomicU64::new(0),
+            io_limits: io_limits_view,
 
             backpressure,
             backpressure_lock: Mutex::new(()),
@@ -382,11 +399,20 @@ impl BlockIO for Guest {
             assert_eq!(chunk.len() as u64 % bs, 0);
 
             let offset_change = chunk.len() as u64 / bs;
+            let io_guard =
+                self.io_limits.claim(chunk.len() as u32).await.map_err(
+                    |e| {
+                        CrucibleError::IoError(format!(
+                            "could not get IO guard for Read: {e:?}"
+                        ))
+                    },
+                )?;
             let (rx, done) = BlockOpWaiter::pair();
             let rio = BlockOp::Read {
                 offset,
                 data: chunk,
                 done,
+                io_guard,
             };
 
             // Our return value always includes the buffer, so we can splice it
@@ -444,6 +470,12 @@ impl BlockIO for Guest {
             assert_eq!(buf.len() as u64 % bs, 0);
             let offset_change = buf.len() as u64 / bs;
 
+            let io_guard =
+                self.io_limits.claim(buf.len() as u32).await.map_err(|e| {
+                    CrucibleError::IoError(format!(
+                        "could not get IO guard for Write: {e:?}"
+                    ))
+                })?;
             self.backpressure_sleep().await?;
 
             let reply = self
@@ -451,6 +483,7 @@ impl BlockIO for Guest {
                     offset,
                     data: buf,
                     done,
+                    io_guard,
                 })
                 .await;
             reply?;
@@ -471,11 +504,18 @@ impl BlockIO for Guest {
             return Ok(());
         }
 
+        let io_guard =
+            self.io_limits.claim(data.len() as u32).await.map_err(|e| {
+                CrucibleError::IoError(format!(
+                    "could not get IO guard for WriteUnwritten: {e:?}"
+                ))
+            })?;
         self.backpressure_sleep().await?;
         self.send_and_wait(|done| BlockOp::WriteUnwritten {
             offset,
             data,
             done,
+            io_guard,
         })
         .await
     }
@@ -484,9 +524,15 @@ impl BlockIO for Guest {
         &self,
         snapshot_details: Option<SnapshotDetails>,
     ) -> Result<(), CrucibleError> {
+        let io_guard = self.io_limits.claim(0).await.map_err(|e| {
+            CrucibleError::IoError(format!(
+                "could not get IO guard for flush: {e:?}"
+            ))
+        })?;
         self.send_and_wait(|done| BlockOp::Flush {
             snapshot_details,
             done,
+            io_guard,
         })
         .await
     }
@@ -543,6 +589,9 @@ pub struct GuestIoHandle {
     /// Queue to receive new blockreqs
     req_rx: mpsc::Receiver<BlockOp>,
 
+    /// IO limiting (shared with the `Guest`)
+    io_limits: IOLimits,
+
     /// Current backpressure (shared with the `Guest`)
     backpressure: SharedBackpressureAmount,
 
@@ -588,6 +637,10 @@ impl GuestIoHandle {
     /// Looks up current backpressure
     pub fn get_backpressure(&self) -> BackpressureAmount {
         self.backpressure.load()
+    }
+
+    pub(crate) fn io_limits(&self) -> &IOLimits {
+        &self.io_limits
     }
 }
 

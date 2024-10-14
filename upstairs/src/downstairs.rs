@@ -11,6 +11,7 @@ use crate::{
     cdt,
     client::{ClientAction, ClientStopReason, DownstairsClient},
     guest::GuestBlockRes,
+    io_limits::{IOLimitGuard, IOLimits},
     live_repair::ExtentInfo,
     stats::DownstairsStatOuter,
     upstairs::{UpstairsConfig, UpstairsState},
@@ -257,6 +258,7 @@ impl Downstairs {
         ds_target: ClientMap<SocketAddr>,
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
         stats: DownstairsStatOuter,
+        io_limits: &IOLimits,
         log: Logger,
     ) -> Self {
         let mut clients = [None, None, None];
@@ -265,6 +267,7 @@ impl Downstairs {
                 i,
                 cfg.clone(),
                 ds_target.get(&i).copied(),
+                io_limits.client_limits(i),
                 log.new(o!("client" => i.get().to_string())),
                 tls_context.clone(),
             ));
@@ -334,7 +337,12 @@ impl Downstairs {
         });
         let stats = DownstairsStatOuter::default();
 
-        let mut ds = Self::new(cfg, ClientMap::new(), None, stats, log);
+        // Build a set of fake IO limits that we won't hit
+        let io_limits = IOLimits::new(u32::MAX as usize, u32::MAX as usize);
+
+        let mut ds =
+            Self::new(cfg, ClientMap::new(), None, stats, &io_limits, log);
+
         // Create a fake repair address so this field is populated.
         for cid in ClientId::iter() {
             ds.clients[cid].repair_addr =
@@ -1108,7 +1116,7 @@ impl Downstairs {
                 // reassignment is handled below.
                 if finished || (repair.aborting_repair && !have_reserved_jobs) {
                     // We're done, submit a final flush!
-                    let flush_id = self.submit_flush(None, None);
+                    let flush_id = self.submit_flush(None, None, None);
 
                     info!(self.log, "LiveRepair final flush submitted");
                     cdt::up__to__ds__flush__start!(|| (flush_id.0));
@@ -1177,7 +1185,7 @@ impl Downstairs {
         let nio = IOop::ExtentLiveNoOp { dependencies: deps };
 
         cdt::gw__noop__start!(|| (noop_id.0));
-        self.enqueue(noop_id, nio, None, ClientMap::new())
+        self.enqueue(noop_id, nio, None, None, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1193,7 +1201,7 @@ impl Downstairs {
 
         cdt::gw__repair__start!(|| (repair_id.0, eid.0));
 
-        self.enqueue(repair_id, repair_io, None, ClientMap::new())
+        self.enqueue(repair_id, repair_io, None, None, None)
     }
 
     fn repair_or_noop(
@@ -1382,7 +1390,7 @@ impl Downstairs {
 
         cdt::gw__reopen__start!(|| (reopen_id.0, eid.0));
 
-        self.enqueue(reopen_id, reopen_io, None, ClientMap::new())
+        self.enqueue(reopen_id, reopen_io, None, None, None)
     }
 
     #[cfg(test)]
@@ -1410,7 +1418,7 @@ impl Downstairs {
             block_size: 512,
         };
 
-        self.enqueue(ds_id, aread, None, ClientMap::new());
+        self.enqueue(ds_id, aread, None, None, None);
         ds_id
     }
 
@@ -1442,6 +1450,7 @@ impl Downstairs {
             request,
             is_write_unwritten,
             ClientData::from_fn(|_| BackpressureGuard::dummy()),
+            IOLimitGuard::dummy(),
         )
     }
 
@@ -1451,6 +1460,7 @@ impl Downstairs {
         write: RawWrite,
         is_write_unwritten: bool,
         bp_guard: ClientData<BackpressureGuard>,
+        io_guard: IOLimitGuard,
     ) -> JobId {
         let ds_id = self.next_id();
         if is_write_unwritten {
@@ -1493,7 +1503,8 @@ impl Downstairs {
             ds_id,
             awrite,
             Some(GuestBlockRes::Acked), // writes are always acked
-            bp_guard.into(),
+            Some(bp_guard),
+            Some(io_guard),
         );
         ds_id
     }
@@ -1523,7 +1534,7 @@ impl Downstairs {
         let close_io = self.create_close_io(eid, deps, repair.to_vec());
 
         cdt::gw__close__start!(|| (close_id.0, eid.0));
-        self.enqueue(close_id, close_io, None, ClientMap::new())
+        self.enqueue(close_id, close_io, None, None, None)
     }
 
     /// Get the repair IDs and dependencies for this extent.
@@ -1874,6 +1885,7 @@ impl Downstairs {
         &mut self,
         snapshot_details: Option<SnapshotDetails>,
         res: Option<BlockRes>,
+        io_guard: Option<IOLimitGuard>,
     ) -> JobId {
         let next_id = self.next_id();
         cdt::gw__flush__start!(|| (next_id.0));
@@ -1906,7 +1918,8 @@ impl Downstairs {
             next_id,
             flush,
             res.map(GuestBlockRes::Other),
-            ClientMap::new(),
+            None,
+            io_guard,
         );
         next_id
     }
@@ -1921,12 +1934,7 @@ impl Downstairs {
         let dependencies = self.ds_active.deps_for_flush(next_id);
         debug!(self.log, "IO Barrier {next_id} has deps {dependencies:?}");
 
-        self.enqueue(
-            next_id,
-            IOop::Barrier { dependencies },
-            None,
-            ClientMap::new(),
-        );
+        self.enqueue(next_id, IOop::Barrier { dependencies }, None, None, None);
         next_id
     }
 
@@ -2005,6 +2013,7 @@ impl Downstairs {
         blocks: ImpactedBlocks,
         data: Buffer,
         res: BlockRes<Buffer, (Buffer, CrucibleError)>,
+        io_guard: IOLimitGuard,
     ) -> JobId {
         // If there is a live-repair in progress that intersects with this read,
         // then reserve job IDs for those jobs.  We must do this before
@@ -2034,7 +2043,7 @@ impl Downstairs {
         };
 
         let res = GuestBlockRes::Read(data, res);
-        self.enqueue(ds_id, aread, Some(res), ClientMap::new());
+        self.enqueue(ds_id, aread, Some(res), None, Some(io_guard));
 
         ds_id
     }
@@ -2045,6 +2054,7 @@ impl Downstairs {
         write: RawWrite,
         is_write_unwritten: bool,
         backpressure_guard: ClientData<BackpressureGuard>,
+        io_guard: IOLimitGuard,
     ) -> JobId {
         // If there is a live-repair in progress that intersects with this read,
         // then reserve job IDs for those jobs.
@@ -2055,6 +2065,7 @@ impl Downstairs {
             write,
             is_write_unwritten,
             backpressure_guard,
+            io_guard,
         )
     }
 
@@ -2107,14 +2118,28 @@ impl Downstairs {
         ds_id: JobId,
         io: IOop,
         res: Option<GuestBlockRes>,
-        mut bp_guard: ClientMap<BackpressureGuard>,
+        bp_guard: Option<ClientData<BackpressureGuard>>,
+        io_limits: Option<IOLimitGuard>,
     ) {
         let mut skipped = 0;
         let last_repair_extent = self.last_repair_extent();
 
+        let mut io_limits = io_limits
+            .map(ClientMap::from)
+            .unwrap_or_else(ClientMap::new);
+        let mut bp_guard =
+            bp_guard.map(ClientMap::from).unwrap_or_else(ClientMap::new);
+
         // Send the job to each client!
         let state = ClientData::from_fn(|cid| {
             let client = &mut self.clients[cid];
+
+            // There's an awkward asymmetry here:
+            //
+            // - `bp_guard` is unpopulated (except for writes), and should be
+            //   filled in if we're not skipping the IO.
+            // - `io_guard` is always populated (except for purely internal IO),
+            //   and guards should be **removed** if we're skipping the IO
             if client.enqueue(ds_id, &io, last_repair_extent) {
                 // Update the per-client backpressure guard
                 if !bp_guard.contains(&cid) {
@@ -2124,6 +2149,7 @@ impl Downstairs {
                 self.send(ds_id, io.clone(), cid);
                 IOState::InProgress
             } else {
+                let _ = io_limits.take(&cid);
                 skipped += 1;
                 IOState::Skipped
             }
@@ -2150,6 +2176,7 @@ impl Downstairs {
                 data: None,
                 read_validations: vec![],
                 backpressure_guard: bp_guard,
+                io_limits,
             },
         );
         if acked {
@@ -3450,6 +3477,7 @@ impl Downstairs {
             },
             is_write_unwritten,
             ClientData::from_fn(|_| BackpressureGuard::dummy()),
+            IOLimitGuard::dummy(),
         )
     }
 
@@ -3480,7 +3508,7 @@ impl Downstairs {
         let ddef = self.ddef.as_ref().unwrap();
         let block_count = blocks.blocks(ddef).len();
         let buf = Buffer::new(block_count, ddef.block_size() as usize);
-        self.submit_read(blocks, buf, BlockRes::dummy())
+        self.submit_read(blocks, buf, BlockRes::dummy(), IOLimitGuard::dummy())
     }
 
     /// Create a test downstairs which has all clients Active
@@ -4328,7 +4356,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
         ds.force_active();
 
-        let next_id = ds.submit_flush(None, None);
+        let next_id = ds.submit_flush(None, None, None);
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -4375,6 +4403,7 @@ pub(crate) mod test {
                 snapshot_name: String::from("snap"),
             }),
             None,
+            None,
         );
 
         assert!(!ds.process_ds_completion(
@@ -4420,7 +4449,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
         ds.force_active();
 
-        let next_id = ds.submit_flush(None, None);
+        let next_id = ds.submit_flush(None, None, None);
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -4466,7 +4495,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
         ds.force_active();
 
-        let next_id = ds.submit_flush(None, None);
+        let next_id = ds.submit_flush(None, None, None);
 
         assert!(!ds.process_ds_completion(
             next_id,
@@ -4862,7 +4891,7 @@ pub(crate) mod test {
         assert!(ds.retired_ids.is_empty());
 
         // Create the flush and send it to the downstairs
-        let flush_id = ds.submit_flush(None, None);
+        let flush_id = ds.submit_flush(None, None, None);
 
         // Simulate completing the flush to downstairs 0 and 1
         assert!(!ds.process_ds_completion(
@@ -5078,7 +5107,7 @@ pub(crate) mod test {
 
         // A flush is required to move work to completed
         // Create the flush then send it to all downstairs.
-        let next_id = ds.submit_flush(None, None);
+        let next_id = ds.submit_flush(None, None, None);
 
         // Complete the Flush at each downstairs.
         assert!(!ds.process_ds_completion(
@@ -5144,7 +5173,7 @@ pub(crate) mod test {
 
         // A flush is required to move work to completed
         // Create the flush then send it to all downstairs.
-        let next_id = ds.submit_flush(None, None);
+        let next_id = ds.submit_flush(None, None, None);
 
         // Send and complete the Flush at each downstairs.
         for cid in ClientId::iter() {
@@ -5221,7 +5250,7 @@ pub(crate) mod test {
         assert!(ds.retired_ids.is_empty());
 
         // Create the flush IO
-        let next_id = ds.submit_flush(None, None);
+        let next_id = ds.submit_flush(None, None, None);
 
         // Complete the flush on all three downstairs.
         assert!(!ds.process_ds_completion(
@@ -5316,7 +5345,7 @@ pub(crate) mod test {
         assert!(ds.retired_ids.is_empty());
 
         // Create and send the flush.
-        let flush_id = ds.submit_flush(None, None);
+        let flush_id = ds.submit_flush(None, None, None);
 
         // Complete the flush on those downstairs.
         assert!(!ds.process_ds_completion(
@@ -6590,7 +6619,7 @@ pub(crate) mod test {
 
         // Create a flush, enqueue it on both the downstairs
         // and the guest work queues.
-        let next_id = ds.submit_flush(None, None);
+        let next_id = ds.submit_flush(None, None, None);
 
         let response = || Ok(Default::default());
         ds.process_ds_completion(
@@ -6636,7 +6665,7 @@ pub(crate) mod test {
 
         // Create a flush, enqueue it on both the downstairs
         // and the guest work queues.
-        let next_id = ds.submit_flush(None, None);
+        let next_id = ds.submit_flush(None, None, None);
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(0),
@@ -6670,7 +6699,7 @@ pub(crate) mod test {
 
         // Create a flush, enqueue it on both the downstairs
         // and the guest work queues.
-        let next_id = ds.submit_flush(None, None);
+        let next_id = ds.submit_flush(None, None, None);
 
         // DS 1 has a failure, and this won't return true as we don't
         // have enough success yet to ACK to the guest.
@@ -6858,7 +6887,7 @@ pub(crate) mod test {
 
         // Perform the flush.
         let next_id = {
-            let next_id = ds.submit_flush(None, None);
+            let next_id = ds.submit_flush(None, None, None);
 
             // As this DS is failed, it should have been skipped
             assert_eq!(
@@ -7085,7 +7114,7 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(2)].skipped_jobs.len(), 0);
 
         // Enqueue the flush.
-        let flush_id = ds.submit_flush(None, None);
+        let flush_id = ds.submit_flush(None, None, None);
 
         assert_eq!(
             ds.job_states(flush_id),
@@ -7527,7 +7556,7 @@ pub(crate) mod test {
         let read_one = ds.create_and_enqueue_generic_read_eob();
 
         // Finally, add a flush
-        let flush_one = ds.submit_flush(None, None);
+        let flush_one = ds.submit_flush(None, None, None);
 
         let job = ds.ds_active.get(&write_one).unwrap();
         assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
@@ -7653,7 +7682,7 @@ pub(crate) mod test {
         let read_one = ds.create_and_enqueue_generic_read_eob();
 
         // Finally, add a flush
-        let flush_one = ds.submit_flush(None, None);
+        let flush_one = ds.submit_flush(None, None, None);
 
         let job = ds.ds_active.get(&write_one).unwrap();
         assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
@@ -7837,7 +7866,7 @@ pub(crate) mod test {
         }
 
         // Create a flush.
-        let flush_one = ds.submit_flush(None, None);
+        let flush_one = ds.submit_flush(None, None, None);
         let job = ds.ds_active.get(&flush_one).unwrap();
         assert_eq!(job.state[ClientId::new(0)], IOState::Skipped);
         assert_eq!(job.state[ClientId::new(1)], IOState::Skipped);
@@ -7890,7 +7919,7 @@ pub(crate) mod test {
         let write_one = ds.create_and_enqueue_generic_write_eob(false);
 
         // Create a flush
-        let flush_one = ds.submit_flush(None, None);
+        let flush_one = ds.submit_flush(None, None, None);
         // Verify all jobs can be acked (or should have been fast-acked)
         let write_job = ds.ds_active.get(&write_one).unwrap();
         assert!(write_job.acked);
@@ -7949,12 +7978,12 @@ pub(crate) mod test {
         // Create a read, write, flush
         let read_one = ds.create_and_enqueue_generic_read_eob();
         let write_one = ds.create_and_enqueue_generic_write_eob(false);
-        let flush_one = ds.submit_flush(None, None);
+        let flush_one = ds.submit_flush(None, None, None);
 
         // Create more IOs.
         let _read_two = ds.create_and_enqueue_generic_read_eob();
         let _write_two = ds.create_and_enqueue_generic_write_eob(false);
-        let _flush_two = ds.submit_flush(None, None);
+        let _flush_two = ds.submit_flush(None, None, None);
 
         // Six jobs have been skipped.
         for cid in ClientId::iter() {
@@ -8889,7 +8918,7 @@ pub(crate) mod test {
 
         let read_id = ds.submit_read_block(eid, BlockOffset(0));
         let write_id = ds.submit_test_write_block(eid, BlockOffset(1), false);
-        let flush_id = ds.submit_flush(None, None);
+        let flush_id = ds.submit_flush(None, None, None);
 
         let repair_ids = create_and_enqueue_repair_ops(&mut ds, eid);
 
@@ -9006,7 +9035,7 @@ pub(crate) mod test {
         let eid = ExtentId(1);
 
         let repair_ids = create_and_enqueue_repair_ops(&mut ds, eid);
-        let flush_id = ds.submit_flush(None, None);
+        let flush_id = ds.submit_flush(None, None, None);
 
         assert_eq!(ds.ds_active.len(), 5);
 
@@ -9086,9 +9115,9 @@ pub(crate) mod test {
 
         let mut ds = Downstairs::repair_test_one_repair();
 
-        let flush_id1 = ds.submit_flush(None, None);
+        let flush_id1 = ds.submit_flush(None, None, None);
         let repair_ids = create_and_enqueue_repair_ops(&mut ds, ExtentId(1));
-        let flush_id2 = ds.submit_flush(None, None);
+        let flush_id2 = ds.submit_flush(None, None, None);
 
         assert_eq!(ds.ds_active.len(), 6);
 
@@ -9121,7 +9150,7 @@ pub(crate) mod test {
 
         let repair_ids1 = create_and_enqueue_repair_ops(&mut ds, ExtentId(0));
 
-        let flush_id = ds.submit_flush(None, None);
+        let flush_id = ds.submit_flush(None, None, None);
 
         let repair_ids2 = create_and_enqueue_repair_ops(&mut ds, ExtentId(1));
 
@@ -9614,7 +9643,7 @@ pub(crate) mod test {
 
         let read_id = ds.submit_read_block(ExtentId(0), BlockOffset(1));
 
-        let flush_id = ds.submit_flush(None, None);
+        let flush_id = ds.submit_flush(None, None, None);
 
         assert_eq!(ds.ds_active.len(), 3);
 
@@ -9801,7 +9830,7 @@ pub(crate) mod test {
             },
         });
 
-        let flush_id = ds.submit_flush(None, None);
+        let flush_id = ds.submit_flush(None, None, None);
 
         assert_eq!(ds.ds_active.len(), 1);
         assert!(ds.get_deps(flush_id).is_empty());

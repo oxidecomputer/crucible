@@ -87,6 +87,7 @@ mod upstairs;
 use upstairs::{UpCounters, UpstairsAction};
 
 mod io_limits;
+use io_limits::IOLimitGuard;
 
 /// Max number of write bytes between the upstairs and an offline downstairs
 ///
@@ -435,6 +436,11 @@ impl<T> ClientData<T> {
             f(ClientId::new(1)),
             f(ClientId::new(2)),
         ])
+    }
+
+    /// Builds a new `ClientData` by applying a function to each item
+    pub fn map<U, F: FnMut(T) -> U>(self, f: F) -> ClientData<U> {
+        ClientData(self.0.map(f))
     }
 
     #[cfg(test)]
@@ -968,6 +974,8 @@ struct DownstairsIO {
     /// Each of these guard handles will automatically decrement the
     /// backpressure count for their respective Downstairs when dropped.
     backpressure_guard: ClientMap<BackpressureGuard>,
+
+    io_limits: ClientMap<io_limits::ClientIOLimitGuard>,
 }
 
 impl DownstairsIO {
@@ -1534,20 +1542,24 @@ pub(crate) enum BlockOp {
         offset: BlockIndex,
         data: Buffer,
         done: BlockRes<Buffer, (Buffer, CrucibleError)>,
+        io_guard: IOLimitGuard,
     },
     Write {
         offset: BlockIndex,
         data: BytesMut,
         done: BlockRes,
+        io_guard: IOLimitGuard,
     },
     WriteUnwritten {
         offset: BlockIndex,
         data: BytesMut,
         done: BlockRes,
+        io_guard: IOLimitGuard,
     },
     Flush {
         snapshot_details: Option<SnapshotDetails>,
         done: BlockRes,
+        io_guard: IOLimitGuard,
     },
     GoActive {
         done: BlockRes,
@@ -1658,6 +1670,7 @@ async fn test_return_iops() {
         offset: BlockIndex(1),
         data: Buffer::new(1, 512),
         done: BlockOpWaiter::pair().1,
+        io_guard: IOLimitGuard::dummy(),
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
@@ -1665,6 +1678,7 @@ async fn test_return_iops() {
         offset: BlockIndex(1),
         data: Buffer::new(8, 512), // 4096 bytes
         done: BlockOpWaiter::pair().1,
+        io_guard: IOLimitGuard::dummy(),
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
@@ -1672,6 +1686,7 @@ async fn test_return_iops() {
         offset: BlockIndex(1),
         data: Buffer::new(31, 512), // 15872 bytes < 16000
         done: BlockOpWaiter::pair().1,
+        io_guard: IOLimitGuard::dummy(),
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
 
@@ -1679,6 +1694,7 @@ async fn test_return_iops() {
         offset: BlockIndex(1),
         data: Buffer::new(32, 512), // 16384 bytes > 16000
         done: BlockOpWaiter::pair().1,
+        io_guard: IOLimitGuard::dummy(),
     };
     assert_eq!(op.iops(IOP_SZ).unwrap(), 2);
 }

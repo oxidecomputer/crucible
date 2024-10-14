@@ -1,9 +1,10 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
     backpressure::BackpressureCounters, cdt, integrity_hash,
-    live_repair::ExtentInfo, upstairs::UpstairsConfig, upstairs::UpstairsState,
-    ClientIOStateCount, ClientId, CrucibleDecoder, CrucibleError, DownstairsIO,
-    DsState, EncryptionContext, IOState, IOop, JobId, Message, RawReadResponse,
+    io_limits::ClientIOLimits, live_repair::ExtentInfo,
+    upstairs::UpstairsConfig, upstairs::UpstairsState, ClientIOStateCount,
+    ClientId, CrucibleDecoder, CrucibleError, DownstairsIO, DsState,
+    EncryptionContext, IOState, IOop, JobId, Message, RawReadResponse,
     ReconcileIO, ReconcileIOState, RegionDefinitionStatus, RegionMetadata,
     Validation,
 };
@@ -130,6 +131,9 @@ pub(crate) struct DownstairsClient {
     /// backpressure.
     pub(crate) backpressure_counters: BackpressureCounters,
 
+    /// Absolute IO limits for this client
+    io_limits: ClientIOLimits,
+
     /// UUID for this downstairs region
     ///
     /// Unpopulated until provided by `Message::RegionInfo`
@@ -202,6 +206,7 @@ impl DownstairsClient {
         client_id: ClientId,
         cfg: Arc<UpstairsConfig>,
         target_addr: Option<SocketAddr>,
+        io_limits: ClientIOLimits,
         log: Logger,
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     ) -> Self {
@@ -218,6 +223,7 @@ impl DownstairsClient {
                 &log,
             ),
             client_id,
+            io_limits,
             region_uuid: None,
             needs_replay: false,
             negotiation_state: NegotiationState::Start,
@@ -258,6 +264,10 @@ impl DownstairsClient {
             cfg,
             client_task: Self::new_dummy_task(false),
             client_id: ClientId::new(0),
+            io_limits: ClientIOLimits::new(
+                crate::IO_OUTSTANDING_MAX_JOBS * 3 / 2,
+                crate::IO_OUTSTANDING_MAX_BYTES as usize * 3 / 2,
+            ),
             region_uuid: None,
             needs_replay: false,
             negotiation_state: NegotiationState::Start,
@@ -361,9 +371,10 @@ impl DownstairsClient {
         // Update our bytes-in-flight counter
         if was_running && !is_running {
             // Because the job is no longer running, it shouldn't count for
-            // backpressure.  Remove the backpressure guard for this client,
-            // which decrements backpressure counters on drop.
+            // backpressure or IO limits.  Remove the backpressure guard for
+            // this client, which decrements backpressure counters on drop.
             job.backpressure_guard.take(&self.client_id);
+            job.io_limits.take(&self.client_id);
         } else if is_running
             && !was_running
             && !job.backpressure_guard.contains(&self.client_id)
@@ -374,6 +385,20 @@ impl DownstairsClient {
                 self.client_id,
                 self.backpressure_counters.increment(&job.work),
             );
+            match self.io_limits.try_claim(job.work.job_bytes() as u32) {
+                Ok(g) => {
+                    job.io_limits.insert(self.client_id, g);
+                }
+                Err(e) => {
+                    // We can't handle the case of "running out of permits
+                    // during replay", because waiting for a permit would
+                    // deadlock the worker task.  Log the error and continue.
+                    warn!(
+                        self.log,
+                        "could not claim IO permits when replaying job: {e:?}"
+                    )
+                }
+            }
         }
 
         old_state
