@@ -1964,8 +1964,8 @@ impl Downstairs {
             .max()
             .unwrap();
 
-        max_jobs as u64 > crate::IO_CACHED_MAX_JOBS
-            || max_bytes > crate::IO_CACHED_MAX_BYTES
+        max_jobs as u64 >= crate::IO_CACHED_MAX_JOBS
+            || max_bytes >= crate::IO_CACHED_MAX_BYTES
     }
 
     pub(crate) fn submit_barrier(&mut self) -> JobId {
@@ -2735,7 +2735,8 @@ impl Downstairs {
                 // Update our barrier count for the removed job
                 if matches!(job.work, IOop::Flush { .. } | IOop::Barrier { .. })
                 {
-                    self.pending_barrier.checked_sub(1).unwrap();
+                    self.pending_barrier =
+                        self.pending_barrier.checked_sub(1).unwrap();
                 }
 
                 // Jobs should have their backpressure contribution removed when
