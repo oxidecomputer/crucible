@@ -2343,7 +2343,7 @@ async fn replace_while_reconcile(
     info!(log, "Begin replacement while reconciliation test");
     loop {
         info!(log, "[{c}] Touch every extent part 1");
-        fill_sparse_workload(&volume, ri).await?;
+        fill_sparse_workload(volume, ri).await?;
 
         info!(log, "[{c}] Stop a downstairs");
         // Stop a downstairs, wait for dsc to confirm it is stopped.
@@ -2357,7 +2357,7 @@ async fn replace_while_reconcile(
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
         info!(log, "[{c}] Touch every extent part 2");
-        fill_sparse_workload(&volume, ri).await?;
+        fill_sparse_workload(volume, ri).await?;
 
         info!(log, "[{c}] Deactivate");
         volume.deactivate().await.unwrap();
@@ -2541,7 +2541,7 @@ async fn replace_before_active(
     let mut new_ds = targets.len() - 1;
     for c in 1.. {
         info!(log, "[{c}] Touch every extent");
-        fill_sparse_workload(&volume, ri).await?;
+        fill_sparse_workload(volume, ri).await?;
 
         volume.deactivate().await.unwrap();
         loop {
@@ -2692,7 +2692,7 @@ async fn replace_workload(
     let ds_total = targets.len() - 1;
 
     if fill {
-        fill_sparse_workload(&volume, ri).await?;
+        fill_sparse_workload(volume, ri).await?;
     }
     // Make a copy of the stop at counter if one was provided so the
     // IO task and the replace task don't have to share wtq
