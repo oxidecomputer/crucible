@@ -18,7 +18,7 @@ fn handle_nbd_client<T: crucible::BlockIO>(
     cpf: &mut crucible::CruciblePseudoFile<T>,
     mut stream: NetTcpStream,
 ) -> Result<()> {
-    let e = Export {
+    let e: Export<()> = Export {
         size: cpf.sz(),
         readonly: false,
         ..Default::default()

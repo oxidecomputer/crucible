@@ -487,6 +487,7 @@ pub struct MockSmfInstance {
     inner: Arc<Mutex<MockSmfInstanceInner>>,
 }
 
+#[cfg(test)]
 impl MockSmfInstance {
     pub fn new(name: String, fmri: String) -> MockSmfInstance {
         MockSmfInstance {

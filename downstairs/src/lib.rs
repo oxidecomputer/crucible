@@ -893,7 +893,7 @@ struct ConnectionData {
     repair_addr: SocketAddr,
 
     /// Token used to cancel the IO tasks
-    #[allow(unused)]
+    #[expect(unused)]
     cancel: tokio_util::sync::DropGuard,
 
     /// IO channel to the reply task

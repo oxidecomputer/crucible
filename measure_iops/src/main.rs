@@ -133,11 +133,7 @@ async fn main() -> Result<()> {
         bsz as usize
     };
 
-    let io_depth = if let Some(io_depth) = opt.io_depth {
-        io_depth
-    } else {
-        1
-    };
+    let io_depth = opt.io_depth.unwrap_or(1);
 
     let mut io_operations_sent = 0;
     let mut bw_consumed = 0;
