@@ -63,8 +63,8 @@ pub use mend::{DownstairsMend, ExtentFix, RegionMetadata};
 pub use pseudo_file::CruciblePseudoFile;
 
 pub(crate) mod guest;
-use guest::GuestIoHandle;
 pub use guest::{Guest, WQCounts};
+use guest::{GuestBlockRes, GuestIoHandle};
 
 mod stats;
 
@@ -938,6 +938,9 @@ struct DownstairsIO {
 
     /// Map of work status, tracked on a per-client basis
     state: ClientData<IOState>,
+
+    /// Reply handle to send data back to the guest
+    res: Option<GuestBlockRes>,
 
     /*
      * Has this been acked to the guest yet?
