@@ -91,15 +91,15 @@ async fn main() -> Result<()> {
         read_only: false,
     };
 
-    let (guest, mut io) = Guest::new(None);
+    let (guest, io) = Guest::new(None);
     let guest = Arc::new(guest);
 
-    if let Some(iop_limit) = opt.iop_limit {
-        io.set_iop_limit(16 * 1024 * 1024, iop_limit);
+    if let Some(_iop_limit) = opt.iop_limit {
+        bail!("IOP limit is not implemented"); // XXX fix this once implemented
     }
 
-    if let Some(bw_limit) = opt.bw_limit_in_bytes {
-        io.set_bw_limit(bw_limit);
+    if let Some(_bw_limit) = opt.bw_limit_in_bytes {
+        bail!("BW limit is not implemented"); // XXX fix this once implemented
     }
 
     let guest = Arc::new(guest);
