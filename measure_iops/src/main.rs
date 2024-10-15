@@ -95,11 +95,19 @@ async fn main() -> Result<()> {
     let guest = Arc::new(guest);
 
     if let Some(_iop_limit) = opt.iop_limit {
-        bail!("IOP limit is not implemented"); // XXX fix this once implemented
+        // XXX fix this once implemented
+        return Err(CrucibleError::Unsupported(
+            "IOP limit is not implemented".to_owned(),
+        )
+        .into());
     }
 
     if let Some(_bw_limit) = opt.bw_limit_in_bytes {
-        bail!("BW limit is not implemented"); // XXX fix this once implemented
+        // XXX fix this once implemented
+        return Err(CrucibleError::Unsupported(
+            "Bandwidth limit is not implemented".to_owned(),
+        )
+        .into());
     }
 
     let guest = Arc::new(guest);
