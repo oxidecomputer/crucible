@@ -94,6 +94,13 @@ pub(crate) struct Downstairs {
     /// buffered (i.e. none have been retired by a `Barrier` operation).
     can_replay: bool,
 
+    /// How many `Flush` or `Barrier` operations are pending?
+    ///
+    /// We only want to send a `Barrier` if there isn't already one pending, so
+    /// we track it here (incrementing in `submit_flush` / `submit_barrier` and
+    /// decrementing in `retire_check`).
+    pending_barrier: usize,
+
     /// Ringbuf of recently acked job IDs.
     acked_ids: AllocRingBuffer<JobId>,
 
@@ -298,6 +305,7 @@ impl Downstairs {
             cfg,
             next_flush: 0,
             can_replay: true,
+            pending_barrier: 0,
             ds_active: ActiveJobs::new(),
             gw_active: HashSet::new(),
             acked_ids: AllocRingBuffer::new(2048),
@@ -1909,6 +1917,7 @@ impl Downstairs {
             extent_limit: extent_under_repair,
         };
 
+        self.pending_barrier += 1;
         self.enqueue(
             next_id,
             flush,
@@ -1916,6 +1925,47 @@ impl Downstairs {
             ClientMap::new(),
         );
         next_id
+    }
+
+    /// Checks to see whether a `Barrier` operation is needed
+    ///
+    /// A `Barrier` is needed if we have buffered more than
+    /// `IO_CACHED_MAX_BYTES/JOBS` worth of complete jobs, and there are no
+    /// other barrier (or flush) operations in flight
+    pub(crate) fn needs_barrier(&self) -> bool {
+        if self.pending_barrier > 0 {
+            return false;
+        }
+
+        // n.b. This may not be 100% reliable: if different Downstairs have
+        // finished a different subset of jobs, then it's theoretically possible
+        // for each DownstairsClient to be under our limits, but for the true
+        // number of cached bytes/jobs to be over the limits.
+        //
+        // It's hard to imagine how we could encounter such a situation, given
+        // job dependencies and no out-of-order execution, so this is more of a
+        // "fun fact" and less an actual concern.
+        let max_jobs = self
+            .clients
+            .iter()
+            .map(|c| {
+                let i = c.io_state_job_count();
+                i.skipped + i.done + i.error
+            })
+            .max()
+            .unwrap();
+        let max_bytes = self
+            .clients
+            .iter()
+            .map(|c| {
+                let i = c.io_state_byte_count();
+                i.skipped + i.done + i.error
+            })
+            .max()
+            .unwrap();
+
+        max_jobs as u64 > crate::IO_CACHED_MAX_JOBS
+            || max_bytes > crate::IO_CACHED_MAX_BYTES
     }
 
     pub(crate) fn submit_barrier(&mut self) -> JobId {
@@ -1928,6 +1978,7 @@ impl Downstairs {
         let dependencies = self.ds_active.deps_for_flush(next_id);
         debug!(self.log, "IO Barrier {next_id} has deps {dependencies:?}");
 
+        self.pending_barrier += 1;
         self.enqueue(
             next_id,
             IOop::Barrier { dependencies },
@@ -2674,12 +2725,18 @@ impl Downstairs {
                 let summary = job.io_summarize(id);
                 self.retired_jobs.push(summary);
                 for cid in ClientId::iter() {
-                    self.clients[cid].retire_job(&job);
+                    self.clients[cid].retire_job(job);
                 }
             }
             // Now that we've collected jobs to retire, remove them from the map
             for &id in &retired {
                 let job = self.ds_active.remove(&id);
+
+                // Update our barrier count for the removed job
+                if matches!(job.work, IOop::Flush { .. } | IOop::Barrier { .. })
+                {
+                    self.pending_barrier.checked_sub(1).unwrap();
+                }
 
                 // Jobs should have their backpressure contribution removed when
                 // they are completed (in `process_io_completion_inner`),

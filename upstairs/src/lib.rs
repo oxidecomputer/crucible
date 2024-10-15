@@ -96,7 +96,19 @@ const IO_OUTSTANDING_MAX_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
 ///
 /// If we exceed this value, the upstairs will give up and mark that offline
 /// downstairs as faulted.
-pub const IO_OUTSTANDING_MAX_JOBS: usize = 10000;
+const IO_OUTSTANDING_MAX_JOBS: usize = 10000;
+
+/// Maximum of bytes to cache from complete (but un-flushed) IO
+///
+/// Caching complete jobs allows us to replay them if a Downstairs goes offline
+/// them comes back.
+const IO_CACHED_MAX_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
+
+/// Maximum of jobs to cache from complete (but un-flushed) IO
+///
+/// Caching complete jobs allows us to replay them if a Downstairs goes offline
+/// them comes back.
+const IO_CACHED_MAX_JOBS: u64 = 10000;
 
 /// The BlockIO trait behaves like a physical NVMe disk (or a virtio virtual
 /// disk): there is no contract about what order operations that are submitted
@@ -306,7 +318,6 @@ mod cdt {
     fn up__action_deferred_message(_: u64) {}
     fn up__action_leak_check(_: u64) {}
     fn up__action_flush_check(_: u64) {}
-    fn up__action_barrier_check(_: u64) {}
     fn up__action_stat_check(_: u64) {}
     fn up__action_repair_check(_: u64) {}
     fn up__action_control_check(_: u64) {}
