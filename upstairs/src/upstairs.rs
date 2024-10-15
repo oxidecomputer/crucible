@@ -569,7 +569,7 @@ impl Upstairs {
                     .counters
                     .action_leak_check));
                 const LEAK_MS: usize = 1000;
-                self.guest.leak_check(LEAK_MS);
+                // XXX Leak check is currently not implemented
                 let leak_tick =
                     tokio::time::Duration::from_millis(LEAK_MS as u64);
                 self.leak_deadline =

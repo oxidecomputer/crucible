@@ -1627,6 +1627,7 @@ macro_rules! ceiling_div {
     };
 }
 
+#[allow(unused)] // pending IOP limits being reimplemented
 impl BlockOp {
     /*
      * Compute number of IO operations represented by this BlockOp, rounding
