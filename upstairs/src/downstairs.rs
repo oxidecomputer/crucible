@@ -2671,8 +2671,7 @@ impl Downstairs {
                 let summary = job.io_summarize(id);
                 self.completed_jobs.push(summary);
                 for cid in ClientId::iter() {
-                    let old_state = &job.state[cid];
-                    self.clients[cid].io_state_count.decr(old_state);
+                    self.clients[cid].retire_job(&job);
                 }
             }
             // Now that we've collected jobs to retire, remove them from the map
@@ -2803,7 +2802,7 @@ impl Downstairs {
     }
 
     pub fn io_state_count(&self) -> IOStateCount {
-        let d = self.collect_stats(|c| c.io_state_count);
+        let d = self.collect_stats(|c| c.io_state_count());
         let f = |g: fn(ClientIOStateCount) -> u32| {
             ClientData([g(d[0]), g(d[1]), g(d[2])])
         };

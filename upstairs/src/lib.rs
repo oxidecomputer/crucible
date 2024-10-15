@@ -1423,36 +1423,30 @@ impl fmt::Display for IOState {
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
-pub struct ClientIOStateCount {
-    pub new: u32,
-    pub in_progress: u32,
-    pub done: u32,
-    pub skipped: u32,
-    pub error: u32,
+#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize)]
+pub struct ClientIOStateCount<T = u32> {
+    pub new: T,
+    pub in_progress: T,
+    pub done: T,
+    pub skipped: T,
+    pub error: T,
 }
 
-impl ClientIOStateCount {
-    fn new() -> ClientIOStateCount {
-        ClientIOStateCount {
-            new: 0,
-            in_progress: 0,
-            done: 0,
-            skipped: 0,
-            error: 0,
+impl std::ops::Index<&IOState> for ClientIOStateCount {
+    type Output = u32;
+    fn index(&self, index: &IOState) -> &Self::Output {
+        match index {
+            IOState::InProgress => &self.in_progress,
+            IOState::Done => &self.done,
+            IOState::Skipped => &self.skipped,
+            IOState::Error(_) => &self.error,
         }
     }
+}
 
-    pub fn incr(&mut self, state: &IOState) {
-        *self.get_mut(state) += 1;
-    }
-
-    pub fn decr(&mut self, state: &IOState) {
-        *self.get_mut(state) -= 1;
-    }
-
-    fn get_mut(&mut self, state: &IOState) -> &mut u32 {
-        match state {
+impl std::ops::IndexMut<&IOState> for ClientIOStateCount {
+    fn index_mut(&mut self, index: &IOState) -> &mut Self::Output {
+        match index {
             IOState::InProgress => &mut self.in_progress,
             IOState::Done => &mut self.done,
             IOState::Skipped => &mut self.skipped,

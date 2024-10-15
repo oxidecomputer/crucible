@@ -119,7 +119,7 @@ pub(crate) struct DownstairsClient {
     client_task: ClientTaskHandle,
 
     /// IO state counters
-    pub(crate) io_state_count: ClientIOStateCount,
+    io_state_count: ClientIOStateCount,
 
     /// Jobs, write bytes, and total IO bytes in this client's queue
     ///
@@ -229,7 +229,7 @@ impl DownstairsClient {
             skipped_jobs: BTreeSet::new(),
             region_metadata: None,
             repair_info: None,
-            io_state_count: ClientIOStateCount::new(),
+            io_state_count: ClientIOStateCount::default(),
             backpressure_counters: BackpressureCounters::new(),
             connection_id: ConnectionId(0),
             client_delay_us,
@@ -268,7 +268,7 @@ impl DownstairsClient {
             skipped_jobs: BTreeSet::new(),
             region_metadata: None,
             repair_info: None,
-            io_state_count: ClientIOStateCount::new(),
+            io_state_count: ClientIOStateCount::default(),
             backpressure_counters: BackpressureCounters::new(),
             connection_id: ConnectionId(0),
             client_delay_us,
@@ -346,10 +346,10 @@ impl DownstairsClient {
         new_state: IOState,
     ) -> IOState {
         let is_running = matches!(new_state, IOState::InProgress);
-        self.io_state_count.incr(&new_state);
+        self.io_state_count[&new_state] += 1;
         let old_state = job.state.insert(self.client_id, new_state);
         let was_running = matches!(old_state, IOState::InProgress);
-        self.io_state_count.decr(&old_state);
+        self.io_state_count[&old_state] -= 1;
 
         // Update our bytes-in-flight counter
         if was_running && !is_running {
@@ -370,6 +370,16 @@ impl DownstairsClient {
         }
 
         old_state
+    }
+
+    /// Retire a job state, handling `io_state_count` counters
+    pub(crate) fn retire_job(&mut self, job: &DownstairsIO) {
+        self.io_state_count[&job.state[self.client_id]] -= 1;
+    }
+
+    /// Returns the current IO state counters
+    pub(crate) fn io_state_count(&self) -> ClientIOStateCount {
+        self.io_state_count
     }
 
     /// Returns a client-specialized copy of the job's `IOop`
@@ -901,12 +911,12 @@ impl DownstairsClient {
             self.skipped_jobs.insert(ds_id);
         }
 
-        // Update our backpressure guard if we're going to send this job
-        self.io_state_count.incr(if should_send {
+        // Update our state counters based on the job state
+        self.io_state_count[if should_send {
             &IOState::InProgress
         } else {
             &IOState::Skipped
-        });
+        }] += 1;
         should_send
     }
 
