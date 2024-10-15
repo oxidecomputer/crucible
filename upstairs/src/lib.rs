@@ -991,20 +991,7 @@ impl DownstairsIO {
      * We don't consider repair IOs in the size calculation.
      */
     pub fn io_size(&self) -> usize {
-        match &self.work {
-            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
-                data.len()
-            }
-            IOop::Read {
-                count, block_size, ..
-            } => (*count * *block_size) as usize,
-            IOop::Flush { .. }
-            | IOop::Barrier { .. }
-            | IOop::ExtentFlushClose { .. }
-            | IOop::ExtentLiveRepair { .. }
-            | IOop::ExtentLiveReopen { .. }
-            | IOop::ExtentLiveNoOp { .. } => 0,
-        }
+        self.work.job_bytes() as usize
     }
 
     /*
@@ -1432,8 +1419,8 @@ pub struct ClientIOStateCount<T = u32> {
     pub error: T,
 }
 
-impl std::ops::Index<&IOState> for ClientIOStateCount {
-    type Output = u32;
+impl<T> std::ops::Index<&IOState> for ClientIOStateCount<T> {
+    type Output = T;
     fn index(&self, index: &IOState) -> &Self::Output {
         match index {
             IOState::InProgress => &self.in_progress,
@@ -1444,7 +1431,7 @@ impl std::ops::Index<&IOState> for ClientIOStateCount {
     }
 }
 
-impl std::ops::IndexMut<&IOState> for ClientIOStateCount {
+impl<T> std::ops::IndexMut<&IOState> for ClientIOStateCount<T> {
     fn index_mut(&mut self, index: &IOState) -> &mut Self::Output {
         match index {
             IOState::InProgress => &mut self.in_progress,

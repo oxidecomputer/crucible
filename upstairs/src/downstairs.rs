@@ -2802,7 +2802,7 @@ impl Downstairs {
     }
 
     pub fn io_state_count(&self) -> IOStateCount {
-        let d = self.collect_stats(|c| c.io_state_count());
+        let d = self.collect_stats(|c| c.io_state_job_count());
         let f = |g: fn(ClientIOStateCount) -> u32| {
             ClientData([g(d[0]), g(d[1]), g(d[2])])
         };
