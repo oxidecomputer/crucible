@@ -17,6 +17,7 @@ use crate::{
     EncryptionContext, GuestIoHandle, Message, RegionDefinition,
     RegionDefinitionStatus, SnapshotDetails, WQCounts,
 };
+use crucible_client_types::RegionExtentInfo;
 use crucible_common::{BlockIndex, CrucibleError};
 use serde::{Deserialize, Serialize};
 
@@ -1049,11 +1050,16 @@ impl Upstairs {
                 };
             }
             // Testing options
-            BlockOp::QueryExtentSize { done } => {
+            BlockOp::QueryExtentInfo { done } => {
                 // Yes, test only
                 match self.ddef.get_def() {
                     Some(rd) => {
-                        done.send_ok(rd.extent_size());
+                        let ei = RegionExtentInfo {
+                            block_size: rd.block_size(),
+                            blocks_per_extent: rd.extent_size().value,
+                            extent_count: rd.extent_count(),
+                        };
+                        done.send_ok(ei);
                     }
                     None => {
                         warn!(

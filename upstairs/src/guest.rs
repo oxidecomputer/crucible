@@ -13,7 +13,8 @@ use crate::{
     BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, JobId, RawReadResponse,
     ReplaceResult, UpstairsAction,
 };
-use crucible_common::{build_logger, Block, BlockIndex, CrucibleError};
+use crucible_client_types::RegionExtentInfo;
+use crucible_common::{build_logger, BlockIndex, CrucibleError};
 use crucible_protocol::SnapshotDetails;
 
 use async_trait::async_trait;
@@ -342,9 +343,13 @@ impl Guest {
         rx.wait().await
     }
 
-    pub async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
-        self.send_and_wait(|done| BlockOp::QueryExtentSize { done })
-            .await
+    pub async fn query_extent_info(
+        &self,
+    ) -> Result<Option<RegionExtentInfo>, CrucibleError> {
+        let ei = self
+            .send_and_wait(|done| BlockOp::QueryExtentInfo { done })
+            .await?;
+        Ok(Some(ei))
     }
 
     pub async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
@@ -463,10 +468,13 @@ impl BlockIO for Guest {
         self.send_and_wait(|done| BlockOp::QueryWorkQueue { done })
             .await
     }
-
-    async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
-        self.send_and_wait(|done| BlockOp::QueryExtentSize { done })
-            .await
+    async fn query_extent_info(
+        &self,
+    ) -> Result<Option<RegionExtentInfo>, CrucibleError> {
+        let ei = self
+            .send_and_wait(|done| BlockOp::QueryExtentInfo { done })
+            .await?;
+        Ok(Some(ei))
     }
 
     async fn total_size(&self) -> Result<u64, CrucibleError> {
