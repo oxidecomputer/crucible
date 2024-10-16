@@ -1412,7 +1412,6 @@ impl fmt::Display for IOState {
 
 #[derive(Debug, Default, Copy, Clone, Serialize, Deserialize)]
 pub struct ClientIOStateCount<T = u32> {
-    pub new: T,
     pub in_progress: T,
     pub done: T,
     pub skipped: T,

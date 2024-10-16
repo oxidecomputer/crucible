@@ -2279,8 +2279,7 @@ impl DownstairsClient {
     }
 
     pub(crate) fn total_live_work(&self) -> usize {
-        (self.io_state_job_count.new + self.io_state_job_count.in_progress)
-            as usize
+        self.io_state_job_count.in_progress as usize
     }
 
     pub(crate) fn total_bytes_outstanding(&self) -> usize {
