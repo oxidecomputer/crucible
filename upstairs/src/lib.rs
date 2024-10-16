@@ -991,20 +991,7 @@ impl DownstairsIO {
      * We don't consider repair IOs in the size calculation.
      */
     pub fn io_size(&self) -> usize {
-        match &self.work {
-            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
-                data.len()
-            }
-            IOop::Read {
-                count, block_size, ..
-            } => (*count * *block_size) as usize,
-            IOop::Flush { .. }
-            | IOop::Barrier { .. }
-            | IOop::ExtentFlushClose { .. }
-            | IOop::ExtentLiveRepair { .. }
-            | IOop::ExtentLiveReopen { .. }
-            | IOop::ExtentLiveNoOp { .. } => 0,
-        }
+        self.work.job_bytes() as usize
     }
 
     /*
@@ -1423,36 +1410,29 @@ impl fmt::Display for IOState {
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
-pub struct ClientIOStateCount {
-    pub new: u32,
-    pub in_progress: u32,
-    pub done: u32,
-    pub skipped: u32,
-    pub error: u32,
+#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize)]
+pub struct ClientIOStateCount<T = u32> {
+    pub in_progress: T,
+    pub done: T,
+    pub skipped: T,
+    pub error: T,
 }
 
-impl ClientIOStateCount {
-    fn new() -> ClientIOStateCount {
-        ClientIOStateCount {
-            new: 0,
-            in_progress: 0,
-            done: 0,
-            skipped: 0,
-            error: 0,
+impl<T> std::ops::Index<&IOState> for ClientIOStateCount<T> {
+    type Output = T;
+    fn index(&self, index: &IOState) -> &Self::Output {
+        match index {
+            IOState::InProgress => &self.in_progress,
+            IOState::Done => &self.done,
+            IOState::Skipped => &self.skipped,
+            IOState::Error(_) => &self.error,
         }
     }
+}
 
-    pub fn incr(&mut self, state: &IOState) {
-        *self.get_mut(state) += 1;
-    }
-
-    pub fn decr(&mut self, state: &IOState) {
-        *self.get_mut(state) -= 1;
-    }
-
-    fn get_mut(&mut self, state: &IOState) -> &mut u32 {
-        match state {
+impl<T> std::ops::IndexMut<&IOState> for ClientIOStateCount<T> {
+    fn index_mut(&mut self, index: &IOState) -> &mut Self::Output {
+        match index {
             IOState::InProgress => &mut self.in_progress,
             IOState::Done => &mut self.done,
             IOState::Skipped => &mut self.skipped,
