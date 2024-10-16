@@ -1712,8 +1712,6 @@ pub struct Arg {
     pub up_counters: UpCounters,
     /// Next JobID
     pub next_job_id: JobId,
-    /// Backpressure value
-    pub up_backpressure: u64,
     /// Jobs on the downstairs work queue.
     pub ds_count: u32,
     /// Number of write bytes in flight
@@ -1792,7 +1790,7 @@ pub fn up_main(
     };
 
     #[cfg(test)]
-    let disable_backpressure = guest.is_queue_backpressure_disabled();
+    let disable_backpressure = guest.is_backpressure_disabled();
 
     /*
      * Build the Upstairs struct that we use to share data between
@@ -1803,7 +1801,7 @@ pub fn up_main(
 
     #[cfg(test)]
     if disable_backpressure {
-        up.disable_client_backpressure();
+        up.downstairs.disable_client_backpressure();
     }
 
     if let Some(pr) = producer_registry {

@@ -3336,19 +3336,11 @@ impl Downstairs {
     }
 
     pub(crate) fn write_bytes_outstanding(&self) -> u64 {
+        // XXX this overlaps with io_state_byte_count
         self.clients
             .iter()
             .filter(|c| matches!(c.state(), DsState::Active))
             .map(|c| c.backpressure_counters.get_write_bytes())
-            .max()
-            .unwrap_or(0)
-    }
-
-    pub(crate) fn jobs_outstanding(&self) -> u64 {
-        self.clients
-            .iter()
-            .filter(|c| matches!(c.state(), DsState::Active))
-            .map(|c| c.backpressure_counters.get_jobs())
             .max()
             .unwrap_or(0)
     }
