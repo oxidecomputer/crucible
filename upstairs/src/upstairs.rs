@@ -533,6 +533,10 @@ impl Upstairs {
 
     /// Apply an action returned from [`Upstairs::select`]
     pub(crate) fn apply(&mut self, action: UpstairsAction) {
+        // Check whether the downstairs has live jobs before performing the
+        // action, because the action may cause it to retire live jobs.
+        let has_jobs = self.downstairs.has_live_jobs();
+
         match action {
             UpstairsAction::Downstairs(d) => {
                 self.counters.action_downstairs += 1;
@@ -617,12 +621,6 @@ impl Upstairs {
         // because too many jobs have piled up.
         self.gone_too_long();
 
-        // Only send automatic flushes if the downstairs is fully idle;
-        // otherwise, keep delaying the flush deadline.
-        if self.downstairs.has_live_jobs() {
-            self.flush_deadline = deadline_secs(self.flush_timeout_secs);
-        }
-
         // Check whether we need to send a Barrier operation to clean out
         // complete-but-unflushed jobs.
         if self.downstairs.needs_barrier() {
@@ -679,6 +677,13 @@ impl Upstairs {
         // For now, check backpressure after every event.  We may want to make
         // this more nuanced in the future.
         self.set_backpressure();
+
+        // We do this last because some of the code above can be slow
+        // (especially during debug builds), and we don't want to set our flush
+        // deadline such that it fires immediately.
+        if has_jobs {
+            self.flush_deadline = deadline_secs(self.flush_timeout_secs);
+        }
     }
 
     /// Helper function to await all deferred block requests
