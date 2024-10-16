@@ -1,6 +1,5 @@
 // Copyright 2024 Oxide Computer Company
 use std::{
-    collections::HashSet,
     net::SocketAddr,
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
@@ -10,7 +9,7 @@ use crate::{
     backpressure::{
         BackpressureAmount, BackpressureConfig, SharedBackpressureAmount,
     },
-    BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, JobId, RawReadResponse,
+    BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, RawReadResponse,
     ReplaceResult, UpstairsAction,
 };
 use crucible_common::{build_logger, Block, BlockIndex, CrucibleError};
@@ -18,7 +17,6 @@ use crucible_protocol::SnapshotDetails;
 
 use async_trait::async_trait;
 use bytes::BytesMut;
-use ringbuffer::{AllocRingBuffer, RingBuffer};
 use slog::{error, info, warn, Logger};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{instrument, span, Level};
@@ -92,67 +90,6 @@ impl GuestBlockRes {
     }
 }
 
-/// This structure keeps track of work that Crucible has accepted from the
-/// "guest" (Propolis, `crutest`, etc)
-///
-/// We store a set of `JobId` for all I/O that has not yet been acknowledged to
-/// the guest, and a ring buffer of the last _N_ acked jobs.
-#[derive(Debug)]
-pub struct GuestWork {
-    active: HashSet<JobId>,
-    completed: AllocRingBuffer<JobId>,
-}
-
-impl GuestWork {
-    pub fn is_empty(&self) -> bool {
-        self.active.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.active.len()
-    }
-
-    /// Helper function to install new work into the map
-    pub(crate) fn submit_job(&mut self, ds_id: JobId, acked: bool) {
-        if acked {
-            self.completed.push(ds_id);
-        } else {
-            self.active.insert(ds_id);
-        }
-    }
-
-    /// Move the given job from active to complete
-    ///
-    /// # Panics
-    /// If the job is not in our active set
-    #[instrument]
-    pub(crate) fn gw_ds_complete(&mut self, ds_id: JobId) {
-        if self.active.remove(&ds_id) {
-            self.completed.push(ds_id);
-        } else {
-            /*
-             * XXX This is just so I can see if ever does happen.
-             */
-            panic!("job {ds_id} not on active list");
-        }
-    }
-
-    pub fn print_last_completed(&self, n: usize) {
-        for j in self.completed.iter().rev().take(n) {
-            print!(" {:4}", j);
-        }
-    }
-}
-
-impl Default for GuestWork {
-    fn default() -> Self {
-        Self {
-            active: HashSet::new(),
-            completed: AllocRingBuffer::new(2048),
-        }
-    }
-}
-
 /// IO handles used by the guest to pass work into Crucible proper
 ///
 /// This data structure is the counterpart to the [`GuestIoHandle`], which
@@ -216,8 +153,6 @@ impl Guest {
         let backpressure = SharedBackpressureAmount::new();
         let io = GuestIoHandle {
             req_rx,
-
-            guest_work: GuestWork::default(),
 
             backpressure: backpressure.clone(),
             backpressure_config: BackpressureConfig::default(),
@@ -614,18 +549,6 @@ pub struct GuestIoHandle {
     /// Backpressure configuration, as a starting point and max delay
     backpressure_config: BackpressureConfig,
 
-    /// Active work from the guest
-    ///
-    /// When the crucible listening task has noticed a new IO request, it
-    /// will pull it from the reqs queue and create an `GtoS` struct
-    /// as well as convert the new IO request into the matching
-    /// downstairs request(s).
-    ///
-    /// It is during this process that data will encrypted. For a read, the
-    /// data is decrypted back to the guest provided buffer after all the
-    /// required downstairs operations are completed.
-    pub guest_work: GuestWork,
-
     /// Log handle, mainly to pass it into the [`Upstairs`]
     pub log: Logger,
 }
@@ -662,31 +585,9 @@ impl GuestIoHandle {
         self.backpressure.store(bp);
     }
 
-    /// Returns the number of active jobs
-    pub fn active_count(&self) -> usize {
-        self.guest_work.active.len()
-    }
-
     /// Looks up current backpressure
     pub fn get_backpressure(&self) -> BackpressureAmount {
         self.backpressure.load()
-    }
-
-    /// Debug function to dump the guest work structure.
-    ///
-    /// TODO: make this one big dump, where we include the up.work.active
-    /// printing for each guest_work. It will be much more dense, but require
-    /// holding both locks for the duration.
-    pub(crate) fn show_work(&self) -> usize {
-        println!("Guest work:  Active and Completed Jobs:");
-        let gw = &self.guest_work;
-        let mut kvec: Vec<_> = gw.active.iter().cloned().collect();
-        kvec.sort_unstable();
-        for id in kvec.iter() {
-            println!("JOB active:[{id:?}]");
-        }
-        println!("JOB completed count:{:?} ", gw.completed.len());
-        kvec.len()
     }
 }
 
