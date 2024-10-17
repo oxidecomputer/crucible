@@ -41,8 +41,10 @@ impl BlockIO for InMemoryBlockIO {
         Ok(())
     }
 
-    async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
-        crucible_bail!(Unsupported, "query_extent_size unsupported",)
+    async fn query_extent_info(
+        &self,
+    ) -> Result<Option<RegionExtentInfo>, CrucibleError> {
+        Ok(None)
     }
 
     async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {

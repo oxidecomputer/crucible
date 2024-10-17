@@ -128,6 +128,8 @@ enum CliCommand {
         #[clap(long, action)]
         skip_verify: bool,
     },
+    /// Run the sparse fill test. Write to a block in each extent.
+    FillSparse,
     /// Flush
     Flush,
     /// Run Generic workload
@@ -234,7 +236,8 @@ async fn cli_read(
      * Convert offset to its byte value.
      */
     let offset = BlockIndex(block_index as u64);
-    let mut data = crucible::Buffer::repeat(255, size, ri.block_size as usize);
+    let mut data =
+        crucible::Buffer::repeat(255, size, ri.volume_info.block_size as usize);
 
     println!("Read  at block {:5}, len:{:7}", offset.0, data.len());
     volume.read(offset, &mut data).await?;
@@ -244,7 +247,7 @@ async fn cli_read(
         dl.clone(),
         block_index,
         &mut ri.write_log,
-        ri.block_size,
+        ri.volume_info.block_size,
         false,
     ) {
         ValidateStatus::Bad => {
@@ -311,13 +314,13 @@ async fn cli_write(
     let data = if block_index + size > ri.total_blocks {
         println!("Skip write log for invalid size {}", ri.total_blocks);
         let mut out = BytesMut::new();
-        out.resize(size * ri.block_size as usize, 0);
+        out.resize(size * ri.volume_info.block_size as usize, 0);
         out
     } else {
         for bi in block_index..block_index + size {
             ri.write_log.update_wc(bi);
         }
-        fill_vec(block_index, size, &ri.write_log, ri.block_size)
+        fill_vec(block_index, size, &ri.write_log, ri.volume_info.block_size)
     };
 
     println!("Write at block {:5}, len:{:7}", offset.0, data.len());
@@ -352,14 +355,18 @@ async fn cli_write_unwritten(
         // like normal and update our internal counter to reflect that.
 
         ri.write_log.update_wc(block_index);
-        fill_vec(block_index, 1, &ri.write_log, ri.block_size)
+        fill_vec(block_index, 1, &ri.write_log, ri.volume_info.block_size)
     } else {
         println!("This block has been written");
         // Fill the write buffer with random data.  We don't expect this
         // to actually make it to disk.
 
-        let mut data = BytesMut::with_capacity(ri.block_size as usize);
-        data.extend((0..ri.block_size).map(|_| rand::thread_rng().gen::<u8>()));
+        let mut data =
+            BytesMut::with_capacity(ri.volume_info.block_size as usize);
+        data.extend(
+            (0..ri.volume_info.block_size)
+                .map(|_| rand::thread_rng().gen::<u8>()),
+        );
         data
     };
 
@@ -499,6 +506,9 @@ async fn cmd_to_msg(
         CliCommand::Fill { skip_verify } => {
             fw.send(CliMessage::Fill(skip_verify)).await?;
         }
+        CliCommand::FillSparse => {
+            fw.send(CliMessage::FillSparse).await?;
+        }
         CliCommand::Flush => {
             fw.send(CliMessage::Flush).await?;
         }
@@ -571,8 +581,8 @@ async fn cmd_to_msg(
         Some(CliMessage::MyUuid(uuid)) => {
             println!("uuid: {}", uuid);
         }
-        Some(CliMessage::Info(es, bs, bl)) => {
-            println!("Got info: {} {} {}", es, bs, bl);
+        Some(CliMessage::Info(vi, bs, bl)) => {
+            println!("Got info: {:?} {} {}", vi, bs, bl);
         }
         Some(CliMessage::DoneOk) => {
             println!("Ok");
@@ -871,6 +881,23 @@ async fn process_cli_command(
                 }
             }
         }
+        CliMessage::FillSparse => {
+            if ri.write_log.is_empty() {
+                fw.send(CliMessage::Error(CrucibleError::GenericError(
+                    "Info not initialized".to_string(),
+                )))
+                .await
+            } else {
+                match fill_sparse_workload(volume, ri).await {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => {
+                        let msg = format!("FillSparse failed with {}", e);
+                        let e = CrucibleError::GenericError(msg);
+                        fw.send(CliMessage::Error(e)).await
+                    }
+                }
+            }
+        }
         CliMessage::Flush => {
             println!("Flush");
             match volume.flush(None).await {
@@ -886,10 +913,7 @@ async fn process_cli_command(
             let new_ri = get_region_info(volume).await;
             match new_ri {
                 Ok(new_ri) => {
-                    let bs = new_ri.block_size;
-                    let es = new_ri.extent_size.value;
-                    let ts = new_ri.total_size;
-                    *ri = new_ri;
+                    *ri = new_ri.clone();
                     /*
                      * We may only want to read input from the file once.
                      * Maybe make a command to specifically do it, but it
@@ -902,7 +926,12 @@ async fn process_cli_command(
                             *wc_filled = true;
                         }
                     }
-                    fw.send(CliMessage::Info(bs, es, ts)).await
+                    fw.send(CliMessage::Info(
+                        new_ri.volume_info,
+                        new_ri.total_size,
+                        new_ri.total_blocks,
+                    ))
+                    .await
                 }
                 Err(e) => fw.send(CliMessage::Error(e)).await,
             }
@@ -1071,9 +1100,12 @@ pub async fn start_cli_server(
      * If write_log len is zero, then the RegionInfo has
      * not been filled.
      */
+    let volume_info = VolumeInfo {
+        block_size: 512,
+        volumes: Vec::new(),
+    };
     let mut ri: RegionInfo = RegionInfo {
-        block_size: 0,
-        extent_size: Block::new_512(0),
+        volume_info,
         total_size: 0,
         total_blocks: 0,
         write_log: WriteLog::new(0),

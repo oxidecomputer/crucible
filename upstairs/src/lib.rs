@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use crucible_client_types::{
-    CrucibleOpts, ReplaceResult, VolumeConstructionRequest,
+    CrucibleOpts, RegionExtentInfo, ReplaceResult, VolumeConstructionRequest,
 };
 pub use crucible_common::*;
 pub use crucible_protocol::*;
@@ -109,8 +109,9 @@ pub trait BlockIO: Sync {
     async fn deactivate(&self) -> Result<(), CrucibleError>;
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError>;
-
-    async fn query_extent_size(&self) -> Result<Block, CrucibleError>;
+    async fn query_extent_info(
+        &self,
+    ) -> Result<Option<RegionExtentInfo>, CrucibleError>;
     async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError>;
 
     // Total bytes of Volume
@@ -1578,8 +1579,8 @@ pub(crate) enum BlockOp {
         done: BlockRes<Uuid>,
     },
     // Begin testing options.
-    QueryExtentSize {
-        done: BlockRes<Block>,
+    QueryExtentInfo {
+        done: BlockRes<RegionExtentInfo>,
     },
     QueryWorkQueue {
         done: BlockRes<WQCounts>,
