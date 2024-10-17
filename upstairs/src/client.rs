@@ -1,7 +1,6 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
-    backpressure::BackpressureCounters, cdt, integrity_hash,
-    io_limits::ClientIOLimits, live_repair::ExtentInfo,
+    cdt, integrity_hash, io_limits::ClientIOLimits, live_repair::ExtentInfo,
     upstairs::UpstairsConfig, upstairs::UpstairsState, ClientIOStateCount,
     ClientId, CrucibleDecoder, CrucibleError, DownstairsIO, DsState,
     EncryptionContext, IOState, IOop, JobId, Message, RawReadResponse,
@@ -125,12 +124,6 @@ pub(crate) struct DownstairsClient {
     /// Number of bytes associated with each IO state
     io_state_byte_count: ClientIOStateCount<u64>,
 
-    /// Jobs, write bytes, and total IO bytes in this client's queue
-    ///
-    /// These values are used for both global and local (per-client)
-    /// backpressure.
-    pub(crate) backpressure_counters: BackpressureCounters,
-
     /// Absolute IO limits for this client
     io_limits: ClientIOLimits,
 
@@ -240,7 +233,6 @@ impl DownstairsClient {
             repair_info: None,
             io_state_job_count: ClientIOStateCount::default(),
             io_state_byte_count: ClientIOStateCount::default(),
-            backpressure_counters: BackpressureCounters::new(),
             connection_id: ConnectionId(0),
             client_delay_us,
         }
@@ -284,7 +276,6 @@ impl DownstairsClient {
             repair_info: None,
             io_state_job_count: ClientIOStateCount::default(),
             io_state_byte_count: ClientIOStateCount::default(),
-            backpressure_counters: BackpressureCounters::new(),
             connection_id: ConnectionId(0),
             client_delay_us,
         }
@@ -373,18 +364,8 @@ impl DownstairsClient {
             // Because the job is no longer running, it shouldn't count for
             // backpressure or IO limits.  Remove the backpressure guard for
             // this client, which decrements backpressure counters on drop.
-            job.backpressure_guard.take(&self.client_id);
             job.io_limits.take(&self.client_id);
-        } else if is_running
-            && !was_running
-            && !job.backpressure_guard.contains(&self.client_id)
-        {
-            // This should only happen if a job is replayed, but that still
-            // counts!
-            job.backpressure_guard.insert(
-                self.client_id,
-                self.backpressure_counters.increment(&job.work),
-            );
+        } else if is_running && !was_running {
             match self.io_limits.try_claim(job.work.job_bytes() as u32) {
                 Ok(g) => {
                     job.io_limits.insert(self.client_id, g);
@@ -2304,12 +2285,11 @@ impl DownstairsClient {
     }
 
     pub(crate) fn total_live_work(&self) -> usize {
-        // XXX this overlaps with self.io_counters
-        self.backpressure_counters.get_jobs() as usize
+        self.io_state_job_count.in_progress as usize
     }
 
     pub(crate) fn total_bytes_outstanding(&self) -> usize {
-        self.backpressure_counters.get_io_bytes() as usize
+        self.io_state_byte_count.in_progress as usize
     }
 
     /// Returns a unique ID for the current connection, or `None`
