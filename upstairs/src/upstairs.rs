@@ -390,6 +390,7 @@ impl Upstairs {
             cfg.clone(),
             ds_target,
             tls_context,
+            stats.ds_stats(),
             log.new(o!("" => "downstairs")),
         );
         let flush_timeout_secs = opt.flush_timeout.unwrap_or(0.5);
@@ -625,7 +626,7 @@ impl Upstairs {
 
         // Handle any jobs that have become ready for acks
         if self.downstairs.has_ackable_jobs() {
-            self.downstairs.ack_jobs(&self.stats)
+            self.downstairs.ack_jobs()
         }
 
         // Check for client-side deactivation

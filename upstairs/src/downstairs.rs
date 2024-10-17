@@ -12,7 +12,7 @@ use crate::{
     client::{ClientAction, ClientStopReason, DownstairsClient},
     guest::GuestBlockRes,
     live_repair::ExtentInfo,
-    stats::UpStatOuter,
+    stats::DownstairsStatOuter,
     upstairs::{UpstairsConfig, UpstairsState},
     AckStatus, ActiveJobs, AllocRingBuffer, BlockRes, Buffer, ClientData,
     ClientIOStateCount, ClientId, ClientMap, CrucibleError, DownstairsIO,
@@ -134,6 +134,9 @@ pub(crate) struct Downstairs {
     /// Region definition (copied from the upstairs)
     ddef: Option<RegionDefinition>,
 
+    /// Handle for stats
+    stats: DownstairsStatOuter,
+
     /// A reqwest client, to be reused when creating Nexus clients
     #[cfg(feature = "notify-nexus")]
     reqwest_client: reqwest::Client,
@@ -253,6 +256,7 @@ impl Downstairs {
         cfg: Arc<UpstairsConfig>,
         ds_target: ClientMap<SocketAddr>,
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
+        stats: DownstairsStatOuter,
         log: Logger,
     ) -> Self {
         let mut clients = [None, None, None];
@@ -303,6 +307,7 @@ impl Downstairs {
             ackable_work: BTreeSet::new(),
             repair: None,
             ddef: None,
+            stats,
 
             #[cfg(feature = "notify-nexus")]
             reqwest_client: reqwest::ClientBuilder::new()
@@ -327,8 +332,9 @@ impl Downstairs {
             read_only: false,
             encryption_context: None,
         });
+        let stats = DownstairsStatOuter::default();
 
-        let mut ds = Self::new(cfg, ClientMap::new(), None, log);
+        let mut ds = Self::new(cfg, ClientMap::new(), None, stats, log);
         // Create a fake repair address so this field is populated.
         for cid in ClientId::iter() {
             ds.clients[cid].repair_addr =
@@ -396,13 +402,13 @@ impl Downstairs {
     }
 
     /// Send back acks for all jobs that are `AckReady`
-    pub(crate) fn ack_jobs(&mut self, up_stats: &UpStatOuter) {
+    pub(crate) fn ack_jobs(&mut self) {
         debug!(self.log, "ack_jobs called in Downstairs");
 
         let ack_list = std::mem::take(&mut self.ackable_work);
         let jobs_checked = ack_list.len();
         for ds_id_done in ack_list.iter() {
-            self.ack_job(*ds_id_done, up_stats);
+            self.ack_job(*ds_id_done);
         }
         debug!(self.log, "ack_ready handled {jobs_checked} jobs");
     }
@@ -413,7 +419,7 @@ impl Downstairs {
     ///
     /// This is public for the sake of unit testing, but shouldn't be called
     /// outside of this module normally.
-    fn ack_job(&mut self, ds_id: JobId, up_stats: &UpStatOuter) {
+    fn ack_job(&mut self, ds_id: JobId) {
         debug!(self.log, "ack_jobs process {}", ds_id);
 
         let done = self.ds_active.get_mut(&ds_id).unwrap();
@@ -423,7 +429,48 @@ impl Downstairs {
 
         done.acked = true;
         let r = done.result();
-        Self::cdt_gw_work_done(ds_id, done, up_stats);
+
+        // Fire DTrace probes and update stats
+        let io_size = done.io_size();
+        match &done.work {
+            IOop::Read { .. } => {
+                cdt::gw__read__done!(|| (ds_id.0));
+                self.stats.add_read(io_size as i64);
+            }
+            IOop::Write { .. } => {
+                cdt::gw__write__done!(|| (ds_id.0));
+                self.stats.add_write(io_size as i64);
+            }
+            IOop::WriteUnwritten { .. } => {
+                cdt::gw__write__unwritten__done!(|| (ds_id.0));
+                // We don't include WriteUnwritten operation in the
+                // metrics for this guest.
+            }
+            IOop::Flush { .. } => {
+                cdt::gw__flush__done!(|| (ds_id.0));
+                self.stats.add_flush();
+            }
+            IOop::Barrier { .. } => {
+                cdt::gw__barrier__done!(|| (ds_id.0));
+                self.stats.add_barrier();
+            }
+            IOop::ExtentFlushClose { extent, .. } => {
+                cdt::gw__close__done!(|| (ds_id.0, extent.0));
+                self.stats.add_flush_close();
+            }
+            IOop::ExtentLiveRepair { extent, .. } => {
+                cdt::gw__repair__done!(|| (ds_id.0, extent.0));
+                self.stats.add_extent_repair();
+            }
+            IOop::ExtentLiveNoOp { .. } => {
+                cdt::gw__noop__done!(|| (ds_id.0));
+                self.stats.add_extent_noop();
+            }
+            IOop::ExtentLiveReopen { extent, .. } => {
+                cdt::gw__reopen__done!(|| (ds_id.0, extent.0));
+                self.stats.add_extent_reopen();
+            }
+        }
         debug!(self.log, "[A] ack job {}", ds_id);
 
         // Copy (if present) read data back to the guest buffer they
@@ -438,50 +485,6 @@ impl Downstairs {
             panic!("job {ds_id} not on gw_active list");
         }
         self.retire_check(ds_id);
-    }
-
-    /// Match on the `IOop` type, update stats, and fire DTrace probes
-    fn cdt_gw_work_done(ds_id: JobId, job: &DownstairsIO, stats: &UpStatOuter) {
-        let io_size = job.io_size();
-        match &job.work {
-            IOop::Read { .. } => {
-                cdt::gw__read__done!(|| (ds_id.0));
-                stats.add_read(io_size as i64);
-            }
-            IOop::Write { .. } => {
-                cdt::gw__write__done!(|| (ds_id.0));
-                stats.add_write(io_size as i64);
-            }
-            IOop::WriteUnwritten { .. } => {
-                cdt::gw__write__unwritten__done!(|| (ds_id.0));
-                // We don't include WriteUnwritten operation in the
-                // metrics for this guest.
-            }
-            IOop::Flush { .. } => {
-                cdt::gw__flush__done!(|| (ds_id.0));
-                stats.add_flush();
-            }
-            IOop::Barrier { .. } => {
-                cdt::gw__barrier__done!(|| (ds_id.0));
-                stats.add_barrier();
-            }
-            IOop::ExtentFlushClose { extent, .. } => {
-                cdt::gw__close__done!(|| (ds_id.0, extent.0));
-                stats.add_flush_close();
-            }
-            IOop::ExtentLiveRepair { extent, .. } => {
-                cdt::gw__repair__done!(|| (ds_id.0, extent.0));
-                stats.add_extent_repair();
-            }
-            IOop::ExtentLiveNoOp { .. } => {
-                cdt::gw__noop__done!(|| (ds_id.0));
-                stats.add_extent_noop();
-            }
-            IOop::ExtentLiveReopen { extent, .. } => {
-                cdt::gw__reopen__done!(|| (ds_id.0, extent.0));
-                stats.add_extent_reopen();
-            }
-        }
     }
 
     /// Helper function to calculate pruned deps for a given job
