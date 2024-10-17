@@ -466,7 +466,7 @@ impl Upstairs {
     /// remaining messages have been processed.
     fn done(&self) -> bool {
         self.guest_dropped
-            && self.guest.guest_work.is_empty()
+            && self.downstairs.gw_active.is_empty()
             && self.downstairs.ds_active.is_empty()
             && self.deferred_ops.is_empty()
             && self.deferred_msgs.is_empty()
@@ -621,15 +621,11 @@ impl Upstairs {
         //
         // This must be called before acking jobs, because it looks in
         // `Downstairs::ackable_jobs` to see which jobs are done.
-        self.downstairs.check_and_continue_live_repair(
-            &mut self.guest.guest_work,
-            &self.state,
-        );
+        self.downstairs.check_and_continue_live_repair(&self.state);
 
         // Handle any jobs that have become ready for acks
         if self.downstairs.has_ackable_jobs() {
-            self.downstairs
-                .ack_jobs(&mut self.guest.guest_work, &self.stats)
+            self.downstairs.ack_jobs(&self.stats)
         }
 
         // Check for client-side deactivation
@@ -725,7 +721,7 @@ impl Upstairs {
         cdt::up__status!(|| {
             let arg = Arg {
                 session_id: self.cfg.session_id.to_string(),
-                up_count: self.guest.guest_work.len() as u32,
+                up_count: self.downstairs.gw_active.len() as u32,
                 up_counters: self.counters,
                 next_job_id: self.downstairs.peek_next_id(),
                 up_backpressure: self.guest.get_backpressure().as_micros(),
@@ -777,7 +773,7 @@ impl Upstairs {
         match c {
             ControlRequest::UpstairsStats(tx) => {
                 let ds_state = self.downstairs.collect_stats(|c| c.state());
-                let up_jobs = self.guest.guest_work.len();
+                let up_jobs = self.downstairs.gw_active.len();
                 let ds_jobs = self.downstairs.active_count();
                 let reconcile_done = self.downstairs.reconcile_repaired();
                 let reconcile_needed =
@@ -898,7 +894,6 @@ impl Upstairs {
             info!(self.log, "No Live Repair required at this time");
         } else if !self.downstairs.start_live_repair(
             &self.state,
-            &mut self.guest.guest_work,
             self.ddef.get_def().unwrap().extent_count(),
         ) {
             // It's hard to hit this condition; we need a Downstairs to be in
@@ -1075,8 +1070,8 @@ impl Upstairs {
                     .filter(|c| c.state() == DsState::Active)
                     .count();
                 done.send_ok(WQCounts {
-                    up_count: self.guest.guest_work.len(),
-                    ds_count: self.downstairs.active_count(),
+                    up_count: self.downstairs.gw_active.len(),
+                    ds_count: self.downstairs.ds_active.len(),
                     active_count,
                 });
             }
@@ -1137,9 +1132,8 @@ impl Upstairs {
 
     pub(crate) fn show_all_work(&self) -> WQCounts {
         let gior = self.guest_io_ready();
-        let up_count = self.guest.active_count();
-
-        let ds_count = self.downstairs.active_count();
+        let up_count = self.downstairs.gw_active.len();
+        let ds_count = self.downstairs.ds_active.len();
 
         println!(
             "----------------------------------------------------------------"
@@ -1153,14 +1147,14 @@ impl Upstairs {
         );
         if ds_count == 0 {
             if up_count != 0 {
-                self.guest.show_work();
+                self.downstairs.show_guest_work();
             }
         } else {
             self.downstairs.show_all_work()
         }
 
         print!("Downstairs last five completed:");
-        self.downstairs.print_last_completed(5);
+        self.downstairs.print_last_retired(5);
         println!();
 
         let active_count = self
@@ -1171,7 +1165,7 @@ impl Upstairs {
             .count();
 
         print!("Upstairs last five completed:  ");
-        self.guest.guest_work.print_last_completed(5);
+        self.downstairs.print_last_acked(5);
         println!();
 
         WQCounts {
@@ -1280,7 +1274,6 @@ impl Upstairs {
             info!(self.log, "flush with snap requested");
         }
         let ds_id = self.downstairs.submit_flush(snapshot_details, res);
-        self.guest.guest_work.submit_job(ds_id, false);
 
         cdt::up__to__ds__flush__start!(|| (ds_id.0));
     }
@@ -1293,7 +1286,6 @@ impl Upstairs {
         // call it!
 
         let ds_id = self.downstairs.submit_barrier();
-        self.guest.guest_work.submit_job(ds_id, false);
 
         cdt::up__to__ds__barrier__start!(|| (ds_id.0));
     }
@@ -1355,7 +1347,6 @@ impl Upstairs {
          * want to create a gap in the IDs.
          */
         let ds_id = self.downstairs.submit_read(impacted_blocks, data, res);
-        self.guest.guest_work.submit_job(ds_id, false);
 
         cdt::up__to__ds__read__start!(|| (ds_id.0));
     }
@@ -1480,7 +1471,6 @@ impl Upstairs {
             write.is_write_unwritten,
             write.guard,
         );
-        self.guest.guest_work.submit_job(ds_id, true);
 
         if write.is_write_unwritten {
             cdt::up__to__ds__write__unwritten__start!(|| (ds_id.0));
