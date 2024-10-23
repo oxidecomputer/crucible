@@ -5,14 +5,11 @@ use tokio::sync::{
     AcquireError, OwnedSemaphorePermit, Semaphore, TryAcquireError,
 };
 
-// Internally, accounting uses MIN_BLOCK_SIZE as the fundamental unit
-use crucible_common::MIN_BLOCK_SIZE;
-
 /// Per-client IO limits
 #[derive(Clone, Debug)]
 pub struct ClientIOLimits {
-    /// Semaphore to claim IO blocks on behalf of a job
-    io_blocks: Arc<Semaphore>,
+    /// Semaphore to claim IO bytes on behalf of a job
+    io_bytes: Arc<Semaphore>,
 
     /// Semaphore to claim individual IO jobs
     jobs: Arc<Semaphore>,
@@ -21,40 +18,32 @@ pub struct ClientIOLimits {
 impl ClientIOLimits {
     /// Builds a new `ClientIOLimits` object with the given limits
     pub fn new(max_jobs: usize, max_io_bytes: usize) -> Self {
-        let max_io_blocks = max_io_bytes / MIN_BLOCK_SIZE;
         ClientIOLimits {
-            io_blocks: Semaphore::new(max_io_blocks).into(),
+            io_bytes: Semaphore::new(max_io_bytes).into(),
             jobs: Semaphore::new(max_jobs).into(),
         }
     }
 
-    /// Claims a certain number of blocks (and one job)
+    /// Claims a certain number of bytes (and one job)
     ///
     /// This function waits until the given resources are available.
     pub async fn claim(
         &self,
         bytes: u32,
     ) -> Result<ClientIOLimitGuard, AcquireError> {
-        let io_blocks = self
-            .io_blocks
-            .clone()
-            .acquire_many_owned(bytes / MIN_BLOCK_SIZE as u32)
-            .await?;
+        let io_bytes = self.io_bytes.clone().acquire_many_owned(bytes).await?;
         let jobs = self.jobs.clone().acquire_owned().await?;
-        Ok(ClientIOLimitGuard { io_blocks, jobs })
+        Ok(ClientIOLimitGuard { io_bytes, jobs })
     }
 
-    /// Tries to claim a certain number of blocks (and one job)
+    /// Tries to claim a certain number of bytes (and one job)
     pub fn try_claim(
         &self,
         bytes: u32,
     ) -> Result<ClientIOLimitGuard, TryAcquireError> {
-        let io_blocks = self
-            .io_blocks
-            .clone()
-            .try_acquire_many_owned(bytes / MIN_BLOCK_SIZE as u32)?;
+        let io_bytes = self.io_bytes.clone().try_acquire_many_owned(bytes)?;
         let jobs = self.jobs.clone().try_acquire_owned()?;
-        Ok(ClientIOLimitGuard { io_blocks, jobs })
+        Ok(ClientIOLimitGuard { io_bytes, jobs })
     }
 }
 
@@ -132,7 +121,7 @@ impl IOLimitView {
 #[derive(Debug)]
 pub struct ClientIOLimitGuard {
     #[expect(unused)]
-    io_blocks: OwnedSemaphorePermit,
+    io_bytes: OwnedSemaphorePermit,
     #[expect(unused)]
     jobs: OwnedSemaphorePermit,
 }
@@ -142,9 +131,9 @@ impl ClientIOLimitGuard {
     pub fn dummy() -> Self {
         let a = Arc::new(Semaphore::new(1));
         let b = Arc::new(Semaphore::new(1));
-        let io_blocks = a.try_acquire_owned().unwrap();
+        let io_bytes = a.try_acquire_owned().unwrap();
         let jobs = b.try_acquire_owned().unwrap();
-        ClientIOLimitGuard { io_blocks, jobs }
+        ClientIOLimitGuard { io_bytes, jobs }
     }
 }
 
