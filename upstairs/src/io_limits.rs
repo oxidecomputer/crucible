@@ -58,7 +58,7 @@ impl ClientIOLimits {
     }
 }
 
-/// Read-write handle for IO limits
+/// Read-write handle for IO limits across all 3x clients
 #[derive(Clone, Debug)]
 pub struct IOLimits(ClientData<ClientIOLimits>);
 
@@ -82,6 +82,7 @@ impl IOLimits {
         IOLimitView(self.clone())
     }
 
+    /// Claim some number of bytes (and one job)
     pub async fn claim(
         &self,
         bytes: u32,
@@ -93,13 +94,16 @@ impl IOLimits {
         Ok(IOLimitGuard(out.map(Option::unwrap)))
     }
 
+    /// Try to claim some number of bytes (and one job)
+    ///
+    /// Returns `Err((ClientId, e))` if any of the claims fail
     pub fn try_claim(
         &self,
         bytes: u32,
-    ) -> Result<IOLimitGuard, TryAcquireError> {
+    ) -> Result<IOLimitGuard, (ClientId, TryAcquireError)> {
         let mut out = ClientData::from_fn(|_| None);
         for i in ClientId::iter() {
-            out[i] = Some(self.0[i].try_claim(bytes)?);
+            out[i] = Some(self.0[i].try_claim(bytes).map_err(|e| (i, e))?);
         }
         Ok(IOLimitGuard(out.map(Option::unwrap)))
     }
@@ -107,7 +111,7 @@ impl IOLimits {
 
 /// View into global IO limits
 ///
-/// This is equivalent to an [`IOLimits`], but exposes a limited API
+/// This is equivalent to an [`IOLimits`], but exposes a more limited API
 #[derive(Clone, Debug)]
 pub struct IOLimitView(IOLimits);
 
@@ -123,11 +127,13 @@ impl IOLimitView {
 ////////////////////////////////////////////////////////////////////////////////
 
 /// Handle owning some amount of per-client IO
+///
+/// The IO permits are released when this handle is dropped
 #[derive(Debug)]
 pub struct ClientIOLimitGuard {
-    #[allow(unused)] // XXX switch to expect(unused) in rustc 1.81.0
+    #[expect(unused)]
     io_blocks: OwnedSemaphorePermit,
-    #[allow(unused)]
+    #[expect(unused)]
     jobs: OwnedSemaphorePermit,
 }
 
@@ -142,6 +148,7 @@ impl ClientIOLimitGuard {
     }
 }
 
+/// Handle which stores IO limit guards for all 3x clients
 #[derive(Debug)]
 pub struct IOLimitGuard(ClientData<ClientIOLimitGuard>);
 

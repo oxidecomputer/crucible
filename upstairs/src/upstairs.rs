@@ -684,10 +684,11 @@ impl Upstairs {
         };
         match self.guest.io_limits().try_claim(bytes) {
             Ok(v) => Some(v),
-            Err(e) => {
+            Err((i, e)) => {
                 warn!(
                     self.log,
-                    "could not apply IO limits to upstairs work: {e:?}"
+                    "could not apply IO limits to upstairs work: \
+                     client {i} returned {e:?}"
                 );
                 None
             }
