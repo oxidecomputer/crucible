@@ -2672,11 +2672,10 @@ async fn test_no_send_offline() {
     assert_eq!(ds[ClientId::new(0)], DsState::Offline);
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
-    println!("WE'RE OFFLINE");
+    info!(harness.log, "DS1 is offline");
 
     // Reconnect ds1
     harness.restart_ds1().await;
-    println!("WE'RE RESTARTING");
 
     // Wait for the Upstairs to try reconnecting, answering pings all the while
     let reconnect_time = CLIENT_RECONNECT_DELAY + Duration::from_secs(2);
@@ -2697,6 +2696,34 @@ async fn test_no_send_offline() {
     });
     harness.ds2.ack_write().await;
     harness.ds3.ack_write().await;
+
+    // We expect to receive the next negotiation packet, not the Write
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let last_flush_number = match harness.ds1().try_recv() {
+        Ok(Message::LastFlush { last_flush_number }) => last_flush_number,
+        m => panic!("unexpected message {m:?}"),
+    };
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(harness.ds1().try_recv(), Err(TryRecvError::Empty));
+
+    // The write should be done
     write_handle.await.unwrap();
+
+    // Now, bring the Downstairs up, which should trigger replay
+    harness
+        .ds1()
+        .send(Message::LastFlushAck { last_flush_number })
+        .unwrap();
+
+    // Give the replay a moment to happen
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // We should see that write sent as a replay
+    match harness.ds1().try_recv() {
+        Ok(Message::Write { header, .. }) => {
+            assert_eq!(header.job_id, JobId(1000))
+        }
+        e => panic!("invalid message {e:?}; expected Write"),
+    }
 }

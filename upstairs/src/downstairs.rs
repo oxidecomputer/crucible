@@ -2117,7 +2117,7 @@ impl Downstairs {
             let client = &mut self.clients[cid];
             let r = client.enqueue(ds_id, &io, last_repair_extent);
             match r {
-                EnqueueResult::Send | EnqueueResult::Store => {
+                EnqueueResult::Send | EnqueueResult::Hold => {
                     // Update the per-client backpressure guard
                     if !bp_guard.contains(&cid) {
                         let g = client.backpressure_counters.increment(&io);

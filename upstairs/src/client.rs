@@ -978,7 +978,7 @@ impl DownstairsClient {
             // cleared out by a subsequent flush (so we'll be able to bring that
             // client back into compliance by replaying jobs).
             DsState::Active => EnqueueResult::Send,
-            DsState::Offline => EnqueueResult::Store,
+            DsState::Offline => EnqueueResult::Hold,
 
             DsState::New
             | DsState::BadVersion
@@ -2351,7 +2351,7 @@ pub(crate) enum EnqueueResult {
     /// This is used when the Downstairs is Offline; we want to mark the job as
     /// in-progress so that it's eligible for replay, but the job should not
     /// actually go out on the wire.
-    Store,
+    Hold,
 
     /// The job should be marked as skipped and not sent
     Skip,
@@ -2360,7 +2360,7 @@ pub(crate) enum EnqueueResult {
 impl EnqueueResult {
     pub(crate) fn state(&self) -> IOState {
         match self {
-            EnqueueResult::Send | EnqueueResult::Store => IOState::InProgress,
+            EnqueueResult::Send | EnqueueResult::Hold => IOState::InProgress,
             EnqueueResult::Skip => IOState::Skipped,
         }
     }
