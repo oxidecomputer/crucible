@@ -44,6 +44,10 @@ const PING_INTERVAL_SECS: f32 = 5.0;
 #[cfg(test)]
 pub const CLIENT_TIMEOUT_SECS: f32 = TIMEOUT_SECS * TIMEOUT_LIMIT as f32;
 
+/// Delay before a client reconnects (to prevent spamming connections)
+pub const CLIENT_RECONNECT_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
 /// Handle to a running I/O task
 ///
 /// The I/O task is "thin"; it simply forwards messages around.  The task
@@ -901,7 +905,8 @@ impl DownstairsClient {
 
     /// Checks whether the given job should be sent
     ///
-    /// Returns `true` if it should be sent and `false` otherwise
+    /// Returns an [`EnqueueResult`] indicating how the caller should handle the
+    /// packet.
     ///
     /// If the job should be skipped, then it is added to `self.skipped_jobs`.
     /// `self.io_state_job_count` is updated with the incoming job state.
@@ -911,7 +916,7 @@ impl DownstairsClient {
         ds_id: JobId,
         io: &IOop,
         last_repair_extent: Option<ExtentId>,
-    ) -> bool {
+    ) -> EnqueueResult {
         // If a downstairs is faulted or ready for repair, we can move
         // that job directly to IOState::Skipped
         // If a downstairs is in repair, then we need to see if this
@@ -922,37 +927,34 @@ impl DownstairsClient {
         let should_send = self.should_send(io, last_repair_extent);
 
         // Update our set of skipped jobs if we're not sending this one
-        if !should_send {
+        if matches!(should_send, EnqueueResult::Skip) {
             self.skipped_jobs.insert(ds_id);
         }
 
         // Update our state counters based on the job state
-        let state = if should_send {
-            &IOState::InProgress
-        } else {
-            &IOState::Skipped
-        };
-        self.io_state_job_count[state] += 1;
-        self.io_state_byte_count[state] += io.job_bytes();
+        let state = should_send.state();
+        self.io_state_job_count[&state] += 1;
+        self.io_state_byte_count[&state] += io.job_bytes();
+
         should_send
     }
 
     /// Checks whether the given job should be sent or skipped
     ///
-    /// Returns `true` if the job should be sent and `false` if it should be
-    /// skipped.
+    /// Returns an [`EnqueueResult`] indicating how the caller should handle the
+    /// packet.
     #[must_use]
     fn should_send(
         &self,
         io: &IOop,
         last_repair_extent: Option<ExtentId>,
-    ) -> bool {
+    ) -> EnqueueResult {
         match self.state {
             // We never send jobs if we're in certain inactive states
             DsState::Faulted
             | DsState::Replaced
             | DsState::Replacing
-            | DsState::LiveRepairReady => false,
+            | DsState::LiveRepairReady => EnqueueResult::Skip,
 
             // We conditionally send jobs if we're in live-repair, depending on
             // the current extent.
@@ -962,7 +964,11 @@ impl DownstairsClient {
                 // there are no reserved repair jobs), or the last extent
                 // for which we have reserved a repair job ID; either way, the
                 // caller has provided it to us.
-                io.send_io_live_repair(last_repair_extent)
+                if io.send_io_live_repair(last_repair_extent) {
+                    EnqueueResult::Send
+                } else {
+                    EnqueueResult::Skip
+                }
             }
 
             // Send jobs if the client is active or offline
@@ -971,7 +977,8 @@ impl DownstairsClient {
             // means that those jobs are marked as InProgress, so they aren't
             // cleared out by a subsequent flush (so we'll be able to bring that
             // client back into compliance by replaying jobs).
-            DsState::Active | DsState::Offline => true,
+            DsState::Active => EnqueueResult::Send,
+            DsState::Offline => EnqueueResult::Hold,
 
             DsState::New
             | DsState::BadVersion
@@ -2334,6 +2341,31 @@ enum NegotiationState {
     Done,
 }
 
+/// Result value from [`DownstairsClient::enqueue`]
+pub(crate) enum EnqueueResult {
+    /// The given job should be marked as in progress and sent
+    Send,
+
+    /// The given job should be marked as in progress, but not sent
+    ///
+    /// This is used when the Downstairs is Offline; we want to mark the job as
+    /// in-progress so that it's eligible for replay, but the job should not
+    /// actually go out on the wire.
+    Hold,
+
+    /// The job should be marked as skipped and not sent
+    Skip,
+}
+
+impl EnqueueResult {
+    pub(crate) fn state(&self) -> IOState {
+        match self {
+            EnqueueResult::Send | EnqueueResult::Hold => IOState::InProgress,
+            EnqueueResult::Skip => IOState::Skipped,
+        }
+    }
+}
+
 /// Action requested by `DownstairsClient::select`
 ///
 /// This is split into a separate data structure because we need to distinguish
@@ -2619,7 +2651,7 @@ impl ClientIoTask {
                         }
                     }
                 }
-                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                _ = tokio::time::sleep(CLIENT_RECONNECT_DELAY) => {
                     // this is fine
                 },
             }

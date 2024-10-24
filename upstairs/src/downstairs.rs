@@ -9,7 +9,7 @@ use std::{
 use crate::{
     backpressure::BackpressureGuard,
     cdt,
-    client::{ClientAction, ClientStopReason, DownstairsClient},
+    client::{ClientAction, ClientStopReason, DownstairsClient, EnqueueResult},
     guest::GuestBlockRes,
     live_repair::ExtentInfo,
     stats::DownstairsStatOuter,
@@ -2115,18 +2115,21 @@ impl Downstairs {
         // Send the job to each client!
         let state = ClientData::from_fn(|cid| {
             let client = &mut self.clients[cid];
-            if client.enqueue(ds_id, &io, last_repair_extent) {
-                // Update the per-client backpressure guard
-                if !bp_guard.contains(&cid) {
-                    let g = client.backpressure_counters.increment(&io);
-                    bp_guard.insert(cid, g);
+            let r = client.enqueue(ds_id, &io, last_repair_extent);
+            match r {
+                EnqueueResult::Send | EnqueueResult::Hold => {
+                    // Update the per-client backpressure guard
+                    if !bp_guard.contains(&cid) {
+                        let g = client.backpressure_counters.increment(&io);
+                        bp_guard.insert(cid, g);
+                    }
+                    if matches!(r, EnqueueResult::Send) {
+                        self.send(ds_id, io.clone(), cid);
+                    }
                 }
-                self.send(ds_id, io.clone(), cid);
-                IOState::InProgress
-            } else {
-                skipped += 1;
-                IOState::Skipped
+                EnqueueResult::Skip => skipped += 1,
             }
+            r.state()
         });
 
         // Writes are acked immediately, before being enqueued

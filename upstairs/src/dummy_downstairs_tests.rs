@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::client::CLIENT_TIMEOUT_SECS;
+use crate::client::{CLIENT_RECONNECT_DELAY, CLIENT_TIMEOUT_SECS};
 use crate::guest::Guest;
 use crate::up_main;
 use crate::BlockIO;
@@ -2645,4 +2645,85 @@ async fn test_write_replay() {
     // Check that the guest hasn't panicked by sending it a message that
     // requires going to the worker thread.
     harness.guest.get_uuid().await.unwrap();
+}
+
+/// Test that messages do not make it to a Downstairs mid-negotiation
+#[tokio::test]
+async fn test_no_send_offline() {
+    let mut harness = TestHarness::new().await;
+    harness.ds1().cfg.reply_to_ping = false;
+
+    // Sleep until we're confident that the Downstairs is kicked out, answering
+    // pings from the other two Downstairs
+    info!(harness.log, "waiting for Upstairs to kick out DS1");
+    let sleep_time = Duration::from_secs_f32(CLIENT_TIMEOUT_SECS + 5.0);
+    tokio::select! {
+        e = harness.ds1.as_mut().unwrap().recv() => {
+            // We've been kicked out!
+            assert!(e.is_none());
+        }
+        _ = harness.ds2.recv() => panic!("unexpected message"),
+        _ = harness.ds3.recv() => panic!("unexpected message"),
+        _ = tokio::time::sleep(sleep_time) => panic!("unexpected timeout"),
+    }
+
+    // Check to make sure that happened
+    let ds = harness.guest.downstairs_state().await.unwrap();
+    assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+    assert_eq!(ds[ClientId::new(1)], DsState::Active);
+    assert_eq!(ds[ClientId::new(2)], DsState::Active);
+    info!(harness.log, "DS1 is offline");
+
+    // Reconnect ds1
+    harness.restart_ds1().await;
+
+    // Wait for the Upstairs to try reconnecting, answering pings all the while
+    let reconnect_time = CLIENT_RECONNECT_DELAY + Duration::from_secs(2);
+    tokio::select! {
+        _ = harness.ds2.recv() => panic!("unexpected message"),
+        _ = harness.ds3.recv() => panic!("unexpected message"),
+        _ = tokio::time::sleep(reconnect_time) => (),
+    }
+
+    // Start negotiation
+    harness.ds1().negotiate_start().await;
+
+    // Check that a write doesn't make it to DS1
+    let write_handle = harness.spawn(|guest| async move {
+        let mut data = BytesMut::new();
+        data.resize(512, 1u8);
+        guest.write(BlockIndex(0), data).await.unwrap();
+    });
+    harness.ds2.ack_write().await;
+    harness.ds3.ack_write().await;
+
+    // We expect to receive the next negotiation packet, not the Write
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let last_flush_number = match harness.ds1().try_recv() {
+        Ok(Message::LastFlush { last_flush_number }) => last_flush_number,
+        m => panic!("unexpected message {m:?}"),
+    };
+
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(harness.ds1().try_recv(), Err(TryRecvError::Empty));
+
+    // The write should be done
+    write_handle.await.unwrap();
+
+    // Now, bring the Downstairs up, which should trigger replay
+    harness
+        .ds1()
+        .send(Message::LastFlushAck { last_flush_number })
+        .unwrap();
+
+    // Give the replay a moment to happen
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // We should see that write sent as a replay
+    match harness.ds1().try_recv() {
+        Ok(Message::Write { header, .. }) => {
+            assert_eq!(header.job_id, JobId(1000))
+        }
+        e => panic!("invalid message {e:?}; expected Write"),
+    }
 }
