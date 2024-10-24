@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crucible_common::{
-    build_logger, integrity_hash, mkdir_for_file, verbose_timeout, Block,
-    BlockIndex, BlockOffset, CrucibleError, ExtentId, RegionDefinition,
+    build_logger, integrity_hash, mkdir_for_file, Block, BlockIndex,
+    BlockOffset, CrucibleError, ExtentId, RegionDefinition, VerboseTimeout,
     MAX_BLOCK_SIZE,
 };
 use crucible_protocol::{
@@ -2057,11 +2057,10 @@ async fn recv_task<RT>(
 ) where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
 {
-    // How long we wait before logging a message that we have not heard from
-    // the upstairs.
-    const TIMEOUT_SECS: f32 = 15.0;
-    // How many timeouts will tolerate before we disconnect from the upstairs.
-    const TIMEOUT_LIMIT: usize = 3;
+    const TIMEOUT: VerboseTimeout = VerboseTimeout {
+        tick: Duration::from_secs(15),
+        count: 3,
+    };
 
     let send_disconnect = || {
         warn!(log, "recv_task sending ConnectionClosed");
@@ -2073,13 +2072,11 @@ async fn recv_task<RT>(
 
     loop {
         tokio::select! {
-            /*
-             * Don't wait more than TIMEOUT_SECS * TIMEOUT_LIMIT seconds to hear
-             * from the other side.
-             * XXX Timeouts, timeouts: always wrong!  Some too short and
-             * some too long.
-             */
-            _ = verbose_timeout(TIMEOUT_SECS, TIMEOUT_LIMIT, log.clone()) => {
+            // Don't wait more than our timeout to hear from the other side.
+            //
+            // XXX Timeouts, timeouts: always wrong!  Some too short and
+            // some too long.
+            _ = TIMEOUT.wait(&log) => {
                 warn!(log, "inactivity timeout");
                 send_disconnect();
                 break;

@@ -19,7 +19,7 @@ use serde::Serialize;
 use tokio::process::{Child, Command};
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc, watch, Mutex};
-use tokio::time::sleep_until;
+use tokio::time::{sleep_until, Duration, Instant};
 use uuid::Uuid;
 
 pub mod client;
@@ -790,12 +790,6 @@ impl DscWork {
     }
 }
 
-pub fn deadline_secs(secs: u64) -> tokio::time::Instant {
-    tokio::time::Instant::now()
-        .checked_add(tokio::time::Duration::from_secs(secs))
-        .unwrap()
-}
-
 // Perform the work requested of us.  Some work is handled in the main
 // loop. Work here are things that don't require modification of state in
 // the main loop.
@@ -973,7 +967,7 @@ async fn start_dsc(
     }
 
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
-    let mut timeout_deadline = deadline_secs(5);
+    let mut timeout_deadline = Instant::now() + Duration::from_secs(5);
     let mut shutdown_sent = false;
     let mut random_restart = false;
     let mut restart_min = 9;
@@ -985,7 +979,7 @@ async fn start_dsc(
                 // If we are trying to shutdown, go and check the state
                 // of all downstairs and see if they have stopped.  If so,
                 // we can exit this loop and the program.
-                if shutdown_sent {
+                let timeout = if shutdown_sent {
                     let mut keep_waiting = false;
                     let rs = dsci.rs.lock().await;
 
@@ -1003,7 +997,7 @@ async fn start_dsc(
                     }
 
                     if keep_waiting {
-                        timeout_deadline = deadline_secs(1);
+                        Duration::from_secs(1)
                     } else {
                         break;
                     }
@@ -1012,14 +1006,13 @@ async fn start_dsc(
                     let cid = rng.gen_range(0..3) as usize;
                     println!("stop rand {}", cid);
                     action_tx_list[cid].send(DownstairsAction::Stop).await.unwrap();
-                    let timeout = rng.gen_range(restart_min..restart_max);
-                    timeout_deadline = deadline_secs(timeout);
+                    Duration::from_secs(rng.gen_range(restart_min..restart_max))
                 } else {
                     // Set the timeout to be a random value between our
                     // min and max.
-                    let timeout = rng.gen_range(restart_min..restart_max);
-                    timeout_deadline = deadline_secs(timeout);
-                }
+                    Duration::from_secs(rng.gen_range(restart_min..restart_max))
+                };
+                timeout_deadline = Instant::now() + timeout;
             },
             _ = notify_rx.changed() => {
                 println!("Main task has work to do, go find it");
@@ -1053,7 +1046,8 @@ async fn start_dsc(
                                 action_tx.send(DownstairsAction::Stop).await.unwrap();
                             }
                             println!("Shut it down");
-                            timeout_deadline = deadline_secs(1);
+                            timeout_deadline =
+                                Instant::now() + Duration::from_secs(1);
                             shutdown_sent = true;
                         }
 
@@ -1313,7 +1307,7 @@ async fn ds_start_monitor(
                     stop_notify = true;
                 } else {
                     // Don't loop too fast if we are not required to restart
-                    tokio::time::sleep_until(deadline_secs(2)).await;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
                 }
             }
         }
