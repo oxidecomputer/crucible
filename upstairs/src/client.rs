@@ -905,7 +905,8 @@ impl DownstairsClient {
 
     /// Checks whether the given job should be sent
     ///
-    /// Returns `true` if it should be sent and `false` otherwise
+    /// Returns an [`EnqueueResult`] indicating how the caller should handle the
+    /// packet.
     ///
     /// If the job should be skipped, then it is added to `self.skipped_jobs`.
     /// `self.io_state_job_count` is updated with the incoming job state.
@@ -940,8 +941,8 @@ impl DownstairsClient {
 
     /// Checks whether the given job should be sent or skipped
     ///
-    /// Returns `true` if the job should be sent and `false` if it should be
-    /// skipped.
+    /// Returns an [`EnqueueResult`] indicating how the caller should handle the
+    /// packet.
     #[must_use]
     fn should_send(
         &self,
@@ -977,7 +978,7 @@ impl DownstairsClient {
             // cleared out by a subsequent flush (so we'll be able to bring that
             // client back into compliance by replaying jobs).
             DsState::Active => EnqueueResult::Send,
-            DsState::Offline => EnqueueResult::Drop,
+            DsState::Offline => EnqueueResult::Store,
 
             DsState::New
             | DsState::BadVersion
@@ -2350,7 +2351,7 @@ pub(crate) enum EnqueueResult {
     /// This is used when the Downstairs is Offline; we want to mark the job as
     /// in-progress so that it's eligible for replay, but the job should not
     /// actually go out on the wire.
-    Drop,
+    Store,
 
     /// The job should be marked as skipped and not sent
     Skip,
@@ -2359,7 +2360,7 @@ pub(crate) enum EnqueueResult {
 impl EnqueueResult {
     pub(crate) fn state(&self) -> IOState {
         match self {
-            EnqueueResult::Send | EnqueueResult::Drop => IOState::InProgress,
+            EnqueueResult::Send | EnqueueResult::Store => IOState::InProgress,
             EnqueueResult::Skip => IOState::Skipped,
         }
     }
