@@ -663,7 +663,7 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
 
         println!("cli connecting to {0}", attach);
 
-        let deadline = tokio::time::sleep_until(deadline_secs(100.0));
+        let deadline = tokio::time::sleep(Duration::from_secs(100));
         tokio::pin!(deadline);
         let tcp = sock.connect(attach);
         tokio::pin!(tcp);
@@ -682,7 +682,7 @@ pub async fn start_cli_client(attach: SocketAddr) -> Result<()> {
                     Err(e) => {
                         println!("connect to {0} failure: {1:?}",
                             attach, e);
-                        tokio::time::sleep_until(deadline_secs(10.0)).await;
+                        tokio::time::sleep(Duration::from_secs(10)).await;
                         continue 'outer;
                     }
                 }

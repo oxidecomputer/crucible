@@ -7,9 +7,7 @@ use crate::{
     ReconcileIO, ReconcileIOState, RegionDefinitionStatus, RegionMetadata,
     Validation,
 };
-use crucible_common::{
-    deadline_secs, verbose_timeout, x509::TLSContext, ExtentId,
-};
+use crucible_common::{x509::TLSContext, ExtentId, VerboseTimeout};
 use crucible_protocol::{
     MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
 };
@@ -28,21 +26,17 @@ use slog::{debug, error, info, o, warn, Logger};
 use tokio::{
     net::{TcpSocket, TcpStream},
     sync::{mpsc, oneshot},
-    time::{sleep_until, Duration},
+    time::{sleep, sleep_until, Duration, Instant},
 };
 use tokio_util::codec::FramedRead;
 use uuid::Uuid;
 
-// How long we wait before logging a message that we have not heard from
-// the downstairs.
-const TIMEOUT_SECS: f32 = 15.0;
-// How many timeouts will we tolerate before we disconnect from a downstairs.
-const TIMEOUT_LIMIT: usize = 3;
-const PING_INTERVAL_SECS: f32 = 5.0;
+pub(crate) const CLIENT_TIMEOUT: VerboseTimeout = VerboseTimeout {
+    tick: Duration::from_secs(15),
+    count: 3,
+};
 
-/// Total time before a client is timed out
-#[cfg(test)]
-pub const CLIENT_TIMEOUT_SECS: f32 = TIMEOUT_SECS * TIMEOUT_LIMIT as f32;
+const PING_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Delay before a client reconnects (to prevent spamming connections)
 pub const CLIENT_RECONNECT_DELAY: std::time::Duration =
@@ -2695,7 +2689,7 @@ impl ClientIoTask {
         // Set a connect timeout, and connect to the target:
         info!(self.log, "connecting to {}", self.target);
         let tcp: TcpStream = tokio::select! {
-            _ = sleep_until(deadline_secs(10.0))=> {
+            _ = sleep(Duration::from_secs(10))=> {
                 warn!(self.log, "connect timeout");
                 return ClientRunResult::ConnectionTimeout;
             }
@@ -2791,7 +2785,7 @@ impl ClientIoTask {
             self.client_id,
         )));
 
-        let mut ping_interval = deadline_secs(PING_INTERVAL_SECS);
+        let mut ping_deadline = Instant::now() + PING_INTERVAL;
         let mut ping_count = 0u64;
         loop {
             tokio::select! {
@@ -2814,8 +2808,8 @@ impl ClientIoTask {
                     }
                 }
 
-                _ = sleep_until(ping_interval) => {
-                    ping_interval = deadline_secs(PING_INTERVAL_SECS);
+                _ = sleep_until(ping_deadline) => {
+                    ping_deadline = Instant::now() + PING_INTERVAL;
                     ping_count += 1;
                     cdt::ds__ping__sent!(|| (ping_count, self.client_id.get()));
 
@@ -2953,7 +2947,7 @@ where
                     }
                 }
             }
-            _ = verbose_timeout(TIMEOUT_SECS, TIMEOUT_LIMIT, log.clone()) => {
+            _ = CLIENT_TIMEOUT.wait(&log) => {
                 warn!(log, "inactivity timeout");
                 break ClientRunResult::Timeout;
             }

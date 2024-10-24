@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::client::{CLIENT_RECONNECT_DELAY, CLIENT_TIMEOUT_SECS};
+use crate::client::{CLIENT_RECONNECT_DELAY, CLIENT_TIMEOUT};
 use crate::guest::Guest;
 use crate::up_main;
 use crate::BlockIO;
@@ -47,6 +47,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tokio_util::codec::FramedRead;
 use tokio_util::codec::FramedWrite;
 use uuid::Uuid;
@@ -1476,13 +1477,13 @@ async fn test_byte_fault_condition() {
     }
 
     // Sleep until we're confident that the Downstairs is kicked out
-    let sleep_time = CLIENT_TIMEOUT_SECS + 5.0;
+    let sleep_time = CLIENT_TIMEOUT.timeout() + Duration::from_secs(5);
     info!(
         harness.log,
-        "waiting {sleep_time} secs for Upstairs to kick out DS1"
+        "waiting {sleep_time:?} secs for Upstairs to kick out DS1"
     );
     tokio::select! {
-        _ = tokio::time::sleep(Duration::from_secs_f32(sleep_time)) => {
+        _ = tokio::time::sleep(sleep_time) => {
             // we're done!
         }
         // we don't listen to ds1 here, so we won't acknowledge any pings!
@@ -1516,8 +1517,8 @@ async fn test_byte_fault_condition_offline() {
     //   Active -> Offline (after 45 seconds).
     // - Then, after its job count hits IO_OUTSTANDING_MAX_BYTES, it will
     //   transition from Offline -> Faulted
-    const MARGIN_SECS: f32 = 2.0;
-    const SEND_JOBS_TIME: f32 = CLIENT_TIMEOUT_SECS - MARGIN_SECS;
+    const MARGIN: Duration = Duration::from_secs(2);
+    let send_jobs_time = CLIENT_TIMEOUT.timeout() - MARGIN;
     let start_time = tokio::time::Instant::now();
 
     // `num_jobs` sends enough bytes to hit the IO_OUTSTANDING_MAX_BYTES
@@ -1530,12 +1531,9 @@ async fn test_byte_fault_condition_offline() {
 
     // First, we'll send jobs until the timeout
     for i in 0..num_jobs / 2 {
-        // Delay so that we hit SEND_JOBS_TIME at the end of this loop
+        // Delay so that we hit `send_jobs_time` at the end of this loop
         tokio::time::sleep_until(
-            start_time
-                + Duration::from_secs_f32(
-                    SEND_JOBS_TIME * i as f32 / (num_jobs / 2) as f32,
-                ),
+            start_time + (send_jobs_time * i as u32) / (num_jobs as u32 / 2),
         )
         .await;
 
@@ -1566,7 +1564,7 @@ async fn test_byte_fault_condition_offline() {
 
     // Sleep until we're confident that the Downstairs is kicked out
     info!(harness.log, "waiting for Upstairs to kick out DS1");
-    tokio::time::sleep(Duration::from_secs_f32(2.0 * MARGIN_SECS)).await;
+    tokio::time::sleep(2 * MARGIN).await;
 
     // Check to make sure that happened
     let ds = harness.guest.downstairs_state().await.unwrap();
@@ -1598,7 +1596,7 @@ async fn test_byte_fault_condition_offline() {
         h.await.unwrap();
 
         let ds = harness.guest.downstairs_state().await.unwrap();
-        if (i + 1) * WRITE_SIZE < IO_OUTSTANDING_MAX_BYTES as usize {
+        if (i as usize + 1) * WRITE_SIZE < IO_OUTSTANDING_MAX_BYTES as usize {
             assert_eq!(ds[ClientId::new(0)], DsState::Offline);
             assert_eq!(ds[ClientId::new(1)], DsState::Active);
             assert_eq!(ds[ClientId::new(2)], DsState::Active);
@@ -1622,24 +1620,21 @@ async fn test_offline_can_deactivate() {
 
     // We're not replying to pings, so DS1 will eventually transition from
     // Active -> Offline (after CLIENT_TIMEOUT_SECS seconds).
-    const MARGIN_SECS: f32 = 5.0;
+    const MARGIN: Duration = Duration::from_secs(5);
 
     // Sleep until we're confident that the Downstairs is kicked out.  We do
     // a loop here so the other downstairs will have a chance to respond to
     // pings.
-    let sleep_time = 5.0;
-    let loop_stop_time = CLIENT_TIMEOUT_SECS + MARGIN_SECS;
-    let mut loop_time = 0.0;
+    let sleep_time = Duration::from_secs(5);
+    let loop_stop_time = Instant::now() + CLIENT_TIMEOUT.timeout() + MARGIN;
 
     // Sleep until we're confident that the Downstairs is kicked out
-    while loop_time < loop_stop_time {
-        tokio::time::sleep(Duration::from_secs_f32(sleep_time)).await;
+    while Instant::now() < loop_stop_time {
+        tokio::time::sleep(sleep_time).await;
         // Respond to pings, but drop anything else (we should not get
         // anything else)
         let _ = harness.ds2.try_recv();
         let _ = harness.ds3.try_recv();
-
-        loop_time += sleep_time;
     }
 
     // Check to make sure downstairs 1 is now offline.
@@ -1662,24 +1657,21 @@ async fn test_offline_with_io_can_deactivate() {
 
     // We're not replying to pings, so DS1 will eventually transition from
     // Active -> Offline (after CLIENT_TIMEOUT_SECS seconds).
-    const MARGIN_SECS: f32 = 5.0;
+    const MARGIN: Duration = Duration::from_secs(5);
 
     // Sleep until we're confident that the Downstairs is kicked out.  We do
     // a loop here so the other downstairs will have a chance to respond to
     // pings.
-    let sleep_time = 5.0;
-    let loop_stop_time = CLIENT_TIMEOUT_SECS + MARGIN_SECS;
-    let mut loop_time = 0.0;
+    let sleep_time = Duration::from_secs(5);
+    let loop_stop_time = Instant::now() + CLIENT_TIMEOUT.timeout() + MARGIN;
 
     // Sleep until we're confident that the Downstairs is kicked out
-    while loop_time < loop_stop_time {
-        tokio::time::sleep(Duration::from_secs_f32(sleep_time)).await;
+    while Instant::now() < loop_stop_time {
+        tokio::time::sleep(sleep_time).await;
         // Respond to pings, but drop anything else (we should not get
         // anything else)
         let _ = harness.ds2.try_recv();
         let _ = harness.ds3.try_recv();
-
-        loop_time += sleep_time;
     }
 
     // Check to make sure downstairs 1 is now offline.
@@ -1727,11 +1719,11 @@ async fn test_all_offline_with_io_can_deactivate() {
 
     // We're not replying to pings, so DS1 will eventually transition from
     // Active -> Offline (after CLIENT_TIMEOUT_SECS seconds).
-    const MARGIN_SECS: f32 = 5.0;
+    const MARGIN: Duration = Duration::from_secs(5);
 
     // Sleep until we're confident that all Downstairs are kicked out.
-    let wait_time = CLIENT_TIMEOUT_SECS + MARGIN_SECS;
-    tokio::time::sleep(Duration::from_secs_f32(wait_time)).await;
+    let wait_time = CLIENT_TIMEOUT.timeout() + MARGIN;
+    tokio::time::sleep(wait_time).await;
 
     // Check to make sure all downstairs are offline.
     let ds = harness.guest.downstairs_state().await.unwrap();
@@ -1801,14 +1793,14 @@ async fn test_job_fault_condition() {
     // Because it has so many pending jobs, it will become Faulted instead of
     // Offline (or rather, will transition Active -> Offline -> Faulted
     // immediately).
-    let sleep_time = CLIENT_TIMEOUT_SECS + 5.0;
+    let sleep_time = CLIENT_TIMEOUT.timeout() + Duration::from_secs(5);
     info!(harness.log, "waiting for Upstairs to kick out DS1");
     info!(
         harness.log,
-        "waiting {sleep_time} secs for Upstairs to kick out DS1"
+        "waiting {sleep_time:?} secs for Upstairs to kick out DS1"
     );
     tokio::select! {
-        _ = tokio::time::sleep(Duration::from_secs_f32(sleep_time)) => {
+        _ = tokio::time::sleep(sleep_time) => {
             // we're done!
         }
         // we don't listen to ds1 here, so we won't acknowledge any pings!
@@ -1843,18 +1835,15 @@ async fn test_job_fault_condition_offline() {
     // - Then, after its job count hits IO_OUTSTANDING_MAX_JOBS, it will
     //   transition from Offline -> Faulted
 
-    const MARGIN_SECS: f32 = 2.0;
-    const SEND_JOBS_TIME: f32 = CLIENT_TIMEOUT_SECS - MARGIN_SECS;
+    const MARGIN: Duration = Duration::from_secs(2);
+    let send_jobs_time = CLIENT_TIMEOUT.timeout() - MARGIN;
     let num_jobs = IO_OUTSTANDING_MAX_JOBS / 2;
     let start_time = tokio::time::Instant::now();
 
     for i in 0..num_jobs {
-        // Delay so that we hit SEND_JOBS_TIME at the end of this loop
+        // Delay so that we hit `send_jobs_time` at the end of this loop
         tokio::time::sleep_until(
-            start_time
-                + Duration::from_secs_f32(
-                    SEND_JOBS_TIME * i as f32 / num_jobs as f32,
-                ),
+            start_time + (send_jobs_time * i as u32) / num_jobs as u32,
         )
         .await;
 
@@ -1887,7 +1876,7 @@ async fn test_job_fault_condition_offline() {
 
     // Sleep until we're confident that the Downstairs is kicked out
     info!(harness.log, "waiting for Upstairs to kick out DS1");
-    tokio::time::sleep(Duration::from_secs_f32(2.0 * MARGIN_SECS)).await;
+    tokio::time::sleep(2 * MARGIN).await;
 
     // Check to make sure that happened
     let ds = harness.guest.downstairs_state().await.unwrap();
@@ -2656,7 +2645,7 @@ async fn test_no_send_offline() {
     // Sleep until we're confident that the Downstairs is kicked out, answering
     // pings from the other two Downstairs
     info!(harness.log, "waiting for Upstairs to kick out DS1");
-    let sleep_time = Duration::from_secs_f32(CLIENT_TIMEOUT_SECS + 5.0);
+    let sleep_time = CLIENT_TIMEOUT.timeout() + Duration::from_secs(5);
     tokio::select! {
         e = harness.ds1.as_mut().unwrap().recv() => {
             // We've been kicked out!
