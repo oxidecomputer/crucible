@@ -932,8 +932,8 @@ impl DownstairsClient {
         } else {
             &IOState::Skipped
         };
-        self.io_state_job_count[&state] += 1;
-        self.io_state_byte_count[&state] += io.job_bytes();
+        self.io_state_job_count[state] += 1;
+        self.io_state_byte_count[state] += io.job_bytes();
         should_send
     }
 

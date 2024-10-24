@@ -2651,7 +2651,7 @@ impl Downstairs {
                 let summary = job.io_summarize(id);
                 self.retired_jobs.push(summary);
                 for cid in ClientId::iter() {
-                    self.clients[cid].retire_job(&job);
+                    self.clients[cid].retire_job(job);
                 }
             }
             // Now that we've collected jobs to retire, remove them from the map
