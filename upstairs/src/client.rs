@@ -520,10 +520,13 @@ impl DownstairsClient {
     }
 
     /// When the downstairs is marked as missing, handle its state transition
-    pub(crate) fn on_missing(&mut self) {
+    pub(crate) fn on_missing(&mut self, can_replay: bool) {
         let current = &self.state;
         let new_state = match current {
-            DsState::Active | DsState::Offline => DsState::Offline,
+            DsState::Active | DsState::Offline if can_replay => {
+                DsState::Offline
+            }
+            DsState::Active | DsState::Offline => DsState::Faulted,
 
             DsState::Faulted
             | DsState::LiveRepair
@@ -862,8 +865,12 @@ impl DownstairsClient {
         reason: ClientStopReason,
     ) {
         let new_state = match self.state {
-            DsState::Active => DsState::Offline,
-            DsState::Offline => DsState::Offline,
+            DsState::Active | DsState::Offline
+                if matches!(reason, ClientStopReason::IneligibleForReplay) =>
+            {
+                DsState::Faulted
+            }
+            DsState::Active | DsState::Offline => DsState::Offline,
             DsState::Migrating => DsState::Faulted,
             DsState::Faulted => DsState::Faulted,
             DsState::Deactivated => DsState::New,
@@ -2432,6 +2439,9 @@ pub(crate) enum ClientStopReason {
 
     /// The upstairs has requested that we deactivate when we were offline
     OfflineDeactivated,
+
+    /// The Upstairs has dropped jobs that would be needed for replay
+    IneligibleForReplay,
 }
 
 /// Response received from the I/O task
