@@ -2,17 +2,23 @@
 
 use super::model::*;
 use anyhow::{anyhow, bail, Result};
+use chrono::{DateTime, Utc};
 use crucible_common::write_json;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use slog::{crit, error, info, Logger};
-use std::collections::BTreeMap;
+use slog::{crit, error, info, warn, Logger};
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 
 use crate::snapshot_interface::SnapshotInterface;
 use crate::ZFSDataset;
+
+/// Maximum parallel region creation we allow.
+const MAX_REGION_WORK: usize = 5;
 
 pub struct DataFile {
     log: Logger,
@@ -22,8 +28,28 @@ pub struct DataFile {
     port_min: u16,
     port_max: u16,
     bell: Condvar,
-    inner: Mutex<Inner>,
+    outer: Mutex<Outer>,
     snapshot_interface: Arc<dyn SnapshotInterface>,
+    // When any task is updating SMF, it should obtain this lock first.
+    pub smf_lock: Mutex<bool>,
+}
+
+/// Describing an active region create job the agent is doing.
+struct RegionJob {
+    /// When this job was requested.
+    request_time: DateTime<Utc>,
+    /// The join_handle for the spawned worker thread
+    join_handle: JoinHandle<Result<(), anyhow::Error>>,
+    /// When the thread has finished its work, a message will arrive here.
+    done_rx: mpsc::Receiver<bool>,
+}
+
+// This struct covers both the inner regions and snapshots as well as
+// the work queue for the agent.  We put both here so we can protect
+// them in the same mutex.
+struct Outer {
+    inner: Inner,
+    work_queue: HashMap<RegionId, RegionJob>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -31,6 +57,12 @@ struct Inner {
     regions: BTreeMap<RegionId, Region>,
     // indexed by region id and snapshot name
     running_snapshots: BTreeMap<RegionId, BTreeMap<String, RunningSnapshot>>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct JobInfo {
+    request_time: DateTime<Utc>,
+    region_id: RegionId,
 }
 
 impl DataFile {
@@ -57,6 +89,9 @@ impl DataFile {
             }
         };
 
+        let work_queue = HashMap::new();
+        let outer = Outer { inner, work_queue };
+
         Ok(DataFile {
             log,
             base_path: base_path.to_path_buf(),
@@ -65,8 +100,9 @@ impl DataFile {
             port_min,
             port_max,
             bell: Condvar::new(),
-            inner: Mutex::new(inner),
+            outer: Mutex::new(outer),
             snapshot_interface,
+            smf_lock: Mutex::new(false),
         })
     }
 
@@ -75,31 +111,64 @@ impl DataFile {
     }
 
     pub fn regions(&self) -> Vec<Region> {
-        self.inner
-            .lock()
-            .unwrap()
-            .regions
-            .values()
-            .cloned()
-            .collect()
+        let outer = self.outer.lock().unwrap();
+        outer.inner.regions.values().cloned().collect()
     }
 
     pub fn running_snapshots(
         &self,
     ) -> BTreeMap<RegionId, BTreeMap<String, RunningSnapshot>> {
-        self.inner.lock().unwrap().running_snapshots.clone()
+        self.outer.lock().unwrap().inner.running_snapshots.clone()
     }
 
     pub fn get(&self, id: &RegionId) -> Option<Region> {
-        self.inner.lock().unwrap().regions.get(id).cloned()
+        self.outer.lock().unwrap().inner.regions.get(id).cloned()
+    }
+
+    // Add the details about a spawned work task to the work queue.
+    pub fn add_work(
+        &self,
+        id: RegionId,
+        join_handle: JoinHandle<Result<(), anyhow::Error>>,
+        request_time: DateTime<Utc>,
+        done_rx: mpsc::Receiver<bool>,
+    ) {
+        let work_queue = &mut self.outer.lock().unwrap().work_queue;
+        let region_job = RegionJob {
+            request_time,
+            join_handle,
+            done_rx,
+        };
+        work_queue.insert(id, region_job);
+    }
+
+    // Return a Vec of JobInfo about all jobs on the work queue.
+    pub fn get_work_queue(&self) -> Vec<JobInfo> {
+        let work_queue = &mut self.outer.lock().unwrap().work_queue;
+        let mut regions = Vec::new();
+        for (k, v) in work_queue.iter() {
+            let job_info = JobInfo {
+                request_time: v.request_time,
+                region_id: k.clone(),
+            };
+            regions.push(job_info);
+        }
+        regions
+    }
+
+    // When a piece of work has completed, it should call this to signal to
+    // the main thread that work has completed.
+    pub fn work_done(&self, done_tx: mpsc::Sender<bool>) {
+        let _ = done_tx.send(true);
+        self.bell.notify_all();
     }
 
     /**
      * Store the database into the JSON file.
      */
-    fn store(&self, inner: MutexGuard<Inner>) {
+    fn store(&self, inner: &Inner) {
         loop {
-            match write_json(&self.conf_path, &*inner, true) {
+            match write_json(&self.conf_path, inner, true) {
                 Ok(()) => return,
                 Err(e) => {
                     /*
@@ -117,7 +186,7 @@ impl DataFile {
         }
     }
 
-    fn get_free_port(&self, inner: &MutexGuard<Inner>) -> Result<u16> {
+    fn get_free_port(&self, inner: &Inner) -> Result<u16> {
         for port_number in self.port_min..=self.port_max {
             let mut region_uses_port = false;
             let mut running_snapshot_uses_port = false;
@@ -180,7 +249,7 @@ impl DataFile {
         &self,
         create: CreateRegion,
     ) -> Result<Region> {
-        let mut inner = self.inner.lock().unwrap();
+        let inner = &mut self.outer.lock().unwrap().inner;
 
         /*
          * Look for a region with this ID.
@@ -204,7 +273,7 @@ impl DataFile {
         /*
          * Allocate a port number that is not yet in use.
          */
-        let port_number = self.get_free_port(&inner)?;
+        let port_number = self.get_free_port(inner)?;
 
         let read_only = create.source.is_some();
 
@@ -243,7 +312,7 @@ impl DataFile {
         &self,
         request: CreateRunningSnapshotRequest,
     ) -> Result<RunningSnapshot> {
-        let mut inner = self.inner.lock().unwrap();
+        let inner = &mut self.outer.lock().unwrap().inner;
 
         /*
          * Look for an existing running snapshot.
@@ -293,7 +362,7 @@ impl DataFile {
         /*
          * Allocate a port number that is not yet in use.
          */
-        let port_number = self.get_free_port(&inner)?;
+        let port_number = self.get_free_port(inner)?;
 
         let s = RunningSnapshot {
             id: request.id.clone(),
@@ -330,7 +399,7 @@ impl DataFile {
         &self,
         request: DeleteRunningSnapshotRequest,
     ) -> Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let inner = &mut self.outer.lock().unwrap().inner;
 
         /*
          * Look for an existing running snapshot.
@@ -426,7 +495,7 @@ impl DataFile {
         &self,
         request: DeleteSnapshotRequest,
     ) -> Result<()> {
-        let inner = self.inner.lock().unwrap();
+        let inner = &mut self.outer.lock().unwrap().inner;
 
         /*
          * Are we running a read-only downstairs for this snapshot? Fail if so.
@@ -518,7 +587,7 @@ impl DataFile {
      * Mark a particular region as failed to provision.
      */
     pub fn fail(&self, id: &RegionId) {
-        let mut inner = self.inner.lock().unwrap();
+        let inner = &mut self.outer.lock().unwrap().inner;
 
         let r = inner.regions.get_mut(id).unwrap();
         let nstate = State::Failed;
@@ -539,7 +608,7 @@ impl DataFile {
      * Mark a particular running snapshot as failed to provision.
      */
     pub fn fail_rs(&self, region_id: &RegionId, snapshot_name: &str) {
-        let mut inner = self.inner.lock().unwrap();
+        let inner = &mut self.outer.lock().unwrap().inner;
 
         let rs = inner
             .running_snapshots
@@ -570,7 +639,7 @@ impl DataFile {
      * Mark a particular region as provisioned.
      */
     pub fn created(&self, id: &RegionId) -> Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let inner = &mut self.outer.lock().unwrap().inner;
 
         let r = inner.regions.get_mut(id).unwrap();
         let nstate = State::Created;
@@ -604,7 +673,7 @@ impl DataFile {
         region_id: &RegionId,
         snapshot_name: &str,
     ) -> Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let inner = &mut self.outer.lock().unwrap().inner;
 
         let rs = inner
             .running_snapshots
@@ -672,7 +741,7 @@ impl DataFile {
      * used in a saga.
      */
     pub fn destroyed(&self, id: &RegionId) -> Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let inner = &mut self.outer.lock().unwrap().inner;
 
         let r = inner.regions.get_mut(id).unwrap();
         let nstate = State::Destroyed;
@@ -702,7 +771,7 @@ impl DataFile {
         region_id: &RegionId,
         snapshot_name: &str,
     ) -> Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let inner = &mut self.outer.lock().unwrap().inner;
 
         let rs = inner
             .running_snapshots
@@ -731,7 +800,7 @@ impl DataFile {
      * Nexus has requested that we destroy this particular region.
      */
     pub fn destroy(&self, id: &RegionId) -> Result<()> {
-        let mut inner = self.inner.lock().unwrap();
+        let inner = &mut self.outer.lock().unwrap().inner;
 
         let r = inner
             .regions
@@ -772,9 +841,41 @@ impl DataFile {
      * wait on the condition variable.
      */
     pub fn first_in_states(&self, states: &[State]) -> Resource {
-        let mut inner = self.inner.lock().unwrap();
+        let mut outer = self.outer.lock().unwrap();
 
         loop {
+            // First check to see if there are completed jobs on the
+            // region create work queue. If we find any that are done,
+            // then remove them now.
+            {
+                let mut done_jobs = Vec::new();
+                for (id, region_job) in outer.work_queue.iter_mut() {
+                    if region_job.join_handle.is_finished()
+                        || region_job.done_rx.try_recv().is_ok()
+                    {
+                        done_jobs.push(id.clone());
+                    } else {
+                        info!(self.log, "id {:?} still running", id);
+                    }
+                }
+
+                for done_id in done_jobs {
+                    let region_job = outer.work_queue.remove(&done_id).unwrap();
+                    // Wait for the thread to wrap up.
+                    if let Err(e) = region_job.join_handle.join() {
+                        warn!(
+                            self.log,
+                            "Exiting work thread reported: {:?}", e
+                        );
+                    }
+                }
+
+                info!(
+                    self.log,
+                    "reqion create work queue len is now: {:?}",
+                    outer.work_queue.len()
+                );
+            }
             /*
              * States are provided in priority order.  We check for regions
              * in the first requested state before we check for
@@ -783,20 +884,46 @@ impl DataFile {
              * regions ahead of creating new regions.
              */
             for s in states {
-                for r in inner.regions.values() {
+                for r in outer.inner.regions.values() {
                     if &r.state == s {
-                        return Resource::Region(r.clone());
+                        // If this region ID is on the work queue hashmap, then
+                        // let that work finish before we take any other action
+                        // on it.
+                        if outer.work_queue.contains_key(&r.id) {
+                            continue;
+                        }
+
+                        // We only return regions in Requested state if we
+                        // have not started working on them yet, and we have
+                        // room on the work queue.  Otherwise, they remain
+                        // requested until we can service them.
+                        if r.state == State::Requested {
+                            assert!(!outer.work_queue.contains_key(&r.id));
+                            if outer.work_queue.len() < MAX_REGION_WORK {
+                                info!(self.log, "ID {:?} ready to add", r.id);
+                                return Resource::Region(r.clone());
+                            } else {
+                                info!(self.log, "No room for {:?} on wq", r.id);
+                                continue;
+                            }
+                        } else {
+                            return Resource::Region(r.clone());
+                        }
                     }
                 }
 
-                for (rid, r) in &inner.running_snapshots {
+                for (rid, r) in &outer.inner.running_snapshots {
                     for (name, rs) in r {
                         if &rs.state == s {
-                            return Resource::RunningSnapshot(
-                                rid.clone(),
-                                name.clone(),
-                                rs.clone(),
-                            );
+                            if outer.work_queue.contains_key(rid) {
+                                continue;
+                            } else {
+                                return Resource::RunningSnapshot(
+                                    rid.clone(),
+                                    name.clone(),
+                                    rs.clone(),
+                                );
+                            }
                         }
                     }
                 }
@@ -806,7 +933,7 @@ impl DataFile {
              * If we did not find any regions in the specified state, sleep
              * on the condvar.
              */
-            inner = self.bell.wait(inner).unwrap();
+            outer = self.bell.wait(outer).unwrap();
         }
     }
 
