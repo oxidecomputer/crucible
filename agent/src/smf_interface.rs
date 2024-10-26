@@ -93,6 +93,7 @@ pub trait SmfInstance {
     >;
     fn disable(&self, temporary: bool) -> Result<(), crucible_smf::ScfError>;
     fn enable(&self, temporary: bool) -> Result<(), crucible_smf::ScfError>;
+    #[cfg(test)]
     fn enabled(&self) -> bool;
 
     fn get_pg(
@@ -146,6 +147,7 @@ impl<'a> SmfInstance for RealSmfInstance<'a> {
         self.inst.enable(temporary)
     }
 
+    #[cfg(test)]
     fn enabled(&self) -> bool {
         unimplemented!();
     }
@@ -355,6 +357,7 @@ impl<'a> SmfTransaction for RealSmfTransaction<'a> {
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 pub struct MockSmf {
     scope: String,
 
@@ -362,8 +365,8 @@ pub struct MockSmf {
     config: Mutex<HashMap<String, MockSmfInstance>>,
 }
 
+#[cfg(test)]
 impl MockSmf {
-    #[cfg(test)]
     pub fn new(scope: String) -> MockSmf {
         MockSmf {
             scope,
@@ -371,12 +374,12 @@ impl MockSmf {
         }
     }
 
-    #[cfg(test)]
     pub fn config_is_empty(&self) -> bool {
         self.config.lock().unwrap().is_empty()
     }
 }
 
+#[cfg(test)]
 impl PartialEq for MockSmf {
     fn eq(&self, other: &Self) -> bool {
         let lhs = self.config.lock().unwrap();
@@ -386,6 +389,7 @@ impl PartialEq for MockSmf {
     }
 }
 
+#[cfg(test)]
 impl SmfInterface for MockSmf {
     fn instances(
         &self,
@@ -435,7 +439,6 @@ impl SmfInterface for MockSmf {
     /// datafile, disabled stuff remains in the current SMF interface and will
     /// cause PartialEq comparison to fail. Prune that here so that comparison
     /// can be done.
-    #[cfg(test)]
     fn prune(&self) {
         let mut config = self.config.lock().unwrap();
         let pairs: Vec<(String, MockSmfInstance)> = config.drain().collect();
@@ -484,6 +487,7 @@ pub struct MockSmfInstance {
     inner: Arc<Mutex<MockSmfInstanceInner>>,
 }
 
+#[cfg(test)]
 impl MockSmfInstance {
     pub fn new(name: String, fmri: String) -> MockSmfInstance {
         MockSmfInstance {
@@ -542,6 +546,7 @@ impl SmfInstance for MockSmfInstance {
         Ok(())
     }
 
+    #[cfg(test)]
     fn enabled(&self) -> bool {
         self.inner.lock().unwrap().enabled
     }

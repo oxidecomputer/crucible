@@ -64,10 +64,11 @@ rand_chacha.workspace = true
 tempfile.workspace = true
 
 [build-dependencies]
-version_check = "0.9.4"
+version_check = "0.9.5"
 
 [features]
 asm = ["usdt/asm"]
 default = []
 zfs_snapshot = []
 integration-tests = [] # Enables creating SQLite volumes
+omicron-build = [] # Uses syncfs(3c) for flushes instead of fsync

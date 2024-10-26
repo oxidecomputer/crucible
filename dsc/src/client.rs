@@ -8,6 +8,8 @@ use anyhow::Result;
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Parser, PartialEq)]
 pub enum ClientCommand {
+    /// Returns true if all downstairs are running
+    AllRunning,
     /// Disable random stopping of downstairs
     DisableRandomStop,
     /// Disable auto restart on the given downstairs client ID
@@ -41,6 +43,15 @@ pub enum ClientCommand {
         #[clap(long, short, action)]
         cid: u32,
     },
+    /// Get port of the given client ID
+    Port {
+        #[clap(long, short, action)]
+        cid: u32,
+    },
+    /// Get count of regions.
+    RegionCount,
+    /// Get region info.
+    RegionInfo,
     /// Shutdown all downstairs, then shutdown dsc itself.
     Shutdown,
     /// Start the downstairs at the given client ID
@@ -64,6 +75,11 @@ pub enum ClientCommand {
     StopAll,
     /// Stop a random downstairs
     StopRand,
+    /// Get the UUID of the given client ID
+    Uuid {
+        #[clap(long, short, action)]
+        cid: u32,
+    },
 }
 
 // Connect to the DSC and run a command.
@@ -71,6 +87,10 @@ pub enum ClientCommand {
 pub async fn client_main(server: String, cmd: ClientCommand) -> Result<()> {
     let dsc = Client::new(&server);
     match cmd {
+        ClientCommand::AllRunning => {
+            let res = dsc.dsc_all_running().await.unwrap();
+            println!("{:?}", res);
+        }
         ClientCommand::DisableRandomStop => {
             let _ = dsc.dsc_disable_random_stop().await.unwrap();
         }
@@ -99,6 +119,18 @@ pub async fn client_main(server: String, cmd: ClientCommand) -> Result<()> {
             let res = dsc.dsc_get_pid(cid).await.unwrap();
             println!("{:?}", res);
         }
+        ClientCommand::Port { cid } => {
+            let res = dsc.dsc_get_port(cid).await.unwrap();
+            println!("{:?}", res);
+        }
+        ClientCommand::RegionCount => {
+            let res = dsc.dsc_get_region_count().await.unwrap();
+            println!("{:?}", res);
+        }
+        ClientCommand::RegionInfo => {
+            let res = dsc.dsc_get_region_info().await.unwrap();
+            println!("{:?}", res);
+        }
         ClientCommand::Shutdown => {
             let _ = dsc.dsc_shutdown().await.unwrap();
         }
@@ -120,6 +152,10 @@ pub async fn client_main(server: String, cmd: ClientCommand) -> Result<()> {
         }
         ClientCommand::StopRand => {
             let _ = dsc.dsc_stop_rand().await.unwrap();
+        }
+        ClientCommand::Uuid { cid } => {
+            let res = dsc.dsc_get_uuid(cid).await.unwrap();
+            println!("{:?}", res);
         }
     }
     Ok(())

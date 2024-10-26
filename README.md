@@ -1,6 +1,22 @@
 # Oxide Crucible
 
-A block storage service.
+Crucible is a distributed network-replicated block storage service.
+
+## Origin
+
+Oxide Computer designed and implemented Crucible to provide high availability
+disk storage for virtual machines hosted on its [Oxide Cloud
+Computer](https://oxide.computer/).
+
+The design outline can be found in Oxide [Request for Discussion
+60](https://rfd.shared.oxide.computer/rfd/0060).  An overview of the Crucible
+implementation is in [RFD 177](https://rfd.shared.oxide.computer/rfd/0177).
+
+An informal discussion of Crucible can be found in [S04 E06 (14 Feb 2024)
+episode of the Oxide and Friends
+podcast](https://oxide.computer/podcasts/oxide-and-friends/1734108).
+
+## Getting Started
 
 There are two components:
 

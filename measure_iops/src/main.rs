@@ -91,15 +91,23 @@ async fn main() -> Result<()> {
         read_only: false,
     };
 
-    let (guest, mut io) = Guest::new(None);
+    let (guest, io) = Guest::new(None);
     let guest = Arc::new(guest);
 
-    if let Some(iop_limit) = opt.iop_limit {
-        io.set_iop_limit(16 * 1024 * 1024, iop_limit);
+    if let Some(_iop_limit) = opt.iop_limit {
+        // XXX fix this once implemented
+        return Err(CrucibleError::Unsupported(
+            "IOP limit is not implemented".to_owned(),
+        )
+        .into());
     }
 
-    if let Some(bw_limit) = opt.bw_limit_in_bytes {
-        io.set_bw_limit(bw_limit);
+    if let Some(_bw_limit) = opt.bw_limit_in_bytes {
+        // XXX fix this once implemented
+        return Err(CrucibleError::Unsupported(
+            "Bandwidth limit is not implemented".to_owned(),
+        )
+        .into());
     }
 
     let guest = Arc::new(guest);
@@ -125,11 +133,7 @@ async fn main() -> Result<()> {
         bsz as usize
     };
 
-    let io_depth = if let Some(io_depth) = opt.io_depth {
-        io_depth
-    } else {
-        1
-    };
+    let io_depth = opt.io_depth.unwrap_or(1);
 
     let mut io_operations_sent = 0;
     let mut bw_consumed = 0;

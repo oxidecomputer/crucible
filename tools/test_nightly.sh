@@ -11,6 +11,7 @@ output_file="/tmp/nightly_results"
 rm -f "$output_file"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/release}
 
 echo "Nightly starts at $(date)" | tee "$output_file"

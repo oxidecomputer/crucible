@@ -20,10 +20,13 @@ use tokio::process::{Child, Command};
 use tokio::runtime::Builder;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::time::sleep_until;
+use uuid::Uuid;
 
 pub mod client;
 pub mod control;
 use client::{client_main, ClientCommand};
+use crucible_client_types::RegionExtentInfo;
+use crucible_common::{config_path, read_json, RegionDefinition};
 
 /// dsc  DownStairs Controller
 #[derive(Debug, Parser)]
@@ -49,7 +52,7 @@ enum Action {
     Create {
         /// The block size for the region
         #[clap(long, default_value = "4096", action)]
-        block_size: u32,
+        block_size: u64,
 
         /// Delete all existing test and region directories
         #[clap(long, action)]
@@ -143,13 +146,13 @@ enum Action {
         )]
         region_dir: Vec<PathBuf>,
     },
-    /// Start a downstairs region set
+    /// Start the requested downstairs regions
     /// This requires the region is already created, unless you include
     /// the --create option.
     Start {
         /// If creating, the block size for the region
         #[clap(long, default_value = "4096", action)]
-        block_size: u32,
+        block_size: u64,
 
         /// Delete all existing test and region directories
         #[clap(long, action, requires = "create")]
@@ -226,6 +229,7 @@ struct DownstairsInfo {
     ds_bin: String,
     region_dir: String,
     port: u32,
+    uuid: Uuid,
     _create_output: String,
     output_file: PathBuf,
     client_id: usize,
@@ -233,10 +237,12 @@ struct DownstairsInfo {
 }
 
 impl DownstairsInfo {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         ds_bin: String,
         region_dir: String,
         port: u32,
+        uuid: Uuid,
         _create_output: String,
         output_file: PathBuf,
         client_id: usize,
@@ -246,6 +252,7 @@ impl DownstairsInfo {
             ds_bin,
             region_dir,
             port,
+            uuid,
             _create_output,
             output_file,
             client_id,
@@ -293,9 +300,9 @@ impl DownstairsInfo {
     }
 }
 
-// Describing the downstairs that together make a region.
+// Describing all the downstairs regions we know about.
 #[derive(Debug)]
-struct RegionSet {
+struct Regions {
     ds: Vec<Arc<DownstairsInfo>>,
     ds_bin: String,
     region_dir: Vec<String>,
@@ -303,6 +310,7 @@ struct RegionSet {
     ds_pid: Vec<Option<u32>>,
     port_base: u32,
     port_step: u32,
+    region_info: Option<RegionExtentInfo>,
 }
 
 // This holds the overall info for the regions we have created.
@@ -310,8 +318,8 @@ struct RegionSet {
 pub struct DscInfo {
     /// The directory location where output files are
     output_dir: PathBuf,
-    /// The region set that make our downstairs
-    rs: Mutex<RegionSet>,
+    /// The regions this dsc knows about
+    rs: Mutex<Regions>,
     /// Work for the dsc to do, what downstairs to start/stop/etc
     work: Mutex<DscWork>,
     /// If the downstairs are started read only
@@ -424,7 +432,7 @@ impl DscInfo {
         };
 
         assert_eq!(rv.len(), region_count);
-        let rs = RegionSet {
+        let rs = Regions {
             ds: Vec::new(),
             ds_bin: downstairs_bin,
             region_dir: rv,
@@ -432,6 +440,7 @@ impl DscInfo {
             ds_pid,
             port_base,
             port_step: 10,
+            region_info: None,
         };
 
         let mrs = Mutex::new(rs);
@@ -448,13 +457,13 @@ impl DscInfo {
     }
 
     /*
-     * Create a default region set.  Attach it to our dsc info struct
+     * Create the requested set of regions.  Attach it to our dsc info struct
      */
-    async fn create_region_set(
+    async fn create_regions(
         &self,
         extent_size: u64,
         extent_count: u32,
-        block_size: u32,
+        block_size: u64,
         encrypted: bool,
         region_count: usize,
     ) -> Result<()> {
@@ -471,27 +480,55 @@ impl DscInfo {
                 .await
                 .unwrap();
         }
-        println!("Region set with {region_count} regions was created");
+        println!("Created {region_count} regions");
         Ok(())
     }
 
     /**
-     * Create a region as part of the region set at the given port with
-     * the provided extent size and extent_count.
+     * Create a region with the provided extent size and extent_count.
      */
     async fn create_ds_region(
         &self,
         ds_id: usize,
         extent_size: u64,
         extent_count: u32,
-        block_size: u32,
+        block_size: u64,
         quiet: bool,
         encrypted: bool,
     ) -> Result<f32> {
         // Create the path for this region by combining the region
         // directory and the port this downstairs will use.
         let mut rs = self.rs.lock().await;
-        // use port to do this, or make a client ID that is port base, etc
+
+        if let Some(cur_ri) = &rs.region_info {
+            // Verify the new region info matches what we already have.
+            if cur_ri.block_size != block_size {
+                println!(
+                    "WARNING: block size difference: {} vs. {}",
+                    cur_ri.block_size, block_size
+                );
+            }
+            if cur_ri.blocks_per_extent != extent_size {
+                println!(
+                    "WARNING: extent size difference: {} vs. {}",
+                    cur_ri.blocks_per_extent, extent_size
+                );
+            }
+            if cur_ri.extent_count != extent_count {
+                println!(
+                    "WARNING: extent count difference: {} vs. {}",
+                    cur_ri.extent_count, extent_count
+                );
+            }
+        } else {
+            // If we don't have region info yet, set it now.
+            rs.region_info = Some(RegionExtentInfo {
+                block_size,
+                blocks_per_extent: extent_size,
+                extent_count,
+            });
+        }
+        // The port is determined by ds_id and the port step value.
         let port = rs.port_base + (ds_id as u32 * rs.port_step);
         let rd = &rs.region_dir[ds_id];
         let new_region_dir = port_to_region(rd.clone(), port)?;
@@ -499,6 +536,7 @@ impl DscInfo {
         let extent_count = format!("{}", extent_count);
         let block_size = format!("{}", block_size);
         let uuid = format!("12345678-0000-0000-0000-{:012}", port);
+        let ds_uuid = Uuid::parse_str(&uuid).unwrap();
         let start = std::time::Instant::now();
         let mut cmd_args = vec![
             "create",
@@ -555,12 +593,14 @@ impl DscInfo {
             rs.ds_bin.clone(),
             new_region_dir,
             port,
+            ds_uuid,
             String::from_utf8(output.stdout).unwrap(),
             output_path,
             ds_id,
             self.read_only,
         );
         rs.ds.push(Arc::new(dsi));
+
         Ok(time_f)
     }
 
@@ -580,8 +620,8 @@ impl DscInfo {
     }
 
     /*
-     * Generate a region set using the starting port and region
-     * directories.  Return error if any of them don't already exist.
+     * Generate regions using the starting port and region directories.
+     * Return error if any of them don't already exist.
      * TODO: This is assuming a fair amount of stuff.
      * Make fewer assumptions...
      */
@@ -589,6 +629,9 @@ impl DscInfo {
         let mut rs = self.rs.lock().await;
         let mut port = rs.port_base;
 
+        // Since we are generating our regions, we must create the required
+        // directories and files.
+        let mut region_info: Option<RegionExtentInfo> = None;
         for ds_id in 0..region_count {
             let rd = rs.region_dir[ds_id].clone();
             let new_region_dir = port_to_region(rd.clone(), port)?;
@@ -602,10 +645,50 @@ impl DscInfo {
                 bail!("Can't find region dir {:?}", new_region_dir);
             }
 
+            // Read the region config information from this region.
+            let cp = config_path::<&Path>(new_region_dir.as_ref());
+            let def: RegionDefinition = match read_json(&cp) {
+                Ok(def) => def,
+                Err(e) => {
+                    bail!("Error {:?} opening region config {:?}", e, cp)
+                }
+            };
+            let new_ri = RegionExtentInfo {
+                block_size: def.block_size(),
+                blocks_per_extent: def.extent_size().value,
+                extent_count: def.extent_count(),
+            };
+
+            // We do expect all regions in a region set to be the same but
+            // we can verify that here and warn if it is not.
+            if let Some(cur_ri) = &region_info {
+                if cur_ri.block_size != new_ri.block_size {
+                    println!(
+                        "WARNING: block size difference: {} vs. {}",
+                        cur_ri.block_size, new_ri.block_size
+                    );
+                }
+                if cur_ri.blocks_per_extent != new_ri.blocks_per_extent {
+                    println!(
+                        "WARNING: extent size difference: {} vs. {}",
+                        cur_ri.blocks_per_extent, new_ri.blocks_per_extent
+                    );
+                }
+                if cur_ri.extent_count != new_ri.extent_count {
+                    println!(
+                        "WARNING: extent count difference: {} vs. {}",
+                        cur_ri.extent_count, new_ri.extent_count
+                    );
+                }
+            } else {
+                region_info = Some(new_ri);
+            }
+
             let dsi = DownstairsInfo::new(
                 rs.ds_bin.clone(),
                 new_region_dir,
                 port,
+                def.uuid(),
                 "/dev/null".to_string(),
                 output_path,
                 ds_id,
@@ -615,7 +698,21 @@ impl DscInfo {
             port += rs.port_step;
         }
 
+        // Update our region information with what we found in the config file.
+        println!("Update our region info with: {:?}", region_info);
+        rs.region_info = region_info;
+
         Ok(())
+    }
+
+    async fn all_running(&self) -> bool {
+        let rs = self.rs.lock().await;
+        for state in rs.ds_state.iter() {
+            if *state != DownstairsState::Running {
+                return false;
+            }
+        }
+        true
     }
 
     async fn get_ds_state(&self, client_id: usize) -> Result<DownstairsState> {
@@ -632,6 +729,36 @@ impl DscInfo {
             bail!("Invalid client ID: {}", client_id);
         }
         Ok(rs.ds_pid[client_id])
+    }
+
+    async fn get_ds_port(&self, client_id: usize) -> Result<u32> {
+        let rs = self.rs.lock().await;
+        if rs.ds.len() <= client_id {
+            bail!("Invalid client ID: {}", client_id);
+        }
+        Ok(rs.ds[client_id].port)
+    }
+
+    async fn get_ds_uuid(&self, client_id: usize) -> Result<Uuid> {
+        let rs = self.rs.lock().await;
+        if rs.ds.len() <= client_id {
+            bail!("Invalid client ID: {}", client_id);
+        }
+        Ok(rs.ds[client_id].uuid)
+    }
+
+    async fn get_region_info(&self) -> Result<RegionExtentInfo> {
+        let rs = self.rs.lock().await;
+        if let Some(ri) = &rs.region_info {
+            Ok(ri.clone())
+        } else {
+            bail!("No region info found");
+        }
+    }
+
+    async fn get_region_count(&self) -> usize {
+        let rs = self.rs.lock().await;
+        rs.ds.len()
     }
 }
 
@@ -819,6 +946,32 @@ async fn start_dsc(
     drop(tx);
     drop(rs);
 
+    // Wait here for all downstairs to start
+    let mut running = 0;
+    loop {
+        let res = rx.recv().await;
+        if let Some(mi) = res {
+            println!(
+                "[{}][{}] initial start wait reports {:?}",
+                mi.port, mi.client_id, mi.state
+            );
+            let mut rs = dsci.rs.lock().await;
+            if mi.state == DownstairsState::Running {
+                running += 1;
+            }
+
+            rs.ds_state[mi.client_id] = mi.state;
+            rs.ds_pid[mi.client_id] = mi.pid;
+
+            if running == rs.ds_state.len() {
+                println!("All downstairs are running");
+                break;
+            }
+        } else {
+            println!("rx.recv got None");
+        }
+    }
+
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
     let mut timeout_deadline = deadline_secs(5);
     let mut shutdown_sent = false;
@@ -957,7 +1110,7 @@ struct MonitorInfo {
 }
 
 /// State of a downstairs.
-#[derive(Debug, Copy, Clone, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Copy, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum DownstairsState {
     Stopped,
@@ -1176,7 +1329,7 @@ async fn loop_create_test(
     dsci: &DscInfo,
     extent_size: u64,
     extent_count: u32,
-    block_size: u32,
+    block_size: u64,
 ) -> Result<()> {
     let mut times = Vec::new();
     for _ in 0..5 {
@@ -1217,16 +1370,16 @@ async fn loop_create_test(
 /*
  * Return a formatted string of the region size in SI units.
  */
-fn region_si(es: u64, ec: u32, bs: u32) -> String {
-    let sz = Byte::from_u64(bs as u64 * es * ec as u64);
+fn region_si(es: u64, ec: u32, bs: u64) -> String {
+    let sz = Byte::from_u64(bs * es * ec as u64);
     format!("{sz:#>11}")
 }
 
 /*
  * Return a formatted string of the extent file size in SI units
  */
-fn efile_si(es: u64, bs: u32) -> String {
-    let sz = Byte::from_u64(bs as u64 * es);
+fn efile_si(es: u64, bs: u64) -> String {
+    let sz = Byte::from_u64(bs * es);
     format!("{sz:#>11}")
 }
 
@@ -1238,7 +1391,7 @@ async fn single_create_test(
     dsci: &DscInfo,
     extent_size: u64,
     extent_count: u32,
-    block_size: u32,
+    block_size: u64,
     csv: &mut Option<&mut csv::Writer<File>>,
 ) -> Result<()> {
     let ct = dsci
@@ -1257,8 +1410,8 @@ async fn single_create_test(
     if let Some(csv) = csv {
         csv.serialize((
             ct,
-            block_size as u64 * extent_size * extent_count as u64,
-            block_size as u64 * extent_size,
+            block_size * extent_size * extent_count as u64,
+            block_size * extent_size,
             extent_size,
             extent_count,
             block_size,
@@ -1280,7 +1433,7 @@ async fn region_create_test(
     long: bool,
     csv_out: Option<PathBuf>,
 ) -> Result<()> {
-    let block_size: u32 = 4096;
+    let block_size: u64 = 4096;
 
     // The total region size we want for the test.  The total region
     // divided by the extent_size will give us the number of extents
@@ -1336,7 +1489,7 @@ async fn region_create_test(
         for es in extent_size.iter() {
             // With power of 2 region sizes, the rs/es should always yield
             // a correct ec.
-            let ec = ((rs / (block_size as u64)) / es) as u32;
+            let ec = ((rs / block_size) / es) as u32;
             if long {
                 loop_create_test(dsci, *es, ec, block_size).await?;
             } else {
@@ -1399,6 +1552,7 @@ fn main() -> Result<()> {
             if cleanup {
                 crate::cleanup(output_dir.clone(), region_dir.clone())?;
             }
+
             let dsci = DscInfo::new(
                 ds_bin,
                 output_dir,
@@ -1410,7 +1564,7 @@ fn main() -> Result<()> {
                 false,
             )?;
 
-            runtime.block_on(dsci.create_region_set(
+            runtime.block_on(dsci.create_regions(
                 extent_size,
                 extent_count,
                 block_size,
@@ -1446,6 +1600,7 @@ fn main() -> Result<()> {
             region_count,
         } => {
             // Delete any existing region if requested
+
             if cleanup {
                 crate::cleanup(output_dir.clone(), region_dir.clone())?;
             } else if create {
@@ -1469,7 +1624,7 @@ fn main() -> Result<()> {
             )?;
 
             if create {
-                runtime.block_on(dsci.create_region_set(
+                runtime.block_on(dsci.create_regions(
                     extent_size,
                     extent_count,
                     block_size,
@@ -1777,12 +1932,17 @@ mod test {
                 *port,
             )
             .unwrap();
-            fs::create_dir_all(ds_region_dir).unwrap();
+            fs::create_dir_all(ds_region_dir.clone()).unwrap();
+
+            let cp = config_path::<&Path>(ds_region_dir.as_ref());
+            let rd = RegionDefinition::default();
+            crucible_common::write_json(&cp, &rd, false).unwrap();
         }
 
         // Verify that we can find the existing region directories.
         dsci.generate_region_set(3).await.unwrap();
-        let _rs = dsci.rs.lock().await;
+        let rs = dsci.rs.lock().await;
+        assert!(rs.region_info.is_some());
     }
 
     #[tokio::test]
@@ -1814,12 +1974,17 @@ mod test {
                 *port,
             )
             .unwrap();
-            fs::create_dir_all(ds_region_dir).unwrap();
+            fs::create_dir_all(ds_region_dir.clone()).unwrap();
+
+            let cp = config_path::<&Path>(ds_region_dir.as_ref());
+            let rd = RegionDefinition::default();
+            crucible_common::write_json(&cp, &rd, false).unwrap();
         }
 
         // Verify that we can find the existing region directories.
         dsci.generate_region_set(4).await.unwrap();
-        let _rs = dsci.rs.lock().await;
+        let rs = dsci.rs.lock().await;
+        assert!(rs.region_info.is_some());
     }
 
     #[tokio::test]

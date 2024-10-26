@@ -392,17 +392,17 @@ only that PID.  See upstairs_info.d for a description of the columns.
 
 ```
 EVT22200005 # dtrace -s single_up_info.d 15579
- SESSION        DS STATE 0        DS STATE 1        DS STATE 2   UPW   DSW  NEXT_JOB BAKPR   WRITE_BO   NEW0  NEW1  NEW2    IP0   IP1   IP2     D0    D1    D2     S0    S1    S2    ER0   ER1   ER2    EC0   EC1   EC2
-c0b92059       live_repair            active            active     3   435    570215  2761  226492416      0     0     0     40   241   241     24   194   194    371     0     0   9384     0     0      0     0     0
-a666a8bd       live_repair            active            active     2     3     90656     0          0      0     0     0      2     1     1      1     2     2      0     0     0   7561     0     0  11640     0     0
-a666a8bd       live_repair            active            active     2    11     90664     0          0      0     0     0      2     1     1      9    10    10      0     0     0   7563     0     0  11640     0     0
-c0b92059       live_repair            active            active     3   514    570762  3111  237219840      0     0     0     67   234   234     33   280   280    414     0     0   9385     0     0      0     0     0
-c0b92059       live_repair            active            active     3   329    571129  2929  231735296      0     0     0      1   227   251     59   102    78    269     0     0   9386     0     0      0     0     0
-a666a8bd       live_repair            active            active     2    19     90672     0          0      0     0     0      2     1     1     17    18    18      0     0     0   7565     0     0  11640     0     0
-c0b92059       live_repair            active            active     3   339    571544   512  127401984      0     0     0      1   139   137     54   200   202    284     0     0   9387     0     0      0     0     0
-a666a8bd       live_repair            active            active     2    23     90676     0          0      0     0     0      2     1     1     21    22    22      0     0     0   7566     0     0  11640     0     0
-c0b92059       live_repair            active            active     3   389    572038   221  101711872      0     0     0      1   112   112     67   277   277    321     0     0   9388     0     0      0     0     0
-a666a8bd       live_repair            active            active     2    31     90684     0          0      0     0     0      2     1     1     29    30    30      0     0     0   7568     0     0  11640     0     0
+ SESSION        DS STATE 0        DS STATE 1        DS STATE 2   UPW   DSW  NEXT_JOB BAKPR   WRITE_BO    IP0   IP1   IP2     D0    D1    D2     S0    S1    S2    ER0   ER1   ER2    EC0   EC1   EC2
+c0b92059       live_repair            active            active     3   435    570215  2761  226492416     40   241   241     24   194   194    371     0     0   9384     0     0      0     0     0
+a666a8bd       live_repair            active            active     2     3     90656     0          0      2     1     1      1     2     2      0     0     0   7561     0     0  11640     0     0
+a666a8bd       live_repair            active            active     2    11     90664     0          0      2     1     1      9    10    10      0     0     0   7563     0     0  11640     0     0
+c0b92059       live_repair            active            active     3   514    570762  3111  237219840     67   234   234     33   280   280    414     0     0   9385     0     0      0     0     0
+c0b92059       live_repair            active            active     3   329    571129  2929  231735296      1   227   251     59   102    78    269     0     0   9386     0     0      0     0     0
+a666a8bd       live_repair            active            active     2    19     90672     0          0      2     1     1     17    18    18      0     0     0   7565     0     0  11640     0     0
+c0b92059       live_repair            active            active     3   339    571544   512  127401984      1   139   137     54   200   202    284     0     0   9387     0     0      0     0     0
+a666a8bd       live_repair            active            active     2    23     90676     0          0      2     1     1     21    22    22      0     0     0   7566     0     0  11640     0     0
+c0b92059       live_repair            active            active     3   389    572038   221  101711872      1   112   112     67   277   277    321     0     0   9388     0     0      0     0     0
+a666a8bd       live_repair            active            active     2    31     90684     0          0      2     1     1     29    30    30      0     0     0   7568     0     0  11640     0     0
 ```
 ## sled_upstairs_info.d
 Similar to upstairs_info.d, this script prints out various counters in
@@ -413,19 +413,19 @@ reporting stats for.
 
 ```
 EVT22200005 # dtrace -s sled_upstairs_info.d 
-  PID  SESSION        DS STATE 0        DS STATE 1        DS STATE 2   UPW   DSW  NEXT_JOB BAKPR   WRITE_BO   NEW0  NEW1  NEW2    IP0   IP1   IP2     D0    D1    D2     S0    S1    S2    ER0   ER1   ER2    EC0   EC1   EC2
-15579 c0b92059       live_repair            active            active     3   367    656347  1616  185597952      0     0     0     75   195   195     69   172   172    223     0     0   9589     0     0      0     0     0
-15579 a666a8bd       live_repair            active            active     2    95     91960     0          0      0     0     0      2     1     1     93    94    94      0     0     0   7827     0     0  11667     0     0
-24948 fac8cbba               new               new               new     0     0      1000     0          0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0
-24948 fac8cbba               new               new               new     0     0      1000     0          0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0
-24948 79d92ceb            active            active            active     0     0      1000     0          0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0
-15579 c0b92059       live_repair            active            active     3   432    656863  2077  203423744      0     0     0    104   168   168     68   264   264    260     0     0   9590     0     0      0     0     0
-15579 a666a8bd       live_repair            active            active     2    99     91964     0          0      0     0     0      2     1     1     97    98    98      0     0     0   7828     0     0  11667     0     0
-24948 127b8de5               new               new               new     0     0      1000     0          0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0
-24948 fac8cbba               new               new               new     0     0      1000     0          0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0
-24948 79d92ceb            active            active            active     0     0      1000     0          0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0
-15579 c0b92059       live_repair            active            active     4   529    657227  4805  282066944      0     0     0     95   296   296     80   233   233    354     0     0   9591     0     0      0     0     0
-15579 a666a8bd       live_repair            active            active     2   107     91972     0          0      0     0     0      2     1     1    105   106   106      0     0     0   7830     0     0  11667     0     0
+  PID  SESSION        DS STATE 0        DS STATE 1        DS STATE 2   UPW   DSW  NEXT_JOB BAKPR   WRITE_BO    IP0   IP1   IP2     D0    D1    D2     S0    S1    S2    ER0   ER1   ER2    EC0   EC1   EC2
+15579 c0b92059       live_repair            active            active     3   367    656347  1616  185597952     75   195   195     69   172   172    223     0     0   9589     0     0      0     0     0
+15579 a666a8bd       live_repair            active            active     2    95     91960     0          0      2     1     1     93    94    94      0     0     0   7827     0     0  11667     0     0
+24948 fac8cbba               new               new               new     0     0      1000     0          0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0
+24948 fac8cbba               new               new               new     0     0      1000     0          0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0
+24948 79d92ceb            active            active            active     0     0      1000     0          0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0
+15579 c0b92059       live_repair            active            active     3   432    656863  2077  203423744    104   168   168     68   264   264    260     0     0   9590     0     0      0     0     0
+15579 a666a8bd       live_repair            active            active     2    99     91964     0          0      2     1     1     97    98    98      0     0     0   7828     0     0  11667     0     0
+24948 127b8de5               new               new               new     0     0      1000     0          0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0
+24948 fac8cbba               new               new               new     0     0      1000     0          0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0
+24948 79d92ceb            active            active            active     0     0      1000     0          0      0     0     0      0     0     0      0     0     0      0     0     0      0     0     0
+15579 c0b92059       live_repair            active            active     4   529    657227  4805  282066944     95   296   296     80   233   233    354     0     0   9591     0     0      0     0     0
+15579 a666a8bd       live_repair            active            active     2   107     91972     0          0      2     1     1    105   106   106      0     0     0   7830     0     0  11667     0     0
 
 ```
 
@@ -509,13 +509,13 @@ for the `Error` state which we don't print.
 Here is an example of how it might look:
 ```
 alan@cat:crucible$ pfexec dtrace -s upstairs_info.d
-   PID  DS STATE 0  DS STATE 1  DS STATE 2  UPW   DSW DELTA BAKPR  WRITE_BO  NEW0 NEW1 NEW2  IP0 IP1 IP2   D0  D1  D2  S0 S1 S2
-  1546      active      active      active    9   165   303    81  82837504     0    0    0   26  17 152  139 148  13   0  0  0
-  1546      active      active      active    7   158   314    33  72351744     0    0    0   32  15 137  126 143  21   0  0  0
-  1546      active      active      active    7   177   327     3  59768832     0    0    0   28  12 113  149 165  64   0  0  0
-  1546      active      active      active    5   154   315    20  68157440     0    0    0   21  11 121  133 143  33   0  0  0
-  1546      active      active      active    7   184   364     0  55574528     0    0    0   15  12 101  169 172  83   0  0  0
-  1546      active      active      active    7   192   362     0  46155264     0    0    0   26  10  95  166 182  97   0  0  0
+   PID  DS STATE 0  DS STATE 1  DS STATE 2  UPW   DSW DELTA BAKPR  WRITE_BO  IP0 IP1 IP2   D0  D1  D2  S0 S1 S2
+  1546      active      active      active    9   165   303    81  82837504   26  17 152  139 148  13   0  0  0
+  1546      active      active      active    7   158   314    33  72351744   32  15 137  126 143  21   0  0  0
+  1546      active      active      active    7   177   327     3  59768832   28  12 113  149 165  64   0  0  0
+  1546      active      active      active    5   154   315    20  68157440   21  11 121  133 143  33   0  0  0
+  1546      active      active      active    7   184   364     0  55574528   15  12 101  169 172  83   0  0  0
+  1546      active      active      active    7   192   362     0  46155264   26  10  95  166 182  97   0  0  0
 ```
 
 ## upstairs_count.d

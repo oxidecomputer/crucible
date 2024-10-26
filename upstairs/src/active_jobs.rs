@@ -69,6 +69,7 @@ impl ActiveJobs {
         // tracker have been recorded.
         match &io.work {
             IOop::Flush { .. }
+            | IOop::Barrier { .. }
             | IOop::Write { .. }
             | IOop::WriteUnwritten { .. }
             | IOop::Read { .. }
@@ -115,15 +116,6 @@ impl ActiveJobs {
         &self,
     ) -> std::collections::btree_map::Keys<JobId, DownstairsIO> {
         self.jobs.keys()
-    }
-
-    /// Returns an iterator over job values
-    #[cfg(test)]
-    #[inline]
-    pub fn values(
-        &self,
-    ) -> std::collections::btree_map::Values<JobId, DownstairsIO> {
-        self.jobs.values()
     }
 
     pub fn deps_for_flush(&mut self, flush_id: JobId) -> Vec<JobId> {

@@ -8,6 +8,9 @@ edition = "2021"
 anyhow.workspace = true
 byte-unit.workspace = true
 clap.workspace = true
+crucible-client-types.workspace = true
+crucible-common.workspace = true
+crucible-workspace-hack.workspace = true
 csv.workspace = true
 dsc-client.workspace = true
 dropshot.workspace = true
@@ -17,7 +20,7 @@ schemars.workspace = true
 serde.workspace = true
 statistical.workspace = true
 tokio.workspace = true
-crucible-workspace-hack.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 expectorate.workspace = true

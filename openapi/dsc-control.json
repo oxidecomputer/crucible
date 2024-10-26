@@ -5,6 +5,31 @@
     "version": "0.0.0"
   },
   "paths": {
+    "/allrunning": {
+      "get": {
+        "summary": "Return true if all downstairs are running",
+        "operationId": "dsc_all_running",
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Boolean",
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/disablerestart/all": {
       "post": {
         "summary": "Disable automatic restart on all downstairs",
@@ -137,6 +162,45 @@
         }
       }
     },
+    "/port/cid/{cid}": {
+      "get": {
+        "summary": "Fetch the port for the requested client_id",
+        "operationId": "dsc_get_port",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "uint32",
+                  "type": "integer",
+                  "format": "uint32",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/randomstop/disable": {
       "post": {
         "summary": "Disable the random stopping of a downstairs",
@@ -219,6 +283,57 @@
         "responses": {
           "204": {
             "description": "resource updated"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/regioncount": {
+      "get": {
+        "summary": "Get the count of regions.",
+        "operationId": "dsc_get_region_count",
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "uint",
+                  "type": "integer",
+                  "format": "uint",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/regioninfo": {
+      "get": {
+        "summary": "Fetch the region info for our downstairs",
+        "operationId": "dsc_get_region_info",
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RegionExtentInfo"
+                }
+              }
+            }
           },
           "4XX": {
             "$ref": "#/components/responses/Error"
@@ -390,6 +505,44 @@
           }
         }
       }
+    },
+    "/uuid/cid/{cid}": {
+      "get": {
+        "summary": "Fetch the UUID for the requested client_id",
+        "operationId": "dsc_get_uuid",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "cid",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "uint",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "successful operation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Uuid",
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -424,6 +577,35 @@
         "required": [
           "message",
           "request_id"
+        ]
+      },
+      "RegionExtentInfo": {
+        "description": "Extent information about a region.",
+        "type": "object",
+        "properties": {
+          "block_size": {
+            "description": "Block size in bytes.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "blocks_per_extent": {
+            "description": "Number of blocks in a single extent.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "extent_count": {
+            "description": "Total number of extents that make up this region.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "block_size",
+          "blocks_per_extent",
+          "extent_count"
         ]
       }
     },

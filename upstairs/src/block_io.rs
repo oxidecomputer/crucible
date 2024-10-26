@@ -40,8 +40,24 @@ impl BlockIO for FileBlockIO {
         Ok(())
     }
 
+    async fn activate_with_gen(&self, _gen: u64) -> Result<(), CrucibleError> {
+        Ok(())
+    }
+
     async fn deactivate(&self) -> Result<(), CrucibleError> {
         Ok(())
+    }
+
+    async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
+        crucible_bail!(Unsupported, "query_extent_size unsupported",)
+    }
+
+    async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
+        Ok(WQCounts {
+            up_count: 0,
+            ds_count: 0,
+            active_count: 0,
+        })
     }
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {
@@ -184,8 +200,26 @@ impl BlockIO for ReqwestBlockIO {
         Ok(())
     }
 
+    async fn activate_with_gen(&self, _gen: u64) -> Result<(), CrucibleError> {
+        Ok(())
+    }
+
     async fn deactivate(&self) -> Result<(), CrucibleError> {
         Ok(())
+    }
+
+    async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
+        Ok(WQCounts {
+            up_count: 0,
+            ds_count: 0,
+            active_count: 0,
+        })
+    }
+
+    async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
+        Err(CrucibleError::Unsupported(
+            "query_extent_size unsupported".to_string(),
+        ))
     }
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError> {

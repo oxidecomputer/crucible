@@ -1,6 +1,4 @@
 // Copyright 2023 Oxide Computer Company
-#![cfg_attr(usdt_need_asm, feature(asm))]
-#![cfg_attr(all(target_os = "macos", usdt_need_asm_sym), feature(asm_sym))]
 #![allow(clippy::mutex_atomic)]
 
 use std::clone::Clone;
@@ -42,13 +40,16 @@ mod dummy_downstairs_tests;
 mod pseudo_file;
 
 pub mod volume;
-pub use volume::Volume;
+pub use volume::{Volume, VolumeBuilder};
 
 pub mod in_memory;
 pub use in_memory::InMemoryBlockIO;
 
 pub mod block_io;
 pub use block_io::{FileBlockIO, ReqwestBlockIO};
+
+pub(crate) mod backpressure;
+use backpressure::BackpressureGuard;
 
 pub mod block_req;
 pub(crate) use block_req::{BlockOpWaiter, BlockRes};
@@ -63,7 +64,7 @@ pub use pseudo_file::CruciblePseudoFile;
 
 pub(crate) mod guest;
 pub use guest::{Guest, WQCounts};
-use guest::{GuestIoHandle, GuestWorkId};
+use guest::{GuestBlockRes, GuestIoHandle};
 
 mod stats;
 
@@ -103,10 +104,14 @@ pub const IO_OUTSTANDING_MAX_JOBS: usize = 10000;
 #[async_trait]
 pub trait BlockIO: Sync {
     async fn activate(&self) -> Result<(), CrucibleError>;
+    async fn activate_with_gen(&self, gen: u64) -> Result<(), CrucibleError>;
 
     async fn deactivate(&self) -> Result<(), CrucibleError>;
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError>;
+
+    async fn query_extent_size(&self) -> Result<Block, CrucibleError>;
+    async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError>;
 
     // Total bytes of Volume
     async fn total_size(&self) -> Result<u64, CrucibleError>;
@@ -207,15 +212,6 @@ pub trait BlockIO: Sync {
             .await
     }
 
-    /// Activate if not active.
-    async fn conditional_activate(&self) -> Result<(), CrucibleError> {
-        if self.query_is_active().await? {
-            return Ok(());
-        }
-
-        self.activate().await
-    }
-
     /// Checks that the data length is a multiple of block size
     ///
     /// Returns block size on success, since we have to look it up anyways.
@@ -257,10 +253,8 @@ pub type CrucibleBlockIOFuture<'a> = Pin<
 /// IO request and has started work on it.
 ///
 /// gw__*__start: This is when the upstairs has taken work from the
-/// `guest` structure and created a new `gw_id` used to track this IO
-/// through the system.  At the point of this probe, we have already
-/// taken two locks, so it's not the very beginning of an IO, but it is
-/// as close as we get after the `gw_id` is created.
+/// `guest` structure and created a new `ds_id` used to track this IO
+/// through the system.  This should be as early as possible.
 ///
 /// up__to__ds_*_start: (Upstairs__to__Downstairs) At this point we have
 /// created the structures to track this IO through the Upstairs and added
@@ -326,6 +320,7 @@ mod cdt {
     fn gw__write__unwritten__start(_: u64) {}
     fn gw__write__deps(_: u64, _: u64) {}
     fn gw__flush__start(_: u64) {}
+    fn gw__barrier__start(_: u64) {}
     fn gw__close__start(_: u64, _: u32) {}
     fn gw__repair__start(_: u64, _: u32) {}
     fn gw__noop__start(_: u64) {}
@@ -334,11 +329,13 @@ mod cdt {
     fn up__to__ds__write__start(_: u64) {}
     fn up__to__ds__write__unwritten__start(_: u64) {}
     fn up__to__ds__flush__start(_: u64) {}
+    fn up__to__ds__barrier__start(_: u64) {}
     fn up__block__req__dropped() {}
     fn ds__read__client__start(_: u64, _: u8) {}
     fn ds__write__client__start(_: u64, _: u8) {}
     fn ds__write__unwritten__client__start(_: u64, _: u8) {}
     fn ds__flush__client__start(_: u64, _: u8) {}
+    fn ds__barrier__client__start(_: u64, _: u8) {}
     fn ds__close__start(_: u64, _: u8, _: u32) {}
     fn ds__repair__start(_: u64, _: u8, _: u32) {}
     fn ds__noop__start(_: u64, _: u8) {}
@@ -360,6 +357,7 @@ mod cdt {
     fn ds__write__client__done(_: u64, _: u8) {}
     fn ds__write__unwritten__client__done(_: u64, _: u8) {}
     fn ds__flush__client__done(_: u64, _: u8) {}
+    fn ds__barrier__client__done(_: u64, _: u8) {}
     fn ds__close__done(_: u64, _: u8) {}
     fn ds__repair__done(_: u64, _: u8) {}
     fn ds__noop__done(_: u64, _: u8) {}
@@ -368,10 +366,12 @@ mod cdt {
     fn up__to__ds__write__done(_: u64) {}
     fn up__to__ds__write__unwritten__done(_: u64) {}
     fn up__to__ds__flush__done(_: u64) {}
+    fn up__to__ds__barrier__done(_: u64) {}
     fn gw__read__done(_: u64) {}
     fn gw__write__done(_: u64) {}
     fn gw__write__unwritten__done(_: u64) {}
     fn gw__flush__done(_: u64) {}
+    fn gw__barrier__done(_: u64) {}
     fn gw__close__done(_: u64, _: u32) {}
     fn gw__repair__done(_: u64, _: u32) {}
     fn gw__noop__done(_: u64) {}
@@ -386,8 +386,7 @@ mod cdt {
 }
 
 /// Array of data associated with three clients, indexed by `ClientId`
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(transparent)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct ClientData<T>([T; 3]);
 
 impl<T> std::ops::Index<ClientId> for ClientData<T> {
@@ -426,11 +425,24 @@ impl<T> ClientData<T> {
         std::mem::swap(&mut self[c], &mut v);
         v
     }
+
+    /// Builds a `ClientData` from a builder function
+    pub fn from_fn<F: FnMut(ClientId) -> T>(mut f: F) -> Self {
+        Self([
+            f(ClientId::new(0)),
+            f(ClientId::new(1)),
+            f(ClientId::new(2)),
+        ])
+    }
+
+    #[cfg(test)]
+    pub fn get(&self) -> &[T; 3] {
+        &self.0
+    }
 }
 
 /// Map of data associated with clients, keyed by `ClientId`
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(transparent)]
+#[derive(Copy, Clone, Debug)]
 pub struct ClientMap<T>(ClientData<Option<T>>);
 
 impl<T> ClientMap<T> {
@@ -450,12 +462,24 @@ impl<T> ClientMap<T> {
     pub fn get(&self, c: &ClientId) -> Option<&T> {
         self.0[*c].as_ref()
     }
+    pub fn contains(&self, c: &ClientId) -> bool {
+        self.0[*c].is_some()
+    }
+    pub fn take(&mut self, c: &ClientId) -> Option<T> {
+        self.0[*c].take()
+    }
 }
 
 impl<T> std::ops::Index<ClientId> for ClientMap<T> {
     type Output = T;
     fn index(&self, index: ClientId) -> &Self::Output {
         self.get(&index).unwrap()
+    }
+}
+
+impl<T> From<ClientData<T>> for ClientMap<T> {
+    fn from(c: ClientData<T>) -> Self {
+        Self(ClientData(c.0.map(Option::Some)))
     }
 }
 
@@ -714,15 +738,15 @@ pub(crate) struct RawReadResponse {
  *              │     ▼   ▼   ▲    ▲                     ║     │
  *              │     │   │   │    │                     ║     │
  *              │     │   │   │    │                     ║     │
- *              │     │   │   ▲  ┌─┘                     ║     │
- *              │     │   │ ┌─┴──┴──┐                    ║     │
- *              │     │   │ │Replay │                    ║     │
- *              │     │   │ │       ├─►─┐                ║     │
- *              │     │   │ └─┬──┬──┘   │                ║     │
- *              │     │   ▼   ▼  ▲      │                ║     │
- *              │     │   │   │  │      │                ▲     │
- *              │     │ ┌─┴───┴──┴──┐   │   ┌────────────╨──┐  │
- *              │     │ │  Offline  │   └─►─┤   Faulted     │  │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   │   │    │                     ║     │
+ *              │     │   ▼   ▲    ▲                     ║     │
+ *              │     │   │   │    │                     ▲     │
+ *              │     │ ┌─┴───┴────┴┐       ┌────────────╨──┐  │
+ *              │     │ │  Offline  │       │   Faulted     │  │
  *              │     │ │           ├─────►─┤               │  │
  *              │     │ └───────────┘       └─┬─┬───────┬─┬─┘  │
  *              │     │                       ▲ ▲       ▼ ▲    ▲
@@ -813,11 +837,6 @@ pub enum DsState {
      */
     Offline,
     /*
-     * This downstairs was offline but is now back online and we are
-     * sending it all the I/O it missed when it was unavailable.
-     */
-    Replay,
-    /*
      * A guest requested deactivation, this downstairs has completed all
      * its outstanding work and is now waiting for the upstairs to
      * transition back to initializing.
@@ -883,9 +902,6 @@ impl std::fmt::Display for DsState {
             DsState::Offline => {
                 write!(f, "Offline")
             }
-            DsState::Replay => {
-                write!(f, "Replay")
-            }
             DsState::Deactivated => {
                 write!(f, "Deactivated")
             }
@@ -918,13 +934,13 @@ pub(crate) enum Validation {
  */
 #[derive(Debug)]
 struct DownstairsIO {
-    ds_id: JobId, // This MUST match our hashmap index
-
-    guest_id: GuestWorkId, // The hashmap ID from the parent guest work.
     work: IOop,
 
     /// Map of work status, tracked on a per-client basis
     state: ClientData<IOState>,
+
+    /// Reply handle to send data back to the guest
+    res: Option<GuestBlockRes>,
 
     /*
      * Has this been acked to the guest yet?
@@ -945,8 +961,11 @@ struct DownstairsIO {
     data: Option<RawReadResponse>,
     read_validations: Vec<Validation>,
 
-    /// Number of bytes that this job has contributed to guest backpressure
-    backpressure_bytes: Option<u64>,
+    /// Handle for this job's contribution to guest backpressure
+    ///
+    /// Each of these guard handles will automatically decrement the
+    /// backpressure count for their respective Downstairs when dropped.
+    backpressure_guard: ClientMap<BackpressureGuard>,
 }
 
 impl DownstairsIO {
@@ -955,7 +974,7 @@ impl DownstairsIO {
 
         for state in self.state.iter() {
             match state {
-                IOState::New | IOState::InProgress => wc.active += 1,
+                IOState::InProgress => wc.active += 1,
                 IOState::Error(_) => wc.error += 1,
                 IOState::Skipped => wc.skipped += 1,
                 IOState::Done => wc.done += 1,
@@ -972,25 +991,13 @@ impl DownstairsIO {
      * We don't consider repair IOs in the size calculation.
      */
     pub fn io_size(&self) -> usize {
-        match &self.work {
-            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
-                data.len()
-            }
-            IOop::Read {
-                count, block_size, ..
-            } => (*count * *block_size) as usize,
-            IOop::Flush { .. }
-            | IOop::ExtentFlushClose { .. }
-            | IOop::ExtentLiveRepair { .. }
-            | IOop::ExtentLiveReopen { .. }
-            | IOop::ExtentLiveNoOp { .. } => 0,
-        }
+        self.work.job_bytes() as usize
     }
 
     /*
      * Return a summary of this job in the form of the WorkSummary struct.
      */
-    pub fn io_summarize(&self) -> WorkSummary {
+    pub fn io_summarize(&self, id: JobId) -> WorkSummary {
         let (job_type, num_blocks, deps) = self.work.ioop_summary();
 
         let mut state = Vec::with_capacity(3);
@@ -1008,7 +1015,7 @@ impl DownstairsIO {
         }
 
         WorkSummary {
-            id: self.ds_id,
+            id,
             replay: self.replay,
             job_type,
             num_blocks,
@@ -1046,10 +1053,11 @@ impl DownstairsIO {
         let wc = self.state_count();
 
         let bad_job = match &self.work {
-            IOop::Read { .. } => wc.error == 3,
+            IOop::Read { .. } => wc.done == 0,
             IOop::Write { .. }
             | IOop::WriteUnwritten { .. }
-            | IOop::Flush { .. } => wc.skipped + wc.error > 1,
+            | IOop::Flush { .. }
+            | IOop::Barrier { .. } => wc.skipped + wc.error > 1,
             IOop::ExtentFlushClose { .. }
             | IOop::ExtentLiveRepair { .. }
             | IOop::ExtentLiveReopen { .. }
@@ -1085,7 +1093,7 @@ struct WorkSummary {
 struct ReconcileIO {
     id: ReconciliationId,
     op: Message,
-    state: ClientData<IOState>,
+    state: ClientData<ReconcileIOState>,
 }
 
 impl ReconcileIO {
@@ -1093,7 +1101,7 @@ impl ReconcileIO {
         ReconcileIO {
             id,
             op,
-            state: ClientData::new(IOState::New),
+            state: ClientData::new(ReconcileIOState::New),
         }
     }
 }
@@ -1147,6 +1155,9 @@ enum IOop {
         snapshot_details: Option<SnapshotDetails>,
         extent_limit: Option<ExtentId>,
     },
+    Barrier {
+        dependencies: Vec<JobId>, // Jobs that must finish before this
+    },
     /*
      * These operations are for repairing a bad downstairs
      */
@@ -1175,10 +1186,11 @@ enum IOop {
 
 impl IOop {
     #[cfg(test)]
-    fn deps(&self) -> &Vec<JobId> {
+    fn deps(&self) -> &[JobId] {
         match &self {
             IOop::Write { dependencies, .. }
             | IOop::Flush { dependencies, .. }
+            | IOop::Barrier { dependencies, .. }
             | IOop::Read { dependencies, .. }
             | IOop::WriteUnwritten { dependencies, .. }
             | IOop::ExtentFlushClose { dependencies, .. }
@@ -1199,6 +1211,11 @@ impl IOop {
                 | IOop::ExtentLiveNoOp { .. }
                 | IOop::ExtentLiveReopen { .. }
         )
+    }
+
+    /// Returns `true` if the `IOop` is a `Write` or `WriteUnwritten`
+    fn is_write(&self) -> bool {
+        matches!(self, IOop::Write { .. } | IOop::WriteUnwritten { .. })
     }
 
     /**
@@ -1233,22 +1250,18 @@ impl IOop {
                 let job_type = "WriteU".to_string();
                 (job_type, blocks.len(), dependencies.clone())
             }
-            IOop::Flush {
-                dependencies,
-                flush_number: _flush_number,
-                gen_number: _gen_number,
-                snapshot_details: _,
-                extent_limit: _,
-            } => {
+            IOop::Flush { dependencies, .. } => {
                 let job_type = "Flush".to_string();
+                (job_type, 0, dependencies.clone())
+            }
+            IOop::Barrier { dependencies, .. } => {
+                let job_type = "Barrier".to_string();
                 (job_type, 0, dependencies.clone())
             }
             IOop::ExtentFlushClose {
                 dependencies,
                 extent,
-                flush_number: _,
-                gen_number: _,
-                repair_downstairs: _,
+                ..
             } => {
                 let job_type = "FClose".to_string();
                 (job_type, extent.0 as usize, dependencies.clone())
@@ -1256,9 +1269,7 @@ impl IOop {
             IOop::ExtentLiveRepair {
                 dependencies,
                 extent,
-                source_downstairs: _,
-                source_repair_address: _,
-                repair_downstairs: _,
+                ..
             } => {
                 let job_type = "Repair".to_string();
                 (job_type, extent.0 as usize, dependencies.clone())
@@ -1284,7 +1295,16 @@ impl IOop {
     // (skipped).
     // Return true if we should send it.
     fn send_io_live_repair(&self, extent_limit: Option<ExtentId>) -> bool {
-        if let Some(extent_limit) = extent_limit {
+        // Always send live-repair IOs
+        if matches!(
+            self,
+            IOop::ExtentLiveReopen { .. }
+                | IOop::ExtentFlushClose { .. }
+                | IOop::ExtentLiveRepair { .. }
+                | IOop::ExtentLiveNoOp { .. }
+        ) {
+            true
+        } else if let Some(extent_limit) = extent_limit {
             // The extent_limit has been set, so we have repair work in
             // progress.  If our IO touches an extent less than or equal
             // to the extent_limit, then we go ahead and send it.
@@ -1325,16 +1345,21 @@ impl IOop {
             _ => 0,
         }
     }
+
+    /// Returns the number of bytes written
+    fn write_bytes(&self) -> u64 {
+        match &self {
+            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
+                data.len() as u64
+            }
+            _ => 0,
+        }
+    }
 }
 
-/*
- * The various states an IO can be in when it is on the work hashmap.
- * There is a state that is unique to each downstairs task we have and
- * they operate independent of each other.
- */
 #[allow(clippy::derive_partial_eq_without_eq)]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub enum IOState {
+#[derive(Debug, Clone, PartialEq)]
+pub enum ReconcileIOState {
     // A new IO request.
     New,
     // The request has been sent to this tasks downstairs.
@@ -1344,7 +1369,24 @@ pub enum IOState {
     // The IO request should be ignored. Ex: we could be doing recovery and
     // we only want a specific downstairs to do that work.
     Skipped,
-    // The IO returned an error.
+}
+
+/*
+ * The various states an IO can be in when it is on the work hashmap.
+ * There is a state that is unique to each downstairs task we have and
+ * they operate independent of each other.
+ */
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum IOState {
+    /// The request has been sent to this tasks downstairs.
+    InProgress,
+    /// The successful response came back from downstairs.
+    Done,
+    /// The IO request should be ignored. Ex: we could be doing recovery and
+    /// we only want a specific downstairs to do that work.
+    Skipped,
+    /// The IO returned an error.
     Error(CrucibleError),
 }
 
@@ -1352,9 +1394,6 @@ impl fmt::Display for IOState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Make sure to right-align output on 4 characters
         match self {
-            IOState::New => {
-                write!(f, " New")
-            }
             IOState::InProgress => {
                 write!(f, "Sent")
             }
@@ -1371,37 +1410,29 @@ impl fmt::Display for IOState {
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
-pub struct ClientIOStateCount {
-    pub new: u32,
-    pub in_progress: u32,
-    pub done: u32,
-    pub skipped: u32,
-    pub error: u32,
+#[derive(Debug, Default, Copy, Clone, Serialize, Deserialize)]
+pub struct ClientIOStateCount<T = u32> {
+    pub in_progress: T,
+    pub done: T,
+    pub skipped: T,
+    pub error: T,
 }
 
-impl ClientIOStateCount {
-    fn new() -> ClientIOStateCount {
-        ClientIOStateCount {
-            new: 0,
-            in_progress: 0,
-            done: 0,
-            skipped: 0,
-            error: 0,
+impl<T> std::ops::Index<&IOState> for ClientIOStateCount<T> {
+    type Output = T;
+    fn index(&self, index: &IOState) -> &Self::Output {
+        match index {
+            IOState::InProgress => &self.in_progress,
+            IOState::Done => &self.done,
+            IOState::Skipped => &self.skipped,
+            IOState::Error(_) => &self.error,
         }
     }
+}
 
-    pub fn incr(&mut self, state: &IOState) {
-        *self.get_mut(state) += 1;
-    }
-
-    pub fn decr(&mut self, state: &IOState) {
-        *self.get_mut(state) -= 1;
-    }
-
-    fn get_mut(&mut self, state: &IOState) -> &mut u32 {
-        match state {
-            IOState::New => &mut self.new,
+impl<T> std::ops::IndexMut<&IOState> for ClientIOStateCount<T> {
+    fn index_mut(&mut self, index: &IOState) -> &mut Self::Output {
+        match index {
             IOState::InProgress => &mut self.in_progress,
             IOState::Done => &mut self.done,
             IOState::Skipped => &mut self.skipped,
@@ -1412,7 +1443,6 @@ impl ClientIOStateCount {
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub struct IOStateCount {
-    pub new: ClientData<u32>,
     pub in_progress: ClientData<u32>,
     pub done: ClientData<u32>,
     pub skipped: ClientData<u32>,
@@ -1422,7 +1452,6 @@ pub struct IOStateCount {
 impl IOStateCount {
     fn show_all(&self) {
         println!("   STATES      DS:0   DS:1   DS:2   TOTAL");
-        self.show(IOState::New);
         self.show(IOState::InProgress);
         self.show(IOState::Done);
         self.show(IOState::Skipped);
@@ -1432,7 +1461,6 @@ impl IOStateCount {
 
     fn get(&self, state: &IOState) -> &ClientData<u32> {
         match state {
-            IOState::New => &self.new,
             IOState::InProgress => &self.in_progress,
             IOState::Done => &self.done,
             IOState::Skipped => &self.skipped,
@@ -1443,9 +1471,6 @@ impl IOStateCount {
     fn show(&self, state: IOState) {
         let state_stat = self.get(&state);
         match state {
-            IOState::New => {
-                print!("    New        ");
-            }
             IOState::InProgress => {
                 print!("    Sent       ");
             }
@@ -1582,6 +1607,7 @@ macro_rules! ceiling_div {
     };
 }
 
+#[allow(unused)] // pending IOP limits being reimplemented
 impl BlockOp {
     /*
      * Compute number of IO operations represented by this BlockOp, rounding

@@ -12,7 +12,7 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BINDIR=${BINDIR:-$ROOT/target/debug}
 
 echo "$ROOT"
-cd "$ROOT" || exit 1
+cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 
 if pgrep -fl crucible-downstairs; then
     echo 'Downstairs already running?' >&2
@@ -38,44 +38,55 @@ function ctrl_c() {
     exit 1
 }
 
+# Use the id of the current user to make a unique path
+user=$(id -u -n)
 # Downstairs regions go in this directory
-testdir="/var/tmp/test_up"
-if [[ -d ${testdir} ]]; then
-    rm -rf ${testdir}
+testdir="/var/tmp/test_up-$user"
+if [[ -d "$testdir" ]]; then
+    rm -rf "$testdir"
 fi
 
 # Store log files we want to keep in /tmp/test_up/.txt as this is what
 # buildomat will look for and archive
-test_output_dir="/tmp/test_up"
-rm -rf ${test_output_dir} 2> /dev/null
-mkdir -p ${test_output_dir}
+test_output_dir="/tmp/test_up-$user"
+rm -rf "$test_output_dir" 2> /dev/null
+mkdir -p "$test_output_dir"
 
 log_prefix="${test_output_dir}/test_up"
 fail_log="${log_prefix}_fail.txt"
 rm -f "$fail_log"
 
 args=()
+hammer_args=()
 dsc_args=()
 dsc_create_args=()
 dump_args=()
+region_sets=1
 
 function usage {
-    echo "Usage: $0 [-N] encrypted|unencrypted"
-    echo "N:  Don't dump color output"
+    echo "Usage: $0 [-N] [-r #] encrypted|unencrypted"
+    echo "N:    Don't dump color output"
+    echo "r: #  Number of region sets to create (default: 1)"
     echo "    encrypted or unencrypted must be provided"
     exit 1
 }
 
-while getopts 'N' opt; do
+shift_count=0
+while getopts 'Nr:' opt; do
     case "$opt" in
         N) echo "Turn off color for downstairs dump"
             dump_args+=("--no-color")
-            shift
+            ((shift_count+=1))
+            ;;
+        r) region_sets=$OPTARG
+            echo "Using $region_sets region sets"
+            ((shift_count+=2))
             ;;
         *) usage
             ;;
     esac
 done
+shift "$shift_count"
 
 case ${1} in
     "unencrypted")
@@ -84,41 +95,37 @@ case ${1} in
         upstairs_key=$(openssl rand -base64 32)
         echo "Upstairs using key: $upstairs_key"
         args+=( --key "$upstairs_key" )
+        hammer_args+=( --key "$upstairs_key" )
         dsc_create_args+=( --encrypted )
         ;;
     *)
+        echo "Unsupported option: $1"
         usage
         ;;
 esac
 
+((region_count=region_sets*3))
+args+=( --dsc "127.0.0.1:9998" )
+
 dsc_output_dir="${test_output_dir}/dsc"
-mkdir -p ${dsc_output_dir}
+mkdir -p "$dsc_output_dir"
 dsc_output="${test_output_dir}/dsc-out.txt"
 
 dsc_create_args+=( --cleanup )
 dsc_args+=( --output-dir "$dsc_output_dir" )
 dsc_args+=( --ds-bin "$cds" )
-
-# Note, this should match the default for DSC
-port_base=8810
-# Build the upstairs args
-for (( i = 0; i < 3; i++ )); do
-    (( port_step = i * 10 ))
-    (( port = port_base + port_step ))
-    args+=( -t "127.0.0.1:$port" )
-done
-
 dsc_args+=( --region-dir "$testdir" )
 echo "dsc output goes to $dsc_output"
 
-echo "Creating three downstairs regions"
-echo "${dsc}" create "${dsc_create_args[@]}" --extent-size 10 --extent-count 5 "${dsc_args[@]}" > "$dsc_output"
-"${dsc}" create "${dsc_create_args[@]}" --extent-size 10 --extent-count 5 "${dsc_args[@]}" >> "$dsc_output" 2>&1
+echo "Creating $region_count downstairs regions"
+echo "${dsc}" create "${dsc_create_args[@]}" --region-count $region_count --extent-size 10 --extent-count 5 "${dsc_args[@]}" > "$dsc_output"
+"${dsc}" create "${dsc_create_args[@]}" --region-count $region_count --extent-size 10 --extent-count 5 "${dsc_args[@]}" >> "$dsc_output" 2>&1
 
-echo "Starting three downstairs"
-echo "${dsc}" start "${dsc_args[@]}" >> "$dsc_output"
-"${dsc}" start "${dsc_args[@]}" >> "$dsc_output" 2>&1 &
+echo "Starting $region_count downstairs"
+echo "${dsc}" start "${dsc_args[@]}" --region-count $region_count >> "$dsc_output"
+"${dsc}" start "${dsc_args[@]}" --region-count $region_count >> "$dsc_output" 2>&1 &
 dsc_pid=$!
+echo "dsc started at PID: $dsc_pid"
 
 sleep 5
 if ! pgrep -P $dsc_pid > /dev/null; then
@@ -128,12 +135,25 @@ if ! pgrep -P $dsc_pid > /dev/null; then
     echo dsc:
     ps -ef | grep dsc
     echo files:
-    ls -l /tmp/test_up
-    ls -l /tmp/test_up/dsc
+    ls -l "$test_output_dir"
+    ls -l "$dsc_output_dir"
     echo cat:
-    cat /tmp/test_up/dsc-out.txt
+    cat "$dsc_output"
     exit 1
 fi
+
+# Wait for all clients to be running.
+cid=0
+while [[ "$cid" -lt "$region_count" ]]; do
+    state=$("$dsc" cmd state -c "$cid")
+    if [[ "$state" != "Running" ]]; then
+        echo "Downstairs client $cid not running, waiting for it"
+        sleep 5
+        continue
+    fi
+    ((cid += 1))
+done
+
 
 # We don't want auto-restart of downstairs, so be sure that is not enabled.
 echo "Disable automatic restart on all downstairs"
@@ -172,10 +192,14 @@ for tt in ${test_list}; do
 done
 (( gen += 10 ))
 
+# Hammer tests only uses three downstairs.
 echo "" >> "${log_prefix}_out.txt"
 echo "Running hammer" | tee -a "${log_prefix}_out.txt"
-echo "$ch" -g "$gen" "${args[@]}" >> "${log_prefix}_out.txt"
-if ! "$ch" -g "$gen" "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
+hammer_args+=( -t "127.0.0.1:8810")
+hammer_args+=( -t "127.0.0.1:8820")
+hammer_args+=( -t "127.0.0.1:8830")
+echo "$ch" -g "$gen" "${hammer_args[@]}" >> "${log_prefix}_out.txt"
+if ! "$ch" -g "$gen" "${hammer_args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
     echo "Failed hammer test"
     echo "Failed hammer test" >> "$fail_log"
     (( res += 1 ))
@@ -206,15 +230,15 @@ else
 fi
 (( gen += 1 ))
 
-echo "Copy the $port file" | tee -a "${log_prefix}_out.txt"
-
+port=8830
+echo "Copy the region for ${testdir}/$port" | tee -a "${log_prefix}_out.txt"
 
 echo cp -r "${testdir}/${port}" "${testdir}/previous"
 cp -r "${testdir}/${port}" "${testdir}/previous"
 
 new_args+=( --verify-in "${testdir}/verify_file" )
-echo "$ct" repair -g "$gen" -q "${new_args[@]}"
-if ! "$ct" repair -g "$gen" -q "${new_args[@]}"; then
+echo "$ct" fill -g "$gen" -q "${new_args[@]}"
+if ! "$ct" fill -g "$gen" -q "${new_args[@]}"; then
     (( res += 1 ))
     echo ""
     echo "Failed repair test part 1"
@@ -231,23 +255,29 @@ echo Kill the current downstairs
 if ! "$dsc" cmd disable-restart-all; then
     (( res += 1 ))
     echo ""
-    echo "Failed repair test part 1, disable auto restart"
-    echo "Failed repair test part 1, disable auto restart" >> "$fail_log"
+    echo "Failed repair test part 1, disable auto restart" | tee -a "$fail_log"
     echo
 fi
 
 if ! "$dsc" cmd stop -c 2; then
     (( res += 1 ))
     echo ""
-    echo "Failed repair test part 1, stopping downstairs 2"
-    echo "Failed repair test part 1, stopping downstairs 2" >> "$fail_log"
+    echo "Failed repair test part 1, stopping downstairs 2" | tee -a "$fail_log"
     echo
 fi
 
-echo rm -rf "${testdir:?}/${port:?}"
+state=$("$dsc" cmd state -c 2)
+while [[ "$state" != "Exit" ]]; do
+    echo "downstairs 2 not stopped yet, waiting"
+    sleep 5
+    state=$("$dsc" cmd state -c 2)
+done
+echo "Downstairs 2 stopped"
+
+echo mv "${testdir}/${port}" "${testdir}/new"
+mv "${testdir}/${port}" "${testdir}/new"
 echo "Now put back the original so we have a mismatch"
 echo mv "${testdir}/previous" "${testdir}/${port}"
-rm -rf "${testdir:?}/${port:?}"
 mv "${testdir}/previous" "${testdir}/${port}"
 
 echo "Restart downstairs with old directory"
@@ -263,6 +293,9 @@ fi
 # Put a dump test in the middle of the repair test, so we
 # can see both a mismatch and that dump works.
 # The dump args look different than other downstairs commands
+# This port base comes from the default for dsc.  If that changes, then this
+# needs to change as well.
+port_base=8810
 for (( i = 0; i < 30; i += 10 )); do
     (( port = port_base + i ))
     dir="${testdir}/$port"
@@ -282,7 +315,7 @@ fi
 
 echo ""
 echo ""
-echo "$ct" "$tt" --range -g "$gen" -q "${new_args[@]}"
+echo "$ct" verify --range -g "$gen" -q "${new_args[@]}"
 if ! "$ct" verify --range -g "$gen" -q "${new_args[@]}"; then
     (( res += 1 ))
     echo ""
@@ -331,7 +364,7 @@ else
 fi
 
 # Tests done, shut down the downstairs.
-echo "Upstairs tests have completed, stopping all downstairs"
+echo "Initial upstairs tests have completed, stopping all downstairs"
 if ! "$dsc" cmd shutdown; then
     (( res += 1 ))
     echo ""
@@ -347,19 +380,22 @@ while : ; do
         break
     fi
     echo "dsc at $dsc_pid has not yet stopped, waiting"
+    "$dsc" cmd shutdown
     sleep 5
 done
 
 echo "Begin replace reconcile test" >> "${log_prefix}_out.txt"
 
-# Create a larger region size for these tests.
-echo "Creating four larger downstairs regions"
-echo "${dsc}" create "${dsc_create_args[@]}" --region-count 4 --extent-count 300 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output"
-"${dsc}" create "${dsc_create_args[@]}" --region-count 4 --extent-count 100 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output" 2>&1
+# Create a larger region size for these tests, and add an additional
+# region so we have one to use for replacement.
+((region_count+=1))
+echo "Creating $region_count larger downstairs regions"
+echo "${dsc}" create "${dsc_create_args[@]}" --region-count "$region_count" --extent-count 300 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output"
+"${dsc}" create "${dsc_create_args[@]}" --region-count "$region_count" --extent-count 100 --block-size 4096 "${dsc_args[@]}" >> "$dsc_output" 2>&1
 
-echo "Starting four downstairs"
-echo "${dsc}" start --region-count 4 "${dsc_args[@]}" >> "$dsc_output"
-"${dsc}" start --region-count 4 "${dsc_args[@]}" >> "$dsc_output" 2>&1 &
+echo "Starting $region_count downstairs"
+echo "${dsc}" start --region-count $region_count "${dsc_args[@]}" >> "$dsc_output"
+"${dsc}" start --region-count "$region_count" "${dsc_args[@]}" >> "$dsc_output" 2>&1 &
 dsc_pid=$!
 
 sleep 5
@@ -369,10 +405,29 @@ if ! pgrep -P $dsc_pid > /dev/null; then
 fi
 echo "" >> "${log_prefix}_out.txt"
 
+echo "dsc restarted at PID: $dsc_pid"
+
+# Wait for all clients to be running.
+cid=0
+while [[ "$cid" -lt "$region_count" ]]; do
+    state=$("$dsc" cmd state -c "$cid")
+    if [[ "$state" != "Running" ]]; then
+        echo "Downstairs client $cid not running, waiting for it"
+        sleep 5
+        continue
+    fi
+    ((cid += 1))
+done
+
 echo "Now do the replace-reconcile test"
 
-echo "$ct" replace-reconcile --replacement 127.0.0.1:8840 -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt"
-if ! "$ct" replace-reconcile --replacement 127.0.0.1:8840 -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
+# Get the port number for the last client, that is our replacement.
+((last_client = region_count - 1))
+last_port=$("$dsc" cmd port -c "$last_client")
+echo "Using $last_port for the replacement port"
+
+echo "$ct" replace-reconcile --replacement 127.0.0.1:"$last_port" -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt"
+if ! "$ct" replace-reconcile --replacement 127.0.0.1:"$last_port" -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
     (( res += 1 ))
     echo ""
     echo "Failed crutest replace-reconcile test"
@@ -385,8 +440,8 @@ fi
 
 ((gen += 20))
 echo "Now do the replace-before-active test"
-echo "$ct" replace-before-active --replacement 127.0.0.1:8840 -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt"
-if ! "$ct" replace-before-active --replacement 127.0.0.1:8840 -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
+echo "$ct" replace-before-active --replacement 127.0.0.1:"$last_port" -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt"
+if ! "$ct" replace-before-active --replacement 127.0.0.1:"$last_port" -c 4 -g "$gen" --stable "${args[@]}" >> "${log_prefix}_out.txt" 2>&1; then
     (( res += 1 ))
     echo ""
     echo "Failed crutest replace-before-active"
@@ -398,7 +453,7 @@ else
 fi
 
 # Tests done, shut down the downstairs.
-echo "Tests have completed, stopping all downstairs"
+echo "All tests have completed, stopping all downstairs"
 if ! "$dsc" cmd shutdown; then
     (( res += 1 ))
     echo ""

@@ -162,6 +162,9 @@ pub struct SnapshotDetails {
 #[repr(u32)]
 #[derive(IntoPrimitive)]
 pub enum MessageVersion {
+    /// Add `Barrier` and `BarrierAck`
+    V12 = 12,
+
     /// Use `ReadBlockContext` instead of `Option<BlockContext>`
     V11 = 11,
 
@@ -207,7 +210,7 @@ pub enum MessageVersion {
 }
 impl MessageVersion {
     pub const fn current() -> Self {
-        Self::V11
+        Self::V12
     }
 }
 
@@ -216,7 +219,7 @@ impl MessageVersion {
  * This, along with the MessageVersion enum above should be updated whenever
  * changes are made to the Message enum below.
  */
-pub const CRUCIBLE_MESSAGE_VERSION: u32 = 11;
+pub const CRUCIBLE_MESSAGE_VERSION: u32 = MessageVersion::current() as u32;
 
 /*
  * If you add or change the Message enum, you must also increment the
@@ -506,6 +509,18 @@ pub enum Message {
         job_id: JobId,
         result: Result<(), CrucibleError>,
     },
+    Barrier {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: JobId,
+        dependencies: Vec<JobId>,
+    },
+    BarrierAck {
+        upstairs_id: Uuid,
+        session_id: Uuid,
+        job_id: JobId,
+        result: Result<(), CrucibleError>,
+    },
 
     ReadRequest {
         upstairs_id: Uuid,
@@ -592,53 +607,57 @@ impl Message {
     /// Return true if this message contains an Error result
     pub fn err(&self) -> Option<&CrucibleError> {
         match self {
-            Message::HereIAm { .. } => None,
-            Message::YesItsMe { .. } => None,
-            Message::VersionMismatch { .. } => None,
-            Message::ReadOnlyMismatch { .. } => None,
-            Message::EncryptedMismatch { .. } => None,
-            Message::PromoteToActive { .. } => None,
-            Message::YouAreNowActive { .. } => None,
-            Message::YouAreNoLongerActive { .. } => None,
-            Message::UuidMismatch { .. } => None,
-            Message::Ruok { .. } => None,
-            Message::Imok { .. } => None,
-            Message::ExtentClose { .. } => None,
-            Message::ExtentReopen { .. } => None,
-            Message::ExtentFlush { .. } => None,
-            Message::ExtentRepair { .. } => None,
-            Message::RepairAckId { .. } => None,
-            Message::RegionInfoPlease { .. } => None,
-            Message::RegionInfo { .. } => None,
-            Message::ExtentVersionsPlease { .. } => None,
-            Message::ExtentVersions { .. } => None,
-            Message::LastFlush { .. } => None,
-            Message::LastFlushAck { .. } => None,
-            Message::Write { .. } => None,
-            Message::ExtentLiveClose { .. } => None,
-            Message::ExtentLiveFlushClose { .. } => None,
-            Message::ExtentLiveRepair { .. } => None,
-            Message::ExtentLiveReopen { .. } => None,
-            Message::ExtentLiveNoOp { .. } => None,
-            Message::Flush { .. } => None,
-            Message::ReadRequest { .. } => None,
-            Message::WriteUnwritten { .. } => None,
-            Message::Unknown(..) => None,
+            Message::HereIAm { .. }
+            | Message::YesItsMe { .. }
+            | Message::VersionMismatch { .. }
+            | Message::ReadOnlyMismatch { .. }
+            | Message::EncryptedMismatch { .. }
+            | Message::PromoteToActive { .. }
+            | Message::YouAreNowActive { .. }
+            | Message::YouAreNoLongerActive { .. }
+            | Message::UuidMismatch { .. }
+            | Message::Ruok { .. }
+            | Message::Imok { .. }
+            | Message::ExtentClose { .. }
+            | Message::ExtentReopen { .. }
+            | Message::ExtentFlush { .. }
+            | Message::ExtentRepair { .. }
+            | Message::RepairAckId { .. }
+            | Message::RegionInfoPlease { .. }
+            | Message::RegionInfo { .. }
+            | Message::ExtentVersionsPlease { .. }
+            | Message::ExtentVersions { .. }
+            | Message::LastFlush { .. }
+            | Message::LastFlushAck { .. }
+            | Message::Write { .. }
+            | Message::ExtentLiveClose { .. }
+            | Message::ExtentLiveFlushClose { .. }
+            | Message::ExtentLiveRepair { .. }
+            | Message::ExtentLiveReopen { .. }
+            | Message::ExtentLiveNoOp { .. }
+            | Message::Flush { .. }
+            | Message::Barrier { .. }
+            | Message::ReadRequest { .. }
+            | Message::WriteUnwritten { .. }
+            | Message::Unknown(..) => None,
 
-            Message::ExtentError { error, .. } => Some(error),
-            Message::ErrorReport { error, .. } => Some(error),
+            Message::ExtentError { error, .. }
+            | Message::ErrorReport { error, .. } => Some(error),
 
             Message::ExtentLiveCloseAck { result, .. } => result.as_ref().err(),
-            Message::ExtentLiveRepairAckId { result, .. } => {
+
+            Message::ExtentLiveRepairAckId { result, .. }
+            | Message::ExtentLiveAckId { result, .. }
+            | Message::WriteAck { result, .. }
+            | Message::FlushAck { result, .. }
+            | Message::BarrierAck { result, .. }
+            | Message::WriteUnwrittenAck { result, .. } => {
                 result.as_ref().err()
             }
-            Message::ExtentLiveAckId { result, .. } => result.as_ref().err(),
-            Message::WriteAck { result, .. } => result.as_ref().err(),
-            Message::FlushAck { result, .. } => result.as_ref().err(),
+
             Message::ReadResponse { header, .. } => {
                 header.blocks.as_ref().err()
             }
-            Message::WriteUnwrittenAck { result, .. } => result.as_ref().err(),
         }
     }
 }
@@ -658,7 +677,7 @@ impl std::fmt::Display for Message {
                         start,
                         ..
                     },
-                data: _,
+                ..
             } => f
                 .debug_struct("Message::Write")
                 .field("upstairs_id", &upstairs_id)
@@ -678,7 +697,7 @@ impl std::fmt::Display for Message {
                         start,
                         ..
                     },
-                data: _,
+                ..
             } => f
                 .debug_struct("Message::WriteUnwritten")
                 .field("upstairs_id", &upstairs_id)
@@ -696,7 +715,7 @@ impl std::fmt::Display for Message {
                         job_id,
                         blocks,
                     },
-                data: _,
+                ..
             } => f
                 .debug_struct("Message::ReadResponse")
                 .field("upstairs_id", &upstairs_id)

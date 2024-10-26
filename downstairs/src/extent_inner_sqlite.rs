@@ -36,13 +36,32 @@ impl ExtentInner for SqliteInner {
         self.0.lock().unwrap().dirty()
     }
 
-    fn flush(
+    fn pre_flush(
         &mut self,
         new_flush: u64,
         new_gen: u64,
         job_id: JobOrReconciliationId,
     ) -> Result<(), CrucibleError> {
-        self.0.lock().unwrap().flush(new_flush, new_gen, job_id)
+        self.0.lock().unwrap().pre_flush(new_flush, new_gen, job_id)
+    }
+
+    fn flush_inner(
+        &mut self,
+        job_id: JobOrReconciliationId,
+    ) -> Result<(), CrucibleError> {
+        self.0.lock().unwrap().flush_inner(job_id)
+    }
+
+    fn post_flush(
+        &mut self,
+        new_flush: u64,
+        new_gen: u64,
+        job_id: JobOrReconciliationId,
+    ) -> Result<(), CrucibleError> {
+        self.0
+            .lock()
+            .unwrap()
+            .post_flush(new_flush, new_gen, job_id)
     }
 
     fn read(
@@ -194,10 +213,10 @@ impl SqliteMoreInner {
         Ok(self.dirty.get())
     }
 
-    fn flush(
+    fn pre_flush(
         &mut self,
-        new_flush: u64,
-        new_gen: u64,
+        _new_flush: u64,
+        _new_gen: u64,
         job_id: JobOrReconciliationId,
     ) -> Result<(), CrucibleError> {
         // Used for profiling
@@ -207,12 +226,19 @@ impl SqliteMoreInner {
             (job_id.get(), self.extent_number.0, n_dirty_blocks)
         });
 
+        Ok(())
+    }
+
+    fn flush_inner(
+        &mut self,
+        job_id: JobOrReconciliationId,
+    ) -> Result<(), CrucibleError> {
         /*
          * We must first fsync to get any outstanding data written to disk.
          * This must be done before we update the flush number.
          */
         cdt::extent__flush__file__start!(|| {
-            (job_id.get(), self.extent_number.0, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0)
         });
         if let Err(e) = self.file.sync_all() {
             /*
@@ -225,9 +251,18 @@ impl SqliteMoreInner {
             );
         }
         cdt::extent__flush__file__done!(|| {
-            (job_id.get(), self.extent_number.0, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0)
         });
 
+        Ok(())
+    }
+
+    fn post_flush(
+        &mut self,
+        new_flush: u64,
+        new_gen: u64,
+        job_id: JobOrReconciliationId,
+    ) -> Result<(), CrucibleError> {
         // Clear old block contexts. In order to be crash consistent, only
         // perform this after the extent fsync is done. For each block
         // written since the last flush, remove all block context rows where
@@ -237,7 +272,7 @@ impl SqliteMoreInner {
         // file is rehashed, since in that case we don't have that luxury.
 
         cdt::extent__flush__collect__hashes__start!(|| {
-            (job_id.get(), self.extent_number.0, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0)
         });
 
         // Rehash any parts of the file that we *may have written* data to since
@@ -250,7 +285,7 @@ impl SqliteMoreInner {
         });
 
         cdt::extent__flush__sqlite__insert__start!(|| {
-            (job_id.get(), self.extent_number.0, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0)
         });
 
         // We put all of our metadb updates into a single transaction to
@@ -265,7 +300,7 @@ impl SqliteMoreInner {
         )?;
 
         cdt::extent__flush__sqlite__insert__done!(|| {
-            (job_id.get(), self.extent_number.0, n_dirty_blocks)
+            (job_id.get(), self.extent_number.0)
         });
 
         self.set_flush_number(new_flush, new_gen)?;
@@ -275,9 +310,7 @@ impl SqliteMoreInner {
         // Finally, reset the file's seek offset to 0
         self.file.seek(SeekFrom::Start(0))?;
 
-        cdt::extent__flush__done!(|| {
-            (job_id.get(), self.extent_number.0, n_dirty_blocks)
-        });
+        cdt::extent__flush__done!(|| { (job_id.get(), self.extent_number.0) });
         Ok(())
     }
 
@@ -527,7 +560,7 @@ impl SqliteMoreInner {
 
         // Perform writes, which may be broken up by skipped blocks
         for (skip, mut group) in (0..write.block_contexts.len())
-            .group_by(|i| writes_to_skip.contains(i))
+            .chunk_by(|i| writes_to_skip.contains(i))
             .into_iter()
         {
             if skip {
@@ -718,6 +751,7 @@ impl SqliteMoreInner {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(&path)?;
 
         file.set_len(size)?;
@@ -1002,8 +1036,7 @@ impl SqliteMoreInner {
     /// unadorned variant should be called instead.
     fn truncate_encryption_contexts_and_hashes_with_tx(
         &self,
-        extent_block_indexes_and_hashes: impl Iterator<Item = (usize, u64)>
-            + ExactSizeIterator,
+        extent_block_indexes_and_hashes: impl ExactSizeIterator<Item = (usize, u64)>,
         tx: &Transaction,
     ) -> Result<()> {
         let n_blocks = extent_block_indexes_and_hashes.len();

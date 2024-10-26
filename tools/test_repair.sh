@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# A test to break, then Repair a downstairs region that is out of sync with
+# A test to break, then reconcile a downstairs region that is out of sync with
 # the other regions. We pick a downstairs at random and restart it with
 # the --lossy flag, meaning it will skip some IO requests (and have to
 # come back and do them later) and will introduce some delay in completing
@@ -25,6 +25,7 @@ set -o pipefail
 
 SECONDS=0
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
 
 cds="$BINDIR/crucible-downstairs"

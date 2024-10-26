@@ -12,14 +12,17 @@ trap ctrl_c INT
 function ctrl_c() {
     echo "Stopping at your request"
     ${dsc} cmd shutdown
+    exit 1
 }
 
 WORK_ROOT=${WORK_ROOT:-/tmp}
 mkdir -p "$WORK_ROOT"
 
 test_log="$WORK_ROOT/test_replay.log"
+verify_log="$WORK_ROOT/test_replay_verify.log"
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/debug}
 crucible_test="$BINDIR/crutest"
 dsc="$BINDIR/dsc"
@@ -31,15 +34,21 @@ if [[ ! -f "$crucible_test" ]] || [[ ! -f "$dsc" ]] || [[ ! -f "$downstairs" ]];
 fi
 
 loops=30
+region_sets=1
 
 usage () {
     echo "Usage: $0 [-l #]]" >&2
-    echo " -l loops   Number of times to cause a replay." >&2
+    echo " -l loops     Number of times to cause a replay." >&2
+    echo " -r regions   Number of region sets to create (default 1)" >&2
 }
 
-while getopts 'l:' opt; do
+while getopts 'l:r:' opt; do
     case "$opt" in
         l)  loops=$OPTARG
+            echo "Set loops"
+            ;;
+        r)  region_sets=$OPTARG
+            echo "Set region sets"
             ;;
         *)  echo "Invalid option"
             usage
@@ -48,18 +57,20 @@ while getopts 'l:' opt; do
     esac
 done
 
+((region_count=region_sets*3))
 echo "" > "$test_log"
 echo "starting $(date)" | tee "$test_log"
 echo "Tail $test_log for test output"
 
-echo "Creating downstairs regions" | tee -a "$test_log"
-if ! ${dsc} create --cleanup --ds-bin "$downstairs" --extent-count 50 >> "$test_log"; then
+echo "Creating $region_count downstairs regions" | tee -a "$test_log"
+if ! ${dsc} create --cleanup --ds-bin "$downstairs" \
+        --extent-count 50 --region-count "$region_count" >> "$test_log"; then
     echo "Failed to create downstairs regions"
     exit 1
 fi
 
-echo "Starting downstairs" | tee -a "$test_log"
-${dsc} start --ds-bin "$downstairs" >> "$test_log" 2>&1 &
+echo "Starting $region_count downstairs" | tee -a "$test_log"
+${dsc} start --ds-bin "$downstairs" --region-count "$region_count" >> "$test_log" 2>&1 &
 dsc_pid=$!
 sleep 5
 if ! ps -p $dsc_pid > /dev/null; then
@@ -67,16 +78,12 @@ if ! ps -p $dsc_pid > /dev/null; then
     exit 1
 fi
 
-args=()
-args+=( -t "127.0.0.1:8810" )
-args+=( -t "127.0.0.1:8820" )
-args+=( -t "127.0.0.1:8830" )
-
 gen=1
 # Initial seed for verify file
 echo "Running initial fill" | tee -a "$test_log"
-if ! "$crucible_test" fill "${args[@]}" -q -g "$gen"\
-          --verify-out alan --retry-activate >> "$test_log" 2>&1 ; then
+if ! "$crucible_test" fill -q -g "$gen"\
+          --dsc 127.0.0.1:9998 \
+          --verify-out "$verify_log" --retry-activate >> "$test_log" 2>&1 ; then
     echo Failed on initial verify seed, check "$test_log"
     ${dsc} cmd shutdown
     exit 1
@@ -85,9 +92,10 @@ fi
 
 SECONDS=0
 echo "Replay loop starts now $(date)" | tee -a "$test_log"
-"$crucible_test" replay "${args[@]}" -c "$loops" \
-        --stable -g "$gen" --verify-out alan \
-        --verify-in alan \
+"$crucible_test" replay -c "$loops" \
+        --stable -g "$gen" --verify-out "$verify_log" \
+        --verify-in "$verify_log" \
+        --dsc 127.0.0.1:9998 \
         --retry-activate >> "$test_log" 2>&1
 result=$?
 duration=$SECONDS
@@ -100,8 +108,10 @@ else
       "$loops" $((duration / 60)) $((duration % 60)) | tee -a "$test_log"
 
     echo "Do final verify" | tee -a "$test_log"
-    if ! "$crucible_test" verify "${args[@]}" -q -g "$gen"\
-              --verify-out alan --verify-in alan >> "$test_log" 2>&1 ; then
+    if ! "$crucible_test" verify -q -g "$gen"\
+              --dsc 127.0.0.1:9998 \
+              --verify-out "$verify_log" \
+              --verify-in "$verify_log" >> "$test_log" 2>&1 ; then
         echo Failed on final verify, check "$test_log"
         result=1
     fi

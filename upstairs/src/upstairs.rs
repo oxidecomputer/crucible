@@ -11,7 +11,6 @@ use crate::{
     },
     downstairs::{Downstairs, DownstairsAction},
     extent_from_offset,
-    guest::GuestBlockRes,
     stats::UpStatOuter,
     BlockOp, BlockRes, Buffer, ClientId, ClientMap, CrucibleOpts, DsState,
     EncryptionContext, GuestIoHandle, Message, RegionDefinition,
@@ -305,9 +304,6 @@ pub(crate) struct UpstairsConfig {
     ///
     /// This is `Some(..)` if a key is provided in the `CrucibleOpts`
     pub encryption_context: Option<EncryptionContext>,
-
-    /// Does this Upstairs throw random errors?
-    pub lossy: bool,
 }
 
 impl UpstairsConfig {
@@ -377,24 +373,32 @@ impl Upstairs {
         info!(log, "Crucible {} has session id: {}", uuid, session_id);
         info!(log, "Upstairs opts: {}", opt);
 
+        if opt.lossy {
+            warn!(log, "lossy flag no longer changes upstairs behavior");
+        }
+
         let cfg = Arc::new(UpstairsConfig {
             encryption_context,
             upstairs_id: uuid,
             session_id,
             generation: AtomicU64::new(gen),
             read_only: opt.read_only,
-            lossy: opt.lossy,
         });
 
         info!(log, "Crucible stats registered with UUID: {}", uuid);
-        let downstairs = Downstairs::new(
+        let mut downstairs = Downstairs::new(
             cfg.clone(),
             ds_target,
             tls_context,
+            stats.ds_stats(),
             log.new(o!("" => "downstairs")),
         );
         let flush_timeout_secs = opt.flush_timeout.unwrap_or(0.5);
         let (control_tx, control_rx) = tokio::sync::mpsc::channel(500);
+
+        if let Some(ddef) = expected_region_def {
+            downstairs.set_ddef(ddef);
+        }
 
         Upstairs {
             state: UpstairsState::Initializing,
@@ -463,7 +467,7 @@ impl Upstairs {
     /// remaining messages have been processed.
     fn done(&self) -> bool {
         self.guest_dropped
-            && self.guest.guest_work.is_empty()
+            && self.downstairs.gw_active.is_empty()
             && self.downstairs.ds_active.is_empty()
             && self.deferred_ops.is_empty()
             && self.deferred_msgs.is_empty()
@@ -566,7 +570,7 @@ impl Upstairs {
                     .counters
                     .action_leak_check));
                 const LEAK_MS: usize = 1000;
-                self.guest.leak_check(LEAK_MS);
+                // XXX Leak check is currently not implemented
                 let leak_tick =
                     tokio::time::Duration::from_millis(LEAK_MS as u64);
                 self.leak_deadline =
@@ -618,27 +622,11 @@ impl Upstairs {
         //
         // This must be called before acking jobs, because it looks in
         // `Downstairs::ackable_jobs` to see which jobs are done.
-        if let Some(job_id) = self.downstairs.check_live_repair() {
-            self.downstairs.continue_live_repair(
-                job_id,
-                &mut self.guest.guest_work,
-                &self.state,
-            );
-        }
-
-        // Send jobs downstairs as they become available.  This must be called
-        // after `continue_live_repair`, which may enqueue jobs.
-        for i in ClientId::iter() {
-            if self.downstairs.clients[i].should_do_more_work() {
-                let ddef = self.ddef.get_def().unwrap();
-                self.downstairs.io_send(i, &ddef);
-            }
-        }
+        self.downstairs.check_and_continue_live_repair(&self.state);
 
         // Handle any jobs that have become ready for acks
         if self.downstairs.has_ackable_jobs() {
-            self.downstairs
-                .ack_jobs(&mut self.guest.guest_work, &self.stats)
+            self.downstairs.ack_jobs()
         }
 
         // Check for client-side deactivation
@@ -734,10 +722,10 @@ impl Upstairs {
         cdt::up__status!(|| {
             let arg = Arg {
                 session_id: self.cfg.session_id.to_string(),
-                up_count: self.guest.guest_work.len() as u32,
+                up_count: self.downstairs.gw_active.len() as u32,
                 up_counters: self.counters,
                 next_job_id: self.downstairs.peek_next_id(),
-                up_backpressure: self.guest.backpressure_us(),
+                up_backpressure: self.guest.get_backpressure().as_micros(),
                 write_bytes_out: self.downstairs.write_bytes_outstanding(),
                 ds_count: self.downstairs.active_count() as u32,
                 ds_state: self.downstairs.collect_stats(|c| c.state()),
@@ -786,7 +774,7 @@ impl Upstairs {
         match c {
             ControlRequest::UpstairsStats(tx) => {
                 let ds_state = self.downstairs.collect_stats(|c| c.state());
-                let up_jobs = self.guest.guest_work.len();
+                let up_jobs = self.downstairs.gw_active.len();
                 let ds_jobs = self.downstairs.active_count();
                 let reconcile_done = self.downstairs.reconcile_repaired();
                 let reconcile_needed =
@@ -907,7 +895,6 @@ impl Upstairs {
             info!(self.log, "No Live Repair required at this time");
         } else if !self.downstairs.start_live_repair(
             &self.state,
-            &mut self.guest.guest_work,
             self.ddef.get_def().unwrap().extent_count(),
         ) {
             // It's hard to hit this condition; we need a Downstairs to be in
@@ -942,7 +929,7 @@ impl Upstairs {
                 self.deferred_ops.push_immediate(DeferredBlockOp::Other(op));
             }
             // Otherwise, we can apply a non-write operation immediately, saving
-            // a trip through the FuturesUnordered
+            // a trip through the DeferredQueue
             _ => {
                 self.apply_guest_request_inner(op);
             }
@@ -982,8 +969,34 @@ impl Upstairs {
                 self.set_active_request(done);
             }
             BlockOp::GoActiveWithGen { gen, done } => {
-                self.cfg.generation.store(gen, Ordering::Release);
-                self.set_active_request(done);
+                // We allow this if we are not active yet, or we are active
+                // with the requested generation number.
+                match &self.state {
+                    UpstairsState::Active | UpstairsState::GoActive(..) => {
+                        if self.cfg.generation() == gen {
+                            // Okay, we want to activate with what we already
+                            // have, that's valid., let the set_active_request
+                            // handle things.
+                            self.set_active_request(done);
+                        } else {
+                            // Gen's don't match, but we are already active,
+                            // or in progress to activate, so fail this request.
+                            done.send_err(
+                                CrucibleError::GenerationNumberInvalid,
+                            );
+                        }
+                    }
+                    UpstairsState::Deactivating(..) => {
+                        // Don't update gen, return error
+                        done.send_err(CrucibleError::UpstairsDeactivating);
+                    }
+                    UpstairsState::Initializing => {
+                        // This case, we update our generation and then
+                        // let set_active_request handle the rest.
+                        self.cfg.generation.store(gen, Ordering::Release);
+                        self.set_active_request(done);
+                    }
+                }
             }
             BlockOp::QueryGuestIOReady { done } => {
                 done.send_ok(self.guest_io_ready());
@@ -1058,8 +1071,8 @@ impl Upstairs {
                     .filter(|c| c.state() == DsState::Active)
                     .count();
                 done.send_ok(WQCounts {
-                    up_count: self.guest.guest_work.len(),
-                    ds_count: self.downstairs.active_count(),
+                    up_count: self.downstairs.gw_active.len(),
+                    ds_count: self.downstairs.ds_active.len(),
                     active_count,
                 });
             }
@@ -1120,9 +1133,8 @@ impl Upstairs {
 
     pub(crate) fn show_all_work(&self) -> WQCounts {
         let gior = self.guest_io_ready();
-        let up_count = self.guest.active_count();
-
-        let ds_count = self.downstairs.active_count();
+        let up_count = self.downstairs.gw_active.len();
+        let ds_count = self.downstairs.ds_active.len();
 
         println!(
             "----------------------------------------------------------------"
@@ -1136,14 +1148,14 @@ impl Upstairs {
         );
         if ds_count == 0 {
             if up_count != 0 {
-                self.guest.show_work();
+                self.downstairs.show_guest_work();
             }
         } else {
             self.downstairs.show_all_work()
         }
 
         print!("Downstairs last five completed:");
-        self.downstairs.print_last_completed(5);
+        self.downstairs.print_last_retired(5);
         println!();
 
         let active_count = self
@@ -1153,7 +1165,8 @@ impl Upstairs {
             .filter(|c| c.state() == DsState::Active)
             .count();
 
-        self.guest.guest_work.print_last_completed(5);
+        print!("Upstairs last five completed:  ");
+        self.downstairs.print_last_acked(5);
         println!();
 
         WQCounts {
@@ -1171,12 +1184,15 @@ impl Upstairs {
                 info!(self.log, "{} active request set", self.cfg.upstairs_id);
             }
             UpstairsState::GoActive(..) => {
+                // We have already been sent a request to go active, but we
+                // are not active yet and will respond (on the original
+                // BlockRes) when we do become active.
                 info!(
                     self.log,
                     "{} request to activate upstairs already going active",
                     self.cfg.upstairs_id
                 );
-                res.send_err(CrucibleError::UpstairsAlreadyActive);
+                res.send_err(CrucibleError::UpstairsActivateInProgress);
                 return;
             }
             UpstairsState::Deactivating(..) => {
@@ -1188,12 +1204,13 @@ impl Upstairs {
                 return;
             }
             UpstairsState::Active => {
+                // We are already active, so go ahead and respond again.
                 info!(
                     self.log,
                     "{} Request to activate upstairs already active",
                     self.cfg.upstairs_id
                 );
-                res.send_err(CrucibleError::UpstairsAlreadyActive);
+                res.send_ok(());
                 return;
             }
         }
@@ -1253,57 +1270,48 @@ impl Upstairs {
          * ID and the next_id are connected here, in that all future writes
          * should be flushed at the next flush ID.
          */
-        let (gw_id, _) = self.guest.guest_work.submit_job(
-            |gw_id| {
-                cdt::gw__flush__start!(|| (gw_id.0));
-                if snapshot_details.is_some() {
-                    info!(self.log, "flush with snap requested");
-                }
-                self.downstairs.submit_flush(gw_id, snapshot_details)
-            },
-            res.map(GuestBlockRes::Other),
-        );
 
-        cdt::up__to__ds__flush__start!(|| (gw_id.0));
+        if snapshot_details.is_some() {
+            info!(self.log, "flush with snap requested");
+        }
+        let ds_id = self.downstairs.submit_flush(snapshot_details, res);
+
+        cdt::up__to__ds__flush__start!(|| (ds_id.0));
+    }
+
+    #[allow(dead_code)] // XXX this will be used soon!
+    fn submit_barrier(&mut self) {
+        // Notice that unlike submit_read and submit_write, we do not check for
+        // guest_io_ready here. The upstairs itself calls submit_barrier
+        // without the guest being involved; indeed the guest is not allowed to
+        // call it!
+
+        let ds_id = self.downstairs.submit_barrier();
+
+        cdt::up__to__ds__barrier__start!(|| (ds_id.0));
     }
 
     /// Submits a read job to the downstairs
-    fn submit_read(
-        &mut self,
-        offset: BlockIndex,
-        data: Buffer,
-        res: BlockRes<Buffer, (Buffer, CrucibleError)>,
-    ) {
-        self.submit_read_inner(offset, data, Some(res))
-    }
-
-    /// Submits a dummy read (without associated `BlockOp`)
+    /// Submits a dummy read (building a fake `BlockRes`)
     #[cfg(test)]
     pub(crate) fn submit_dummy_read(
         &mut self,
         offset: BlockIndex,
         data: Buffer,
     ) {
-        self.submit_read_inner(offset, data, None)
+        let br = BlockRes::dummy();
+        self.submit_read(offset, data, br)
     }
 
-    /// Submit a read job to the downstairs, optionally without a `BlockOp`
-    ///
-    /// # Panics
-    /// If `res` is `None` and this isn't the test suite
-    fn submit_read_inner(
+    /// Submit a read job to the downstairs
+    fn submit_read(
         &mut self,
         offset: BlockIndex,
         data: Buffer,
-        res: Option<BlockRes<Buffer, (Buffer, CrucibleError)>>,
+        res: BlockRes<Buffer, (Buffer, CrucibleError)>,
     ) {
-        #[cfg(not(test))]
-        assert!(res.is_some());
-
         if !self.guest_io_ready() {
-            if let Some(res) = res {
-                res.send_err((data, CrucibleError::UpstairsInactive));
-            }
+            res.send_err((data, CrucibleError::UpstairsInactive));
             return;
         }
 
@@ -1318,9 +1326,7 @@ impl Upstairs {
          * Verify IO is in range for our region
          */
         if let Err(e) = ddef.validate_io(offset, data.len()) {
-            if let Some(res) = res {
-                res.send_err((data, e));
-            }
+            res.send_err((data, e));
             return;
         }
 
@@ -1341,15 +1347,29 @@ impl Upstairs {
          * Grab this ID after extent_from_offset: in case of Err we don't
          * want to create a gap in the IDs.
          */
-        let (gw_id, _) = self.guest.guest_work.submit_job(
-            |gw_id| {
-                cdt::gw__read__start!(|| (gw_id.0));
-                self.downstairs.submit_read(gw_id, impacted_blocks, ddef)
-            },
-            res.map(|res| GuestBlockRes::Read(data, res)),
-        );
+        let ds_id = self.downstairs.submit_read(impacted_blocks, data, res);
 
-        cdt::up__to__ds__read__start!(|| (gw_id.0));
+        cdt::up__to__ds__read__start!(|| (ds_id.0));
+    }
+
+    /// Submits a dummy write (without an associated `BlockOp`)
+    ///
+    /// This **does not** go through the deferred-write pipeline
+    #[cfg(test)]
+    pub(crate) fn submit_dummy_write(
+        &mut self,
+        offset: BlockIndex,
+        data: BytesMut,
+        is_write_unwritten: bool,
+    ) {
+        if let Some(w) = self.compute_deferred_write(
+            offset,
+            data,
+            BlockRes::dummy(),
+            is_write_unwritten,
+        ) {
+            self.submit_write(DeferredWrite::run(w))
+        }
     }
 
     /// Submits a new write job to the upstairs
@@ -1364,42 +1384,6 @@ impl Upstairs {
         res: BlockRes,
         is_write_unwritten: bool,
     ) {
-        self.submit_deferred_write_inner(
-            offset,
-            data,
-            Some(res),
-            is_write_unwritten,
-        )
-    }
-
-    /// Submits a dummy write (without an associated `BlockOp`)
-    ///
-    /// This **does not** go through the deferred-write pipeline
-    #[cfg(test)]
-    pub(crate) fn submit_dummy_write(
-        &mut self,
-        offset: BlockIndex,
-        data: BytesMut,
-        is_write_unwritten: bool,
-    ) {
-        if let Some(w) =
-            self.compute_deferred_write(offset, data, None, is_write_unwritten)
-        {
-            self.submit_write(DeferredWrite::run(w))
-        }
-    }
-
-    /// Submits a new write job to the upstairs, optionally without a `BlockRes`
-    ///
-    /// # Panics
-    /// If `res` is `None` and this isn't running in the test suite
-    fn submit_deferred_write_inner(
-        &mut self,
-        offset: BlockIndex,
-        data: BytesMut,
-        res: Option<BlockRes>,
-        is_write_unwritten: bool,
-    ) {
         // It's possible for the write to be invalid out of the gate, in which
         // case `compute_deferred_write` replies to the `res` itself and returns
         // `None`.  Otherwise, we have to store a future to process the write
@@ -1407,7 +1391,7 @@ impl Upstairs {
         if let Some(w) =
             self.compute_deferred_write(offset, data, res, is_write_unwritten)
         {
-            let should_defer = !self.deferred_msgs.is_empty()
+            let should_defer = !self.deferred_ops.is_empty()
                 || w.data.len() > MIN_DEFER_SIZE_BYTES as usize;
             if should_defer {
                 let tx = self.deferred_ops.push_oneshot();
@@ -1426,22 +1410,15 @@ impl Upstairs {
         &mut self,
         offset: BlockIndex,
         data: BytesMut,
-        res: Option<BlockRes>,
+        res: BlockRes,
         is_write_unwritten: bool,
     ) -> Option<DeferredWrite> {
-        #[cfg(not(test))]
-        assert!(res.is_some());
-
         if !self.guest_io_ready() {
-            if let Some(res) = res {
-                res.send_err(CrucibleError::UpstairsInactive);
-            }
+            res.send_err(CrucibleError::UpstairsInactive);
             return None;
         }
         if self.cfg.read_only {
-            if let Some(res) = res {
-                res.send_err(CrucibleError::ModifyingReadOnlyRegion);
-            }
+            res.send_err(CrucibleError::ModifyingReadOnlyRegion);
             return None;
         }
 
@@ -1450,9 +1427,7 @@ impl Upstairs {
          */
         let ddef = self.ddef.get_def().unwrap();
         if let Err(e) = ddef.validate_io(offset, data.len()) {
-            if let Some(res) = res {
-                res.send_err(e);
-            }
+            res.send_err(e);
             return None;
         }
 
@@ -1464,13 +1439,18 @@ impl Upstairs {
         let impacted_blocks =
             extent_from_offset(&ddef, offset, ddef.bytes_to_blocks(data.len()));
 
+        let guard = self.downstairs.early_write_backpressure(data.len() as u64);
+
+        // Fast-ack, pretending to be done immediately operations
+        res.send_ok(());
+
         Some(DeferredWrite {
             ddef,
             impacted_blocks,
             data,
-            res,
             is_write_unwritten,
             cfg: self.cfg.clone(),
+            guard,
         })
     }
 
@@ -1486,27 +1466,17 @@ impl Upstairs {
          * Grab this ID after extent_from_offset: in case of Err we don't
          * want to create a gap in the IDs.
          */
-        let (gw_id, _) = self.guest.guest_work.submit_job(
-            |gw_id| {
-                if write.is_write_unwritten {
-                    cdt::gw__write__unwritten__start!(|| (gw_id.0));
-                } else {
-                    cdt::gw__write__start!(|| (gw_id.0));
-                }
-                self.downstairs.submit_write(
-                    gw_id,
-                    write.impacted_blocks,
-                    write.data,
-                    write.is_write_unwritten,
-                )
-            },
-            write.res.map(GuestBlockRes::Other),
+        let ds_id = self.downstairs.submit_write(
+            write.impacted_blocks,
+            write.data,
+            write.is_write_unwritten,
+            write.guard,
         );
 
         if write.is_write_unwritten {
-            cdt::up__to__ds__write__unwritten__start!(|| (gw_id.0));
+            cdt::up__to__ds__write__unwritten__start!(|| (ds_id.0));
         } else {
-            cdt::up__to__ds__write__start!(|| (gw_id.0));
+            cdt::up__to__ds__write__start!(|| (ds_id.0));
         }
     }
 
@@ -1634,6 +1604,7 @@ impl Upstairs {
             Message::WriteAck { .. }
             | Message::WriteUnwrittenAck { .. }
             | Message::FlushAck { .. }
+            | Message::BarrierAck { .. }
             | Message::ReadResponse { .. }
             | Message::ExtentLiveCloseAck { .. }
             | Message::ExtentLiveAckId { .. }
@@ -1671,6 +1642,14 @@ impl Upstairs {
                     Err(e) => self.set_inactive(e),
                     Ok(false) => (),
                     Ok(true) => {
+                        // Copy the region definition into the Downstairs
+                        self.downstairs.set_ddef(self.ddef.get_def().unwrap());
+
+                        // Check to see whether we want to replay jobs (if the
+                        // Downstairs is coming back from being Offline)
+                        // TODO should we only do this in certain new states?
+                        self.downstairs.check_replay(client_id);
+
                         // Negotiation succeeded for this Downstairs, let's see
                         // what we can do from here
                         match self.downstairs.clients[client_id].state() {
@@ -1727,6 +1706,7 @@ impl Upstairs {
             Message::HereIAm { .. }
             | Message::Ruok
             | Message::Flush { .. }
+            | Message::Barrier { .. }
             | Message::LastFlush { .. }
             | Message::Write { .. }
             | Message::WriteUnwritten { .. }
@@ -1981,7 +1961,10 @@ impl Upstairs {
         self.set_inactive(CrucibleError::UuidMismatch);
     }
 
-    /// Forces the upstairs state to `UpstairsState::Active`
+    /// Forces the upstairs and downstairs into active states
+    ///
+    /// The upstairs state is set to `UpstairsState::Active`; the Downstairs is
+    /// set to `DsState::Active` for each client.
     ///
     /// This means that we haven't gone through negotiation, so behavior may be
     /// wonky or unexpected; this is only allowed during unit tests.
@@ -1989,11 +1972,13 @@ impl Upstairs {
     pub(crate) fn force_active(&mut self) -> Result<(), CrucibleError> {
         match &self.state {
             UpstairsState::Initializing => {
+                self.downstairs.force_active();
                 self.state = UpstairsState::Active;
                 Ok(())
             }
-            UpstairsState::Active | UpstairsState::GoActive(..) => {
-                Err(CrucibleError::UpstairsAlreadyActive)
+            UpstairsState::Active => Ok(()),
+            UpstairsState::GoActive(..) => {
+                Err(CrucibleError::UpstairsActivateInProgress)
             }
             UpstairsState::Deactivating(..) => {
                 /*
@@ -2044,16 +2029,9 @@ impl Upstairs {
 
     /// Sets both guest and per-client backpressure
     fn set_backpressure(&self) {
-        let dsw_max = self
-            .downstairs
-            .clients
-            .iter()
-            .map(|c| c.total_live_work())
-            .max()
-            .unwrap_or(0);
         self.guest.set_backpressure(
             self.downstairs.write_bytes_outstanding(),
-            dsw_max as u64,
+            self.downstairs.jobs_outstanding(),
         );
 
         self.downstairs.set_client_backpressure();
@@ -2092,7 +2070,6 @@ pub(crate) mod test {
     use super::*;
     use crate::{
         client::ClientStopReason,
-        downstairs::test::set_all_active,
         test::{make_encrypted_upstairs, make_upstairs},
         Block, BlockOp, BlockOpWaiter, DsState, JobId,
     };
@@ -2109,7 +2086,6 @@ pub(crate) mod test {
         ddef.set_extent_count(4);
 
         let mut up = Upstairs::test_default(Some(ddef));
-        set_all_active(&mut up.downstairs);
         for c in up.downstairs.clients.iter_mut() {
             // Give all downstairs a repair address
             c.repair_addr = Some("0.0.0.0:1".parse().unwrap());
@@ -2183,7 +2159,8 @@ pub(crate) mod test {
         let reply = ds_done_brw.wait().await;
         assert!(reply.is_err());
 
-        up.force_active().unwrap();
+        // Make the Upstairs Active while leaving the Downstairs as New
+        up.state = UpstairsState::Active;
 
         let (ds_done_brw, ds_done_res) = BlockOpWaiter::pair();
         up.apply(UpstairsAction::Guest(BlockOp::Deactivate {
@@ -2211,7 +2188,6 @@ pub(crate) mod test {
 
         let mut up = Upstairs::test_default(None);
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         // The deactivate message should happen immediately
         let (ds_done_brw, ds_done_res) = BlockOpWaiter::pair();
@@ -2313,8 +2289,8 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 2);
 
-        assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty());
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]);
     }
 
     #[test]
@@ -2355,9 +2331,9 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
 
-        assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id],);
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty());
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]);
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]);
     }
 
     #[test]
@@ -2394,9 +2370,9 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
 
-        assert!(jobs[0].work.deps().is_empty()); // write (op 0)
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // flush (op 1)
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // write (op 2)
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // write (op 0)
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // flush (op 1)
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]); // write (op 2)
     }
 
     #[test]
@@ -2441,18 +2417,15 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 7);
 
-        assert!(jobs[0].work.deps().is_empty()); // write @ 0
-        assert!(jobs[1].work.deps().is_empty()); // write @ 1
-        assert!(jobs[2].work.deps().is_empty()); // write @ 2
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // write @ 0
+        assert!(upstairs.downstairs.get_deps(jobs[1]).is_empty()); // write @ 1
+        assert!(upstairs.downstairs.get_deps(jobs[2]).is_empty()); // write @ 2
 
-        assert_eq!(
-            jobs[3].work.deps(), // flush
-            &[jobs[0].ds_id, jobs[1].ds_id, jobs[2].ds_id],
-        );
+        assert_eq!(upstairs.downstairs.get_deps(jobs[3]), &jobs[0..3],); // flush
 
-        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // write @ 3
-        assert_eq!(jobs[5].work.deps(), &[jobs[3].ds_id]); // write @ 4
-        assert_eq!(jobs[6].work.deps(), &[jobs[3].ds_id]); // write @ 5
+        assert_eq!(upstairs.downstairs.get_deps(jobs[4]), &[jobs[3]]); // write @ 3
+        assert_eq!(upstairs.downstairs.get_deps(jobs[5]), &[jobs[3]]); // write @ 4
+        assert_eq!(upstairs.downstairs.get_deps(jobs[6]), &[jobs[3]]); // write @ 5
     }
 
     #[test]
@@ -2489,11 +2462,11 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 4);
 
-        assert!(jobs[0].work.deps().is_empty()); // write @ 0,1,2
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // write @ 0,1,2
 
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // write @ 0
-        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id]); // write @ 1
-        assert_eq!(jobs[3].work.deps(), &[jobs[0].ds_id]); // write @ 2
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // write @ 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[0]]); // write @ 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[3]), &[jobs[0]]); // write @ 2
     }
 
     #[test]
@@ -2542,23 +2515,23 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 7);
 
-        assert!(jobs[0].work.deps().is_empty()); // write @ 0,1,2
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // write @ 0,1,2
 
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // write @ 0
-        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id]); // write @ 1
-        assert_eq!(jobs[3].work.deps(), &[jobs[0].ds_id]); // write @ 2
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // write @ 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[0]]); // write @ 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[3]), &[jobs[0]]); // write @ 2
 
         assert_eq!(
-            jobs[4].work.deps(), // second write @ 0
-            &[jobs[1].ds_id],
+            upstairs.downstairs.get_deps(jobs[4]), // second write @ 0
+            &[jobs[1]],
         );
         assert_eq!(
-            jobs[5].work.deps(), // second write @ 1
-            &[jobs[2].ds_id],
+            upstairs.downstairs.get_deps(jobs[5]), // second write @ 1
+            &[jobs[2]],
         );
         assert_eq!(
-            jobs[6].work.deps(), // second write @ 2
-            &[jobs[3].ds_id],
+            upstairs.downstairs.get_deps(jobs[6]), // second write @ 2
+            &[jobs[3]],
         );
     }
 
@@ -2596,13 +2569,13 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 4);
 
-        assert!(jobs[0].work.deps().is_empty()); // write @ 0
-        assert!(jobs[1].work.deps().is_empty()); // write @ 1
-        assert!(jobs[2].work.deps().is_empty()); // write @ 2
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // write @ 0
+        assert!(upstairs.downstairs.get_deps(jobs[1]).is_empty()); // write @ 1
+        assert!(upstairs.downstairs.get_deps(jobs[2]).is_empty()); // write @ 2
 
         assert_eq!(
-            jobs[3].work.deps(), // write @ 0,1,2
-            &[jobs[0].ds_id, jobs[1].ds_id, jobs[2].ds_id],
+            upstairs.downstairs.get_deps(jobs[3]), // write @ 0,1,2
+            &[jobs[0], jobs[1], jobs[2]],
         );
     }
 
@@ -2632,8 +2605,8 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 2);
 
-        assert!(jobs[0].work.deps().is_empty()); // write @ 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // read @ 0
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // write @ 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // read @ 0
     }
 
     #[test]
@@ -2666,13 +2639,13 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 4);
 
-        assert!(jobs[0].work.deps().is_empty()); // write @ 0
-        assert!(jobs[1].work.deps().is_empty()); // write @ 1
-        assert!(jobs[2].work.deps().is_empty()); // write @ 2
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // write @ 0
+        assert!(upstairs.downstairs.get_deps(jobs[1]).is_empty()); // write @ 1
+        assert!(upstairs.downstairs.get_deps(jobs[2]).is_empty()); // write @ 2
 
         assert_eq!(
-            jobs[3].work.deps(), // read @ 0,1
-            &[jobs[0].ds_id, jobs[1].ds_id],
+            upstairs.downstairs.get_deps(jobs[3]), // read @ 0,1
+            &[jobs[0], jobs[1]],
         );
     }
 
@@ -2700,8 +2673,8 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 2);
 
-        assert!(jobs[0].work.deps().is_empty()); // read @ 0
-        assert!(jobs[1].work.deps().is_empty()); // read @ 0
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // read @ 0
+        assert!(upstairs.downstairs.get_deps(jobs[1]).is_empty()); // read @ 0
     }
 
     #[test]
@@ -2734,9 +2707,9 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
 
-        assert!(jobs[0].work.deps().is_empty()); // write @ 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // read @ 0
-        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id]); // read @ 0
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // write @ 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // read @ 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[0]]); // read @ 0
     }
 
     #[test]
@@ -2769,9 +2742,9 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
 
-        assert!(jobs[0].work.deps().is_empty()); // write @ 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // flush
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // read @ 0
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // write @ 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // flush
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]); // read @ 0
     }
 
     #[test]
@@ -2797,9 +2770,9 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
 
-        assert!(jobs[0].work.deps().is_empty());
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]);
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty());
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]);
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]);
     }
 
     #[test]
@@ -2851,23 +2824,23 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 8);
 
-        assert!(jobs[0].work.deps().is_empty()); // flush (op 0)
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // flush (op 0)
 
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // write (op 1)
-        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id]); // write (op 2)
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // write (op 1)
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[0]]); // write (op 2)
 
         assert_eq!(
-            jobs[3].work.deps(),
-            &[jobs[0].ds_id, jobs[1].ds_id, jobs[2].ds_id],
+            upstairs.downstairs.get_deps(jobs[3]),
+            &[jobs[0], jobs[1], jobs[2]],
         ); // flush (op 3)
 
-        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // write (op 4)
-        assert_eq!(jobs[5].work.deps(), &[jobs[3].ds_id]); // write (op 5)
-        assert_eq!(jobs[6].work.deps(), &[jobs[3].ds_id]); // write (op 6)
+        assert_eq!(upstairs.downstairs.get_deps(jobs[4]), &[jobs[3]]); // write (op 4)
+        assert_eq!(upstairs.downstairs.get_deps(jobs[5]), &[jobs[3]]); // write (op 5)
+        assert_eq!(upstairs.downstairs.get_deps(jobs[6]), &[jobs[3]]); // write (op 6)
 
         assert_eq!(
-            jobs[7].work.deps(), // flush (op 7)
-            &[jobs[3].ds_id, jobs[4].ds_id, jobs[5].ds_id, jobs[6].ds_id],
+            upstairs.downstairs.get_deps(jobs[7]), // flush (op 7)
+            &[jobs[3], jobs[4], jobs[5], jobs[6]],
         );
     }
 
@@ -2897,8 +2870,8 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 2);
 
-        assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // op 1
     }
 
     #[test]
@@ -2931,9 +2904,9 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
 
-        assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // op 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]); // op 2
     }
 
     #[test]
@@ -2986,14 +2959,14 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 6);
 
-        assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // op 1
 
-        assert!(jobs[2].work.deps().is_empty()); // op 2
-        assert_eq!(jobs[3].work.deps(), &[jobs[2].ds_id]); // op 3
+        assert!(upstairs.downstairs.get_deps(jobs[2]).is_empty()); // op 2
+        assert_eq!(upstairs.downstairs.get_deps(jobs[3]), &[jobs[2]]); // op 3
 
-        assert!(jobs[4].work.deps().is_empty()); // op 4
-        assert_eq!(jobs[5].work.deps(), &[jobs[4].ds_id]); // op 5
+        assert!(upstairs.downstairs.get_deps(jobs[4]).is_empty()); // op 4
+        assert_eq!(upstairs.downstairs.get_deps(jobs[5]), &[jobs[4]]); // op 5
     }
 
     #[test]
@@ -3024,11 +2997,11 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 5);
 
-        assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
-        assert_eq!(jobs[3].work.deps(), &[jobs[2].ds_id]); // op 3
-        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // op 4
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // op 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]); // op 2
+        assert_eq!(upstairs.downstairs.get_deps(jobs[3]), &[jobs[2]]); // op 3
+        assert_eq!(upstairs.downstairs.get_deps(jobs[4]), &[jobs[3]]); // op 4
     }
 
     #[test]
@@ -3059,11 +3032,11 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 5);
 
-        assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
-        assert_eq!(jobs[3].work.deps(), &[jobs[2].ds_id]); // op 3
-        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // op 4
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // op 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]); // op 2
+        assert_eq!(upstairs.downstairs.get_deps(jobs[3]), &[jobs[2]]); // op 3
+        assert_eq!(upstairs.downstairs.get_deps(jobs[4]), &[jobs[3]]); // op 4
     }
 
     #[test]
@@ -3106,9 +3079,10 @@ pub(crate) mod test {
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
 
-        assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert!(jobs[1].work.deps().is_empty()); // op 1
-        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id, jobs[1].ds_id],); // op 2
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
+        assert!(upstairs.downstairs.get_deps(jobs[1]).is_empty()); // op 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[0], jobs[1]],);
+        // op 2
     }
 
     #[test]
@@ -3147,7 +3121,7 @@ pub(crate) mod test {
         );
 
         let ds = &upstairs.downstairs;
-        let jobs = ds.get_all_jobs();
+        let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
 
         // confirm which extents are impacted (in case make_upstairs changes)
@@ -3157,9 +3131,9 @@ pub(crate) mod test {
         assert_ne!(ds.get_extents_for(jobs[0]), ds.get_extents_for(jobs[2]));
 
         // confirm deps
-        assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // op 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]); // op 2
     }
 
     #[test]
@@ -3210,7 +3184,7 @@ pub(crate) mod test {
         upstairs.submit_dummy_read(BlockIndex(99), Buffer::new(1, 512));
 
         let ds = &upstairs.downstairs;
-        let jobs = ds.get_all_jobs();
+        let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 5);
 
         // confirm which extents are impacted (in case make_upstairs changes)
@@ -3223,11 +3197,11 @@ pub(crate) mod test {
         assert_ne!(ds.get_extents_for(jobs[0]), ds.get_extents_for(jobs[2]));
         assert_ne!(ds.get_extents_for(jobs[4]), ds.get_extents_for(jobs[2]));
 
-        assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
-        assert_eq!(jobs[3].work.deps(), &[jobs[1].ds_id, jobs[2].ds_id]); // op 3
-        assert_eq!(jobs[4].work.deps(), &[jobs[3].ds_id]); // op 4
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // op 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]); // op 2
+        assert_eq!(upstairs.downstairs.get_deps(jobs[3]), &[jobs[1], jobs[2]]); // op 3
+        assert_eq!(upstairs.downstairs.get_deps(jobs[4]), &[jobs[3]]); // op 4
     }
 
     #[test]
@@ -3266,7 +3240,7 @@ pub(crate) mod test {
         );
 
         let ds = &upstairs.downstairs;
-        let jobs = ds.get_all_jobs();
+        let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
 
         // confirm which extents are impacted (in case make_upstairs changes)
@@ -3276,9 +3250,9 @@ pub(crate) mod test {
 
         assert_ne!(ds.get_extents_for(jobs[0]), ds.get_extents_for(jobs[1]));
 
-        assert!(jobs[0].work.deps().is_empty()); // op 0
-        assert!(jobs[1].work.deps().is_empty()); // op 1
-        assert_eq!(jobs[2].work.deps(), &[jobs[0].ds_id, jobs[1].ds_id]); // op 2
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
+        assert!(upstairs.downstairs.get_deps(jobs[1]).is_empty()); // op 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[0], jobs[1]]); // op 2
     }
 
     #[test]
@@ -3312,13 +3286,13 @@ pub(crate) mod test {
         assert_eq!(jobs.len(), 3);
 
         // assert read has no deps
-        assert!(jobs[0].work.deps().is_empty()); // op 0
+        assert!(upstairs.downstairs.get_deps(jobs[0]).is_empty()); // op 0
 
         // assert flush depends on the read
-        assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]); // op 1
+        assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]); // op 1
 
         // assert write depends on just the flush
-        assert_eq!(jobs[2].work.deps(), &[jobs[1].ds_id]); // op 2
+        assert_eq!(upstairs.downstairs.get_deps(jobs[2]), &[jobs[1]]); // op 2
     }
 
     #[test]
@@ -3339,13 +3313,11 @@ pub(crate) mod test {
         );
 
         {
+            let jobs = upstairs.downstairs.get_all_jobs();
             let ds = &mut upstairs.downstairs;
-            let jobs = ds.get_all_jobs();
             assert_eq!(jobs.len(), 1);
 
-            let ds_id = jobs[0].ds_id;
-
-            crate::downstairs::test::finish_job(ds, ds_id);
+            crate::downstairs::test::finish_job(ds, jobs[0]);
         }
 
         // submit an overlapping write
@@ -3357,14 +3329,12 @@ pub(crate) mod test {
         );
 
         {
-            let ds = &upstairs.downstairs;
-            let jobs = ds.get_all_jobs();
-
             // retire_check not run yet, so there's two active jobs
+            let jobs = upstairs.downstairs.get_all_jobs();
             assert_eq!(jobs.len(), 2);
 
             // the second write should still depend on the first write!
-            assert_eq!(jobs[1].work.deps(), &[jobs[0].ds_id]);
+            assert_eq!(upstairs.downstairs.get_deps(jobs[1]), &[jobs[0]]);
         }
     }
 
@@ -3387,7 +3357,6 @@ pub(crate) mod test {
         assert!(!up.downstairs.live_repair_in_progress());
 
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         // No need to repair or check for future repairs here either
         up.on_repair_check();
@@ -3411,7 +3380,6 @@ pub(crate) mod test {
 
         let mut up = Upstairs::test_default(Some(ddef));
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         // Force client 1 into LiveRepairReady
         up.ds_transition(ClientId::new(1), DsState::Faulted);
@@ -3433,7 +3401,6 @@ pub(crate) mod test {
 
         let mut up = Upstairs::test_default(Some(ddef));
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         for i in [1, 2].into_iter().map(ClientId::new) {
             // Force client 1 into LiveRepairReady
@@ -3460,7 +3427,6 @@ pub(crate) mod test {
 
         let mut up = Upstairs::test_default(Some(ddef));
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
         up.ds_transition(ClientId::new(1), DsState::Faulted);
         up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
         up.ds_transition(ClientId::new(1), DsState::LiveRepair);
@@ -3490,7 +3456,6 @@ pub(crate) mod test {
 
         let mut up = Upstairs::test_default(Some(ddef));
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
         up.ds_transition(ClientId::new(1), DsState::Faulted);
         up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
 
@@ -3522,7 +3487,6 @@ pub(crate) mod test {
 
         let mut up = make_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         // Build a write, put it on the work queue.
         let offset = BlockIndex(7);
@@ -3640,7 +3604,6 @@ pub(crate) mod test {
     fn good_decryption() {
         let mut up = make_encrypted_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
@@ -3688,7 +3651,6 @@ pub(crate) mod test {
     async fn good_deferred_decryption() {
         let mut up = make_encrypted_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let blocks = 16384 / 512;
         let data = Buffer::new(blocks, 512);
@@ -3747,7 +3709,6 @@ pub(crate) mod test {
     async fn bad_deferred_decryption_means_panic() {
         let mut up = make_encrypted_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let blocks = 16384 / 512;
         let data = Buffer::new(blocks, 512);
@@ -3825,7 +3786,6 @@ pub(crate) mod test {
     fn bad_decryption_means_panic() {
         let mut up = make_encrypted_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
@@ -3889,7 +3849,6 @@ pub(crate) mod test {
     fn bad_read_hash_makes_panic() {
         let mut up = make_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
@@ -3935,7 +3894,6 @@ pub(crate) mod test {
     fn work_read_hash_mismatch() {
         let mut up = make_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
@@ -3997,7 +3955,6 @@ pub(crate) mod test {
         // Test that a hash mismatch on the third response will trigger a panic.
         let mut up = make_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
@@ -4061,7 +4018,6 @@ pub(crate) mod test {
         // Test that a hash length mismatch will panic
         let mut up = make_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
@@ -4122,7 +4078,6 @@ pub(crate) mod test {
         // hash mismatch panic.
         let mut up = make_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
@@ -4179,7 +4134,6 @@ pub(crate) mod test {
         // Test that missing data on the 2nd read response will panic
         let mut up = make_upstairs();
         up.force_active().unwrap();
-        set_all_active(&mut up.downstairs);
 
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
@@ -4229,5 +4183,77 @@ pub(crate) mod test {
             .unwrap();
         assert!(!r.contains("HashMismatch"));
         assert!(r.contains("read hash mismatch"));
+    }
+
+    #[test]
+    fn write_defer() {
+        let mut up = make_upstairs();
+        up.force_active().unwrap();
+
+        const NODEFER_SIZE: usize = MIN_DEFER_SIZE_BYTES as usize - 512;
+        const DEFER_SIZE: usize = MIN_DEFER_SIZE_BYTES as usize * 2;
+
+        // Submit a short write, which should not be deferred
+        let mut data = BytesMut::new();
+        data.extend_from_slice(vec![1; NODEFER_SIZE].as_slice());
+        let offset = BlockIndex(7);
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Write { offset, data, done }));
+        assert_eq!(up.deferred_ops.len(), 0);
+
+        // Submit a long write, which should be deferred
+        let mut data = BytesMut::new();
+        data.extend_from_slice(vec![2; DEFER_SIZE].as_slice());
+        let offset = BlockIndex(7);
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Write { offset, data, done }));
+        assert_eq!(up.deferred_ops.len(), 1);
+        assert_eq!(up.deferred_msgs.len(), 0);
+
+        // Submit a short write, which would normally not be deferred, but
+        // there's already a deferred job in the queue
+        let mut data = BytesMut::new();
+        data.extend_from_slice(vec![3; NODEFER_SIZE].as_slice());
+        let offset = BlockIndex(7);
+        let (_res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Write { offset, data, done }));
+        assert_eq!(up.deferred_ops.len(), 2);
+        assert_eq!(up.deferred_msgs.len(), 0);
+    }
+
+    /// What happens when a guest submits a read after three downstairs have
+    /// faulted?
+    #[tokio::test]
+    async fn three_faulted_downstairs_read() {
+        let mut up = make_upstairs();
+        up.force_active().unwrap();
+
+        up.downstairs.clients[ClientId::new(0)]
+            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+        up.downstairs.clients[ClientId::new(1)]
+            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+        up.downstairs.clients[ClientId::new(2)]
+            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+
+        let data = Buffer::new(1, 512);
+        let offset = BlockIndex(7);
+        let (res, done) = BlockOpWaiter::pair();
+        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+
+        let reply = res.wait_raw().await.unwrap();
+        match reply {
+            // Alan says "If none of the reads returned, then the guest had
+            // better get an error."
+            Err((_, _)) => {
+                // ok!
+            }
+
+            Ok(_) => {
+                // Alan says "If we return OK, then what data are we giving the
+                // guest?"
+                eprintln!("{reply:?}");
+                panic!("returned Ok!");
+            }
+        }
     }
 }

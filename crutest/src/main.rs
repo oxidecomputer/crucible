@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU64;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
@@ -18,6 +18,7 @@ use futures::stream::FuturesOrdered;
 use futures::StreamExt;
 use human_bytes::human_bytes;
 use indicatif::{ProgressBar, ProgressStyle};
+use oximeter::types::ProducerRegistry;
 use rand::prelude::*;
 use rand_chacha::rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
@@ -34,9 +35,12 @@ mod protocol;
 mod stats;
 pub use stats::*;
 
+use crucible::volume::VolumeBuilder;
 use crucible::*;
+use crucible_client_types::RegionExtentInfo;
 use crucible_protocol::CRUCIBLE_MESSAGE_VERSION;
 use dsc_client::{types::DownstairsState, Client};
+use repair_client::Client as repair_client;
 
 /*
  * The various tests this program supports.
@@ -50,6 +54,11 @@ enum Workload {
     Balloon,
     Big,
     Biggest,
+    /// Send many random writes, then report how long a single read takes
+    Bufferbloat {
+        #[clap(flatten)]
+        cfg: BufferbloatWorkload,
+    },
     Burst,
     /// Starts a CLI client
     Cli {
@@ -106,15 +115,16 @@ enum Workload {
         #[clap(flatten)]
         cfg: RandReadWriteWorkload,
     },
+    /// Run IO, and as soon as we get a final ACK, drop the volume to
+    /// see if we can leave IOs outstanding on one of the downstairs.
+    /// This test works best if one of the downstairs is running with
+    /// lossy option set, which will make it go slower than the others.
     Repair,
     /// Test the downstairs replay path.
     /// Stop a downstairs, then run some IO, then start that downstairs back
     /// up.  Verify all IO to all downstairs finishes.
-    Replay {
-        /// URL location of the running dsc server
-        #[clap(long, default_value = "http://127.0.0.1:9998", action)]
-        dsc: String,
-    },
+    /// This test requires a dsc server to control the downstairs.
+    Replay,
     /// Test the downstairs replacement path.
     /// Run IO to the upstairs, then replace a downstairs, then run
     /// more IO and verify it all works as expected.
@@ -130,20 +140,12 @@ enum Workload {
     },
     /// Test that we can replace a downstairs when the upstairs is not active.
     ReplaceBeforeActive {
-        /// URL location of the running dsc server
-        #[clap(long, default_value = "http://127.0.0.1:9998", action)]
-        dsc: String,
-
         /// The address:port of a running downstairs for replacement
         #[clap(long, action)]
         replacement: SocketAddr,
     },
     /// Test replacement of a downstairs while doing the initial reconciliation.
     ReplaceReconcile {
-        /// URL location of the running dsc server
-        #[clap(long, default_value = "http://127.0.0.1:9998", action)]
-        dsc: String,
-
         /// The address:port of a running downstairs for replacement
         #[clap(long, action)]
         replacement: SocketAddr,
@@ -177,6 +179,12 @@ pub struct Opt {
     #[clap(short, long, global = true, action)]
     count: Option<usize>,
 
+    /// IP:Port for a dsc server.
+    /// Some tests require a dsc enpoint to control the downstairs.
+    /// A dsc endpoint can also be used to construct the initial Volume.
+    #[clap(long, global = true, action)]
+    dsc: Option<SocketAddr>,
+
     /// How long to wait before the auto flush check fires
     #[clap(long, global = true, action)]
     flush_timeout: Option<f32>,
@@ -191,15 +199,6 @@ pub struct Opt {
     /// TLS option
     #[clap(long, action)]
     key_pem: Option<String>,
-
-    /// This allows the Upstairs to run in a mode where it will not
-    /// always submit new work to downstairs when it first receives
-    /// it.  This is for testing dependencies and should not be
-    /// used in production.  Passing args like this to the upstairs
-    /// may not be the best way to test, but until we have something
-    /// better... XXX
-    #[clap(long, global = true, action)]
-    lossy: bool,
 
     /// Spin up a dropshot endpoint and serve metrics from it.
     /// This will use the values in metric-register and metric-collect
@@ -248,18 +247,16 @@ pub struct Opt {
     stable: bool,
 
     /// The IP:Port where each downstairs is listening.
-    #[clap(
-        short,
-        long,
-        global = true,
-        default_value = "127.0.0.1:9000",
-        action
-    )]
+    #[clap(short, long, global = true, action)]
     target: Vec<SocketAddr>,
 
     /// A UUID to use for the upstairs.
     #[clap(long, global = true, action)]
     uuid: Option<Uuid>,
+
+    /// Read in a VCR from a file for use in constructing a volume
+    #[clap(long, global = true, value_name = "VCRFILE", action)]
+    vcr_file: Option<PathBuf>,
 
     /// In addition to any tests, verify the volume on startup.
     /// This only has value if verify_in is also set.
@@ -294,9 +291,25 @@ pub fn opts() -> Result<Opt> {
     Ok(opt)
 }
 
-fn history_file<P: AsRef<Path>>(file: P) -> PathBuf {
-    let out = file.as_ref().to_path_buf();
-    out
+#[derive(Copy, Clone, Debug, clap::Args)]
+struct BufferbloatWorkload {
+    /// Size in blocks of each IO
+    #[clap(long, default_value_t = 1, action)]
+    io_size: usize,
+    /// Number of outstanding IOs at the same time.
+    #[clap(long, default_value_t = 1, action)]
+    io_depth: usize,
+    /// Number of seconds to run
+    #[clap(long, default_value_t = 10, action)]
+    time: u64,
+    /// Print the volume log (at `INFO` level) to `stderr`
+    ///
+    /// If this is not set, then only `ERROR` messages are logged
+    ///
+    /// By default, this is not set, because the volume log is noisy and
+    /// interrupts our intentional logging.
+    #[clap(short, long)]
+    verbose: bool,
 }
 
 #[derive(Copy, Clone, Debug, clap::Args)]
@@ -313,11 +326,11 @@ struct RandReadWriteWorkload {
     /// Completely fill the region with random data first
     #[clap(long)]
     fill: bool,
-    /// Print the guest log (at `INFO` level) to `stderr`
+    /// Print the volume log (at `INFO` level) to `stderr`
     ///
     /// If this is not set, then only `ERROR` messages are logged
     ///
-    /// By default, this is not set, because the guest log is noisy and
+    /// By default, this is not set, because the volume log is noisy and
     /// interrupts our intentional logging.
     #[clap(short, long)]
     verbose: bool,
@@ -378,6 +391,26 @@ impl RandReadWriteConfig {
     }
 }
 
+/// Configuration for `bufferbloat_workload`
+#[derive(Copy, Clone, Debug)]
+struct BufferbloatConfig {
+    encrypted: bool,
+    io_depth: usize,
+    blocks_per_io: usize,
+    time_secs: u64,
+}
+
+impl BufferbloatConfig {
+    fn new(cfg: BufferbloatWorkload, encrypted: bool) -> Self {
+        BufferbloatConfig {
+            encrypted,
+            io_depth: cfg.io_depth,
+            blocks_per_io: cfg.io_size,
+            time_secs: cfg.time,
+        }
+    }
+}
+
 /*
  * All the tests need this basic info about the region.
  * Not all tests make use of the write_log yet, but perhaps someday..
@@ -396,14 +429,14 @@ pub struct RegionInfo {
 /*
  * All the tests need this basic set of information about the region.
  */
-async fn get_region_info(guest: &Guest) -> Result<RegionInfo, CrucibleError> {
+async fn get_region_info(volume: &Volume) -> Result<RegionInfo, CrucibleError> {
     /*
      * These query requests have the side effect of preventing the test from
      * starting before the upstairs is ready.
      */
-    let block_size = guest.get_block_size().await?;
-    let extent_size = guest.query_extent_size().await?;
-    let total_size = guest.total_size().await?;
+    let block_size = volume.get_block_size().await?;
+    let extent_size = volume.query_extent_size().await?;
+    let total_size = volume.total_size().await?;
     let total_blocks = (total_size / block_size) as usize;
 
     /*
@@ -627,7 +660,7 @@ impl WriteLog {
 }
 
 async fn load_write_log(
-    guest: &Arc<Guest>,
+    volume: &Volume,
     ri: &mut RegionInfo,
     vi: PathBuf,
     verify: bool,
@@ -635,16 +668,14 @@ async fn load_write_log(
     /*
      * Fill the write count from a provided file.
      */
-    let cp = history_file(vi);
-    ri.write_log = match read_json(&cp) {
+    ri.write_log = match read_json(&vi) {
         Ok(write_log) => write_log,
-        Err(e) => bail!("Error {:?} reading verify config {:?}", e, cp),
+        Err(e) => bail!("Error {:?} reading verify config {:?}", e, vi),
     };
-    println!("Loading write count information from file {:?}", cp);
+    println!("Loading write count information from file {vi:?}");
     if ri.write_log.len() != ri.total_blocks {
         bail!(
-            "Verify file {:?} blocks:{} does not match regions:{}",
-            cp,
+            "Verify file {vi:?} blocks:{} does not match regions:{}",
             ri.write_log.len(),
             ri.total_blocks
         );
@@ -653,7 +684,7 @@ async fn load_write_log(
      * Only verify the volume if requested.
      */
     if verify {
-        if let Err(e) = verify_volume(guest, ri, false).await {
+        if let Err(e) = verify_volume(volume, ri, false).await {
             bail!("Initial volume verify failed: {:?}", e)
         }
     }
@@ -697,9 +728,206 @@ async fn handle_signals(
     }
 }
 
+// Construct a volume and a list of targets for use by the tests.
+// Our choice of how to construct the volume depends on what options we
+// have been given.
+//
+// If we have been provided a vcr file, this will get first priority and all
+// other options will be ignored.
+//
+// Second choice is if we are provided the address for a dsc server.  We can
+// use the dsc server to determine part of what we need to create a Volume.
+// The rest of what we need we can gather from the CrucibleOpts, which are
+// built from options provided on the command line, or their defaults.
+//
+// For the final choice we have to construct a Volume by asking our downstairs
+// for information that we need up front, which we then combine with
+// CrucibleOpts.  This will work as long as one of the downstairs is up
+// already.  If we have a test that requires no downstairs to be running on
+// startup, then we need to provide a VCR file, or use the dsc server.
+//
+// While making our volume, we also record the targets that become part of
+// the volume in a separate Vec.  In some cases we no longer have access to
+// the target information after the volume is constructed, and some tests also
+// want the specific targets, so we make and return that list here.
+async fn make_a_volume(
+    opt: &Opt,
+    volume_logger: Logger,
+    test_log: &Logger,
+    pr: Option<ProducerRegistry>,
+) -> Result<(Volume, Vec<SocketAddr>)> {
+    let up_uuid = opt.uuid.unwrap_or_else(Uuid::new_v4);
+    let mut crucible_opts = CrucibleOpts {
+        id: up_uuid,
+        target: opt.target.clone(),
+        lossy: false,
+        flush_timeout: opt.flush_timeout,
+        key: opt.key.clone(),
+        cert_pem: opt.cert_pem.clone(),
+        key_pem: opt.key_pem.clone(),
+        root_cert_pem: opt.root_cert_pem.clone(),
+        control: opt.control,
+        read_only: opt.read_only,
+    };
+
+    if let Some(vcr_file) = &opt.vcr_file {
+        let vcr: VolumeConstructionRequest = match read_json(vcr_file) {
+            Ok(vcr) => vcr,
+            Err(e) => {
+                bail!("Error {:?} reading VCR from {:?}", e, vcr_file)
+            }
+        };
+        info!(test_log, "Using VCR: {:?}", vcr);
+
+        if opt.gen != 0 {
+            warn!(test_log, "gen option is ignored when VCR is provided");
+        }
+        if !opt.target.is_empty() {
+            warn!(test_log, "targets are ignored when VCR is provided");
+        }
+        let targets = vcr.targets();
+
+        let volume = Volume::construct(vcr, pr, volume_logger).await.unwrap();
+        Ok((volume, targets))
+    } else if opt.dsc.is_some() {
+        // We were given a dsc endpoint, use that to create a VCR that
+        // represents our Volume.
+        if !opt.target.is_empty() {
+            warn!(test_log, "targets are ignored when dsc option is provided");
+        }
+        let dsc = opt.dsc.unwrap();
+        let dsc_url = format!("http://{}", dsc);
+        let dsc_client = Client::new(&dsc_url);
+        let ri = match dsc_client.dsc_get_region_info().await {
+            Ok(res) => res.into_inner(),
+            Err(e) => {
+                bail!("Failed to get region info from {:?}: {}", dsc_url, e);
+            }
+        };
+        info!(test_log, "use region info: {:?}", ri);
+        let extent_info = RegionExtentInfo {
+            block_size: ri.block_size,
+            blocks_per_extent: ri.blocks_per_extent,
+            extent_count: ri.extent_count,
+        };
+
+        let res = dsc_client.dsc_get_region_count().await.unwrap();
+        let regions = res.into_inner();
+        if regions < 3 {
+            bail!("Found {regions} regions.  We need at least 3");
+        }
+
+        let sv_count = regions / 3;
+        let region_remainder = regions % 3;
+        info!(
+            test_log,
+            "dsc has {} regions.  This means {} sub_volumes", regions, sv_count
+        );
+        if region_remainder != 0 {
+            warn!(
+                test_log,
+                "{} regions from dsc will not be part of any sub_volume",
+                region_remainder,
+            );
+        }
+
+        // We start by creating the volume builder
+        let mut builder =
+            VolumeBuilder::new(extent_info.block_size, volume_logger);
+
+        // Now, loop over regions we found from dsc and make a
+        // sub_volume at every three.
+        let mut targets = Vec::new();
+        let mut cid = 0;
+        for sv in 0..sv_count {
+            let mut sv_targets = Vec::new();
+            for _ in 0..3 {
+                let port = dsc_client.dsc_get_port(cid).await.unwrap();
+                let tar = SocketAddr::new(
+                    dsc.ip(),
+                    port.into_inner().try_into().unwrap(),
+                );
+                sv_targets.push(tar);
+                targets.push(tar);
+                cid += 1;
+            }
+            info!(test_log, "SV {:?} has targets: {:?}", sv, sv_targets);
+            crucible_opts.target = sv_targets;
+
+            builder
+                .add_subvolume_create_guest(
+                    crucible_opts.clone(),
+                    extent_info.clone(),
+                    opt.gen,
+                    pr.clone(),
+                )
+                .await
+                .unwrap();
+        }
+
+        Ok((Volume::from(builder), targets))
+    } else {
+        // We were not provided a VCR, so, we have to make one by using
+        // the repair port on a downstairs to get region information that
+        // we require.  Once we have that information, we can build a VCR
+        // from it.
+
+        // For each sub-volume, we need to know:
+        // block_size, blocks_per_extent, and extent_size.  We can get any
+        // of the target downstairs to give us this info, if they are
+        // running.  We don't care which one responds.  Any mismatch will
+        // be detected later in the process and handled by the upstairs.
+        let mut extent_info_result = None;
+        for target in &crucible_opts.target {
+            let port = target.port() + crucible_common::REPAIR_PORT_OFFSET;
+            let addr = SocketAddr::new(target.ip(), port);
+            let repair_url = format!("http://{addr}");
+            info!(test_log, "look at: {repair_url}");
+            let repair_client = repair_client::new(&repair_url);
+            match repair_client.get_region_info().await {
+                Ok(ri) => {
+                    info!(test_log, "RI is: {:?}", ri);
+                    extent_info_result = Some(RegionExtentInfo {
+                        block_size: ri.block_size(),
+                        blocks_per_extent: ri.extent_size().value,
+                        extent_count: ri.extent_count(),
+                    });
+                    break;
+                }
+                Err(e) => {
+                    warn!(
+                        test_log,
+                        "Failed to get info from {:?} {:?}", repair_url, e
+                    );
+                }
+            }
+        }
+        let extent_info = match extent_info_result {
+            Some(ei) => ei,
+            None => {
+                bail!("Can't determine extent info to build a Volume");
+            }
+        };
+        let targets = crucible_opts.target.clone();
+
+        let mut builder =
+            VolumeBuilder::new(extent_info.block_size, volume_logger);
+        builder
+            .add_subvolume_create_guest(
+                crucible_opts.clone(),
+                extent_info,
+                opt.gen,
+                pr,
+            )
+            .await
+            .unwrap();
+
+        Ok((Volume::from(builder), targets))
+    }
+}
+
 /**
- * This is an example Crucible client.
- * Here we make use of the interfaces that Crucible exposes.
+ * A test program that makes use use of the interfaces that Crucible exposes.
  */
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -721,26 +949,9 @@ async fn main() -> Result<()> {
         bail!("Verify requires verify_in file");
     }
 
-    let up_uuid = opt.uuid.unwrap_or_else(Uuid::new_v4);
-
-    let crucible_opts = CrucibleOpts {
-        id: up_uuid,
-        target: opt.target.clone(),
-        lossy: opt.lossy,
-        flush_timeout: opt.flush_timeout,
-        key: opt.key,
-        cert_pem: opt.cert_pem,
-        key_pem: opt.key_pem,
-        root_cert_pem: opt.root_cert_pem,
-        control: opt.control,
-        read_only: opt.read_only,
-    };
-
-    /*
-     * If just want the cli, then start that after our runtime.  The cli
-     * does not need upstairs started, as that should happen in the
-     * cli-server code.
-     */
+    // If just want the cli, then start that after our runtime.  The cli
+    // does not need upstairs started, as that should happen in the
+    // cli-server code.
     if let Workload::Cli { attach } = opt.workload {
         cli::start_cli_client(attach).await?;
         return Ok(());
@@ -748,8 +959,16 @@ async fn main() -> Result<()> {
 
     // Opt out of verbose logs for certain tests
     let log_level = match opt.workload {
-        Workload::RandRead { cfg } | Workload::RandWrite { cfg } => {
-            if cfg.verbose {
+        Workload::RandRead {
+            cfg: RandReadWriteWorkload { verbose, .. },
+        }
+        | Workload::RandWrite {
+            cfg: RandReadWriteWorkload { verbose, .. },
+        }
+        | Workload::Bufferbloat {
+            cfg: BufferbloatWorkload { verbose, .. },
+        } => {
+            if verbose {
                 slog::Level::Info
             } else {
                 slog::Level::Error
@@ -757,17 +976,9 @@ async fn main() -> Result<()> {
         }
         _ => slog::Level::Info,
     };
-    let guest_logger = crucible_common::build_logger_with_level(log_level);
+    let volume_logger = crucible_common::build_logger_with_level(log_level);
 
-    let test_log = guest_logger.new(o!("task" => "crutest".to_string()));
-    /*
-     * The structure we use to send work from outside crucible into the
-     * Upstairs main task.
-     * We create this here instead of inside up_main() so we can use
-     * the methods provided by guest to interact with Crucible.
-     */
-    let (guest, io) = Guest::new(Some(guest_logger));
-    let guest = Arc::new(guest);
+    let test_log = volume_logger.new(o!("task" => "crutest".to_string()));
 
     let pr;
     if opt.metrics {
@@ -797,12 +1008,16 @@ async fn main() -> Result<()> {
         pr = None;
     }
 
-    let _join_handle = up_main(crucible_opts, opt.gen, None, io, pr)?;
-    println!("Crucible runtime is spawned");
+    // Build a Volume for all the tests to use.
+    let (volume, mut targets) =
+        make_a_volume(&opt, volume_logger.clone(), &test_log, pr).await?;
+
+    let downstairs_in_volume = targets.len() - (targets.len() % 3);
+    info!(test_log, "Downstairs in volume = {downstairs_in_volume}");
 
     if let Workload::CliServer { listen, port } = opt.workload {
         cli::start_cli_server(
-            &guest,
+            &volume,
             listen,
             port,
             opt.verify_in,
@@ -813,20 +1028,20 @@ async fn main() -> Result<()> {
     }
 
     if opt.retry_activate {
-        while let Err(e) = guest.activate_with_gen(opt.gen).await {
+        while let Err(e) = volume.activate_with_gen(opt.gen).await {
             println!("Activate returns: {:#}  Retrying", e);
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
         }
         println!("Activate successful");
     } else {
-        guest.activate_with_gen(opt.gen).await?;
+        volume.activate_with_gen(opt.gen).await?;
     }
 
     println!("Wait for a query_work_queue command to finish before sending IO");
-    guest.query_work_queue().await?;
+    volume.query_work_queue().await?;
 
     loop {
-        match guest.query_is_active().await {
+        match volume.query_is_active().await {
             Ok(true) => {
                 break;
             }
@@ -841,7 +1056,7 @@ async fn main() -> Result<()> {
      * Build the region info struct that all the tests will use.
      * This includes importing and verifying from a write log, if requested.
      */
-    let mut region_info = match get_region_info(&guest).await {
+    let mut region_info = match get_region_info(&volume).await {
         Ok(region_info) => region_info,
         Err(e) => bail!("failed to get region info: {:?}", e),
     };
@@ -864,7 +1079,7 @@ async fn main() -> Result<()> {
                 opt.verify_at_start
             }
         };
-        load_write_log(&guest, &mut region_info, verify_in, verify).await?;
+        load_write_log(&volume, &mut region_info, verify_in, verify).await?;
     }
 
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<SignalAction>(4);
@@ -881,20 +1096,26 @@ async fn main() -> Result<()> {
     match opt.workload {
         Workload::Balloon => {
             println!("Run balloon test");
-            balloon_workload(&guest, &mut region_info).await?;
+            balloon_workload(&volume, &mut region_info).await?;
         }
         Workload::Big => {
             println!("Run big test");
-            big_workload(&guest, &mut region_info).await?;
+            big_workload(&volume, &mut region_info).await?;
         }
         Workload::Biggest => {
             println!("Run biggest IO test");
-            biggest_io_workload(&guest, &mut region_info).await?;
+            biggest_io_workload(&volume, &mut region_info).await?;
         }
         Workload::Burst => {
             println!("Run burst test (demo in a loop)");
-            burst_workload(&guest, 460, 190, &mut region_info, &opt.verify_out)
-                .await?;
+            burst_workload(
+                &volume,
+                460,
+                190,
+                &mut region_info,
+                &opt.verify_out,
+            )
+            .await?;
         }
         Workload::Cli { .. } => {
             unreachable!("This case handled above");
@@ -909,26 +1130,23 @@ async fn main() -> Result<()> {
              */
             let count = opt.count.unwrap_or(5);
             println!("Run deactivate test");
-            deactivate_workload(&guest, count, &mut region_info, opt.gen)
+            deactivate_workload(&volume, count, &mut region_info, opt.gen)
                 .await?;
         }
         Workload::Demo => {
             println!("Run Demo test");
             let count = opt.count.unwrap_or(300);
-            /*
-             * Set lossy on a downstairs otherwise it will probably keep up.
-             */
-            demo_workload(&guest, count, &mut region_info).await?;
+            demo_workload(&volume, count, &mut region_info).await?;
         }
         Workload::Dep => {
             println!("Run dep test");
-            dep_workload(&guest, &mut region_info).await?;
+            dep_workload(&volume, &mut region_info).await?;
         }
 
         Workload::Dirty => {
             println!("Run dirty test");
             let count = opt.count.unwrap_or(10);
-            dirty_workload(&guest, &mut region_info, count).await?;
+            dirty_workload(&volume, &mut region_info, count).await?;
 
             /*
              * Saving state here when we have not waited for a flush
@@ -938,16 +1156,15 @@ async fn main() -> Result<()> {
              * things that came after the flush.
              */
             if let Some(vo) = &opt.verify_out {
-                let cp = history_file(vo);
-                write_json(&cp, &region_info.write_log, true)?;
-                println!("Wrote out file {:?}", cp);
+                write_json(vo, &region_info.write_log, true)?;
+                println!("Wrote out file {vo:?}");
             }
             return Ok(());
         }
 
         Workload::Fill { skip_verify } => {
             println!("Fill test");
-            fill_workload(&guest, &mut region_info, skip_verify).await?;
+            fill_workload(&volume, &mut region_info, skip_verify).await?;
         }
 
         Workload::Generic => {
@@ -961,13 +1178,13 @@ async fn main() -> Result<()> {
                 }
             };
 
-            generic_workload(&guest, &mut wtq, &mut region_info, opt.quiet)
+            generic_workload(&volume, &mut wtq, &mut region_info, opt.quiet)
                 .await?;
         }
 
         Workload::One => {
             println!("One test");
-            one_workload(&guest, &mut region_info).await?;
+            one_workload(&volume, &mut region_info).await?;
         }
         Workload::Perf {
             io_size,
@@ -1009,7 +1226,7 @@ async fn main() -> Result<()> {
             // The header for all perf tests
             perf_header();
             perf_workload(
-                &guest,
+                &volume,
                 &region_info,
                 opt_wtr,
                 count,
@@ -1025,7 +1242,7 @@ async fn main() -> Result<()> {
         }
         Workload::RandRead { cfg } => {
             rand_read_write_workload(
-                &guest,
+                &volume,
                 &mut region_info,
                 RandReadWriteConfig::new(
                     cfg,
@@ -1040,13 +1257,24 @@ async fn main() -> Result<()> {
         }
         Workload::RandWrite { cfg } => {
             rand_read_write_workload(
-                &guest,
+                &volume,
                 &mut region_info,
                 RandReadWriteConfig::new(
                     cfg,
                     is_encrypted,
                     RandReadWriteMode::Write,
                 ),
+            )
+            .await?;
+            if opt.quit {
+                return Ok(());
+            }
+        }
+        Workload::Bufferbloat { cfg } => {
+            bufferbloat_workload(
+                &volume,
+                &mut region_info,
+                BufferbloatConfig::new(cfg, is_encrypted),
             )
             .await?;
             if opt.quit {
@@ -1069,16 +1297,15 @@ async fn main() -> Result<()> {
         Workload::Repair => {
             println!("Run Repair workload");
             let count = opt.count.unwrap_or(10);
-            repair_workload(&guest, count, &mut region_info).await?;
-            drop(guest);
+            repair_workload(&volume, count, &mut region_info).await?;
+            drop(volume);
             if let Some(vo) = &opt.verify_out {
-                let cp = history_file(vo);
-                write_json(&cp, &region_info.write_log, true)?;
-                println!("Wrote out file {:?}", cp);
+                write_json(vo, &region_info.write_log, true)?;
+                println!("Wrote out file {vo:?}");
             }
             return Ok(());
         }
-        Workload::Replay { dsc } => {
+        Workload::Replay => {
             // Either we have a count, or we run until we get a signal.
             let mut wtq = {
                 if opt.continuous {
@@ -1088,10 +1315,23 @@ async fn main() -> Result<()> {
                     WhenToQuit::Count { count }
                 }
             };
-
-            let dsc_client = Client::new(&dsc);
-            replay_workload(&guest, &mut wtq, &mut region_info, dsc_client)
-                .await?;
+            let dsc_client = match opt.dsc {
+                Some(dsc_addr) => {
+                    let dsc_url = format!("http://{}", dsc_addr);
+                    Client::new(&dsc_url)
+                }
+                None => {
+                    bail!("Replay workload requires a dsc endpoint");
+                }
+            };
+            replay_workload(
+                &volume,
+                &mut wtq,
+                &mut region_info,
+                dsc_client,
+                downstairs_in_volume as u32,
+            )
+            .await?;
         }
         Workload::Replace {
             fast_fill,
@@ -1107,13 +1347,11 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // Build the list of targets we use during the replace test.
-            // The first three are provided in the crucible opts, and the
-            // final one (the replacement) is a test specific arg.
-            let mut targets = opt.target.clone();
+            // Add to the list of targets for our volume the replacement
+            // target provided on the command line
             targets.push(replacement);
             replace_workload(
-                &guest,
+                &volume,
                 &mut wtq,
                 &mut region_info,
                 targets,
@@ -1121,8 +1359,16 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Workload::ReplaceBeforeActive { dsc, replacement } => {
-            let dsc_client = Client::new(&dsc);
+        Workload::ReplaceBeforeActive { replacement } => {
+            let dsc_client = match opt.dsc {
+                Some(dsc_addr) => {
+                    let dsc_url = format!("http://{}", dsc_addr);
+                    Client::new(&dsc_url)
+                }
+                None => {
+                    bail!("Replace before active requires a dsc endpoint");
+                }
+            };
             // Either we have a count, or we run until we get a signal.
             let wtq = {
                 if opt.continuous {
@@ -1133,13 +1379,23 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // Build the list of targets we use during the replace test.
-            // The first three are provided in the crucible opts, and the
-            // final one (the replacement) is a test specific arg.
-            let mut targets = opt.target.clone();
+            // Add to the list of targets for our volume the replacement
+            // target provided on the command line
             targets.push(replacement);
+
+            // Verify the number of targets dsc has matches what the number
+            // of targets we found.
+            let res = dsc_client.dsc_get_region_count().await.unwrap();
+            let region_count = res.into_inner();
+            if region_count != targets.len() as u32 {
+                bail!(
+                    "Downstairs targets:{} does not match dsc targets: {}",
+                    region_count,
+                    targets.len(),
+                );
+            }
             replace_before_active(
-                &guest,
+                &volume,
                 wtq,
                 &mut region_info,
                 targets,
@@ -1149,8 +1405,16 @@ async fn main() -> Result<()> {
             )
             .await?;
         }
-        Workload::ReplaceReconcile { dsc, replacement } => {
-            let dsc_client = Client::new(&dsc);
+        Workload::ReplaceReconcile { replacement } => {
+            let dsc_client = match opt.dsc {
+                Some(dsc_addr) => {
+                    let dsc_url = format!("http://{}", dsc_addr);
+                    Client::new(&dsc_url)
+                }
+                None => {
+                    bail!("Replace reconcile requires a dsc endpoint");
+                }
+            };
             // Either we have a count, or we run until we get a signal.
             let wtq = {
                 if opt.continuous {
@@ -1161,13 +1425,23 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // Build the list of targets we use during the replace test.
-            // The first three are provided in the crucible opts, and the
-            // final one (the replacement) is a test specific arg.
-            let mut targets = opt.target.clone();
+            // Add to the list of targets for our volume the replacement
+            // target provided on the command line
             targets.push(replacement);
+
+            // Verify the number of targets dsc has matches what the number
+            // of targets we found.
+            let res = dsc_client.dsc_get_region_count().await.unwrap();
+            let region_count = res.into_inner();
+            if region_count != targets.len() as u32 {
+                bail!(
+                    "Downstairs targets:{} does not match dsc targets: {}",
+                    region_count,
+                    targets.len(),
+                );
+            }
             replace_while_reconcile(
-                &guest,
+                &volume,
                 wtq,
                 &mut region_info,
                 targets,
@@ -1179,7 +1453,7 @@ async fn main() -> Result<()> {
         }
         Workload::Span => {
             println!("Span test");
-            span_workload(&guest, &mut region_info).await?;
+            span_workload(&volume, &mut region_info).await?;
         }
         Workload::Verify => {
             /*
@@ -1188,14 +1462,13 @@ async fn main() -> Result<()> {
              * and then re-check the volume.
              */
             if let Err(e) =
-                verify_volume(&guest, &mut region_info, opt.range).await
+                verify_volume(&volume, &mut region_info, opt.range).await
             {
                 bail!("Initial volume verify failed: {:?}", e)
             }
             if let Some(vo) = &opt.verify_out {
-                let cp = history_file(vo);
-                write_json(&cp, &region_info.write_log, true)?;
-                println!("Wrote out file {:?}", cp);
+                write_json(vo, &region_info.write_log, true)?;
+                println!("Wrote out file {vo:?}");
             }
             if opt.quit {
                 println!("Verify test completed");
@@ -1205,18 +1478,19 @@ async fn main() -> Result<()> {
                     tokio::time::sleep(tokio::time::Duration::from_secs(10))
                         .await;
                     if let Err(e) =
-                        verify_volume(&guest, &mut region_info, opt.range).await
+                        verify_volume(&volume, &mut region_info, opt.range)
+                            .await
                     {
                         bail!("Volume verify failed: {:?}", e)
                     }
-                    let mut wc = guest.show_work().await?;
+                    let mut wc = volume.show_work().await?;
                     while wc.up_count + wc.ds_count > 0 {
                         println!("Waiting for all work to be completed");
                         tokio::time::sleep(tokio::time::Duration::from_secs(
                             10,
                         ))
                         .await;
-                        wc = guest.show_work().await?;
+                        wc = volume.show_work().await?;
                     }
                 }
             }
@@ -1227,25 +1501,24 @@ async fn main() -> Result<()> {
         Workload::WFR => {
             println!("Run Write-Flush-Read random IO test");
             let count = opt.count.unwrap_or(10);
-            write_flush_read_workload(&guest, count, &mut region_info).await?;
+            write_flush_read_workload(&volume, count, &mut region_info).await?;
         }
     }
 
     if opt.verify_at_end {
-        if let Err(e) = verify_volume(&guest, &mut region_info, false).await {
+        if let Err(e) = verify_volume(&volume, &mut region_info, false).await {
             bail!("Final volume verify failed: {:?}", e)
         }
     }
 
     if let Some(vo) = &opt.verify_out {
-        let cp = history_file(vo);
-        write_json(&cp, &region_info.write_log, true)?;
-        println!("Wrote out file {:?}", cp);
+        write_json(vo, &region_info.write_log, true)?;
+        println!("Wrote out file {vo:?}");
     }
 
     println!("CLIENT: Tests done.  All submitted work has been ACK'd");
     loop {
-        let wc = guest.show_work().await?;
+        let wc = volume.show_work().await?;
         println!(
             "CLIENT: Up:{} ds:{} act:{}",
             wc.up_count, wc.ds_count, wc.active_count
@@ -1255,7 +1528,7 @@ async fn main() -> Result<()> {
             return Ok(());
         } else if opt.stable
             && wc.up_count + wc.ds_count == 0
-            && wc.active_count == 3
+            && wc.active_count == downstairs_in_volume
         {
             println!("CLIENT: All jobs finished, all DS active.");
             return Ok(());
@@ -1270,7 +1543,7 @@ async fn main() -> Result<()> {
  * value for a block since the last commit was called.
  */
 async fn verify_volume(
-    guest: &Arc<Guest>,
+    volume: &Volume,
     ri: &mut RegionInfo,
     range: bool,
 ) -> Result<()> {
@@ -1300,7 +1573,7 @@ async fn verify_volume(
     let tasks = futures::stream::FuturesUnordered::new();
     for i in 0..NUM_WORKERS {
         let mut block_index = i * IO_SIZE;
-        let guest = guest.clone();
+        let volume = volume.clone();
         let write_log = write_log.clone();
         let blocks_done = blocks_done.clone();
         let total_blocks = ri.total_blocks;
@@ -1314,7 +1587,7 @@ async fn verify_volume(
 
                 let next_io_blocks = (total_blocks - block_index).min(IO_SIZE);
                 data.reset(next_io_blocks, block_size as usize);
-                guest.read(offset, &mut data).await?;
+                volume.read(offset, &mut data).await?;
 
                 let mut write_log = write_log.write().unwrap();
                 match validate_vec(
@@ -1623,7 +1896,7 @@ fn validate_vec<V: AsRef<[u8]>>(
  * I named it balloon because each loop on a block "balloons" from the
  * minimum IO size to the largest possible IO size.
  */
-async fn balloon_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
+async fn balloon_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
     for block_index in 0..ri.total_blocks {
         /*
          * Loop over all the IO sizes (in blocks) that an IO can
@@ -1646,12 +1919,12 @@ async fn balloon_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
             let offset = BlockIndex(block_index as u64);
 
             println!("IO at block:{}  size in blocks:{}", block_index, size);
-            guest.write(offset, data).await?;
-            guest.flush(None).await?;
+            volume.write(offset, data).await?;
+            volume.flush(None).await?;
 
             let mut data =
                 crucible::Buffer::repeat(255, size, ri.block_size as usize);
-            guest.read(offset, &mut data).await?;
+            volume.read(offset, &mut data).await?;
 
             let dl = data.into_bytes();
             match validate_vec(
@@ -1676,7 +1949,7 @@ async fn balloon_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
  * Write then read (and verify) to every possible block.
  */
 async fn fill_workload(
-    guest: &Arc<Guest>,
+    volume: &Volume,
     ri: &mut RegionInfo,
     skip_verify: bool,
 ) -> Result<()> {
@@ -1699,7 +1972,7 @@ async fn fill_workload(
     let tasks = futures::stream::FuturesUnordered::new();
     for i in 0..NUM_WORKERS {
         let mut block_index = i * IO_SIZE;
-        let guest = guest.clone();
+        let volume = volume.clone();
         let write_log = write_log.clone();
         let blocks_done = blocks_done.clone();
         let total_blocks = ri.total_blocks;
@@ -1729,7 +2002,7 @@ async fn fill_workload(
                     )
                 };
 
-                guest.write(offset, data).await?;
+                volume.write(offset, data).await?;
 
                 block_index += NUM_WORKERS * IO_SIZE;
                 let progress =
@@ -1744,7 +2017,7 @@ async fn fill_workload(
         t.await??;
     }
 
-    guest.flush(None).await?;
+    volume.flush(None).await?;
     pb.finish();
 
     // Now that all the workers are done, put the write log back into place
@@ -1757,7 +2030,7 @@ async fn fill_workload(
     );
 
     if !skip_verify {
-        verify_volume(guest, ri, false).await?;
+        verify_volume(volume, ri, false).await?;
     }
     Ok(())
 }
@@ -1767,7 +2040,7 @@ async fn fill_workload(
  * touched without having to write to every block.
  */
 async fn fill_sparse_workload(
-    guest: &Guest,
+    volume: &Volume,
     ri: &mut RegionInfo,
 ) -> Result<()> {
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
@@ -1789,10 +2062,10 @@ async fn fill_sparse_workload(
         let data = fill_vec(block_index, 1, &ri.write_log, ri.block_size);
 
         println!("[{extent}/{extents}] Write to block {}", block_index);
-        guest.write(offset, data).await?;
+        volume.write(offset, data).await?;
     }
 
-    guest.flush(None).await?;
+    volume.flush(None).await?;
     Ok(())
 }
 
@@ -1802,7 +2075,7 @@ async fn fill_sparse_workload(
  * Read data is verified.
  */
 async fn generic_workload(
-    guest: &Arc<Guest>,
+    volume: &Volume,
     wtq: &mut WhenToQuit,
     ri: &mut RegionInfo,
     quiet: bool,
@@ -1840,7 +2113,7 @@ async fn generic_workload(
                     }
                 }
             }
-            guest.flush(None).await?;
+            volume.flush(None).await?;
         } else {
             // Read or Write both need this
             // Pick a random size (in blocks) for the IO, up to max_io_size
@@ -1898,7 +2171,7 @@ async fn generic_workload(
                     }
                     println!();
                 }
-                guest.write(offset, data).await?;
+                volume.write(offset, data).await?;
             } else {
                 // Read (+ verify)
                 let mut data =
@@ -1925,7 +2198,7 @@ async fn generic_workload(
                         sw = size_width,
                     );
                 }
-                guest.read(offset, &mut data).await?;
+                volume.read(offset, &mut data).await?;
 
                 let data_len = data.len();
                 let dl = data.into_bytes();
@@ -1957,7 +2230,7 @@ async fn generic_workload(
                     }
                     Ok(SignalAction::Verify) => {
                         println!("Verify Volume");
-                        if let Err(e) = verify_volume(guest, ri, false).await {
+                        if let Err(e) = verify_volume(volume, ri, false).await {
                             bail!("Requested volume verify failed: {:?}", e)
                         }
                     }
@@ -1973,17 +2246,18 @@ async fn generic_workload(
 // Make use of dsc to stop and start a downstairs while sending IO.  This
 // should trigger the replay code path.
 async fn replay_workload(
-    guest: &Arc<Guest>,
+    volume: &Volume,
     wtq: &mut WhenToQuit,
     ri: &mut RegionInfo,
     dsc_client: Client,
+    ds_count: u32,
 ) -> Result<()> {
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
     let mut generic_wtq = WhenToQuit::Count { count: 300 };
 
     for c in 1.. {
         // Pick a DS at random
-        let stopped_ds = rng.gen_range(0..3);
+        let stopped_ds = rng.gen_range(0..ds_count);
         dsc_client.dsc_stop(stopped_ds).await.unwrap();
         loop {
             let res = dsc_client.dsc_get_ds_state(stopped_ds).await.unwrap();
@@ -1994,20 +2268,20 @@ async fn replay_workload(
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
 
-        generic_workload(guest, &mut generic_wtq, ri, false).await?;
+        generic_workload(volume, &mut generic_wtq, ri, false).await?;
 
         let res = dsc_client.dsc_start(stopped_ds).await;
         println!("Replay: started {stopped_ds}, returned:{:?}", res);
 
         // Wait for all IO to finish before we continue
         loop {
-            let wc = guest.show_work().await?;
+            let wc = volume.show_work().await?;
             println!(
                 "CLIENT: Up:{} ds:{} act:{}",
                 wc.up_count, wc.ds_count, wc.active_count
             );
-            if wc.up_count + wc.ds_count == 0 && wc.active_count == 3 {
-                println!("Replay: All jobs finished, all DS active.");
+            if wc.up_count + wc.ds_count == 0 {
+                println!("Replay: All jobs finished");
                 break;
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
@@ -2027,7 +2301,7 @@ async fn replay_workload(
                     }
                     Ok(SignalAction::Verify) => {
                         println!("Verify Volume");
-                        if let Err(e) = verify_volume(guest, ri, false).await {
+                        if let Err(e) = verify_volume(volume, ri, false).await {
                             bail!("Requested volume verify failed: {:?}", e)
                         }
                     }
@@ -2048,7 +2322,7 @@ async fn replay_workload(
 // will allow us to create a mismatch between downstairs which will then
 // trigger a reconcile.
 async fn replace_while_reconcile(
-    guest: &Arc<Guest>,
+    volume: &Volume,
     mut wtq: WhenToQuit,
     ri: &mut RegionInfo,
     targets: Vec<SocketAddr>,
@@ -2056,10 +2330,12 @@ async fn replace_while_reconcile(
     mut gen: u64,
     log: Logger,
 ) -> Result<()> {
-    assert!(targets.len() == 4);
+    assert!(targets.len() % 3 == 1);
 
+    // The total number of downstairs we have that are part of the Volume.
+    let ds_total = targets.len() - 1;
     let mut old_ds = 0;
-    let mut new_ds = 3;
+    let mut new_ds = targets.len() - 1;
     let mut c = 1;
     // How long we wait for reconcile to start before we replace
     let mut active_wait = 6;
@@ -2067,7 +2343,7 @@ async fn replace_while_reconcile(
     info!(log, "Begin replacement while reconciliation test");
     loop {
         info!(log, "[{c}] Touch every extent part 1");
-        fill_sparse_workload(guest, ri).await?;
+        fill_sparse_workload(volume, ri).await?;
 
         info!(log, "[{c}] Stop a downstairs");
         // Stop a downstairs, wait for dsc to confirm it is stopped.
@@ -2081,12 +2357,12 @@ async fn replace_while_reconcile(
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
         info!(log, "[{c}] Touch every extent part 2");
-        fill_sparse_workload(guest, ri).await?;
+        fill_sparse_workload(volume, ri).await?;
 
         info!(log, "[{c}] Deactivate");
-        guest.deactivate().await.unwrap();
+        volume.deactivate().await.unwrap();
         loop {
-            let is_active = guest.query_is_active().await.unwrap();
+            let is_active = volume.query_is_active().await.unwrap();
             if !is_active {
                 break;
             }
@@ -2113,7 +2389,7 @@ async fn replace_while_reconcile(
         // Spawn a task to re-activate, this will not finish till all three
         // downstairs have reconciled.
         gen += 1;
-        let gc = guest.clone();
+        let gc = volume.clone();
         let handle =
             tokio::spawn(async move { gc.activate_with_gen(gen).await });
 
@@ -2121,7 +2397,7 @@ async fn replace_while_reconcile(
         tokio::time::sleep(tokio::time::Duration::from_secs(active_wait)).await;
 
         //  Give the activation request time to percolate in the upstairs.
-        let is_active = guest.query_is_active().await.unwrap();
+        let is_active = volume.query_is_active().await.unwrap();
         info!(log, "[{c}] activate should now be waiting {:?}", is_active);
         // If this check fails, then the reconciliation has finished
         // before we had a chance to replace our downstairs. We try here to
@@ -2150,7 +2426,7 @@ async fn replace_while_reconcile(
             targets[old_ds as usize],
             targets[new_ds],
         );
-        match guest
+        match volume
             .replace_downstairs(
                 Uuid::new_v4(),
                 targets[old_ds as usize],
@@ -2166,7 +2442,7 @@ async fn replace_while_reconcile(
 
         info!(log, "[{c}] Wait for activation after replacement");
         loop {
-            let is_active = guest.query_is_active().await.unwrap();
+            let is_active = volume.query_is_active().await.unwrap();
             if is_active {
                 break;
             }
@@ -2183,13 +2459,13 @@ async fn replace_while_reconcile(
         }
 
         info!(log, "[{c}] Verify volume after replacement");
-        if let Err(e) = verify_volume(guest, ri, false).await {
+        if let Err(e) = verify_volume(volume, ri, false).await {
             bail!("Requested volume verify failed: {:?}", e)
         }
 
         // Wait for all IO to finish before we continue
         loop {
-            let wc = guest.show_work().await?;
+            let wc = volume.show_work().await?;
             info!(
                 log,
                 "[{c}] Jobs Up:{} Ds:{}  DS active:{}",
@@ -2197,15 +2473,15 @@ async fn replace_while_reconcile(
                 wc.ds_count,
                 wc.active_count
             );
-            if wc.up_count + wc.ds_count == 0 && wc.active_count == 3 {
-                info!(log, "[{c}] Replay: All jobs finished, all DS active.");
+            if wc.up_count + wc.ds_count == 0 && wc.active_count == ds_total {
+                info!(log, "[{c}] All jobs finished, all DS active.");
                 break;
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
 
-        old_ds = (old_ds + 1) % 4;
-        new_ds = (new_ds + 1) % 4;
+        old_ds = (old_ds + 1) % (ds_total as u32 + 1);
+        new_ds = (new_ds + 1) % (ds_total + 1);
 
         c += 1;
         match wtq {
@@ -2224,7 +2500,7 @@ async fn replace_while_reconcile(
                     }
                     Ok(SignalAction::Verify) => {
                         println!("Verify Volume");
-                        if let Err(e) = verify_volume(guest, ri, false).await {
+                        if let Err(e) = verify_volume(volume, ri, false).await {
                             bail!("Requested volume verify failed: {:?}", e)
                         }
                     }
@@ -2243,7 +2519,7 @@ async fn replace_while_reconcile(
 // Make use of dsc to stop our downstairs before activation.
 // Do a fill on each loop so every extent will need to be repaired.
 async fn replace_before_active(
-    guest: &Arc<Guest>,
+    volume: &Volume,
     mut wtq: WhenToQuit,
     ri: &mut RegionInfo,
     targets: Vec<SocketAddr>,
@@ -2251,18 +2527,25 @@ async fn replace_before_active(
     mut gen: u64,
     log: Logger,
 ) -> Result<()> {
-    assert!(targets.len() == 4);
+    assert!(targets.len() % 3 == 1);
 
     info!(log, "Begin replacement before activation test");
+    // We need to start from a known state and be sure that all three of the
+    // current downstairs are consistent with each other. To guarantee this
+    // we write to every block, then flush, then read.  This way we know
+    // that the initial downstairs are all synced up on the same flush and
+    // generation numbers.
+    fill_workload(volume, ri, true).await?;
+    let ds_total = targets.len() - 1;
     let mut old_ds = 0;
-    let mut new_ds = 3;
+    let mut new_ds = targets.len() - 1;
     for c in 1.. {
         info!(log, "[{c}] Touch every extent");
-        fill_sparse_workload(guest, ri).await?;
+        fill_sparse_workload(volume, ri).await?;
 
-        guest.deactivate().await.unwrap();
+        volume.deactivate().await.unwrap();
         loop {
-            let is_active = guest.query_is_active().await.unwrap();
+            let is_active = volume.query_is_active().await.unwrap();
             if !is_active {
                 break;
             }
@@ -2285,13 +2568,13 @@ async fn replace_before_active(
         // Spawn a task to re-activate, this will not finish till all three
         // downstairs respond.
         gen += 1;
-        let gc = guest.clone();
+        let gc = volume.clone();
         let handle =
             tokio::spawn(async move { gc.activate_with_gen(gen).await });
 
         //  Give the activation request time to percolate in the upstairs.
         tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
-        let is_active = guest.query_is_active().await.unwrap();
+        let is_active = volume.query_is_active().await.unwrap();
         info!(log, "[{c}] activate should now be waiting {:?}", is_active);
         assert!(!is_active);
 
@@ -2301,7 +2584,7 @@ async fn replace_before_active(
             targets[old_ds as usize],
             targets[new_ds],
         );
-        match guest
+        match volume
             .replace_downstairs(
                 Uuid::new_v4(),
                 targets[old_ds as usize],
@@ -2317,7 +2600,7 @@ async fn replace_before_active(
 
         info!(log, "[{c}] Wait for activation after replacement");
         loop {
-            let is_active = guest.query_is_active().await.unwrap();
+            let is_active = volume.query_is_active().await.unwrap();
             if is_active {
                 break;
             }
@@ -2334,7 +2617,7 @@ async fn replace_before_active(
         }
 
         info!(log, "[{c}] Verify volume after replacement");
-        if let Err(e) = verify_volume(guest, ri, false).await {
+        if let Err(e) = verify_volume(volume, ri, false).await {
             bail!("Requested volume verify failed: {:?}", e)
         }
 
@@ -2344,7 +2627,7 @@ async fn replace_before_active(
 
         // Wait for all IO to finish before we continue
         loop {
-            let wc = guest.show_work().await?;
+            let wc = volume.show_work().await?;
             info!(
                 log,
                 "[{c}] Jobs Up:{} Ds:{}  DS active:{}",
@@ -2352,15 +2635,15 @@ async fn replace_before_active(
                 wc.ds_count,
                 wc.active_count
             );
-            if wc.up_count + wc.ds_count == 0 && wc.active_count == 3 {
-                info!(log, "[{c}] Replay: All jobs finished, all DS active.");
+            if wc.up_count + wc.ds_count == 0 && wc.active_count == ds_total {
+                info!(log, "[{c}] All jobs finished, all DS active.");
                 break;
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
 
-        old_ds = (old_ds + 1) % 4;
-        new_ds = (new_ds + 1) % 4;
+        old_ds = (old_ds + 1) % (ds_total as u32 + 1);
+        new_ds = (new_ds + 1) % (ds_total + 1);
 
         match wtq {
             WhenToQuit::Count { count } => {
@@ -2378,7 +2661,7 @@ async fn replace_before_active(
                     }
                     Ok(SignalAction::Verify) => {
                         println!("Verify Volume");
-                        if let Err(e) = verify_volume(guest, ri, false).await {
+                        if let Err(e) = verify_volume(volume, ri, false).await {
                             bail!("Requested volume verify failed: {:?}", e)
                         }
                     }
@@ -2397,16 +2680,19 @@ async fn replace_before_active(
 // bunch more IO.  Wait for all IO to finish (on all three downstairs) before
 // we continue.
 async fn replace_workload(
-    guest: &Arc<Guest>,
+    volume: &Volume,
     wtq: &mut WhenToQuit,
     ri: &mut RegionInfo,
     targets: Vec<SocketAddr>,
     fill: bool,
 ) -> Result<()> {
-    assert!(targets.len() == 4);
+    assert!(targets.len() % 3 == 1);
+
+    // The total number of downstairs we have that are part of the Volume.
+    let ds_total = targets.len() - 1;
 
     if fill {
-        fill_sparse_workload(guest, ri).await?;
+        fill_sparse_workload(volume, ri).await?;
     }
     // Make a copy of the stop at counter if one was provided so the
     // IO task and the replace task don't have to share wtq
@@ -2419,17 +2705,17 @@ async fn replace_workload(
     let stop_token = CancellationToken::new();
     let stop_token_c = stop_token.clone();
     let (work_count_tx, mut work_count_rx) = mpsc::channel(1);
-    let guest_c = guest.clone();
+    let volume_c = volume.clone();
     let handle = tokio::spawn(async move {
         let mut old_ds = 0;
-        let mut new_ds = 3;
+        let mut new_ds = ds_total;
         let mut c = 1;
         loop {
             println!(
                 "[{c}] Replacing DS {old_ds}:{} with {new_ds}:{}",
                 targets[old_ds], targets[new_ds],
             );
-            match guest_c
+            match volume_c
                 .replace_downstairs(
                     Uuid::new_v4(),
                     targets[old_ds],
@@ -2443,25 +2729,25 @@ async fn replace_workload(
                 }
             }
             // Wait for the replacement to be reflected in the downstairs status.
-            let mut wc = guest_c.show_work().await?;
-            while wc.active_count == 3 {
+            let mut wc = volume_c.show_work().await?;
+            while wc.active_count == ds_total {
                 // Wait for one of the DS to start repair
                 println!(
                     "[{c}] Waiting for replace to start: up:{} ds:{} act:{}",
                     wc.up_count, wc.ds_count, wc.active_count
                 );
                 tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
-                wc = guest_c.show_work().await?;
+                wc = volume_c.show_work().await?;
             }
 
             // We have started live repair, now wait for it to finish.
-            while wc.active_count != 3 {
+            while wc.active_count != ds_total {
                 println!(
                     "[{c}] Waiting for replace to finish: up:{} ds:{} act:{}",
                     wc.up_count, wc.ds_count, wc.active_count
                 );
                 tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
-                wc = guest_c.show_work().await?;
+                wc = volume_c.show_work().await?;
             }
             // Tell the global thread that a repair is done and what count we
             // are at.
@@ -2480,19 +2766,19 @@ async fn replace_workload(
             }
 
             // No stopping yet, let's do another loop.
-            old_ds = (old_ds + 1) % 4;
-            new_ds = (new_ds + 1) % 4;
+            old_ds = (old_ds + 1) % (ds_total + 1);
+            new_ds = (new_ds + 1) % (ds_total + 1);
             c += 1;
         }
         println!("Replace tasks ends after {c} loops");
         Ok(())
     });
 
-    // The replace is started, now generate traffic through the guest
+    // The replace is started, now generate traffic through the volume
     // in a loop, checking to see if it is time to stop.
     loop {
         let mut workload_wtq = WhenToQuit::Count { count: 100 };
-        generic_workload(guest, &mut workload_wtq, ri, false)
+        generic_workload(volume, &mut workload_wtq, ri, false)
             .await
             .unwrap();
 
@@ -2513,7 +2799,7 @@ async fn replace_workload(
                         break;
                     }
                     Ok(SignalAction::Verify) => {
-                        if let Err(e) = verify_volume(guest, ri, false).await {
+                        if let Err(e) = verify_volume(volume, ri, false).await {
                             bail!("Requested volume verify failed: {:?}", e)
                         }
                     }
@@ -2532,12 +2818,12 @@ async fn replace_workload(
     // Wait for all IO to settle down and all downstairs to be active
     // before we do the next loop.
     loop {
-        let wc = guest.show_work().await?;
+        let wc = volume.show_work().await?;
         println!(
             "Replace test done: up:{} ds:{} act:{}",
             wc.up_count, wc.ds_count, wc.active_count
         );
-        if wc.up_count + wc.ds_count == 0 && wc.active_count == 3 {
+        if wc.up_count + wc.ds_count == 0 && wc.active_count == ds_total {
             println!("Replace: All jobs finished, all DS active.");
             break;
         }
@@ -2554,7 +2840,7 @@ async fn replace_workload(
  * automatic flush can come through and sync our data.
  */
 async fn dirty_workload(
-    guest: &Guest,
+    volume: &Volume,
     ri: &mut RegionInfo,
     count: usize,
 ) -> Result<()> {
@@ -2599,7 +2885,7 @@ async fn dirty_workload(
             width = count_width,
         );
 
-        let future = guest.write(offset, data);
+        let future = volume.write(offset, data);
         futureslist.push_back(future);
     }
     println!("loop over {} futures", futureslist.len());
@@ -2770,7 +3056,7 @@ struct Record {
  */
 #[allow(clippy::too_many_arguments)]
 async fn perf_workload(
-    guest: &Arc<Guest>,
+    volume: &Volume,
     ri: &RegionInfo,
     mut wtr: Option<csv::Writer<File>>,
     count: usize,
@@ -2781,7 +3067,7 @@ async fn perf_workload(
 ) -> Result<()> {
     // Before we start, make sure the work queues are empty.
     loop {
-        let wc = guest.query_work_queue().await?;
+        let wc = volume.query_work_queue().await?;
         if wc.up_count + wc.ds_count == 0 {
             break;
         }
@@ -2821,7 +3107,7 @@ async fn perf_workload(
 
             for write_buffer in write_buffers.iter().take(io_depth) {
                 let offset: u64 = rng.gen::<u64>() % offset_mod;
-                let future = guest.write_to_byte_offset(
+                let future = volume.write_to_byte_offset(
                     offset * ri.block_size,
                     write_buffer.clone(),
                 );
@@ -2835,7 +3121,7 @@ async fn perf_workload(
         }
         let big_end = big_start.elapsed();
 
-        guest.flush(None).await?;
+        volume.flush(None).await?;
         perf_summary("rwrites", count, io_depth, &wtime, big_end, es, ec);
         if let Some(wtr) = wtr.as_mut() {
             perf_csv(
@@ -2853,7 +3139,7 @@ async fn perf_workload(
 
         // Before we loop or end, make sure the work queues are empty.
         loop {
-            let wc = guest.query_work_queue().await?;
+            let wc = volume.query_work_queue().await?;
             if wc.up_count + wc.ds_count == 0 {
                 break;
             }
@@ -2871,10 +3157,10 @@ async fn perf_workload(
             for mut read_buffer in read_buffers.drain(0..io_depth) {
                 let offset: u64 = rng.gen::<u64>() % offset_mod;
                 let future = {
-                    let guest = guest.clone();
+                    let volume = volume.clone();
                     let bs = ri.block_size;
                     tokio::spawn(async move {
-                        guest
+                        volume
                             .read_from_byte_offset(
                                 offset * bs,
                                 &mut read_buffer,
@@ -2912,11 +3198,11 @@ async fn perf_workload(
             );
         }
 
-        guest.flush(None).await?;
+        volume.flush(None).await?;
 
         // Before we finish, make sure the work queues are empty.
         loop {
-            let wc = guest.query_work_queue().await?;
+            let wc = volume.query_work_queue().await?;
             if wc.up_count + wc.ds_count == 0 {
                 break;
             }
@@ -2948,13 +3234,13 @@ fn print_region_description(ri: &RegionInfo, encrypted: bool) {
 }
 
 async fn rand_read_write_workload(
-    guest: &Arc<Guest>,
+    volume: &Volume,
     ri: &mut RegionInfo,
     cfg: RandReadWriteConfig,
 ) -> Result<()> {
     // Before we start, make sure the work queues are empty.
     loop {
-        let wc = guest.query_work_queue().await?;
+        let wc = volume.query_work_queue().await?;
         if wc.up_count + wc.ds_count == 0 {
             break;
         }
@@ -2968,7 +3254,7 @@ async fn rand_read_write_workload(
 
     if cfg.fill {
         println!("filling region before {desc}");
-        fill_workload(guest, ri, true).await?;
+        fill_workload(volume, ri, true).await?;
     }
 
     if cfg.blocks_per_io > ri.total_blocks {
@@ -2993,7 +3279,7 @@ async fn rand_read_write_workload(
     let mut workers = vec![];
     for _ in 0..cfg.io_depth {
         let stop = stop.clone();
-        let guest = guest.clone();
+        let volume = volume.clone();
         let byte_count = byte_count.clone();
         let handle = tokio::spawn(async move {
             match cfg.mode {
@@ -3005,7 +3291,7 @@ async fn rand_read_write_workload(
                     while !stop.load(Ordering::Acquire) {
                         let offset =
                             rng.gen_range(0..=total_blocks - cfg.blocks_per_io);
-                        guest
+                        volume
                             .write(BlockIndex(offset as u64), buf.clone())
                             .await
                             .unwrap();
@@ -3018,7 +3304,7 @@ async fn rand_read_write_workload(
                     while !stop.load(Ordering::Acquire) {
                         let offset =
                             rng.gen_range(0..=total_blocks - cfg.blocks_per_io);
-                        guest
+                        volume
                             .read(BlockIndex(offset as u64), &mut buf)
                             .await
                             .unwrap();
@@ -3083,18 +3369,18 @@ async fn rand_read_write_workload(
         h.await??;
     }
 
-    // Spawn a secondary worker to wait and log during guest deactivation
+    // Spawn a secondary worker to wait and log during volume deactivation
     let stop = Arc::new(AtomicBool::new(false));
     {
-        let guest = guest.clone();
+        let volume = volume.clone();
         let stop = stop.clone();
         tokio::spawn(async move {
             while !stop.load(Ordering::Relaxed) {
-                let Ok(wq) = guest.query_work_queue().await else {
+                let Ok(wq) = volume.query_work_queue().await else {
                     break;
                 };
                 print!(
-                    "\r stopping guest [{} jobs remaining]    ",
+                    "\r stopping volume [{} jobs remaining]    ",
                     wq.ds_count + wq.up_count
                 );
                 std::io::stdout().lock().flush().unwrap();
@@ -3102,7 +3388,7 @@ async fn rand_read_write_workload(
             }
         });
     }
-    guest.deactivate().await?;
+    volume.deactivate().await?;
     stop.store(true, Ordering::Relaxed);
 
     let mean = samples.iter().sum::<f64>() / samples.len() as f64;
@@ -3120,11 +3406,124 @@ async fn rand_read_write_workload(
     Ok(())
 }
 
+async fn bufferbloat_workload(
+    volume: &Volume,
+    ri: &mut RegionInfo,
+    cfg: BufferbloatConfig,
+) -> Result<()> {
+    // Before we start, make sure the work queues are empty.
+    loop {
+        let wc = volume.query_work_queue().await?;
+        if wc.up_count + wc.ds_count == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    if cfg.blocks_per_io > ri.total_blocks {
+        bail!("too many blocks per IO; can't exceed {}", ri.total_blocks);
+    }
+
+    println!(
+        "\n----------------------------------------------\
+        \nbufferbloat test\
+        \n----------------------------------------------\
+        \ninitial {:?} sec random write with {} chunks ({} block{})",
+        cfg.time_secs,
+        human_bytes((cfg.blocks_per_io as u64 * ri.block_size) as f64),
+        cfg.blocks_per_io,
+        if cfg.blocks_per_io > 1 { "s" } else { "" },
+    );
+    print_region_description(ri, cfg.encrypted);
+    println!("----------------------------------------------");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let byte_count = Arc::new(AtomicUsize::new(0));
+
+    let block_size = ri.block_size as usize;
+    let total_blocks = ri.total_blocks;
+    let mut workers = vec![];
+    for _ in 0..cfg.io_depth {
+        let stop = stop.clone();
+        let volume = volume.clone();
+        let byte_count = byte_count.clone();
+        let handle = tokio::spawn(async move {
+            let mut buf = BytesMut::new();
+            buf.resize(cfg.blocks_per_io * block_size, 0u8);
+            let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+            rng.fill_bytes(&mut buf);
+            while !stop.load(Ordering::Acquire) {
+                let offset =
+                    rng.gen_range(0..=total_blocks - cfg.blocks_per_io);
+                volume
+                    .write(BlockIndex(offset as u64), buf.clone())
+                    .await
+                    .unwrap();
+                byte_count.fetch_add(buf.len(), Ordering::Relaxed);
+            }
+            Ok::<(), CrucibleError>(())
+        });
+        workers.push(handle);
+    }
+
+    let start = std::time::Instant::now();
+    let sleep_time = Duration::from_secs(cfg.time_secs);
+    {
+        let volume = volume.clone();
+        let stop = stop.clone();
+        tokio::spawn(async move {
+            while !stop.load(Ordering::Relaxed) {
+                let Ok(wq) = volume.query_work_queue().await else {
+                    break;
+                };
+                if sleep_time > start.elapsed() {
+                    let dt = sleep_time - start.elapsed();
+                    print!(
+                        "\r{} jobs in queue, {:.1?} secs remaining      ",
+                        wq.ds_count + wq.up_count,
+                        dt,
+                    );
+                    std::io::stdout().lock().flush().unwrap();
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
+    }
+
+    // Sleep to fill up the buffers
+    tokio::time::sleep(Duration::from_secs(cfg.time_secs)).await;
+
+    // Create a read action
+    let read = {
+        let g = volume.clone();
+        tokio::spawn(async move {
+            let mut buffer = Buffer::new(1, block_size);
+            let start = std::time::Instant::now();
+            g.read(BlockIndex(0), &mut buffer).await.unwrap();
+            start.elapsed()
+        })
+    };
+    stop.store(true, Ordering::Release);
+
+    // Join all workers
+    for h in workers {
+        h.await??;
+    }
+
+    println!("\nawaiting final read...");
+    let read_time = read.await?;
+    println!("read took {read_time:?}");
+
+    volume.flush(None).await?;
+
+    Ok(())
+}
+
 /*
  * Generate a random offset and length, and write to then read from
  * that offset/length.  Verify the data is what we expect.
  */
-async fn one_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
+async fn one_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
     /*
      * TODO: Allow the user to specify a seed here.
      */
@@ -3153,12 +3552,12 @@ async fn one_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
 
     println!("Write at block {:5}, len:{:7}", offset.0, data.len());
 
-    guest.write(offset, data).await?;
+    volume.write(offset, data).await?;
 
     let mut data = crucible::Buffer::repeat(255, size, ri.block_size as usize);
 
     println!("Read  at block {:5}, len:{:7}", offset.0, data.len());
-    guest.read(offset, &mut data).await?;
+    volume.read(offset, &mut data).await?;
 
     let dl = data.into_bytes();
     match validate_vec(dl, block_index, &mut ri.write_log, ri.block_size, false)
@@ -3170,7 +3569,7 @@ async fn one_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
     }
 
     println!("Flush");
-    guest.flush(None).await?;
+    volume.flush(None).await?;
 
     Ok(())
 }
@@ -3182,7 +3581,7 @@ async fn one_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
  * for the IO parts of this.
  */
 async fn deactivate_workload(
-    guest: &Arc<Guest>,
+    volume: &Volume,
     count: usize,
     ri: &mut RegionInfo,
     mut gen: u64,
@@ -3196,7 +3595,7 @@ async fn deactivate_workload(
             width = count_width
         );
         let mut wtq = WhenToQuit::Count { count: 20 };
-        generic_workload(guest, &mut wtq, ri, false).await?;
+        generic_workload(volume, &mut wtq, ri, false).await?;
         println!(
             "{:>0width$}/{:>0width$}, CLIENT: Now disconnect",
             c,
@@ -3209,14 +3608,14 @@ async fn deactivate_workload(
             count,
             width = count_width
         );
-        guest.deactivate().await?;
+        volume.deactivate().await?;
         println!(
             "{:>0width$}/{:>0width$}, CLIENT: Now disconnect done.",
             c,
             count,
             width = count_width
         );
-        let wc = guest.show_work().await?;
+        let wc = volume.show_work().await?;
         println!(
             "{:>0width$}/{:>0width$}, CLIENT: Up:{} ds:{}",
             c,
@@ -3227,7 +3626,7 @@ async fn deactivate_workload(
         );
         let mut retry = 1;
         gen += 1;
-        while let Err(e) = guest.activate_with_gen(gen).await {
+        while let Err(e) = volume.activate_with_gen(gen).await {
             println!(
                 "{:>0width$}/{:>0width$}, Retry:{} activate {:?}",
                 c,
@@ -3245,7 +3644,7 @@ async fn deactivate_workload(
     }
     println!("One final");
     let mut wtq = WhenToQuit::Count { count: 20 };
-    generic_workload(guest, &mut wtq, ri, false).await?;
+    generic_workload(volume, &mut wtq, ri, false).await?;
 
     Ok(())
 }
@@ -3255,7 +3654,7 @@ async fn deactivate_workload(
  * that offset/length.  Verify the data is what we expect.
  */
 async fn write_flush_read_workload(
-    guest: &Guest,
+    volume: &Volume,
     count: usize,
     ri: &mut RegionInfo,
 ) -> Result<()> {
@@ -3268,7 +3667,7 @@ async fn write_flush_read_workload(
     for c in 1..=count {
         /*
          * Pick a random size (in blocks) for the IO, up to the size of the
-         * entire region.
+         * max IO we allow.
          */
         let size = rng.gen_range(1..=ri.max_block_io);
 
@@ -3302,13 +3701,13 @@ async fn write_flush_read_workload(
             data.len(),
             width = count_width,
         );
-        guest.write(offset, data).await?;
+        volume.write(offset, data).await?;
 
-        guest.flush(None).await?;
+        volume.flush(None).await?;
 
         let mut data =
             crucible::Buffer::repeat(255, size, ri.block_size as usize);
-        guest.read(offset, &mut data).await?;
+        volume.read(offset, &mut data).await?;
 
         let dl = data.into_bytes();
         match validate_vec(
@@ -3333,7 +3732,7 @@ async fn write_flush_read_workload(
  * Wait for each burst to finish, pause, then loop.
  */
 async fn burst_workload(
-    guest: &Arc<Guest>,
+    volume: &Volume,
     count: usize,
     demo_count: usize,
     ri: &mut RegionInfo,
@@ -3341,8 +3740,8 @@ async fn burst_workload(
 ) -> Result<()> {
     let count_width = count.to_string().len();
     for c in 1..=count {
-        demo_workload(guest, demo_count, ri).await?;
-        let mut wc = guest.show_work().await?;
+        demo_workload(volume, demo_count, ri).await?;
+        let mut wc = volume.show_work().await?;
         while wc.up_count + wc.ds_count != 0 {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
             println!(
@@ -3354,7 +3753,7 @@ async fn burst_workload(
                 width = count_width
             );
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
-            wc = guest.show_work().await?;
+            wc = volume.show_work().await?;
         }
 
         /*
@@ -3363,9 +3762,8 @@ async fn burst_workload(
          */
         println!();
         if let Some(vo) = &verify_out {
-            let cp = history_file(vo);
-            write_json(&cp, &ri.write_log, true)?;
-            println!("Wrote out file {:?} at this time", cp);
+            write_json(vo, &ri.write_log, true)?;
+            println!("Wrote out file {vo:?} at this time");
         }
         println!(
             "{:>0width$}/{:>0width$}: 2 second pause, then another test loop",
@@ -3383,7 +3781,7 @@ async fn burst_workload(
  * We try to exit this test and leave jobs outstanding.
  */
 async fn repair_workload(
-    guest: &Guest,
+    volume: &Volume,
     count: usize,
     ri: &mut RegionInfo,
 ) -> Result<()> {
@@ -3409,7 +3807,7 @@ async fn repair_workload(
                 count,
                 width = count_width,
             );
-            guest.flush(None).await?;
+            volume.flush(None).await?;
             // Commit the current write log because we know this flush
             // will make it out on at least two DS, so any writes before this
             // point should also be persistent.
@@ -3462,7 +3860,7 @@ async fn repair_workload(
                 }
                 println!();
 
-                guest.write(offset, data).await?;
+                volume.write(offset, data).await?;
             } else {
                 // Read
                 let mut data =
@@ -3478,11 +3876,11 @@ async fn repair_workload(
                     bw = block_width,
                     sw = size_width,
                 );
-                guest.read(offset, &mut data).await?;
+                volume.read(offset, &mut data).await?;
             }
         }
     }
-    guest.show_work().await?;
+    volume.show_work().await?;
     Ok(())
 }
 
@@ -3492,7 +3890,7 @@ async fn repair_workload(
  * then watch them complete.
  */
 async fn demo_workload(
-    guest: &Arc<Guest>,
+    volume: &Volume,
     count: usize,
     ri: &mut RegionInfo,
 ) -> Result<()> {
@@ -3515,7 +3913,7 @@ async fn demo_workload(
         let op = rng.gen_range(0..10);
         if op == 0 {
             // flush
-            let future = guest.flush(None);
+            let future = volume.flush(None);
             write_futures.push_back(future);
         } else {
             // Read or Write both need this
@@ -3541,17 +3939,17 @@ async fn demo_workload(
                 let data =
                     fill_vec(block_index, size, &ri.write_log, ri.block_size);
 
-                let future = guest.write(offset, data);
+                let future = volume.write(offset, data);
                 write_futures.push_back(future);
             } else {
                 // Read
                 let block_size = ri.block_size as usize;
                 let future = {
-                    let guest = guest.clone();
+                    let volume = volume.clone();
                     tokio::spawn(async move {
                         let mut data =
                             crucible::Buffer::repeat(255, size, block_size);
-                        guest.read(offset, &mut data).await?;
+                        volume.read(offset, &mut data).await?;
                         Ok(data)
                     })
                 };
@@ -3582,7 +3980,7 @@ async fn demo_workload(
      */
     println!("All submitted jobs completed, waiting for downstairs");
     while wc.up_count + wc.ds_count > 0 {
-        wc = guest.show_work().await?;
+        wc = volume.show_work().await?;
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
     }
     println!("All downstairs jobs completed.");
@@ -3597,7 +3995,7 @@ async fn demo_workload(
  * This is a test workload that generates a single write spanning an extent
  * then will try to read the same.
  */
-async fn span_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
+async fn span_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
     /*
      * Pick the last block in the first extent
      */
@@ -3613,15 +4011,15 @@ async fn span_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
     let data = fill_vec(block_index, 2, &ri.write_log, ri.block_size);
 
     println!("Sending a write spanning two extents");
-    guest.write(offset, data).await?;
+    volume.write(offset, data).await?;
 
     println!("Sending a flush");
-    guest.flush(None).await?;
+    volume.flush(None).await?;
 
     let mut data = crucible::Buffer::repeat(99, 2, ri.block_size as usize);
 
     println!("Sending a read spanning two extents");
-    guest.read(offset, &mut data).await?;
+    volume.read(offset, &mut data).await?;
 
     let dl = data.into_bytes();
     match validate_vec(dl, block_index, &mut ri.write_log, ri.block_size, false)
@@ -3638,7 +4036,7 @@ async fn span_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
  * Write, flush, then read every block in the volume.
  * We wait for each op to finish, so this is all sequential.
  */
-async fn big_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
+async fn big_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
     for block_index in 0..ri.total_blocks {
         /*
          * Update the write count for all blocks we plan to write to.
@@ -3651,12 +4049,12 @@ async fn big_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
          */
         let offset = BlockIndex(block_index as u64);
 
-        guest.write(offset, data).await?;
+        volume.write(offset, data).await?;
 
-        guest.flush(None).await?;
+        volume.flush(None).await?;
 
         let mut data = crucible::Buffer::repeat(255, 1, ri.block_size as usize);
-        guest.read(offset, &mut data).await?;
+        volume.read(offset, &mut data).await?;
 
         let dl = data.into_bytes();
         match validate_vec(
@@ -3674,12 +4072,15 @@ async fn big_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
     }
 
     println!("All IOs sent");
-    guest.show_work().await?;
+    volume.show_work().await?;
 
     Ok(())
 }
 
-async fn biggest_io_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
+async fn biggest_io_workload(
+    volume: &Volume,
+    ri: &mut RegionInfo,
+) -> Result<()> {
     /*
      * Based on our protocol, send the biggest IO we can.
      */
@@ -3728,7 +4129,7 @@ async fn biggest_io_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
             block_index, next_io_blocks
         );
 
-        guest.write(offset, data).await?;
+        volume.write(offset, data).await?;
 
         block_index += next_io_blocks;
     }
@@ -3739,13 +4140,10 @@ async fn biggest_io_workload(guest: &Guest, ri: &mut RegionInfo) -> Result<()> {
 /*
  * A loop that generates a bunch of random reads and writes, increasing the
  * offset each operation.  After 20 are submitted, we wait for all to finish.
- * Use this test and pass the --lossy flag and upstairs will at random skip
- * sending jobs to the downstairs, creating dependencys that it will
- * eventually resolve.
  *
  * TODO: Make this test use the global write count, but remember, async.
  */
-async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
+async fn dep_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
     let final_offset = ri.total_size - ri.block_size;
 
     let mut my_offset: u64 = 0;
@@ -3775,7 +4173,7 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
                     my_offset,
                     data.len()
                 );
-                let future = guest.write_to_byte_offset(my_offset, data);
+                let future = volume.write_to_byte_offset(my_offset, data);
                 write_futures.push_back(future);
             } else {
                 let mut data =
@@ -3790,9 +4188,9 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
                 );
 
                 let future = {
-                    let guest = guest.clone();
+                    let volume = volume.clone();
                     tokio::spawn(async move {
-                        guest
+                        volume
                             .read_from_byte_offset(my_offset, &mut data)
                             .await?;
                         Ok(data)
@@ -3802,13 +4200,13 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
             }
         }
 
-        guest.show_work().await?;
+        volume.show_work().await?;
 
         // The final flush is to help prevent the pause that we get when the
         // last command is a write or read and we have to wait x seconds for the
         // flush check to trigger.
         println!("Loop:{} send a final flush and wait", my_count);
-        let flush_future = guest.flush(None);
+        let flush_future = volume.flush(None);
         write_futures.push_back(flush_future);
 
         println!(
@@ -3826,7 +4224,7 @@ async fn dep_workload(guest: &Arc<Guest>, ri: &mut RegionInfo) -> Result<()> {
         }
 
         println!("Loop:{} all futures done", my_count);
-        guest.show_work().await?;
+        volume.show_work().await?;
     }
 
     println!("dep test done");

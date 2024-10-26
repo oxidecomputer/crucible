@@ -6,11 +6,11 @@
 #  `pstop` or kill the downstairs process
 #  wait for missing downstairs to be faulted
 #  `pstart` or restart the downstairs
-#  Let the repair start.
+#  Let the live repair start.
 #  `pstop` or kill the same downstairs again.
 #  wait for missing downstairs to be faulted again
 #  `pstart` or restart the downstairs again
-#  Let the upstairs repair start over and finish.
+#  Let the upstairs live repair start over and finish.
 #  Stop crutest, then restart and verify the whole disk.
 
 err=0
@@ -41,6 +41,7 @@ dsc_test_log=/tmp/test_fail_live_repair_dsc.log
 verify_file=/tmp/test_fail_live_verify
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 export BINDIR=${BINDIR:-$ROOT/target/release}
 crucible_test="$BINDIR/crutest"
 cds="$BINDIR/crucible-downstairs"
@@ -94,8 +95,7 @@ fi
 echo "starting $(date)" | tee ${loop_log}
 echo "Tail $test_log for test output"
 
-# Make enough extents that we can be sure to catch in while it
-# is repairing.
+# Make enough extents that we can be sure to catch it while it is repairing.
 if ! ${dsc} create --cleanup \
   --ds-bin "$cds" \
   --extent-count 400 \

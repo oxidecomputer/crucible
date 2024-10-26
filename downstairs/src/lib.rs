@@ -1,6 +1,4 @@
 // Copyright 2023 Oxide Computer Company
-#![cfg_attr(usdt_need_asm, feature(asm))]
-#![cfg_attr(all(target_os = "macos", usdt_need_asm_sym), feature(asm_sym))]
 
 use futures::lock::Mutex;
 use std::cmp::Ordering;
@@ -37,6 +35,7 @@ use tokio_util::codec::FramedRead;
 use uuid::Uuid;
 
 pub mod admin;
+mod complete_jobs;
 mod dump;
 mod dynamometer;
 mod extent;
@@ -48,6 +47,7 @@ mod extent_inner_raw;
 pub(crate) mod extent_inner_raw_common;
 mod extent_inner_sqlite;
 
+use complete_jobs::CompletedJobs;
 use extent::ExtentState;
 use region::Region;
 
@@ -82,6 +82,9 @@ enum IOop {
         snapshot_details: Option<SnapshotDetails>,
         extent_limit: Option<ExtentId>,
     },
+    Barrier {
+        dependencies: Vec<JobId>, // Jobs that must finish before this
+    },
     /*
      * These operations are for repairing a bad downstairs
      */
@@ -114,6 +117,7 @@ impl IOop {
         match &self {
             IOop::Write { dependencies, .. }
             | IOop::Flush { dependencies, .. }
+            | IOop::Barrier { dependencies, .. }
             | IOop::Read { dependencies, .. }
             | IOop::WriteUnwritten { dependencies, .. }
             | IOop::ExtentClose { dependencies, .. }
@@ -687,6 +691,9 @@ pub fn show_work(ds: &mut Downstairs) {
                     IOop::Read { dependencies, .. } => ("Read", dependencies),
                     IOop::Write { dependencies, .. } => ("Write", dependencies),
                     IOop::Flush { dependencies, .. } => ("Flush", dependencies),
+                    IOop::Barrier { dependencies, .. } => {
+                        ("Barrier", dependencies)
+                    }
                     IOop::WriteUnwritten { dependencies, .. } => {
                         ("WriteU", dependencies)
                     }
@@ -710,8 +717,7 @@ pub fn show_work(ds: &mut Downstairs) {
             }
         }
 
-        info!(ds.log, "Completed work {:?}", work.completed);
-        info!(ds.log, "Last flush: {:?}", work.last_flush);
+        info!(ds.log, "Completed work {:?}", work.completed());
     }
 }
 
@@ -722,6 +728,7 @@ pub mod cdt {
     fn submit__writeunwritten__start(_: u64) {}
     fn submit__write__start(_: u64) {}
     fn submit__flush__start(_: u64) {}
+    fn submit__barrier__start(_: u64) {}
     fn submit__el__close__start(_: u64) {}
     fn submit__el__flush__close__start(_: u64) {}
     fn submit__el__repair__start(_: u64) {}
@@ -741,44 +748,24 @@ pub mod cdt {
     fn submit__writeunwritten__done(_: u64) {}
     fn submit__write__done(_: u64) {}
     fn submit__flush__done(_: u64) {}
-    fn extent__flush__start(job_id: u64, extent_id: u32, extent_size: u64) {}
-    fn extent__flush__done(job_id: u64, extent_id: u32, extent_size: u64) {}
-    fn extent__flush__file__start(
+    fn extent__flush__start(
         job_id: u64,
         extent_id: u32,
-        extent_size: u64,
+        num_dirty_blocks: u64,
     ) {
     }
-    fn extent__flush__file__done(
-        job_id: u64,
-        extent_id: u32,
-        extent_size: u64,
-    ) {
-    }
-    fn extent__flush__collect__hashes__start(
-        job_id: u64,
-        extent_id: u32,
-        num_dirty: u64,
-    ) {
-    }
+    fn extent__flush__done(job_id: u64, extent_id: u32) {}
+    fn extent__flush__file__start(job_id: u64, extent_id: u32) {}
+    fn extent__flush__file__done(job_id: u64, extent_id: u32) {}
+    fn extent__flush__collect__hashes__start(job_id: u64, extent_id: u32) {}
     fn extent__flush__collect__hashes__done(
         job_id: u64,
         extent_id: u32,
         num_rehashed: u64,
     ) {
     }
-    fn extent__flush__sqlite__insert__start(
-        job_id: u64,
-        extent_id: u32,
-        extent_size: u64,
-    ) {
-    }
-    fn extent__flush__sqlite__insert__done(
-        _job_id: u64,
-        _extent_id: u32,
-        extent_size: u64,
-    ) {
-    }
+    fn extent__flush__sqlite__insert__start(job_id: u64, extent_id: u32) {}
+    fn extent__flush__sqlite__insert__done(job_id: u64, extent_id: u32) {}
     fn extent__write__start(job_id: u64, extent_id: u32, n_blocks: u64) {}
     fn extent__write__done(job_id: u64, extent_id: u32, n_blocks: u64) {}
     fn extent__write__get__hashes__start(
@@ -906,7 +893,7 @@ struct ConnectionData {
     repair_addr: SocketAddr,
 
     /// Token used to cancel the IO tasks
-    #[allow(unused)]
+    #[expect(unused)]
     cancel: tokio_util::sync::DropGuard,
 
     /// IO channel to the reply task
@@ -947,6 +934,7 @@ impl ActiveConnection {
     fn new(
         data: ConnectionData,
         upstairs_connection: UpstairsConnection,
+        last_flush: Option<JobId>,
         log: &Logger,
     ) -> Self {
         let log = log.new(o!(
@@ -955,7 +943,7 @@ impl ActiveConnection {
         Self {
             data,
             upstairs_connection,
-            work: Work::new(log.new(o!("role" => "work"))),
+            work: Work::new(last_flush, log.new(o!("role" => "work"))),
             log,
         }
     }
@@ -993,6 +981,11 @@ impl ActiveConnection {
                 ..
             }
             | Message::Flush {
+                upstairs_id,
+                session_id,
+                ..
+            }
+            | Message::Barrier {
                 upstairs_id,
                 session_id,
                 ..
@@ -1159,6 +1152,25 @@ impl ActiveConnection {
                 self.do_work_if_ready(
                     job_id,
                     new_flush,
+                    flags,
+                    reqwest_client,
+                    dss,
+                    region,
+                )
+                .await?
+            }
+            Message::Barrier {
+                job_id,
+                dependencies,
+                ..
+            } => {
+                cdt::submit__barrier__start!(|| job_id.0);
+
+                let new_barrier = IOop::Barrier { dependencies };
+
+                self.do_work_if_ready(
+                    job_id,
+                    new_barrier,
                     flags,
                     reqwest_client,
                     dss,
@@ -1335,9 +1347,9 @@ impl ActiveConnection {
             Message::ExtentFlush {
                 repair_id,
                 extent_id,
-                client_id: _,
                 flush_number,
                 gen_number,
+                ..
             } => {
                 let msg = {
                     debug!(
@@ -1592,8 +1604,7 @@ impl ActiveConnection {
             self.reply(m)?;
 
             if is_flush {
-                self.work.last_flush = new_id;
-                self.work.completed = Vec::with_capacity(32);
+                self.work.completed.reset(new_id);
             } else {
                 self.work.completed.push(new_id);
             }
@@ -1738,6 +1749,18 @@ impl ActiveConnection {
                     session_id: upstairs_connection.session_id,
                     job_id,
                     result,
+                }
+            }
+            IOop::Barrier { dependencies } => {
+                debug!(self.log, "Barrier     :{job_id} deps:{dependencies:?}",);
+
+                // No work is actually done here; the barrier just lets us drop
+                // older dependencies (because it waits for all of them).
+                Message::BarrierAck {
+                    upstairs_id: upstairs_connection.upstairs_id,
+                    session_id: upstairs_connection.session_id,
+                    job_id,
+                    result: Ok(()),
                 }
             }
             IOop::ExtentClose {
@@ -2299,6 +2322,7 @@ impl Downstairs {
     ///
     /// # Panics
     /// If the connection is not present or is not running
+    #[cfg(test)]
     fn active_mut(&mut self, conn_id: ConnectionId) -> &mut ActiveConnection {
         let Some(ConnectionState::Running(a)) =
             self.connection_state.get_mut(&conn_id)
@@ -2319,14 +2343,6 @@ impl Downstairs {
             panic!("could not get work from connection {conn_id:?}");
         };
         a
-    }
-
-    /// Mutably borrows a connection's `Work`
-    ///
-    /// # Panics
-    /// If the connection is not present or is not running
-    fn work_mut(&mut self, conn_id: ConnectionId) -> &mut Work {
-        &mut self.active_mut(conn_id).work
     }
 
     /// Borrow a connection's `Work`
@@ -2361,12 +2377,12 @@ impl Downstairs {
         ));
         self.connection_state.insert(
             conn_id,
-            ConnectionState::Running(ActiveConnection {
+            ConnectionState::Running(ActiveConnection::new(
                 data,
                 upstairs_connection,
-                work: Work::new(log.new(o!("role" => "work"))),
-                log,
-            }),
+                None,
+                &log,
+            )),
         );
         (cancel, reply_channel_rx)
     }
@@ -2438,7 +2454,7 @@ impl Downstairs {
                         .unwrap();
 
                     let active_upstairs_connection = self.connection_state
-                        [&active_id]
+                        [active_id]
                         .upstairs_connection()
                         .expect("bad ConnectionId for active connection");
                     warn!(
@@ -2539,7 +2555,7 @@ impl Downstairs {
     fn is_active(&self, connection: UpstairsConnection) -> bool {
         let uuid = connection.upstairs_id;
         if let Some(id) = self.active_upstairs.get(&uuid) {
-            self.connection_state[&id].upstairs_connection() == Some(connection)
+            self.connection_state[id].upstairs_connection() == Some(connection)
         } else {
             false
         }
@@ -2940,11 +2956,10 @@ impl Downstairs {
                 *state = ConnectionState::Running(ActiveConnection::new(
                     data,
                     upstairs_connection,
+                    Some(last_flush_number),
                     &self.log,
                 ));
 
-                let work = self.work_mut(conn_id);
-                work.last_flush = last_flush_number;
                 info!(self.log, "Set last flush {}", last_flush_number);
 
                 let state = &self.connection_state[&conn_id]; // reborrow
@@ -2981,6 +2996,7 @@ impl Downstairs {
                 *state = ConnectionState::Running(ActiveConnection::new(
                     data,
                     upstairs_connection,
+                    None,
                     &self.log,
                 ));
 
@@ -3270,27 +3286,24 @@ pub struct Work {
     /// given job.
     outstanding_deps: HashMap<JobId, usize>,
 
-    /*
-     * We have to keep track of all IOs that have been issued since
-     * our last flush, as that is how we make sure dependencies are
-     * respected. The last_flush is the downstairs job ID number (ds_id
-     * typically) for the most recent flush.
-     */
-    last_flush: JobId,
-    completed: Vec<JobId>,
+    /// Track completed jobs since the last flush
+    completed: CompletedJobs,
 
     log: Logger,
 }
 
 impl Work {
-    fn new(log: Logger) -> Self {
+    fn new(last_flush: Option<JobId>, log: Logger) -> Self {
         Work {
             dep_wait: HashMap::new(),
             outstanding_deps: HashMap::new(),
-            last_flush: JobId(0), // TODO(matt) make this an Option?
-            completed: Vec::with_capacity(32),
+            completed: CompletedJobs::new(last_flush),
             log,
         }
+    }
+
+    fn completed(&self) -> &[JobId] {
+        self.completed.completed()
     }
 
     fn jobs(&self) -> usize {
@@ -3338,9 +3351,7 @@ impl Work {
         let num_deps_outstanding = work
             .deps()
             .iter()
-            .filter(|&dep| {
-                *dep > self.last_flush && !self.completed.contains(dep)
-            })
+            .filter(|&dep| !self.completed.is_complete(*dep))
             .count();
 
         if num_deps_outstanding > 0 {
@@ -3361,6 +3372,7 @@ impl Work {
                         IOop::Write { .. } => "Write",
                         IOop::WriteUnwritten { .. } => "WriteUnwritten",
                         IOop::Flush { .. } => "Flush",
+                        IOop::Barrier { .. } => "Barrier",
                         IOop::Read { .. } => "Read",
                         IOop::ExtentClose { .. } => "ECLose",
                         IOop::ExtentFlushClose { .. } => "EFlushCLose",
@@ -3701,31 +3713,17 @@ mod test {
     }
 
     fn complete(work: &mut Work, ds_id: JobId, job: IOop) {
-        let is_flush = {
-            // validate that deps are done
-            let dep_list = job.deps();
-            for dep in dep_list {
-                let last_flush_satisfied = dep <= &work.last_flush;
-                let complete_satisfied = work.completed.contains(dep);
+        // validate that deps are done
+        assert!(job
+            .deps()
+            .iter()
+            .all(|dep| work.completed.is_complete(*dep)));
 
-                assert!(last_flush_satisfied || complete_satisfied);
-            }
-
-            matches!(
-                job,
-                IOop::Flush {
-                    dependencies: _,
-                    flush_number: _,
-                    gen_number: _,
-                    snapshot_details: _,
-                    extent_limit: _,
-                }
-            )
-        };
-
-        if is_flush {
-            work.last_flush = ds_id;
-            work.completed = Vec::with_capacity(32);
+        // Flushes and barriers both guarantee that no future jobs will depend
+        // on jobs that preceded them, so we reset the completed jobs list to
+        // only include their job id.
+        if matches!(job, IOop::Flush { .. } | IOop::Barrier { .. }) {
+            work.completed.reset(ds_id);
         } else {
             work.completed.push(ds_id);
         }
@@ -3756,7 +3754,7 @@ mod test {
 
     #[test]
     fn you_had_one_job() {
-        let mut work = Work::new(csl());
+        let mut work = Work::new(None, csl());
         add_work(&mut work, JobId(1000), vec![], false);
 
         assert_eq!(work.new_work(), vec![JobId(1000)]);
@@ -3766,7 +3764,7 @@ mod test {
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.completed, vec![JobId(1000)]);
+        assert_eq!(work.completed(), [JobId(1000)]);
 
         assert!(test_push_next_jobs(&mut work).is_empty());
     }
@@ -4179,14 +4177,14 @@ mod test {
         let writes = create_generic_test_write(eid);
 
         let rio = IOop::Write {
-            dependencies: vec![JobId(1000), JobId(1001)],
+            dependencies: vec![JobId(1001)],
             writes,
         };
         ds.active_mut(conn_id).add_work(JobId(1002), rio);
 
         // Now close the extent
         let rio = IOop::ExtentClose {
-            dependencies: vec![JobId(1000), JobId(1001), JobId(1002)],
+            dependencies: vec![JobId(1001), JobId(1002)],
             extent: eid,
         };
         ds.active_mut(conn_id).add_work(JobId(1003), rio);
@@ -4586,7 +4584,7 @@ mod test {
     #[test]
     fn jobs_write_unwritten() {
         // Verify WriteUnwritten jobs move through the work queue
-        let mut work = Work::new(csl());
+        let mut work = Work::new(None, csl());
         add_work_rf(&mut work, JobId(1000), vec![]);
 
         assert_eq!(work.new_work(), vec![JobId(1000)]);
@@ -4596,14 +4594,14 @@ mod test {
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.completed, vec![JobId(1000)]);
+        assert_eq!(work.completed(), [JobId(1000)]);
 
         assert!(test_push_next_jobs(&mut work).is_empty());
     }
 
     fn test_misc_work_through_work_queue(ds_id: JobId, ioop: IOop) {
         // Verify that a IOop work request will move through the work queue.
-        let mut work = Work::new(csl());
+        let mut work = Work::new(None, csl());
         work.add_work(ds_id, ioop);
 
         assert_eq!(work.new_work(), vec![ds_id]);
@@ -4613,7 +4611,7 @@ mod test {
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.completed, vec![ds_id]);
+        assert_eq!(work.completed(), [ds_id]);
 
         assert!(test_push_next_jobs(&mut work).is_empty());
     }
@@ -4683,7 +4681,7 @@ mod test {
 
     #[test]
     fn jobs_independent() {
-        let mut work = Work::new(csl());
+        let mut work = Work::new(None, csl());
 
         // Add two independent jobs
         add_work(&mut work, JobId(1000), vec![], false);
@@ -4702,14 +4700,14 @@ mod test {
         // do work
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.completed, vec![JobId(1000), JobId(1001)]);
+        assert_eq!(work.completed(), [JobId(1000), JobId(1001)]);
 
         assert!(test_push_next_jobs(&mut work).is_empty());
     }
 
     #[test]
     fn unblock_job() {
-        let mut work = Work::new(csl());
+        let mut work = Work::new(None, csl());
 
         // Add two jobs, one blocked on another
         add_work(&mut work, JobId(1000), vec![], false);
@@ -4727,7 +4725,7 @@ mod test {
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.completed, vec![JobId(1000)]);
+        assert_eq!(work.completed(), [JobId(1000)]);
 
         let next_jobs = test_push_next_jobs(&mut work);
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001)]);
@@ -4735,7 +4733,7 @@ mod test {
 
     #[test]
     fn unblock_job_chain() {
-        let mut work = Work::new(csl());
+        let mut work = Work::new(None, csl());
 
         // Add three jobs all blocked on each other in a chain
         add_work(&mut work, JobId(1000), vec![], false);
@@ -4762,26 +4760,29 @@ mod test {
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.completed, vec![JobId(1000)]);
+        assert_eq!(work.completed(), [JobId(1000)]);
         let next_jobs = test_push_next_jobs(&mut work);
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001)]);
         assert_eq!(work.new_work(), vec![JobId(1002)]);
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.completed, vec![JobId(1000), JobId(1001)]);
+        assert_eq!(work.completed(), [JobId(1000), JobId(1001)]);
         let next_jobs = test_push_next_jobs(&mut work);
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         assert!(work.new_work().is_empty());
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.completed, vec![JobId(1000), JobId(1001), JobId(1002)]);
+        assert_eq!(
+            work.completed(),
+            vec![JobId(1000), JobId(1001), JobId(1002)]
+        );
     }
 
     #[test]
     fn unblock_job_chain_first_is_flush() {
-        let mut work = Work::new(csl());
+        let mut work = Work::new(None, csl());
 
         // Add three jobs all blocked on each other in a chain, first is flush
         add_work(&mut work, JobId(1000), vec![], true);
@@ -4808,39 +4809,31 @@ mod test {
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush, JobId(1000));
-        assert!(work.completed.is_empty());
+        assert_eq!(work.completed(), vec![JobId(1000)]);
         let next_jobs = test_push_next_jobs(&mut work);
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001)]);
         assert_eq!(work.new_work(), vec![JobId(1002)]);
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush, JobId(1000));
-        assert_eq!(work.completed, vec![JobId(1001)]);
+        assert_eq!(work.completed(), vec![JobId(1000), JobId(1001)]);
         let next_jobs = test_push_next_jobs(&mut work);
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         assert!(work.new_work().is_empty());
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush, JobId(1000));
-        assert_eq!(work.completed, vec![JobId(1001), JobId(1002)]);
+        assert_eq!(work.completed(), [JobId(1000), JobId(1001), JobId(1002)]);
     }
 
     #[test]
     fn unblock_job_chain_second_is_flush() {
-        let mut work = Work::new(csl());
+        let mut work = Work::new(None, csl());
 
         // Add three jobs all blocked on each other in a chain, second is flush
         add_work(&mut work, JobId(1000), vec![], false);
         add_work(&mut work, JobId(1001), vec![JobId(1000)], true);
-        add_work(
-            &mut work,
-            JobId(1002),
-            vec![JobId(1000), JobId(1001)],
-            false,
-        );
+        add_work(&mut work, JobId(1002), vec![JobId(1001)], false);
 
         // new_work returns all new or dep wait jobs
         assert_eq!(
@@ -4857,28 +4850,26 @@ mod test {
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.completed, vec![JobId(1000)]);
+        assert_eq!(work.completed(), [JobId(1000)]);
         let next_jobs = test_push_next_jobs(&mut work);
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001)]);
         assert_eq!(work.new_work(), vec![JobId(1002)]);
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush, JobId(1001));
-        assert!(work.completed.is_empty());
+        assert_eq!(work.completed(), vec![JobId(1001)]);
         let next_jobs = test_push_next_jobs(&mut work);
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         assert!(work.new_work().is_empty());
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush, JobId(1001));
-        assert_eq!(work.completed, vec![JobId(1002)]);
+        assert_eq!(work.completed(), [JobId(1001), JobId(1002)]);
     }
 
     #[test]
     fn unblock_job_upstairs_sends_big_deps() {
-        let mut work = Work::new(csl());
+        let mut work = Work::new(None, csl());
 
         // Add three jobs all blocked on each other
         add_work(&mut work, JobId(1000), vec![], false);
@@ -4898,21 +4889,15 @@ mod test {
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush, JobId(1002));
-        assert!(work.completed.is_empty());
+        assert_eq!(work.completed(), vec![JobId(1002)]);
 
-        // Upstairs sends a job with these three in deps, not knowing Downstairs
+        // Upstairs sends a job with the flush in deps, not knowing Downstairs
         // has done the jobs already
-        add_work(
-            &mut work,
-            JobId(1003),
-            vec![JobId(1000), JobId(1001), JobId(1002)],
-            false,
-        );
+        add_work(&mut work, JobId(1003), vec![JobId(1002)], false);
         add_work(
             &mut work,
             JobId(1004),
-            vec![JobId(1000), JobId(1001), JobId(1002), JobId(1003)],
+            vec![JobId(1002), JobId(1003)],
             false,
         );
 
@@ -4924,13 +4909,12 @@ mod test {
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1004)]);
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush, JobId(1002));
-        assert_eq!(work.completed, vec![JobId(1003), JobId(1004)]);
+        assert_eq!(work.completed(), [JobId(1002), JobId(1003), JobId(1004)]);
     }
 
     #[test]
     fn job_dep_not_satisfied() {
-        let mut work = Work::new(csl());
+        let mut work = Work::new(None, csl());
 
         // Add three jobs all blocked on each other
         add_work(&mut work, JobId(1000), vec![], false);
@@ -4952,15 +4936,14 @@ mod test {
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002)]);
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush, JobId(1002));
-        assert!(work.completed.is_empty());
+        assert_eq!(work.completed(), vec![JobId(1002)]);
 
         assert_eq!(work.new_work(), vec![JobId(1003)]);
     }
 
     #[test]
     fn two_job_chains() {
-        let mut work = Work::new(csl());
+        let mut work = Work::new(None, csl());
 
         // Add three jobs all blocked on each other
         add_work(&mut work, JobId(1000), vec![], false);
@@ -4981,13 +4964,13 @@ mod test {
         let next_jobs = test_push_next_jobs(&mut work);
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1000), JobId(2000)]);
         test_do_work(&mut work, next_jobs);
-        assert_eq!(work.completed, vec![JobId(1000), JobId(2000)]);
+        assert_eq!(work.completed(), [JobId(1000), JobId(2000)]);
 
         let next_jobs = test_push_next_jobs(&mut work);
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001), JobId(2001)]);
         test_do_work(&mut work, next_jobs);
         assert_eq!(
-            work.completed,
+            work.completed(),
             vec![JobId(1000), JobId(2000), JobId(1001), JobId(2001)]
         );
 
@@ -4995,8 +4978,7 @@ mod test {
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1002), JobId(2002)]);
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.last_flush, JobId(2002));
-        assert!(work.completed.is_empty());
+        assert_eq!(work.completed(), vec![JobId(2002)]);
     }
 
     #[test]
@@ -5004,7 +4986,7 @@ mod test {
         /*
          * Test that jobs arriving out of order still complete.
          */
-        let mut work = Work::new(csl());
+        let mut work = Work::new(None, csl());
 
         // Add three jobs all blocked on each other (missing 1002)
         add_work(&mut work, JobId(1000), vec![], false);
@@ -5028,7 +5010,7 @@ mod test {
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.completed, vec![JobId(1000)]);
+        assert_eq!(work.completed(), [JobId(1000)]);
 
         let next_jobs = test_push_next_jobs(&mut work);
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001)]);
@@ -5043,7 +5025,7 @@ mod test {
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(
-            work.completed,
+            work.completed(),
             vec![JobId(1000), JobId(1001), JobId(1002), JobId(1003)]
         );
     }
@@ -5053,7 +5035,7 @@ mod test {
         /*
          * Test that jobs arriving out of order still complete.
          */
-        let mut work = Work::new(csl());
+        let mut work = Work::new(None, csl());
 
         // Add three jobs all blocked on each other (missing 1002)
         add_work(&mut work, JobId(1000), vec![], false);
@@ -5077,7 +5059,7 @@ mod test {
             false,
         );
 
-        assert_eq!(work.completed, vec![JobId(1000)]);
+        assert_eq!(work.completed(), [JobId(1000)]);
 
         let next_jobs = test_push_next_jobs(&mut work);
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001)]);
@@ -5092,7 +5074,7 @@ mod test {
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(
-            work.completed,
+            work.completed(),
             vec![JobId(1000), JobId(1001), JobId(1002), JobId(1003)]
         );
     }
@@ -5102,7 +5084,7 @@ mod test {
         /*
          * Test that jobs arriving out of order still complete.
          */
-        let mut work = Work::new(csl());
+        let mut work = Work::new(None, csl());
 
         // Add three jobs all blocked on each other (missing 1002)
         add_work(&mut work, JobId(1000), vec![], false);
@@ -5119,7 +5101,7 @@ mod test {
 
         test_do_work(&mut work, next_jobs);
 
-        assert_eq!(work.completed, vec![JobId(1000)]);
+        assert_eq!(work.completed(), [JobId(1000)]);
 
         let next_jobs = test_push_next_jobs(&mut work);
         assert_eq!(to_job_ids(&next_jobs), vec![JobId(1001)]);
@@ -5146,8 +5128,8 @@ mod test {
         test_do_work(&mut work, next_jobs);
 
         assert_eq!(
-            work.completed,
-            vec![JobId(1000), JobId(1001), JobId(1002), JobId(1003)]
+            work.completed(),
+            [JobId(1000), JobId(1001), JobId(1002), JobId(1003)]
         );
     }
 

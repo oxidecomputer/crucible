@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dropshot::ApiDescription;
+use dropshot::Body;
 use dropshot::ConfigDropshot;
 use dropshot::HandlerTaskMode;
 use dropshot::HttpError;
@@ -10,8 +11,7 @@ use dropshot::HttpResponseOk;
 use dropshot::HttpServerStarter;
 use dropshot::RequestContext;
 use dropshot::{endpoint, Path};
-use http::{Response, StatusCode};
-use hyper::Body;
+use hyper::{Response, StatusCode};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -152,7 +152,9 @@ async fn get_extent_file(
     get_a_file(extent_path).await
 }
 
-async fn get_a_file(path: PathBuf) -> Result<Response<Body>, HttpError> {
+async fn get_a_file(
+    path: PathBuf,
+) -> Result<Response<dropshot::Body>, HttpError> {
     /*
      * Make sure our file is neither a link nor a directory.
      */
@@ -181,13 +183,16 @@ async fn get_a_file(path: PathBuf) -> Result<Response<Body>, HttpError> {
             )
         })?;
 
-        let file_stream = hyper_staticfile::FileBytesStream::new(file);
+        let file_access = hyper_staticfile::vfs::TokioFileAccess::new(file);
+        let file_stream =
+            hyper_staticfile::util::FileBytesStream::new(file_access);
+        let body = Body::wrap(hyper_staticfile::Body::Full(file_stream));
         let content_type = "application/octet-stream".to_string();
 
         Ok(Response::builder()
             .status(StatusCode::OK)
-            .header(http::header::CONTENT_TYPE, content_type)
-            .body(file_stream.into_body())?)
+            .header(hyper::header::CONTENT_TYPE, content_type)
+            .body(body)?)
     }
 }
 

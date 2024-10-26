@@ -7,10 +7,8 @@ set -o pipefail
 ulimit -n 16384
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT" || (echo failed to cd "$ROOT"; exit 1)
 BINDIR=${BINDIR:-$ROOT/target/debug}
-
-echo "$ROOT"
-cd "$ROOT"
 
 if pgrep -fl crucible-downstairs; then
     echo 'Downstairs already running?' >&2
