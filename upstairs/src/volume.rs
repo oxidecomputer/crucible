@@ -621,6 +621,9 @@ impl Volume {
         for sub_volume in &self.sub_volumes {
             match sub_volume.query_extent_info().await? {
                 Some(ei) => {
+                    // When a volume is created and sub_volumes are added to
+                    // it, we verify that the block sizes match, so we never
+                    // expect there to be a mismatch.
                     assert_eq!(self.block_size, ei.block_size);
                     let svi = SubVolumeInfo {
                         blocks_per_extent: ei.blocks_per_extent,
@@ -629,6 +632,10 @@ impl Volume {
                     volumes.push(svi);
                 }
                 None => {
+                    // Mixing sub_volumes with and without
+                    if !volumes.is_empty() {
+                        crucible_bail!(SubvolumeTypeMismatch);
+                    }
                     continue;
                 }
             }
@@ -993,6 +1000,20 @@ pub struct VolumeInfo {
 pub struct SubVolumeInfo {
     pub blocks_per_extent: u64,
     pub extent_count: u32,
+}
+
+impl VolumeInfo {
+    pub fn total_size(&self) -> u64 {
+        self.block_size * (self.total_blocks() as u64)
+    }
+
+    pub fn total_blocks(&self) -> usize {
+        let mut total_blocks = 0;
+        for sv in &self.volumes {
+            total_blocks += sv.blocks_per_extent * (sv.extent_count as u64);
+        }
+        total_blocks.try_into().unwrap()
+    }
 }
 
 // Traditional subvolume is just one region set

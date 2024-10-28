@@ -103,6 +103,9 @@ pub enum CrucibleError {
     #[error("Subvolume size mismatch!")]
     SubvolumeSizeMismatch,
 
+    #[error("Subvolume type mismatch!")]
+    SubvolumeTypeMismatch,
+
     #[error("Cannot serve blocks: {0}")]
     CannotServeBlocks(String),
 
@@ -407,6 +410,7 @@ impl From<CrucibleError> for dropshot::HttpError {
             | CrucibleError::RwLockError(_)
             | CrucibleError::SendError(_)
             | CrucibleError::SubvolumeSizeMismatch
+            | CrucibleError::SubvolumeTypeMismatch
             | CrucibleError::UpstairsActivateInProgress
             | CrucibleError::UpstairsDeactivating
             | CrucibleError::UuidMismatch

@@ -1064,11 +1064,11 @@ impl Upstairs {
                     None => {
                         warn!(
                             self.log,
-                            "Extent size not available (active: {})",
+                            "Extent info not available (active: {})",
                             self.guest_io_ready()
                         );
                         done.send_err(CrucibleError::PropertyNotAvailable(
-                            "extent size".to_string(),
+                            "extent info".to_string(),
                         ));
                     }
                 };

@@ -38,7 +38,7 @@ pub enum CliMessage {
     FillSparse,
     Flush,
     Generic(usize, bool),
-    Info(VolumeInfo, u64, usize),
+    Info(VolumeInfo),
     InfoPlease,
     IsActive,
     MyUuid(Uuid),
@@ -225,7 +225,7 @@ mod tests {
             block_size: 512,
             volumes: Vec::new(),
         };
-        let input = CliMessage::Info(vi, 2, 99);
+        let input = CliMessage::Info(vi);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }

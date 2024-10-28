@@ -78,6 +78,8 @@ enum Workload {
     Demo,
     Dep,
     Dirty,
+    /// Write to one random block in every extent, then flush.
+    FastFill,
     Fill {
         /// Don't do the verify step after filling the region.
         #[clap(long, action)]
@@ -418,10 +420,14 @@ impl BufferbloatConfig {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RegionInfo {
     volume_info: VolumeInfo,
-    total_size: u64,
-    total_blocks: usize,
     write_log: WriteLog,
     max_block_io: usize,
+}
+
+impl RegionInfo {
+    pub fn block_size(&self) -> u64 {
+        self.volume_info.block_size
+    }
 }
 
 /*
@@ -464,8 +470,6 @@ async fn get_region_info(volume: &Volume) -> Result<RegionInfo, CrucibleError> {
 
     Ok(RegionInfo {
         volume_info,
-        total_size,
-        total_blocks,
         write_log,
         max_block_io,
     })
@@ -668,11 +672,11 @@ async fn load_write_log(
         Err(e) => bail!("Error {:?} reading verify config {:?}", e, vi),
     };
     println!("Loading write count information from file {vi:?}");
-    if ri.write_log.len() != ri.total_blocks {
+    if ri.write_log.len() != ri.volume_info.total_blocks() {
         bail!(
             "Verify file {vi:?} blocks:{} does not match regions:{}",
             ri.write_log.len(),
-            ri.total_blocks
+            ri.volume_info.total_blocks()
         );
     }
     /*
@@ -1157,6 +1161,11 @@ async fn main() -> Result<()> {
             return Ok(());
         }
 
+        Workload::FastFill => {
+            println!("FastFill test");
+            fill_sparse_workload(&volume, &mut region_info).await?;
+        }
+
         Workload::Fill { skip_verify } => {
             println!("Fill test");
             fill_workload(&volume, &mut region_info, skip_verify).await?;
@@ -1542,14 +1551,15 @@ async fn verify_volume(
     ri: &mut RegionInfo,
     range: bool,
 ) -> Result<()> {
-    assert_eq!(ri.write_log.len(), ri.total_blocks);
+    assert_eq!(ri.write_log.len(), ri.volume_info.total_blocks());
 
     println!(
         "Read and Verify all blocks (0..{} range:{})",
-        ri.total_blocks, range
+        ri.volume_info.total_blocks(),
+        range
     );
 
-    let pb = ProgressBar::new(ri.total_blocks as u64);
+    let pb = ProgressBar::new(ri.volume_info.total_blocks() as u64);
     pb.set_style(ProgressStyle::default_bar()
         .template(
             "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})"
@@ -1571,7 +1581,7 @@ async fn verify_volume(
         let volume = volume.clone();
         let write_log = write_log.clone();
         let blocks_done = blocks_done.clone();
-        let total_blocks = ri.total_blocks;
+        let total_blocks = ri.volume_info.total_blocks();
         let block_size = ri.volume_info.block_size;
         let pb = pb.clone();
         tasks.push(tokio::task::spawn(async move {
@@ -1892,7 +1902,7 @@ fn validate_vec<V: AsRef<[u8]>>(
  * minimum IO size to the largest possible IO size.
  */
 async fn balloon_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
-    for block_index in 0..ri.total_blocks {
+    for block_index in 0..ri.volume_info.total_blocks() {
         /*
          * Loop over all the IO sizes (in blocks) that an IO can
          * have, given our starting block and the total number of blocks
@@ -1955,7 +1965,7 @@ async fn fill_workload(
     ri: &mut RegionInfo,
     skip_verify: bool,
 ) -> Result<()> {
-    let pb = ProgressBar::new(ri.total_blocks as u64);
+    let pb = ProgressBar::new(ri.volume_info.total_blocks() as u64);
     pb.set_style(ProgressStyle::default_bar()
         .template(
             "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})"
@@ -1977,7 +1987,7 @@ async fn fill_workload(
         let volume = volume.clone();
         let write_log = write_log.clone();
         let blocks_done = blocks_done.clone();
-        let total_blocks = ri.total_blocks;
+        let total_blocks = ri.volume_info.total_blocks();
         let block_size = ri.volume_info.block_size;
         let pb = pb.clone();
         tasks.push(tokio::task::spawn(async move {
@@ -2047,12 +2057,14 @@ async fn fill_sparse_workload(
 ) -> Result<()> {
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
+    let mut extent_block_start = 0;
     // We loop over all sub volumes, doing one write to each extent.
     for (index, sv) in ri.volume_info.volumes.iter().enumerate() {
         let extents = sv.extent_count as usize;
         let extent_size = sv.blocks_per_extent as usize;
         for extent in 0..extents {
-            let mut block_index: usize = extent * extent_size;
+            let mut block_index: usize =
+                extent_block_start + (extent * extent_size);
             let random_offset = rng.gen_range(0..extent_size);
             block_index += random_offset;
 
@@ -2073,6 +2085,7 @@ async fn fill_sparse_workload(
             );
             volume.write(offset, data).await?;
         }
+        extent_block_start += extent_size * sv.extent_count as usize;
     }
 
     volume.flush(None).await?;
@@ -2099,10 +2112,11 @@ async fn generic_workload(
         WhenToQuit::Count { count } => count.to_string().len(),
         _ => 5,
     };
-    let block_width = ri.total_blocks.to_string().len();
+    let total_blocks = ri.volume_info.total_blocks();
+    let block_width = total_blocks.to_string().len();
     let size_width = (10 * ri.volume_info.block_size).to_string().len();
 
-    let max_io_size = std::cmp::min(10, ri.total_blocks);
+    let max_io_size = std::cmp::min(10, total_blocks);
 
     for c in 1.. {
         let op = rng.gen_range(0..10);
@@ -2132,7 +2146,7 @@ async fn generic_workload(
             // Once we have our IO size, decide where the starting offset should
             // be, which is the total possible size minus the randomly chosen
             // IO size.
-            let block_max = ri.total_blocks - size + 1;
+            let block_max = total_blocks - size + 1;
             let block_index = rng.gen_range(0..block_max);
 
             // Convert offset and length to their byte values.
@@ -2877,7 +2891,7 @@ async fn dirty_workload(
      * be, which is the total possible size minus the randomly chosen
      * IO size.
      */
-    let block_max = ri.total_blocks - size + 1;
+    let block_max = ri.volume_info.total_blocks() - size + 1;
     let count_width = count.to_string().len();
     for c in 1..=count {
         let block_index = rng.gen_range(0..block_max);
@@ -3118,11 +3132,11 @@ async fn perf_workload(
     for sv in ri.volume_info.volumes.iter() {
         es += sv.blocks_per_extent;
     }
-    let ec = ri.total_blocks as u64 / es;
+    let ec = ri.volume_info.total_blocks() as u64 / es;
 
     // To make a random block offset, we take the total block count and subtract
     // the IO size in blocks (so that we don't overspill the region)
-    let offset_mod = (ri.total_blocks - blocks_per_io) as u64;
+    let offset_mod = (ri.volume_info.total_blocks() - blocks_per_io) as u64;
     for _ in 0..write_loop {
         let mut wtime = Vec::with_capacity(count);
         let big_start = Instant::now();
@@ -3253,10 +3267,14 @@ fn print_region_description(ri: &RegionInfo, encrypted: bool) {
             human_bytes((block_size * sv.blocks_per_extent) as f64)
         );
     }
-    println!("  total blocks:                 {}", ri.total_blocks);
+    println!(
+        "  total blocks:                 {}",
+        ri.volume_info.total_blocks()
+    );
+    let total_size = ri.volume_info.total_size();
     println!(
         "  total size:                   {}",
-        human_bytes(ri.total_size as f64)
+        human_bytes(total_size as f64)
     );
     println!(
         "  encryption:                   {}",
@@ -3288,8 +3306,9 @@ async fn rand_read_write_workload(
         fill_workload(volume, ri, true).await?;
     }
 
-    if cfg.blocks_per_io > ri.total_blocks {
-        bail!("too many blocks per IO; can't exceed {}", ri.total_blocks);
+    let total_blocks = ri.volume_info.total_blocks();
+    if cfg.blocks_per_io > total_blocks {
+        bail!("too many blocks per IO; can't exceed {}", total_blocks);
     }
 
     let block_size = ri.volume_info.block_size as usize;
@@ -3306,7 +3325,6 @@ async fn rand_read_write_workload(
     let stop = Arc::new(AtomicBool::new(false));
     let byte_count = Arc::new(AtomicUsize::new(0));
 
-    let total_blocks = ri.total_blocks;
     let mut workers = vec![];
     for _ in 0..cfg.io_depth {
         let stop = stop.clone();
@@ -3451,8 +3469,9 @@ async fn bufferbloat_workload(
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
-    if cfg.blocks_per_io > ri.total_blocks {
-        bail!("too many blocks per IO; can't exceed {}", ri.total_blocks);
+    let total_blocks = ri.volume_info.total_blocks();
+    if cfg.blocks_per_io > total_blocks {
+        bail!("too many blocks per IO; can't exceed {}", total_blocks);
     }
 
     let block_size = ri.volume_info.block_size as usize;
@@ -3472,7 +3491,6 @@ async fn bufferbloat_workload(
     let stop = Arc::new(AtomicBool::new(false));
     let byte_count = Arc::new(AtomicUsize::new(0));
 
-    let total_blocks = ri.total_blocks;
     let mut workers = vec![];
     for _ in 0..cfg.io_depth {
         let stop = stop.clone();
@@ -3566,7 +3584,7 @@ async fn one_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
      * IO size.
      */
     let size = 1;
-    let block_max = ri.total_blocks - size + 1;
+    let block_max = ri.volume_info.total_blocks() - size + 1;
     let block_index = rng.gen_range(0..block_max);
 
     /*
@@ -3708,7 +3726,7 @@ async fn write_flush_read_workload(
          * be, which is the total possible size minus the randomly chosen
          * IO size.
          */
-        let block_max = ri.total_blocks - size + 1;
+        let block_max = ri.volume_info.total_blocks() - size + 1;
         let block_index = rng.gen_range(0..block_max);
 
         /*
@@ -3825,7 +3843,8 @@ async fn repair_workload(
     let mut one_write = false;
     // These help the printlns use the minimum white space
     let count_width = count.to_string().len();
-    let block_width = ri.total_blocks.to_string().len();
+    let total_blocks = ri.volume_info.total_blocks();
+    let block_width = total_blocks.to_string().len();
     let block_size = ri.volume_info.block_size;
     let size_width = (10 * block_size).to_string().len();
     for c in 1..=count {
@@ -3858,7 +3877,7 @@ async fn repair_workload(
             // Once we have our IO size, decide where the starting offset should
             // be, which is the total possible size minus the randomly chosen
             // IO size.
-            let block_max = ri.total_blocks - size + 1;
+            let block_max = total_blocks - size + 1;
             let block_index = rng.gen_range(0..block_max);
 
             // Convert offset and length to their byte values.
@@ -3955,7 +3974,7 @@ async fn demo_workload(
             // Once we have our IO size, decide where the starting offset should
             // be, which is the total possible size minus the randomly chosen
             // IO size.
-            let block_max = ri.total_blocks - size + 1;
+            let block_max = ri.volume_info.total_blocks() - size + 1;
             let block_index = rng.gen_range(0..block_max);
 
             // Convert offset and length to their byte values.
@@ -4132,7 +4151,7 @@ async fn span_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
  * We wait for each op to finish, so this is all sequential.
  */
 async fn big_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
-    for block_index in 0..ri.total_blocks {
+    for block_index in 0..ri.volume_info.total_blocks() {
         /*
          * Update the write count for all blocks we plan to write to.
          */
@@ -4185,20 +4204,21 @@ async fn biggest_io_workload(
      * Based on our protocol, send the biggest IO we can.
      */
     println!("determine blocks for large io");
+    let total_blocks = ri.volume_info.total_blocks();
     let biggest_io_in_blocks = {
         let crucible_max_io =
             crucible_protocol::CrucibleEncoder::max_io_blocks(
                 ri.volume_info.block_size as usize,
             )?;
 
-        if crucible_max_io < ri.total_blocks {
+        if crucible_max_io < total_blocks {
             crucible_max_io
         } else {
             println!(
                 "Volume total blocks {} smaller than max IO blocks {}",
-                ri.total_blocks, crucible_max_io,
+                total_blocks, crucible_max_io,
             );
-            ri.total_blocks
+            total_blocks
         }
     };
 
@@ -4207,12 +4227,12 @@ async fn biggest_io_workload(
         biggest_io_in_blocks
     );
     let mut block_index = 0;
-    while block_index < ri.total_blocks {
+    while block_index < total_blocks {
         let offset = BlockIndex(block_index as u64);
 
         let next_io_blocks =
-            if block_index + biggest_io_in_blocks > ri.total_blocks {
-                ri.total_blocks - block_index
+            if block_index + biggest_io_in_blocks > total_blocks {
+                total_blocks - block_index
             } else {
                 biggest_io_in_blocks
             };
@@ -4248,7 +4268,8 @@ async fn biggest_io_workload(
  * TODO: Make this test use the global write count, but remember, async.
  */
 async fn dep_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
-    let final_offset = ri.total_size - ri.volume_info.block_size;
+    let total_size = ri.volume_info.total_size();
+    let final_offset = total_size - ri.volume_info.block_size;
 
     let mut my_offset: u64 = 0;
     for my_count in 1..150 {
