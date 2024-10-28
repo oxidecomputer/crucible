@@ -384,14 +384,14 @@ pub(crate) mod up_test {
         };
 
         // Validate it
-        let successful_hash = validate_encrypted_read_response(
+        let r = validate_encrypted_read_response(
             Some(ctx),
             &mut data,
             &Arc::new(context),
             &csl(),
-        )?;
+        );
 
-        assert_eq!(successful_hash, Validation::Encrypted(ctx));
+        assert!(r.is_ok());
 
         // `validate_encrypted_read_response` will mutate the read
         // response's data value, make sure it decrypted
@@ -430,15 +430,15 @@ pub(crate) mod up_test {
         data.resize(512, 0u8);
 
         // Validate the read response
-        let successful_hash = validate_encrypted_read_response(
+        let r = validate_encrypted_read_response(
             None,
             &mut data,
             &Arc::new(context),
             &csl(),
-        )?;
+        );
 
         // The above function will return None for a blank block
-        assert_eq!(successful_hash, Validation::Empty);
+        assert!(r.is_ok());
         assert_eq!(data, vec![0u8; 512]);
 
         Ok(())
@@ -456,16 +456,13 @@ pub(crate) mod up_test {
         let original_data = data.clone();
 
         // Validate it
-        let successful_hash = validate_unencrypted_read_response(
+        let r = validate_unencrypted_read_response(
             Some(read_response_hash),
             &mut data,
             &csl(),
-        )?;
-
-        assert_eq!(
-            successful_hash,
-            Validation::Unencrypted(read_response_hash)
         );
+
+        assert!(r.is_ok());
         assert_eq!(data, original_data);
 
         Ok(())
@@ -480,10 +477,9 @@ pub(crate) mod up_test {
         let original_data = data.clone();
 
         // Validate a read response
-        let successful_hash =
-            validate_unencrypted_read_response(None, &mut data, &csl())?;
+        let r = validate_unencrypted_read_response(None, &mut data, &csl());
 
-        assert_eq!(successful_hash, Validation::Empty);
+        assert!(r.is_ok());
         assert_eq!(data, original_data);
 
         Ok(())

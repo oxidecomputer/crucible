@@ -882,17 +882,6 @@ impl std::fmt::Display for DsState {
     }
 }
 
-/// Results of validating a single block
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub(crate) enum Validation {
-    /// The block has no hash / context and is empty
-    Empty,
-    /// For an unencrypted block, the result is the hash
-    Unencrypted(u64),
-    /// For an encrypted block, the result is the tag + nonce
-    Encrypted(crucible_protocol::EncryptionContext),
-}
-
 /*
  * A unit of work for downstairs that is put into the hashmap.
  */
@@ -918,12 +907,12 @@ struct DownstairsIO {
      */
     replay: bool,
 
-    /*
-     * If the operation is a Read, this holds the resulting buffer
-     * The validation vec holds the validation results for the read
-     */
+    /// If the operation is a Read, this holds the resulting buffer and hashes
+    ///
+    /// The buffer _may_ be removed during the transfer to the Guest, to reduce
+    /// `memcpy` overhead.  If this occurs, the hashes remain present for
+    /// consistency checking with subsequent replies.
     data: Option<RawReadResponse>,
-    read_validations: Vec<Validation>,
 
     /// Handle for this job's contribution to guest backpressure
     ///

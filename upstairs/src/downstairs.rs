@@ -19,7 +19,7 @@ use crate::{
     DownstairsMend, DsState, ExtentFix, ExtentRepairIDs, IOState, IOStateCount,
     IOop, ImpactedBlocks, JobId, Message, RawReadResponse, RawWrite,
     ReconcileIO, ReconciliationId, RegionDefinition, ReplaceResult,
-    SnapshotDetails, Validation, WorkSummary,
+    SnapshotDetails, WorkSummary,
 };
 use crucible_common::{
     impacted_blocks::ImpactedAddr, BlockIndex, BlockOffset, ExtentId,
@@ -425,8 +425,6 @@ impl Downstairs {
         let done = self.ds_active.get_mut(&ds_id).unwrap();
         assert!(!done.acked);
 
-        let data = done.data.take();
-
         done.acked = true;
         let r = done.result();
 
@@ -476,6 +474,10 @@ impl Downstairs {
         // Copy (if present) read data back to the guest buffer they
         // provided to us, and notify any waiters.
         if let Some(res) = done.res.take() {
+            let data = done
+                .data
+                .as_mut()
+                .map(|v| (v.blocks.as_slice(), &mut v.data));
             res.transfer_and_notify(data, r);
         }
 
@@ -2134,7 +2136,6 @@ impl Downstairs {
                 res,
                 replay: false,
                 data: None,
-                read_validations: vec![],
                 backpressure_guard: bp_guard,
             },
         );
@@ -2810,7 +2811,6 @@ impl Downstairs {
         &mut self,
         client_id: ClientId,
         m: Message,
-        read_validations: Vec<Validation>,
         up_state: &UpstairsState,
     ) -> Result<(), CrucibleError> {
         let (upstairs_id, session_id, ds_id, read_data, extent_info) = match m {
@@ -3061,7 +3061,6 @@ impl Downstairs {
             ds_id,
             client_id,
             read_data,
-            read_validations,
             up_state,
             extent_info,
         );
@@ -3108,17 +3107,10 @@ impl Downstairs {
     ) -> bool {
         let was_ackable = self.ackable_work.contains(&ds_id);
 
-        // Make up dummy values for hashes, since they're not actually checked
-        // here (besides confirming that we have the correct number).
-        let hashes = match &responses {
-            Ok(r) => vec![Validation::Unencrypted(0); r.blocks.len()],
-            Err(..) => vec![],
-        };
         self.process_io_completion_inner(
             ds_id,
             client_id,
             responses,
-            hashes,
             up_state,
             extent_info,
         );
@@ -3132,7 +3124,6 @@ impl Downstairs {
         ds_id: JobId,
         client_id: ClientId,
         responses: Result<RawReadResponse, CrucibleError>,
-        read_validations: Vec<Validation>,
         up_state: &UpstairsState,
         extent_info: Option<ExtentInfo>,
     ) {
@@ -3161,18 +3152,10 @@ impl Downstairs {
             return;
         };
 
-        // Sanity-checking for a programmer error during offloaded decryption.
-        // If we didn't get one hash per read block, then `responses` must
-        // have been converted into `Err(..)`.
-        if let Ok(reads) = &responses {
-            assert_eq!(reads.blocks.len(), read_validations.len());
-        }
-
         if self.clients[client_id].process_io_completion(
             ds_id,
             job,
             responses,
-            read_validations,
             deactivate,
             extent_info,
         ) {

@@ -9,7 +9,7 @@ use crate::{
     backpressure::{
         BackpressureAmount, BackpressureConfig, SharedBackpressureAmount,
     },
-    BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, RawReadResponse,
+    BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, ReadBlockContext,
     ReplaceResult, UpstairsAction,
 };
 use crucible_client_types::RegionExtentInfo;
@@ -36,16 +36,15 @@ pub(crate) enum GuestBlockRes {
 }
 
 impl GuestBlockRes {
-    /*
-     * When all downstairs jobs have completed, and all buffers have been
-     * attached to the GtoS struct, we can do the final copy of the data
-     * from upstairs memory back to the guest's memory. Notify corresponding
-     * BlockOpWaiter if required
-     */
+    /// Copy data to guest buffers and notify the guest
+    ///
+    /// The `downstairs_response` must be present if this was a `Read` job.  In
+    /// this case, the `&mut BytesMut` argument may be taken (to reduce `memcpy`
+    /// overhead).
     #[instrument]
     pub(crate) fn transfer_and_notify(
         self,
-        downstairs_response: Option<RawReadResponse>,
+        downstairs_response: Option<(&[ReadBlockContext], &mut BytesMut)>,
         result: Result<(), CrucibleError>,
     ) {
         /*
@@ -60,13 +59,13 @@ impl GuestBlockRes {
          */
         match self {
             GuestBlockRes::Read(mut buffer, res) => {
-                if let Some(downstairs_response) = downstairs_response {
+                if let Some((blocks, data)) = downstairs_response {
                     // XXX don't do if result.is_err()?
                     // Copy over into guest memory.
                     let _ignored =
                         span!(Level::TRACE, "copy to guest buffer").entered();
 
-                    buffer.write_read_response(downstairs_response);
+                    buffer.write_read_response(blocks, data);
                 } else {
                     // Should this panic?  If the caller is requesting a
                     // transfer, the guest_buffer should exist. If it does not
