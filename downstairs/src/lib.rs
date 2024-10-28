@@ -2057,6 +2057,7 @@ async fn recv_task<RT>(
 ) where
     RT: tokio::io::AsyncRead + std::marker::Unpin + std::marker::Send,
 {
+    // Disconnect from the upstairs after 45 sec, logging a warning every 15s
     const TIMEOUT: VerboseTimeout = VerboseTimeout {
         tick: Duration::from_secs(15),
         count: 3,

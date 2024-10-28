@@ -424,11 +424,14 @@ impl From<CrucibleError> for dropshot::HttpError {
 ///
 /// This object waits for `tick * count`, printing a log message every `tick`
 pub struct VerboseTimeout {
+    /// Interval at which we log a timeout warning
     pub tick: Duration,
+    /// Number of intervals before returning
     pub count: u32,
 }
 
 impl VerboseTimeout {
+    /// Wait for `tick * count` duration, logging every `tick`
     pub async fn wait(&self, log: &slog::Logger) {
         for i in 0..self.count {
             tokio::time::sleep(self.tick).await;
@@ -436,6 +439,7 @@ impl VerboseTimeout {
         }
     }
 
+    /// Returns the total timeout duration for this object
     pub fn timeout(&self) -> Duration {
         self.tick * self.count
     }

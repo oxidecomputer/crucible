@@ -31,6 +31,7 @@ use tokio::{
 use tokio_util::codec::FramedRead;
 use uuid::Uuid;
 
+// Disconnect from downstairs upstairs after 45 sec, logging a warning every 15s
 pub(crate) const CLIENT_TIMEOUT: VerboseTimeout = VerboseTimeout {
     tick: Duration::from_secs(15),
     count: 3,
