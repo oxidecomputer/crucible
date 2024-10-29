@@ -343,42 +343,6 @@ impl Guest {
         rx.wait().await
     }
 
-    pub async fn query_extent_info(
-        &self,
-    ) -> Result<Option<RegionExtentInfo>, CrucibleError> {
-        let ei = self
-            .send_and_wait(|done| BlockOp::QueryExtentInfo { done })
-            .await?;
-        Ok(Some(ei))
-    }
-
-    pub async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
-        self.send_and_wait(|done| BlockOp::QueryWorkQueue { done })
-            .await
-    }
-
-    // Maybe this can just be a guest specific thing, not a BlockIO
-    pub async fn activate_with_gen(
-        &self,
-        gen: u64,
-    ) -> Result<(), CrucibleError> {
-        let (rx, done) = BlockOpWaiter::pair();
-        self.send(BlockOp::GoActiveWithGen { gen, done }).await;
-        info!(
-            self.log,
-            "The guest has requested activation with gen:{}", gen
-        );
-
-        rx.wait().await?;
-
-        info!(
-            self.log,
-            "The guest has finished waiting for activation with:{}", gen
-        );
-
-        Ok(())
-    }
-
     /// Sleeps for a backpressure-dependent amount, holding the lock
     ///
     /// If backpressure is saturated, logs and returns an error.
