@@ -1714,7 +1714,7 @@ impl Downstairs {
     pub(crate) fn on_reconciliation_ack(
         &mut self,
         client_id: ClientId,
-        m: Message,
+        repair_id: ReconciliationId,
         up_state: &UpstairsState,
     ) -> bool {
         let Some(next) = self.reconcile_current_work.as_mut() else {
@@ -1742,10 +1742,6 @@ impl Downstairs {
             return false;
         }
 
-        let Message::RepairAckId { repair_id } = m else {
-            panic!("invalid message {m:?} for on_reconciliation_ack");
-        };
-
         if self.clients[client_id].on_reconciliation_job_done(repair_id, next) {
             self.reconcile_current_work = None;
             self.reconcile_repair_needed -= 1;
@@ -1763,17 +1759,11 @@ impl Downstairs {
     pub(crate) fn on_reconciliation_failed(
         &mut self,
         client_id: ClientId,
-        m: Message,
+        repair_id: ReconciliationId,
+        extent_id: ExtentId,
+        error: CrucibleError,
         up_state: &UpstairsState,
     ) {
-        let Message::ExtentError {
-            repair_id,
-            extent_id,
-            error,
-        } = m
-        else {
-            panic!("invalid message {m:?}");
-        };
         error!(
             self.clients[client_id].log,
             "extent {extent_id} error on job {repair_id}: {error}"
@@ -6119,9 +6109,7 @@ pub(crate) mod test {
         // Send an ack to trigger the reconciliation state check
         let nw = ds.on_reconciliation_ack(
             ClientId::new(0),
-            Message::RepairAckId {
-                repair_id: close_id,
-            },
+            close_id,
             &UpstairsState::Active,
         );
         assert!(!nw);
@@ -6166,28 +6154,15 @@ pub(crate) mod test {
         ds.send_next_reconciliation_req();
 
         // Downstairs 0 and 2 are okay, but 1 failed (for some reason!)
-        let msg = Message::RepairAckId { repair_id: rep_id };
-        assert!(!ds.on_reconciliation_ack(
-            ClientId::new(0),
-            msg.clone(),
-            &up_state
-        ));
+        assert!(!ds.on_reconciliation_ack(ClientId::new(0), rep_id, &up_state));
         ds.on_reconciliation_failed(
             ClientId::new(1),
-            Message::ExtentError {
-                repair_id: rep_id,
-                extent_id: ExtentId(1),
-                error: CrucibleError::GenericError(
-                    "test extent error".to_owned(),
-                ),
-            },
+            rep_id,
+            ExtentId(1),
+            CrucibleError::GenericError("test extent error".to_owned()),
             &up_state,
         );
-        assert!(!ds.on_reconciliation_ack(
-            ClientId::new(2),
-            msg.clone(),
-            &up_state
-        ));
+        assert!(!ds.on_reconciliation_ack(ClientId::new(2), rep_id, &up_state));
 
         // Getting the next work to do should verify the previous is done,
         // and handle a state change for a downstairs.
@@ -6255,34 +6230,18 @@ pub(crate) mod test {
 
         // Ack the close job.  Reconciliation isn't done at this point, because
         // there's another job in the task list.
-        let msg = Message::RepairAckId {
-            repair_id: close_id,
-        };
         for i in ClientId::iter() {
-            assert!(!ds.on_reconciliation_ack(i, msg.clone(), &up_state));
+            assert!(!ds.on_reconciliation_ack(i, close_id, &up_state));
         }
 
         // The third ack will have sent the next reconciliation job
         assert!(ds.reconcile_task_list.is_empty());
 
         // Now, make sure we consider this done only after all three are done
-        let msg = Message::RepairAckId { repair_id: rep_id };
-        assert!(!ds.on_reconciliation_ack(
-            ClientId::new(0),
-            msg.clone(),
-            &up_state
-        ));
-        assert!(!ds.on_reconciliation_ack(
-            ClientId::new(1),
-            msg.clone(),
-            &up_state
-        ));
+        assert!(!ds.on_reconciliation_ack(ClientId::new(0), rep_id, &up_state));
+        assert!(!ds.on_reconciliation_ack(ClientId::new(1), rep_id, &up_state));
         // The third ack finishes reconciliation!
-        assert!(ds.on_reconciliation_ack(
-            ClientId::new(2),
-            msg.clone(),
-            &up_state
-        ));
+        assert!(ds.on_reconciliation_ack(ClientId::new(2), rep_id, &up_state));
         assert_eq!(ds.reconcile_repair_needed, 0);
         assert_eq!(ds.reconcile_repaired, 2);
     }
@@ -6328,19 +6287,10 @@ pub(crate) mod test {
         assert_eq!(job.state[ClientId::new(1)], ReconcileIOState::InProgress);
         assert_eq!(job.state[ClientId::new(2)], ReconcileIOState::InProgress);
 
-        let msg = Message::RepairAckId { repair_id: rep_id };
-        assert!(!ds.on_reconciliation_ack(
-            ClientId::new(1),
-            msg.clone(),
-            &up_state
-        ));
+        assert!(!ds.on_reconciliation_ack(ClientId::new(1), rep_id, &up_state));
         // The second ack finishes reconciliation, because it was skipped for
         // client 0 (which was the source of repairs).
-        assert!(ds.on_reconciliation_ack(
-            ClientId::new(2),
-            msg.clone(),
-            &up_state
-        ));
+        assert!(ds.on_reconciliation_ack(ClientId::new(2), rep_id, &up_state));
         assert_eq!(ds.reconcile_repair_needed, 0);
         assert_eq!(ds.reconcile_repaired, 1);
     }
@@ -6375,11 +6325,8 @@ pub(crate) mod test {
 
         // If we get back an ack from client 0, something has gone terribly
         // wrong (because the jobs should have been skipped for it)
-        ds.on_reconciliation_ack(
-            ClientId::new(0),
-            Message::RepairAckId { repair_id: rep_id },
-            &up_state,
-        ); // this should panic!
+        ds.on_reconciliation_ack(ClientId::new(0), rep_id, &up_state);
+        // this should panic!
     }
 
     #[test]
@@ -6414,17 +6361,8 @@ pub(crate) mod test {
         assert!(!ds.send_next_reconciliation_req());
 
         // Now, make sure we consider this done only after all three are done
-        let msg = Message::RepairAckId { repair_id: rep_id };
-        assert!(!ds.on_reconciliation_ack(
-            ClientId::new(1),
-            msg.clone(),
-            &up_state
-        ));
-        assert!(!ds.on_reconciliation_ack(
-            ClientId::new(2),
-            msg.clone(),
-            &up_state
-        ));
+        assert!(!ds.on_reconciliation_ack(ClientId::new(1), rep_id, &up_state));
+        assert!(!ds.on_reconciliation_ack(ClientId::new(2), rep_id, &up_state));
         // don't finish
 
         ds.send_next_reconciliation_req(); // panics!
