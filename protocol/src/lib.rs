@@ -1328,10 +1328,47 @@ mod tests {
         };
         let encoded = bincode::serialize(&m).unwrap();
         assert_eq!(
-            &encoded[0..8],
+            encoded,
             [
                 1, 0, 0, 0, // tag
-                123, 0, 0, 0 // version
+                123, 0, 0, 0, // version
+                0, 0, 0, 0, // SocketAddr::SocketAddrV4
+                127, 0, 0, 1, // ip: Ipv4Addr
+                123, 0, // port: u16
+            ]
+        );
+
+        let m = Message::YesItsMe {
+            version: 123,
+            repair_addr: "[ff1d::12e]:456".parse().unwrap(),
+        };
+        let encoded = bincode::serialize(&m).unwrap();
+        assert_eq!(
+            encoded,
+            [
+                1, 0, 0, 0, // tag
+                123, 0, 0, 0, // version
+                1, 0, 0, 0, // SocketAddr::SocketAddrV6
+                0xff, 0x1d, 0, 0, 0, 0, 0, 0, // ip: Ipv6Addr
+                0, 0, 0, 0, 0, 0, 0x1, 0x2e, // ip (cont)
+                200, 1 // port
+            ]
+        );
+    }
+
+    /// Test that the `Message::VersionMismatch { version }` encoding is stable
+    ///
+    /// This encoding is used to check for compatibility, so it cannot change
+    /// even upon protocol version bumps.
+    #[test]
+    fn version_mismatch() {
+        let m = Message::VersionMismatch { version: 0x3456 };
+        let encoded = bincode::serialize(&m).unwrap();
+        assert_eq!(
+            encoded,
+            [
+                2, 0, 0, 0, // tag
+                0x56, 0x34, 0, 0 // version
             ]
         );
     }
