@@ -1684,17 +1684,23 @@ impl Upstairs {
                 }
             }
 
-            Message::ExtentError { .. } => {
+            Message::ExtentError {
+                repair_id,
+                extent_id,
+                error,
+            } => {
                 self.downstairs.on_reconciliation_failed(
                     client_id,
-                    m,
+                    repair_id,
+                    extent_id,
+                    error,
                     &self.state,
                 );
             }
-            Message::RepairAckId { .. } => {
+            Message::RepairAckId { repair_id } => {
                 if self.downstairs.on_reconciliation_ack(
                     client_id,
-                    m,
+                    repair_id,
                     &self.state,
                 ) {
                     // reconciliation is done, great work everyone
@@ -1706,8 +1712,8 @@ impl Upstairs {
                 self.on_no_longer_active(client_id, m);
             }
 
-            Message::UuidMismatch { .. } => {
-                self.on_uuid_mismatch(client_id, m);
+            Message::UuidMismatch { expected_id } => {
+                self.on_uuid_mismatch(client_id, expected_id);
             }
 
             // These are all messages that we send out, so we shouldn't see them
@@ -1953,11 +1959,7 @@ impl Upstairs {
         self.set_inactive(CrucibleError::NoLongerActive);
     }
 
-    fn on_uuid_mismatch(&mut self, client_id: ClientId, m: Message) {
-        let Message::UuidMismatch { expected_id } = m else {
-            panic!("called on_uuid_mismatch on invalid message {m:?}");
-        };
-
+    fn on_uuid_mismatch(&mut self, client_id: ClientId, expected_id: Uuid) {
         let client_log = &self.downstairs.clients[client_id].log;
         error!(
             client_log,
