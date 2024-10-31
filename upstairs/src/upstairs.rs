@@ -38,9 +38,6 @@ use uuid::Uuid;
 /// How often to log stats for DTrace
 const STAT_INTERVAL: Duration = Duration::from_secs(1);
 
-/// How often to do IO / bandwidth limit checking
-const LEAK_INTERVAL: Duration = Duration::from_millis(1000);
-
 /// How often to do live-repair status checking
 const REPAIR_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -92,7 +89,6 @@ pub struct UpCounters {
     action_guest: u64,
     action_deferred_block: u64,
     action_deferred_message: u64,
-    action_leak_check: u64,
     action_flush_check: u64,
     action_stat_check: u64,
     action_repair_check: u64,
@@ -108,7 +104,6 @@ impl UpCounters {
             action_guest: 0,
             action_deferred_block: 0,
             action_deferred_message: 0,
-            action_leak_check: 0,
             action_flush_check: 0,
             action_stat_check: 0,
             action_repair_check: 0,
@@ -141,7 +136,6 @@ impl UpCounters {
 ///   - Client timeout
 ///   - Client ping intervals
 ///   - Live-repair checks
-///   - IOPS leaking
 ///   - Automatic flushes
 ///   - DTrace logging of stats
 /// - Control requests from the controller server
@@ -236,9 +230,6 @@ pub(crate) struct Upstairs {
     /// Next time to check for repairs
     repair_check_deadline: Option<Instant>,
 
-    /// Next time to leak IOP / bandwidth tokens from the Guest
-    leak_deadline: Instant,
-
     /// Next time to trigger an automatic flush
     flush_deadline: Instant,
 
@@ -278,7 +269,6 @@ pub(crate) enum UpstairsAction {
     /// A deferred message has arrived
     DeferredMessage(DeferredMessage),
 
-    LeakCheck,
     FlushCheck,
     StatUpdate,
     RepairCheck,
@@ -414,7 +404,6 @@ impl Upstairs {
             state: UpstairsState::Initializing,
             cfg,
             repair_check_deadline: None,
-            leak_deadline: now + LEAK_INTERVAL,
             flush_deadline: now + flush_interval,
             stat_deadline: now + STAT_INTERVAL,
             flush_interval,
@@ -525,9 +514,6 @@ impl Upstairs {
                 };
                 UpstairsAction::DeferredMessage(m)
             }
-            _ = sleep_until(self.leak_deadline) => {
-                UpstairsAction::LeakCheck
-            }
             _ = sleep_until(self.flush_deadline) => {
                 UpstairsAction::FlushCheck
             }
@@ -573,14 +559,6 @@ impl Upstairs {
                     .counters
                     .action_deferred_message));
                 self.on_client_message(m);
-            }
-            UpstairsAction::LeakCheck => {
-                self.counters.action_leak_check += 1;
-                cdt::up__action_leak_check!(|| (self
-                    .counters
-                    .action_leak_check));
-                // XXX Leak check is currently not implemented
-                self.leak_deadline = Instant::now() + LEAK_INTERVAL;
             }
             UpstairsAction::FlushCheck => {
                 self.counters.action_flush_check += 1;

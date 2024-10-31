@@ -32,15 +32,8 @@ Tool arguments:
     --samples
         how many samples to take (default 100). also the number of seconds the tool runs.
 
-    --iop-limit
-        how many IOPs per second to set
-
     --io-size-in-bytes
         how large of a read or write operation to send. defaults to block size.
 
     --io-depth
         how many IOs to send at a time
-
-    --bw-limit-in-bytes
-        how many bytes per second to set
-
