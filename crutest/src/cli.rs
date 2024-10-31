@@ -795,15 +795,8 @@ async fn process_cli_command(
         },
         CliMessage::Commit => {
             if let Some(ri) = ri_option {
-                if ri.write_log.is_empty() {
-                    fw.send(CliMessage::Error(CrucibleError::GenericError(
-                        "Info not initialized".to_string(),
-                    )))
-                    .await
-                } else {
-                    ri.write_log.commit();
-                    fw.send(CliMessage::DoneOk).await
-                }
+                ri.write_log.commit();
+                fw.send(CliMessage::DoneOk).await
             } else {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Info not initialized".to_string(),
@@ -818,17 +811,10 @@ async fn process_cli_command(
                 )))
                 .await
             } else if let Some(ri) = ri_option {
-                if ri.write_log.is_empty() {
-                    fw.send(CliMessage::Error(CrucibleError::GenericError(
-                        "Internal write count buffer empty".to_string(),
-                    )))
-                    .await
-                } else {
-                    let mut vec: Vec<u8> = vec![255; 2];
-                    vec[0] = (offset % 255) as u8;
-                    vec[1] = ri.write_log.get_seed(offset) % 255;
-                    fw.send(CliMessage::ExpectedResponse(offset, vec)).await
-                }
+                let mut vec: Vec<u8> = vec![255; 2];
+                vec[0] = (offset % 255) as u8;
+                vec[1] = ri.write_log.get_seed(offset) % 255;
+                fw.send(CliMessage::ExpectedResponse(offset, vec)).await
             } else {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Info not initialized".to_string(),
@@ -838,12 +824,7 @@ async fn process_cli_command(
         }
         CliMessage::Export => {
             if let Some(ri) = ri_option {
-                if ri.write_log.is_empty() {
-                    fw.send(CliMessage::Error(CrucibleError::GenericError(
-                        "Info not initialized".to_string(),
-                    )))
-                    .await
-                } else if let Some(vo) = verify_output {
+                if let Some(vo) = verify_output {
                     println!("Exporting write history to {vo:?}");
                     match write_json(&vo, &ri.write_log, true) {
                         Ok(_) => fw.send(CliMessage::DoneOk).await,
@@ -872,20 +853,13 @@ async fn process_cli_command(
         }
         CliMessage::Generic(count, quiet) => {
             if let Some(ri) = ri_option {
-                if ri.write_log.is_empty() {
-                    fw.send(CliMessage::Error(CrucibleError::GenericError(
-                        "Info not initialized".to_string(),
-                    )))
-                    .await
-                } else {
-                    let mut wtq = WhenToQuit::Count { count };
-                    match generic_workload(volume, &mut wtq, ri, quiet).await {
-                        Ok(_) => fw.send(CliMessage::DoneOk).await,
-                        Err(e) => {
-                            let msg = format!("{}", e);
-                            let e = CrucibleError::GenericError(msg);
-                            fw.send(CliMessage::Error(e)).await
-                        }
+                let mut wtq = WhenToQuit::Count { count };
+                match generic_workload(volume, &mut wtq, ri, quiet).await {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => {
+                        let msg = format!("{}", e);
+                        let e = CrucibleError::GenericError(msg);
+                        fw.send(CliMessage::Error(e)).await
                     }
                 }
             } else {
@@ -897,19 +871,12 @@ async fn process_cli_command(
         }
         CliMessage::Fill(skip_verify) => {
             if let Some(ri) = ri_option {
-                if ri.write_log.is_empty() {
-                    fw.send(CliMessage::Error(CrucibleError::GenericError(
-                        "Info not initialized".to_string(),
-                    )))
-                    .await
-                } else {
-                    match fill_workload(volume, ri, skip_verify).await {
-                        Ok(_) => fw.send(CliMessage::DoneOk).await,
-                        Err(e) => {
-                            let msg = format!("Fill/Verify failed with {}", e);
-                            let e = CrucibleError::GenericError(msg);
-                            fw.send(CliMessage::Error(e)).await
-                        }
+                match fill_workload(volume, ri, skip_verify).await {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => {
+                        let msg = format!("Fill/Verify failed with {}", e);
+                        let e = CrucibleError::GenericError(msg);
+                        fw.send(CliMessage::Error(e)).await
                     }
                 }
             } else {
@@ -921,19 +888,12 @@ async fn process_cli_command(
         }
         CliMessage::FillSparse => {
             if let Some(ri) = ri_option {
-                if ri.write_log.is_empty() {
-                    fw.send(CliMessage::Error(CrucibleError::GenericError(
-                        "Info not initialized".to_string(),
-                    )))
-                    .await
-                } else {
-                    match fill_sparse_workload(volume, ri).await {
-                        Ok(_) => fw.send(CliMessage::DoneOk).await,
-                        Err(e) => {
-                            let msg = format!("FillSparse failed with {}", e);
-                            let e = CrucibleError::GenericError(msg);
-                            fw.send(CliMessage::Error(e)).await
-                        }
+                match fill_sparse_workload(volume, ri).await {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => {
+                        let msg = format!("FillSparse failed with {}", e);
+                        let e = CrucibleError::GenericError(msg);
+                        fw.send(CliMessage::Error(e)).await
                     }
                 }
             } else {
@@ -978,31 +938,24 @@ async fn process_cli_command(
         }
         CliMessage::Perf(count, io_size, io_depth, read_loops, write_loops) => {
             if let Some(ri) = ri_option {
-                if ri.write_log.is_empty() {
-                    fw.send(CliMessage::Error(CrucibleError::GenericError(
-                        "Info not initialized".to_string(),
-                    )))
-                    .await
-                } else {
-                    perf_header();
-                    match perf_workload(
-                        volume,
-                        ri,
-                        None,
-                        count,
-                        io_size,
-                        io_depth,
-                        read_loops,
-                        write_loops,
-                    )
-                    .await
-                    {
-                        Ok(_) => fw.send(CliMessage::DoneOk).await,
-                        Err(e) => {
-                            let msg = format!("{}", e);
-                            let e = CrucibleError::GenericError(msg);
-                            fw.send(CliMessage::Error(e)).await
-                        }
+                perf_header();
+                match perf_workload(
+                    volume,
+                    ri,
+                    None,
+                    count,
+                    io_size,
+                    io_depth,
+                    read_loops,
+                    write_loops,
+                )
+                .await
+                {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => {
+                        let msg = format!("{}", e);
+                        let e = CrucibleError::GenericError(msg);
+                        fw.send(CliMessage::Error(e)).await
                     }
                 }
             } else {
@@ -1014,20 +967,13 @@ async fn process_cli_command(
         }
         CliMessage::RandRead => {
             if let Some(ri) = ri_option {
-                if ri.write_log.is_empty() {
-                    fw.send(CliMessage::Error(CrucibleError::GenericError(
-                        "Info not initialized".to_string(),
-                    )))
-                    .await
-                } else {
-                    let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
-                    let size = 1;
-                    let block_max = ri.volume_info.total_blocks() - size + 1;
-                    let offset = rng.gen_range(0..block_max);
+                let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
+                let size = 1;
+                let block_max = ri.volume_info.total_blocks() - size + 1;
+                let offset = rng.gen_range(0..block_max);
 
-                    let res = cli_read(volume, ri, offset, size).await;
-                    fw.send(CliMessage::ReadResponse(offset, res)).await
-                }
+                let res = cli_read(volume, ri, offset, size).await;
+                fw.send(CliMessage::ReadResponse(offset, res)).await
             } else {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Info not initialized".to_string(),
@@ -1037,16 +983,9 @@ async fn process_cli_command(
         }
         CliMessage::RandWrite => {
             if let Some(ri) = ri_option {
-                if ri.write_log.is_empty() {
-                    fw.send(CliMessage::Error(CrucibleError::GenericError(
-                        "Info not initialized".to_string(),
-                    )))
-                    .await
-                } else {
-                    match rand_write(volume, ri).await {
-                        Ok(_) => fw.send(CliMessage::DoneOk).await,
-                        Err(e) => fw.send(CliMessage::Error(e)).await,
-                    }
+                match rand_write(volume, ri).await {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => fw.send(CliMessage::Error(e)).await,
                 }
             } else {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
@@ -1057,15 +996,8 @@ async fn process_cli_command(
         }
         CliMessage::Read(offset, len) => {
             if let Some(ri) = ri_option {
-                if ri.write_log.is_empty() {
-                    fw.send(CliMessage::Error(CrucibleError::GenericError(
-                        "Info not initialized".to_string(),
-                    )))
-                    .await
-                } else {
-                    let res = cli_read(volume, ri, offset, len).await;
-                    fw.send(CliMessage::ReadResponse(offset, res)).await
-                }
+                let res = cli_read(volume, ri, offset, len).await;
+                fw.send(CliMessage::ReadResponse(offset, res)).await
             } else {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
                     "Info not initialized".to_string(),
@@ -1083,16 +1015,9 @@ async fn process_cli_command(
         },
         CliMessage::Write(offset, len) => {
             if let Some(ri) = ri_option {
-                if ri.write_log.is_empty() {
-                    fw.send(CliMessage::Error(CrucibleError::GenericError(
-                        "Info not initialized".to_string(),
-                    )))
-                    .await
-                } else {
-                    match cli_write(volume, ri, offset, len).await {
-                        Ok(_) => fw.send(CliMessage::DoneOk).await,
-                        Err(e) => fw.send(CliMessage::Error(e)).await,
-                    }
+                match cli_write(volume, ri, offset, len).await {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => fw.send(CliMessage::Error(e)).await,
                 }
             } else {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
@@ -1103,16 +1028,9 @@ async fn process_cli_command(
         }
         CliMessage::WriteUnwritten(offset) => {
             if let Some(ri) = ri_option {
-                if ri.write_log.is_empty() {
-                    fw.send(CliMessage::Error(CrucibleError::GenericError(
-                        "Info not initialized".to_string(),
-                    )))
-                    .await
-                } else {
-                    match cli_write_unwritten(volume, ri, offset).await {
-                        Ok(_) => fw.send(CliMessage::DoneOk).await,
-                        Err(e) => fw.send(CliMessage::Error(e)).await,
-                    }
+                match cli_write_unwritten(volume, ri, offset).await {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => fw.send(CliMessage::Error(e)).await,
                 }
             } else {
                 fw.send(CliMessage::Error(CrucibleError::GenericError(
@@ -1127,23 +1045,14 @@ async fn process_cli_command(
         }
         CliMessage::Verify => {
             if let Some(ri) = ri_option {
-                if ri.write_log.is_empty() {
-                    fw.send(CliMessage::Error(CrucibleError::GenericError(
-                        "Info not initialized".to_string(),
-                    )))
-                    .await
-                } else {
-                    match verify_volume(volume, ri, false).await {
-                        Ok(_) => fw.send(CliMessage::DoneOk).await,
-                        Err(e) => {
-                            println!("Verify failed with {:?}", e);
-                            fw.send(CliMessage::Error(
-                                CrucibleError::GenericError(
-                                    "Verify failed".to_string(),
-                                ),
-                            ))
-                            .await
-                        }
+                match verify_volume(volume, ri, false).await {
+                    Ok(_) => fw.send(CliMessage::DoneOk).await,
+                    Err(e) => {
+                        println!("Verify failed with {:?}", e);
+                        fw.send(CliMessage::Error(CrucibleError::GenericError(
+                            "Verify failed".to_string(),
+                        )))
+                        .await
                     }
                 }
             } else {
