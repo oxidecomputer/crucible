@@ -611,6 +611,43 @@ impl Volume {
 
         Ok(())
     }
+
+    pub async fn volume_extent_info(
+        &self,
+    ) -> Result<VolumeInfo, CrucibleError> {
+        // A volume has multiple levels of extent info, not just one.
+        let mut volumes = Vec::new();
+
+        for sub_volume in &self.sub_volumes {
+            match sub_volume.query_extent_info().await? {
+                Some(ei) => {
+                    // When a volume is created and sub_volumes are added to
+                    // it, we verify that the block sizes match, so we never
+                    // expect there to be a mismatch.
+                    assert_eq!(self.block_size, ei.block_size);
+                    let svi = SubVolumeInfo {
+                        blocks_per_extent: ei.blocks_per_extent,
+                        extent_count: ei.extent_count,
+                    };
+                    volumes.push(svi);
+                }
+                None => {
+                    // Mixing sub_volumes with and without
+                    if !volumes.is_empty() {
+                        crucible_bail!(SubvolumeTypeMismatch);
+                    }
+                    continue;
+                }
+            }
+        }
+
+        Ok(VolumeInfo {
+            block_size: self.block_size,
+            volumes,
+        })
+
+        // TODO: add support for read only parents
+    }
 }
 
 #[async_trait]
@@ -682,22 +719,12 @@ impl BlockIO for VolumeInner {
 
     // Return a vec of these?
     // Return a struct with a vec for SV and Some/None for ROP?
-    async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
-        // ZZZ this needs more info, what if ROP and SV differ?
-        for sub_volume in &self.sub_volumes {
-            match sub_volume.query_extent_size().await {
-                Ok(es) => {
-                    return Ok(es);
-                }
-                _ => {
-                    continue;
-                }
-            }
-        }
-        if let Some(ref read_only_parent) = &self.read_only_parent {
-            return read_only_parent.query_extent_size().await;
-        }
-        crucible_bail!(IoError, "Cannot determine extent size");
+    async fn query_extent_info(
+        &self,
+    ) -> Result<Option<RegionExtentInfo>, CrucibleError> {
+        // A volume has multiple levels of extent info, not just one.
+        // To get the same info in the proper form, use volume_extent_info()
+        Ok(None)
     }
 
     async fn deactivate(&self) -> Result<(), CrucibleError> {
@@ -964,6 +991,31 @@ impl BlockIO for VolumeInner {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct VolumeInfo {
+    pub block_size: u64,
+    pub volumes: Vec<SubVolumeInfo>,
+}
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct SubVolumeInfo {
+    pub blocks_per_extent: u64,
+    pub extent_count: u32,
+}
+
+impl VolumeInfo {
+    pub fn total_size(&self) -> u64 {
+        self.block_size * (self.total_blocks() as u64)
+    }
+
+    pub fn total_blocks(&self) -> usize {
+        let mut total_blocks = 0;
+        for sv in &self.volumes {
+            total_blocks += sv.blocks_per_extent * (sv.extent_count as u64);
+        }
+        total_blocks.try_into().unwrap()
+    }
+}
+
 // Traditional subvolume is just one region set
 impl SubVolume {
     // Compute sub volume LBA from total volume LBA.
@@ -1061,8 +1113,10 @@ impl BlockIO for SubVolume {
     async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
         self.block_io.query_work_queue().await
     }
-    async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
-        self.block_io.query_extent_size().await
+    async fn query_extent_info(
+        &self,
+    ) -> Result<Option<RegionExtentInfo>, CrucibleError> {
+        self.block_io.query_extent_info().await
     }
 
     async fn deactivate(&self) -> Result<(), CrucibleError> {

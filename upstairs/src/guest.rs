@@ -12,7 +12,8 @@ use crate::{
     BlockIO, BlockOp, BlockOpWaiter, BlockRes, Buffer, RawReadResponse,
     ReplaceResult, UpstairsAction,
 };
-use crucible_common::{build_logger, Block, BlockIndex, CrucibleError};
+use crucible_client_types::RegionExtentInfo;
+use crucible_common::{build_logger, BlockIndex, CrucibleError};
 use crucible_protocol::SnapshotDetails;
 
 use async_trait::async_trait;
@@ -198,38 +199,6 @@ impl Guest {
         rx.wait().await
     }
 
-    pub async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
-        self.send_and_wait(|done| BlockOp::QueryExtentSize { done })
-            .await
-    }
-
-    pub async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError> {
-        self.send_and_wait(|done| BlockOp::QueryWorkQueue { done })
-            .await
-    }
-
-    // Maybe this can just be a guest specific thing, not a BlockIO
-    pub async fn activate_with_gen(
-        &self,
-        gen: u64,
-    ) -> Result<(), CrucibleError> {
-        let (rx, done) = BlockOpWaiter::pair();
-        self.send(BlockOp::GoActiveWithGen { gen, done }).await;
-        info!(
-            self.log,
-            "The guest has requested activation with gen:{}", gen
-        );
-
-        rx.wait().await?;
-
-        info!(
-            self.log,
-            "The guest has finished waiting for activation with:{}", gen
-        );
-
-        Ok(())
-    }
-
     /// Sleeps for a backpressure-dependent amount, holding the lock
     ///
     /// If backpressure is saturated, logs and returns an error.
@@ -319,10 +288,13 @@ impl BlockIO for Guest {
         self.send_and_wait(|done| BlockOp::QueryWorkQueue { done })
             .await
     }
-
-    async fn query_extent_size(&self) -> Result<Block, CrucibleError> {
-        self.send_and_wait(|done| BlockOp::QueryExtentSize { done })
-            .await
+    async fn query_extent_info(
+        &self,
+    ) -> Result<Option<RegionExtentInfo>, CrucibleError> {
+        let ei = self
+            .send_and_wait(|done| BlockOp::QueryExtentInfo { done })
+            .await?;
+        Ok(Some(ei))
     }
 
     async fn total_size(&self) -> Result<u64, CrucibleError> {
