@@ -13,5 +13,5 @@ set -e
 # downstairs uses 512b sectors
 ./target/release/measure-iops \
   -t $D0:3801 -t $D1:3801 -t $D2:3801 --samples 30 \
-  --io-depth 8 --io-size-in-bytes $((512 * 5)) # --iop-limit 250
+  --io-depth 8 --io-size-in-bytes $((512 * 5))
 
