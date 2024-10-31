@@ -578,7 +578,6 @@ impl DownstairsClient {
 
             DsState::Deactivated
             | DsState::Reconcile
-            | DsState::Disconnected
             | DsState::WaitQuorum
             | DsState::WaitActive
             | DsState::Disabled => Some(DsState::New),
@@ -859,7 +858,7 @@ impl DownstairsClient {
                  * downstairs to receive IO, so we go to the back of the
                  * line and have to re-verify it again.
                  */
-                DsState::Disconnected
+                DsState::New
             }
         };
 
@@ -960,7 +959,6 @@ impl DownstairsClient {
             DsState::New
             | DsState::WaitActive
             | DsState::WaitQuorum
-            | DsState::Disconnected
             | DsState::Reconcile
             | DsState::Deactivated
             | DsState::Disabled
@@ -1045,7 +1043,6 @@ impl DownstairsClient {
                     }
                 } else if old_state != DsState::New
                     && old_state != DsState::Faulted
-                    && old_state != DsState::Disconnected
                     && old_state != DsState::Replaced
                 {
                     panic!(

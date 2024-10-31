@@ -715,17 +715,17 @@ pub(crate) struct RawReadResponse {
  *    ┌─────────────►    New    ╞═════◄════════════════╗ ║
  *    │       ┌─────►           ├─────◄──────┐         ║ ║
  *    │       │     └────┬───┬──┘            │         ║ ║
- *    │       │          ▼   └───►───┐       │         ║ ║
- *    │    bad│     ┌────┴──────┐    │       │         ║ ║
- *    │ region│     │   Wait    │    │       │         ║ ║
+ *    │       │          ▼   └───►───┐ other │         ║ ║
+ *    │    bad│     ┌────┴──────┐    │ failures        ║ ║
+ *    │ region│     │   Wait    │    │       ▲         ║ ║
  *    │       │     │  Active   ├─►┐ │       │         ║ ║
- *    │       │     └────┬──────┘  │ │  ┌────┴───────┐ ║ ║
- *    │       │     ┌────┴──────┐  │ └──┤            │ ║ ║
- *    │       │     │   Wait    │  └────┤Disconnected│ ║ ║
- *    │       └─────┤  Quorum   ├──►────┤            │ ║ ║
- *    │             └────┬──────┘       └────┬───────┘ ║ ║
+ *    │       │     └────┬──────┘  │ │       │         ║ ║
+ *    │       │     ┌────┴──────┐  │ └───────┤         ║ ║
+ *    │       │     │   Wait    │  └─────────┤         ║ ║
+ *    │       └─────┤  Quorum   ├──►─────────┤         ║ ║
+ *    │             └────┬──────┘            │         ║ ║
  *    │          ........▼..........         │         ║ ║
- *    │failed    :  ┌────┴──────┐  :         ▲         ║ ║
+ *    │failed    :  ┌────┴──────┐  :         │         ║ ║
  *    │reconcile :  │ Reconcile │  :         │       ╔═╝ ║
  *    └─────────────┤           ├──►─────────┘       ║   ║
  *               :  └────┬──────┘  :                 ║   ║
@@ -786,12 +786,6 @@ pub enum DsState {
      * Waiting for the minimum number of downstairs to be present.
      */
     WaitQuorum,
-    /*
-     * We were connected, but did not transition all the way to
-     * active before the connection went away. Arriving here means the
-     * downstairs has to go back through the whole negotiation process.
-     */
-    Disconnected,
     /*
      * Initial startup, downstairs are repairing from each other.
      */
@@ -857,9 +851,6 @@ impl std::fmt::Display for DsState {
             }
             DsState::WaitQuorum => {
                 write!(f, "WaitQuorum")
-            }
-            DsState::Disconnected => {
-                write!(f, "Disconnected")
             }
             DsState::Reconcile => {
                 write!(f, "Reconcile")

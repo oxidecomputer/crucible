@@ -93,7 +93,6 @@
           "new",
           "wait_active",
           "wait_quorum",
-          "disconnected",
           "reconcile",
           "active",
           "faulted",

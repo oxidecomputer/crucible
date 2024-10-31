@@ -92,7 +92,6 @@ fn short_state(dss: DsState) -> String {
         DsState::New => "NEW".to_string(),
         DsState::WaitActive => "WAC".to_string(),
         DsState::WaitQuorum => "WAQ".to_string(),
-        DsState::Disconnected => "DIS".to_string(),
         DsState::Reconcile => "REC".to_string(),
         DsState::Active => "ACT".to_string(),
         DsState::Faulted => "FLT".to_string(),
