@@ -1847,7 +1847,6 @@ impl DownstairsClient {
                             String::new()
                         },
                     );
-                    self.checked_state_transition(up_state, DsState::New);
                     if !match_gen {
                         let gen_error = format!(
                             "Generation requested:{} found:{}",
