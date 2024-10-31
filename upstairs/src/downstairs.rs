@@ -1780,7 +1780,10 @@ impl Downstairs {
             if c.state() == DsState::Reconcile {
                 // Restart the IO task.  This will cause the Upstairs to
                 // deactivate through a ClientAction::TaskStopped.
-                c.set_failed_reconcile(up_state);
+                c.restart_connection(
+                    up_state,
+                    ClientStopReason::FailedReconcile,
+                );
                 error!(self.log, "Mark {} as FAILED REPAIR", i);
             }
         }
