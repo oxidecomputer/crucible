@@ -928,8 +928,8 @@ impl DownstairsClient {
 
         // Update our state counters based on the job state
         let state = should_send.state();
-        self.io_state_job_count[state] += 1;
-        self.io_state_byte_count[state] += io.job_bytes();
+        self.io_state_job_count[&state] += 1;
+        self.io_state_byte_count[&state] += io.job_bytes();
 
         should_send
     }
