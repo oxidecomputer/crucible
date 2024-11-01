@@ -91,13 +91,10 @@
         "type": "string",
         "enum": [
           "new",
-          "bad_version",
           "wait_active",
           "wait_quorum",
-          "bad_region",
           "disconnected",
           "reconcile",
-          "failed_reconcile",
           "active",
           "faulted",
           "live_repair_ready",

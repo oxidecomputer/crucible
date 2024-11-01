@@ -531,11 +531,8 @@ impl DownstairsClient {
             DsState::New
             | DsState::Deactivated
             | DsState::Reconcile
-            | DsState::FailedReconcile
             | DsState::Disconnected
-            | DsState::BadVersion
             | DsState::WaitQuorum
-            | DsState::BadRegion
             | DsState::WaitActive
             | DsState::Disabled => DsState::Disconnected,
 
@@ -845,16 +842,6 @@ impl DownstairsClient {
         self.state
     }
 
-    /// Sets the current state to `DsState::FailedReconcile`
-    pub(crate) fn set_failed_reconcile(&mut self, up_state: &UpstairsState) {
-        info!(
-            self.log,
-            "Transition from {} to FailedReconcile", self.state
-        );
-        self.checked_state_transition(up_state, DsState::FailedReconcile);
-        self.restart_connection(up_state, ClientStopReason::FailedReconcile)
-    }
-
     pub(crate) fn restart_connection(
         &mut self,
         up_state: &UpstairsState,
@@ -867,7 +854,6 @@ impl DownstairsClient {
             DsState::Faulted => DsState::Faulted,
             DsState::Deactivated => DsState::New,
             DsState::Reconcile => DsState::New,
-            DsState::FailedReconcile => DsState::New,
             DsState::LiveRepair => DsState::Faulted,
             DsState::LiveRepairReady => DsState::Faulted,
             DsState::Replacing => DsState::Replaced,
@@ -976,13 +962,10 @@ impl DownstairsClient {
             DsState::Offline => EnqueueResult::Hold,
 
             DsState::New
-            | DsState::BadVersion
             | DsState::WaitActive
             | DsState::WaitQuorum
-            | DsState::BadRegion
             | DsState::Disconnected
             | DsState::Reconcile
-            | DsState::FailedReconcile
             | DsState::Deactivated
             | DsState::Disabled
             | DsState::Migrating => panic!(
@@ -1081,9 +1064,6 @@ impl DownstairsClient {
             DsState::WaitQuorum => {
                 assert_eq!(old_state, DsState::WaitActive);
             }
-            DsState::FailedReconcile => {
-                assert_eq!(old_state, DsState::Reconcile);
-            }
             DsState::Faulted => {
                 match old_state {
                     DsState::Active
@@ -1162,7 +1142,7 @@ impl DownstairsClient {
                     DsState::Active
                     | DsState::Deactivated
                     | DsState::Faulted
-                    | DsState::FailedReconcile => {} // Okay
+                    | DsState::Reconcile => {} // Okay
                     _ => {
                         panic_invalid();
                     }
@@ -1180,12 +1160,6 @@ impl DownstairsClient {
                 // A move to Disabled can happen at any time we are talking
                 // to a downstairs.
             }
-            DsState::BadVersion => match old_state {
-                DsState::New | DsState::Disconnected => {}
-                _ => {
-                    panic_invalid();
-                }
-            },
             _ => {
                 panic!(
                     "[{}] Missing check for transition {} to {}",
@@ -1749,10 +1723,6 @@ impl DownstairsClient {
                         CRUCIBLE_MESSAGE_VERSION,
                         version
                     );
-                    self.checked_state_transition(
-                        up_state,
-                        DsState::BadVersion,
-                    );
                     self.restart_connection(
                         up_state,
                         ClientStopReason::Incompatible,
@@ -1811,7 +1781,6 @@ impl DownstairsClient {
                     "downstairs version is {version}, \
                      ours is {CRUCIBLE_MESSAGE_VERSION}"
                 );
-                self.checked_state_transition(up_state, DsState::BadVersion);
                 self.restart_connection(
                     up_state,
                     ClientStopReason::Incompatible,
