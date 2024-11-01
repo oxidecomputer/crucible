@@ -42,7 +42,6 @@ pub enum CliMessage {
     InfoPlease,
     IsActive,
     MyUuid(Uuid),
-    Perf(usize, usize, usize, usize, usize),
     Read(usize, usize),
     RandRead,
     ReadResponse(usize, Result<Bytes, CrucibleError>),
@@ -312,13 +311,6 @@ mod tests {
     #[test]
     fn rt_generic() -> Result<()> {
         let input = CliMessage::Generic(2, true);
-        assert_eq!(input, round_trip(&input)?);
-        Ok(())
-    }
-
-    #[test]
-    fn rt_perf() -> Result<()> {
-        let input = CliMessage::Perf(2, 3, 4, 2, 2);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }

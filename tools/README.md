@@ -47,12 +47,6 @@ This runs a selection of tests from this directory and reports their
 results.  It is intended to be a test for Crucible that runs nightly
 and does deeper/longer tests than what we do as part of every push.
 
-## test_perf.sh
-A test that creates three downstairs regions of ~100G each and then runs
-the crutest perf test using those regions.
-A variety of extent size and extent counts are used (always the same total
-region size of ~100G).
-
 ## test_repair.sh
 A test to break, then repair a downstairs region that is out of sync with
 the other regions, in a loop

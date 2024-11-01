@@ -1596,7 +1596,7 @@ async fn test_byte_fault_condition_offline() {
         h.await.unwrap();
 
         let ds = harness.guest.downstairs_state().await.unwrap();
-        if (i as usize + 1) * WRITE_SIZE < IO_OUTSTANDING_MAX_BYTES as usize {
+        if (i + 1) * WRITE_SIZE < IO_OUTSTANDING_MAX_BYTES as usize {
             assert_eq!(ds[ClientId::new(0)], DsState::Offline);
             assert_eq!(ds[ClientId::new(1)], DsState::Active);
             assert_eq!(ds[ClientId::new(2)], DsState::Active);
