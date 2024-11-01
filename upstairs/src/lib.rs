@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use crucible_client_types::{
-    CrucibleOpts, ReplaceResult, VolumeConstructionRequest,
+    CrucibleOpts, RegionExtentInfo, ReplaceResult, VolumeConstructionRequest,
 };
 pub use crucible_common::*;
 pub use crucible_protocol::*;
@@ -109,8 +109,9 @@ pub trait BlockIO: Sync {
     async fn deactivate(&self) -> Result<(), CrucibleError>;
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError>;
-
-    async fn query_extent_size(&self) -> Result<Block, CrucibleError>;
+    async fn query_extent_info(
+        &self,
+    ) -> Result<Option<RegionExtentInfo>, CrucibleError>;
     async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError>;
 
     // Total bytes of Volume
@@ -1578,8 +1579,8 @@ pub(crate) enum BlockOp {
         done: BlockRes<Uuid>,
     },
     // Begin testing options.
-    QueryExtentSize {
-        done: BlockRes<Block>,
+    QueryExtentInfo {
+        done: BlockRes<RegionExtentInfo>,
     },
     QueryWorkQueue {
         done: BlockRes<WQCounts>,
@@ -1599,86 +1600,6 @@ pub(crate) enum BlockOp {
         client_id: ClientId,
         done: BlockRes<()>,
     },
-}
-
-macro_rules! ceiling_div {
-    ($a: expr, $b: expr) => {
-        ($a + ($b - 1)) / $b
-    };
-}
-
-#[allow(unused)] // pending IOP limits being reimplemented
-impl BlockOp {
-    /*
-     * Compute number of IO operations represented by this BlockOp, rounding
-     * up. For example, if IOP size is 16k:
-     *
-     *   A read of 8k is 1 IOP
-     *   A write of 16k is 1 IOP
-     *   A write of 16001b is 2 IOPs
-     *   A flush isn't an IOP
-     *
-     * We are not counting WriteUnwritten ops as IO toward the users IO
-     * limits.  Though, if too many volumes are created with scrubbers
-     * running, we may have to revisit that.
-     */
-    pub fn iops(&self, iop_sz: usize) -> Option<usize> {
-        match self {
-            BlockOp::Read { data, .. } => {
-                Some(ceiling_div!(data.len(), iop_sz))
-            }
-            BlockOp::Write { data, .. } => {
-                Some(ceiling_div!(data.len(), iop_sz))
-            }
-            _ => None,
-        }
-    }
-
-    pub fn consumes_iops(&self) -> bool {
-        matches!(self, BlockOp::Read { .. } | BlockOp::Write { .. })
-    }
-
-    // Return the total size of this BlockOp
-    pub fn sz(&self) -> Option<usize> {
-        match self {
-            BlockOp::Read { data, .. } => Some(data.len()),
-            BlockOp::Write { data, .. } => Some(data.len()),
-            _ => None,
-        }
-    }
-}
-
-#[tokio::test]
-async fn test_return_iops() {
-    const IOP_SZ: usize = 16000;
-
-    let op = BlockOp::Read {
-        offset: BlockIndex(1),
-        data: Buffer::new(1, 512),
-        done: BlockOpWaiter::pair().1,
-    };
-    assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
-
-    let op = BlockOp::Read {
-        offset: BlockIndex(1),
-        data: Buffer::new(8, 512), // 4096 bytes
-        done: BlockOpWaiter::pair().1,
-    };
-    assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
-
-    let op = BlockOp::Read {
-        offset: BlockIndex(1),
-        data: Buffer::new(31, 512), // 15872 bytes < 16000
-        done: BlockOpWaiter::pair().1,
-    };
-    assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
-
-    let op = BlockOp::Read {
-        offset: BlockIndex(1),
-        data: Buffer::new(32, 512), // 16384 bytes > 16000
-        done: BlockOpWaiter::pair().1,
-    };
-    assert_eq!(op.iops(IOP_SZ).unwrap(), 2);
 }
 
 /**

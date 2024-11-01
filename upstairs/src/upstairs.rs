@@ -4,7 +4,6 @@ use crate::{
     cdt,
     client::{ClientAction, ClientRunResult},
     control::ControlRequest,
-    deadline_secs,
     deferred::{
         DeferredBlockOp, DeferredMessage, DeferredQueue, DeferredRead,
         DeferredWrite, EncryptedWrite,
@@ -16,12 +15,16 @@ use crate::{
     EncryptionContext, GuestIoHandle, Message, RegionDefinition,
     RegionDefinitionStatus, SnapshotDetails, WQCounts,
 };
+use crucible_client_types::RegionExtentInfo;
 use crucible_common::{BlockIndex, CrucibleError};
 use serde::{Deserialize, Serialize};
 
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 
 use bytes::BytesMut;
@@ -34,7 +37,10 @@ use tokio::{
 use uuid::Uuid;
 
 /// How often to log stats for DTrace
-const STAT_INTERVAL_SECS: f32 = 1.0;
+const STAT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How often to do live-repair status checking
+const REPAIR_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Minimum IO size (in bytes) before encryption / decryption is done off-thread
 const MIN_DEFER_SIZE_BYTES: u64 = 8192;
@@ -84,7 +90,6 @@ pub struct UpCounters {
     action_guest: u64,
     action_deferred_block: u64,
     action_deferred_message: u64,
-    action_leak_check: u64,
     action_flush_check: u64,
     action_stat_check: u64,
     action_repair_check: u64,
@@ -100,7 +105,6 @@ impl UpCounters {
             action_guest: 0,
             action_deferred_block: 0,
             action_deferred_message: 0,
-            action_leak_check: 0,
             action_flush_check: 0,
             action_stat_check: 0,
             action_repair_check: 0,
@@ -133,7 +137,6 @@ impl UpCounters {
 ///   - Client timeout
 ///   - Client ping intervals
 ///   - Live-repair checks
-///   - IOPS leaking
 ///   - Automatic flushes
 ///   - DTrace logging of stats
 /// - Control requests from the controller server
@@ -226,10 +229,7 @@ pub(crate) struct Upstairs {
     pub(crate) log: Logger,
 
     /// Next time to check for repairs
-    repair_check_interval: Option<Instant>,
-
-    /// Next time to leak IOP / bandwidth tokens from the Guest
-    leak_deadline: Instant,
+    repair_check_deadline: Option<Instant>,
 
     /// Next time to trigger an automatic flush
     flush_deadline: Instant,
@@ -238,7 +238,7 @@ pub(crate) struct Upstairs {
     stat_deadline: Instant,
 
     /// Interval between automatic flushes
-    flush_timeout_secs: f32,
+    flush_interval: Duration,
 
     /// Receiver queue for control requests
     control_rx: mpsc::Receiver<ControlRequest>,
@@ -270,7 +270,6 @@ pub(crate) enum UpstairsAction {
     /// A deferred message has arrived
     DeferredMessage(DeferredMessage),
 
-    LeakCheck,
     FlushCheck,
     StatUpdate,
     RepairCheck,
@@ -394,20 +393,21 @@ impl Upstairs {
             log.new(o!("" => "downstairs")),
         );
         let flush_timeout_secs = opt.flush_timeout.unwrap_or(0.5);
+        let flush_interval = Duration::from_secs_f32(flush_timeout_secs);
         let (control_tx, control_rx) = tokio::sync::mpsc::channel(500);
 
         if let Some(ddef) = expected_region_def {
             downstairs.set_ddef(ddef);
         }
 
+        let now = Instant::now();
         Upstairs {
             state: UpstairsState::Initializing,
             cfg,
-            repair_check_interval: None,
-            leak_deadline: deadline_secs(1.0),
-            flush_deadline: deadline_secs(flush_timeout_secs),
-            stat_deadline: deadline_secs(STAT_INTERVAL_SECS),
-            flush_timeout_secs,
+            repair_check_deadline: None,
+            flush_deadline: now + flush_interval,
+            stat_deadline: now + STAT_INTERVAL,
+            flush_interval,
             guest,
             guest_dropped: false,
             ddef: rd_status,
@@ -482,7 +482,7 @@ impl Upstairs {
             d = self.guest.recv(), if !self.guest_dropped => {
                 d
             }
-            _ = self.repair_check_interval
+            _ = self.repair_check_deadline
                 .map(|r| Either::Left(sleep_until(r)))
                 .unwrap_or(Either::Right(pending()))
             => {
@@ -514,9 +514,6 @@ impl Upstairs {
                     return UpstairsAction::NoOp;
                 };
                 UpstairsAction::DeferredMessage(m)
-            }
-            _ = sleep_until(self.leak_deadline) => {
-                UpstairsAction::LeakCheck
             }
             _ = sleep_until(self.flush_deadline) => {
                 UpstairsAction::FlushCheck
@@ -564,18 +561,6 @@ impl Upstairs {
                     .action_deferred_message));
                 self.on_client_message(m);
             }
-            UpstairsAction::LeakCheck => {
-                self.counters.action_leak_check += 1;
-                cdt::up__action_leak_check!(|| (self
-                    .counters
-                    .action_leak_check));
-                const LEAK_MS: usize = 1000;
-                // XXX Leak check is currently not implemented
-                let leak_tick =
-                    tokio::time::Duration::from_millis(LEAK_MS as u64);
-                self.leak_deadline =
-                    Instant::now().checked_add(leak_tick).unwrap();
-            }
             UpstairsAction::FlushCheck => {
                 self.counters.action_flush_check += 1;
                 cdt::up__action_flush_check!(|| (self
@@ -584,7 +569,7 @@ impl Upstairs {
                 if self.need_flush {
                     self.submit_flush(None, None);
                 }
-                self.flush_deadline = deadline_secs(self.flush_timeout_secs);
+                self.flush_deadline = Instant::now() + self.flush_interval;
             }
             UpstairsAction::StatUpdate => {
                 self.counters.action_stat_check += 1;
@@ -592,7 +577,7 @@ impl Upstairs {
                     .counters
                     .action_stat_check));
                 self.on_stat_update();
-                self.stat_deadline = deadline_secs(STAT_INTERVAL_SECS);
+                self.stat_deadline = Instant::now() + STAT_INTERVAL;
             }
             UpstairsAction::RepairCheck => {
                 self.counters.action_repair_check += 1;
@@ -847,7 +832,7 @@ impl Upstairs {
     /// the [DsState::LiveRepairReady] state, indicating it needs to be
     /// repaired. If a Downstairs needs to be repaired, try to start repairing
     /// it. When starting the repair fails, this function will schedule a task
-    /// to retry the repair by setting [Self::repair_check_interval].
+    /// to retry the repair by setting [Self::repair_check_deadline].
     ///
     /// If this Upstairs is [UpstairsConfig::read_only], this function will move
     /// any Downstairs from [DsState::LiveRepairReady] back to [DsState::Active]
@@ -856,7 +841,7 @@ impl Upstairs {
         info!(self.log, "Checking if live repair is needed");
         if !matches!(self.state, UpstairsState::Active) {
             info!(self.log, "inactive, no live repair needed");
-            self.repair_check_interval = None;
+            self.repair_check_deadline = None;
             return;
         }
 
@@ -868,7 +853,7 @@ impl Upstairs {
             for c in self.downstairs.clients.iter_mut() {
                 c.skip_live_repair(&self.state);
             }
-            self.repair_check_interval = None;
+            self.repair_check_deadline = None;
             return;
         }
 
@@ -886,12 +871,13 @@ impl Upstairs {
             info!(self.log, "Live Repair already running");
             // Queue up a later check if we need it
             if any_in_repair_ready {
-                self.repair_check_interval = Some(deadline_secs(10.0));
+                self.repair_check_deadline =
+                    Some(Instant::now() + REPAIR_CHECK_INTERVAL);
             } else {
-                self.repair_check_interval = None;
+                self.repair_check_deadline = None;
             }
         } else if !any_in_repair_ready {
-            self.repair_check_interval = None;
+            self.repair_check_deadline = None;
             info!(self.log, "No Live Repair required at this time");
         } else if !self.downstairs.start_live_repair(
             &self.state,
@@ -900,7 +886,8 @@ impl Upstairs {
             // It's hard to hit this condition; we need a Downstairs to be in
             // LiveRepairReady, but for no other downstairs to be in Active.
             warn!(self.log, "Could not start live repair, trying again later");
-            self.repair_check_interval = Some(deadline_secs(10.0));
+            self.repair_check_deadline =
+                Some(Instant::now() + REPAIR_CHECK_INTERVAL);
         } else {
             // We started the repair in the call to start_live_repair above
         }
@@ -1044,20 +1031,25 @@ impl Upstairs {
                 };
             }
             // Testing options
-            BlockOp::QueryExtentSize { done } => {
+            BlockOp::QueryExtentInfo { done } => {
                 // Yes, test only
                 match self.ddef.get_def() {
                     Some(rd) => {
-                        done.send_ok(rd.extent_size());
+                        let ei = RegionExtentInfo {
+                            block_size: rd.block_size(),
+                            blocks_per_extent: rd.extent_size().value,
+                            extent_count: rd.extent_count(),
+                        };
+                        done.send_ok(ei);
                     }
                     None => {
                         warn!(
                             self.log,
-                            "Extent size not available (active: {})",
+                            "Extent info not available (active: {})",
                             self.guest_io_ready()
                         );
                         done.send_err(CrucibleError::PropertyNotAvailable(
-                            "extent size".to_string(),
+                            "extent info".to_string(),
                         ));
                     }
                 };
@@ -1660,14 +1652,14 @@ impl Upstairs {
                                 if self.connect_region_set() {
                                     // We connected normally, so there's no need
                                     // to check for live-repair.
-                                    self.repair_check_interval = None;
+                                    self.repair_check_deadline = None;
                                 }
                             }
 
                             DsState::LiveRepairReady => {
                                 // Immediately check for live-repair
-                                self.repair_check_interval =
-                                    Some(deadline_secs(0.0));
+                                self.repair_check_deadline =
+                                    Some(Instant::now());
                             }
 
                             s => panic!("bad state after negotiation: {s:?}"),
@@ -1676,17 +1668,23 @@ impl Upstairs {
                 }
             }
 
-            Message::ExtentError { .. } => {
+            Message::ExtentError {
+                repair_id,
+                extent_id,
+                error,
+            } => {
                 self.downstairs.on_reconciliation_failed(
                     client_id,
-                    m,
+                    repair_id,
+                    extent_id,
+                    error,
                     &self.state,
                 );
             }
-            Message::RepairAckId { .. } => {
+            Message::RepairAckId { repair_id } => {
                 if self.downstairs.on_reconciliation_ack(
                     client_id,
-                    m,
+                    repair_id,
                     &self.state,
                 ) {
                     // reconciliation is done, great work everyone
@@ -1698,8 +1696,8 @@ impl Upstairs {
                 self.on_no_longer_active(client_id, m);
             }
 
-            Message::UuidMismatch { .. } => {
-                self.on_uuid_mismatch(client_id, m);
+            Message::UuidMismatch { expected_id } => {
+                self.on_uuid_mismatch(client_id, expected_id);
             }
 
             // These are all messages that we send out, so we shouldn't see them
@@ -1945,11 +1943,7 @@ impl Upstairs {
         self.set_inactive(CrucibleError::NoLongerActive);
     }
 
-    fn on_uuid_mismatch(&mut self, client_id: ClientId, m: Message) {
-        let Message::UuidMismatch { expected_id } = m else {
-            panic!("called on_uuid_mismatch on invalid message {m:?}");
-        };
-
+    fn on_uuid_mismatch(&mut self, client_id: ClientId, expected_id: Uuid) {
         let client_log = &self.downstairs.clients[client_id].log;
         error!(
             client_log,
@@ -2114,7 +2108,7 @@ pub(crate) mod test {
 
         // Assert that the repair started
         up.on_repair_check();
-        assert!(up.repair_check_interval.is_none());
+        assert!(up.repair_check_deadline.is_none());
         assert!(up.downstairs.live_repair_in_progress());
 
         // The first thing that should happen after we start repair_exetnt
@@ -3353,14 +3347,14 @@ pub(crate) mod test {
         // Before we are active, we have no need to repair or check for future
         // repairs.
         up.on_repair_check();
-        assert!(up.repair_check_interval.is_none());
+        assert!(up.repair_check_deadline.is_none());
         assert!(!up.downstairs.live_repair_in_progress());
 
         up.force_active().unwrap();
 
         // No need to repair or check for future repairs here either
         up.on_repair_check();
-        assert!(up.repair_check_interval.is_none());
+        assert!(up.repair_check_deadline.is_none());
         assert!(!up.downstairs.live_repair_in_progress());
 
         // No downstairs should change state.
@@ -3385,7 +3379,7 @@ pub(crate) mod test {
         up.ds_transition(ClientId::new(1), DsState::Faulted);
         up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
         up.on_repair_check();
-        assert!(up.repair_check_interval.is_none());
+        assert!(up.repair_check_deadline.is_none());
         assert!(up.downstairs.live_repair_in_progress());
         assert_eq!(up.ds_state(ClientId::new(1)), DsState::LiveRepair);
         assert!(up.downstairs.repair().is_some());
@@ -3408,7 +3402,7 @@ pub(crate) mod test {
             up.ds_transition(i, DsState::LiveRepairReady);
         }
         up.on_repair_check();
-        assert!(up.repair_check_interval.is_none());
+        assert!(up.repair_check_deadline.is_none());
         assert!(up.downstairs.live_repair_in_progress());
 
         assert_eq!(up.ds_state(ClientId::new(0)), DsState::Active);
@@ -3434,17 +3428,17 @@ pub(crate) mod test {
         // Start the live-repair
         up.on_repair_check();
         assert!(up.downstairs.live_repair_in_progress());
-        assert!(up.repair_check_interval.is_none());
+        assert!(up.repair_check_deadline.is_none());
 
         // Pretend that DS 0 faulted then came back through to LiveRepairReady;
         // we won't halt the existing repair, but will configure
-        // repair_check_interval to check again in the future.
+        // repair_check_deadline to check again in the future.
         up.ds_transition(ClientId::new(0), DsState::Faulted);
         up.ds_transition(ClientId::new(0), DsState::LiveRepairReady);
 
         up.on_repair_check();
         assert!(up.downstairs.live_repair_in_progress());
-        assert!(up.repair_check_interval.is_some());
+        assert!(up.repair_check_deadline.is_some());
     }
 
     #[test]
@@ -3460,12 +3454,12 @@ pub(crate) mod test {
         up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
 
         up.on_repair_check();
-        assert!(up.repair_check_interval.is_none());
+        assert!(up.repair_check_deadline.is_none());
         assert!(up.downstairs.live_repair_in_progress());
 
         // Checking again is idempotent
         up.on_repair_check();
-        assert!(up.repair_check_interval.is_none());
+        assert!(up.repair_check_deadline.is_none());
         assert!(up.downstairs.live_repair_in_progress());
     }
 

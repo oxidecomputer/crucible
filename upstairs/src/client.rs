@@ -7,9 +7,7 @@ use crate::{
     ReconcileIO, ReconcileIOState, RegionDefinitionStatus, RegionMetadata,
     Validation,
 };
-use crucible_common::{
-    deadline_secs, verbose_timeout, x509::TLSContext, ExtentId,
-};
+use crucible_common::{x509::TLSContext, ExtentId, VerboseTimeout};
 use crucible_protocol::{
     MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
 };
@@ -28,21 +26,22 @@ use slog::{debug, error, info, o, warn, Logger};
 use tokio::{
     net::{TcpSocket, TcpStream},
     sync::{mpsc, oneshot},
-    time::{sleep_until, Duration},
+    time::{sleep, sleep_until, Duration, Instant},
 };
 use tokio_util::codec::FramedRead;
 use uuid::Uuid;
 
-// How long we wait before logging a message that we have not heard from
-// the downstairs.
-const TIMEOUT_SECS: f32 = 15.0;
-// How many timeouts will we tolerate before we disconnect from a downstairs.
-const TIMEOUT_LIMIT: usize = 3;
-const PING_INTERVAL_SECS: f32 = 5.0;
+// Disconnect from downstairs upstairs after 45 sec, logging a warning every 15s
+pub(crate) const CLIENT_TIMEOUT: VerboseTimeout = VerboseTimeout {
+    tick: Duration::from_secs(15),
+    count: 3,
+};
 
-/// Total time before a client is timed out
-#[cfg(test)]
-pub const CLIENT_TIMEOUT_SECS: f32 = TIMEOUT_SECS * TIMEOUT_LIMIT as f32;
+const PING_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Delay before a client reconnects (to prevent spamming connections)
+pub const CLIENT_RECONNECT_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(10);
 
 /// Handle to a running I/O task
 ///
@@ -901,7 +900,8 @@ impl DownstairsClient {
 
     /// Checks whether the given job should be sent
     ///
-    /// Returns `true` if it should be sent and `false` otherwise
+    /// Returns an [`EnqueueResult`] indicating how the caller should handle the
+    /// packet.
     ///
     /// If the job should be skipped, then it is added to `self.skipped_jobs`.
     /// `self.io_state_job_count` is updated with the incoming job state.
@@ -911,7 +911,7 @@ impl DownstairsClient {
         ds_id: JobId,
         io: &IOop,
         last_repair_extent: Option<ExtentId>,
-    ) -> bool {
+    ) -> EnqueueResult {
         // If a downstairs is faulted or ready for repair, we can move
         // that job directly to IOState::Skipped
         // If a downstairs is in repair, then we need to see if this
@@ -922,37 +922,34 @@ impl DownstairsClient {
         let should_send = self.should_send(io, last_repair_extent);
 
         // Update our set of skipped jobs if we're not sending this one
-        if !should_send {
+        if matches!(should_send, EnqueueResult::Skip) {
             self.skipped_jobs.insert(ds_id);
         }
 
         // Update our state counters based on the job state
-        let state = if should_send {
-            &IOState::InProgress
-        } else {
-            &IOState::Skipped
-        };
+        let state = should_send.state();
         self.io_state_job_count[state] += 1;
         self.io_state_byte_count[state] += io.job_bytes();
+
         should_send
     }
 
     /// Checks whether the given job should be sent or skipped
     ///
-    /// Returns `true` if the job should be sent and `false` if it should be
-    /// skipped.
+    /// Returns an [`EnqueueResult`] indicating how the caller should handle the
+    /// packet.
     #[must_use]
     fn should_send(
         &self,
         io: &IOop,
         last_repair_extent: Option<ExtentId>,
-    ) -> bool {
+    ) -> EnqueueResult {
         match self.state {
             // We never send jobs if we're in certain inactive states
             DsState::Faulted
             | DsState::Replaced
             | DsState::Replacing
-            | DsState::LiveRepairReady => false,
+            | DsState::LiveRepairReady => EnqueueResult::Skip,
 
             // We conditionally send jobs if we're in live-repair, depending on
             // the current extent.
@@ -962,7 +959,11 @@ impl DownstairsClient {
                 // there are no reserved repair jobs), or the last extent
                 // for which we have reserved a repair job ID; either way, the
                 // caller has provided it to us.
-                io.send_io_live_repair(last_repair_extent)
+                if io.send_io_live_repair(last_repair_extent) {
+                    EnqueueResult::Send
+                } else {
+                    EnqueueResult::Skip
+                }
             }
 
             // Send jobs if the client is active or offline
@@ -971,7 +972,8 @@ impl DownstairsClient {
             // means that those jobs are marked as InProgress, so they aren't
             // cleared out by a subsequent flush (so we'll be able to bring that
             // client back into compliance by replaying jobs).
-            DsState::Active | DsState::Offline => true,
+            DsState::Active => EnqueueResult::Send,
+            DsState::Offline => EnqueueResult::Hold,
 
             DsState::New
             | DsState::BadVersion
@@ -2334,6 +2336,31 @@ enum NegotiationState {
     Done,
 }
 
+/// Result value from [`DownstairsClient::enqueue`]
+pub(crate) enum EnqueueResult {
+    /// The given job should be marked as in progress and sent
+    Send,
+
+    /// The given job should be marked as in progress, but not sent
+    ///
+    /// This is used when the Downstairs is Offline; we want to mark the job as
+    /// in-progress so that it's eligible for replay, but the job should not
+    /// actually go out on the wire.
+    Hold,
+
+    /// The job should be marked as skipped and not sent
+    Skip,
+}
+
+impl EnqueueResult {
+    pub(crate) fn state(&self) -> IOState {
+        match self {
+            EnqueueResult::Send | EnqueueResult::Hold => IOState::InProgress,
+            EnqueueResult::Skip => IOState::Skipped,
+        }
+    }
+}
+
 /// Action requested by `DownstairsClient::select`
 ///
 /// This is split into a separate data structure because we need to distinguish
@@ -2619,7 +2646,7 @@ impl ClientIoTask {
                         }
                     }
                 }
-                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                _ = tokio::time::sleep(CLIENT_RECONNECT_DELAY) => {
                     // this is fine
                 },
             }
@@ -2663,7 +2690,7 @@ impl ClientIoTask {
         // Set a connect timeout, and connect to the target:
         info!(self.log, "connecting to {}", self.target);
         let tcp: TcpStream = tokio::select! {
-            _ = sleep_until(deadline_secs(10.0))=> {
+            _ = sleep(Duration::from_secs(10))=> {
                 warn!(self.log, "connect timeout");
                 return ClientRunResult::ConnectionTimeout;
             }
@@ -2759,7 +2786,7 @@ impl ClientIoTask {
             self.client_id,
         )));
 
-        let mut ping_interval = deadline_secs(PING_INTERVAL_SECS);
+        let mut ping_deadline = Instant::now() + PING_INTERVAL;
         let mut ping_count = 0u64;
         loop {
             tokio::select! {
@@ -2782,8 +2809,8 @@ impl ClientIoTask {
                     }
                 }
 
-                _ = sleep_until(ping_interval) => {
-                    ping_interval = deadline_secs(PING_INTERVAL_SECS);
+                _ = sleep_until(ping_deadline) => {
+                    ping_deadline = Instant::now() + PING_INTERVAL;
                     ping_count += 1;
                     cdt::ds__ping__sent!(|| (ping_count, self.client_id.get()));
 
@@ -2921,7 +2948,7 @@ where
                     }
                 }
             }
-            _ = verbose_timeout(TIMEOUT_SECS, TIMEOUT_LIMIT, log.clone()) => {
+            _ = CLIENT_TIMEOUT.wait(&log) => {
                 warn!(log, "inactivity timeout");
                 break ClientRunResult::Timeout;
             }
