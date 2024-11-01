@@ -548,11 +548,7 @@ impl DownstairsClient {
     ///
     /// # Panics
     /// If `self.client_task` is not `None`, or `self.target_addr` is `None`
-    pub(crate) fn reinitialize(
-        &mut self,
-        up_state: &UpstairsState,
-        auto_promote: bool,
-    ) {
+    pub(crate) fn reinitialize(&mut self, up_state: &UpstairsState) {
         // Clear this Downstair's repair address, and let the YesItsMe set it.
         // This works if this Downstairs is new, reconnecting, or was replaced
         // entirely; the repair address could have changed in any of these
@@ -560,11 +556,17 @@ impl DownstairsClient {
         self.repair_addr = None;
         self.needs_replay = false;
 
-        if auto_promote {
-            self.promote_state = Some(PromoteState::Waiting);
-        } else {
-            self.promote_state = None;
-        }
+        // If the upstairs is already active (or trying to go active), then the
+        // downstairs should automatically call PromoteToActive when it reaches
+        // the relevant state.
+        self.promote_state = match up_state {
+            UpstairsState::Active | UpstairsState::GoActive(..) => {
+                Some(PromoteState::Waiting)
+            }
+            UpstairsState::Initializing
+            | UpstairsState::Deactivating { .. } => None,
+        };
+
         self.negotiation_state = NegotiationState::Start;
 
         let current = &self.state;
@@ -595,8 +597,8 @@ impl DownstairsClient {
 
         self.connection_id.update();
 
-        // Restart with a short delay
-        self.start_task(true, auto_promote);
+        // Restart with a short delay, connecting if we're auto-promoting
+        self.start_task(true, self.promote_state.is_some());
     }
 
     /// Sets the `needs_replay` flag

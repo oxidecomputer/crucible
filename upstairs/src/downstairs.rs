@@ -505,7 +505,6 @@ impl Downstairs {
     pub(crate) fn reinitialize(
         &mut self,
         client_id: ClientId,
-        auto_promote: bool,
         up_state: &UpstairsState,
     ) {
         // If the IO task stops on its own, then under certain circumstances,
@@ -522,7 +521,7 @@ impl Downstairs {
 
         // Restart the IO task for that specific client, transitioning to a new
         // state.
-        self.clients[client_id].reinitialize(up_state, auto_promote);
+        self.clients[client_id].reinitialize(up_state);
 
         for i in ClientId::iter() {
             // Clear per-client delay, because we're starting a new session

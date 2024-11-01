@@ -2008,17 +2008,8 @@ impl Upstairs {
         self.downstairs
             .notify_nexus_of_client_task_stopped(client_id, reason);
 
-        // If the upstairs is already active (or trying to go active), then the
-        // downstairs should automatically call PromoteToActive when it reaches
-        // the relevant state.
-        let auto_promote = match self.state {
-            UpstairsState::Active | UpstairsState::GoActive(..) => true,
-            UpstairsState::Initializing
-            | UpstairsState::Deactivating { .. } => false,
-        };
-
         self.downstairs
-            .reinitialize(client_id, auto_promote, &self.state);
+            .reinitialize(client_id, &self.state);
     }
 
     /// Sets both guest and per-client backpressure
