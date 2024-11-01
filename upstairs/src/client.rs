@@ -571,29 +571,35 @@ impl DownstairsClient {
 
         let current = &self.state;
         let new_state = match current {
-            DsState::Active | DsState::Offline => DsState::Offline,
+            DsState::Active => Some(DsState::Offline),
+            DsState::LiveRepair | DsState::LiveRepairReady => {
+                Some(DsState::Faulted)
+            }
 
-            DsState::Faulted
-            | DsState::LiveRepair
-            | DsState::LiveRepairReady => DsState::Faulted,
-
-            DsState::New
-            | DsState::Deactivated
+            DsState::Deactivated
             | DsState::Reconcile
             | DsState::Disconnected
             | DsState::WaitQuorum
             | DsState::WaitActive
-            | DsState::Disabled => DsState::New,
+            | DsState::Disabled => Some(DsState::New),
 
             // If we have replaced a downstairs, don't forget that.
-            DsState::Replacing | DsState::Replaced => DsState::Replaced,
+            DsState::Replacing => Some(DsState::Replaced),
+
+            // We stay in these states through the task restart
+            DsState::Offline
+            | DsState::Faulted
+            | DsState::New
+            | DsState::Replaced => None,
 
             DsState::Migrating => panic!(),
         };
 
         // Jobs are skipped and replayed in `Downstairs::reinitialize`, which is
         // (probably) the caller of this function.
-        self.checked_state_transition(up_state, new_state);
+        if let Some(new_state) = new_state {
+            self.checked_state_transition(up_state, new_state);
+        }
 
         self.connection_id.update();
 
