@@ -98,7 +98,6 @@
           "faulted",
           "live_repair_ready",
           "live_repair",
-          "migrating",
           "offline",
           "deactivated",
           "disabled",

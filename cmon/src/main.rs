@@ -97,7 +97,6 @@ fn short_state(dss: DsState) -> String {
         DsState::Faulted => "FLT".to_string(),
         DsState::LiveRepairReady => "LRR".to_string(),
         DsState::LiveRepair => "LR".to_string(),
-        DsState::Migrating => "MIG".to_string(),
         DsState::Offline => "OFF".to_string(),
         DsState::Deactivated => "DAV".to_string(),
         DsState::Disabled => "DIS".to_string(),

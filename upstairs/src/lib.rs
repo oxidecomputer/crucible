@@ -810,10 +810,6 @@ pub enum DsState {
      */
     LiveRepair,
     /*
-     * This downstairs is being migrated to a new location
-     */
-    Migrating,
-    /*
      * This downstairs was active, but is now no longer connected.
      * We may have work for it in memory, so a replay is possible
      * if this downstairs reconnects in time.
@@ -866,9 +862,6 @@ impl std::fmt::Display for DsState {
             }
             DsState::LiveRepair => {
                 write!(f, "LiveRepair")
-            }
-            DsState::Migrating => {
-                write!(f, "Migrating")
             }
             DsState::Offline => {
                 write!(f, "Offline")
