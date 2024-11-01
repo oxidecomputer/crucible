@@ -1426,7 +1426,6 @@ dependencies = [
  "crucible-common",
  "crucible-protocol",
  "crucible-workspace-hack",
- "csv",
  "dsc-client",
  "futures",
  "futures-core",

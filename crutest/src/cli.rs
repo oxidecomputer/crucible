@@ -145,24 +145,6 @@ enum CliCommand {
     Info,
     /// Report if the Upstairs is ready for IO
     IsActive,
-    /// Run the client perf test
-    Perf {
-        /// Number of IOs to execute for each test phase
-        #[clap(long, short, default_value = "5000", action)]
-        count: usize,
-        /// Size in blocks of each IO
-        #[clap(long, default_value = "1", action)]
-        io_size: usize,
-        /// Number of outstanding IOs at the same time
-        #[clap(long, default_value = "1", action)]
-        io_depth: usize,
-        /// Number of read test loops to do.
-        #[clap(long, default_value = "2", action)]
-        read_loops: usize,
-        /// Number of write test loops to do.
-        #[clap(long, default_value = "2", action)]
-        write_loops: usize,
-    },
     /// Quit the CLI
     Quit,
     /// Read from a given block offset
@@ -521,22 +503,6 @@ async fn cmd_to_msg(
         }
         CliCommand::Info => {
             fw.send(CliMessage::InfoPlease).await?;
-        }
-        CliCommand::Perf {
-            count,
-            io_size,
-            io_depth,
-            read_loops,
-            write_loops,
-        } => {
-            fw.send(CliMessage::Perf(
-                count,
-                io_size,
-                io_depth,
-                read_loops,
-                write_loops,
-            ))
-            .await?;
         }
         CliCommand::Quit => {
             println!("The quit command has nothing to send");
@@ -934,35 +900,6 @@ async fn process_cli_command(
                     fw.send(CliMessage::Info(new_ri.volume_info)).await
                 }
                 Err(e) => fw.send(CliMessage::Error(e)).await,
-            }
-        }
-        CliMessage::Perf(count, io_size, io_depth, read_loops, write_loops) => {
-            if let Some(ri) = ri_option {
-                perf_header();
-                match perf_workload(
-                    volume,
-                    ri,
-                    None,
-                    count,
-                    io_size,
-                    io_depth,
-                    read_loops,
-                    write_loops,
-                )
-                .await
-                {
-                    Ok(_) => fw.send(CliMessage::DoneOk).await,
-                    Err(e) => {
-                        let msg = format!("{}", e);
-                        let e = CrucibleError::GenericError(msg);
-                        fw.send(CliMessage::Error(e)).await
-                    }
-                }
-            } else {
-                fw.send(CliMessage::Error(CrucibleError::GenericError(
-                    "Info not initialized".to_string(),
-                )))
-                .await
             }
         }
         CliMessage::RandRead => {
