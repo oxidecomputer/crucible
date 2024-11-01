@@ -2008,8 +2008,7 @@ impl Upstairs {
         self.downstairs
             .notify_nexus_of_client_task_stopped(client_id, reason);
 
-        self.downstairs
-            .reinitialize(client_id, &self.state);
+        self.downstairs.reinitialize(client_id, &self.state);
     }
 
     /// Sets both guest and per-client backpressure

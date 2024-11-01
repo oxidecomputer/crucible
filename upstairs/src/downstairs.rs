@@ -528,6 +528,12 @@ impl Downstairs {
             self.clients[i].set_delay_us(0);
         }
 
+        // Special-case: if a Downstairs goes away midway through initial
+        // reconciliation, then we have to manually abort reconciliation.
+        if self.clients.iter().any(|c| c.state() == DsState::Reconcile) {
+            self.abort_reconciliation(up_state);
+        }
+
         // If this client is coming back from being offline, then mark that its
         // jobs must be replayed when it completes negotiation.
         if self.clients[client_id].state() == DsState::Offline {
