@@ -1502,7 +1502,7 @@ impl Upstairs {
                 // Defer the message if it's a (large) read that needs
                 // decryption, or there are other deferred messages in the queue
                 // (to preserve order).  Otherwise, handle it immediately.
-                if let Message::ReadResponse { header, .. } = &m {
+                if let Message::ReadResponse { header, data } = m {
                     // Any read larger than `MIN_DEFER_SIZE_BYTES` constant
                     // should be deferred to the worker pool; smaller reads can
                     // be processed in-thread (since the overhead isn't worth
@@ -1524,7 +1524,8 @@ impl Upstairs {
                         };
 
                     let dr = DeferredRead {
-                        message: m,
+                        header,
+                        data,
                         client_id,
                         connection_id: id,
                         cfg: self.cfg.clone(),
@@ -1543,7 +1544,6 @@ impl Upstairs {
                 } else {
                     let dm = DeferredMessage {
                         message: m,
-                        hashes: vec![],
                         client_id,
                         connection_id: id,
                     };
@@ -1569,7 +1569,7 @@ impl Upstairs {
     }
 
     fn on_client_message(&mut self, dm: DeferredMessage) {
-        let (client_id, m, hashes) = (dm.client_id, dm.message, dm.hashes);
+        let (client_id, m) = (dm.client_id, dm.message);
 
         // It's possible for a deferred message to arrive **after** we have
         // disconnected from this particular Downstairs.  In that case, we want
@@ -1605,7 +1605,6 @@ impl Upstairs {
                 let r = self.downstairs.process_io_completion(
                     client_id,
                     m,
-                    hashes,
                     &self.state,
                 );
                 if let Err(e) = r {

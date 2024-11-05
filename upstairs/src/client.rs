@@ -5,7 +5,6 @@ use crate::{
     ClientIOStateCount, ClientId, CrucibleDecoder, CrucibleError, DownstairsIO,
     DsState, EncryptionContext, IOState, IOop, JobId, Message, RawReadResponse,
     ReconcileIO, ReconcileIOState, RegionDefinitionStatus, RegionMetadata,
-    Validation,
 };
 use crucible_common::{x509::TLSContext, ExtentId, VerboseTimeout};
 use crucible_protocol::{
@@ -1226,7 +1225,6 @@ impl DownstairsClient {
         ds_id: JobId,
         job: &mut DownstairsIO,
         responses: Result<RawReadResponse, CrucibleError>,
-        read_validations: Vec<Validation>,
         deactivate: bool,
         extent_info: Option<ExtentInfo>,
     ) -> bool {
@@ -1357,7 +1355,7 @@ impl DownstairsClient {
                      */
                     let read_data = responses.unwrap();
                     assert!(!read_data.blocks.is_empty());
-                    if job.read_validations != read_validations {
+                    if job.data.as_ref().unwrap().blocks != read_data.blocks {
                         // XXX This error needs to go to Nexus
                         // XXX This will become the "force all downstairs
                         // to stop and refuse to restart" mode.
@@ -1371,8 +1369,8 @@ impl DownstairsClient {
                             self.client_id,
                             ds_id,
                             self.cfg.session_id,
-                            job.read_validations,
-                            read_validations,
+                            job.data.as_ref().unwrap().blocks,
+                            read_data.blocks,
                             start_eid,
                             start_offset,
                             job.state,
@@ -1419,9 +1417,7 @@ impl DownstairsClient {
                     assert!(extent_info.is_none());
                     if jobs_completed_ok == 1 {
                         assert!(job.data.is_none());
-                        assert!(job.read_validations.is_empty());
                         job.data = Some(read_data);
-                        job.read_validations = read_validations;
                         assert!(!job.acked);
                         ackable = true;
                         debug!(self.log, "Read AckReady {}", ds_id.0);
@@ -1433,7 +1429,8 @@ impl DownstairsClient {
                          * that and verify they are the same.
                          */
                         debug!(self.log, "Read already AckReady {ds_id}");
-                        if job.read_validations != read_validations {
+                        let job_blocks = &job.data.as_ref().unwrap().blocks;
+                        if job_blocks != &read_data.blocks {
                             // XXX This error needs to go to Nexus
                             // XXX This will become the "force all downstairs
                             // to stop and refuse to restart" mode.
@@ -1444,8 +1441,8 @@ impl DownstairsClient {
                                 job: {:?}",
                                 self.client_id,
                                 ds_id,
-                                job.read_validations,
-                                read_validations,
+                                job_blocks,
+                                read_data.blocks,
                                 job,
                             );
                         }
@@ -2947,18 +2944,15 @@ fn update_net_done_probes(m: &Message, cid: ClientId) {
 }
 
 /// Returns:
-/// - `Ok(Some(ctx))` for successfully decrypted data
-/// - `Ok(None)` if there is no block context and the block is all 0
+/// - `Ok(())` for successfully decrypted data, or if there is no block context
+///   and the block is all 0s (i.e. a valid empty block)
 /// - `Err(..)` otherwise
-///
-/// The return value of this will be stored with the job, and compared
-/// between each read.
 pub(crate) fn validate_encrypted_read_response(
     block_context: Option<crucible_protocol::EncryptionContext>,
     data: &mut [u8],
     encryption_context: &EncryptionContext,
     log: &Logger,
-) -> Result<Validation, CrucibleError> {
+) -> Result<(), CrucibleError> {
     // XXX because we don't have block generation numbers, an attacker
     // downstairs could:
     //
@@ -2980,7 +2974,7 @@ pub(crate) fn validate_encrypted_read_response(
         //
         // XXX if it's not a blank block, we may be under attack?
         if data.iter().all(|&x| x == 0) {
-            return Ok(Validation::Empty);
+            return Ok(());
         } else {
             error!(log, "got empty block context with non-blank block");
             return Err(CrucibleError::MissingBlockContext);
@@ -3002,7 +2996,7 @@ pub(crate) fn validate_encrypted_read_response(
         Tag::from_slice(&ctx.tag[..]),
     );
     if decryption_result.is_ok() {
-        Ok(Validation::Encrypted(ctx))
+        Ok(())
     } else {
         error!(log, "Decryption failed!");
         Err(CrucibleError::DecryptionError)
@@ -3010,21 +3004,20 @@ pub(crate) fn validate_encrypted_read_response(
 }
 
 /// Returns:
-/// - Ok(Some(valid_hash)) where the integrity hash matches
-/// - Ok(None) where there is no integrity hash in the response and the
-///   block is all 0
+/// - Ok(()) where the integrity hash matches (or the integrity hash is missing
+///   and the block is all 0s, indicating an empty block)
 /// - Err otherwise
 pub(crate) fn validate_unencrypted_read_response(
     block_hash: Option<u64>,
     data: &mut [u8],
     log: &Logger,
-) -> Result<Validation, CrucibleError> {
+) -> Result<(), CrucibleError> {
     if let Some(hash) = block_hash {
         // check integrity hashes - make sure it is correct
         let computed_hash = integrity_hash(&[data]);
 
         if computed_hash == hash {
-            Ok(Validation::Unencrypted(computed_hash))
+            Ok(())
         } else {
             // No integrity hash was correct for this response
             error!(log, "No match computed hash:0x{:x}", computed_hash,);
@@ -3048,7 +3041,7 @@ pub(crate) fn validate_unencrypted_read_response(
         //
         // XXX if it's not a blank block, we may be under attack?
         if data[..].iter().all(|&x| x == 0) {
-            Ok(Validation::Empty)
+            Ok(())
         } else {
             error!(log, "got empty block context with non-blank block");
             Err(CrucibleError::MissingBlockContext)
