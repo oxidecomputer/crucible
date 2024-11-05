@@ -5695,13 +5695,13 @@ mod test {
             blocks_per_extent: sv_tds.blocks_per_extent(),
             extent_count: sv_tds.extent_count(),
             opts: sv_opts.clone(),
-            gen: 1,
+            gen: 2,
         }];
 
         let new_vol = VolumeConstructionRequest::Volume {
             id: sv_volume_id,
             block_size: BLOCK_SIZE as u64,
-            sub_volumes: new_sub_vol.clone(),
+            sub_volumes: new_sub_vol,
             read_only_parent: Some(rop),
         };
 
@@ -5714,6 +5714,14 @@ mod test {
         // Make one new downstairs
         let new_downstairs = tds.new_downstairs().await.unwrap();
         info!(log, "A New downstairs: {:?}", new_downstairs.address());
+
+        let more_sub_vol = vec![VolumeConstructionRequest::Region {
+            block_size: BLOCK_SIZE as u64,
+            blocks_per_extent: sv_tds.blocks_per_extent(),
+            extent_count: sv_tds.extent_count(),
+            opts: sv_opts.clone(),
+            gen: 3,
+        }];
 
         let mut new_opts = tds.opts().clone();
         new_opts.target[0] = new_downstairs.address();
@@ -5732,7 +5740,7 @@ mod test {
         let replacement = VolumeConstructionRequest::Volume {
             id: sv_volume_id,
             block_size: BLOCK_SIZE as u64,
-            sub_volumes: new_sub_vol.clone(),
+            sub_volumes: more_sub_vol,
             read_only_parent: Some(new_rop),
         };
 
