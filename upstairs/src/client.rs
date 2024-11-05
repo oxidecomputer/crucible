@@ -518,42 +518,6 @@ impl DownstairsClient {
         info!(self.log, " {} final dependency list {:?}", ds_id, deps);
     }
 
-    /// When the downstairs is marked as missing, handle its state transition
-    pub(crate) fn on_missing(&mut self) {
-        let current = &self.state;
-        let new_state = match current {
-            DsState::Active | DsState::Offline => DsState::Offline,
-
-            DsState::Faulted
-            | DsState::LiveRepair
-            | DsState::LiveRepairReady => DsState::Faulted,
-
-            DsState::New
-            | DsState::Deactivated
-            | DsState::Reconcile
-            | DsState::Disconnected
-            | DsState::WaitQuorum
-            | DsState::WaitActive
-            | DsState::Disabled => DsState::Disconnected,
-
-            // If we have replaced a downstairs, don't forget that.
-            DsState::Replacing | DsState::Replaced => DsState::Replaced,
-
-            DsState::Migrating => panic!(),
-        };
-
-        if *current != new_state {
-            info!(
-                self.log,
-                "Gone missing, transition from {current:?} to {new_state:?}"
-            );
-        }
-
-        // Jobs are skipped and replayed in `Downstairs::reinitialize`, which is
-        // (probably) the caller of this function.
-        self.state = new_state;
-    }
-
     /// Checks whether this Downstairs is ready for the upstairs to deactivate
     ///
     /// # Panics
@@ -584,7 +548,7 @@ impl DownstairsClient {
     ///
     /// # Panics
     /// If `self.client_task` is not `None`, or `self.target_addr` is `None`
-    pub(crate) fn reinitialize(&mut self, auto_promote: bool) {
+    pub(crate) fn reinitialize(&mut self, up_state: &UpstairsState) {
         // Clear this Downstair's repair address, and let the YesItsMe set it.
         // This works if this Downstairs is new, reconnecting, or was replaced
         // entirely; the repair address could have changed in any of these
@@ -592,23 +556,55 @@ impl DownstairsClient {
         self.repair_addr = None;
         self.needs_replay = false;
 
-        if auto_promote {
-            self.promote_state = Some(PromoteState::Waiting);
-        } else {
-            self.promote_state = None;
-        }
+        // If the upstairs is already active (or trying to go active), then the
+        // downstairs should automatically call PromoteToActive when it reaches
+        // the relevant state.
+        self.promote_state = match up_state {
+            UpstairsState::Active | UpstairsState::GoActive(..) => {
+                Some(PromoteState::Waiting)
+            }
+            UpstairsState::Initializing
+            | UpstairsState::Deactivating { .. } => None,
+        };
+
         self.negotiation_state = NegotiationState::Start;
 
-        // TODO this is an awkward special case!
-        if self.state == DsState::Disconnected {
-            info!(self.log, "Disconnected -> New");
-            self.state = DsState::New;
+        let current = &self.state;
+        let new_state = match current {
+            DsState::Active => Some(DsState::Offline),
+            DsState::LiveRepair | DsState::LiveRepairReady => {
+                Some(DsState::Faulted)
+            }
+
+            DsState::Deactivated
+            | DsState::Reconcile
+            | DsState::Disconnected
+            | DsState::WaitQuorum
+            | DsState::WaitActive
+            | DsState::Disabled => Some(DsState::New),
+
+            // If we have replaced a downstairs, don't forget that.
+            DsState::Replacing => Some(DsState::Replaced),
+
+            // We stay in these states through the task restart
+            DsState::Offline
+            | DsState::Faulted
+            | DsState::New
+            | DsState::Replaced => None,
+
+            DsState::Migrating => panic!(),
+        };
+
+        // Jobs are skipped and replayed in `Downstairs::reinitialize`, which is
+        // (probably) the caller of this function.
+        if let Some(new_state) = new_state {
+            self.checked_state_transition(up_state, new_state);
         }
 
         self.connection_id.update();
 
-        // Restart with a short delay
-        self.start_task(true, auto_promote);
+        // Restart with a short delay, connecting if we're auto-promoting
+        self.start_task(true, self.promote_state.is_some());
     }
 
     /// Sets the `needs_replay` flag
@@ -1142,7 +1138,8 @@ impl DownstairsClient {
                     DsState::Active
                     | DsState::Deactivated
                     | DsState::Faulted
-                    | DsState::Reconcile => {} // Okay
+                    | DsState::Reconcile
+                    | DsState::Disabled => {} // Okay
                     _ => {
                         panic_invalid();
                     }
@@ -1858,7 +1855,6 @@ impl DownstairsClient {
                             String::new()
                         },
                     );
-                    self.checked_state_transition(up_state, DsState::New);
                     if !match_gen {
                         let gen_error = format!(
                             "Generation requested:{} found:{}",
