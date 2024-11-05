@@ -578,7 +578,6 @@ impl DownstairsClient {
 
             DsState::Deactivated
             | DsState::Reconcile
-            | DsState::Disconnected
             | DsState::WaitQuorum
             | DsState::WaitActive
             | DsState::Disabled => Some(DsState::New),
@@ -591,8 +590,6 @@ impl DownstairsClient {
             | DsState::Faulted
             | DsState::New
             | DsState::Replaced => None,
-
-            DsState::Migrating => panic!(),
         };
 
         // Jobs are skipped and replayed in `Downstairs::reinitialize`, which is
@@ -846,7 +843,6 @@ impl DownstairsClient {
         let new_state = match self.state {
             DsState::Active => DsState::Offline,
             DsState::Offline => DsState::Offline,
-            DsState::Migrating => DsState::Faulted,
             DsState::Faulted => DsState::Faulted,
             DsState::Deactivated => DsState::New,
             DsState::Reconcile => DsState::New,
@@ -859,7 +855,7 @@ impl DownstairsClient {
                  * downstairs to receive IO, so we go to the back of the
                  * line and have to re-verify it again.
                  */
-                DsState::Disconnected
+                DsState::New
             }
         };
 
@@ -960,11 +956,9 @@ impl DownstairsClient {
             DsState::New
             | DsState::WaitActive
             | DsState::WaitQuorum
-            | DsState::Disconnected
             | DsState::Reconcile
             | DsState::Deactivated
-            | DsState::Disabled
-            | DsState::Migrating => panic!(
+            | DsState::Disabled => panic!(
                 "enqueue should not be called from state {:?}",
                 self.state
             ),
@@ -1045,7 +1039,6 @@ impl DownstairsClient {
                     }
                 } else if old_state != DsState::New
                     && old_state != DsState::Faulted
-                    && old_state != DsState::Disconnected
                     && old_state != DsState::Replaced
                 {
                     panic!(
@@ -1156,12 +1149,6 @@ impl DownstairsClient {
             DsState::Disabled => {
                 // A move to Disabled can happen at any time we are talking
                 // to a downstairs.
-            }
-            _ => {
-                panic!(
-                    "[{}] Missing check for transition {} to {}",
-                    self.client_id, old_state, new_state
-                );
             }
         }
 

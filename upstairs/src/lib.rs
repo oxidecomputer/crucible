@@ -715,17 +715,17 @@ pub(crate) struct RawReadResponse {
  *    ┌─────────────►    New    ╞═════◄════════════════╗ ║
  *    │       ┌─────►           ├─────◄──────┐         ║ ║
  *    │       │     └────┬───┬──┘            │         ║ ║
- *    │       │          ▼   └───►───┐       │         ║ ║
- *    │    bad│     ┌────┴──────┐    │       │         ║ ║
- *    │ region│     │   Wait    │    │       │         ║ ║
+ *    │       │          ▼   └───►───┐ other │         ║ ║
+ *    │    bad│     ┌────┴──────┐    │ failures        ║ ║
+ *    │ region│     │   Wait    │    │       ▲         ║ ║
  *    │       │     │  Active   ├─►┐ │       │         ║ ║
- *    │       │     └────┬──────┘  │ │  ┌────┴───────┐ ║ ║
- *    │       │     ┌────┴──────┐  │ └──┤            │ ║ ║
- *    │       │     │   Wait    │  └────┤Disconnected│ ║ ║
- *    │       └─────┤  Quorum   ├──►────┤            │ ║ ║
- *    │             └────┬──────┘       └────┬───────┘ ║ ║
+ *    │       │     └────┬──────┘  │ │       │         ║ ║
+ *    │       │     ┌────┴──────┐  │ └───────┤         ║ ║
+ *    │       │     │   Wait    │  └─────────┤         ║ ║
+ *    │       └─────┤  Quorum   ├──►─────────┤         ║ ║
+ *    │             └────┬──────┘            │         ║ ║
  *    │          ........▼..........         │         ║ ║
- *    │failed    :  ┌────┴──────┐  :         ▲         ║ ║
+ *    │failed    :  ┌────┴──────┐  :         │         ║ ║
  *    │reconcile :  │ Reconcile │  :         │       ╔═╝ ║
  *    └─────────────┤           ├──►─────────┘       ║   ║
  *               :  └────┬──────┘  :                 ║   ║
@@ -787,12 +787,6 @@ pub enum DsState {
      */
     WaitQuorum,
     /*
-     * We were connected, but did not transition all the way to
-     * active before the connection went away. Arriving here means the
-     * downstairs has to go back through the whole negotiation process.
-     */
-    Disconnected,
-    /*
      * Initial startup, downstairs are repairing from each other.
      */
     Reconcile,
@@ -815,10 +809,6 @@ pub enum DsState {
      * This downstairs is undergoing LiveRepair
      */
     LiveRepair,
-    /*
-     * This downstairs is being migrated to a new location
-     */
-    Migrating,
     /*
      * This downstairs was active, but is now no longer connected.
      * We may have work for it in memory, so a replay is possible
@@ -858,9 +848,6 @@ impl std::fmt::Display for DsState {
             DsState::WaitQuorum => {
                 write!(f, "WaitQuorum")
             }
-            DsState::Disconnected => {
-                write!(f, "Disconnected")
-            }
             DsState::Reconcile => {
                 write!(f, "Reconcile")
             }
@@ -875,9 +862,6 @@ impl std::fmt::Display for DsState {
             }
             DsState::LiveRepair => {
                 write!(f, "LiveRepair")
-            }
-            DsState::Migrating => {
-                write!(f, "Migrating")
             }
             DsState::Offline => {
                 write!(f, "Offline")
