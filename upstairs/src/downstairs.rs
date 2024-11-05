@@ -505,16 +505,8 @@ impl Downstairs {
     pub(crate) fn reinitialize(
         &mut self,
         client_id: ClientId,
-        auto_promote: bool,
         up_state: &UpstairsState,
     ) {
-        let prev_state = self.clients[client_id].state();
-
-        // If the connection goes down here, we need to know what state we were
-        // in to decide what state to transition to.  The on_missing method will
-        // do that for us!
-        self.clients[client_id].on_missing();
-
         // If the IO task stops on its own, then under certain circumstances,
         // we want to skip all of its jobs.  (If we requested that the IO task
         // stop, then whoever made that request is responsible for skipping jobs
@@ -523,15 +515,13 @@ impl Downstairs {
         // Specifically, we want to skip jobs if the only path back online for
         // that client goes through live-repair; if that client can come back
         // through replay, then the jobs must remain live.
-        let new_state = self.clients[client_id].state();
-        if matches!(prev_state, DsState::LiveRepair | DsState::Active)
-            && matches!(new_state, DsState::Faulted)
-        {
+        if matches!(self.clients[client_id].state(), DsState::LiveRepair) {
             self.skip_all_jobs(client_id);
         }
 
-        // Restart the IO task for that specific client
-        self.clients[client_id].reinitialize(auto_promote);
+        // Restart the IO task for that specific client, transitioning to a new
+        // state.
+        self.clients[client_id].reinitialize(up_state);
 
         for i in ClientId::iter() {
             // Clear per-client delay, because we're starting a new session
@@ -1780,7 +1770,10 @@ impl Downstairs {
             if c.state() == DsState::Reconcile {
                 // Restart the IO task.  This will cause the Upstairs to
                 // deactivate through a ClientAction::TaskStopped.
-                c.set_failed_reconcile(up_state);
+                c.restart_connection(
+                    up_state,
+                    ClientStopReason::FailedReconcile,
+                );
                 error!(self.log, "Mark {} as FAILED REPAIR", i);
             }
         }

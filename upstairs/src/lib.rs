@@ -708,27 +708,27 @@ pub(crate) struct RawReadResponse {
  * deactivated.
  *
  *                       │
- *                       ▼
- *                       │
- *                  ┌────┴──────┐
- *   ┌───────┐      │           ╞═════◄══════════════════╗
- *   │  Bad  │      │    New    ╞═════◄════════════════╗ ║
- *   │Version├──◄───┤           ├─────◄──────┐         ║ ║
- *   └───────┘      └────┬───┬──┘            │         ║ ║
- *                       ▼   └───►───┐       │         ║ ║
- *                  ┌────┴──────┐    │       │         ║ ║
- *                  │   Wait    │    │       │         ║ ║
- *                  │  Active   ├─►┐ │       │         ║ ║
- *                  └────┬──────┘  │ │  ┌────┴───────┐ ║ ║
- *   ┌───────┐      ┌────┴──────┐  │ └──┤            │ ║ ║
- *   │  Bad  │      │   Wait    │  └────┤Disconnected│ ║ ║
- *   │Region ├──◄───┤  Quorum   ├──►────┤            │ ║ ║
- *   └───────┘      └────┬──────┘       └────┬───────┘ ║ ║
- *               ........▼..........         │         ║ ║
- *  ┌─────────┐  :  ┌────┴──────┐  :         ▲         ║ ║
- *  │ Failed  │  :  │ Reconcile │  :         │       ╔═╝ ║
- *  │Reconcile├─◄───┤           ├──►─────────┘       ║   ║
- *  └─────────┘  :  └────┬──────┘  :                 ║   ║
+ *                ┌──┐   ▼
+ *             bad│  │   │
+ *         version│ ┌▼───┴──────┐
+ *                └─┤           ╞═════◄══════════════════╗
+ *    ┌─────────────►    New    ╞═════◄════════════════╗ ║
+ *    │       ┌─────►           ├─────◄──────┐         ║ ║
+ *    │       │     └────┬───┬──┘            │         ║ ║
+ *    │       │          ▼   └───►───┐ other │         ║ ║
+ *    │    bad│     ┌────┴──────┐    │ failures        ║ ║
+ *    │ region│     │   Wait    │    │       ▲         ║ ║
+ *    │       │     │  Active   ├─►┐ │       │         ║ ║
+ *    │       │     └────┬──────┘  │ │       │         ║ ║
+ *    │       │     ┌────┴──────┐  │ └───────┤         ║ ║
+ *    │       │     │   Wait    │  └─────────┤         ║ ║
+ *    │       └─────┤  Quorum   ├──►─────────┤         ║ ║
+ *    │             └────┬──────┘            │         ║ ║
+ *    │          ........▼..........         │         ║ ║
+ *    │failed    :  ┌────┴──────┐  :         │         ║ ║
+ *    │reconcile :  │ Reconcile │  :         │       ╔═╝ ║
+ *    └─────────────┤           ├──►─────────┘       ║   ║
+ *               :  └────┬──────┘  :                 ║   ║
  *  Not Active   :       │         :                 ▲   ▲  Not Active
  *  .............. . . . │. . . . ...................║...║............
  *  Active               ▼                           ║   ║  Active
@@ -779,10 +779,6 @@ pub enum DsState {
      */
     New,
     /*
-     * Incompatible software version reported.
-     */
-    BadVersion,
-    /*
      * Waiting for activation signal.
      */
     WaitActive,
@@ -791,23 +787,9 @@ pub enum DsState {
      */
     WaitQuorum,
     /*
-     * Incompatible region format reported.
-     */
-    BadRegion,
-    /*
-     * We were connected, but did not transition all the way to
-     * active before the connection went away. Arriving here means the
-     * downstairs has to go back through the whole negotiation process.
-     */
-    Disconnected,
-    /*
      * Initial startup, downstairs are repairing from each other.
      */
     Reconcile,
-    /*
-     * Failed when attempting to make consistent.
-     */
-    FailedReconcile,
     /*
      * Ready for and/or currently receiving IO
      */
@@ -827,10 +809,6 @@ pub enum DsState {
      * This downstairs is undergoing LiveRepair
      */
     LiveRepair,
-    /*
-     * This downstairs is being migrated to a new location
-     */
-    Migrating,
     /*
      * This downstairs was active, but is now no longer connected.
      * We may have work for it in memory, so a replay is possible
@@ -864,26 +842,14 @@ impl std::fmt::Display for DsState {
             DsState::New => {
                 write!(f, "New")
             }
-            DsState::BadVersion => {
-                write!(f, "BadVersion")
-            }
             DsState::WaitActive => {
                 write!(f, "WaitActive")
             }
             DsState::WaitQuorum => {
                 write!(f, "WaitQuorum")
             }
-            DsState::BadRegion => {
-                write!(f, "BadRegion")
-            }
-            DsState::Disconnected => {
-                write!(f, "Disconnected")
-            }
             DsState::Reconcile => {
                 write!(f, "Reconcile")
-            }
-            DsState::FailedReconcile => {
-                write!(f, "FailedReconcile")
             }
             DsState::Active => {
                 write!(f, "Active")
@@ -896,9 +862,6 @@ impl std::fmt::Display for DsState {
             }
             DsState::LiveRepair => {
                 write!(f, "LiveRepair")
-            }
-            DsState::Migrating => {
-                write!(f, "Migrating")
             }
             DsState::Offline => {
                 write!(f, "Offline")

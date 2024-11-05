@@ -90,18 +90,13 @@ enum Action {
 fn short_state(dss: DsState) -> String {
     match dss {
         DsState::New => "NEW".to_string(),
-        DsState::BadVersion => "BVR".to_string(),
         DsState::WaitActive => "WAC".to_string(),
         DsState::WaitQuorum => "WAQ".to_string(),
-        DsState::BadRegion => "BRE".to_string(),
-        DsState::Disconnected => "DIS".to_string(),
         DsState::Reconcile => "REC".to_string(),
-        DsState::FailedReconcile => "FRE".to_string(),
         DsState::Active => "ACT".to_string(),
         DsState::Faulted => "FLT".to_string(),
         DsState::LiveRepairReady => "LRR".to_string(),
         DsState::LiveRepair => "LR".to_string(),
-        DsState::Migrating => "MIG".to_string(),
         DsState::Offline => "OFF".to_string(),
         DsState::Deactivated => "DAV".to_string(),
         DsState::Disabled => "DIS".to_string(),
