@@ -5695,7 +5695,7 @@ mod test {
             blocks_per_extent: sv_tds.blocks_per_extent(),
             extent_count: sv_tds.extent_count(),
             opts: sv_opts.clone(),
-            gen: 2,
+            gen: 1,
         }];
 
         let new_vol = VolumeConstructionRequest::Volume {
