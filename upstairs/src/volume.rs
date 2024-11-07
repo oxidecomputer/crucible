@@ -39,7 +39,7 @@ fn build_region_definition(
 }
 
 // Result of comparing two [`VolumeConstructionRequest::Region`] values
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum VCRDelta {
     /// The Regions are identical.
     Same,
@@ -50,7 +50,7 @@ enum VCRDelta {
 }
 
 // Result of comparing two [`VolumeConstructionRequest::Volume`] values
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum CompareResult {
     Volume {
         sub_compares: Vec<CompareResult>,
@@ -1601,7 +1601,7 @@ impl Volume {
                     read_only_parent_compare,
                 };
 
-                Ok(sv_res.clone())
+                Ok(sv_res)
             }
 
             (
