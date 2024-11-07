@@ -79,7 +79,7 @@ enum Workload {
     /// Write to one random block in every extent, then flush.
     FastFill,
     Fill {
-        /// Don't do the verify step after filling the region.
+        /// Don't do the verify step after filling the disk.
         #[clap(long, action)]
         skip_verify: bool,
     },
@@ -110,8 +110,8 @@ enum Workload {
     /// Run IO to the upstairs, then replace a downstairs, then run
     /// more IO and verify it all works as expected.
     Replace {
-        /// Before each replacement, do a fill of the region so
-        /// the replace will have to copy the entire region..
+        /// Before each replacement, do a fill of the disk so the replace will
+        /// have to copy the entire disk..
         #[clap(long, action)]
         fast_fill: bool,
 
@@ -304,7 +304,7 @@ struct RandReadWriteWorkload {
     /// Number of seconds to run
     #[clap(long, default_value_t = 60, action)]
     time: u64,
-    /// Completely fill the region with random data first
+    /// Completely fill the disk with random data first
     #[clap(long)]
     fill: bool,
     /// Print the volume log (at `INFO` level) to `stderr`
@@ -393,27 +393,27 @@ impl BufferbloatConfig {
 }
 
 /*
- * All the tests need this basic info about the region.
+ * All the tests need this basic info about the disk.
  * Not all tests make use of the write_log yet, but perhaps someday..
  */
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RegionInfo {
+pub struct DiskInfo {
     volume_info: VolumeInfo,
     write_log: WriteLog,
     max_block_io: usize,
 }
 
-impl RegionInfo {
+impl DiskInfo {
     pub fn block_size(&self) -> u64 {
         self.volume_info.block_size
     }
 }
 
 /*
- * All the tests need this basic set of information about the region.
+ * All the tests need this basic set of information about the disk.
  */
-async fn get_region_info(volume: &Volume) -> Result<RegionInfo, CrucibleError> {
+async fn get_disk_info(volume: &Volume) -> Result<DiskInfo, CrucibleError> {
     /*
      * These query requests have the side effect of preventing the test from
      * starting before the upstairs is ready.
@@ -433,7 +433,7 @@ async fn get_region_info(volume: &Volume) -> Result<RegionInfo, CrucibleError> {
     }
 
     println!(
-        "Region: sv:{} bs:{}  ts:{}  tb:{}  max_io:{} or {}",
+        "Disk: sv:{} bs:{}  ts:{}  tb:{}  max_io:{} or {}",
         volume_info.volumes.len(),
         volume_info.block_size,
         total_size,
@@ -448,7 +448,7 @@ async fn get_region_info(volume: &Volume) -> Result<RegionInfo, CrucibleError> {
      */
     let write_log = WriteLog::new(total_blocks);
 
-    Ok(RegionInfo {
+    Ok(DiskInfo {
         volume_info,
         write_log,
         max_block_io,
@@ -469,7 +469,7 @@ async fn get_region_info(volume: &Volume) -> Result<RegionInfo, CrucibleError> {
  *
  * In addition to the current write count, we make a second copy of the
  * write count when the commit method is called.  This can be used to record
- * the write count of a region at a specific time (like a flush) and then
+ * the write count of a disk at a specific time (like a flush) and then
  * later used to verify that a given block has data in it from at minimum
  * that commit, but up to the current write count.
  *
@@ -640,7 +640,7 @@ impl WriteLog {
 
 async fn load_write_log(
     volume: &Volume,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
     vi: PathBuf,
     verify: bool,
 ) -> Result<()> {
@@ -654,7 +654,7 @@ async fn load_write_log(
     println!("Loading write count information from file {vi:?}");
     if ri.write_log.len() != ri.volume_info.total_blocks() {
         bail!(
-            "Verify file {vi:?} blocks:{} does not match regions:{}",
+            "Verify file {vi:?} blocks:{} does not match disk:{}",
             ri.write_log.len(),
             ri.volume_info.total_blocks()
         );
@@ -1032,12 +1032,12 @@ async fn main() -> Result<()> {
     }
 
     /*
-     * Build the region info struct that all the tests will use.
+     * Build the disk info struct that all the tests will use.
      * This includes importing and verifying from a write log, if requested.
      */
-    let mut region_info = match get_region_info(&volume).await {
-        Ok(region_info) => region_info,
-        Err(e) => bail!("failed to get region info: {:?}", e),
+    let mut disk_info = match get_disk_info(&volume).await {
+        Ok(disk_info) => disk_info,
+        Err(e) => bail!("failed to get disk info: {:?}", e),
     };
 
     /*
@@ -1058,7 +1058,7 @@ async fn main() -> Result<()> {
                 opt.verify_at_start
             }
         };
-        load_write_log(&volume, &mut region_info, verify_in, verify).await?;
+        load_write_log(&volume, &mut disk_info, verify_in, verify).await?;
     }
 
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<SignalAction>(4);
@@ -1075,26 +1075,20 @@ async fn main() -> Result<()> {
     match opt.workload {
         Workload::Balloon => {
             println!("Run balloon test");
-            balloon_workload(&volume, &mut region_info).await?;
+            balloon_workload(&volume, &mut disk_info).await?;
         }
         Workload::Big => {
             println!("Run big test");
-            big_workload(&volume, &mut region_info).await?;
+            big_workload(&volume, &mut disk_info).await?;
         }
         Workload::Biggest => {
             println!("Run biggest IO test");
-            biggest_io_workload(&volume, &mut region_info).await?;
+            biggest_io_workload(&volume, &mut disk_info).await?;
         }
         Workload::Burst => {
             println!("Run burst test (demo in a loop)");
-            burst_workload(
-                &volume,
-                460,
-                190,
-                &mut region_info,
-                &opt.verify_out,
-            )
-            .await?;
+            burst_workload(&volume, 460, 190, &mut disk_info, &opt.verify_out)
+                .await?;
         }
         Workload::Cli { .. } => {
             unreachable!("This case handled above");
@@ -1109,23 +1103,23 @@ async fn main() -> Result<()> {
              */
             let count = opt.count.unwrap_or(5);
             println!("Run deactivate test");
-            deactivate_workload(&volume, count, &mut region_info, opt.gen)
+            deactivate_workload(&volume, count, &mut disk_info, opt.gen)
                 .await?;
         }
         Workload::Demo => {
             println!("Run Demo test");
             let count = opt.count.unwrap_or(300);
-            demo_workload(&volume, count, &mut region_info).await?;
+            demo_workload(&volume, count, &mut disk_info).await?;
         }
         Workload::Dep => {
             println!("Run dep test");
-            dep_workload(&volume, &mut region_info).await?;
+            dep_workload(&volume, &mut disk_info).await?;
         }
 
         Workload::Dirty => {
             println!("Run dirty test");
             let count = opt.count.unwrap_or(10);
-            dirty_workload(&volume, &mut region_info, count).await?;
+            dirty_workload(&volume, &mut disk_info, count).await?;
 
             /*
              * Saving state here when we have not waited for a flush
@@ -1135,7 +1129,7 @@ async fn main() -> Result<()> {
              * things that came after the flush.
              */
             if let Some(vo) = &opt.verify_out {
-                write_json(vo, &region_info.write_log, true)?;
+                write_json(vo, &disk_info.write_log, true)?;
                 println!("Wrote out file {vo:?}");
             }
             return Ok(());
@@ -1143,12 +1137,12 @@ async fn main() -> Result<()> {
 
         Workload::FastFill => {
             println!("FastFill test");
-            fill_sparse_workload(&volume, &mut region_info).await?;
+            fill_sparse_workload(&volume, &mut disk_info).await?;
         }
 
         Workload::Fill { skip_verify } => {
             println!("Fill test");
-            fill_workload(&volume, &mut region_info, skip_verify).await?;
+            fill_workload(&volume, &mut disk_info, skip_verify).await?;
         }
 
         Workload::Generic => {
@@ -1162,18 +1156,18 @@ async fn main() -> Result<()> {
                 }
             };
 
-            generic_workload(&volume, &mut wtq, &mut region_info, opt.quiet)
+            generic_workload(&volume, &mut wtq, &mut disk_info, opt.quiet)
                 .await?;
         }
 
         Workload::One => {
             println!("One test");
-            one_workload(&volume, &mut region_info).await?;
+            one_workload(&volume, &mut disk_info).await?;
         }
         Workload::RandRead { cfg } => {
             rand_read_write_workload(
                 &volume,
-                &mut region_info,
+                &mut disk_info,
                 RandReadWriteConfig::new(
                     cfg,
                     is_encrypted,
@@ -1188,7 +1182,7 @@ async fn main() -> Result<()> {
         Workload::RandWrite { cfg } => {
             rand_read_write_workload(
                 &volume,
-                &mut region_info,
+                &mut disk_info,
                 RandReadWriteConfig::new(
                     cfg,
                     is_encrypted,
@@ -1203,7 +1197,7 @@ async fn main() -> Result<()> {
         Workload::Bufferbloat { cfg } => {
             bufferbloat_workload(
                 &volume,
-                &mut region_info,
+                &mut disk_info,
                 BufferbloatConfig::new(cfg, is_encrypted),
             )
             .await?;
@@ -1227,10 +1221,10 @@ async fn main() -> Result<()> {
         Workload::Repair => {
             println!("Run Repair workload");
             let count = opt.count.unwrap_or(10);
-            repair_workload(&volume, count, &mut region_info).await?;
+            repair_workload(&volume, count, &mut disk_info).await?;
             drop(volume);
             if let Some(vo) = &opt.verify_out {
-                write_json(vo, &region_info.write_log, true)?;
+                write_json(vo, &disk_info.write_log, true)?;
                 println!("Wrote out file {vo:?}");
             }
             return Ok(());
@@ -1257,7 +1251,7 @@ async fn main() -> Result<()> {
             replay_workload(
                 &volume,
                 &mut wtq,
-                &mut region_info,
+                &mut disk_info,
                 dsc_client,
                 downstairs_in_volume as u32,
             )
@@ -1283,7 +1277,7 @@ async fn main() -> Result<()> {
             replace_workload(
                 &volume,
                 &mut wtq,
-                &mut region_info,
+                &mut disk_info,
                 targets,
                 fast_fill,
             )
@@ -1327,7 +1321,7 @@ async fn main() -> Result<()> {
             replace_before_active(
                 &volume,
                 wtq,
-                &mut region_info,
+                &mut disk_info,
                 targets,
                 dsc_client,
                 opt.gen,
@@ -1373,7 +1367,7 @@ async fn main() -> Result<()> {
             replace_while_reconcile(
                 &volume,
                 wtq,
-                &mut region_info,
+                &mut disk_info,
                 targets,
                 dsc_client,
                 opt.gen,
@@ -1383,7 +1377,7 @@ async fn main() -> Result<()> {
         }
         Workload::Span => {
             println!("Span test");
-            span_workload(&volume, &mut region_info).await?;
+            span_workload(&volume, &mut disk_info).await?;
         }
         Workload::Verify => {
             /*
@@ -1392,12 +1386,12 @@ async fn main() -> Result<()> {
              * and then re-check the volume.
              */
             if let Err(e) =
-                verify_volume(&volume, &mut region_info, opt.range).await
+                verify_volume(&volume, &mut disk_info, opt.range).await
             {
                 bail!("Initial volume verify failed: {:?}", e)
             }
             if let Some(vo) = &opt.verify_out {
-                write_json(vo, &region_info.write_log, true)?;
+                write_json(vo, &disk_info.write_log, true)?;
                 println!("Wrote out file {vo:?}");
             }
             if opt.quit {
@@ -1408,8 +1402,7 @@ async fn main() -> Result<()> {
                     tokio::time::sleep(tokio::time::Duration::from_secs(10))
                         .await;
                     if let Err(e) =
-                        verify_volume(&volume, &mut region_info, opt.range)
-                            .await
+                        verify_volume(&volume, &mut disk_info, opt.range).await
                     {
                         bail!("Volume verify failed: {:?}", e)
                     }
@@ -1431,18 +1424,18 @@ async fn main() -> Result<()> {
         Workload::WFR => {
             println!("Run Write-Flush-Read random IO test");
             let count = opt.count.unwrap_or(10);
-            write_flush_read_workload(&volume, count, &mut region_info).await?;
+            write_flush_read_workload(&volume, count, &mut disk_info).await?;
         }
     }
 
     if opt.verify_at_end {
-        if let Err(e) = verify_volume(&volume, &mut region_info, false).await {
+        if let Err(e) = verify_volume(&volume, &mut disk_info, false).await {
             bail!("Final volume verify failed: {:?}", e)
         }
     }
 
     if let Some(vo) = &opt.verify_out {
-        write_json(vo, &region_info.write_log, true)?;
+        write_json(vo, &disk_info.write_log, true)?;
         println!("Wrote out file {vo:?}");
     }
 
@@ -1474,7 +1467,7 @@ async fn main() -> Result<()> {
  */
 async fn verify_volume(
     volume: &Volume,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
     range: bool,
 ) -> Result<()> {
     assert_eq!(ri.write_log.len(), ri.volume_info.total_blocks());
@@ -1827,7 +1820,7 @@ fn validate_vec<V: AsRef<[u8]>>(
  * I named it balloon because each loop on a block "balloons" from the
  * minimum IO size to the largest possible IO size.
  */
-async fn balloon_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
+async fn balloon_workload(volume: &Volume, ri: &mut DiskInfo) -> Result<()> {
     for block_index in 0..ri.volume_info.total_blocks() {
         /*
          * Loop over all the IO sizes (in blocks) that an IO can
@@ -1888,7 +1881,7 @@ async fn balloon_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
  */
 async fn fill_workload(
     volume: &Volume,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
     skip_verify: bool,
 ) -> Result<()> {
     let pb = ProgressBar::new(ri.volume_info.total_blocks() as u64);
@@ -1979,7 +1972,7 @@ async fn fill_workload(
  */
 async fn fill_sparse_workload(
     volume: &Volume,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
 ) -> Result<()> {
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
@@ -2026,7 +2019,7 @@ async fn fill_sparse_workload(
 async fn generic_workload(
     volume: &Volume,
     wtq: &mut WhenToQuit,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
     quiet: bool,
 ) -> Result<()> {
     /*
@@ -2205,7 +2198,7 @@ async fn generic_workload(
 async fn replay_workload(
     volume: &Volume,
     wtq: &mut WhenToQuit,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
     dsc_client: Client,
     ds_count: u32,
 ) -> Result<()> {
@@ -2281,7 +2274,7 @@ async fn replay_workload(
 async fn replace_while_reconcile(
     volume: &Volume,
     mut wtq: WhenToQuit,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
     targets: Vec<SocketAddr>,
     dsc_client: Client,
     mut gen: u64,
@@ -2478,7 +2471,7 @@ async fn replace_while_reconcile(
 async fn replace_before_active(
     volume: &Volume,
     mut wtq: WhenToQuit,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
     targets: Vec<SocketAddr>,
     dsc_client: Client,
     mut gen: u64,
@@ -2639,7 +2632,7 @@ async fn replace_before_active(
 async fn replace_workload(
     volume: &Volume,
     wtq: &mut WhenToQuit,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
     targets: Vec<SocketAddr>,
     fill: bool,
 ) -> Result<()> {
@@ -2798,7 +2791,7 @@ async fn replace_workload(
  */
 async fn dirty_workload(
     volume: &Volume,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
     count: usize,
 ) -> Result<()> {
     /*
@@ -2857,9 +2850,9 @@ async fn dirty_workload(
     Ok(())
 }
 
-/// Prints a pleasant summary of the given region
-fn print_region_description(ri: &RegionInfo, encrypted: bool) {
-    println!("region info:");
+/// Prints a pleasant summary of the given disk
+fn print_disk_description(ri: &DiskInfo, encrypted: bool) {
+    println!("disk info:");
     let block_size = ri.volume_info.block_size;
     println!("  block size:                   {} bytes", block_size);
     for (index, sv) in ri.volume_info.volumes.iter().enumerate() {
@@ -2890,7 +2883,7 @@ fn print_region_description(ri: &RegionInfo, encrypted: bool) {
 
 async fn rand_read_write_workload(
     volume: &Volume,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
     cfg: RandReadWriteConfig,
 ) -> Result<()> {
     // Before we start, make sure the work queues are empty.
@@ -2908,7 +2901,7 @@ async fn rand_read_write_workload(
     };
 
     if cfg.fill {
-        println!("filling region before {desc}");
+        println!("filling disk before {desc}");
         fill_workload(volume, ri, true).await?;
     }
 
@@ -2925,7 +2918,7 @@ async fn rand_read_write_workload(
         cfg.blocks_per_io,
         if cfg.blocks_per_io > 1 { "s" } else { "" },
     );
-    print_region_description(ri, cfg.encrypted);
+    print_disk_description(ri, cfg.encrypted);
     println!("----------------------------------------------");
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -3063,7 +3056,7 @@ async fn rand_read_write_workload(
 
 async fn bufferbloat_workload(
     volume: &Volume,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
     cfg: BufferbloatConfig,
 ) -> Result<()> {
     // Before we start, make sure the work queues are empty.
@@ -3091,7 +3084,7 @@ async fn bufferbloat_workload(
         cfg.blocks_per_io,
         if cfg.blocks_per_io > 1 { "s" } else { "" },
     );
-    print_region_description(ri, cfg.encrypted);
+    print_disk_description(ri, cfg.encrypted);
     println!("----------------------------------------------");
 
     let stop = Arc::new(AtomicBool::new(false));
@@ -3178,7 +3171,7 @@ async fn bufferbloat_workload(
  * Generate a random offset and length, and write to then read from
  * that offset/length.  Verify the data is what we expect.
  */
-async fn one_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
+async fn one_workload(volume: &Volume, ri: &mut DiskInfo) -> Result<()> {
     /*
      * TODO: Allow the user to specify a seed here.
      */
@@ -3238,7 +3231,7 @@ async fn one_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
 async fn deactivate_workload(
     volume: &Volume,
     count: usize,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
     mut gen: u64,
 ) -> Result<()> {
     let count_width = count.to_string().len();
@@ -3311,7 +3304,7 @@ async fn deactivate_workload(
 async fn write_flush_read_workload(
     volume: &Volume,
     count: usize,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
 ) -> Result<()> {
     /*
      * TODO: Allow the user to specify a seed here.
@@ -3390,7 +3383,7 @@ async fn burst_workload(
     volume: &Volume,
     count: usize,
     demo_count: usize,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
     verify_out: &Option<PathBuf>,
 ) -> Result<()> {
     let count_width = count.to_string().len();
@@ -3438,7 +3431,7 @@ async fn burst_workload(
 async fn repair_workload(
     volume: &Volume,
     count: usize,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
 ) -> Result<()> {
     // TODO: Allow the user to specify a seed here.
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
@@ -3549,7 +3542,7 @@ async fn repair_workload(
 async fn demo_workload(
     volume: &Volume,
     count: usize,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
 ) -> Result<()> {
     // TODO: Allow the user to specify a seed here.
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
@@ -3657,7 +3650,7 @@ async fn demo_workload(
  * then will try to read the same.  When multiple sub_volumes are present we
  * also issue a Write/Flush/Read that will span the two sub_volumes.
  */
-async fn span_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
+async fn span_workload(volume: &Volume, ri: &mut DiskInfo) -> Result<()> {
     let mut extent_block_start = 0;
     let last_sub_volume = ri.volume_info.volumes.len() - 1;
     let block_size = ri.volume_info.block_size;
@@ -3756,7 +3749,7 @@ async fn span_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
  * Write, flush, then read every block in the volume.
  * We wait for each op to finish, so this is all sequential.
  */
-async fn big_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
+async fn big_workload(volume: &Volume, ri: &mut DiskInfo) -> Result<()> {
     for block_index in 0..ri.volume_info.total_blocks() {
         /*
          * Update the write count for all blocks we plan to write to.
@@ -3802,10 +3795,7 @@ async fn big_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
     Ok(())
 }
 
-async fn biggest_io_workload(
-    volume: &Volume,
-    ri: &mut RegionInfo,
-) -> Result<()> {
+async fn biggest_io_workload(volume: &Volume, ri: &mut DiskInfo) -> Result<()> {
     /*
      * Based on our protocol, send the biggest IO we can.
      */
@@ -3873,7 +3863,7 @@ async fn biggest_io_workload(
  *
  * TODO: Make this test use the global write count, but remember, async.
  */
-async fn dep_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
+async fn dep_workload(volume: &Volume, ri: &mut DiskInfo) -> Result<()> {
     let total_size = ri.volume_info.total_size();
     let final_offset = total_size - ri.volume_info.block_size;
 

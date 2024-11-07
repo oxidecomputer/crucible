@@ -124,7 +124,7 @@ enum CliCommand {
     Export,
     /// Run the fill then verify test.
     Fill {
-        /// Don't do the verify step after filling the region.
+        /// Don't do the verify step after filling the disk.
         #[clap(long, action)]
         skip_verify: bool,
     },
@@ -210,7 +210,7 @@ enum CliCommand {
  */
 async fn cli_read(
     volume: &Volume,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
     block_index: usize,
     size: usize,
 ) -> Result<Bytes, CrucibleError> {
@@ -252,7 +252,7 @@ async fn cli_read(
  */
 async fn rand_write(
     volume: &Volume,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
 ) -> Result<(), CrucibleError> {
     /*
      * TODO: Allow the user to specify a seed here.
@@ -278,7 +278,7 @@ async fn rand_write(
  */
 async fn cli_write(
     volume: &Volume,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
     block_index: usize,
     size: usize,
 ) -> Result<(), CrucibleError> {
@@ -323,7 +323,7 @@ async fn cli_write(
  */
 async fn cli_write_unwritten(
     volume: &Volume,
-    ri: &mut RegionInfo,
+    ri: &mut DiskInfo,
     block_index: usize,
 ) -> Result<(), CrucibleError> {
     /*
@@ -726,7 +726,7 @@ async fn process_cli_command(
     volume: &Volume,
     fw: &mut FramedWrite<tokio::net::tcp::OwnedWriteHalf, CliEncoder>,
     cmd: protocol::CliMessage,
-    ri_option: &mut Option<RegionInfo>,
+    ri_option: &mut Option<DiskInfo>,
     wc_filled: &mut bool,
     verify_input: Option<PathBuf>,
     verify_output: Option<PathBuf>,
@@ -881,7 +881,7 @@ async fn process_cli_command(
             Err(e) => fw.send(CliMessage::Error(e)).await,
         },
         CliMessage::InfoPlease => {
-            match get_region_info(volume).await {
+            match get_disk_info(volume).await {
                 Ok(mut new_ri) => {
                     /*
                      * We may only want to read input from the file once.
@@ -1034,17 +1034,15 @@ pub async fn start_cli_server(
     let listener = TcpListener::bind(&listen_on).await?;
 
     /*
-     * If write_log len is zero, then the RegionInfo has
-     * not been filled.
+     * If write_log len is zero, then the DiskInfo has not been filled.
      */
     let mut ri = None;
     /*
      * If we have write info data from previous runs, we can't update our
-     * internal region info struct until we actually connect to our
-     * downstairs and get that region info. Once we have it, we can
-     * populate it with what we expect for each block. If we have filled
-     * the write count struct once, or we did not provide any previous
-     * write counts, don't require it again.
+     * internal disk info struct until we actually connect to our downstairs
+     * and get that disk info. Once we have it, we can populate it with what
+     * we expect for each block. If we have filled the write count struct once,
+     * or we did not provide any previous write counts, don't require it again.
      */
     let mut wc_filled = verify_input.is_none();
     loop {
