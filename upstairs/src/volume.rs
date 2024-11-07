@@ -3505,6 +3505,16 @@ mod test {
         }
     }
 
+    // For tests to decide what mix of read_only_parents the two VCRs should
+    // be created with.
+    #[derive(Debug, PartialEq)]
+    enum ReadOnlyParentMode {
+        Both,
+        OnlyOriginal,
+        OnlyReplacement,
+        Neither,
+    }
+
     #[test]
     fn volume_replace_basic() {
         // A valid replacement VCR is provided with only one target being
@@ -3512,14 +3522,38 @@ mod test {
         // Test all three targets for replacement.
         // Test with 1, 2, and 3 sub_volumes.
         // Test with the difference being in each sub_volume.
-        // Test both with and without a read_only_parent.
+        // Test all combinations of read_only_parents.
         for sv in 1..4 {
             for sv_changed in 0..sv {
                 for cid in 0..3 {
-                    test_volume_replace_inner(sv, sv_changed, cid, false)
-                        .unwrap();
-                    test_volume_replace_inner(sv, sv_changed, cid, true)
-                        .unwrap();
+                    test_volume_replace_inner(
+                        sv,
+                        sv_changed,
+                        cid,
+                        ReadOnlyParentMode::Both,
+                    )
+                    .unwrap();
+                    test_volume_replace_inner(
+                        sv,
+                        sv_changed,
+                        cid,
+                        ReadOnlyParentMode::OnlyOriginal,
+                    )
+                    .unwrap();
+                    test_volume_replace_inner(
+                        sv,
+                        sv_changed,
+                        cid,
+                        ReadOnlyParentMode::OnlyReplacement,
+                    )
+                    .unwrap_err();
+                    test_volume_replace_inner(
+                        sv,
+                        sv_changed,
+                        cid,
+                        ReadOnlyParentMode::Neither,
+                    )
+                    .unwrap();
                 }
             }
         }
@@ -3534,12 +3568,12 @@ mod test {
     // want the target to be different.
     // cid: The client ID where the change will happen, which is the
     // same as the index in the crucible opts target array.
-    // add_rop: True to create a read_only_parent, false for None
+    // rop_mode: enum of which VCR will have a ROP and which will not.
     fn test_volume_replace_inner(
         sv_count: usize,
         sv_changed: usize,
         cid: usize,
-        add_rop: bool,
+        rop_mode: ReadOnlyParentMode,
     ) -> Result<()> {
         assert!(sv_count > sv_changed);
         assert!(cid < 3);
@@ -3553,17 +3587,21 @@ mod test {
         let blocks_per_extent = 10;
         let extent_count = 9;
 
-        let rop = if add_rop {
-            let rop = Box::new(VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 3,
-            });
-            Some(rop)
-        } else {
-            None
+        let test_rop = Box::new(VolumeConstructionRequest::Region {
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts: opts.clone(),
+            gen: 3,
+        });
+
+        let (original_rop, replacement_rop) = match rop_mode {
+            ReadOnlyParentMode::Both => {
+                (Some(test_rop.clone()), Some(test_rop))
+            }
+            ReadOnlyParentMode::OnlyOriginal => (Some(test_rop), None),
+            ReadOnlyParentMode::OnlyReplacement => (None, Some(test_rop)),
+            ReadOnlyParentMode::Neither => (None, None),
         };
 
         let mut sub_volumes = Vec::new();
@@ -3582,7 +3620,7 @@ mod test {
             id: vol_id,
             block_size,
             sub_volumes,
-            read_only_parent: rop.clone(),
+            read_only_parent: original_rop,
         };
 
         // Change just the minimum things and use the updated values
@@ -3612,13 +3650,13 @@ mod test {
             id: vol_id,
             block_size,
             sub_volumes: replacement_sub_volumes,
-            read_only_parent: rop.clone(),
+            read_only_parent: replacement_rop,
         };
 
         let log = csl();
         info!(log,
-            "replacement of CID {cid} with sv_count:{} sv_changed:{} rop_some:{}",
-            sv_count, sv_changed, rop.is_some()
+            "replacement of CID {} with sv_count:{} sv_changed:{} rop_mode:{:?}",
+            cid, sv_count, sv_changed, rop_mode
         );
         let ReplacementRequestCheck::Valid { old, new } =
             Volume::compare_vcr_for_target_replacement(
@@ -3641,8 +3679,26 @@ mod test {
         // We need at least two sub_volumes for this test.
         for sv in 2..4 {
             for sv_changed in 0..sv {
-                test_volume_replace_no_gen_inner(sv, sv_changed, false);
-                test_volume_replace_no_gen_inner(sv, sv_changed, true);
+                test_volume_replace_no_gen_inner(
+                    sv,
+                    sv_changed,
+                    ReadOnlyParentMode::Both,
+                );
+                test_volume_replace_no_gen_inner(
+                    sv,
+                    sv_changed,
+                    ReadOnlyParentMode::OnlyOriginal,
+                );
+                test_volume_replace_no_gen_inner(
+                    sv,
+                    sv_changed,
+                    ReadOnlyParentMode::OnlyReplacement,
+                );
+                test_volume_replace_no_gen_inner(
+                    sv,
+                    sv_changed,
+                    ReadOnlyParentMode::Neither,
+                );
             }
         }
     }
@@ -3650,7 +3706,7 @@ mod test {
     fn test_volume_replace_no_gen_inner(
         sv_count: usize,
         sv_changed: usize,
-        add_rop: bool,
+        rop_mode: ReadOnlyParentMode,
     ) {
         assert!(sv_count > sv_changed);
         // A replacement VCR is created with a single sub_volume that has
@@ -3665,17 +3721,21 @@ mod test {
         let blocks_per_extent = 10;
         let extent_count = 9;
 
-        let rop = if add_rop {
-            let rop = Box::new(VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 3,
-            });
-            Some(rop)
-        } else {
-            None
+        let test_rop = Box::new(VolumeConstructionRequest::Region {
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts: opts.clone(),
+            gen: 3,
+        });
+
+        let (original_rop, replacement_rop) = match rop_mode {
+            ReadOnlyParentMode::Both => {
+                (Some(test_rop.clone()), Some(test_rop))
+            }
+            ReadOnlyParentMode::OnlyOriginal => (Some(test_rop), None),
+            ReadOnlyParentMode::OnlyReplacement => (None, Some(test_rop)),
+            ReadOnlyParentMode::Neither => (None, None),
         };
 
         let mut sub_volumes = Vec::new();
@@ -3694,7 +3754,7 @@ mod test {
             id: vol_id,
             block_size,
             sub_volumes,
-            read_only_parent: rop.clone(),
+            read_only_parent: original_rop,
         };
 
         // Change just the target and gen for one subvolume, but not the others.
@@ -3723,16 +3783,16 @@ mod test {
             id: vol_id,
             block_size,
             sub_volumes: replacement_sub_volumes,
-            read_only_parent: rop.clone(),
+            read_only_parent: replacement_rop,
         };
 
         let log = csl();
         info!(
             log,
-            "replacement of with sv_count:{} sv_changed:{} rop_some:{}",
+            "replacement of with sv_count:{} sv_changed:{} rop_mode:{:?}",
             sv_count,
             sv_changed,
-            rop.is_some()
+            rop_mode,
         );
         assert!(Volume::compare_vcr_for_target_replacement(
             original,
@@ -3816,12 +3876,15 @@ mod test {
     // Test both with and without a read_only_parent.
     fn volume_replace_self() {
         for sv in 1..4 {
-            test_volume_replace_self_inner(sv, false);
-            test_volume_replace_self_inner(sv, true);
+            test_volume_replace_self_inner(sv, ReadOnlyParentMode::Both);
+            test_volume_replace_self_inner(sv, ReadOnlyParentMode::Neither);
         }
     }
 
-    fn test_volume_replace_self_inner(sv_count: usize, add_rop: bool) {
+    fn test_volume_replace_self_inner(
+        sv_count: usize,
+        rop_mode: ReadOnlyParentMode,
+    ) {
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
@@ -3829,17 +3892,22 @@ mod test {
 
         let opts = generic_crucible_opts(vol_id);
 
-        let rop = if add_rop {
-            let rop = Box::new(VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 3,
-            });
-            Some(rop)
-        } else {
-            None
+        let rop = match rop_mode {
+            ReadOnlyParentMode::Both => {
+                let test_rop = Box::new(VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: opts.clone(),
+                    gen: 3,
+                });
+                Some(test_rop)
+            }
+            ReadOnlyParentMode::Neither => None,
+            ReadOnlyParentMode::OnlyOriginal
+            | ReadOnlyParentMode::OnlyReplacement => {
+                panic!("Unsupported test mode");
+            }
         };
 
         let mut sub_volumes = Vec::new();
@@ -3875,32 +3943,45 @@ mod test {
     // This is valid for a migration, but not valid for a target replacement.
     // We test both calls here.
     // Test with 1, 2, and 3 sub_volumes.
-    // Test both with and without a read_only_parent.
+    // Test with all combinations of read_only_parent, knowing that the
+    // OnlyReplacement case should always fail.
     fn volume_vcr_no_targets() {
         for sv in 1..3 {
-            volume_vcr_no_targets_inner(sv, false);
-            volume_vcr_no_targets_inner(sv, true);
+            volume_vcr_no_targets_inner(sv, ReadOnlyParentMode::Both);
+            volume_vcr_no_targets_inner(sv, ReadOnlyParentMode::OnlyOriginal);
+            volume_vcr_no_targets_inner(
+                sv,
+                ReadOnlyParentMode::OnlyReplacement,
+            );
+            volume_vcr_no_targets_inner(sv, ReadOnlyParentMode::Neither);
         }
     }
 
-    fn volume_vcr_no_targets_inner(sv_count: usize, add_rop: bool) {
+    fn volume_vcr_no_targets_inner(
+        sv_count: usize,
+        rop_mode: ReadOnlyParentMode,
+    ) {
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
         let extent_count = 9;
 
         let opts = generic_crucible_opts(vol_id);
-        let rop = if add_rop {
-            let rop = Box::new(VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 3,
-            });
-            Some(rop)
-        } else {
-            None
+        let test_rop = Box::new(VolumeConstructionRequest::Region {
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts: opts.clone(),
+            gen: 3,
+        });
+
+        let (original_rop, replacement_rop) = match rop_mode {
+            ReadOnlyParentMode::Both => {
+                (Some(test_rop.clone()), Some(test_rop))
+            }
+            ReadOnlyParentMode::OnlyOriginal => (Some(test_rop), None),
+            ReadOnlyParentMode::OnlyReplacement => (None, Some(test_rop)),
+            ReadOnlyParentMode::Neither => (None, None),
         };
 
         let mut sub_volumes = Vec::new();
@@ -3919,7 +4000,7 @@ mod test {
             id: vol_id,
             block_size,
             sub_volumes,
-            read_only_parent: rop.clone(),
+            read_only_parent: original_rop,
         };
 
         let mut replacement_sub_volumes = Vec::new();
@@ -3938,23 +4019,34 @@ mod test {
             id: vol_id,
             block_size,
             sub_volumes: replacement_sub_volumes,
-            read_only_parent: rop,
+            read_only_parent: replacement_rop,
         };
 
         let log = csl();
 
         // Replacement should return ReplacementMatchesOriginal
-        assert!(matches!(
-            Volume::compare_vcr_for_target_replacement(
-                original.clone(),
-                replacement.clone(),
-                &log,
-            ),
-            Ok(ReplacementRequestCheck::ReplacementMatchesOriginal),
-        ));
+        let res = Volume::compare_vcr_for_target_replacement(
+            original.clone(),
+            replacement.clone(),
+            &log,
+        );
+        if rop_mode == ReadOnlyParentMode::OnlyReplacement {
+            assert!(res.is_err());
+        } else {
+            assert!(matches!(
+                res,
+                Ok(ReplacementRequestCheck::ReplacementMatchesOriginal)
+            ));
+        };
 
         // Migration is valid with these VCRs
-        Volume::compare_vcr_for_migration(original, replacement, &log).unwrap();
+        let res =
+            Volume::compare_vcr_for_migration(original, replacement, &log);
+        if rop_mode == ReadOnlyParentMode::OnlyReplacement {
+            assert!(res.is_err());
+        } else {
+            assert!(res.is_ok());
+        };
     }
 
     #[test]
