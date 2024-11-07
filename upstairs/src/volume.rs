@@ -1574,15 +1574,16 @@ impl Volume {
                 let read_only_parent_compare =
                     Box::new(match (o_read_only_parent, n_read_only_parent) {
                         (.., None) => {
-                            // The New VCR is none. When comparing
-                            // read_only_parents this is okay.
+                            // The replacement VCR has no read_only_parent. This
+                            // is a valid situation as read_only_parents will go
+                            // away after a scrub finishes.
                             CompareResult::NewMissing
                         }
 
                         (None, Some(..)) => {
-                            // It's never valid when comparing VCRs to have
-                            // the original VCR be missing and the new VCR
-                            // is present.
+                            // It's never valid when comparing VCRs to have the
+                            // original VCR be missing a read_only_parent and the
+                            // new VCR to have a read_only_parent.
                             crucible_bail!(
                                 ReplaceRequestInvalid,
                                 "VCR added where there should not be one"
@@ -3559,6 +3560,26 @@ mod test {
         }
     }
 
+    // Helper function to build as many sv_count sub-volumes as requested.
+    fn build_subvolume_vcr(
+        sv_count: usize,
+        block_size: u64,
+        blocks_per_extent: u64,
+        extent_count: u32,
+        opts: CrucibleOpts,
+        gen: u64,
+    ) -> Vec<VolumeConstructionRequest> {
+        (0..sv_count)
+            .map(|_| VolumeConstructionRequest::Region {
+                block_size,
+                blocks_per_extent,
+                extent_count,
+                opts: opts.clone(),
+                gen,
+            })
+            .collect()
+    }
+
     // A basic replacement of a target in a sub_volume, with options to
     // create multiple sub_volumes, and to select which sub_volume and specific
     // target to be different.
@@ -3604,17 +3625,14 @@ mod test {
             ReadOnlyParentMode::Neither => (None, None),
         };
 
-        let mut sub_volumes = Vec::new();
-        for _ in 0..sv_count {
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            };
-            sub_volumes.push(sv);
-        }
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
 
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
@@ -3738,17 +3756,14 @@ mod test {
             ReadOnlyParentMode::Neither => (None, None),
         };
 
-        let mut sub_volumes = Vec::new();
-        for _ in 0..sv_count {
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            };
-            sub_volumes.push(sv);
-        }
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
 
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
@@ -3910,17 +3925,14 @@ mod test {
             }
         };
 
-        let mut sub_volumes = Vec::new();
-        for _ in 0..sv_count {
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            };
-            sub_volumes.push(sv);
-        }
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
@@ -3984,17 +3996,14 @@ mod test {
             ReadOnlyParentMode::Neither => (None, None),
         };
 
-        let mut sub_volumes = Vec::new();
-        for _ in 0..sv_count {
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            };
-            sub_volumes.push(sv);
-        }
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
 
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
@@ -4073,17 +4082,15 @@ mod test {
 
         let opts = generic_crucible_opts(vol_id);
 
-        let mut sub_volumes = Vec::new();
-        for _ in 0..sv_count {
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            };
-            sub_volumes.push(sv);
-        }
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
+
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
@@ -4155,17 +4162,14 @@ mod test {
 
         let opts = generic_crucible_opts(vol_id);
 
-        let mut sub_volumes = Vec::new();
-        for _ in 0..sv_count {
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            };
-            sub_volumes.push(sv);
-        }
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
 
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
@@ -4235,18 +4239,15 @@ mod test {
         let extent_count = 9;
 
         let opts = generic_crucible_opts(vol_id);
-        let mut sub_volumes = Vec::new();
 
-        for _ in 0..sv_count {
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            };
-            sub_volumes.push(sv);
-        }
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
 
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
@@ -4325,17 +4326,14 @@ mod test {
         let opts = generic_crucible_opts(vol_id);
 
         // Make the sub_volume(s).
-        let mut sub_volumes = Vec::new();
-        for _ in 0..sv_count {
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            };
-            sub_volumes.push(sv);
-        }
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
 
         // Make the read only parent.
         let mut rop_opts = generic_crucible_opts(rop_id);
@@ -4361,17 +4359,14 @@ mod test {
         let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
         rop_opts.target[1] = new_target;
 
-        let mut sub_volumes = Vec::new();
-        for _ in 0..sv_count {
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 3,
-            };
-            sub_volumes.push(sv);
-        }
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            3,
+        );
         // Make the replacement VCR with the updated target for the
         // read_only_parent.
         let replacement = VolumeConstructionRequest::Volume {
@@ -4432,17 +4427,14 @@ mod test {
 
         // Make the sub_volume(s) that both VCRs will share.
         let opts = generic_crucible_opts(vol_id);
-        let mut sub_volumes = Vec::new();
-        for _ in 0..sv_count {
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            };
-            sub_volumes.push(sv);
-        }
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
 
         // Make the read only parent.
         let mut rop_opts = generic_crucible_opts(rop_id);
@@ -4538,17 +4530,14 @@ mod test {
         let extent_count = 9;
 
         let opts = generic_crucible_opts(vol_id);
-        let mut sub_volumes = Vec::new();
-        for _ in 0..sv_count {
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            };
-            sub_volumes.push(sv);
-        }
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
 
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
@@ -4624,18 +4613,14 @@ mod test {
         let extent_count = 9;
 
         let opts = generic_crucible_opts(vol_id);
-
-        let mut sub_volumes = Vec::new();
-        for _ in 0..sv_count {
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            };
-            sub_volumes.push(sv);
-        }
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
 
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
@@ -4706,17 +4691,14 @@ mod test {
         let extent_count = 9;
 
         let opts = generic_crucible_opts(vol_id);
-        let mut sub_volumes = Vec::new();
-        for _ in 0..sv_count {
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: opts.clone(),
-                gen: 2,
-            };
-            sub_volumes.push(sv);
-        }
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            opts.clone(),
+            2,
+        );
 
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
@@ -4774,17 +4756,14 @@ mod test {
         sv_count: usize,
         sv_changed: usize,
     ) -> Result<(SocketAddr, SocketAddr), crucible_common::CrucibleError> {
-        let mut sub_volumes = Vec::new();
-        for _ in 0..sv_count {
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: o_opts.clone(),
-                gen: 2,
-            };
-            sub_volumes.push(sv);
-        }
+        let sub_volumes = build_subvolume_vcr(
+            sv_count,
+            block_size,
+            blocks_per_extent,
+            extent_count,
+            o_opts.clone(),
+            2,
+        );
 
         let original = VolumeConstructionRequest::Volume {
             id,
