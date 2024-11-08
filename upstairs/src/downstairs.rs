@@ -2112,7 +2112,10 @@ impl Downstairs {
                         self.send(ds_id, io.clone(), cid);
                     }
                 }
-                EnqueueResult::Skip => skipped += 1,
+                EnqueueResult::Skip => {
+                    let _ = bp_guard.take(&cid);
+                    skipped += 1;
+                }
             }
             r.state()
         });
@@ -2653,7 +2656,7 @@ impl Downstairs {
                     if job.backpressure_guard.contains(&c) {
                         warn!(
                             self.log,
-                            "job {ds_id} had pending backpressure bytes \
+                            "job {id} had pending backpressure bytes \
                              for client {c}"
                         );
                         // Backpressure is decremented on drop
