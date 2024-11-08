@@ -3580,6 +3580,53 @@ mod test {
             .collect()
     }
 
+    // Take an existing VCR (required to be VCR::Region), and fabricate a
+    // new set of VCRs from it.  We change the generation number of all the
+    // new sub_volumes, but only change the requested target in one requested
+    // sub_volume at the requested client ID.
+    fn build_replacement_subvol(
+        sv_count: usize,
+        sv_changed: usize,
+        source_vcr: VolumeConstructionRequest,
+        cid: usize,
+    ) -> Vec<VolumeConstructionRequest> {
+        let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
+
+        let (block_size, blocks_per_extent, extent_count, opts, gen) =
+            match source_vcr {
+                VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts,
+                    gen,
+                } => {
+                    (block_size, blocks_per_extent, extent_count, opts, gen + 1)
+                }
+                _ => {
+                    panic!("Unsupported VCR");
+                }
+            };
+
+        (0..sv_count)
+            .map(|i| {
+                let mut replacement_opts = opts.clone();
+
+                if i == sv_changed {
+                    replacement_opts.target[cid] = new_target;
+                }
+
+                VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: replacement_opts.clone(),
+                    gen,
+                }
+            })
+            .collect()
+    }
+
     // A basic replacement of a target in a sub_volume, with options to
     // create multiple sub_volumes, and to select which sub_volume and specific
     // target to be different.
@@ -3637,7 +3684,7 @@ mod test {
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
-            sub_volumes,
+            sub_volumes: sub_volumes.clone(),
             read_only_parent: original_rop,
         };
 
@@ -3646,24 +3693,13 @@ mod test {
         let original_target = opts.target[cid];
         let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
 
-        let mut replacement_sub_volumes = Vec::new();
-        for i in 0..sv_count {
-            let mut replacement_opts = opts.clone();
-            let replacement_gen = 3;
+        let replacement_sub_volumes = build_replacement_subvol(
+            sv_count,
+            sv_changed,
+            sub_volumes[0].clone(),
+            cid,
+        );
 
-            if i == sv_changed {
-                replacement_opts.target[cid] = new_target;
-            }
-
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: replacement_opts.clone(),
-                gen: replacement_gen,
-            };
-            replacement_sub_volumes.push(sv);
-        }
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
@@ -3775,25 +3811,26 @@ mod test {
         // Change just the target and gen for one subvolume, but not the others.
         let new_target: SocketAddr = "127.0.0.1:8888".parse().unwrap();
 
-        let mut replacement_sub_volumes = Vec::new();
-        for i in 0..sv_count {
-            let mut replacement_opts = opts.clone();
-            let mut replacement_gen = 2;
+        let replacement_sub_volumes = (0..sv_count)
+            .map(|i| {
+                let mut replacement_opts = opts.clone();
+                let mut replacement_gen = 2;
 
-            if i == sv_changed {
-                replacement_opts.target[1] = new_target;
-                replacement_gen += 1;
-            }
+                if i == sv_changed {
+                    replacement_opts.target[1] = new_target;
+                    replacement_gen += 1;
+                }
 
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: replacement_opts.clone(),
-                gen: replacement_gen,
-            };
-            replacement_sub_volumes.push(sv);
-        }
+                VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: replacement_opts.clone(),
+                    gen: replacement_gen,
+                }
+            })
+            .collect();
+
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
@@ -4012,17 +4049,15 @@ mod test {
             read_only_parent: original_rop,
         };
 
-        let mut replacement_sub_volumes = Vec::new();
-        for _ in 0..sv_count {
-            let sv = VolumeConstructionRequest::Region {
+        let replacement_sub_volumes = (0..sv_count)
+            .map(|_| VolumeConstructionRequest::Region {
                 block_size,
                 blocks_per_extent,
                 extent_count,
                 opts: opts.clone(),
                 gen: 3,
-            };
-            replacement_sub_volumes.push(sv);
-        }
+            })
+            .collect();
 
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
@@ -4075,6 +4110,7 @@ mod test {
         sv_count: usize,
         sv_changed: usize,
     ) {
+        assert!(sv_count > sv_changed);
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
@@ -4091,32 +4127,19 @@ mod test {
             2,
         );
 
+        let replacement_sub_volumes = build_replacement_subvol(
+            sv_count,
+            sv_changed,
+            sub_volumes[0].clone(),
+            1,
+        );
+
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
             sub_volumes,
             read_only_parent: None,
         };
-
-        let mut replacement_sub_volumes = Vec::new();
-        for i in 0..sv_count {
-            let mut replacement_opts = opts.clone();
-            let mut replacement_gen = 2;
-
-            if i == sv_changed {
-                replacement_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
-                replacement_gen += 1;
-            }
-
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: replacement_opts,
-                gen: replacement_gen,
-            };
-            replacement_sub_volumes.push(sv);
-        }
 
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
@@ -4155,6 +4178,7 @@ mod test {
     }
 
     fn volume_replace_mismatch_vid_inner(sv_count: usize, sv_changed: usize) {
+        assert!(sv_count > sv_changed);
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
@@ -4171,31 +4195,19 @@ mod test {
             2,
         );
 
+        let replacement_sub_volumes = build_replacement_subvol(
+            sv_count,
+            sv_changed,
+            sub_volumes[0].clone(),
+            1,
+        );
+
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
             sub_volumes,
             read_only_parent: None,
         };
-
-        let mut replacement_sub_volumes = Vec::new();
-        for i in 0..sv_count {
-            let mut replacement_opts = opts.clone();
-            let mut replacement_gen = 2;
-
-            if i == sv_changed {
-                replacement_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
-                replacement_gen += 1;
-            }
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: replacement_opts,
-                gen: replacement_gen,
-            };
-            replacement_sub_volumes.push(sv);
-        }
 
         let replacement = VolumeConstructionRequest::Volume {
             id: Uuid::new_v4(),
@@ -4233,6 +4245,7 @@ mod test {
     }
 
     fn volume_replace_mismatch_vrop_inner(sv_count: usize, sv_changed: usize) {
+        assert!(sv_count > sv_changed);
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
@@ -4249,31 +4262,19 @@ mod test {
             2,
         );
 
+        let replacement_sub_volumes = build_replacement_subvol(
+            sv_count,
+            sv_changed,
+            sub_volumes[0].clone(),
+            1,
+        );
+
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
             sub_volumes,
             read_only_parent: None,
         };
-
-        let mut replacement_sub_volumes = Vec::new();
-        for i in 0..sv_count {
-            let mut replacement_opts = opts.clone();
-            let mut replacement_gen = 2;
-
-            if i == sv_changed {
-                replacement_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
-                replacement_gen += 1;
-            }
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: replacement_opts,
-                gen: replacement_gen,
-            };
-            replacement_sub_volumes.push(sv);
-        }
 
         // Replacement can't have a read_only_parent
         let replacement = VolumeConstructionRequest::Volume {
@@ -4419,6 +4420,7 @@ mod test {
         sv_count: usize,
         sv_changed: usize,
     ) {
+        assert!(sv_count > sv_changed);
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let rop_id = Uuid::new_v4();
@@ -4446,6 +4448,13 @@ mod test {
             gen: 4,
         };
 
+        let replacement_sub_volumes = build_replacement_subvol(
+            sv_count,
+            sv_changed,
+            sub_volumes[0].clone(),
+            1,
+        );
+
         // Make the original VCR using what we created above.
         let original = VolumeConstructionRequest::Volume {
             id: vol_id,
@@ -4453,26 +4462,6 @@ mod test {
             sub_volumes,
             read_only_parent: Some(Box::new(rop.clone())),
         };
-
-        // Update the sub_volume target with a new downstairs
-        let mut replacement_sub_volumes = Vec::new();
-        for i in 0..sv_count {
-            let mut replacement_opts = opts.clone();
-            let mut replacement_gen = 2;
-
-            if i == sv_changed {
-                replacement_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
-                replacement_gen += 1;
-            }
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: replacement_opts,
-                gen: replacement_gen,
-            };
-            replacement_sub_volumes.push(sv);
-        }
 
         // Update the ROP target with a new downstairs
         rop_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
@@ -4524,6 +4513,7 @@ mod test {
     }
 
     fn volume_replace_mismatch_sv_bs_inner(sv_count: usize, sv_changed: usize) {
+        assert!(sv_count > sv_changed);
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
@@ -4546,26 +4536,26 @@ mod test {
             read_only_parent: None,
         };
 
-        let mut replacement_sub_volumes = Vec::new();
-        for i in 0..sv_count {
-            let mut replacement_opts = opts.clone();
-            let mut replacement_gen = 2;
-            let mut replacement_block_size = block_size;
+        let replacement_sub_volumes = (0..sv_count)
+            .map(|i| {
+                let mut replacement_opts = opts.clone();
+                let replacement_gen = 3;
+                let mut replacement_block_size = block_size;
 
-            if i == sv_changed {
-                replacement_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
-                replacement_gen += 1;
-                replacement_block_size = 4096;
-            }
-            let sv = VolumeConstructionRequest::Region {
-                block_size: replacement_block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: replacement_opts,
-                gen: replacement_gen,
-            };
-            replacement_sub_volumes.push(sv);
-        }
+                if i == sv_changed {
+                    replacement_opts.target[1] =
+                        "127.0.0.1:8888".parse().unwrap();
+                    replacement_block_size = 4096;
+                }
+                VolumeConstructionRequest::Region {
+                    block_size: replacement_block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: replacement_opts,
+                    gen: replacement_gen,
+                }
+            })
+            .collect();
 
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
@@ -4607,6 +4597,7 @@ mod test {
         sv_count: usize,
         sv_changed: usize,
     ) {
+        assert!(sv_count > sv_changed);
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
@@ -4629,26 +4620,26 @@ mod test {
             read_only_parent: None,
         };
 
-        let mut replacement_sub_volumes = Vec::new();
-        for i in 0..sv_count {
-            let mut replacement_opts = opts.clone();
-            let mut replacement_gen = 2;
-            let mut replacement_bpe = blocks_per_extent;
+        let replacement_sub_volumes = (0..sv_count)
+            .map(|i| {
+                let mut replacement_opts = opts.clone();
+                let replacement_gen = 3;
+                let mut replacement_bpe = blocks_per_extent;
 
-            if i == sv_changed {
-                replacement_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
-                replacement_gen += 1;
-                replacement_bpe += 2;
-            }
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent: replacement_bpe,
-                extent_count,
-                opts: replacement_opts,
-                gen: replacement_gen,
-            };
-            replacement_sub_volumes.push(sv);
-        }
+                if i == sv_changed {
+                    replacement_opts.target[1] =
+                        "127.0.0.1:8888".parse().unwrap();
+                    replacement_bpe += 2;
+                }
+                VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent: replacement_bpe,
+                    extent_count,
+                    opts: replacement_opts,
+                    gen: replacement_gen,
+                }
+            })
+            .collect();
 
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
@@ -4685,6 +4676,7 @@ mod test {
         }
     }
     fn volume_replace_mismatch_sv_ec_inner(sv_count: usize, sv_changed: usize) {
+        assert!(sv_count > sv_changed);
         let block_size = 512;
         let vol_id = Uuid::new_v4();
         let blocks_per_extent = 10;
@@ -4707,26 +4699,27 @@ mod test {
             read_only_parent: None,
         };
 
-        let mut replacement_sub_volumes = Vec::new();
-        for i in 0..sv_count {
-            let mut replacement_opts = opts.clone();
-            let mut replacement_gen = 2;
-            let mut replacement_ec = extent_count;
+        let replacement_sub_volumes = (0..sv_count)
+            .map(|i| {
+                let mut replacement_opts = opts.clone();
+                let replacement_gen = 3;
+                let mut replacement_ec = extent_count;
 
-            if i == sv_changed {
-                replacement_opts.target[1] = "127.0.0.1:8888".parse().unwrap();
-                replacement_gen += 1;
-                replacement_ec += 2;
-            }
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count: replacement_ec,
-                opts: replacement_opts,
-                gen: replacement_gen,
-            };
-            replacement_sub_volumes.push(sv);
-        }
+                if i == sv_changed {
+                    replacement_opts.target[1] =
+                        "127.0.0.1:8888".parse().unwrap();
+                    replacement_ec += 2;
+                }
+                VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count: replacement_ec,
+                    opts: replacement_opts,
+                    gen: replacement_gen,
+                }
+            })
+            .collect();
+
         let replacement = VolumeConstructionRequest::Volume {
             id: vol_id,
             block_size,
@@ -4756,6 +4749,7 @@ mod test {
         sv_count: usize,
         sv_changed: usize,
     ) -> Result<(SocketAddr, SocketAddr), crucible_common::CrucibleError> {
+        assert!(sv_count > sv_changed);
         let sub_volumes = build_subvolume_vcr(
             sv_count,
             block_size,
@@ -4772,24 +4766,23 @@ mod test {
             read_only_parent: None,
         };
 
-        let mut replacement_sub_volumes = Vec::new();
-        for i in 0..sv_count {
-            let mut replacement_opts = o_opts.clone();
-            let mut replacement_gen = 2;
+        let replacement_sub_volumes = (0..sv_count)
+            .map(|i| {
+                let mut replacement_opts = o_opts.clone();
+                let replacement_gen = 3;
 
-            if i == sv_changed {
-                replacement_opts = n_opts.clone();
-                replacement_gen += 1;
-            }
-            let sv = VolumeConstructionRequest::Region {
-                block_size,
-                blocks_per_extent,
-                extent_count,
-                opts: replacement_opts,
-                gen: replacement_gen,
-            };
-            replacement_sub_volumes.push(sv);
-        }
+                if i == sv_changed {
+                    replacement_opts = n_opts.clone();
+                }
+                VolumeConstructionRequest::Region {
+                    block_size,
+                    blocks_per_extent,
+                    extent_count,
+                    opts: replacement_opts,
+                    gen: replacement_gen,
+                }
+            })
+            .collect();
 
         let replacement = VolumeConstructionRequest::Volume {
             id,
