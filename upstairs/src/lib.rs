@@ -96,7 +96,19 @@ const IO_OUTSTANDING_MAX_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
 ///
 /// If we exceed this value, the upstairs will give up and mark that offline
 /// downstairs as faulted.
-pub const IO_OUTSTANDING_MAX_JOBS: usize = 10000;
+const IO_OUTSTANDING_MAX_JOBS: usize = 10000;
+
+/// Maximum of bytes to cache from complete (but un-flushed) IO
+///
+/// Caching complete jobs allows us to replay them if a Downstairs goes offline
+/// them comes back.
+const IO_CACHED_MAX_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
+
+/// Maximum of jobs to cache from complete (but un-flushed) IO
+///
+/// Caching complete jobs allows us to replay them if a Downstairs goes offline
+/// them comes back.
+const IO_CACHED_MAX_JOBS: u64 = 10000;
 
 /// The BlockIO trait behaves like a physical NVMe disk (or a virtio virtual
 /// disk): there is no contract about what order operations that are submitted
@@ -1273,6 +1285,11 @@ impl IOop {
                     // If we have set extent limit, then we go ahead and
                     // send the flush with the extent_limit in it, and allow
                     // the downstairs to act based on that.
+                    true
+                }
+                IOop::Barrier { .. } => {
+                    // The Barrier IOop doesn't actually touch any extents; it's
+                    // purely for dependency management.
                     true
                 }
                 _ => {
