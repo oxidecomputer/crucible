@@ -48,9 +48,6 @@ pub use in_memory::InMemoryBlockIO;
 pub mod block_io;
 pub use block_io::{FileBlockIO, ReqwestBlockIO};
 
-pub(crate) mod backpressure;
-use backpressure::BackpressureGuard;
-
 pub mod block_req;
 pub(crate) use block_req::{BlockOpWaiter, BlockRes};
 
@@ -86,17 +83,20 @@ mod downstairs;
 mod upstairs;
 use upstairs::{UpCounters, UpstairsAction};
 
+mod io_limits;
+use io_limits::IOLimitGuard;
+
 /// Max number of write bytes between the upstairs and an offline downstairs
 ///
-/// If we exceed this value, the upstairs will give
-/// up and mark the offline downstairs as faulted.
-const IO_OUTSTANDING_MAX_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
+/// If we exceed this value, the upstairs will give up and mark the offline
+/// downstairs as faulted.
+const IO_OUTSTANDING_MAX_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
 
 /// Max number of outstanding IOs between the upstairs and an offline downstairs
 ///
 /// If we exceed this value, the upstairs will give up and mark that offline
 /// downstairs as faulted.
-const IO_OUTSTANDING_MAX_JOBS: usize = 10000;
+pub const IO_OUTSTANDING_MAX_JOBS: usize = 1000;
 
 /// Maximum of bytes to cache from complete (but un-flushed) IO
 ///
@@ -446,6 +446,11 @@ impl<T> ClientData<T> {
             f(ClientId::new(1)),
             f(ClientId::new(2)),
         ])
+    }
+
+    /// Builds a new `ClientData` by applying a function to each item
+    pub fn map<U, F: FnMut(T) -> U>(self, f: F) -> ClientData<U> {
+        ClientData(self.0.map(f))
     }
 
     #[cfg(test)]
@@ -926,11 +931,7 @@ struct DownstairsIO {
     /// consistency checking with subsequent replies.
     data: Option<RawReadResponse>,
 
-    /// Handle for this job's contribution to guest backpressure
-    ///
-    /// Each of these guard handles will automatically decrement the
-    /// backpressure count for their respective Downstairs when dropped.
-    backpressure_guard: ClientMap<BackpressureGuard>,
+    io_limits: ClientMap<io_limits::ClientIOLimitGuard>,
 }
 
 impl DownstairsIO {
@@ -1315,16 +1316,6 @@ impl IOop {
             _ => 0,
         }
     }
-
-    /// Returns the number of bytes written
-    fn write_bytes(&self) -> u64 {
-        match &self {
-            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
-                data.len() as u64
-            }
-            _ => 0,
-        }
-    }
 }
 
 #[allow(clippy::derive_partial_eq_without_eq)]
@@ -1502,20 +1493,24 @@ pub(crate) enum BlockOp {
         offset: BlockIndex,
         data: Buffer,
         done: BlockRes<Buffer, (Buffer, CrucibleError)>,
+        io_guard: IOLimitGuard,
     },
     Write {
         offset: BlockIndex,
         data: BytesMut,
         done: BlockRes,
+        io_guard: IOLimitGuard,
     },
     WriteUnwritten {
         offset: BlockIndex,
         data: BytesMut,
         done: BlockRes,
+        io_guard: IOLimitGuard,
     },
     Flush {
         snapshot_details: Option<SnapshotDetails>,
         done: BlockRes,
+        io_guard: IOLimitGuard,
     },
     GoActive {
         done: BlockRes,
@@ -1584,8 +1579,6 @@ pub struct Arg {
     pub up_counters: UpCounters,
     /// Next JobID
     pub next_job_id: JobId,
-    /// Backpressure value
-    pub up_backpressure: u64,
     /// Jobs on the downstairs work queue.
     pub ds_count: u32,
     /// Number of write bytes in flight
@@ -1664,7 +1657,7 @@ pub fn up_main(
     };
 
     #[cfg(test)]
-    let disable_backpressure = guest.is_queue_backpressure_disabled();
+    let disable_backpressure = guest.is_backpressure_disabled();
 
     /*
      * Build the Upstairs struct that we use to share data between
@@ -1675,7 +1668,7 @@ pub fn up_main(
 
     #[cfg(test)]
     if disable_backpressure {
-        up.disable_client_backpressure();
+        up.downstairs.disable_client_backpressure();
     }
 
     if let Some(pr) = producer_registry {

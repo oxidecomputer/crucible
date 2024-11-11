@@ -567,8 +567,7 @@ impl TestHarness {
         // require triggering a timeout
         let (g, mut io) = Guest::new(Some(log.clone()));
         if opts.disable_backpressure {
-            io.disable_queue_backpressure();
-            io.disable_byte_backpressure();
+            io.disable_backpressure();
         }
         let guest = Arc::new(g);
 
