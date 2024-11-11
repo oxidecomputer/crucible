@@ -3516,6 +3516,15 @@ mod test {
         Neither,
     }
 
+    impl ReadOnlyParentMode {
+        fn test_all<F: FnMut(Self)>(mut f: F) {
+            f(ReadOnlyParentMode::Both);
+            f(ReadOnlyParentMode::OnlyOriginal);
+            f(ReadOnlyParentMode::OnlyReplacement);
+            f(ReadOnlyParentMode::Neither);
+        }
+    }
+
     #[test]
     fn volume_replace_basic() {
         // A valid replacement VCR is provided with only one target being
@@ -3733,26 +3742,9 @@ mod test {
         // We need at least two sub_volumes for this test.
         for sv in 2..4 {
             for sv_changed in 0..sv {
-                test_volume_replace_no_gen_inner(
-                    sv,
-                    sv_changed,
-                    ReadOnlyParentMode::Both,
-                );
-                test_volume_replace_no_gen_inner(
-                    sv,
-                    sv_changed,
-                    ReadOnlyParentMode::OnlyOriginal,
-                );
-                test_volume_replace_no_gen_inner(
-                    sv,
-                    sv_changed,
-                    ReadOnlyParentMode::OnlyReplacement,
-                );
-                test_volume_replace_no_gen_inner(
-                    sv,
-                    sv_changed,
-                    ReadOnlyParentMode::Neither,
-                );
+                ReadOnlyParentMode::test_all(|mode| {
+                    test_volume_replace_no_gen_inner(sv, sv_changed, mode);
+                });
             }
         }
     }
@@ -3996,13 +3988,9 @@ mod test {
     // OnlyReplacement case should always fail.
     fn volume_vcr_no_targets() {
         for sv in 1..3 {
-            volume_vcr_no_targets_inner(sv, ReadOnlyParentMode::Both);
-            volume_vcr_no_targets_inner(sv, ReadOnlyParentMode::OnlyOriginal);
-            volume_vcr_no_targets_inner(
-                sv,
-                ReadOnlyParentMode::OnlyReplacement,
-            );
-            volume_vcr_no_targets_inner(sv, ReadOnlyParentMode::Neither);
+            ReadOnlyParentMode::test_all(|mode| {
+                volume_vcr_no_targets_inner(sv, mode);
+            });
         }
     }
 
