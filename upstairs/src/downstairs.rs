@@ -1014,8 +1014,8 @@ impl Downstairs {
 
     /// Pushes live-repair forward, if possible
     ///
-    /// It's possible that handling the current live-repair job will make
-    /// subsequent live-repair jobs ackable immediately
+    /// It's possible that handling the current live-repair job will cause
+    /// subsequent live-repair jobs to be completed immediately
     /// (`test_repair_extent_fail_noop_out_of_order` exercises this case).  As
     /// such, this function will continue running until the next live-repair job
     /// is not ready.
@@ -2178,7 +2178,7 @@ impl Downstairs {
     ///
     /// - enqueue the job in each of [Self::clients] (clients may skip the job)
     /// - add the job to [Self::ds_active]
-    /// - Mark the job as ackable if it was skipped by all downstairs
+    /// - Ack the job immediately if it was skipped by all downstairs
     /// - Check that the job was already acked if it's a write (the "fast ack"
     ///   optimization, which is performed elsewhere)
     /// - Send the job to each downstairs client task (if not skipped)
@@ -2583,8 +2583,8 @@ impl Downstairs {
 
     /// Move all `New` and `InProgress` jobs for the given client to `Skipped`
     ///
-    /// This may lead to jobs being marked as ackable, since a skipped job
-    /// counts as complete in some circumstances.
+    /// This may lead to jobs being acked, since a skipped job counts as
+    /// complete in some circumstances.
     pub(crate) fn skip_all_jobs(&mut self, client_id: ClientId) {
         info!(
             self.log,
@@ -3222,7 +3222,7 @@ impl Downstairs {
 
     /// Wrapper for marking a single job as done from the given client
     ///
-    /// This can be used to test handling of ackable work, etc.
+    /// This can be used to test handling of job acks, etc
     ///
     /// Returns true if the given job has gone from not acked to acked.  This is
     /// for historical reasons, because it's often used in existing tests.
@@ -4802,9 +4802,8 @@ pub(crate) mod test {
 
         // Simulate completing both writes to downstairs 0 and 1
         //
-        // write_unwritten jobs become ackable upon the second completion;
-        // normal writes were ackable from the start (and hence
-        // process_ds_completion always returns `false`)
+        // all writes are acked immediately upon submission, so
+        // process_ds_completion always returns `false`.
         assert!(!ds.process_ds_completion(
             id1,
             ClientId::new(0),
@@ -6636,7 +6635,7 @@ pub(crate) mod test {
             None
         ));
 
-        // the operation was previously marked as ackable, because it's a write
+        // the operation was already fast-acked, because it's a write
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
@@ -6802,7 +6801,7 @@ pub(crate) mod test {
 
         let response = Ok(build_read_response(&[]));
 
-        // Process the operation for client 2, which makes the job ackable
+        // Process the operation for client 2, which acks the job
         assert!(ds.process_ds_completion(
             next_id,
             ClientId::new(2),
@@ -6846,8 +6845,8 @@ pub(crate) mod test {
             None
         ));
 
-        // process_ds_operation for client 2; the job was already ackable
-        // (because it's a write) so this returns false
+        // process_ds_operation for client 2; the job was already acked (because
+        // it's a write) so this returns false
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
@@ -6887,7 +6886,7 @@ pub(crate) mod test {
         ));
         // We don't process client 1, it had failed
 
-        // again, the job was ackable immediately
+        // again, the job was acked immediately because it's a write
         assert!(!ds.process_ds_completion(
             next_id,
             ClientId::new(2),
@@ -6988,7 +6987,7 @@ pub(crate) mod test {
             None
         ));
 
-        // Process the operation for client 2.  The job was already ackable, so
+        // Process the operation for client 2.  The job was already acked, so
         // this returns `false`
         assert!(!ds.process_ds_completion(
             write_id,

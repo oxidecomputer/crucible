@@ -170,7 +170,6 @@ impl UpCounters {
 ///
 /// For example, we _always_ do things like
 /// - Send all pending IO to the client work tasks
-/// - Ack all ackable jobs to the guest
 /// - Step through the live-repair state machine (if it's running)
 /// - Check for client-side deactivation (if it's pending)
 /// - Set backpressure time in the clients
@@ -1647,7 +1646,7 @@ impl Upstairs {
 
             // IO operation replies
             //
-            // This may cause jobs to become ackable!
+            // This may cause jobs to be acked!
             Message::WriteAck { .. }
             | Message::WriteUnwrittenAck { .. }
             | Message::FlushAck { .. }
