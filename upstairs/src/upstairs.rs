@@ -611,15 +611,7 @@ impl Upstairs {
         }
 
         // Check to see whether live-repair can continue
-        //
-        // This must be called before acking jobs, because it looks in
-        // `Downstairs::ackable_jobs` to see which jobs are done.
         self.downstairs.check_and_continue_live_repair(&self.state);
-
-        // Handle any jobs that have become ready for acks
-        if self.downstairs.has_ackable_jobs() {
-            self.downstairs.ack_jobs()
-        }
 
         // Check for client-side deactivation
         if matches!(&self.state, UpstairsState::Deactivating(..)) {
