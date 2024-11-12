@@ -375,11 +375,6 @@ mod cdt {
     fn ds__repair__done(_: u64, _: u8) {}
     fn ds__noop__done(_: u64, _: u8) {}
     fn ds__reopen__done(_: u64, _: u8) {}
-    fn up__to__ds__read__done(_: u64) {}
-    fn up__to__ds__write__done(_: u64) {}
-    fn up__to__ds__write__unwritten__done(_: u64) {}
-    fn up__to__ds__flush__done(_: u64) {}
-    fn up__to__ds__barrier__done(_: u64) {}
     fn gw__read__done(_: u64) {}
     fn gw__write__done(_: u64) {}
     fn gw__write__unwritten__done(_: u64) {}
@@ -511,12 +506,6 @@ pub struct WorkCounts {
     error: u64,   // This IO had an error.
     skipped: u64, // Skipped
     done: u64,    // This IO has completed
-}
-
-impl WorkCounts {
-    fn completed_ok(&self) -> u64 {
-        self.done
-    }
 }
 
 #[derive(Debug, Copy, Clone)]
