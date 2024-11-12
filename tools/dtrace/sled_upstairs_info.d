@@ -46,8 +46,7 @@ crucible_upstairs*:::up-status
      * we don't print it all on one line, then multiple sessions will
      * clobber each others output.
      */
-    printf("%5d %8s %17s %17s %17s %5s %5s %9s %5s %10s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s\n",
-
+    printf("%5d %8s %17s %17s %17s %5s %5s %5s %10s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s\n",
     pid,
     substr(session_id, 0, 8),
 
@@ -62,7 +61,6 @@ crucible_upstairs*:::up-status
 
     /* Job ID and backpressure */
     json(copyinstr(arg1), "ok.next_job_id"),
-    json(copyinstr(arg1), "ok.up_backpressure"),
     json(copyinstr(arg1), "ok.write_bytes_out"),
 
     /* In progress jobs on the work list for each downstairs */

@@ -10,6 +10,7 @@ use crate::{
     },
     downstairs::{Downstairs, DownstairsAction},
     extent_from_offset,
+    io_limits::IOLimitGuard,
     stats::UpStatOuter,
     BlockOp, BlockRes, Buffer, ClientId, ClientMap, CrucibleOpts, DsState,
     EncryptionContext, GuestIoHandle, Message, RegionDefinition,
@@ -172,7 +173,7 @@ impl UpCounters {
 /// - Ack all ackable jobs to the guest
 /// - Step through the live-repair state machine (if it's running)
 /// - Check for client-side deactivation (if it's pending)
-/// - Set backpressure time in the guest
+/// - Set backpressure time in the clients
 ///
 /// Keeping the `Upstairs` "clean" through this invariant maintenance makes it
 /// easier to think about its state, because it's guaranteed to be clean when we
@@ -206,12 +207,11 @@ pub(crate) struct Upstairs {
 
     /// Marks whether a flush is needed
     ///
-    /// The Upstairs keeps all IOs in memory until a flush is ACK'd back from
-    /// all three downstairs.  If there are IOs we have accepted into the work
-    /// queue that don't end with a flush, then we set this to indicate that the
-    /// upstairs may need to issue a flush of its own to be sure that data is
-    /// pushed to disk.  Note that this is not an indication of an ACK'd flush,
-    /// just that the last IO command we put on the work queue was not a flush.
+    /// If there are IOs we have accepted into the work queue that don't end
+    /// with a flush, then we set this to indicate that the upstairs may need to
+    /// issue a flush of its own to be sure that data is pushed to disk.  Note
+    /// that this is not an indication of an ACK'd flush, just that the last IO
+    /// command we put on the work queue was not a flush.
     need_flush: bool,
 
     /// Statistics for this upstairs
@@ -390,6 +390,7 @@ impl Upstairs {
             ds_target,
             tls_context,
             stats.ds_stats(),
+            guest.io_limits(),
             log.new(o!("" => "downstairs")),
         );
         let flush_timeout_secs = opt.flush_timeout.unwrap_or(0.5);
@@ -422,11 +423,6 @@ impl Upstairs {
             deferred_msgs: DeferredQueue::new(),
             pool,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn disable_client_backpressure(&mut self) {
-        self.downstairs.disable_client_backpressure();
     }
 
     /// Build an Upstairs for simple tests
@@ -531,6 +527,10 @@ impl Upstairs {
 
     /// Apply an action returned from [`Upstairs::select`]
     pub(crate) fn apply(&mut self, action: UpstairsAction) {
+        // Check whether the downstairs has live jobs before performing the
+        // action, because the action may cause it to retire live jobs.
+        let has_jobs = self.downstairs.has_live_jobs();
+
         match action {
             UpstairsAction::Downstairs(d) => {
                 self.counters.action_downstairs += 1;
@@ -567,7 +567,8 @@ impl Upstairs {
                     .counters
                     .action_flush_check));
                 if self.need_flush {
-                    self.submit_flush(None, None);
+                    let io_guard = self.try_acquire_io(0);
+                    self.submit_flush(None, None, io_guard);
                 }
                 self.flush_deadline = Instant::now() + self.flush_interval;
             }
@@ -602,6 +603,12 @@ impl Upstairs {
         // Check whether we need to mark an offline Downstairs as faulted
         // because too many jobs have piled up.
         self.gone_too_long();
+
+        // Check whether we need to send a Barrier operation to clean out
+        // complete-but-unflushed jobs.
+        if self.downstairs.needs_barrier() {
+            self.submit_barrier()
+        }
 
         // Check to see whether live-repair can continue
         //
@@ -652,7 +659,41 @@ impl Upstairs {
 
         // For now, check backpressure after every event.  We may want to make
         // this more nuanced in the future.
-        self.set_backpressure();
+        self.downstairs.set_client_backpressure();
+
+        // We do this last because some of the code above can be slow
+        // (especially during debug builds), and we don't want to set our flush
+        // deadline such that it fires immediately.
+        if has_jobs {
+            self.flush_deadline = Instant::now() + self.flush_interval;
+        }
+    }
+
+    /// Attempts to acquire permits to perform an IO job with the given bytes
+    ///
+    /// Upon failure, logs an error and returns `None`.
+    ///
+    /// This function is used by messages generated internally to the Upstairs
+    /// for best-effort IO limiting.  If the message would exceed our available
+    /// permits, it's still allowed (because to do otherwise would deadlock the
+    /// upstairs task).  In other words, internally generated messages can limit
+    /// guest IO work, but not the other way around
+    fn try_acquire_io(&self, bytes: usize) -> Option<IOLimitGuard> {
+        let Ok(bytes) = u32::try_from(bytes) else {
+            warn!(self.log, "too many bytes for try_acquire_io");
+            return None;
+        };
+        match self.guest.io_limits().try_claim(bytes) {
+            Ok(v) => Some(v),
+            Err((i, e)) => {
+                warn!(
+                    self.log,
+                    "could not apply IO limits to upstairs work: \
+                     client {i} returned {e:?}"
+                );
+                None
+            }
+        }
     }
 
     /// Helper function to await all deferred block requests
@@ -710,7 +751,6 @@ impl Upstairs {
                 up_count: self.downstairs.gw_active.len() as u32,
                 up_counters: self.counters,
                 next_job_id: self.downstairs.peek_next_id(),
-                up_backpressure: self.guest.get_backpressure().as_micros(),
                 write_bytes_out: self.downstairs.write_bytes_outstanding(),
                 ds_count: self.downstairs.active_count() as u32,
                 ds_state: self.downstairs.collect_stats(|c| c.state()),
@@ -903,11 +943,21 @@ impl Upstairs {
         match op {
             // All Write operations are deferred, because they will offload
             // encryption to a separate thread pool.
-            BlockOp::Write { offset, data, done } => {
-                self.submit_deferred_write(offset, data, done, false);
+            BlockOp::Write {
+                offset,
+                data,
+                done,
+                io_guard,
+            } => {
+                self.submit_deferred_write(offset, data, done, false, io_guard);
             }
-            BlockOp::WriteUnwritten { offset, data, done } => {
-                self.submit_deferred_write(offset, data, done, true);
+            BlockOp::WriteUnwritten {
+                offset,
+                data,
+                done,
+                io_guard,
+            } => {
+                self.submit_deferred_write(offset, data, done, true, io_guard);
             }
             // If we have any deferred requests in the FuturesOrdered, then we
             // have to keep using it for subsequent requests (even ones that are
@@ -1074,15 +1124,19 @@ impl Upstairs {
                 done.send_ok(self.show_all_work());
             }
 
-            BlockOp::Read { offset, data, done } => {
-                self.submit_read(offset, data, done)
-            }
+            BlockOp::Read {
+                offset,
+                data,
+                done,
+                io_guard,
+            } => self.submit_read(offset, data, done, io_guard),
             BlockOp::Write { .. } | BlockOp::WriteUnwritten { .. } => {
                 panic!("writes must always be deferred")
             }
             BlockOp::Flush {
                 snapshot_details,
                 done,
+                io_guard,
             } => {
                 /*
                  * Submit for read and write both check if the upstairs is
@@ -1095,7 +1149,7 @@ impl Upstairs {
                     done.send_err(CrucibleError::UpstairsInactive);
                     return;
                 }
-                self.submit_flush(Some(done), snapshot_details);
+                self.submit_flush(Some(done), snapshot_details, Some(io_guard));
             }
             BlockOp::ReplaceDownstairs { id, old, new, done } => {
                 let r = self.downstairs.replace(id, old, new, &self.state);
@@ -1235,7 +1289,8 @@ impl Upstairs {
         }
         if !self.downstairs.can_deactivate_immediately() {
             debug!(self.log, "not ready to deactivate; submitting final flush");
-            self.submit_flush(None, None);
+            let io_guard = self.try_acquire_io(0);
+            self.submit_flush(None, None, io_guard);
         } else {
             debug!(self.log, "ready to deactivate right away");
             // Deactivation is handled in the invariant-checking portion of
@@ -1249,6 +1304,7 @@ impl Upstairs {
         &mut self,
         res: Option<BlockRes>,
         snapshot_details: Option<SnapshotDetails>,
+        io_guard: Option<IOLimitGuard>,
     ) {
         // Notice that unlike submit_read and submit_write, we do not check for
         // guest_io_ready here. The upstairs itself can call submit_flush
@@ -1266,18 +1322,18 @@ impl Upstairs {
         if snapshot_details.is_some() {
             info!(self.log, "flush with snap requested");
         }
-        let ds_id = self.downstairs.submit_flush(snapshot_details, res);
+        let ds_id =
+            self.downstairs
+                .submit_flush(snapshot_details, res, io_guard);
 
         cdt::up__to__ds__flush__start!(|| (ds_id.0));
     }
 
-    #[allow(dead_code)] // XXX this will be used soon!
     fn submit_barrier(&mut self) {
         // Notice that unlike submit_read and submit_write, we do not check for
         // guest_io_ready here. The upstairs itself calls submit_barrier
         // without the guest being involved; indeed the guest is not allowed to
         // call it!
-
         let ds_id = self.downstairs.submit_barrier();
 
         cdt::up__to__ds__barrier__start!(|| (ds_id.0));
@@ -1291,8 +1347,7 @@ impl Upstairs {
         offset: BlockIndex,
         data: Buffer,
     ) {
-        let br = BlockRes::dummy();
-        self.submit_read(offset, data, br)
+        self.submit_read(offset, data, BlockRes::dummy(), IOLimitGuard::dummy())
     }
 
     /// Submit a read job to the downstairs
@@ -1301,6 +1356,7 @@ impl Upstairs {
         offset: BlockIndex,
         data: Buffer,
         res: BlockRes<Buffer, (Buffer, CrucibleError)>,
+        io_guard: IOLimitGuard,
     ) {
         if !self.guest_io_ready() {
             res.send_err((data, CrucibleError::UpstairsInactive));
@@ -1339,7 +1395,9 @@ impl Upstairs {
          * Grab this ID after extent_from_offset: in case of Err we don't
          * want to create a gap in the IDs.
          */
-        let ds_id = self.downstairs.submit_read(impacted_blocks, data, res);
+        let ds_id =
+            self.downstairs
+                .submit_read(impacted_blocks, data, res, io_guard);
 
         cdt::up__to__ds__read__start!(|| (ds_id.0));
     }
@@ -1359,6 +1417,7 @@ impl Upstairs {
             data,
             BlockRes::dummy(),
             is_write_unwritten,
+            IOLimitGuard::dummy(),
         ) {
             self.submit_write(DeferredWrite::run(w))
         }
@@ -1375,14 +1434,19 @@ impl Upstairs {
         data: BytesMut,
         res: BlockRes,
         is_write_unwritten: bool,
+        io_guard: IOLimitGuard,
     ) {
         // It's possible for the write to be invalid out of the gate, in which
         // case `compute_deferred_write` replies to the `res` itself and returns
         // `None`.  Otherwise, we have to store a future to process the write
         // result.
-        if let Some(w) =
-            self.compute_deferred_write(offset, data, res, is_write_unwritten)
-        {
+        if let Some(w) = self.compute_deferred_write(
+            offset,
+            data,
+            res,
+            is_write_unwritten,
+            io_guard,
+        ) {
             let should_defer = !self.deferred_ops.is_empty()
                 || w.data.len() > MIN_DEFER_SIZE_BYTES as usize;
             if should_defer {
@@ -1404,6 +1468,7 @@ impl Upstairs {
         data: BytesMut,
         res: BlockRes,
         is_write_unwritten: bool,
+        io_guard: IOLimitGuard,
     ) -> Option<DeferredWrite> {
         if !self.guest_io_ready() {
             res.send_err(CrucibleError::UpstairsInactive);
@@ -1431,8 +1496,6 @@ impl Upstairs {
         let impacted_blocks =
             extent_from_offset(&ddef, offset, ddef.bytes_to_blocks(data.len()));
 
-        let guard = self.downstairs.early_write_backpressure(data.len() as u64);
-
         // Fast-ack, pretending to be done immediately operations
         res.send_ok(());
 
@@ -1442,7 +1505,7 @@ impl Upstairs {
             data,
             is_write_unwritten,
             cfg: self.cfg.clone(),
-            guard,
+            io_guard,
         })
     }
 
@@ -1462,7 +1525,7 @@ impl Upstairs {
             write.impacted_blocks,
             write.data,
             write.is_write_unwritten,
-            write.guard,
+            write.io_guard,
         );
 
         if write.is_write_unwritten {
@@ -2010,16 +2073,6 @@ impl Upstairs {
         self.downstairs.reinitialize(client_id, &self.state);
     }
 
-    /// Sets both guest and per-client backpressure
-    fn set_backpressure(&self) {
-        self.guest.set_backpressure(
-            self.downstairs.write_bytes_outstanding(),
-            self.downstairs.jobs_outstanding(),
-        );
-
-        self.downstairs.set_client_backpressure();
-    }
-
     /// Returns the `RegionDefinition`
     ///
     /// # Panics
@@ -2341,7 +2394,7 @@ pub(crate) mod test {
         );
 
         // op 1
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
         // op 2
         upstairs.submit_dummy_write(
@@ -2386,7 +2439,7 @@ pub(crate) mod test {
         }
 
         // op 3
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
         // ops 4 to 6
         for i in 3..6 {
@@ -2717,7 +2770,7 @@ pub(crate) mod test {
         );
 
         // op 1
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
         // op 2
         upstairs.submit_dummy_read(BlockIndex(0), Buffer::new(2, 512));
@@ -2744,11 +2797,11 @@ pub(crate) mod test {
         let mut upstairs = make_upstairs();
         upstairs.force_active().unwrap();
 
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
@@ -2778,7 +2831,7 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
         // ops 1 to 2
         for i in 0..2 {
@@ -2790,7 +2843,7 @@ pub(crate) mod test {
         }
 
         // op 3
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
         // ops 4 to 6
         for i in 0..3 {
@@ -2802,7 +2855,7 @@ pub(crate) mod test {
         }
 
         // op 7
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 8);
@@ -3256,7 +3309,7 @@ pub(crate) mod test {
         upstairs.submit_dummy_read(BlockIndex(95), Buffer::new(2, 512));
 
         // op 1
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
         // op 2
         upstairs.submit_dummy_write(
@@ -3475,10 +3528,21 @@ pub(crate) mod test {
         let offset = BlockIndex(7);
         let data = BytesMut::from([1; 512].as_slice());
         let (_write_res, done) = BlockOpWaiter::pair();
+        let io_guard = IOLimitGuard::dummy();
         let op = if is_write_unwritten {
-            BlockOp::WriteUnwritten { offset, data, done }
+            BlockOp::WriteUnwritten {
+                offset,
+                data,
+                done,
+                io_guard,
+            }
         } else {
-            BlockOp::Write { offset, data, done }
+            BlockOp::Write {
+                offset,
+                data,
+                done,
+                io_guard,
+            }
         };
         up.apply(UpstairsAction::Guest(op));
         up.await_deferred_ops().await;
@@ -3591,7 +3655,13 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         // fake read response from downstairs that will successfully decrypt
         let mut data = Vec::from([1u8; 512]);
@@ -3639,7 +3709,13 @@ pub(crate) mod test {
         let data = Buffer::new(blocks, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         let mut data = Vec::from([1u8; 512]);
 
@@ -3697,7 +3773,13 @@ pub(crate) mod test {
         let data = Buffer::new(blocks, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         // fake read response from downstairs that will fail decryption
         let mut data = Vec::from([1u8; 512]);
@@ -3773,7 +3855,13 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         // fake read response from downstairs that will fail decryption
         let mut data = Vec::from([1u8; 512]);
@@ -3836,7 +3924,13 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         // fake read response from downstairs that will fail integrity hash
         // check
@@ -3881,7 +3975,13 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         let data = BytesMut::from([1u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
@@ -3942,7 +4042,13 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         for client_id in [ClientId::new(0), ClientId::new(1)] {
             let data = BytesMut::from([1u8; 512].as_slice());
@@ -4005,7 +4111,13 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         let data = BytesMut::from([1u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
@@ -4065,7 +4177,13 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         // The first read has no block contexts, because it was unwritten
         let data = BytesMut::from([0u8; 512].as_slice());
@@ -4121,7 +4239,13 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         // The first read has no block contexts, because it was unwritten
         let data = BytesMut::from([0u8; 512].as_slice());
@@ -4181,7 +4305,13 @@ pub(crate) mod test {
         data.extend_from_slice(vec![1; NODEFER_SIZE].as_slice());
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Write { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Write {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
         assert_eq!(up.deferred_ops.len(), 0);
 
         // Submit a long write, which should be deferred
@@ -4189,7 +4319,13 @@ pub(crate) mod test {
         data.extend_from_slice(vec![2; DEFER_SIZE].as_slice());
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Write { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Write {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
         assert_eq!(up.deferred_ops.len(), 1);
         assert_eq!(up.deferred_msgs.len(), 0);
 
@@ -4199,7 +4335,13 @@ pub(crate) mod test {
         data.extend_from_slice(vec![3; NODEFER_SIZE].as_slice());
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Write { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Write {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
         assert_eq!(up.deferred_ops.len(), 2);
         assert_eq!(up.deferred_msgs.len(), 0);
     }
@@ -4221,7 +4363,13 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
         let (res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         let reply = res.wait_raw().await.unwrap();
         match reply {

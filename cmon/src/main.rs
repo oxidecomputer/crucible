@@ -41,7 +41,6 @@ enum DtraceDisplay {
     Replaced,
     ExtentLiveRepair,
     ExtentLimit,
-    Backpressure,
     NextJobId,
     JobDelta,
     DsDelay,
@@ -61,7 +60,6 @@ impl fmt::Display for DtraceDisplay {
             DtraceDisplay::Replaced => write!(f, "replaced"),
             DtraceDisplay::ExtentLiveRepair => write!(f, "extent_live_repair"),
             DtraceDisplay::ExtentLimit => write!(f, "extent_under_repair"),
-            DtraceDisplay::Backpressure => write!(f, "backpressure"),
             DtraceDisplay::NextJobId => write!(f, "next_job_id"),
             DtraceDisplay::JobDelta => write!(f, "job_delta"),
             DtraceDisplay::DsDelay => write!(f, "ds_delay"),
@@ -229,9 +227,6 @@ fn print_dtrace_header(dd: &[DtraceDisplay]) {
             DtraceDisplay::ExtentLimit => {
                 print!(" {:>4}", "EXTL");
             }
-            DtraceDisplay::Backpressure => {
-                print!(" {:>5}", "BAKPR");
-            }
             DtraceDisplay::NextJobId => {
                 print!(" {:>7}", "NEXTJOB");
             }
@@ -347,9 +342,6 @@ fn print_dtrace_row(d_out: Arg, dd: &[DtraceDisplay], last_job_id: &mut u64) {
             }
             DtraceDisplay::ExtentLimit => {
                 print!(" {:4}", d_out.ds_extent_limit);
-            }
-            DtraceDisplay::Backpressure => {
-                print!(" {:>5}", d_out.up_backpressure);
             }
             DtraceDisplay::NextJobId => {
                 print!(" {:>7}", d_out.next_job_id);
