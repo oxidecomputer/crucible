@@ -7,7 +7,7 @@ filename='/tmp/get-ds-state.out'
 # Gather state on all running propolis servers, record summary to a file
 dtrace -s /opt/oxide/crucible_dtrace/get-ds-state.d | sort -n | uniq | awk 'NF' > "$filename"
 # Walk the lines in the file, append the zone name to each line.
-while read p; do
+while read -r p; do
         # For each line in the file, pull out the PID we are looking at and
         # print the zone that process is running in.
         pid=$(echo $p | awk '{print $1}')

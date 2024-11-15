@@ -1,5 +1,5 @@
 /*
- * Print a live reapir status line.
+ * Print a live repair status line for all matching probes.
  * Exit after 5 seconds.
  */
 #pragma D option quiet

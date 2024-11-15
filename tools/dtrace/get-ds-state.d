@@ -1,5 +1,5 @@
 /*
- * Print a status line for a given PID.
+ * Print a status line for all matching probes.
  * Exit after 5 seconds.
  */
 #pragma D option quiet
