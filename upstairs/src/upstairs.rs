@@ -170,7 +170,6 @@ impl UpCounters {
 ///
 /// For example, we _always_ do things like
 /// - Send all pending IO to the client work tasks
-/// - Ack all ackable jobs to the guest
 /// - Step through the live-repair state machine (if it's running)
 /// - Check for client-side deactivation (if it's pending)
 /// - Set backpressure time in the clients
@@ -611,15 +610,7 @@ impl Upstairs {
         }
 
         // Check to see whether live-repair can continue
-        //
-        // This must be called before acking jobs, because it looks in
-        // `Downstairs::ackable_jobs` to see which jobs are done.
         self.downstairs.check_and_continue_live_repair(&self.state);
-
-        // Handle any jobs that have become ready for acks
-        if self.downstairs.has_ackable_jobs() {
-            self.downstairs.ack_jobs()
-        }
 
         // Check for client-side deactivation
         if matches!(&self.state, UpstairsState::Deactivating(..)) {
@@ -1655,7 +1646,7 @@ impl Upstairs {
 
             // IO operation replies
             //
-            // This may cause jobs to become ackable!
+            // This may cause jobs to be acked!
             Message::WriteAck { .. }
             | Message::WriteUnwrittenAck { .. }
             | Message::FlushAck { .. }
