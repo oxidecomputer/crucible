@@ -1,11 +1,10 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
-    backpressure::BackpressureCounters, cdt, integrity_hash,
-    live_repair::ExtentInfo, upstairs::UpstairsConfig, upstairs::UpstairsState,
-    ClientIOStateCount, ClientId, CrucibleDecoder, CrucibleError, DownstairsIO,
-    DsState, EncryptionContext, IOState, IOop, JobId, Message, RawReadResponse,
+    cdt, integrity_hash, io_limits::ClientIOLimits, live_repair::ExtentInfo,
+    upstairs::UpstairsConfig, upstairs::UpstairsState, ClientIOStateCount,
+    ClientId, CrucibleDecoder, CrucibleError, DownstairsIO, DsState,
+    EncryptionContext, IOState, IOop, JobId, Message, RawReadResponse,
     ReconcileIO, ReconcileIOState, RegionDefinitionStatus, RegionMetadata,
-    Validation,
 };
 use crucible_common::{x509::TLSContext, ExtentId, VerboseTimeout};
 use crucible_protocol::{
@@ -123,11 +122,8 @@ pub(crate) struct DownstairsClient {
     /// Number of bytes associated with each IO state
     io_state_byte_count: ClientIOStateCount<u64>,
 
-    /// Jobs, write bytes, and total IO bytes in this client's queue
-    ///
-    /// These values are used for both global and local (per-client)
-    /// backpressure.
-    pub(crate) backpressure_counters: BackpressureCounters,
+    /// Absolute IO limits for this client
+    io_limits: ClientIOLimits,
 
     /// UUID for this downstairs region
     ///
@@ -201,6 +197,7 @@ impl DownstairsClient {
         client_id: ClientId,
         cfg: Arc<UpstairsConfig>,
         target_addr: Option<SocketAddr>,
+        io_limits: ClientIOLimits,
         log: Logger,
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     ) -> Self {
@@ -217,6 +214,7 @@ impl DownstairsClient {
                 &log,
             ),
             client_id,
+            io_limits,
             region_uuid: None,
             needs_replay: false,
             negotiation_state: NegotiationState::Start,
@@ -233,7 +231,6 @@ impl DownstairsClient {
             repair_info: None,
             io_state_job_count: ClientIOStateCount::default(),
             io_state_byte_count: ClientIOStateCount::default(),
-            backpressure_counters: BackpressureCounters::new(),
             connection_id: ConnectionId(0),
             client_delay_us,
         }
@@ -257,6 +254,10 @@ impl DownstairsClient {
             cfg,
             client_task: Self::new_dummy_task(false),
             client_id: ClientId::new(0),
+            io_limits: ClientIOLimits::new(
+                crate::IO_OUTSTANDING_MAX_JOBS * 3 / 2,
+                crate::IO_OUTSTANDING_MAX_BYTES as usize * 3 / 2,
+            ),
             region_uuid: None,
             needs_replay: false,
             negotiation_state: NegotiationState::Start,
@@ -273,7 +274,6 @@ impl DownstairsClient {
             repair_info: None,
             io_state_job_count: ClientIOStateCount::default(),
             io_state_byte_count: ClientIOStateCount::default(),
-            backpressure_counters: BackpressureCounters::new(),
             connection_id: ConnectionId(0),
             client_delay_us,
         }
@@ -360,19 +360,24 @@ impl DownstairsClient {
         // Update our bytes-in-flight counter
         if was_running && !is_running {
             // Because the job is no longer running, it shouldn't count for
-            // backpressure.  Remove the backpressure guard for this client,
-            // which decrements backpressure counters on drop.
-            job.backpressure_guard.take(&self.client_id);
-        } else if is_running
-            && !was_running
-            && !job.backpressure_guard.contains(&self.client_id)
-        {
-            // This should only happen if a job is replayed, but that still
-            // counts!
-            job.backpressure_guard.insert(
-                self.client_id,
-                self.backpressure_counters.increment(&job.work),
-            );
+            // backpressure or IO limits.  Remove the backpressure guard for
+            // this client, which decrements backpressure counters on drop.
+            job.io_limits.take(&self.client_id);
+        } else if is_running && !was_running {
+            match self.io_limits.try_claim(job.work.job_bytes() as u32) {
+                Ok(g) => {
+                    job.io_limits.insert(self.client_id, g);
+                }
+                Err(e) => {
+                    // We can't handle the case of "running out of permits
+                    // during replay", because waiting for a permit would
+                    // deadlock the worker task.  Log the error and continue.
+                    warn!(
+                        self.log,
+                        "could not claim IO permits when replaying job: {e:?}"
+                    )
+                }
+            }
         }
 
         old_state
@@ -518,42 +523,6 @@ impl DownstairsClient {
         info!(self.log, " {} final dependency list {:?}", ds_id, deps);
     }
 
-    /// When the downstairs is marked as missing, handle its state transition
-    pub(crate) fn on_missing(&mut self) {
-        let current = &self.state;
-        let new_state = match current {
-            DsState::Active | DsState::Offline => DsState::Offline,
-
-            DsState::Faulted
-            | DsState::LiveRepair
-            | DsState::LiveRepairReady => DsState::Faulted,
-
-            DsState::New
-            | DsState::Deactivated
-            | DsState::Reconcile
-            | DsState::Disconnected
-            | DsState::WaitQuorum
-            | DsState::WaitActive
-            | DsState::Disabled => DsState::Disconnected,
-
-            // If we have replaced a downstairs, don't forget that.
-            DsState::Replacing | DsState::Replaced => DsState::Replaced,
-
-            DsState::Migrating => panic!(),
-        };
-
-        if *current != new_state {
-            info!(
-                self.log,
-                "Gone missing, transition from {current:?} to {new_state:?}"
-            );
-        }
-
-        // Jobs are skipped and replayed in `Downstairs::reinitialize`, which is
-        // (probably) the caller of this function.
-        self.state = new_state;
-    }
-
     /// Checks whether this Downstairs is ready for the upstairs to deactivate
     ///
     /// # Panics
@@ -584,7 +553,11 @@ impl DownstairsClient {
     ///
     /// # Panics
     /// If `self.client_task` is not `None`, or `self.target_addr` is `None`
-    pub(crate) fn reinitialize(&mut self, auto_promote: bool) {
+    pub(crate) fn reinitialize(
+        &mut self,
+        up_state: &UpstairsState,
+        can_replay: bool,
+    ) {
         // Clear this Downstair's repair address, and let the YesItsMe set it.
         // This works if this Downstairs is new, reconnecting, or was replaced
         // entirely; the repair address could have changed in any of these
@@ -592,23 +565,55 @@ impl DownstairsClient {
         self.repair_addr = None;
         self.needs_replay = false;
 
-        if auto_promote {
-            self.promote_state = Some(PromoteState::Waiting);
-        } else {
-            self.promote_state = None;
-        }
+        // If the upstairs is already active (or trying to go active), then the
+        // downstairs should automatically call PromoteToActive when it reaches
+        // the relevant state.
+        self.promote_state = match up_state {
+            UpstairsState::Active | UpstairsState::GoActive(..) => {
+                Some(PromoteState::Waiting)
+            }
+            UpstairsState::Initializing
+            | UpstairsState::Deactivating { .. } => None,
+        };
+
         self.negotiation_state = NegotiationState::Start;
 
-        // TODO this is an awkward special case!
-        if self.state == DsState::Disconnected {
-            info!(self.log, "Disconnected -> New");
-            self.state = DsState::New;
+        let current = &self.state;
+        let new_state = match current {
+            DsState::Active | DsState::Offline if !can_replay => {
+                Some(DsState::Faulted)
+            }
+            DsState::Active => Some(DsState::Offline),
+            DsState::LiveRepair | DsState::LiveRepairReady => {
+                Some(DsState::Faulted)
+            }
+
+            DsState::Deactivated
+            | DsState::Reconcile
+            | DsState::WaitQuorum
+            | DsState::WaitActive
+            | DsState::Disabled => Some(DsState::New),
+
+            // If we have replaced a downstairs, don't forget that.
+            DsState::Replacing => Some(DsState::Replaced),
+
+            // We stay in these states through the task restart
+            DsState::Offline
+            | DsState::Faulted
+            | DsState::New
+            | DsState::Replaced => None,
+        };
+
+        // Jobs are skipped and replayed in `Downstairs::reinitialize`, which is
+        // (probably) the caller of this function.
+        if let Some(new_state) = new_state {
+            self.checked_state_transition(up_state, new_state);
         }
 
         self.connection_id.update();
 
-        // Restart with a short delay
-        self.start_task(true, auto_promote);
+        // Restart with a short delay, connecting if we're auto-promoting
+        self.start_task(true, self.promote_state.is_some());
     }
 
     /// Sets the `needs_replay` flag
@@ -848,9 +853,12 @@ impl DownstairsClient {
         reason: ClientStopReason,
     ) {
         let new_state = match self.state {
-            DsState::Active => DsState::Offline,
-            DsState::Offline => DsState::Offline,
-            DsState::Migrating => DsState::Faulted,
+            DsState::Active | DsState::Offline
+                if matches!(reason, ClientStopReason::IneligibleForReplay) =>
+            {
+                DsState::Faulted
+            }
+            DsState::Active | DsState::Offline => DsState::Offline,
             DsState::Faulted => DsState::Faulted,
             DsState::Deactivated => DsState::New,
             DsState::Reconcile => DsState::New,
@@ -863,7 +871,7 @@ impl DownstairsClient {
                  * downstairs to receive IO, so we go to the back of the
                  * line and have to re-verify it again.
                  */
-                DsState::Disconnected
+                DsState::New
             }
         };
 
@@ -964,11 +972,9 @@ impl DownstairsClient {
             DsState::New
             | DsState::WaitActive
             | DsState::WaitQuorum
-            | DsState::Disconnected
             | DsState::Reconcile
             | DsState::Deactivated
-            | DsState::Disabled
-            | DsState::Migrating => panic!(
+            | DsState::Disabled => panic!(
                 "enqueue should not be called from state {:?}",
                 self.state
             ),
@@ -1049,7 +1055,6 @@ impl DownstairsClient {
                     }
                 } else if old_state != DsState::New
                     && old_state != DsState::Faulted
-                    && old_state != DsState::Disconnected
                     && old_state != DsState::Replaced
                 {
                     panic!(
@@ -1142,7 +1147,8 @@ impl DownstairsClient {
                     DsState::Active
                     | DsState::Deactivated
                     | DsState::Faulted
-                    | DsState::Reconcile => {} // Okay
+                    | DsState::Reconcile
+                    | DsState::Disabled => {} // Okay
                     _ => {
                         panic_invalid();
                     }
@@ -1159,12 +1165,6 @@ impl DownstairsClient {
             DsState::Disabled => {
                 // A move to Disabled can happen at any time we are talking
                 // to a downstairs.
-            }
-            _ => {
-                panic!(
-                    "[{}] Missing check for transition {} to {}",
-                    self.client_id, old_state, new_state
-                );
             }
         }
 
@@ -1242,7 +1242,6 @@ impl DownstairsClient {
         ds_id: JobId,
         job: &mut DownstairsIO,
         responses: Result<RawReadResponse, CrucibleError>,
-        read_validations: Vec<Validation>,
         deactivate: bool,
         extent_info: Option<ExtentInfo>,
     ) -> bool {
@@ -1373,7 +1372,7 @@ impl DownstairsClient {
                      */
                     let read_data = responses.unwrap();
                     assert!(!read_data.blocks.is_empty());
-                    if job.read_validations != read_validations {
+                    if job.data.as_ref().unwrap().blocks != read_data.blocks {
                         // XXX This error needs to go to Nexus
                         // XXX This will become the "force all downstairs
                         // to stop and refuse to restart" mode.
@@ -1387,8 +1386,8 @@ impl DownstairsClient {
                             self.client_id,
                             ds_id,
                             self.cfg.session_id,
-                            job.read_validations,
-                            read_validations,
+                            job.data.as_ref().unwrap().blocks,
+                            read_data.blocks,
                             start_eid,
                             start_offset,
                             job.state,
@@ -1435,9 +1434,7 @@ impl DownstairsClient {
                     assert!(extent_info.is_none());
                     if jobs_completed_ok == 1 {
                         assert!(job.data.is_none());
-                        assert!(job.read_validations.is_empty());
                         job.data = Some(read_data);
-                        job.read_validations = read_validations;
                         assert!(!job.acked);
                         ackable = true;
                         debug!(self.log, "Read AckReady {}", ds_id.0);
@@ -1449,7 +1446,8 @@ impl DownstairsClient {
                          * that and verify they are the same.
                          */
                         debug!(self.log, "Read already AckReady {ds_id}");
-                        if job.read_validations != read_validations {
+                        let job_blocks = &job.data.as_ref().unwrap().blocks;
+                        if job_blocks != &read_data.blocks {
                             // XXX This error needs to go to Nexus
                             // XXX This will become the "force all downstairs
                             // to stop and refuse to restart" mode.
@@ -1460,8 +1458,8 @@ impl DownstairsClient {
                                 job: {:?}",
                                 self.client_id,
                                 ds_id,
-                                job.read_validations,
-                                read_validations,
+                                job_blocks,
+                                read_data.blocks,
                                 job,
                             );
                         }
@@ -1858,7 +1856,6 @@ impl DownstairsClient {
                             String::new()
                         },
                     );
-                    self.checked_state_transition(up_state, DsState::New);
                     if !match_gen {
                         let gen_error = format!(
                             "Generation requested:{} found:{}",
@@ -2254,7 +2251,7 @@ impl DownstairsClient {
     }
 
     pub(crate) fn total_bytes_outstanding(&self) -> usize {
-        self.backpressure_counters.get_io_bytes() as usize
+        self.io_state_byte_count.in_progress as usize
     }
 
     /// Returns a unique ID for the current connection, or `None`
@@ -2428,6 +2425,9 @@ pub(crate) enum ClientStopReason {
 
     /// The upstairs has requested that we deactivate when we were offline
     OfflineDeactivated,
+
+    /// The Upstairs has dropped jobs that would be needed for replay
+    IneligibleForReplay,
 }
 
 /// Response received from the I/O task
@@ -2964,18 +2964,15 @@ fn update_net_done_probes(m: &Message, cid: ClientId) {
 }
 
 /// Returns:
-/// - `Ok(Some(ctx))` for successfully decrypted data
-/// - `Ok(None)` if there is no block context and the block is all 0
+/// - `Ok(())` for successfully decrypted data, or if there is no block context
+///   and the block is all 0s (i.e. a valid empty block)
 /// - `Err(..)` otherwise
-///
-/// The return value of this will be stored with the job, and compared
-/// between each read.
 pub(crate) fn validate_encrypted_read_response(
     block_context: Option<crucible_protocol::EncryptionContext>,
     data: &mut [u8],
     encryption_context: &EncryptionContext,
     log: &Logger,
-) -> Result<Validation, CrucibleError> {
+) -> Result<(), CrucibleError> {
     // XXX because we don't have block generation numbers, an attacker
     // downstairs could:
     //
@@ -2997,7 +2994,7 @@ pub(crate) fn validate_encrypted_read_response(
         //
         // XXX if it's not a blank block, we may be under attack?
         if data.iter().all(|&x| x == 0) {
-            return Ok(Validation::Empty);
+            return Ok(());
         } else {
             error!(log, "got empty block context with non-blank block");
             return Err(CrucibleError::MissingBlockContext);
@@ -3019,7 +3016,7 @@ pub(crate) fn validate_encrypted_read_response(
         Tag::from_slice(&ctx.tag[..]),
     );
     if decryption_result.is_ok() {
-        Ok(Validation::Encrypted(ctx))
+        Ok(())
     } else {
         error!(log, "Decryption failed!");
         Err(CrucibleError::DecryptionError)
@@ -3027,21 +3024,20 @@ pub(crate) fn validate_encrypted_read_response(
 }
 
 /// Returns:
-/// - Ok(Some(valid_hash)) where the integrity hash matches
-/// - Ok(None) where there is no integrity hash in the response and the
-///   block is all 0
+/// - Ok(()) where the integrity hash matches (or the integrity hash is missing
+///   and the block is all 0s, indicating an empty block)
 /// - Err otherwise
 pub(crate) fn validate_unencrypted_read_response(
     block_hash: Option<u64>,
     data: &mut [u8],
     log: &Logger,
-) -> Result<Validation, CrucibleError> {
+) -> Result<(), CrucibleError> {
     if let Some(hash) = block_hash {
         // check integrity hashes - make sure it is correct
         let computed_hash = integrity_hash(&[data]);
 
         if computed_hash == hash {
-            Ok(Validation::Unencrypted(computed_hash))
+            Ok(())
         } else {
             // No integrity hash was correct for this response
             error!(log, "No match computed hash:0x{:x}", computed_hash,);
@@ -3065,7 +3061,7 @@ pub(crate) fn validate_unencrypted_read_response(
         //
         // XXX if it's not a blank block, we may be under attack?
         if data[..].iter().all(|&x| x == 0) {
-            Ok(Validation::Empty)
+            Ok(())
         } else {
             error!(log, "got empty block context with non-blank block");
             Err(CrucibleError::MissingBlockContext)

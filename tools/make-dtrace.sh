@@ -23,7 +23,9 @@ tar cvf ../../out/crucible-dtrace.tar \
     README.md \
     all_downstairs.d \
     downstairs_count.d \
+    get-ds-state.d \
     get-ds-state.sh \
+    get-lr-state.d \
     get-lr-state.sh \
     perf-downstairs-os.d \
     perf-downstairs-three.d \

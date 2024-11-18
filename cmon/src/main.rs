@@ -41,7 +41,6 @@ enum DtraceDisplay {
     Replaced,
     ExtentLiveRepair,
     ExtentLimit,
-    Backpressure,
     NextJobId,
     JobDelta,
     DsDelay,
@@ -61,7 +60,6 @@ impl fmt::Display for DtraceDisplay {
             DtraceDisplay::Replaced => write!(f, "replaced"),
             DtraceDisplay::ExtentLiveRepair => write!(f, "extent_live_repair"),
             DtraceDisplay::ExtentLimit => write!(f, "extent_under_repair"),
-            DtraceDisplay::Backpressure => write!(f, "backpressure"),
             DtraceDisplay::NextJobId => write!(f, "next_job_id"),
             DtraceDisplay::JobDelta => write!(f, "job_delta"),
             DtraceDisplay::DsDelay => write!(f, "ds_delay"),
@@ -92,13 +90,11 @@ fn short_state(dss: DsState) -> String {
         DsState::New => "NEW".to_string(),
         DsState::WaitActive => "WAC".to_string(),
         DsState::WaitQuorum => "WAQ".to_string(),
-        DsState::Disconnected => "DIS".to_string(),
         DsState::Reconcile => "REC".to_string(),
         DsState::Active => "ACT".to_string(),
         DsState::Faulted => "FLT".to_string(),
         DsState::LiveRepairReady => "LRR".to_string(),
         DsState::LiveRepair => "LR".to_string(),
-        DsState::Migrating => "MIG".to_string(),
         DsState::Offline => "OFF".to_string(),
         DsState::Deactivated => "DAV".to_string(),
         DsState::Disabled => "DIS".to_string(),
@@ -231,9 +227,6 @@ fn print_dtrace_header(dd: &[DtraceDisplay]) {
             DtraceDisplay::ExtentLimit => {
                 print!(" {:>4}", "EXTL");
             }
-            DtraceDisplay::Backpressure => {
-                print!(" {:>5}", "BAKPR");
-            }
             DtraceDisplay::NextJobId => {
                 print!(" {:>7}", "NEXTJOB");
             }
@@ -349,9 +342,6 @@ fn print_dtrace_row(d_out: Arg, dd: &[DtraceDisplay], last_job_id: &mut u64) {
             }
             DtraceDisplay::ExtentLimit => {
                 print!(" {:4}", d_out.ds_extent_limit);
-            }
-            DtraceDisplay::Backpressure => {
-                print!(" {:>5}", d_out.up_backpressure);
             }
             DtraceDisplay::NextJobId => {
                 print!(" {:>7}", d_out.next_job_id);
