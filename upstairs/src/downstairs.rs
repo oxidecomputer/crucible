@@ -474,12 +474,77 @@ impl Downstairs {
         }
     }
 
+    /// Checks whether an ack and/or a retire check is necessary for the job
+    fn ack_check(&mut self, ds_id: JobId, deactivate: bool) {
+        let job = self.ds_active.get(&ds_id).unwrap();
+
+        // Find the number of `Done` jobs, which determines when we ack back to
+        // the Guest.  In addition, we always ack (and perform a retire check)
+        // if the job is complete on all 3x downstairs.
+        let okay = job
+            .state
+            .iter()
+            .filter(|s| matches!(s, IOState::Done))
+            .count();
+
+        let complete = job.state.iter().all(|s| {
+            matches!(s, IOState::Done | IOState::Error(..) | IOState::Skipped)
+        });
+
+        // Decide if we're ready to ack this job
+        let ack_ready = match &job.work {
+            IOop::Read { .. } => okay == 1,
+            IOop::Write { .. } | IOop::WriteUnwritten { .. } => okay == 2,
+            IOop::Flush {
+                snapshot_details, ..
+            } => {
+                let n = if deactivate || snapshot_details.is_some() {
+                    3
+                } else {
+                    2
+                };
+                okay == n
+            }
+            IOop::Barrier { .. }
+            | IOop::ExtentFlushClose { .. }
+            | IOop::ExtentLiveRepair { .. }
+            | IOop::ExtentLiveReopen { .. }
+            | IOop::ExtentLiveNoOp { .. } => okay == 3,
+        };
+
+        // Do logging and ack the job
+        if !job.acked && (ack_ready || complete) {
+            match &job.work {
+                IOop::Flush { .. } => {
+                    if deactivate {
+                        debug!(self.log, "deactivate flush {ds_id} done");
+                    }
+                }
+                IOop::ExtentFlushClose { .. } => {
+                    debug!(self.log, "ExtentFlushClose {ds_id} AckReady");
+                }
+                IOop::ExtentLiveRepair { .. } => {
+                    debug!(self.log, "ExtentLiveRepair AckReady {ds_id}");
+                }
+                IOop::ExtentLiveReopen { .. } => {
+                    debug!(self.log, "ExtentLiveReopen AckReady {ds_id}");
+                }
+                IOop::ExtentLiveNoOp { .. } => {
+                    debug!(self.log, "ExtentLiveNoOp AckReady {ds_id}");
+                }
+                _ => (),
+            }
+            self.ack_job(ds_id);
+        }
+
+        if complete {
+            self.retire_check(ds_id);
+        }
+    }
+
     /// Send the ack for a single job back upstairs through `GuestWork`
     ///
     /// Update stats for the upstairs as well
-    ///
-    /// This is public for the sake of unit testing, but shouldn't be called
-    /// outside of this module normally.
     fn ack_job(&mut self, ds_id: JobId) {
         debug!(self.log, "ack_jobs process {}", ds_id);
 
@@ -2238,10 +2303,7 @@ impl Downstairs {
         // Ack the job immediately if it was skipped on all 3x downstairs
         // (and wasn't previously acked, i.e. isn't a write)
         if skipped == 3 {
-            if !acked {
-                self.ack_job(ds_id);
-            }
-            self.retire_check(ds_id);
+            self.ack_check(ds_id, false);
             warn!(self.log, "job {} skipped on all downstairs", &ds_id);
         }
     }
@@ -2592,8 +2654,7 @@ impl Downstairs {
             self.ds_active.len(),
         );
 
-        let mut ack_jobs = vec![];
-        let mut retire_check = vec![];
+        let mut ack_check = vec![];
         let mut number_jobs_skipped = 0;
 
         self.ds_active.for_each(|ds_id, job| {
@@ -2602,29 +2663,9 @@ impl Downstairs {
             if matches!(state, IOState::InProgress) {
                 self.clients[client_id].skip_job(*ds_id, job);
                 number_jobs_skipped += 1;
-
-                // Check to see if this being skipped means we can ACK
-                // the job back to the guest.
-                if job.acked {
-                    // Push this onto a queue to do the retire check when
-                    // we aren't doing a mutable iteration.
-                    retire_check.push(*ds_id);
-                } else {
-                    let wc = job.state_count();
-                    if (wc.error + wc.skipped + wc.done) == 3 {
-                        info!(
-                            self.log,
-                            "[{}] notify = true for {}", client_id, ds_id
-                        );
-                        ack_jobs.push(*ds_id);
-                    }
-                }
+                ack_check.push(*ds_id);
             }
         });
-
-        for ds_id in ack_jobs {
-            self.ack_job(ds_id);
-        }
 
         info!(
             self.log,
@@ -2633,8 +2674,8 @@ impl Downstairs {
             number_jobs_skipped
         );
 
-        for ds_id in retire_check {
-            self.retire_check(ds_id);
+        for ds_id in ack_check {
+            self.ack_check(ds_id, false);
         }
     }
 
@@ -3284,23 +3325,12 @@ impl Downstairs {
             return;
         };
 
-        let was_acked = job.acked;
-        let should_ack = self.clients[client_id].process_io_completion(
+        self.clients[client_id].process_io_completion(
             ds_id,
             job,
             responses,
-            deactivate,
             extent_info,
         );
-
-        // If all 3 jobs are done, we can check here to see if we can remove
-        // this job from the DS list.
-        let wc = job.state_count();
-        let complete = (wc.error + wc.skipped + wc.done) == 3;
-
-        if !was_acked && (should_ack || complete) {
-            self.ack_job(ds_id);
-        }
 
         // Decide what to do when we have an error from this IO.
         // Mark this downstairs as bad if this was a write or flush
@@ -3363,9 +3393,8 @@ impl Downstairs {
             }
         }
 
-        if complete {
-            self.retire_check(ds_id);
-        }
+        // Check whether this job needs to be acked or retired
+        self.ack_check(ds_id, deactivate);
     }
 
     /// Accessor for [`Downstairs::reconcile_repaired`]
@@ -4949,8 +4978,8 @@ pub(crate) mod test {
             Some([3].as_slice())
         );
 
-        assert_eq!(ds.clients[ClientId::new(0)].stats.downstairs_errors, 0);
-        assert_eq!(ds.clients[ClientId::new(1)].stats.downstairs_errors, 0);
+        assert_eq!(ds.clients[ClientId::new(0)].stats.downstairs_errors, 1);
+        assert_eq!(ds.clients[ClientId::new(1)].stats.downstairs_errors, 1);
         assert_eq!(ds.clients[ClientId::new(2)].stats.downstairs_errors, 0);
 
         // send another read, and expect all to return something
