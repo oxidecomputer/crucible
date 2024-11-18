@@ -2304,7 +2304,7 @@ impl Downstairs {
         // (and wasn't previously acked, i.e. isn't a write)
         if skipped == 3 {
             self.ack_check(ds_id, false);
-            warn!(self.log, "job {} skipped on all downstairs", &ds_id);
+            debug!(self.log, "job {ds_id} skipped on all downstairs");
         }
     }
 
