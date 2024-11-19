@@ -3326,6 +3326,18 @@ impl Downstairs {
         }
     }
 
+    /// Returns the number of clients that can accept IO
+    ///
+    /// A client can accept IO if it is in the `Active` or `LiveRepair` state.
+    pub fn active_client_count(&self) -> usize {
+        self.clients
+            .iter()
+            .filter(|c| {
+                matches!(c.state(), DsState::Active | DsState::LiveRepair)
+            })
+            .count()
+    }
+
     /// Wrapper for marking a single job as done from the given client
     ///
     /// This can be used to test handling of job acks, etc
