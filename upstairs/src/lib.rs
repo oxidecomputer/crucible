@@ -952,6 +952,11 @@ impl DownstairsIO {
 
         let bad_job = match &self.work {
             IOop::Read { .. } => wc.done == 0,
+            // Flushes with snapshots must be good on all 3x Downstairs
+            IOop::Flush {
+                snapshot_details: Some(..),
+                ..
+            } => wc.skipped + wc.error > 0,
             IOop::Write { .. }
             | IOop::WriteUnwritten { .. }
             | IOop::Flush { .. }
