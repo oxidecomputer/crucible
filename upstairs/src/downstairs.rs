@@ -9,8 +9,8 @@ use std::{
 use crate::{
     cdt,
     client::{
-        ClientAction, ClientFaultReason, ClientStopReason, DownstairsClient,
-        EnqueueResult,
+        ClientAction, ClientFaultReason, ClientNegotiationFailed,
+        DownstairsClient, EnqueueResult,
     },
     guest::GuestBlockRes,
     io_limits::{IOLimitGuard, IOLimits},
@@ -1916,9 +1916,9 @@ impl Downstairs {
             if c.state() == DsState::Reconcile {
                 // Restart the IO task.  This will cause the Upstairs to
                 // deactivate through a ClientAction::TaskStopped.
-                c.restart_connection(
+                c.abort_negotiation(
                     up_state,
-                    ClientStopReason::FailedReconcile,
+                    ClientNegotiationFailed::FailedReconcile,
                 );
                 error!(self.log, "Mark {} as FAILED REPAIR", i);
             }
