@@ -1159,8 +1159,8 @@ impl Upstairs {
 
             #[cfg(test)]
             BlockOp::FaultDownstairs { client_id, done } => {
-                self.downstairs.skip_all_jobs(client_id);
-                self.downstairs.clients[client_id].fault(
+                self.downstairs.fault_client(
+                    client_id,
                     &self.state,
                     crate::client::ClientStopReason::RequestedFault,
                 );

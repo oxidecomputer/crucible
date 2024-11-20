@@ -728,9 +728,11 @@ impl Downstairs {
         // requested deactivation to finish.
         if self.clients[client_id].state() == DsState::Offline {
             info!(self.log, "[{}] Offline client moved to Faulted", client_id);
-            self.skip_all_jobs(client_id);
-            self.clients[client_id]
-                .fault(up_state, ClientStopReason::OfflineDeactivated);
+            self.fault_client(
+                client_id,
+                up_state,
+                ClientStopReason::OfflineDeactivated,
+            );
             return false;
         }
         // If there are jobs in the queue, then we have to check them!
@@ -2645,9 +2647,19 @@ impl Downstairs {
         };
 
         if let Some(err) = failed {
-            self.skip_all_jobs(client_id);
-            self.clients[client_id].fault(up_state, err);
+            self.fault_client(client_id, up_state, err);
         }
+    }
+
+    /// Marks a client as faulted, skipping pending IO and stopping the worker
+    pub(crate) fn fault_client(
+        &mut self,
+        client_id: ClientId,
+        up_state: &UpstairsState,
+        err: ClientStopReason,
+    ) {
+        self.skip_all_jobs(client_id);
+        self.clients[client_id].fault(up_state, err);
     }
 
     /// Move all `New` and `InProgress` jobs for the given client to `Skipped`
@@ -2705,30 +2717,23 @@ impl Downstairs {
         for i in ClientId::iter() {
             match self.clients[i].state() {
                 DsState::LiveRepair => {
-                    self.skip_all_jobs(i);
-                    self.clients[i].abort_repair(up_state, true);
-                }
-                DsState::Faulted => {
-                    // Jobs were already skipped when we hit the IO error that
-                    // marked us as faulted
-                    self.clients[i].abort_repair(up_state, false);
+                    self.fault_client(
+                        i,
+                        up_state,
+                        ClientStopReason::FailedLiveRepair,
+                    );
                 }
                 DsState::LiveRepairReady => {
                     // TODO I don't think this is necessary
                     self.skip_all_jobs(i);
-
-                    // Set repair_info to None, so that the next
-                    // ExtentFlushClose sees it empty (as expected). repair_info
-                    // is set on all clients, even those not directly
-                    // participating in live-repair, so we have to always clear
-                    // it; in the cases above, it's cleared in `abort_repair`.
-                    self.clients[i].repair_info = None;
                 }
-                _ => {
-                    // (see comment above)
-                    self.clients[i].repair_info = None;
-                }
+                _ => {}
             }
+            // Set repair_info to None, so that the next ExtentFlushClose sees
+            // it empty (as expected). repair_info is set on all clients, even
+            // those not directly participating in live-repair, so we have to
+            // always clear it.
+            self.clients[i].clear_repair_state();
         }
 
         if let Some(repair) = &mut self.repair {
@@ -3383,13 +3388,9 @@ impl Downstairs {
                         | IOop::ExtentLiveNoOp { .. }
                         | IOop::ExtentLiveReopen { .. }
                 ) {
-                    // This error means the downstairs will go to Faulted.
-                    // Walk the active job list and mark any that were
-                    // new or in progress to skipped.
-                    self.skip_all_jobs(client_id);
-                    self.clients[client_id]
-                        .checked_state_transition(up_state, DsState::Faulted);
-                    self.clients[client_id].restart_connection(
+                    // Send this Downstairs to faulted
+                    self.fault_client(
+                        client_id,
                         up_state,
                         ClientStopReason::IOError,
                     );
@@ -4337,7 +4338,7 @@ struct DownstairsBackpressureConfig {
 
 #[cfg(test)]
 pub(crate) mod test {
-    use super::{Downstairs, PendingJob};
+    use super::{ClientStopReason, Downstairs, PendingJob};
     use crate::{
         downstairs::{LiveRepairData, LiveRepairState, ReconcileData},
         live_repair::ExtentInfo,
@@ -9619,9 +9620,11 @@ pub(crate) mod test {
 
         // Fault the downstairs
         let to_repair = ClientId::new(1);
-        ds.skip_all_jobs(to_repair);
-        ds.clients[to_repair]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+        ds.fault_client(
+            to_repair,
+            &UpstairsState::Active,
+            ClientStopReason::RequestedFault,
+        );
         ds.clients[to_repair].checked_state_transition(
             &UpstairsState::Active,
             DsState::LiveRepairReady,
@@ -9786,9 +9789,11 @@ pub(crate) mod test {
 
         // Fault the downstairs
         let to_repair = ClientId::new(1);
-        ds.skip_all_jobs(to_repair);
-        ds.clients[to_repair]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+        ds.fault_client(
+            to_repair,
+            &UpstairsState::Active,
+            ClientStopReason::RequestedFault,
+        );
         ds.clients[to_repair].checked_state_transition(
             &UpstairsState::Active,
             DsState::LiveRepairReady,
@@ -9940,9 +9945,11 @@ pub(crate) mod test {
 
         // Fault the downstairs
         let to_repair = ClientId::new(1);
-        ds.skip_all_jobs(to_repair);
-        ds.clients[to_repair]
-            .checked_state_transition(&UpstairsState::Active, DsState::Faulted);
+        ds.fault_client(
+            to_repair,
+            &UpstairsState::Active,
+            ClientStopReason::RequestedFault,
+        );
         ds.clients[to_repair].checked_state_transition(
             &UpstairsState::Active,
             DsState::LiveRepairReady,
