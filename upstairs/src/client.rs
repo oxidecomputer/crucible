@@ -854,7 +854,12 @@ impl DownstairsClient {
     ) {
         let new_state = match self.state {
             DsState::Active | DsState::Offline
-                if matches!(reason, ClientStopReason::IneligibleForReplay) =>
+                if matches!(
+                    reason,
+                    ClientStopReason::Fault(
+                        ClientFaultReason::IneligibleForReplay
+                    )
+                ) =>
             {
                 DsState::Faulted
             }
@@ -1195,10 +1200,10 @@ impl DownstairsClient {
     pub(crate) fn fault(
         &mut self,
         up_state: &UpstairsState,
-        reason: ClientStopReason,
+        reason: ClientFaultReason,
     ) {
         self.checked_state_transition(up_state, DsState::Faulted);
-        self.halt_io_task(reason);
+        self.halt_io_task(reason.into());
     }
 
     /// Finishes an in-progress live repair, setting our state to `Active`
@@ -2194,36 +2199,37 @@ pub(crate) enum ClientStopReason {
     /// Reconcile failed and we're restarting
     FailedReconcile,
 
-    /// Received an error from some IO
-    IOError,
-
     /// Negotiation message received out of order
     BadNegotiationOrder,
 
     /// Negotiation says that we are incompatible
     Incompatible,
 
-    /// Live-repair failed
-    FailedLiveRepair,
-
-    /// Too many jobs in the queue
-    TooManyOutstandingJobs,
-
-    /// Too many bytes in the queue
-    TooManyOutstandingBytes,
-
     /// The upstairs has requested that we deactivate
     Deactivated,
 
-    /// The test suite has requested a fault
+    /// We have explicitly faulted the client
+    Fault(ClientFaultReason),
+}
+
+/// Subset of [`ClientStopReason`] for faulting a client
+#[derive(Debug)]
+pub(crate) enum ClientFaultReason {
+    IOError,
+    FailedLiveRepair,
+    TooManyOutstandingJobs,
+    TooManyOutstandingBytes,
+    OfflineDeactivated,
+    IneligibleForReplay,
+
     #[cfg(test)]
     RequestedFault,
+}
 
-    /// The upstairs has requested that we deactivate when we were offline
-    OfflineDeactivated,
-
-    /// The Upstairs has dropped jobs that would be needed for replay
-    IneligibleForReplay,
+impl From<ClientFaultReason> for ClientStopReason {
+    fn from(f: ClientFaultReason) -> ClientStopReason {
+        ClientStopReason::Fault(f)
+    }
 }
 
 /// Response received from the I/O task

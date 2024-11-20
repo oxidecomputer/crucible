@@ -8,7 +8,10 @@ use std::{
 
 use crate::{
     cdt,
-    client::{ClientAction, ClientStopReason, DownstairsClient, EnqueueResult},
+    client::{
+        ClientAction, ClientFaultReason, ClientStopReason, DownstairsClient,
+        EnqueueResult,
+    },
     guest::GuestBlockRes,
     io_limits::{IOLimitGuard, IOLimits},
     live_repair::ExtentInfo,
@@ -731,7 +734,7 @@ impl Downstairs {
             self.fault_client(
                 client_id,
                 up_state,
-                ClientStopReason::OfflineDeactivated,
+                ClientFaultReason::OfflineDeactivated,
             );
             return false;
         }
@@ -2628,20 +2631,20 @@ impl Downstairs {
                 self.log,
                 "downstairs failed, too many outstanding jobs {work_count}"
             );
-            Some(ClientStopReason::TooManyOutstandingJobs)
+            Some(ClientFaultReason::TooManyOutstandingJobs)
         } else if byte_count as u64 > crate::IO_OUTSTANDING_MAX_BYTES {
             warn!(
                 self.log,
                 "downstairs failed, too many outstanding bytes {byte_count}"
             );
-            Some(ClientStopReason::TooManyOutstandingBytes)
+            Some(ClientFaultReason::TooManyOutstandingBytes)
         } else if !self.can_replay {
             // XXX can this actually happen?
             warn!(
                 self.log,
                 "downstairs became ineligible for replay while offline"
             );
-            Some(ClientStopReason::IneligibleForReplay)
+            Some(ClientFaultReason::IneligibleForReplay)
         } else {
             None
         };
@@ -2656,7 +2659,7 @@ impl Downstairs {
         &mut self,
         client_id: ClientId,
         up_state: &UpstairsState,
-        err: ClientStopReason,
+        err: ClientFaultReason,
     ) {
         self.skip_all_jobs(client_id);
         self.clients[client_id].fault(up_state, err);
@@ -2720,7 +2723,7 @@ impl Downstairs {
                     self.fault_client(
                         i,
                         up_state,
-                        ClientStopReason::FailedLiveRepair,
+                        ClientFaultReason::FailedLiveRepair,
                     );
                 }
                 DsState::LiveRepairReady => {
@@ -3392,7 +3395,7 @@ impl Downstairs {
                     self.fault_client(
                         client_id,
                         up_state,
-                        ClientStopReason::IOError,
+                        ClientFaultReason::IOError,
                     );
                 }
             }
@@ -4338,7 +4341,7 @@ struct DownstairsBackpressureConfig {
 
 #[cfg(test)]
 pub(crate) mod test {
-    use super::{ClientStopReason, Downstairs, PendingJob};
+    use super::{ClientFaultReason, Downstairs, PendingJob};
     use crate::{
         downstairs::{LiveRepairData, LiveRepairState, ReconcileData},
         live_repair::ExtentInfo,
@@ -9623,7 +9626,7 @@ pub(crate) mod test {
         ds.fault_client(
             to_repair,
             &UpstairsState::Active,
-            ClientStopReason::RequestedFault,
+            ClientFaultReason::RequestedFault,
         );
         ds.clients[to_repair].checked_state_transition(
             &UpstairsState::Active,
@@ -9792,7 +9795,7 @@ pub(crate) mod test {
         ds.fault_client(
             to_repair,
             &UpstairsState::Active,
-            ClientStopReason::RequestedFault,
+            ClientFaultReason::RequestedFault,
         );
         ds.clients[to_repair].checked_state_transition(
             &UpstairsState::Active,
@@ -9948,7 +9951,7 @@ pub(crate) mod test {
         ds.fault_client(
             to_repair,
             &UpstairsState::Active,
-            ClientStopReason::RequestedFault,
+            ClientFaultReason::RequestedFault,
         );
         ds.clients[to_repair].checked_state_transition(
             &UpstairsState::Active,

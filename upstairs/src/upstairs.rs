@@ -1162,7 +1162,7 @@ impl Upstairs {
                 self.downstairs.fault_client(
                     client_id,
                     &self.state,
-                    crate::client::ClientStopReason::RequestedFault,
+                    crate::client::ClientFaultReason::RequestedFault,
                 );
                 done.send_ok(());
             }
