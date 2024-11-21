@@ -65,6 +65,9 @@ use guest::{GuestBlockRes, GuestIoHandle};
 
 mod stats;
 
+pub use client::{
+    ClientFaultReason, ClientNegotiationFailed, ClientStopReason,
+};
 pub use crucible_common::impacted_blocks::*;
 
 mod deferred;
@@ -785,6 +788,7 @@ pub(crate) struct RawReadResponse {
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(tag = "type", content = "value")]
 pub enum DsState {
     /*
      * New connection
@@ -828,25 +832,13 @@ pub enum DsState {
      */
     Offline,
     /*
-     * A guest requested deactivation, this downstairs has completed all
-     * its outstanding work and is now waiting for the upstairs to
-     * transition back to initializing.
-     */
-    Deactivated,
-    /*
-     * Another Upstairs has connected and is now active.
-     */
-    Disabled,
-    /*
-     * This downstairs is being replaced, Any active task needs to clear
-     * any state and exit.
-     */
-    Replacing,
-    /*
      * The current downstairs tasks have ended and the replacement has
      * begun.
      */
     Replaced,
+
+    /// The IO task for the client is being stopped
+    Stopping(crate::client::ClientStopReason),
 }
 impl std::fmt::Display for DsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -878,17 +870,11 @@ impl std::fmt::Display for DsState {
             DsState::Offline => {
                 write!(f, "Offline")
             }
-            DsState::Deactivated => {
-                write!(f, "Deactivated")
-            }
-            DsState::Disabled => {
-                write!(f, "Disabled")
-            }
-            DsState::Replacing => {
-                write!(f, "Replacing")
-            }
             DsState::Replaced => {
                 write!(f, "Replaced")
+            }
+            DsState::Stopping(..) => {
+                write!(f, "Stopping")
             }
         }
     }
