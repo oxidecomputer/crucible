@@ -1797,29 +1797,28 @@ impl Downstairs {
             reconcile.reconcile_repair_needed,
         );
 
-        #[cfg(feature = "notify-nexus")]
-        {
-            let reconcile_id = reconcile.id;
-            let current_task = reconcile.reconcile_task_list_index;
-
-            // `on_reconciliation_job_done` increments one of these and
-            // decrements the other, so add them together to get total task
-            // count to send to Nexus.
-            let task_count =
-                self.reconcile_repaired + self.reconcile_repair_needed;
-
-            self.notify_nexus_of_reconcile_progress(
-                reconcile_id,
-                current_task,
-                task_count,
-            );
-        }
-
         for c in self.clients.iter_mut() {
             c.send_next_reconciliation_req(&mut next);
         }
 
         reconcile.current_work = Some(next);
+
+        #[cfg(feature = "notify-nexus")]
+        {
+            let reconcile_id = reconcile.id;
+
+            // `on_reconciliation_job_done` increments one of these and
+            // decrements the other, so add them together to get total task
+            // count to send to Nexus.
+            let task_count =
+                self.reconcile_repaired + reconcile.reconcile_repair_needed;
+
+            self.notify_nexus_of_reconcile_progress(
+                reconcile_id,
+                self.reconcile_repaired,
+                task_count,
+            );
+        }
 
         false
     }
@@ -1915,12 +1914,16 @@ impl Downstairs {
 
         info!(self.log, "Clear out existing repair work queue");
 
-        if self.reconcile.take().is_some() {
+        if let Some(r) = self.reconcile.take() {
             #[cfg(feature = "notify-nexus")]
             {
                 self.notify_nexus_of_reconcile_finished(
-                    reconcile, true, /* aborted */
+                    &r, true, /* aborted */
                 );
+            }
+            #[cfg(not(feature = "notify-nexus"))]
+            {
+                let _ = r; // avoid unused warning
             }
             self.reconcile_repaired = 0;
         } else {
