@@ -12,8 +12,10 @@ use crate::guest::Guest;
 use crate::up_main;
 use crate::BlockIO;
 use crate::Buffer;
+use crate::ConnectionMode;
 use crate::CrucibleError;
 use crate::DsState;
+use crate::NegotiationState;
 use crate::{
     IO_CACHED_MAX_BYTES, IO_CACHED_MAX_JOBS, IO_OUTSTANDING_MAX_BYTES,
     IO_OUTSTANDING_MAX_JOBS,
@@ -1562,7 +1564,13 @@ async fn test_byte_fault_condition() {
 
     // Check to make sure that happened
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
+    assert_eq!(
+        ds[ClientId::new(0)],
+        DsState::Connecting {
+            mode: ConnectionMode::Faulted,
+            state: NegotiationState::Start { auto_promote: true }
+        }
+    );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
 
@@ -1633,7 +1641,13 @@ async fn test_byte_fault_condition_offline() {
 
     // Check to make sure that happened
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+    assert_eq!(
+        ds[ClientId::new(0)],
+        DsState::Connecting {
+            mode: ConnectionMode::Offline,
+            state: NegotiationState::Start { auto_promote: true }
+        }
+    );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
 
@@ -1662,11 +1676,23 @@ async fn test_byte_fault_condition_offline() {
 
         let ds = harness.guest.downstairs_state().await.unwrap();
         if (i + 1) * WRITE_SIZE < IO_OUTSTANDING_MAX_BYTES as usize {
-            assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+            assert_eq!(
+                ds[ClientId::new(0)],
+                DsState::Connecting {
+                    mode: ConnectionMode::Offline,
+                    state: NegotiationState::Start { auto_promote: true }
+                }
+            );
             assert_eq!(ds[ClientId::new(1)], DsState::Active);
             assert_eq!(ds[ClientId::new(2)], DsState::Active);
         } else {
-            assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
+            assert_eq!(
+                ds[ClientId::new(0)],
+                DsState::Connecting {
+                    mode: ConnectionMode::Faulted,
+                    state: NegotiationState::Start { auto_promote: true }
+                }
+            );
             assert_eq!(ds[ClientId::new(1)], DsState::Active);
             assert_eq!(ds[ClientId::new(2)], DsState::Active);
         }
@@ -1711,7 +1737,13 @@ async fn test_offline_can_deactivate() {
 
     // Check to make sure downstairs 1 is now offline.
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+    assert_eq!(
+        ds[ClientId::new(0)],
+        DsState::Connecting {
+            mode: ConnectionMode::Offline,
+            state: NegotiationState::Start { auto_promote: true }
+        }
+    );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
 
@@ -1748,7 +1780,13 @@ async fn test_offline_with_io_can_deactivate() {
 
     // Check to make sure downstairs 1 is now offline.
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+    assert_eq!(
+        ds[ClientId::new(0)],
+        DsState::Connecting {
+            mode: ConnectionMode::Offline,
+            state: NegotiationState::Start { auto_promote: true }
+        }
+    );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
 
@@ -1799,9 +1837,15 @@ async fn test_all_offline_with_io_can_deactivate() {
 
     // Check to make sure all downstairs are offline.
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Offline);
-    assert_eq!(ds[ClientId::new(1)], DsState::Offline);
-    assert_eq!(ds[ClientId::new(2)], DsState::Offline);
+    for cid in ClientId::iter() {
+        assert_eq!(
+            ds[cid],
+            DsState::Connecting {
+                mode: ConnectionMode::Offline,
+                state: NegotiationState::Start { auto_promote: true }
+            }
+        );
+    }
 
     // We must `spawn` here because `read` will wait for the response to
     // come back before returning
@@ -1898,7 +1942,13 @@ async fn test_job_fault_condition() {
 
     // Check to make sure that happened
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
+    assert_eq!(
+        ds[ClientId::new(0)],
+        DsState::Connecting {
+            mode: ConnectionMode::Faulted,
+            state: NegotiationState::Start { auto_promote: true }
+        }
+    );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
 
@@ -1964,7 +2014,13 @@ async fn test_job_fault_condition_offline() {
 
     // Check to make sure that happened
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+    assert_eq!(
+        ds[ClientId::new(0)],
+        DsState::Connecting {
+            mode: ConnectionMode::Offline,
+            state: NegotiationState::Start { auto_promote: true }
+        }
+    );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
 
@@ -2007,12 +2063,24 @@ async fn test_job_fault_condition_offline() {
         let ds = harness.guest.downstairs_state().await.unwrap();
         if i + barrier_count < IO_OUTSTANDING_MAX_JOBS {
             // At this point, we should still be offline
-            assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+            assert_eq!(
+                ds[ClientId::new(0)],
+                DsState::Connecting {
+                    mode: ConnectionMode::Offline,
+                    state: NegotiationState::Start { auto_promote: true }
+                }
+            );
             assert_eq!(ds[ClientId::new(1)], DsState::Active);
             assert_eq!(ds[ClientId::new(2)], DsState::Active);
         } else {
             // After ds1 is kicked out, we shouldn't see any more messages
-            assert_eq!(ds[ClientId::new(0)], DsState::Faulted);
+            assert_eq!(
+                ds[ClientId::new(0)],
+                DsState::Connecting {
+                    mode: ConnectionMode::Faulted,
+                    state: NegotiationState::Start { auto_promote: true }
+                }
+            );
             assert_eq!(ds[ClientId::new(1)], DsState::Active);
             assert_eq!(ds[ClientId::new(2)], DsState::Active);
         }
@@ -2752,7 +2820,13 @@ async fn test_no_send_offline() {
 
     // Check to make sure that happened
     let ds = harness.guest.downstairs_state().await.unwrap();
-    assert_eq!(ds[ClientId::new(0)], DsState::Offline);
+    assert_eq!(
+        ds[ClientId::new(0)],
+        DsState::Connecting {
+            mode: ConnectionMode::Offline,
+            state: NegotiationState::Start { auto_promote: true }
+        }
+    );
     assert_eq!(ds[ClientId::new(1)], DsState::Active);
     assert_eq!(ds[ClientId::new(2)], DsState::Active);
     info!(harness.log, "DS1 is offline");

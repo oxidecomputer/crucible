@@ -67,6 +67,7 @@ mod stats;
 
 pub use client::{
     ClientFaultReason, ClientNegotiationFailed, ClientStopReason,
+    NegotiationState,
 };
 pub use crucible_common::impacted_blocks::*;
 
@@ -790,94 +791,92 @@ pub(crate) struct RawReadResponse {
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type", content = "value")]
 pub enum DsState {
-    /*
-     * New connection
-     */
-    New,
-    /*
-     * Waiting for activation signal.
-     */
-    WaitActive,
-    /*
-     * Waiting for the minimum number of downstairs to be present.
-     */
-    WaitQuorum,
-    /*
-     * Initial startup, downstairs are repairing from each other.
-     */
-    Reconcile,
-    /*
-     * Ready for and/or currently receiving IO
-     */
+    /// New connection
+    Connecting {
+        state: NegotiationState,
+        mode: ConnectionMode,
+    },
+
+    /// Ready for and/or currently receiving IO
     Active,
-    /*
-     * IO attempts to this downstairs are failing at too high of a
-     * rate, or it is not able to keep up, or it is having some
-     * error such that we can no longer use it.
-     */
-    Faulted,
-    /*
-     * This downstairs was failed, but has disconnected and now we
-     * are ready to repair it.
-     */
-    LiveRepairReady,
-    /*
-     * This downstairs is undergoing LiveRepair
-     */
+
+    /// This downstairs is undergoing LiveRepair
     LiveRepair,
-    /*
-     * This downstairs was active, but is now no longer connected.
-     * We may have work for it in memory, so a replay is possible
-     * if this downstairs reconnects in time.
-     */
-    Offline,
-    /*
-     * The current downstairs tasks have ended and the replacement has
-     * begun.
-     */
-    Replaced,
 
     /// The IO task for the client is being stopped
-    Stopping(crate::client::ClientStopReason),
+    Stopping(ClientStopReason),
 }
 impl std::fmt::Display for DsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DsState::New => {
-                write!(f, "New")
-            }
-            DsState::WaitActive => {
+            DsState::Connecting {
+                state: NegotiationState::WaitActive,
+                ..
+            } => {
                 write!(f, "WaitActive")
             }
-            DsState::WaitQuorum => {
+            DsState::Connecting {
+                state: NegotiationState::WaitQuorum,
+                ..
+            } => {
                 write!(f, "WaitQuorum")
             }
-            DsState::Reconcile => {
+            DsState::Connecting {
+                state: NegotiationState::Reconcile,
+                ..
+            } => {
                 write!(f, "Reconcile")
+            }
+            DsState::Connecting {
+                state: NegotiationState::LiveRepairReady,
+                ..
+            } => {
+                write!(f, "LiveRepairReady")
             }
             DsState::Active => {
                 write!(f, "Active")
             }
-            DsState::Faulted => {
+            DsState::Connecting {
+                mode: ConnectionMode::New,
+                ..
+            } => {
+                write!(f, "New")
+            }
+            DsState::Connecting {
+                mode: ConnectionMode::Faulted,
+                ..
+            } => {
                 write!(f, "Faulted")
             }
-            DsState::LiveRepairReady => {
-                write!(f, "LiveRepairReady")
+            DsState::Connecting {
+                mode: ConnectionMode::Offline,
+                ..
+            } => {
+                write!(f, "Offline")
+            }
+            DsState::Connecting {
+                mode: ConnectionMode::Replaced,
+                ..
+            } => {
+                write!(f, "Replaced")
             }
             DsState::LiveRepair => {
                 write!(f, "LiveRepair")
-            }
-            DsState::Offline => {
-                write!(f, "Offline")
-            }
-            DsState::Replaced => {
-                write!(f, "Replaced")
             }
             DsState::Stopping(..) => {
                 write!(f, "Stopping")
             }
         }
     }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionMode {
+    Offline,
+    New,
+    Faulted,
+    Replaced,
 }
 
 /*
