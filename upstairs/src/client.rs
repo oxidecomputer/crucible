@@ -319,14 +319,13 @@ impl DownstairsClient {
         });
     }
 
-    fn halt_io_task(&mut self, r: ClientStopReason) {
+    fn halt_io_task(&mut self, up_state: &UpstairsState, r: ClientStopReason) {
         info!(self.log, "halting IO task due to {r:?}");
         if let Some(t) = self.client_task.client_stop_tx.take() {
             if let Err(_e) = t.send(r) {
                 warn!(self.log, "failed to send stop request")
             }
-            // XXX use checked_state_transition?
-            self.state = DsState::Stopping(r);
+            self.checked_state_transition(up_state, DsState::Stopping(r));
         } else {
             warn!(self.log, "client task is already stopping")
         }
@@ -550,7 +549,7 @@ impl DownstairsClient {
 
     /// Switches the client state to Deactivated and stops the IO task
     pub(crate) fn deactivate(&mut self, up_state: &UpstairsState) {
-        self.halt_io_task(ClientStopReason::Deactivated)
+        self.halt_io_task(up_state, ClientStopReason::Deactivated)
     }
 
     /// Resets this Downstairs and start a fresh connection
@@ -864,7 +863,7 @@ impl DownstairsClient {
         up_state: &UpstairsState,
         reason: ClientNegotiationFailed,
     ) {
-        self.halt_io_task(reason.into());
+        self.halt_io_task(up_state, reason.into());
     }
 
     /// Sets the current state to `DsState::Active`
@@ -974,7 +973,7 @@ impl DownstairsClient {
         self.region_metadata = None;
         self.stats.replaced += 1;
 
-        self.halt_io_task(ClientStopReason::Replacing);
+        self.halt_io_task(up_state, ClientStopReason::Replacing);
     }
 
     /// Sets `self.state` to `new_state`, with logging and validity checking
@@ -1201,8 +1200,7 @@ impl DownstairsClient {
         up_state: &UpstairsState,
         reason: ClientFaultReason,
     ) {
-        self.checked_state_transition(up_state, DsState::Faulted);
-        self.halt_io_task(reason.into());
+        self.halt_io_task(up_state, reason.into());
     }
 
     /// Finishes an in-progress live repair, setting our state to `Active`
@@ -1373,7 +1371,7 @@ impl DownstairsClient {
     ///
     /// The IO task will automatically restart in the main event handler
     pub(crate) fn disable(&mut self, up_state: &UpstairsState) {
-        self.halt_io_task(ClientStopReason::Disabled);
+        self.halt_io_task(up_state, ClientStopReason::Disabled);
     }
 
     /// Skips from `LiveRepairReady` to `Active`; a no-op otherwise
