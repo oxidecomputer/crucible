@@ -113,25 +113,16 @@ pub(crate) struct Downstairs {
     /// Data for an in-progress reconciliation
     reconcile: Option<ReconcileData>,
 
-    /// Current piece of reconcile work that the downstairs are working on
+    /// Number of failing attempts to reconcile the downstairs
     ///
-    /// It can be New, InProgress, Skipped, or Done.
-    reconcile_current_work: Option<ReconcileIO>,
-
-    /// Remaining reconciliation work
-    ///
-    /// This queue holds the remaining work required to make all three
-    /// downstairs in a region set the same.
-    reconcile_task_list: VecDeque<ReconcileIO>,
+    /// This is stored outside of `reconcile` because it's an independent
+    /// statistic that isn't associated with a particular activation.
+    reconcile_repair_aborted: usize,
 
     /// Number of extents repaired during initial activation
+    ///
+    /// This is stored outside of `reconcile` because it can be read afterwards
     reconcile_repaired: usize,
-
-    /// Number of extents needing repair during initial activation
-    reconcile_repair_needed: usize,
-
-    /// Number of failing attempts to reconcile the downstairs
-    reconcile_repair_aborted: usize,
 
     /// The logger for messages sent from downstairs methods.
     log: Logger,
@@ -308,8 +299,28 @@ pub(crate) struct ReconcileData {
     /// An ID uniquely identifying this reconciliation
     id: Uuid,
 
-    /// Current index into reconcile_task_list
-    reconcile_task_list_index: usize,
+    /// Current piece of reconcile work that the downstairs are working on
+    ///
+    /// It can be `InProgress`, `Skipped`, or `Done`.
+    current_work: Option<ReconcileIO>,
+
+    /// Pending reconciliation work
+    task_list: VecDeque<ReconcileIO>,
+
+    /// Number of extents needing repair during initial activation
+    reconcile_repair_needed: usize,
+}
+
+impl ReconcileData {
+    fn new<V: Into<VecDeque<ReconcileIO>>>(task_list: V) -> Self {
+        let task_list = task_list.into();
+        Self {
+            id: Uuid::new_v4(),
+            current_work: None,
+            reconcile_repair_needed: task_list.len(),
+            task_list,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -372,10 +383,7 @@ impl Downstairs {
             retired_jobs: AllocRingBuffer::new(8),
             next_id: JobId(1000),
             reconcile: None,
-            reconcile_current_work: None,
-            reconcile_task_list: VecDeque::new(),
             reconcile_repaired: 0,
-            reconcile_repair_needed: 0,
             reconcile_repair_aborted: 0,
             log: log.new(o!("" => "downstairs".to_string())),
             repair: None,
@@ -826,7 +834,7 @@ impl Downstairs {
             // If we failed to begin the repair, then assert that nothing has
             // changed and everything is empty.
             assert!(self.ds_active.is_empty());
-            assert!(self.reconcile_task_list.is_empty());
+            assert!(self.reconcile.is_none());
 
             for c in self.clients.iter() {
                 assert_eq!(c.state(), DsState::WaitQuorum);
@@ -934,35 +942,31 @@ impl Downstairs {
          * about that
          */
         if let Some(reconcile_list) = self.mismatch_list() {
-            self.reconcile = Some(ReconcileData {
-                id: Uuid::new_v4(),
-                reconcile_task_list_index: 0,
-            });
-
-            #[cfg(feature = "notify-nexus")]
-            {
-                let reconcile = self.reconcile.as_ref().unwrap();
-                self.notify_nexus_of_reconcile_start(reconcile);
-            }
-
             for c in self.clients.iter_mut() {
                 c.begin_reconcile();
             }
 
-            info!(
-                self.log,
-                "starting reconciliation {}: found {:?} extents that need repair",
-                self.reconcile.as_ref().unwrap().id,
-                reconcile_list.mend.len()
-            );
-
-            self.convert_rc_to_messages(
+            let task_list = self.convert_rc_to_messages(
                 reconcile_list.mend,
                 max_flush,
                 max_gen,
             );
 
-            self.reconcile_repair_needed = self.reconcile_task_list.len();
+            let reconcile = ReconcileData::new(task_list);
+
+            info!(
+                self.log,
+                "starting reconciliation {}: found {:?} extents that need repair",
+                reconcile.id,
+                reconcile.reconcile_repair_needed,
+            );
+
+            #[cfg(feature = "notify-nexus")]
+            {
+                self.notify_nexus_of_reconcile_start(&reconcile);
+            }
+
+            self.reconcile = Some(reconcile);
             self.reconcile_repaired = 0;
 
             Ok(true)
@@ -1699,12 +1703,13 @@ impl Downstairs {
     /// performed, and no message can start until the previous message
     /// has been ack'd by all three downstairs.
     fn convert_rc_to_messages(
-        &mut self,
+        &self,
         mut rec_list: HashMap<ExtentId, ExtentFix>,
         max_flush: u64,
         max_gen: u64,
-    ) {
+    ) -> VecDeque<ReconcileIO> {
         let mut rep_id = ReconciliationId(0);
+        let mut out = VecDeque::with_capacity(rec_list.len());
         info!(self.log, "Full repair list: {:?}", rec_list);
         for (ext, ef) in rec_list.drain() {
             /*
@@ -1715,7 +1720,7 @@ impl Downstairs {
              * Send repair command to bad extents
              * Reopen extent.
              */
-            self.reconcile_task_list.push_back(ReconcileIO::new(
+            out.push_back(ReconcileIO::new(
                 rep_id,
                 Message::ExtentFlush {
                     repair_id: rep_id,
@@ -1727,7 +1732,7 @@ impl Downstairs {
             ));
             rep_id.0 += 1;
 
-            self.reconcile_task_list.push_back(ReconcileIO::new(
+            out.push_back(ReconcileIO::new(
                 rep_id,
                 Message::ExtentClose {
                     repair_id: rep_id,
@@ -1737,7 +1742,7 @@ impl Downstairs {
             rep_id.0 += 1;
 
             let repair = self.clients[ef.source].repair_addr.unwrap();
-            self.reconcile_task_list.push_back(ReconcileIO::new(
+            out.push_back(ReconcileIO::new(
                 rep_id,
                 Message::ExtentRepair {
                     repair_id: rep_id,
@@ -1749,7 +1754,7 @@ impl Downstairs {
             ));
             rep_id.0 += 1;
 
-            self.reconcile_task_list.push_back(ReconcileIO::new(
+            out.push_back(ReconcileIO::new(
                 rep_id,
                 Message::ExtentReopen {
                     repair_id: rep_id,
@@ -1759,7 +1764,8 @@ impl Downstairs {
             rep_id.0 += 1;
         }
 
-        info!(self.log, "Task list: {:?}", self.reconcile_task_list);
+        info!(self.log, "Task list: {:?}", out);
+        out
     }
 
     /// Takes the next task from `self.reconcile_task_list` and runs it
@@ -1773,50 +1779,46 @@ impl Downstairs {
     /// If `self.reconcile_current_work` is not `None`, or if `self.reconcile`
     /// is `None`.
     pub(crate) fn send_next_reconciliation_req(&mut self) -> bool {
-        assert!(self.reconcile_current_work.is_none());
-
         let Some(reconcile) = &mut self.reconcile else {
             panic!("`self.reconcile` must be Some during reconciliation");
         };
+        assert!(reconcile.current_work.is_none());
 
-        let Some(mut next) = self.reconcile_task_list.pop_front() else {
+        let Some(mut next) = reconcile.task_list.pop_front() else {
             info!(self.log, "done with reconciliation");
             return true;
         };
-
-        reconcile.reconcile_task_list_index += 1;
 
         debug!(
             self.log,
             "reconciliation {}: on task {} of {}",
             reconcile.id,
-            reconcile.reconcile_task_list_index,
-            self.reconcile_repair_needed,
+            self.reconcile_repaired,
+            reconcile.reconcile_repair_needed,
         );
-
-        #[cfg(feature = "notify-nexus")]
-        {
-            let reconcile_id = reconcile.id;
-            let current_task = reconcile.reconcile_task_list_index;
-
-            // `on_reconciliation_job_done` increments one of these and
-            // decrements the other, so add them together to get total task
-            // count to send to Nexus.
-            let task_count =
-                self.reconcile_repaired + self.reconcile_repair_needed;
-
-            self.notify_nexus_of_reconcile_progress(
-                reconcile_id,
-                current_task,
-                task_count,
-            );
-        }
 
         for c in self.clients.iter_mut() {
             c.send_next_reconciliation_req(&mut next);
         }
 
-        self.reconcile_current_work = Some(next);
+        reconcile.current_work = Some(next);
+
+        #[cfg(feature = "notify-nexus")]
+        {
+            let reconcile_id = reconcile.id;
+
+            // `on_reconciliation_job_done` increments one of these and
+            // decrements the other, so add them together to get total task
+            // count to send to Nexus.
+            let task_count =
+                self.reconcile_repaired + reconcile.reconcile_repair_needed;
+
+            self.notify_nexus_of_reconcile_progress(
+                reconcile_id,
+                self.reconcile_repaired,
+                task_count,
+            );
+        }
 
         false
     }
@@ -1834,7 +1836,7 @@ impl Downstairs {
         repair_id: ReconciliationId,
         up_state: &UpstairsState,
     ) -> bool {
-        let Some(next) = self.reconcile_current_work.as_mut() else {
+        if self.reconcile.is_none() {
             // This can happen if reconciliation is cancelled (e.g. one
             // Downstairs died) but reconciliation acks are still coming through
             // from the other downstairs.
@@ -1859,9 +1861,14 @@ impl Downstairs {
             return false;
         }
 
+        let Some(reconcile) = self.reconcile.as_mut() else {
+            unreachable!(); // checked above
+        };
+
+        let next = reconcile.current_work.as_mut().unwrap();
         if self.clients[client_id].on_reconciliation_job_done(repair_id, next) {
-            self.reconcile_current_work = None;
-            self.reconcile_repair_needed -= 1;
+            reconcile.current_work = None;
+            reconcile.reconcile_repair_needed -= 1;
             self.reconcile_repaired += 1;
             self.send_next_reconciliation_req()
         } else {
@@ -1906,28 +1913,24 @@ impl Downstairs {
         }
 
         info!(self.log, "Clear out existing repair work queue");
-        self.reconcile_task_list = VecDeque::new();
-        self.reconcile_current_work = None;
 
-        if self.reconcile.is_some() {
+        if let Some(r) = self.reconcile.take() {
             #[cfg(feature = "notify-nexus")]
             {
-                let reconcile = self.reconcile.as_ref().unwrap();
                 self.notify_nexus_of_reconcile_finished(
-                    reconcile, true, /* aborted */
+                    &r, true, /* aborted */
                 );
             }
-            self.reconcile = None;
-            self.reconcile_repair_needed = 0;
+            #[cfg(not(feature = "notify-nexus"))]
+            {
+                let _ = r; // avoid unused warning
+            }
             self.reconcile_repaired = 0;
-
-            self.reconcile_repair_aborted += 1;
         } else {
             // If reconcile is None, then these should also be cleared
-            assert_eq!(self.reconcile_repair_needed, 0);
             assert_eq!(self.reconcile_repaired, 0);
-            self.reconcile_repair_aborted += 1;
         }
+        self.reconcile_repair_aborted += 1;
     }
 
     /// Asserts that initial reconciliation is done, and sets clients as Active
@@ -1936,7 +1939,6 @@ impl Downstairs {
     /// If that isn't the case!
     pub(crate) fn on_reconciliation_done(&mut self, from_state: DsState) {
         assert!(self.ds_active.is_empty());
-        assert!(self.reconcile_task_list.is_empty());
 
         for (i, c) in self.clients.iter_mut().enumerate() {
             assert_eq!(c.state(), from_state, "invalid state for client {i}");
@@ -1945,17 +1947,15 @@ impl Downstairs {
 
         if from_state == DsState::Reconcile {
             // reconciliation completed
-            assert!(self.reconcile.is_some());
+            let r = self.reconcile.take().unwrap();
+            assert!(r.task_list.is_empty());
 
             #[cfg(feature = "notify-nexus")]
             {
-                let reconcile = self.reconcile.as_ref().unwrap();
                 self.notify_nexus_of_reconcile_finished(
-                    reconcile, false, /* aborted */
+                    &r, false, /* aborted */
                 );
             }
-
-            self.reconcile = None;
         } else if from_state == DsState::WaitQuorum {
             // no reconciliation was required
             assert!(self.reconcile.is_none());
@@ -3404,7 +3404,10 @@ impl Downstairs {
 
     /// Accessor for [`Downstairs::reconcile_repair_needed`]
     pub(crate) fn reconcile_repair_needed(&self) -> usize {
-        self.reconcile_repair_needed
+        self.reconcile
+            .as_ref()
+            .map(|r| r.reconcile_repair_needed)
+            .unwrap_or(0)
     }
 
     /// Accessor for [`Downstairs::reconcile_repair_aborted`]
@@ -5790,13 +5793,14 @@ pub(crate) mod test {
         rec_list.insert(repair_extent, ef);
         let max_flush = 22;
         let max_gen = 33;
-        ds.convert_rc_to_messages(rec_list, max_flush, max_gen);
+        let mut reconcile_task_list =
+            ds.convert_rc_to_messages(rec_list, max_flush, max_gen);
 
         // Walk the list and check for messages we expect to find
-        assert_eq!(ds.reconcile_task_list.len(), 4);
+        assert_eq!(reconcile_task_list.len(), 4);
 
         // First task, flush
-        let rio = ds.reconcile_task_list.pop_front().unwrap();
+        let rio = reconcile_task_list.pop_front().unwrap();
         assert_eq!(rio.id, ReconciliationId(0));
         match rio.op {
             Message::ExtentFlush {
@@ -5821,7 +5825,7 @@ pub(crate) mod test {
         assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(2)]);
 
         // Second task, close extent
-        let rio = ds.reconcile_task_list.pop_front().unwrap();
+        let rio = reconcile_task_list.pop_front().unwrap();
         assert_eq!(rio.id, ReconciliationId(1));
         match rio.op {
             Message::ExtentClose {
@@ -5840,7 +5844,7 @@ pub(crate) mod test {
         assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(2)]);
 
         // Third task, repair extent
-        let rio = ds.reconcile_task_list.pop_front().unwrap();
+        let rio = reconcile_task_list.pop_front().unwrap();
         assert_eq!(rio.id, ReconciliationId(2));
         match rio.op {
             Message::ExtentRepair {
@@ -5868,7 +5872,7 @@ pub(crate) mod test {
         assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(2)]);
 
         // Third task, close extent
-        let rio = ds.reconcile_task_list.pop_front().unwrap();
+        let rio = reconcile_task_list.pop_front().unwrap();
         assert_eq!(rio.id, ReconciliationId(3));
         match rio.op {
             Message::ExtentReopen {
@@ -5909,13 +5913,14 @@ pub(crate) mod test {
         rec_list.insert(repair_extent, ef);
         let max_flush = 66;
         let max_gen = 77;
-        ds.convert_rc_to_messages(rec_list, max_flush, max_gen);
+        let mut reconcile_task_list =
+            ds.convert_rc_to_messages(rec_list, max_flush, max_gen);
 
         // Walk the list and check for messages we expect to find
-        assert_eq!(ds.reconcile_task_list.len(), 4);
+        assert_eq!(reconcile_task_list.len(), 4);
 
         // First task, flush
-        let rio = ds.reconcile_task_list.pop_front().unwrap();
+        let rio = reconcile_task_list.pop_front().unwrap();
         assert_eq!(rio.id, ReconciliationId(0));
         match rio.op {
             Message::ExtentFlush {
@@ -5940,7 +5945,7 @@ pub(crate) mod test {
         assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(2)]);
 
         // Second task, close extent
-        let rio = ds.reconcile_task_list.pop_front().unwrap();
+        let rio = reconcile_task_list.pop_front().unwrap();
         assert_eq!(rio.id, ReconciliationId(1));
         match rio.op {
             Message::ExtentClose {
@@ -5959,7 +5964,7 @@ pub(crate) mod test {
         assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(2)]);
 
         // Third task, repair extent
-        let rio = ds.reconcile_task_list.pop_front().unwrap();
+        let rio = reconcile_task_list.pop_front().unwrap();
         assert_eq!(rio.id, ReconciliationId(2));
         match rio.op {
             Message::ExtentRepair {
@@ -5987,7 +5992,7 @@ pub(crate) mod test {
         assert_eq!(ReconcileIOState::New, rio.state[ClientId::new(2)]);
 
         // Third task, close extent
-        let rio = ds.reconcile_task_list.pop_front().unwrap();
+        let rio = reconcile_task_list.pop_front().unwrap();
         assert_eq!(rio.id, ReconciliationId(3));
         match rio.op {
             Message::ExtentReopen {
@@ -6013,10 +6018,7 @@ pub(crate) mod test {
         let mut ds = Downstairs::test_default();
         set_all_reconcile(&mut ds);
 
-        ds.reconcile = Some(ReconcileData {
-            id: Uuid::new_v4(),
-            reconcile_task_list_index: 0,
-        });
+        ds.reconcile = Some(ReconcileData::new([]));
 
         let w = ds.send_next_reconciliation_req();
         assert!(w); // reconciliation is "done", because there's nothing there
@@ -6028,31 +6030,28 @@ pub(crate) mod test {
         // not in the correct state, and that it will clear the work queue and
         // mark other downstairs as failed.
         let mut ds = Downstairs::test_default();
+        set_all_reconcile(&mut ds);
 
         let close_id = ReconciliationId(0);
         let rep_id = ReconciliationId(1);
 
-        ds.reconcile = Some(ReconcileData {
-            id: Uuid::new_v4(),
-            reconcile_task_list_index: 0,
-        });
-
-        // Put a jobs on the todo list
-        ds.reconcile_task_list.push_back(ReconcileIO::new(
-            close_id,
-            Message::ExtentClose {
-                repair_id: close_id,
-                extent_id: ExtentId(1),
-            },
-        ));
-        ds.reconcile_task_list.push_back(ReconcileIO::new(
-            rep_id,
-            Message::ExtentClose {
-                repair_id: rep_id,
-                extent_id: ExtentId(1),
-            },
-        ));
-        set_all_reconcile(&mut ds);
+        // Put two jobs on the todo list
+        ds.reconcile = Some(ReconcileData::new([
+            ReconcileIO::new(
+                close_id,
+                Message::ExtentClose {
+                    repair_id: close_id,
+                    extent_id: ExtentId(1),
+                },
+            ),
+            ReconcileIO::new(
+                rep_id,
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: ExtentId(1),
+                },
+            ),
+        ]));
 
         // Send the first reconciliation req
         assert!(!ds.send_next_reconciliation_req());
@@ -6072,15 +6071,12 @@ pub(crate) mod test {
         );
         assert!(!nw);
 
-        // The two troublesome tasks will pass through DsState::ReconcileFailed and
-        // end up in DsState::New.
+        // The two troublesome tasks will end up in DsState::New.
         assert_eq!(ds.clients[ClientId::new(0)].state(), DsState::New);
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::Faulted);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::New);
 
-        // Verify that no more reconciliation work is happening
-        assert!(ds.reconcile_task_list.is_empty());
-        assert!(ds.reconcile_current_work.is_none());
+        // Verify that reconciliation has been stopped
         assert!(ds.reconcile.is_none());
     }
 
@@ -6095,19 +6091,14 @@ pub(crate) mod test {
         let up_state = UpstairsState::Active;
         let rep_id = ReconciliationId(0);
 
-        ds.reconcile = Some(ReconcileData {
-            id: Uuid::new_v4(),
-            reconcile_task_list_index: 0,
-        });
-
-        // Put two jobs on the todo list
-        ds.reconcile_task_list.push_back(ReconcileIO::new(
+        ds.reconcile = Some(ReconcileData::new([ReconcileIO::new(
             rep_id,
             Message::ExtentClose {
                 repair_id: rep_id,
                 extent_id: ExtentId(1),
             },
-        ));
+        )]));
+
         // Send that job
         ds.send_next_reconciliation_req();
 
@@ -6128,8 +6119,8 @@ pub(crate) mod test {
         assert_eq!(ds.clients[ClientId::new(1)].state(), DsState::New);
         assert_eq!(ds.clients[ClientId::new(2)].state(), DsState::New);
 
-        // Verify that there are no reconciliation requests
-        assert!(ds.reconcile_task_list.is_empty());
+        // Verify that reconciliation has stopped
+        assert!(ds.reconcile.is_none());
     }
 
     #[test]
@@ -6140,13 +6131,13 @@ pub(crate) mod test {
         set_all_reconcile(&mut ds);
 
         let rep_id = ReconciliationId(0);
-        ds.reconcile_task_list.push_back(ReconcileIO::new(
+        ds.reconcile = Some(ReconcileData::new([ReconcileIO::new(
             rep_id,
             Message::ExtentClose {
                 repair_id: rep_id,
                 extent_id: ExtentId(1),
             },
-        ));
+        )]));
 
         // Send that req
         assert!(!ds.send_next_reconciliation_req());
@@ -6162,26 +6153,22 @@ pub(crate) mod test {
         let close_id = ReconciliationId(0);
         let rep_id = ReconciliationId(1);
 
-        ds.reconcile = Some(ReconcileData {
-            id: Uuid::new_v4(),
-            reconcile_task_list_index: 0,
-        });
-
-        ds.reconcile_task_list.push_back(ReconcileIO::new(
-            close_id,
-            Message::ExtentClose {
-                repair_id: close_id,
-                extent_id: ExtentId(1),
-            },
-        ));
-        ds.reconcile_task_list.push_back(ReconcileIO::new(
-            rep_id,
-            Message::ExtentClose {
-                repair_id: rep_id,
-                extent_id: ExtentId(1),
-            },
-        ));
-        ds.reconcile_repair_needed = ds.reconcile_task_list.len();
+        ds.reconcile = Some(ReconcileData::new([
+            ReconcileIO::new(
+                close_id,
+                Message::ExtentClose {
+                    repair_id: close_id,
+                    extent_id: ExtentId(1),
+                },
+            ),
+            ReconcileIO::new(
+                rep_id,
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: ExtentId(1),
+                },
+            ),
+        ]));
 
         // Send the close job.  Reconciliation isn't done at this point!
         assert!(!ds.send_next_reconciliation_req());
@@ -6193,14 +6180,14 @@ pub(crate) mod test {
         }
 
         // The third ack will have sent the next reconciliation job
-        assert!(ds.reconcile_task_list.is_empty());
+        assert!(ds.reconcile.as_ref().unwrap().task_list.is_empty());
 
         // Now, make sure we consider this done only after all three are done
         assert!(!ds.on_reconciliation_ack(ClientId::new(0), rep_id, &up_state));
         assert!(!ds.on_reconciliation_ack(ClientId::new(1), rep_id, &up_state));
         // The third ack finishes reconciliation!
         assert!(ds.on_reconciliation_ack(ClientId::new(2), rep_id, &up_state));
-        assert_eq!(ds.reconcile_repair_needed, 0);
+        assert_eq!(ds.reconcile_repair_needed(), 0);
         assert_eq!(ds.reconcile_repaired, 2);
     }
 
@@ -6213,13 +6200,8 @@ pub(crate) mod test {
         let up_state = UpstairsState::Active;
         let rep_id = ReconciliationId(1);
 
-        ds.reconcile = Some(ReconcileData {
-            id: Uuid::new_v4(),
-            reconcile_task_list_index: 0,
-        });
-
         // Queue up a repair message, which will be skiped for client 0
-        ds.reconcile_task_list.push_back(ReconcileIO::new(
+        ds.reconcile = Some(ReconcileData::new([ReconcileIO::new(
             rep_id,
             Message::ExtentRepair {
                 repair_id: rep_id,
@@ -6231,14 +6213,13 @@ pub(crate) mod test {
                 ),
                 dest_clients: vec![ClientId::new(1), ClientId::new(2)],
             },
-        ));
-        ds.reconcile_repair_needed = ds.reconcile_task_list.len();
+        )]));
 
         // Send the job.  Reconciliation isn't done at this point!
         assert!(!ds.send_next_reconciliation_req());
 
         // Mark all three as in progress
-        let Some(job) = &ds.reconcile_current_work else {
+        let Some(job) = &ds.reconcile.as_ref().unwrap().current_work else {
             panic!("failed to find current work");
         };
         assert_eq!(job.state[ClientId::new(0)], ReconcileIOState::Skipped);
@@ -6249,7 +6230,7 @@ pub(crate) mod test {
         // The second ack finishes reconciliation, because it was skipped for
         // client 0 (which was the source of repairs).
         assert!(ds.on_reconciliation_ack(ClientId::new(2), rep_id, &up_state));
-        assert_eq!(ds.reconcile_repair_needed, 0);
+        assert_eq!(ds.reconcile_repair_needed(), 0);
         assert_eq!(ds.reconcile_repaired, 1);
     }
 
@@ -6264,7 +6245,7 @@ pub(crate) mod test {
         let rep_id = ReconciliationId(1);
 
         // Queue up a repair message, which will be skiped for client 0
-        ds.reconcile_task_list.push_back(ReconcileIO::new(
+        ds.reconcile = Some(ReconcileData::new([ReconcileIO::new(
             rep_id,
             Message::ExtentRepair {
                 repair_id: rep_id,
@@ -6276,7 +6257,7 @@ pub(crate) mod test {
                 ),
                 dest_clients: vec![ClientId::new(1), ClientId::new(2)],
             },
-        ));
+        )]));
 
         // Send the job.  Reconciliation isn't done at this point!
         assert!(!ds.send_next_reconciliation_req());
@@ -6300,20 +6281,22 @@ pub(crate) mod test {
         let rep_id = ReconciliationId(1);
 
         // Queue up a repair message, which will be skiped for client 0
-        ds.reconcile_task_list.push_back(ReconcileIO::new(
-            close_id,
-            Message::ExtentClose {
-                repair_id: close_id,
-                extent_id: ExtentId(1),
-            },
-        ));
-        ds.reconcile_task_list.push_back(ReconcileIO::new(
-            rep_id,
-            Message::ExtentClose {
-                repair_id: rep_id,
-                extent_id: ExtentId(1),
-            },
-        ));
+        ds.reconcile = Some(ReconcileData::new([
+            ReconcileIO::new(
+                close_id,
+                Message::ExtentClose {
+                    repair_id: close_id,
+                    extent_id: ExtentId(1),
+                },
+            ),
+            ReconcileIO::new(
+                rep_id,
+                Message::ExtentClose {
+                    repair_id: rep_id,
+                    extent_id: ExtentId(1),
+                },
+            ),
+        ]));
 
         // Send the first req; reconciliation is not yet done
         assert!(!ds.send_next_reconciliation_req());
