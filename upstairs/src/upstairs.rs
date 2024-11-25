@@ -4,24 +4,28 @@ use crate::{
     cdt,
     client::{ClientAction, ClientRunResult},
     control::ControlRequest,
-    deadline_secs,
     deferred::{
         DeferredBlockOp, DeferredMessage, DeferredQueue, DeferredRead,
         DeferredWrite, EncryptedWrite,
     },
     downstairs::{Downstairs, DownstairsAction},
     extent_from_offset,
+    io_limits::IOLimitGuard,
     stats::UpStatOuter,
     BlockOp, BlockRes, Buffer, ClientId, ClientMap, CrucibleOpts, DsState,
     EncryptionContext, GuestIoHandle, Message, RegionDefinition,
     RegionDefinitionStatus, SnapshotDetails, WQCounts,
 };
+use crucible_client_types::RegionExtentInfo;
 use crucible_common::{BlockIndex, CrucibleError};
 use serde::{Deserialize, Serialize};
 
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 
 use bytes::BytesMut;
@@ -34,7 +38,10 @@ use tokio::{
 use uuid::Uuid;
 
 /// How often to log stats for DTrace
-const STAT_INTERVAL_SECS: f32 = 1.0;
+const STAT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How often to do live-repair status checking
+const REPAIR_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Minimum IO size (in bytes) before encryption / decryption is done off-thread
 const MIN_DEFER_SIZE_BYTES: u64 = 8192;
@@ -84,7 +91,6 @@ pub struct UpCounters {
     action_guest: u64,
     action_deferred_block: u64,
     action_deferred_message: u64,
-    action_leak_check: u64,
     action_flush_check: u64,
     action_stat_check: u64,
     action_repair_check: u64,
@@ -100,7 +106,6 @@ impl UpCounters {
             action_guest: 0,
             action_deferred_block: 0,
             action_deferred_message: 0,
-            action_leak_check: 0,
             action_flush_check: 0,
             action_stat_check: 0,
             action_repair_check: 0,
@@ -133,7 +138,6 @@ impl UpCounters {
 ///   - Client timeout
 ///   - Client ping intervals
 ///   - Live-repair checks
-///   - IOPS leaking
 ///   - Automatic flushes
 ///   - DTrace logging of stats
 /// - Control requests from the controller server
@@ -166,10 +170,9 @@ impl UpCounters {
 ///
 /// For example, we _always_ do things like
 /// - Send all pending IO to the client work tasks
-/// - Ack all ackable jobs to the guest
 /// - Step through the live-repair state machine (if it's running)
 /// - Check for client-side deactivation (if it's pending)
-/// - Set backpressure time in the guest
+/// - Set backpressure time in the clients
 ///
 /// Keeping the `Upstairs` "clean" through this invariant maintenance makes it
 /// easier to think about its state, because it's guaranteed to be clean when we
@@ -203,12 +206,11 @@ pub(crate) struct Upstairs {
 
     /// Marks whether a flush is needed
     ///
-    /// The Upstairs keeps all IOs in memory until a flush is ACK'd back from
-    /// all three downstairs.  If there are IOs we have accepted into the work
-    /// queue that don't end with a flush, then we set this to indicate that the
-    /// upstairs may need to issue a flush of its own to be sure that data is
-    /// pushed to disk.  Note that this is not an indication of an ACK'd flush,
-    /// just that the last IO command we put on the work queue was not a flush.
+    /// If there are IOs we have accepted into the work queue that don't end
+    /// with a flush, then we set this to indicate that the upstairs may need to
+    /// issue a flush of its own to be sure that data is pushed to disk.  Note
+    /// that this is not an indication of an ACK'd flush, just that the last IO
+    /// command we put on the work queue was not a flush.
     need_flush: bool,
 
     /// Statistics for this upstairs
@@ -226,10 +228,7 @@ pub(crate) struct Upstairs {
     pub(crate) log: Logger,
 
     /// Next time to check for repairs
-    repair_check_interval: Option<Instant>,
-
-    /// Next time to leak IOP / bandwidth tokens from the Guest
-    leak_deadline: Instant,
+    repair_check_deadline: Option<Instant>,
 
     /// Next time to trigger an automatic flush
     flush_deadline: Instant,
@@ -238,7 +237,7 @@ pub(crate) struct Upstairs {
     stat_deadline: Instant,
 
     /// Interval between automatic flushes
-    flush_timeout_secs: f32,
+    flush_interval: Duration,
 
     /// Receiver queue for control requests
     control_rx: mpsc::Receiver<ControlRequest>,
@@ -270,7 +269,6 @@ pub(crate) enum UpstairsAction {
     /// A deferred message has arrived
     DeferredMessage(DeferredMessage),
 
-    LeakCheck,
     FlushCheck,
     StatUpdate,
     RepairCheck,
@@ -391,23 +389,25 @@ impl Upstairs {
             ds_target,
             tls_context,
             stats.ds_stats(),
+            guest.io_limits(),
             log.new(o!("" => "downstairs")),
         );
         let flush_timeout_secs = opt.flush_timeout.unwrap_or(0.5);
+        let flush_interval = Duration::from_secs_f32(flush_timeout_secs);
         let (control_tx, control_rx) = tokio::sync::mpsc::channel(500);
 
         if let Some(ddef) = expected_region_def {
             downstairs.set_ddef(ddef);
         }
 
+        let now = Instant::now();
         Upstairs {
             state: UpstairsState::Initializing,
             cfg,
-            repair_check_interval: None,
-            leak_deadline: deadline_secs(1.0),
-            flush_deadline: deadline_secs(flush_timeout_secs),
-            stat_deadline: deadline_secs(STAT_INTERVAL_SECS),
-            flush_timeout_secs,
+            repair_check_deadline: None,
+            flush_deadline: now + flush_interval,
+            stat_deadline: now + STAT_INTERVAL,
+            flush_interval,
             guest,
             guest_dropped: false,
             ddef: rd_status,
@@ -422,11 +422,6 @@ impl Upstairs {
             deferred_msgs: DeferredQueue::new(),
             pool,
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn disable_client_backpressure(&mut self) {
-        self.downstairs.disable_client_backpressure();
     }
 
     /// Build an Upstairs for simple tests
@@ -482,7 +477,7 @@ impl Upstairs {
             d = self.guest.recv(), if !self.guest_dropped => {
                 d
             }
-            _ = self.repair_check_interval
+            _ = self.repair_check_deadline
                 .map(|r| Either::Left(sleep_until(r)))
                 .unwrap_or(Either::Right(pending()))
             => {
@@ -515,9 +510,6 @@ impl Upstairs {
                 };
                 UpstairsAction::DeferredMessage(m)
             }
-            _ = sleep_until(self.leak_deadline) => {
-                UpstairsAction::LeakCheck
-            }
             _ = sleep_until(self.flush_deadline) => {
                 UpstairsAction::FlushCheck
             }
@@ -534,6 +526,10 @@ impl Upstairs {
 
     /// Apply an action returned from [`Upstairs::select`]
     pub(crate) fn apply(&mut self, action: UpstairsAction) {
+        // Check whether the downstairs has live jobs before performing the
+        // action, because the action may cause it to retire live jobs.
+        let has_jobs = self.downstairs.has_live_jobs();
+
         match action {
             UpstairsAction::Downstairs(d) => {
                 self.counters.action_downstairs += 1;
@@ -564,27 +560,16 @@ impl Upstairs {
                     .action_deferred_message));
                 self.on_client_message(m);
             }
-            UpstairsAction::LeakCheck => {
-                self.counters.action_leak_check += 1;
-                cdt::up__action_leak_check!(|| (self
-                    .counters
-                    .action_leak_check));
-                const LEAK_MS: usize = 1000;
-                // XXX Leak check is currently not implemented
-                let leak_tick =
-                    tokio::time::Duration::from_millis(LEAK_MS as u64);
-                self.leak_deadline =
-                    Instant::now().checked_add(leak_tick).unwrap();
-            }
             UpstairsAction::FlushCheck => {
                 self.counters.action_flush_check += 1;
                 cdt::up__action_flush_check!(|| (self
                     .counters
                     .action_flush_check));
                 if self.need_flush {
-                    self.submit_flush(None, None);
+                    let io_guard = self.try_acquire_io(0);
+                    self.submit_flush(None, None, io_guard);
                 }
-                self.flush_deadline = deadline_secs(self.flush_timeout_secs);
+                self.flush_deadline = Instant::now() + self.flush_interval;
             }
             UpstairsAction::StatUpdate => {
                 self.counters.action_stat_check += 1;
@@ -592,7 +577,7 @@ impl Upstairs {
                     .counters
                     .action_stat_check));
                 self.on_stat_update();
-                self.stat_deadline = deadline_secs(STAT_INTERVAL_SECS);
+                self.stat_deadline = Instant::now() + STAT_INTERVAL;
             }
             UpstairsAction::RepairCheck => {
                 self.counters.action_repair_check += 1;
@@ -618,16 +603,14 @@ impl Upstairs {
         // because too many jobs have piled up.
         self.gone_too_long();
 
-        // Check to see whether live-repair can continue
-        //
-        // This must be called before acking jobs, because it looks in
-        // `Downstairs::ackable_jobs` to see which jobs are done.
-        self.downstairs.check_and_continue_live_repair(&self.state);
-
-        // Handle any jobs that have become ready for acks
-        if self.downstairs.has_ackable_jobs() {
-            self.downstairs.ack_jobs()
+        // Check whether we need to send a Barrier operation to clean out
+        // complete-but-unflushed jobs.
+        if self.downstairs.needs_barrier() {
+            self.submit_barrier()
         }
+
+        // Check to see whether live-repair can continue
+        self.downstairs.check_and_continue_live_repair(&self.state);
 
         // Check for client-side deactivation
         if matches!(&self.state, UpstairsState::Deactivating(..)) {
@@ -667,7 +650,41 @@ impl Upstairs {
 
         // For now, check backpressure after every event.  We may want to make
         // this more nuanced in the future.
-        self.set_backpressure();
+        self.downstairs.set_client_backpressure();
+
+        // We do this last because some of the code above can be slow
+        // (especially during debug builds), and we don't want to set our flush
+        // deadline such that it fires immediately.
+        if has_jobs {
+            self.flush_deadline = Instant::now() + self.flush_interval;
+        }
+    }
+
+    /// Attempts to acquire permits to perform an IO job with the given bytes
+    ///
+    /// Upon failure, logs an error and returns `None`.
+    ///
+    /// This function is used by messages generated internally to the Upstairs
+    /// for best-effort IO limiting.  If the message would exceed our available
+    /// permits, it's still allowed (because to do otherwise would deadlock the
+    /// upstairs task).  In other words, internally generated messages can limit
+    /// guest IO work, but not the other way around
+    fn try_acquire_io(&self, bytes: usize) -> Option<IOLimitGuard> {
+        let Ok(bytes) = u32::try_from(bytes) else {
+            warn!(self.log, "too many bytes for try_acquire_io");
+            return None;
+        };
+        match self.guest.io_limits().try_claim(bytes) {
+            Ok(v) => Some(v),
+            Err((i, e)) => {
+                warn!(
+                    self.log,
+                    "could not apply IO limits to upstairs work: \
+                     client {i} returned {e:?}"
+                );
+                None
+            }
+        }
     }
 
     /// Helper function to await all deferred block requests
@@ -725,7 +742,6 @@ impl Upstairs {
                 up_count: self.downstairs.gw_active.len() as u32,
                 up_counters: self.counters,
                 next_job_id: self.downstairs.peek_next_id(),
-                up_backpressure: self.guest.get_backpressure().as_micros(),
                 write_bytes_out: self.downstairs.write_bytes_outstanding(),
                 ds_count: self.downstairs.active_count() as u32,
                 ds_state: self.downstairs.collect_stats(|c| c.state()),
@@ -847,7 +863,7 @@ impl Upstairs {
     /// the [DsState::LiveRepairReady] state, indicating it needs to be
     /// repaired. If a Downstairs needs to be repaired, try to start repairing
     /// it. When starting the repair fails, this function will schedule a task
-    /// to retry the repair by setting [Self::repair_check_interval].
+    /// to retry the repair by setting [Self::repair_check_deadline].
     ///
     /// If this Upstairs is [UpstairsConfig::read_only], this function will move
     /// any Downstairs from [DsState::LiveRepairReady] back to [DsState::Active]
@@ -856,7 +872,7 @@ impl Upstairs {
         info!(self.log, "Checking if live repair is needed");
         if !matches!(self.state, UpstairsState::Active) {
             info!(self.log, "inactive, no live repair needed");
-            self.repair_check_interval = None;
+            self.repair_check_deadline = None;
             return;
         }
 
@@ -868,7 +884,7 @@ impl Upstairs {
             for c in self.downstairs.clients.iter_mut() {
                 c.skip_live_repair(&self.state);
             }
-            self.repair_check_interval = None;
+            self.repair_check_deadline = None;
             return;
         }
 
@@ -886,12 +902,13 @@ impl Upstairs {
             info!(self.log, "Live Repair already running");
             // Queue up a later check if we need it
             if any_in_repair_ready {
-                self.repair_check_interval = Some(deadline_secs(10.0));
+                self.repair_check_deadline =
+                    Some(Instant::now() + REPAIR_CHECK_INTERVAL);
             } else {
-                self.repair_check_interval = None;
+                self.repair_check_deadline = None;
             }
         } else if !any_in_repair_ready {
-            self.repair_check_interval = None;
+            self.repair_check_deadline = None;
             info!(self.log, "No Live Repair required at this time");
         } else if !self.downstairs.start_live_repair(
             &self.state,
@@ -900,7 +917,8 @@ impl Upstairs {
             // It's hard to hit this condition; we need a Downstairs to be in
             // LiveRepairReady, but for no other downstairs to be in Active.
             warn!(self.log, "Could not start live repair, trying again later");
-            self.repair_check_interval = Some(deadline_secs(10.0));
+            self.repair_check_deadline =
+                Some(Instant::now() + REPAIR_CHECK_INTERVAL);
         } else {
             // We started the repair in the call to start_live_repair above
         }
@@ -916,11 +934,21 @@ impl Upstairs {
         match op {
             // All Write operations are deferred, because they will offload
             // encryption to a separate thread pool.
-            BlockOp::Write { offset, data, done } => {
-                self.submit_deferred_write(offset, data, done, false);
+            BlockOp::Write {
+                offset,
+                data,
+                done,
+                io_guard,
+            } => {
+                self.submit_deferred_write(offset, data, done, false, io_guard);
             }
-            BlockOp::WriteUnwritten { offset, data, done } => {
-                self.submit_deferred_write(offset, data, done, true);
+            BlockOp::WriteUnwritten {
+                offset,
+                data,
+                done,
+                io_guard,
+            } => {
+                self.submit_deferred_write(offset, data, done, true, io_guard);
             }
             // If we have any deferred requests in the FuturesOrdered, then we
             // have to keep using it for subsequent requests (even ones that are
@@ -1044,20 +1072,25 @@ impl Upstairs {
                 };
             }
             // Testing options
-            BlockOp::QueryExtentSize { done } => {
+            BlockOp::QueryExtentInfo { done } => {
                 // Yes, test only
                 match self.ddef.get_def() {
                     Some(rd) => {
-                        done.send_ok(rd.extent_size());
+                        let ei = RegionExtentInfo {
+                            block_size: rd.block_size(),
+                            blocks_per_extent: rd.extent_size().value,
+                            extent_count: rd.extent_count(),
+                        };
+                        done.send_ok(ei);
                     }
                     None => {
                         warn!(
                             self.log,
-                            "Extent size not available (active: {})",
+                            "Extent info not available (active: {})",
                             self.guest_io_ready()
                         );
                         done.send_err(CrucibleError::PropertyNotAvailable(
-                            "extent size".to_string(),
+                            "extent info".to_string(),
                         ));
                     }
                 };
@@ -1082,15 +1115,19 @@ impl Upstairs {
                 done.send_ok(self.show_all_work());
             }
 
-            BlockOp::Read { offset, data, done } => {
-                self.submit_read(offset, data, done)
-            }
+            BlockOp::Read {
+                offset,
+                data,
+                done,
+                io_guard,
+            } => self.submit_read(offset, data, done, io_guard),
             BlockOp::Write { .. } | BlockOp::WriteUnwritten { .. } => {
                 panic!("writes must always be deferred")
             }
             BlockOp::Flush {
                 snapshot_details,
                 done,
+                io_guard,
             } => {
                 /*
                  * Submit for read and write both check if the upstairs is
@@ -1103,7 +1140,7 @@ impl Upstairs {
                     done.send_err(CrucibleError::UpstairsInactive);
                     return;
                 }
-                self.submit_flush(Some(done), snapshot_details);
+                self.submit_flush(Some(done), snapshot_details, Some(io_guard));
             }
             BlockOp::ReplaceDownstairs { id, old, new, done } => {
                 let r = self.downstairs.replace(id, old, new, &self.state);
@@ -1243,7 +1280,8 @@ impl Upstairs {
         }
         if !self.downstairs.can_deactivate_immediately() {
             debug!(self.log, "not ready to deactivate; submitting final flush");
-            self.submit_flush(None, None);
+            let io_guard = self.try_acquire_io(0);
+            self.submit_flush(None, None, io_guard);
         } else {
             debug!(self.log, "ready to deactivate right away");
             // Deactivation is handled in the invariant-checking portion of
@@ -1257,6 +1295,7 @@ impl Upstairs {
         &mut self,
         res: Option<BlockRes>,
         snapshot_details: Option<SnapshotDetails>,
+        io_guard: Option<IOLimitGuard>,
     ) {
         // Notice that unlike submit_read and submit_write, we do not check for
         // guest_io_ready here. The upstairs itself can call submit_flush
@@ -1274,18 +1313,18 @@ impl Upstairs {
         if snapshot_details.is_some() {
             info!(self.log, "flush with snap requested");
         }
-        let ds_id = self.downstairs.submit_flush(snapshot_details, res);
+        let ds_id =
+            self.downstairs
+                .submit_flush(snapshot_details, res, io_guard);
 
         cdt::up__to__ds__flush__start!(|| (ds_id.0));
     }
 
-    #[allow(dead_code)] // XXX this will be used soon!
     fn submit_barrier(&mut self) {
         // Notice that unlike submit_read and submit_write, we do not check for
         // guest_io_ready here. The upstairs itself calls submit_barrier
         // without the guest being involved; indeed the guest is not allowed to
         // call it!
-
         let ds_id = self.downstairs.submit_barrier();
 
         cdt::up__to__ds__barrier__start!(|| (ds_id.0));
@@ -1299,8 +1338,7 @@ impl Upstairs {
         offset: BlockIndex,
         data: Buffer,
     ) {
-        let br = BlockRes::dummy();
-        self.submit_read(offset, data, br)
+        self.submit_read(offset, data, BlockRes::dummy(), IOLimitGuard::dummy())
     }
 
     /// Submit a read job to the downstairs
@@ -1309,6 +1347,7 @@ impl Upstairs {
         offset: BlockIndex,
         data: Buffer,
         res: BlockRes<Buffer, (Buffer, CrucibleError)>,
+        io_guard: IOLimitGuard,
     ) {
         if !self.guest_io_ready() {
             res.send_err((data, CrucibleError::UpstairsInactive));
@@ -1347,7 +1386,9 @@ impl Upstairs {
          * Grab this ID after extent_from_offset: in case of Err we don't
          * want to create a gap in the IDs.
          */
-        let ds_id = self.downstairs.submit_read(impacted_blocks, data, res);
+        let ds_id =
+            self.downstairs
+                .submit_read(impacted_blocks, data, res, io_guard);
 
         cdt::up__to__ds__read__start!(|| (ds_id.0));
     }
@@ -1367,6 +1408,7 @@ impl Upstairs {
             data,
             BlockRes::dummy(),
             is_write_unwritten,
+            IOLimitGuard::dummy(),
         ) {
             self.submit_write(DeferredWrite::run(w))
         }
@@ -1383,14 +1425,19 @@ impl Upstairs {
         data: BytesMut,
         res: BlockRes,
         is_write_unwritten: bool,
+        io_guard: IOLimitGuard,
     ) {
         // It's possible for the write to be invalid out of the gate, in which
         // case `compute_deferred_write` replies to the `res` itself and returns
         // `None`.  Otherwise, we have to store a future to process the write
         // result.
-        if let Some(w) =
-            self.compute_deferred_write(offset, data, res, is_write_unwritten)
-        {
+        if let Some(w) = self.compute_deferred_write(
+            offset,
+            data,
+            res,
+            is_write_unwritten,
+            io_guard,
+        ) {
             let should_defer = !self.deferred_ops.is_empty()
                 || w.data.len() > MIN_DEFER_SIZE_BYTES as usize;
             if should_defer {
@@ -1412,6 +1459,7 @@ impl Upstairs {
         data: BytesMut,
         res: BlockRes,
         is_write_unwritten: bool,
+        io_guard: IOLimitGuard,
     ) -> Option<DeferredWrite> {
         if !self.guest_io_ready() {
             res.send_err(CrucibleError::UpstairsInactive);
@@ -1439,8 +1487,6 @@ impl Upstairs {
         let impacted_blocks =
             extent_from_offset(&ddef, offset, ddef.bytes_to_blocks(data.len()));
 
-        let guard = self.downstairs.early_write_backpressure(data.len() as u64);
-
         // Fast-ack, pretending to be done immediately operations
         res.send_ok(());
 
@@ -1450,7 +1496,7 @@ impl Upstairs {
             data,
             is_write_unwritten,
             cfg: self.cfg.clone(),
-            guard,
+            io_guard,
         })
     }
 
@@ -1470,7 +1516,7 @@ impl Upstairs {
             write.impacted_blocks,
             write.data,
             write.is_write_unwritten,
-            write.guard,
+            write.io_guard,
         );
 
         if write.is_write_unwritten {
@@ -1510,7 +1556,7 @@ impl Upstairs {
                 // Defer the message if it's a (large) read that needs
                 // decryption, or there are other deferred messages in the queue
                 // (to preserve order).  Otherwise, handle it immediately.
-                if let Message::ReadResponse { header, .. } = &m {
+                if let Message::ReadResponse { header, data } = m {
                     // Any read larger than `MIN_DEFER_SIZE_BYTES` constant
                     // should be deferred to the worker pool; smaller reads can
                     // be processed in-thread (since the overhead isn't worth
@@ -1532,7 +1578,8 @@ impl Upstairs {
                         };
 
                     let dr = DeferredRead {
-                        message: m,
+                        header,
+                        data,
                         client_id,
                         connection_id: id,
                         cfg: self.cfg.clone(),
@@ -1551,7 +1598,6 @@ impl Upstairs {
                 } else {
                     let dm = DeferredMessage {
                         message: m,
-                        hashes: vec![],
                         client_id,
                         connection_id: id,
                     };
@@ -1577,7 +1623,7 @@ impl Upstairs {
     }
 
     fn on_client_message(&mut self, dm: DeferredMessage) {
-        let (client_id, m, hashes) = (dm.client_id, dm.message, dm.hashes);
+        let (client_id, m) = (dm.client_id, dm.message);
 
         // It's possible for a deferred message to arrive **after** we have
         // disconnected from this particular Downstairs.  In that case, we want
@@ -1600,7 +1646,7 @@ impl Upstairs {
 
             // IO operation replies
             //
-            // This may cause jobs to become ackable!
+            // This may cause jobs to be acked!
             Message::WriteAck { .. }
             | Message::WriteUnwrittenAck { .. }
             | Message::FlushAck { .. }
@@ -1613,7 +1659,6 @@ impl Upstairs {
                 let r = self.downstairs.process_io_completion(
                     client_id,
                     m,
-                    hashes,
                     &self.state,
                 );
                 if let Err(e) = r {
@@ -1660,14 +1705,14 @@ impl Upstairs {
                                 if self.connect_region_set() {
                                     // We connected normally, so there's no need
                                     // to check for live-repair.
-                                    self.repair_check_interval = None;
+                                    self.repair_check_deadline = None;
                                 }
                             }
 
                             DsState::LiveRepairReady => {
                                 // Immediately check for live-repair
-                                self.repair_check_interval =
-                                    Some(deadline_secs(0.0));
+                                self.repair_check_deadline =
+                                    Some(Instant::now());
                             }
 
                             s => panic!("bad state after negotiation: {s:?}"),
@@ -1676,17 +1721,23 @@ impl Upstairs {
                 }
             }
 
-            Message::ExtentError { .. } => {
+            Message::ExtentError {
+                repair_id,
+                extent_id,
+                error,
+            } => {
                 self.downstairs.on_reconciliation_failed(
                     client_id,
-                    m,
+                    repair_id,
+                    extent_id,
+                    error,
                     &self.state,
                 );
             }
-            Message::RepairAckId { .. } => {
+            Message::RepairAckId { repair_id } => {
                 if self.downstairs.on_reconciliation_ack(
                     client_id,
-                    m,
+                    repair_id,
                     &self.state,
                 ) {
                     // reconciliation is done, great work everyone
@@ -1698,8 +1749,8 @@ impl Upstairs {
                 self.on_no_longer_active(client_id, m);
             }
 
-            Message::UuidMismatch { .. } => {
-                self.on_uuid_mismatch(client_id, m);
+            Message::UuidMismatch { expected_id } => {
+                self.on_uuid_mismatch(client_id, expected_id);
             }
 
             // These are all messages that we send out, so we shouldn't see them
@@ -1945,11 +1996,7 @@ impl Upstairs {
         self.set_inactive(CrucibleError::NoLongerActive);
     }
 
-    fn on_uuid_mismatch(&mut self, client_id: ClientId, m: Message) {
-        let Message::UuidMismatch { expected_id } = m else {
-            panic!("called on_uuid_mismatch on invalid message {m:?}");
-        };
-
+    fn on_uuid_mismatch(&mut self, client_id: ClientId, expected_id: Uuid) {
         let client_log = &self.downstairs.clients[client_id].log;
         error!(
             client_log,
@@ -2014,27 +2061,7 @@ impl Upstairs {
         self.downstairs
             .notify_nexus_of_client_task_stopped(client_id, reason);
 
-        // If the upstairs is already active (or trying to go active), then the
-        // downstairs should automatically call PromoteToActive when it reaches
-        // the relevant state.
-        let auto_promote = match self.state {
-            UpstairsState::Active | UpstairsState::GoActive(..) => true,
-            UpstairsState::Initializing
-            | UpstairsState::Deactivating { .. } => false,
-        };
-
-        self.downstairs
-            .reinitialize(client_id, auto_promote, &self.state);
-    }
-
-    /// Sets both guest and per-client backpressure
-    fn set_backpressure(&self) {
-        self.guest.set_backpressure(
-            self.downstairs.write_bytes_outstanding(),
-            self.downstairs.jobs_outstanding(),
-        );
-
-        self.downstairs.set_client_backpressure();
+        self.downstairs.reinitialize(client_id, &self.state);
     }
 
     /// Returns the `RegionDefinition`
@@ -2114,7 +2141,7 @@ pub(crate) mod test {
 
         // Assert that the repair started
         up.on_repair_check();
-        assert!(up.repair_check_interval.is_none());
+        assert!(up.repair_check_deadline.is_none());
         assert!(up.downstairs.live_repair_in_progress());
 
         // The first thing that should happen after we start repair_exetnt
@@ -2358,7 +2385,7 @@ pub(crate) mod test {
         );
 
         // op 1
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
         // op 2
         upstairs.submit_dummy_write(
@@ -2403,7 +2430,7 @@ pub(crate) mod test {
         }
 
         // op 3
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
         // ops 4 to 6
         for i in 3..6 {
@@ -2734,7 +2761,7 @@ pub(crate) mod test {
         );
 
         // op 1
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
         // op 2
         upstairs.submit_dummy_read(BlockIndex(0), Buffer::new(2, 512));
@@ -2761,11 +2788,11 @@ pub(crate) mod test {
         let mut upstairs = make_upstairs();
         upstairs.force_active().unwrap();
 
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 3);
@@ -2795,7 +2822,7 @@ pub(crate) mod test {
         upstairs.force_active().unwrap();
 
         // op 0
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
         // ops 1 to 2
         for i in 0..2 {
@@ -2807,7 +2834,7 @@ pub(crate) mod test {
         }
 
         // op 3
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
         // ops 4 to 6
         for i in 0..3 {
@@ -2819,7 +2846,7 @@ pub(crate) mod test {
         }
 
         // op 7
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
         let jobs = upstairs.downstairs.get_all_jobs();
         assert_eq!(jobs.len(), 8);
@@ -3273,7 +3300,7 @@ pub(crate) mod test {
         upstairs.submit_dummy_read(BlockIndex(95), Buffer::new(2, 512));
 
         // op 1
-        upstairs.submit_flush(None, None);
+        upstairs.submit_flush(None, None, None);
 
         // op 2
         upstairs.submit_dummy_write(
@@ -3353,14 +3380,14 @@ pub(crate) mod test {
         // Before we are active, we have no need to repair or check for future
         // repairs.
         up.on_repair_check();
-        assert!(up.repair_check_interval.is_none());
+        assert!(up.repair_check_deadline.is_none());
         assert!(!up.downstairs.live_repair_in_progress());
 
         up.force_active().unwrap();
 
         // No need to repair or check for future repairs here either
         up.on_repair_check();
-        assert!(up.repair_check_interval.is_none());
+        assert!(up.repair_check_deadline.is_none());
         assert!(!up.downstairs.live_repair_in_progress());
 
         // No downstairs should change state.
@@ -3385,7 +3412,7 @@ pub(crate) mod test {
         up.ds_transition(ClientId::new(1), DsState::Faulted);
         up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
         up.on_repair_check();
-        assert!(up.repair_check_interval.is_none());
+        assert!(up.repair_check_deadline.is_none());
         assert!(up.downstairs.live_repair_in_progress());
         assert_eq!(up.ds_state(ClientId::new(1)), DsState::LiveRepair);
         assert!(up.downstairs.repair().is_some());
@@ -3408,7 +3435,7 @@ pub(crate) mod test {
             up.ds_transition(i, DsState::LiveRepairReady);
         }
         up.on_repair_check();
-        assert!(up.repair_check_interval.is_none());
+        assert!(up.repair_check_deadline.is_none());
         assert!(up.downstairs.live_repair_in_progress());
 
         assert_eq!(up.ds_state(ClientId::new(0)), DsState::Active);
@@ -3434,17 +3461,17 @@ pub(crate) mod test {
         // Start the live-repair
         up.on_repair_check();
         assert!(up.downstairs.live_repair_in_progress());
-        assert!(up.repair_check_interval.is_none());
+        assert!(up.repair_check_deadline.is_none());
 
         // Pretend that DS 0 faulted then came back through to LiveRepairReady;
         // we won't halt the existing repair, but will configure
-        // repair_check_interval to check again in the future.
+        // repair_check_deadline to check again in the future.
         up.ds_transition(ClientId::new(0), DsState::Faulted);
         up.ds_transition(ClientId::new(0), DsState::LiveRepairReady);
 
         up.on_repair_check();
         assert!(up.downstairs.live_repair_in_progress());
-        assert!(up.repair_check_interval.is_some());
+        assert!(up.repair_check_deadline.is_some());
     }
 
     #[test]
@@ -3460,12 +3487,12 @@ pub(crate) mod test {
         up.ds_transition(ClientId::new(1), DsState::LiveRepairReady);
 
         up.on_repair_check();
-        assert!(up.repair_check_interval.is_none());
+        assert!(up.repair_check_deadline.is_none());
         assert!(up.downstairs.live_repair_in_progress());
 
         // Checking again is idempotent
         up.on_repair_check();
-        assert!(up.repair_check_interval.is_none());
+        assert!(up.repair_check_deadline.is_none());
         assert!(up.downstairs.live_repair_in_progress());
     }
 
@@ -3492,10 +3519,21 @@ pub(crate) mod test {
         let offset = BlockIndex(7);
         let data = BytesMut::from([1; 512].as_slice());
         let (_write_res, done) = BlockOpWaiter::pair();
+        let io_guard = IOLimitGuard::dummy();
         let op = if is_write_unwritten {
-            BlockOp::WriteUnwritten { offset, data, done }
+            BlockOp::WriteUnwritten {
+                offset,
+                data,
+                done,
+                io_guard,
+            }
         } else {
-            BlockOp::Write { offset, data, done }
+            BlockOp::Write {
+                offset,
+                data,
+                done,
+                io_guard,
+            }
         };
         up.apply(UpstairsAction::Guest(op));
         up.await_deferred_ops().await;
@@ -3608,7 +3646,13 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         // fake read response from downstairs that will successfully decrypt
         let mut data = Vec::from([1u8; 512]);
@@ -3656,7 +3700,13 @@ pub(crate) mod test {
         let data = Buffer::new(blocks, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         let mut data = Vec::from([1u8; 512]);
 
@@ -3714,7 +3764,13 @@ pub(crate) mod test {
         let data = Buffer::new(blocks, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         // fake read response from downstairs that will fail decryption
         let mut data = Vec::from([1u8; 512]);
@@ -3790,7 +3846,13 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         // fake read response from downstairs that will fail decryption
         let mut data = Vec::from([1u8; 512]);
@@ -3853,7 +3915,13 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         // fake read response from downstairs that will fail integrity hash
         // check
@@ -3898,7 +3966,13 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         let data = BytesMut::from([1u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
@@ -3959,7 +4033,13 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         for client_id in [ClientId::new(0), ClientId::new(1)] {
             let data = BytesMut::from([1u8; 512].as_slice());
@@ -4022,7 +4102,13 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         let data = BytesMut::from([1u8; 512].as_slice());
         let hash = integrity_hash(&[&data]);
@@ -4082,7 +4168,13 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         // The first read has no block contexts, because it was unwritten
         let data = BytesMut::from([0u8; 512].as_slice());
@@ -4138,7 +4230,13 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         // The first read has no block contexts, because it was unwritten
         let data = BytesMut::from([0u8; 512].as_slice());
@@ -4198,7 +4296,13 @@ pub(crate) mod test {
         data.extend_from_slice(vec![1; NODEFER_SIZE].as_slice());
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Write { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Write {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
         assert_eq!(up.deferred_ops.len(), 0);
 
         // Submit a long write, which should be deferred
@@ -4206,7 +4310,13 @@ pub(crate) mod test {
         data.extend_from_slice(vec![2; DEFER_SIZE].as_slice());
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Write { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Write {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
         assert_eq!(up.deferred_ops.len(), 1);
         assert_eq!(up.deferred_msgs.len(), 0);
 
@@ -4216,7 +4326,13 @@ pub(crate) mod test {
         data.extend_from_slice(vec![3; NODEFER_SIZE].as_slice());
         let offset = BlockIndex(7);
         let (_res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Write { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Write {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
         assert_eq!(up.deferred_ops.len(), 2);
         assert_eq!(up.deferred_msgs.len(), 0);
     }
@@ -4238,7 +4354,13 @@ pub(crate) mod test {
         let data = Buffer::new(1, 512);
         let offset = BlockIndex(7);
         let (res, done) = BlockOpWaiter::pair();
-        up.apply(UpstairsAction::Guest(BlockOp::Read { offset, data, done }));
+        let io_guard = IOLimitGuard::dummy();
+        up.apply(UpstairsAction::Guest(BlockOp::Read {
+            offset,
+            data,
+            done,
+            io_guard,
+        }));
 
         let reply = res.wait_raw().await.unwrap();
         match reply {

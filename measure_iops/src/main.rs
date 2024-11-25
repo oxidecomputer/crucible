@@ -38,16 +38,10 @@ pub struct Opt {
     samples: usize,
 
     #[clap(long, action)]
-    iop_limit: Option<usize>,
-
-    #[clap(long, action)]
     io_size_in_bytes: Option<usize>,
 
     #[clap(long, action)]
     io_depth: Option<usize>,
-
-    #[clap(long, action)]
-    bw_limit_in_bytes: Option<usize>,
 
     /// Submit all zeroes instead of random data
     #[clap(long, action)]
@@ -94,23 +88,6 @@ async fn main() -> Result<()> {
     let (guest, io) = Guest::new(None);
     let guest = Arc::new(guest);
 
-    if let Some(_iop_limit) = opt.iop_limit {
-        // XXX fix this once implemented
-        return Err(CrucibleError::Unsupported(
-            "IOP limit is not implemented".to_owned(),
-        )
-        .into());
-    }
-
-    if let Some(_bw_limit) = opt.bw_limit_in_bytes {
-        // XXX fix this once implemented
-        return Err(CrucibleError::Unsupported(
-            "Bandwidth limit is not implemented".to_owned(),
-        )
-        .into());
-    }
-
-    let guest = Arc::new(guest);
     let _join_handle = up_main(crucible_opts, opt.gen, None, io, None)?;
     println!("Crucible runtime is spawned");
 

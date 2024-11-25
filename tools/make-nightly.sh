@@ -27,7 +27,6 @@ tar cavf out/crucible-nightly.tar.gz \
   tools/test_live_repair.sh \
   tools/test_fail_live_repair.sh \
   tools/test_mem.sh \
-  tools/test_perf.sh \
   tools/test_replay.sh \
   tools/test_repair.sh \
   tools/test_replace_special.sh \

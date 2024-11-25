@@ -12,7 +12,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use slog::Drain;
 use tempfile::NamedTempFile;
-use tokio::time::{Duration, Instant};
+use tokio::time::Duration;
 
 mod region;
 pub use region::{
@@ -102,6 +102,9 @@ pub enum CrucibleError {
 
     #[error("Subvolume size mismatch!")]
     SubvolumeSizeMismatch,
+
+    #[error("Subvolume type mismatch!")]
+    SubvolumeTypeMismatch,
 
     #[error("Cannot serve blocks: {0}")]
     CannotServeBlocks(String),
@@ -407,6 +410,7 @@ impl From<CrucibleError> for dropshot::HttpError {
             | CrucibleError::RwLockError(_)
             | CrucibleError::SendError(_)
             | CrucibleError::SubvolumeSizeMismatch
+            | CrucibleError::SubvolumeTypeMismatch
             | CrucibleError::UpstairsActivateInProgress
             | CrucibleError::UpstairsDeactivating
             | CrucibleError::UuidMismatch
@@ -420,16 +424,27 @@ impl From<CrucibleError> for dropshot::HttpError {
     }
 }
 
-pub fn deadline_secs(secs: f32) -> Instant {
-    Instant::now()
-        .checked_add(Duration::from_secs_f32(secs))
-        .unwrap()
+/// Helper object for verbose timeouts
+///
+/// This object waits for `tick * count`, printing a log message every `tick`
+pub struct VerboseTimeout {
+    /// Interval at which we log a timeout warning
+    pub tick: Duration,
+    /// Number of intervals before returning
+    pub count: u32,
 }
 
-pub async fn verbose_timeout(secs: f32, n: usize, log: slog::Logger) {
-    let d = Duration::from_secs_f32(secs);
-    for i in 0..n {
-        tokio::time::sleep(d).await;
-        slog::warn!(log, "timeout {}/{n}", i + 1,);
+impl VerboseTimeout {
+    /// Wait for `tick * count` duration, logging every `tick`
+    pub async fn wait(&self, log: &slog::Logger) {
+        for i in 0..self.count {
+            tokio::time::sleep(self.tick).await;
+            slog::warn!(log, "timeout {}/{}", i + 1, self.count);
+        }
+    }
+
+    /// Returns the total timeout duration for this object
+    pub fn timeout(&self) -> Duration {
+        self.tick * self.count
     }
 }

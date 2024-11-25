@@ -1,19 +1,7 @@
 // Copyright 2023 Oxide Computer Company
-use std::fmt;
-use std::fs::File;
-use std::io::Write;
-use std::net::{IpAddr, SocketAddr};
-use std::num::NonZeroU64;
-use std::path::PathBuf;
-use std::sync::{
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-    Arc,
-};
-
 use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 use clap::Parser;
-use csv::WriterBuilder;
 use futures::stream::FuturesOrdered;
 use futures::StreamExt;
 use human_bytes::human_bytes;
@@ -25,6 +13,15 @@ use serde::{Deserialize, Serialize};
 use signal_hook::consts::signal::*;
 use signal_hook_tokio::Signals;
 use slog::{info, o, warn, Logger};
+use std::fmt;
+use std::io::Write;
+use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroU64;
+use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc,
+};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
@@ -35,7 +32,7 @@ mod protocol;
 mod stats;
 pub use stats::*;
 
-use crucible::volume::VolumeBuilder;
+use crucible::volume::{VolumeBuilder, VolumeInfo};
 use crucible::*;
 use crucible_client_types::RegionExtentInfo;
 use crucible_protocol::CRUCIBLE_MESSAGE_VERSION;
@@ -79,32 +76,16 @@ enum Workload {
     Demo,
     Dep,
     Dirty,
+    /// Write to one random block in every extent, then flush.
+    FastFill,
     Fill {
-        /// Don't do the verify step after filling the region.
+        /// Don't do the verify step after filling the disk.
         #[clap(long, action)]
         skip_verify: bool,
     },
     Generic,
     Nothing,
     One,
-    /// Run the perf test, random writes, then random reads
-    Perf {
-        /// Size in blocks of each IO
-        #[clap(long, default_value_t = 1, action)]
-        io_size: usize,
-        /// Number of outstanding IOs at the same time.
-        #[clap(long, default_value_t = 1, action)]
-        io_depth: usize,
-        /// Output file for IO times
-        #[clap(long, global = true, name = "PERF", action)]
-        perf_out: Option<PathBuf>,
-        /// Number of read test loops to do.
-        #[clap(long, default_value_t = 2, action)]
-        read_loops: usize,
-        /// Number of write test loops to do.
-        #[clap(long, default_value_t = 2, action)]
-        write_loops: usize,
-    },
     /// Measure performance with a random read workload
     RandRead {
         #[clap(flatten)]
@@ -129,8 +110,8 @@ enum Workload {
     /// Run IO to the upstairs, then replace a downstairs, then run
     /// more IO and verify it all works as expected.
     Replace {
-        /// Before each replacement, do a fill of the region so
-        /// the replace will have to copy the entire region..
+        /// Before each replacement, do a fill of the disk so the replace will
+        /// have to copy the entire disk..
         #[clap(long, action)]
         fast_fill: bool,
 
@@ -323,7 +304,7 @@ struct RandReadWriteWorkload {
     /// Number of seconds to run
     #[clap(long, default_value_t = 60, action)]
     time: u64,
-    /// Completely fill the region with random data first
+    /// Completely fill the disk with random data first
     #[clap(long)]
     fill: bool,
     /// Print the volume log (at `INFO` level) to `stderr`
@@ -412,52 +393,53 @@ impl BufferbloatConfig {
 }
 
 /*
- * All the tests need this basic info about the region.
+ * All the tests need this basic info about the disk.
  * Not all tests make use of the write_log yet, but perhaps someday..
  */
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct RegionInfo {
-    block_size: u64,
-    extent_size: Block,
-    total_size: u64,
-    total_blocks: usize,
+pub struct DiskInfo {
+    volume_info: VolumeInfo,
     write_log: WriteLog,
     max_block_io: usize,
 }
 
+impl DiskInfo {
+    pub fn block_size(&self) -> u64 {
+        self.volume_info.block_size
+    }
+}
+
 /*
- * All the tests need this basic set of information about the region.
+ * All the tests need this basic set of information about the disk.
  */
-async fn get_region_info(volume: &Volume) -> Result<RegionInfo, CrucibleError> {
+async fn get_disk_info(volume: &Volume) -> Result<DiskInfo, CrucibleError> {
     /*
      * These query requests have the side effect of preventing the test from
      * starting before the upstairs is ready.
      */
-    let block_size = volume.get_block_size().await?;
-    let extent_size = volume.query_extent_size().await?;
+    let volume_info = volume.volume_extent_info().await?;
     let total_size = volume.total_size().await?;
-    let total_blocks = (total_size / block_size) as usize;
+    let total_blocks = (total_size / volume_info.block_size) as usize;
 
     /*
      * Limit the max IO size (in blocks) to be 1MiB or the size
      * of the volume, whichever is smaller
      */
     const MAX_IO_BYTES: usize = 1024 * 1024;
-    let mut max_block_io = MAX_IO_BYTES / block_size as usize;
+    let mut max_block_io = MAX_IO_BYTES / volume_info.block_size as usize;
     if total_blocks < max_block_io {
         max_block_io = total_blocks;
     }
 
     println!(
-        "Region: es:{} ec:{} bs:{}  ts:{}  tb:{}  max_io:{} or {}",
-        extent_size.value,
-        total_blocks as u64 / extent_size.value,
-        block_size,
+        "Disk: sv:{} bs:{}  ts:{}  tb:{}  max_io:{} or {}",
+        volume_info.volumes.len(),
+        volume_info.block_size,
         total_size,
         total_blocks,
         max_block_io,
-        (max_block_io as u64 * block_size),
+        (max_block_io as u64 * volume_info.block_size),
     );
 
     /*
@@ -466,11 +448,8 @@ async fn get_region_info(volume: &Volume) -> Result<RegionInfo, CrucibleError> {
      */
     let write_log = WriteLog::new(total_blocks);
 
-    Ok(RegionInfo {
-        block_size,
-        extent_size,
-        total_size,
-        total_blocks,
+    Ok(DiskInfo {
+        volume_info,
         write_log,
         max_block_io,
     })
@@ -490,7 +469,7 @@ async fn get_region_info(volume: &Volume) -> Result<RegionInfo, CrucibleError> {
  *
  * In addition to the current write count, we make a second copy of the
  * write count when the commit method is called.  This can be used to record
- * the write count of a region at a specific time (like a flush) and then
+ * the write count of a disk at a specific time (like a flush) and then
  * later used to verify that a given block has data in it from at minimum
  * that commit, but up to the current write count.
  *
@@ -661,30 +640,30 @@ impl WriteLog {
 
 async fn load_write_log(
     volume: &Volume,
-    ri: &mut RegionInfo,
+    di: &mut DiskInfo,
     vi: PathBuf,
     verify: bool,
 ) -> Result<()> {
     /*
      * Fill the write count from a provided file.
      */
-    ri.write_log = match read_json(&vi) {
+    di.write_log = match read_json(&vi) {
         Ok(write_log) => write_log,
         Err(e) => bail!("Error {:?} reading verify config {:?}", e, vi),
     };
     println!("Loading write count information from file {vi:?}");
-    if ri.write_log.len() != ri.total_blocks {
+    if di.write_log.len() != di.volume_info.total_blocks() {
         bail!(
-            "Verify file {vi:?} blocks:{} does not match regions:{}",
-            ri.write_log.len(),
-            ri.total_blocks
+            "Verify file {vi:?} blocks:{} does not match disk:{}",
+            di.write_log.len(),
+            di.volume_info.total_blocks()
         );
     }
     /*
      * Only verify the volume if requested.
      */
     if verify {
-        if let Err(e) = verify_volume(volume, ri, false).await {
+        if let Err(e) = verify_volume(volume, di, false).await {
             bail!("Initial volume verify failed: {:?}", e)
         }
     }
@@ -804,7 +783,7 @@ async fn make_a_volume(
                 bail!("Failed to get region info from {:?}: {}", dsc_url, e);
             }
         };
-        info!(test_log, "use region info: {:?}", ri);
+        info!(test_log, "Use this region info from dsc: {:?}", ri);
         let extent_info = RegionExtentInfo {
             block_size: ri.block_size,
             blocks_per_extent: ri.blocks_per_extent,
@@ -1053,12 +1032,12 @@ async fn main() -> Result<()> {
     }
 
     /*
-     * Build the region info struct that all the tests will use.
+     * Build the disk info struct that all the tests will use.
      * This includes importing and verifying from a write log, if requested.
      */
-    let mut region_info = match get_region_info(&volume).await {
-        Ok(region_info) => region_info,
-        Err(e) => bail!("failed to get region info: {:?}", e),
+    let mut disk_info = match get_disk_info(&volume).await {
+        Ok(disk_info) => disk_info,
+        Err(e) => bail!("failed to get disk info: {:?}", e),
     };
 
     /*
@@ -1079,7 +1058,7 @@ async fn main() -> Result<()> {
                 opt.verify_at_start
             }
         };
-        load_write_log(&volume, &mut region_info, verify_in, verify).await?;
+        load_write_log(&volume, &mut disk_info, verify_in, verify).await?;
     }
 
     let (shutdown_tx, shutdown_rx) = mpsc::channel::<SignalAction>(4);
@@ -1096,26 +1075,20 @@ async fn main() -> Result<()> {
     match opt.workload {
         Workload::Balloon => {
             println!("Run balloon test");
-            balloon_workload(&volume, &mut region_info).await?;
+            balloon_workload(&volume, &mut disk_info).await?;
         }
         Workload::Big => {
             println!("Run big test");
-            big_workload(&volume, &mut region_info).await?;
+            big_workload(&volume, &mut disk_info).await?;
         }
         Workload::Biggest => {
             println!("Run biggest IO test");
-            biggest_io_workload(&volume, &mut region_info).await?;
+            biggest_io_workload(&volume, &mut disk_info).await?;
         }
         Workload::Burst => {
             println!("Run burst test (demo in a loop)");
-            burst_workload(
-                &volume,
-                460,
-                190,
-                &mut region_info,
-                &opt.verify_out,
-            )
-            .await?;
+            burst_workload(&volume, 460, 190, &mut disk_info, &opt.verify_out)
+                .await?;
         }
         Workload::Cli { .. } => {
             unreachable!("This case handled above");
@@ -1130,23 +1103,23 @@ async fn main() -> Result<()> {
              */
             let count = opt.count.unwrap_or(5);
             println!("Run deactivate test");
-            deactivate_workload(&volume, count, &mut region_info, opt.gen)
+            deactivate_workload(&volume, count, &mut disk_info, opt.gen)
                 .await?;
         }
         Workload::Demo => {
             println!("Run Demo test");
             let count = opt.count.unwrap_or(300);
-            demo_workload(&volume, count, &mut region_info).await?;
+            demo_workload(&volume, count, &mut disk_info).await?;
         }
         Workload::Dep => {
             println!("Run dep test");
-            dep_workload(&volume, &mut region_info).await?;
+            dep_workload(&volume, &mut disk_info).await?;
         }
 
         Workload::Dirty => {
             println!("Run dirty test");
             let count = opt.count.unwrap_or(10);
-            dirty_workload(&volume, &mut region_info, count).await?;
+            dirty_workload(&volume, &mut disk_info, count).await?;
 
             /*
              * Saving state here when we have not waited for a flush
@@ -1156,15 +1129,20 @@ async fn main() -> Result<()> {
              * things that came after the flush.
              */
             if let Some(vo) = &opt.verify_out {
-                write_json(vo, &region_info.write_log, true)?;
+                write_json(vo, &disk_info.write_log, true)?;
                 println!("Wrote out file {vo:?}");
             }
             return Ok(());
         }
 
+        Workload::FastFill => {
+            println!("FastFill test");
+            fill_sparse_workload(&volume, &mut disk_info).await?;
+        }
+
         Workload::Fill { skip_verify } => {
             println!("Fill test");
-            fill_workload(&volume, &mut region_info, skip_verify).await?;
+            fill_workload(&volume, &mut disk_info, skip_verify).await?;
         }
 
         Workload::Generic => {
@@ -1178,72 +1156,18 @@ async fn main() -> Result<()> {
                 }
             };
 
-            generic_workload(&volume, &mut wtq, &mut region_info, opt.quiet)
+            generic_workload(&volume, &mut wtq, &mut disk_info, opt.quiet)
                 .await?;
         }
 
         Workload::One => {
             println!("One test");
-            one_workload(&volume, &mut region_info).await?;
-        }
-        Workload::Perf {
-            io_size,
-            io_depth,
-            perf_out,
-            read_loops,
-            write_loops,
-        } => {
-            // Pathetic.  This tiny wait is just so all my output from the
-            // test will be after all the upstairs messages have finised.
-            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-            println!("Perf test");
-            let count = opt.count.unwrap_or(5000);
-
-            // NOTICE: The graphing code REQUIRES the data to be in a
-            // specific format, where the first 7 columns are as described
-            // below, and the 8 through whatever are the data samples from
-            // the performance test.
-            let mut opt_wtr = None;
-            let mut wtr;
-            if let Some(perf_out) = perf_out {
-                wtr = WriterBuilder::new()
-                    .flexible(true)
-                    .from_path(perf_out)
-                    .unwrap();
-                wtr.serialize((
-                    "type",
-                    "total_time_ns",
-                    "io_depth",
-                    "io_size",
-                    "count",
-                    "es",
-                    "ec",
-                    "times",
-                ))?;
-                opt_wtr = Some(wtr);
-            }
-
-            // The header for all perf tests
-            perf_header();
-            perf_workload(
-                &volume,
-                &region_info,
-                opt_wtr,
-                count,
-                io_depth,
-                io_size,
-                write_loops,
-                read_loops,
-            )
-            .await?;
-            if opt.quit {
-                return Ok(());
-            }
+            one_workload(&volume, &mut disk_info).await?;
         }
         Workload::RandRead { cfg } => {
             rand_read_write_workload(
                 &volume,
-                &mut region_info,
+                &mut disk_info,
                 RandReadWriteConfig::new(
                     cfg,
                     is_encrypted,
@@ -1258,7 +1182,7 @@ async fn main() -> Result<()> {
         Workload::RandWrite { cfg } => {
             rand_read_write_workload(
                 &volume,
-                &mut region_info,
+                &mut disk_info,
                 RandReadWriteConfig::new(
                     cfg,
                     is_encrypted,
@@ -1273,7 +1197,7 @@ async fn main() -> Result<()> {
         Workload::Bufferbloat { cfg } => {
             bufferbloat_workload(
                 &volume,
-                &mut region_info,
+                &mut disk_info,
                 BufferbloatConfig::new(cfg, is_encrypted),
             )
             .await?;
@@ -1297,10 +1221,10 @@ async fn main() -> Result<()> {
         Workload::Repair => {
             println!("Run Repair workload");
             let count = opt.count.unwrap_or(10);
-            repair_workload(&volume, count, &mut region_info).await?;
+            repair_workload(&volume, count, &mut disk_info).await?;
             drop(volume);
             if let Some(vo) = &opt.verify_out {
-                write_json(vo, &region_info.write_log, true)?;
+                write_json(vo, &disk_info.write_log, true)?;
                 println!("Wrote out file {vo:?}");
             }
             return Ok(());
@@ -1327,7 +1251,7 @@ async fn main() -> Result<()> {
             replay_workload(
                 &volume,
                 &mut wtq,
-                &mut region_info,
+                &mut disk_info,
                 dsc_client,
                 downstairs_in_volume as u32,
             )
@@ -1353,7 +1277,7 @@ async fn main() -> Result<()> {
             replace_workload(
                 &volume,
                 &mut wtq,
-                &mut region_info,
+                &mut disk_info,
                 targets,
                 fast_fill,
             )
@@ -1397,7 +1321,7 @@ async fn main() -> Result<()> {
             replace_before_active(
                 &volume,
                 wtq,
-                &mut region_info,
+                &mut disk_info,
                 targets,
                 dsc_client,
                 opt.gen,
@@ -1443,7 +1367,7 @@ async fn main() -> Result<()> {
             replace_while_reconcile(
                 &volume,
                 wtq,
-                &mut region_info,
+                &mut disk_info,
                 targets,
                 dsc_client,
                 opt.gen,
@@ -1453,7 +1377,7 @@ async fn main() -> Result<()> {
         }
         Workload::Span => {
             println!("Span test");
-            span_workload(&volume, &mut region_info).await?;
+            span_workload(&volume, &mut disk_info).await?;
         }
         Workload::Verify => {
             /*
@@ -1462,12 +1386,12 @@ async fn main() -> Result<()> {
              * and then re-check the volume.
              */
             if let Err(e) =
-                verify_volume(&volume, &mut region_info, opt.range).await
+                verify_volume(&volume, &mut disk_info, opt.range).await
             {
                 bail!("Initial volume verify failed: {:?}", e)
             }
             if let Some(vo) = &opt.verify_out {
-                write_json(vo, &region_info.write_log, true)?;
+                write_json(vo, &disk_info.write_log, true)?;
                 println!("Wrote out file {vo:?}");
             }
             if opt.quit {
@@ -1478,8 +1402,7 @@ async fn main() -> Result<()> {
                     tokio::time::sleep(tokio::time::Duration::from_secs(10))
                         .await;
                     if let Err(e) =
-                        verify_volume(&volume, &mut region_info, opt.range)
-                            .await
+                        verify_volume(&volume, &mut disk_info, opt.range).await
                     {
                         bail!("Volume verify failed: {:?}", e)
                     }
@@ -1501,18 +1424,18 @@ async fn main() -> Result<()> {
         Workload::WFR => {
             println!("Run Write-Flush-Read random IO test");
             let count = opt.count.unwrap_or(10);
-            write_flush_read_workload(&volume, count, &mut region_info).await?;
+            write_flush_read_workload(&volume, count, &mut disk_info).await?;
         }
     }
 
     if opt.verify_at_end {
-        if let Err(e) = verify_volume(&volume, &mut region_info, false).await {
+        if let Err(e) = verify_volume(&volume, &mut disk_info, false).await {
             bail!("Final volume verify failed: {:?}", e)
         }
     }
 
     if let Some(vo) = &opt.verify_out {
-        write_json(vo, &region_info.write_log, true)?;
+        write_json(vo, &disk_info.write_log, true)?;
         println!("Wrote out file {vo:?}");
     }
 
@@ -1544,17 +1467,18 @@ async fn main() -> Result<()> {
  */
 async fn verify_volume(
     volume: &Volume,
-    ri: &mut RegionInfo,
+    di: &mut DiskInfo,
     range: bool,
 ) -> Result<()> {
-    assert_eq!(ri.write_log.len(), ri.total_blocks);
+    assert_eq!(di.write_log.len(), di.volume_info.total_blocks());
 
     println!(
         "Read and Verify all blocks (0..{} range:{})",
-        ri.total_blocks, range
+        di.volume_info.total_blocks(),
+        range
     );
 
-    let pb = ProgressBar::new(ri.total_blocks as u64);
+    let pb = ProgressBar::new(di.volume_info.total_blocks() as u64);
     pb.set_style(ProgressStyle::default_bar()
         .template(
             "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})"
@@ -1566,7 +1490,7 @@ async fn verify_volume(
     const NUM_WORKERS: usize = 8;
 
     // Steal the write log, so we can share it between threads
-    let write_log = std::mem::replace(&mut ri.write_log, WriteLog::new(0));
+    let write_log = std::mem::replace(&mut di.write_log, WriteLog::new(0));
     let write_log = Arc::new(std::sync::RwLock::new(write_log));
     let blocks_done = Arc::new(AtomicUsize::new(0));
 
@@ -1576,8 +1500,8 @@ async fn verify_volume(
         let volume = volume.clone();
         let write_log = write_log.clone();
         let blocks_done = blocks_done.clone();
-        let total_blocks = ri.total_blocks;
-        let block_size = ri.block_size;
+        let total_blocks = di.volume_info.total_blocks();
+        let block_size = di.volume_info.block_size;
         let pb = pb.clone();
         tasks.push(tokio::task::spawn(async move {
             let mut result = Ok(());
@@ -1641,7 +1565,7 @@ async fn verify_volume(
     pb.finish();
 
     // Now that all the workers are done, put the write log back into place
-    ri.write_log = std::mem::replace(
+    di.write_log = std::mem::replace(
         &mut Arc::try_unwrap(write_log)
             .expect("could not unwrap write log")
             .write()
@@ -1896,23 +1820,27 @@ fn validate_vec<V: AsRef<[u8]>>(
  * I named it balloon because each loop on a block "balloons" from the
  * minimum IO size to the largest possible IO size.
  */
-async fn balloon_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
-    for block_index in 0..ri.total_blocks {
+async fn balloon_workload(volume: &Volume, di: &mut DiskInfo) -> Result<()> {
+    for block_index in 0..di.volume_info.total_blocks() {
         /*
          * Loop over all the IO sizes (in blocks) that an IO can
          * have, given our starting block and the total number of blocks
          * We always have at least one block, and possibly more.
          */
-        for size in 1..=(ri.max_block_io - block_index) {
+        for size in 1..=(di.max_block_io - block_index) {
             /*
              * Update the write count for all blocks we plan to write to.
              */
             for i in 0..size {
-                ri.write_log.update_wc(block_index + i);
+                di.write_log.update_wc(block_index + i);
             }
 
-            let data =
-                fill_vec(block_index, size, &ri.write_log, ri.block_size);
+            let data = fill_vec(
+                block_index,
+                size,
+                &di.write_log,
+                di.volume_info.block_size,
+            );
             /*
              * Convert block_index to its byte value.
              */
@@ -1922,16 +1850,19 @@ async fn balloon_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
             volume.write(offset, data).await?;
             volume.flush(None).await?;
 
-            let mut data =
-                crucible::Buffer::repeat(255, size, ri.block_size as usize);
+            let mut data = crucible::Buffer::repeat(
+                255,
+                size,
+                di.volume_info.block_size as usize,
+            );
             volume.read(offset, &mut data).await?;
 
             let dl = data.into_bytes();
             match validate_vec(
                 dl,
                 block_index,
-                &mut ri.write_log,
-                ri.block_size,
+                &mut di.write_log,
+                di.volume_info.block_size,
                 false,
             ) {
                 ValidateStatus::Bad | ValidateStatus::InRange => {
@@ -1950,10 +1881,10 @@ async fn balloon_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
  */
 async fn fill_workload(
     volume: &Volume,
-    ri: &mut RegionInfo,
+    di: &mut DiskInfo,
     skip_verify: bool,
 ) -> Result<()> {
-    let pb = ProgressBar::new(ri.total_blocks as u64);
+    let pb = ProgressBar::new(di.volume_info.total_blocks() as u64);
     pb.set_style(ProgressStyle::default_bar()
         .template(
             "[{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} ({eta})"
@@ -1965,7 +1896,7 @@ async fn fill_workload(
     const NUM_WORKERS: usize = 8;
 
     // Steal the write log, so we can share it between threads
-    let write_log = std::mem::replace(&mut ri.write_log, WriteLog::new(0));
+    let write_log = std::mem::replace(&mut di.write_log, WriteLog::new(0));
     let write_log = Arc::new(std::sync::RwLock::new(write_log));
     let blocks_done = Arc::new(AtomicUsize::new(0));
 
@@ -1975,8 +1906,8 @@ async fn fill_workload(
         let volume = volume.clone();
         let write_log = write_log.clone();
         let blocks_done = blocks_done.clone();
-        let total_blocks = ri.total_blocks;
-        let block_size = ri.block_size;
+        let total_blocks = di.volume_info.total_blocks();
+        let block_size = di.volume_info.block_size;
         let pb = pb.clone();
         tasks.push(tokio::task::spawn(async move {
             while block_index < total_blocks {
@@ -2021,7 +1952,7 @@ async fn fill_workload(
     pb.finish();
 
     // Now that all the workers are done, put the write log back into place
-    ri.write_log = std::mem::replace(
+    di.write_log = std::mem::replace(
         &mut Arc::try_unwrap(write_log)
             .expect("could not unwrap write log")
             .write()
@@ -2030,7 +1961,7 @@ async fn fill_workload(
     );
 
     if !skip_verify {
-        verify_volume(volume, ri, false).await?;
+        verify_volume(volume, di, false).await?;
     }
     Ok(())
 }
@@ -2041,28 +1972,39 @@ async fn fill_workload(
  */
 async fn fill_sparse_workload(
     volume: &Volume,
-    ri: &mut RegionInfo,
+    di: &mut DiskInfo,
 ) -> Result<()> {
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
-    // Figure out how many extents we have
-    let extents = ri.total_blocks / (ri.extent_size.value as usize);
-    let extent_size = ri.extent_size.value as usize;
+    let mut extent_block_start = 0;
+    // We loop over all sub volumes, doing one write to each extent.
+    for (index, sv) in di.volume_info.volumes.iter().enumerate() {
+        let extents = sv.extent_count as usize;
+        let extent_size = sv.blocks_per_extent as usize;
+        for extent in 0..extents {
+            let mut block_index: usize =
+                extent_block_start + (extent * extent_size);
+            let random_offset = rng.gen_range(0..extent_size);
+            block_index += random_offset;
 
-    // Do one write to each extent.
-    for extent in 0..extents {
-        let mut block_index: usize = extent * extent_size;
-        let random_offset: usize = rng.gen_range(0..extent_size);
-        block_index += random_offset;
+            let offset = BlockIndex(block_index.try_into().unwrap());
 
-        let offset = BlockIndex(block_index as u64);
+            di.write_log.update_wc(block_index);
 
-        ri.write_log.update_wc(block_index);
+            let data = fill_vec(
+                block_index,
+                1,
+                &di.write_log,
+                di.volume_info.block_size,
+            );
 
-        let data = fill_vec(block_index, 1, &ri.write_log, ri.block_size);
-
-        println!("[{extent}/{extents}] Write to block {}", block_index);
-        volume.write(offset, data).await?;
+            println!(
+                "[{index}][{extent}/{extents}] Write to block {}",
+                block_index
+            );
+            volume.write(offset, data).await?;
+        }
+        extent_block_start += extent_size * sv.extent_count as usize;
     }
 
     volume.flush(None).await?;
@@ -2077,7 +2019,7 @@ async fn fill_sparse_workload(
 async fn generic_workload(
     volume: &Volume,
     wtq: &mut WhenToQuit,
-    ri: &mut RegionInfo,
+    di: &mut DiskInfo,
     quiet: bool,
 ) -> Result<()> {
     /*
@@ -2089,10 +2031,11 @@ async fn generic_workload(
         WhenToQuit::Count { count } => count.to_string().len(),
         _ => 5,
     };
-    let block_width = ri.total_blocks.to_string().len();
-    let size_width = (10 * ri.block_size).to_string().len();
+    let total_blocks = di.volume_info.total_blocks();
+    let block_width = total_blocks.to_string().len();
+    let size_width = (10 * di.volume_info.block_size).to_string().len();
 
-    let max_io_size = std::cmp::min(10, ri.total_blocks);
+    let max_io_size = std::cmp::min(10, total_blocks);
 
     for c in 1.. {
         let op = rng.gen_range(0..10);
@@ -2122,7 +2065,7 @@ async fn generic_workload(
             // Once we have our IO size, decide where the starting offset should
             // be, which is the total possible size minus the randomly chosen
             // IO size.
-            let block_max = ri.total_blocks - size + 1;
+            let block_max = total_blocks - size + 1;
             let block_index = rng.gen_range(0..block_max);
 
             // Convert offset and length to their byte values.
@@ -2132,11 +2075,15 @@ async fn generic_workload(
                 // Write
                 // Update the write count for all blocks we plan to write to.
                 for i in 0..size {
-                    ri.write_log.update_wc(block_index + i);
+                    di.write_log.update_wc(block_index + i);
                 }
 
-                let data =
-                    fill_vec(block_index, size, &ri.write_log, ri.block_size);
+                let data = fill_vec(
+                    block_index,
+                    size,
+                    &di.write_log,
+                    di.volume_info.block_size,
+                );
 
                 if !quiet {
                     match wtq {
@@ -2154,7 +2101,7 @@ async fn generic_workload(
                     }
                 }
 
-                assert_eq!(data[1], ri.write_log.get_seed(block_index));
+                assert_eq!(data[1], di.write_log.get_seed(block_index));
                 if !quiet {
                     print!(
                         " Write block {:>bw$}  len {:>sw$}  data:",
@@ -2166,7 +2113,7 @@ async fn generic_workload(
                     for i in 0..size {
                         print!(
                             " {:>3}",
-                            ri.write_log.get_seed(block_index + i)
+                            di.write_log.get_seed(block_index + i)
                         );
                     }
                     println!();
@@ -2174,8 +2121,11 @@ async fn generic_workload(
                 volume.write(offset, data).await?;
             } else {
                 // Read (+ verify)
-                let mut data =
-                    crucible::Buffer::repeat(255, size, ri.block_size as usize);
+                let mut data = crucible::Buffer::repeat(
+                    255,
+                    size,
+                    di.volume_info.block_size as usize,
+                );
                 if !quiet {
                     match wtq {
                         WhenToQuit::Count { count } => {
@@ -2205,8 +2155,8 @@ async fn generic_workload(
                 match validate_vec(
                     dl,
                     block_index,
-                    &mut ri.write_log,
-                    ri.block_size,
+                    &mut di.write_log,
+                    di.volume_info.block_size,
                     false,
                 ) {
                     ValidateStatus::Bad | ValidateStatus::InRange => {
@@ -2230,7 +2180,7 @@ async fn generic_workload(
                     }
                     Ok(SignalAction::Verify) => {
                         println!("Verify Volume");
-                        if let Err(e) = verify_volume(volume, ri, false).await {
+                        if let Err(e) = verify_volume(volume, di, false).await {
                             bail!("Requested volume verify failed: {:?}", e)
                         }
                     }
@@ -2248,7 +2198,7 @@ async fn generic_workload(
 async fn replay_workload(
     volume: &Volume,
     wtq: &mut WhenToQuit,
-    ri: &mut RegionInfo,
+    di: &mut DiskInfo,
     dsc_client: Client,
     ds_count: u32,
 ) -> Result<()> {
@@ -2268,7 +2218,7 @@ async fn replay_workload(
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
 
-        generic_workload(volume, &mut generic_wtq, ri, false).await?;
+        generic_workload(volume, &mut generic_wtq, di, false).await?;
 
         let res = dsc_client.dsc_start(stopped_ds).await;
         println!("Replay: started {stopped_ds}, returned:{:?}", res);
@@ -2301,7 +2251,7 @@ async fn replay_workload(
                     }
                     Ok(SignalAction::Verify) => {
                         println!("Verify Volume");
-                        if let Err(e) = verify_volume(volume, ri, false).await {
+                        if let Err(e) = verify_volume(volume, di, false).await {
                             bail!("Requested volume verify failed: {:?}", e)
                         }
                     }
@@ -2324,7 +2274,7 @@ async fn replay_workload(
 async fn replace_while_reconcile(
     volume: &Volume,
     mut wtq: WhenToQuit,
-    ri: &mut RegionInfo,
+    di: &mut DiskInfo,
     targets: Vec<SocketAddr>,
     dsc_client: Client,
     mut gen: u64,
@@ -2343,7 +2293,7 @@ async fn replace_while_reconcile(
     info!(log, "Begin replacement while reconciliation test");
     loop {
         info!(log, "[{c}] Touch every extent part 1");
-        fill_sparse_workload(volume, ri).await?;
+        fill_sparse_workload(volume, di).await?;
 
         info!(log, "[{c}] Stop a downstairs");
         // Stop a downstairs, wait for dsc to confirm it is stopped.
@@ -2357,7 +2307,7 @@ async fn replace_while_reconcile(
             tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
         }
         info!(log, "[{c}] Touch every extent part 2");
-        fill_sparse_workload(volume, ri).await?;
+        fill_sparse_workload(volume, di).await?;
 
         info!(log, "[{c}] Deactivate");
         volume.deactivate().await.unwrap();
@@ -2459,7 +2409,7 @@ async fn replace_while_reconcile(
         }
 
         info!(log, "[{c}] Verify volume after replacement");
-        if let Err(e) = verify_volume(volume, ri, false).await {
+        if let Err(e) = verify_volume(volume, di, false).await {
             bail!("Requested volume verify failed: {:?}", e)
         }
 
@@ -2500,7 +2450,7 @@ async fn replace_while_reconcile(
                     }
                     Ok(SignalAction::Verify) => {
                         println!("Verify Volume");
-                        if let Err(e) = verify_volume(volume, ri, false).await {
+                        if let Err(e) = verify_volume(volume, di, false).await {
                             bail!("Requested volume verify failed: {:?}", e)
                         }
                     }
@@ -2521,7 +2471,7 @@ async fn replace_while_reconcile(
 async fn replace_before_active(
     volume: &Volume,
     mut wtq: WhenToQuit,
-    ri: &mut RegionInfo,
+    di: &mut DiskInfo,
     targets: Vec<SocketAddr>,
     dsc_client: Client,
     mut gen: u64,
@@ -2535,13 +2485,13 @@ async fn replace_before_active(
     // we write to every block, then flush, then read.  This way we know
     // that the initial downstairs are all synced up on the same flush and
     // generation numbers.
-    fill_workload(volume, ri, true).await?;
+    fill_workload(volume, di, true).await?;
     let ds_total = targets.len() - 1;
     let mut old_ds = 0;
     let mut new_ds = targets.len() - 1;
     for c in 1.. {
         info!(log, "[{c}] Touch every extent");
-        fill_sparse_workload(volume, ri).await?;
+        fill_sparse_workload(volume, di).await?;
 
         volume.deactivate().await.unwrap();
         loop {
@@ -2617,7 +2567,7 @@ async fn replace_before_active(
         }
 
         info!(log, "[{c}] Verify volume after replacement");
-        if let Err(e) = verify_volume(volume, ri, false).await {
+        if let Err(e) = verify_volume(volume, di, false).await {
             bail!("Requested volume verify failed: {:?}", e)
         }
 
@@ -2661,7 +2611,7 @@ async fn replace_before_active(
                     }
                     Ok(SignalAction::Verify) => {
                         println!("Verify Volume");
-                        if let Err(e) = verify_volume(volume, ri, false).await {
+                        if let Err(e) = verify_volume(volume, di, false).await {
                             bail!("Requested volume verify failed: {:?}", e)
                         }
                     }
@@ -2682,7 +2632,7 @@ async fn replace_before_active(
 async fn replace_workload(
     volume: &Volume,
     wtq: &mut WhenToQuit,
-    ri: &mut RegionInfo,
+    di: &mut DiskInfo,
     targets: Vec<SocketAddr>,
     fill: bool,
 ) -> Result<()> {
@@ -2692,7 +2642,7 @@ async fn replace_workload(
     let ds_total = targets.len() - 1;
 
     if fill {
-        fill_sparse_workload(volume, ri).await?;
+        fill_sparse_workload(volume, di).await?;
     }
     // Make a copy of the stop at counter if one was provided so the
     // IO task and the replace task don't have to share wtq
@@ -2778,7 +2728,7 @@ async fn replace_workload(
     // in a loop, checking to see if it is time to stop.
     loop {
         let mut workload_wtq = WhenToQuit::Count { count: 100 };
-        generic_workload(volume, &mut workload_wtq, ri, false)
+        generic_workload(volume, &mut workload_wtq, di, false)
             .await
             .unwrap();
 
@@ -2799,7 +2749,7 @@ async fn replace_workload(
                         break;
                     }
                     Ok(SignalAction::Verify) => {
-                        if let Err(e) = verify_volume(volume, ri, false).await {
+                        if let Err(e) = verify_volume(volume, di, false).await {
                             bail!("Requested volume verify failed: {:?}", e)
                         }
                     }
@@ -2841,7 +2791,7 @@ async fn replace_workload(
  */
 async fn dirty_workload(
     volume: &Volume,
-    ri: &mut RegionInfo,
+    di: &mut DiskInfo,
     count: usize,
 ) -> Result<()> {
     /*
@@ -2860,7 +2810,7 @@ async fn dirty_workload(
      * be, which is the total possible size minus the randomly chosen
      * IO size.
      */
-    let block_max = ri.total_blocks - size + 1;
+    let block_max = di.volume_info.total_blocks() - size + 1;
     let count_width = count.to_string().len();
     for c in 1..=count {
         let block_index = rng.gen_range(0..block_max);
@@ -2872,9 +2822,14 @@ async fn dirty_workload(
         /*
          * Update the write count for the block we plan to write to.
          */
-        ri.write_log.update_wc(block_index);
+        di.write_log.update_wc(block_index);
 
-        let data = fill_vec(block_index, size, &ri.write_log, ri.block_size);
+        let data = fill_vec(
+            block_index,
+            size,
+            &di.write_log,
+            di.volume_info.block_size,
+        );
 
         println!(
             "[{:>0width$}/{:>0width$}] Write at block {}, len:{}",
@@ -2895,347 +2850,40 @@ async fn dirty_workload(
     Ok(())
 }
 
-/*
- * Print the perf header.
- */
-pub fn perf_header() {
+/// Prints a pleasant summary of the given disk
+fn print_disk_description(di: &DiskInfo, encrypted: bool) {
+    println!("disk info:");
+    let block_size = di.volume_info.block_size;
+    println!("  block size:                   {} bytes", block_size);
+    for (index, sv) in di.volume_info.volumes.iter().enumerate() {
+        println!(
+            "  sub_volume {index} blocks / extent: {}",
+            sv.blocks_per_extent
+        );
+        println!("  sub_volume {index} extent count:    {}", sv.extent_count);
+        println!(
+            "  sub_volume {index} extent size:     {}",
+            human_bytes((block_size * sv.blocks_per_extent) as f64)
+        );
+    }
     println!(
-        "{:>8} {:7} {:5} {:4} {:>7} {:>7} {:>7} {:>7} {:>8} {:>5} {:>5}",
-        "TEST",
-        "SECONDS",
-        "COUNT",
-        "DPTH",
-        "IOPS",
-        "MEAN",
-        "P95",
-        "P99",
-        "MAX",
-        "ES",
-        "EC",
+        "  total blocks:                 {}",
+        di.volume_info.total_blocks()
     );
-}
-
-/*
- * Take the Vec of Durations for IOs and write it out in CSV format using
- * the provided CSV Writer.
- */
-#[allow(clippy::too_many_arguments)]
-pub fn perf_csv(
-    wtr: &mut csv::Writer<File>,
-    msg: &str,
-    count: usize,
-    io_depth: usize,
-    io_size: usize,
-    duration: Duration,
-    iotimes: &[Duration],
-    es: u64,
-    ec: u64,
-) {
-    // Convert all Durations to u64 nanoseconds.
-    let times = iotimes
-        .iter()
-        .map(|x| (x.as_secs() * 100000000) + x.subsec_nanos() as u64)
-        .collect::<Vec<u64>>();
-
-    let time_in_nsec =
-        duration.as_secs() * 100000000 + duration.subsec_nanos() as u64;
-
-    wtr.serialize(Record {
-        label: msg.to_string(),
-        total_time: time_in_nsec,
-        io_depth,
-        io_size,
-        count,
-        es,
-        ec,
-        time: times,
-    })
-    .unwrap();
-    wtr.flush().unwrap();
-}
-
-// Percentile
-// Given a SORTED vec of f32's (I'm trusting you to provide that),
-// and a value between 1 and 99 (the desired percentile),
-// determine which index (or which indexes to average) contain our desired
-// percentile.
-// Once we have the value at our index (or the average of two values at the
-// desired indices), return that to the caller.
-//
-// Remember, the array index is one less (zero-based index)
-fn percentile(times: &[f32], perc: u8) -> Result<f32> {
-    if times.is_empty() {
-        bail!("Array for percentile too short");
-    }
-    if perc == 0 || perc >= 100 {
-        bail!("Requested percentile not: 0 < {} < 100", perc);
-    }
-
-    let position = times.len() as f32 * (perc as f32 / 100.0);
-
-    if position == position.trunc() {
-        // Our position is a whole number.
-        // We use the rounded up position as our second index because the
-        // array index is zero based.
-        let index_two = position.ceil() as usize;
-        let index_one = index_two - 1;
-
-        Ok((times[index_one] + times[index_two]) / 2.0)
-    } else {
-        // Our position is not an integer, so round up to get the correct
-        // position for our percentile.  However, since we need to subtract
-        // one to get the zero-based index, we can just round down here.
-        // This is the same as rounding up, then subtracting one.
-        let index = position.trunc() as usize;
-        Ok(times[index])
-    }
-}
-
-/*
- * Display the summary results from a perf run.
- */
-fn perf_summary(
-    msg: &str,
-    count: usize,
-    io_depth: usize,
-    times: &[Duration],
-    total_time: Duration,
-    es: u64,
-    ec: u64,
-) {
-    // Convert all the Durations into floats.
-    let mut times = times
-        .iter()
-        .map(|x| x.as_secs() as f32 + (x.subsec_nanos() as f32 / 1e9))
-        .collect::<Vec<f32>>();
-    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Determine the number of seconds as a float elapsed to perform
-    // all the IOs. Then, divide the total operations performed to get
-    // the average IOPs
-    let time_f =
-        total_time.as_secs() as f32 + (total_time.subsec_nanos() as f32 / 1e9);
+    let total_size = di.volume_info.total_size();
     println!(
-        "{:>8} {:>7.2} {:5} {:4} {:>7.2} {:.5} {:.5} {:.5} {:8.5} {:>5} {:>5}",
-        msg,
-        time_f,
-        count,
-        io_depth,
-        count as f32 / time_f,
-        statistical::mean(&times),
-        percentile(&times, 95).unwrap(),
-        percentile(&times, 99).unwrap(),
-        times.last().unwrap(),
-        es,
-        ec,
-    );
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Record {
-    label: String,
-    total_time: u64,
-    io_depth: usize,
-    io_size: usize,
-    count: usize,
-    es: u64,
-    ec: u64,
-    time: Vec<u64>,
-}
-/**
- * A simple IO test in two stages: 100% random writes, then 100% random
- * reads. The caller can select:
- * io_depth:      The number of outstanding IOs issued at a time
- * blocks_per_io: The size of each io (in multiple of block size).
- * count:         The number of loops to perform for each test (all IOs
- *                in io_depth are considered as a single loop).
- * write_loop:    The number of times to do the 100% write loop.
- * read_loop:     The number of times to do the 100% read loop.
- *
- * A summary is printed at the end of each stage.
- */
-#[allow(clippy::too_many_arguments)]
-async fn perf_workload(
-    volume: &Volume,
-    ri: &RegionInfo,
-    mut wtr: Option<csv::Writer<File>>,
-    count: usize,
-    io_depth: usize,
-    blocks_per_io: usize,
-    write_loop: usize,
-    read_loop: usize,
-) -> Result<()> {
-    // Before we start, make sure the work queues are empty.
-    loop {
-        let wc = volume.query_work_queue().await?;
-        if wc.up_count + wc.ds_count == 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(2)).await;
-    }
-
-    let mut rng = rand::thread_rng();
-    let io_size = blocks_per_io * ri.block_size as usize;
-
-    let write_buffers: Vec<BytesMut> =
-        (0..io_depth)
-            .map(|_| {
-                let mut out = BytesMut::with_capacity(io_size);
-                out.extend((0..io_size).map(|_| -> u8 {
-                    rng.sample(rand::distributions::Standard)
-                }));
-                out
-            })
-            .collect();
-
-    let mut read_buffers: Vec<Buffer> = (0..io_depth)
-        .map(|_| Buffer::new(blocks_per_io, ri.block_size as usize))
-        .collect();
-
-    let es = ri.extent_size.value;
-    let ec = ri.total_blocks as u64 / es;
-
-    // To make a random block offset, we take the total block count and subtract
-    // the IO size in blocks (so that we don't overspill the region)
-    let offset_mod = (ri.total_blocks - blocks_per_io) as u64;
-    for _ in 0..write_loop {
-        let mut wtime = Vec::with_capacity(count);
-        let big_start = Instant::now();
-        for _ in 0..count {
-            let burst_start = Instant::now();
-            let mut write_futures = FuturesOrdered::new();
-
-            for write_buffer in write_buffers.iter().take(io_depth) {
-                let offset: u64 = rng.gen::<u64>() % offset_mod;
-                let future = volume.write_to_byte_offset(
-                    offset * ri.block_size,
-                    write_buffer.clone(),
-                );
-                write_futures.push_back(future);
-            }
-
-            while let Some(result) = write_futures.next().await {
-                result?;
-            }
-            wtime.push(burst_start.elapsed());
-        }
-        let big_end = big_start.elapsed();
-
-        volume.flush(None).await?;
-        perf_summary("rwrites", count, io_depth, &wtime, big_end, es, ec);
-        if let Some(wtr) = wtr.as_mut() {
-            perf_csv(
-                wtr,
-                "rwrite",
-                count,
-                io_depth,
-                blocks_per_io,
-                big_end,
-                &wtime,
-                es,
-                ec,
-            );
-        }
-
-        // Before we loop or end, make sure the work queues are empty.
-        loop {
-            let wc = volume.query_work_queue().await?;
-            if wc.up_count + wc.ds_count == 0 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_secs(2)).await;
-        }
-    }
-
-    let mut rtime = Vec::with_capacity(count);
-    for _ in 0..read_loop {
-        let big_start = Instant::now();
-        for _ in 0..count {
-            let burst_start = Instant::now();
-            let mut read_futures = FuturesOrdered::new();
-
-            for mut read_buffer in read_buffers.drain(0..io_depth) {
-                let offset: u64 = rng.gen::<u64>() % offset_mod;
-                let future = {
-                    let volume = volume.clone();
-                    let bs = ri.block_size;
-                    tokio::spawn(async move {
-                        volume
-                            .read_from_byte_offset(
-                                offset * bs,
-                                &mut read_buffer,
-                            )
-                            .await?;
-                        Ok(read_buffer)
-                    })
-                };
-                read_futures.push_back(future);
-            }
-
-            while let Some(result) = read_futures.next().await {
-                let result: Result<Buffer, CrucibleError> = result?;
-                let read_buffer = result?;
-                read_buffers.push(read_buffer);
-            }
-
-            rtime.push(burst_start.elapsed());
-        }
-        let big_end = big_start.elapsed();
-
-        perf_summary("rreads", count, io_depth, &rtime, big_end, es, ec);
-
-        if let Some(wtr) = wtr.as_mut() {
-            perf_csv(
-                wtr,
-                "rread",
-                count,
-                io_depth,
-                blocks_per_io,
-                big_end,
-                &rtime,
-                es,
-                ec,
-            );
-        }
-
-        volume.flush(None).await?;
-
-        // Before we finish, make sure the work queues are empty.
-        loop {
-            let wc = volume.query_work_queue().await?;
-            if wc.up_count + wc.ds_count == 0 {
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
-        }
-    }
-    Ok(())
-}
-
-/// Prints a pleasant summary of the given region
-fn print_region_description(ri: &RegionInfo, encrypted: bool) {
-    println!("region info:");
-    println!("  block size:      {} bytes", ri.block_size);
-    println!("  blocks / extent: {}", ri.extent_size.value);
-    println!(
-        "  extent size:     {}",
-        human_bytes((ri.block_size * ri.extent_size.value) as f64)
+        "  total size:                   {}",
+        human_bytes(total_size as f64)
     );
     println!(
-        "  extent count:    {}",
-        ri.total_blocks as u64 / ri.extent_size.value
-    );
-    println!("  total blocks:    {}", ri.total_blocks);
-    println!("  total size:      {}", human_bytes(ri.total_size as f64));
-    println!(
-        "  encryption:      {}",
+        "  encryption:                   {}",
         if encrypted { "yes" } else { "no" }
     );
 }
 
 async fn rand_read_write_workload(
     volume: &Volume,
-    ri: &mut RegionInfo,
+    di: &mut DiskInfo,
     cfg: RandReadWriteConfig,
 ) -> Result<()> {
     // Before we start, make sure the work queues are empty.
@@ -3253,29 +2901,29 @@ async fn rand_read_write_workload(
     };
 
     if cfg.fill {
-        println!("filling region before {desc}");
-        fill_workload(volume, ri, true).await?;
+        println!("filling disk before {desc}");
+        fill_workload(volume, di, true).await?;
     }
 
-    if cfg.blocks_per_io > ri.total_blocks {
-        bail!("too many blocks per IO; can't exceed {}", ri.total_blocks);
+    let total_blocks = di.volume_info.total_blocks();
+    if cfg.blocks_per_io > total_blocks {
+        bail!("too many blocks per IO; can't exceed {}", total_blocks);
     }
 
+    let block_size = di.volume_info.block_size as usize;
     println!(
         "\n----------------------------------------------\
         \nrandom {desc} with {} chunks ({} block{})",
-        human_bytes((cfg.blocks_per_io as u64 * ri.block_size) as f64),
+        human_bytes((cfg.blocks_per_io as u64 * block_size as u64) as f64),
         cfg.blocks_per_io,
         if cfg.blocks_per_io > 1 { "s" } else { "" },
     );
-    print_region_description(ri, cfg.encrypted);
+    print_disk_description(di, cfg.encrypted);
     println!("----------------------------------------------");
 
     let stop = Arc::new(AtomicBool::new(false));
     let byte_count = Arc::new(AtomicUsize::new(0));
 
-    let block_size = ri.block_size as usize;
-    let total_blocks = ri.total_blocks;
     let mut workers = vec![];
     for _ in 0..cfg.io_depth {
         let stop = stop.clone();
@@ -3408,7 +3056,7 @@ async fn rand_read_write_workload(
 
 async fn bufferbloat_workload(
     volume: &Volume,
-    ri: &mut RegionInfo,
+    di: &mut DiskInfo,
     cfg: BufferbloatConfig,
 ) -> Result<()> {
     // Before we start, make sure the work queues are empty.
@@ -3420,28 +3068,28 @@ async fn bufferbloat_workload(
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 
-    if cfg.blocks_per_io > ri.total_blocks {
-        bail!("too many blocks per IO; can't exceed {}", ri.total_blocks);
+    let total_blocks = di.volume_info.total_blocks();
+    if cfg.blocks_per_io > total_blocks {
+        bail!("too many blocks per IO; can't exceed {}", total_blocks);
     }
 
+    let block_size = di.volume_info.block_size as usize;
     println!(
         "\n----------------------------------------------\
         \nbufferbloat test\
         \n----------------------------------------------\
         \ninitial {:?} sec random write with {} chunks ({} block{})",
         cfg.time_secs,
-        human_bytes((cfg.blocks_per_io as u64 * ri.block_size) as f64),
+        human_bytes((cfg.blocks_per_io as u64 * block_size as u64) as f64),
         cfg.blocks_per_io,
         if cfg.blocks_per_io > 1 { "s" } else { "" },
     );
-    print_region_description(ri, cfg.encrypted);
+    print_disk_description(di, cfg.encrypted);
     println!("----------------------------------------------");
 
     let stop = Arc::new(AtomicBool::new(false));
     let byte_count = Arc::new(AtomicUsize::new(0));
 
-    let block_size = ri.block_size as usize;
-    let total_blocks = ri.total_blocks;
     let mut workers = vec![];
     for _ in 0..cfg.io_depth {
         let stop = stop.clone();
@@ -3523,7 +3171,7 @@ async fn bufferbloat_workload(
  * Generate a random offset and length, and write to then read from
  * that offset/length.  Verify the data is what we expect.
  */
-async fn one_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
+async fn one_workload(volume: &Volume, di: &mut DiskInfo) -> Result<()> {
     /*
      * TODO: Allow the user to specify a seed here.
      */
@@ -3535,7 +3183,7 @@ async fn one_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
      * IO size.
      */
     let size = 1;
-    let block_max = ri.total_blocks - size + 1;
+    let block_max = di.volume_info.total_blocks() - size + 1;
     let block_index = rng.gen_range(0..block_max);
 
     /*
@@ -3546,22 +3194,22 @@ async fn one_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
     /*
      * Update the write count for the block we plan to write to.
      */
-    ri.write_log.update_wc(block_index);
+    di.write_log.update_wc(block_index);
 
-    let data = fill_vec(block_index, size, &ri.write_log, ri.block_size);
+    let block_size = di.volume_info.block_size;
+    let data = fill_vec(block_index, size, &di.write_log, block_size);
 
     println!("Write at block {:5}, len:{:7}", offset.0, data.len());
 
     volume.write(offset, data).await?;
 
-    let mut data = crucible::Buffer::repeat(255, size, ri.block_size as usize);
+    let mut data = crucible::Buffer::repeat(255, size, block_size as usize);
 
     println!("Read  at block {:5}, len:{:7}", offset.0, data.len());
     volume.read(offset, &mut data).await?;
 
     let dl = data.into_bytes();
-    match validate_vec(dl, block_index, &mut ri.write_log, ri.block_size, false)
-    {
+    match validate_vec(dl, block_index, &mut di.write_log, block_size, false) {
         ValidateStatus::Bad | ValidateStatus::InRange => {
             bail!("Error at {}", block_index);
         }
@@ -3583,7 +3231,7 @@ async fn one_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
 async fn deactivate_workload(
     volume: &Volume,
     count: usize,
-    ri: &mut RegionInfo,
+    di: &mut DiskInfo,
     mut gen: u64,
 ) -> Result<()> {
     let count_width = count.to_string().len();
@@ -3595,7 +3243,7 @@ async fn deactivate_workload(
             width = count_width
         );
         let mut wtq = WhenToQuit::Count { count: 20 };
-        generic_workload(volume, &mut wtq, ri, false).await?;
+        generic_workload(volume, &mut wtq, di, false).await?;
         println!(
             "{:>0width$}/{:>0width$}, CLIENT: Now disconnect",
             c,
@@ -3644,7 +3292,7 @@ async fn deactivate_workload(
     }
     println!("One final");
     let mut wtq = WhenToQuit::Count { count: 20 };
-    generic_workload(volume, &mut wtq, ri, false).await?;
+    generic_workload(volume, &mut wtq, di, false).await?;
 
     Ok(())
 }
@@ -3656,7 +3304,7 @@ async fn deactivate_workload(
 async fn write_flush_read_workload(
     volume: &Volume,
     count: usize,
-    ri: &mut RegionInfo,
+    di: &mut DiskInfo,
 ) -> Result<()> {
     /*
      * TODO: Allow the user to specify a seed here.
@@ -3664,19 +3312,20 @@ async fn write_flush_read_workload(
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
 
     let count_width = count.to_string().len();
+    let block_size = di.volume_info.block_size;
     for c in 1..=count {
         /*
          * Pick a random size (in blocks) for the IO, up to the size of the
          * max IO we allow.
          */
-        let size = rng.gen_range(1..=ri.max_block_io);
+        let size = rng.gen_range(1..=di.max_block_io);
 
         /*
          * Once we have our IO size, decide where the starting offset should
          * be, which is the total possible size minus the randomly chosen
          * IO size.
          */
-        let block_max = ri.total_blocks - size + 1;
+        let block_max = di.volume_info.total_blocks() - size + 1;
         let block_index = rng.gen_range(0..block_max);
 
         /*
@@ -3688,10 +3337,10 @@ async fn write_flush_read_workload(
          * Update the write count for all blocks we plan to write to.
          */
         for i in 0..size {
-            ri.write_log.update_wc(block_index + i);
+            di.write_log.update_wc(block_index + i);
         }
 
-        let data = fill_vec(block_index, size, &ri.write_log, ri.block_size);
+        let data = fill_vec(block_index, size, &di.write_log, block_size);
 
         println!(
             "{:>0width$}/{:>0width$} IO at block {:5}, len:{:7}",
@@ -3705,16 +3354,15 @@ async fn write_flush_read_workload(
 
         volume.flush(None).await?;
 
-        let mut data =
-            crucible::Buffer::repeat(255, size, ri.block_size as usize);
+        let mut data = crucible::Buffer::repeat(255, size, block_size as usize);
         volume.read(offset, &mut data).await?;
 
         let dl = data.into_bytes();
         match validate_vec(
             dl,
             block_index,
-            &mut ri.write_log,
-            ri.block_size,
+            &mut di.write_log,
+            block_size,
             false,
         ) {
             ValidateStatus::Bad | ValidateStatus::InRange => {
@@ -3735,12 +3383,12 @@ async fn burst_workload(
     volume: &Volume,
     count: usize,
     demo_count: usize,
-    ri: &mut RegionInfo,
+    di: &mut DiskInfo,
     verify_out: &Option<PathBuf>,
 ) -> Result<()> {
     let count_width = count.to_string().len();
     for c in 1..=count {
-        demo_workload(volume, demo_count, ri).await?;
+        demo_workload(volume, demo_count, di).await?;
         let mut wc = volume.show_work().await?;
         while wc.up_count + wc.ds_count != 0 {
             tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -3762,7 +3410,7 @@ async fn burst_workload(
          */
         println!();
         if let Some(vo) = &verify_out {
-            write_json(vo, &ri.write_log, true)?;
+            write_json(vo, &di.write_log, true)?;
             println!("Wrote out file {vo:?} at this time");
         }
         println!(
@@ -3783,7 +3431,7 @@ async fn burst_workload(
 async fn repair_workload(
     volume: &Volume,
     count: usize,
-    ri: &mut RegionInfo,
+    di: &mut DiskInfo,
 ) -> Result<()> {
     // TODO: Allow the user to specify a seed here.
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
@@ -3794,8 +3442,10 @@ async fn repair_workload(
     let mut one_write = false;
     // These help the printlns use the minimum white space
     let count_width = count.to_string().len();
-    let block_width = ri.total_blocks.to_string().len();
-    let size_width = (10 * ri.block_size).to_string().len();
+    let total_blocks = di.volume_info.total_blocks();
+    let block_width = total_blocks.to_string().len();
+    let block_size = di.volume_info.block_size;
+    let size_width = (10 * block_size).to_string().len();
     for c in 1..=count {
         let op = rng.gen_range(0..10);
         // Make sure the last few commands are not a flush
@@ -3815,7 +3465,7 @@ async fn repair_workload(
             // those writes might not make it if we have three dirty extents
             // and the one we choose could be the one that does not have
             // the write (no flush, no guarantee of persistence).
-            ri.write_log.commit();
+            di.write_log.commit();
             // Make sure a write comes next.
             one_write = false;
         } else {
@@ -3826,7 +3476,7 @@ async fn repair_workload(
             // Once we have our IO size, decide where the starting offset should
             // be, which is the total possible size minus the randomly chosen
             // IO size.
-            let block_max = ri.total_blocks - size + 1;
+            let block_max = total_blocks - size + 1;
             let block_index = rng.gen_range(0..block_max);
 
             // Convert offset and length to their byte values.
@@ -3837,11 +3487,11 @@ async fn repair_workload(
                 one_write = true;
                 // Update the write count for all blocks we plan to write to.
                 for i in 0..size {
-                    ri.write_log.update_wc(block_index + i);
+                    di.write_log.update_wc(block_index + i);
                 }
 
                 let data =
-                    fill_vec(block_index, size, &ri.write_log, ri.block_size);
+                    fill_vec(block_index, size, &di.write_log, block_size);
 
                 print!(
                     "{:>0width$}/{:>0width$} Write \
@@ -3854,9 +3504,9 @@ async fn repair_workload(
                     bw = block_width,
                     sw = size_width,
                 );
-                assert_eq!(data[1], ri.write_log.get_seed(block_index));
+                assert_eq!(data[1], di.write_log.get_seed(block_index));
                 for i in 0..size {
-                    print!("{:>3} ", ri.write_log.get_seed(block_index + i));
+                    print!("{:>3} ", di.write_log.get_seed(block_index + i));
                 }
                 println!();
 
@@ -3864,7 +3514,7 @@ async fn repair_workload(
             } else {
                 // Read
                 let mut data =
-                    crucible::Buffer::repeat(255, size, ri.block_size as usize);
+                    crucible::Buffer::repeat(255, size, block_size as usize);
                 println!(
                     "{:>0width$}/{:>0width$} Read  \
                     block {:>bw$}  len {:>sw$}",
@@ -3892,7 +3542,7 @@ async fn repair_workload(
 async fn demo_workload(
     volume: &Volume,
     count: usize,
-    ri: &mut RegionInfo,
+    di: &mut DiskInfo,
 ) -> Result<()> {
     // TODO: Allow the user to specify a seed here.
     let mut rng = rand_chacha::ChaCha8Rng::from_entropy();
@@ -3902,7 +3552,7 @@ async fn demo_workload(
     // We take the state of the volume now as our minimum, and verify
     // that the read at the end of this loop finds some value between
     // what it is now and what it is at the end of test.
-    ri.write_log.commit();
+    di.write_log.commit();
 
     let mut read_futures = FuturesOrdered::new();
     let mut write_futures = FuturesOrdered::new();
@@ -3923,7 +3573,7 @@ async fn demo_workload(
             // Once we have our IO size, decide where the starting offset should
             // be, which is the total possible size minus the randomly chosen
             // IO size.
-            let block_max = ri.total_blocks - size + 1;
+            let block_max = di.volume_info.total_blocks() - size + 1;
             let block_index = rng.gen_range(0..block_max);
 
             // Convert offset and length to their byte values.
@@ -3933,17 +3583,21 @@ async fn demo_workload(
                 // Write
                 // Update the write count for all blocks we plan to write to.
                 for i in 0..size {
-                    ri.write_log.update_wc(block_index + i);
+                    di.write_log.update_wc(block_index + i);
                 }
 
-                let data =
-                    fill_vec(block_index, size, &ri.write_log, ri.block_size);
+                let data = fill_vec(
+                    block_index,
+                    size,
+                    &di.write_log,
+                    di.volume_info.block_size,
+                );
 
                 let future = volume.write(offset, data);
                 write_futures.push_back(future);
             } else {
                 // Read
-                let block_size = ri.block_size as usize;
+                let block_size = di.volume_info.block_size as usize;
                 let future = {
                     let volume = volume.clone();
                     tokio::spawn(async move {
@@ -3986,48 +3640,107 @@ async fn demo_workload(
     println!("All downstairs jobs completed.");
 
     // Commit the current state as the new minimum for any future tests.
-    ri.write_log.commit();
+    di.write_log.commit();
 
     Ok(())
 }
 
 /*
  * This is a test workload that generates a single write spanning an extent
- * then will try to read the same.
+ * then will try to read the same.  When multiple sub_volumes are present we
+ * also issue a Write/Flush/Read that will span the two sub_volumes.
  */
-async fn span_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
-    /*
-     * Pick the last block in the first extent
-     */
-    let block_index = (ri.extent_size.value - 1) as usize;
+async fn span_workload(volume: &Volume, di: &mut DiskInfo) -> Result<()> {
+    let mut extent_block_start = 0;
+    let last_sub_volume = di.volume_info.volumes.len() - 1;
+    let block_size = di.volume_info.block_size;
+    for (index, sv) in di.volume_info.volumes.iter().enumerate() {
+        // Pick the last block in the first extent
+        let extent_size = sv.blocks_per_extent as usize;
+        let block_index = extent_block_start + extent_size - 1;
 
-    /*
-     * Update the counter for the blocks we are about to write.
-     */
-    ri.write_log.update_wc(block_index);
-    ri.write_log.update_wc(block_index + 1);
+        // Update the counter for the blocks we are about to write.
+        di.write_log.update_wc(block_index);
+        di.write_log.update_wc(block_index + 1);
 
-    let offset = BlockIndex(block_index as u64);
-    let data = fill_vec(block_index, 2, &ri.write_log, ri.block_size);
+        let offset = BlockIndex(block_index as u64);
+        let data = fill_vec(block_index, 2, &di.write_log, block_size);
 
-    println!("Sending a write spanning two extents");
-    volume.write(offset, data).await?;
+        println!(
+            "sub_volume:{} Block:{} Send a write spanning two extents",
+            index, block_index
+        );
+        volume.write(offset, data).await?;
 
-    println!("Sending a flush");
-    volume.flush(None).await?;
+        println!("sub_volume:{index} Send a flush");
+        volume.flush(None).await?;
 
-    let mut data = crucible::Buffer::repeat(99, 2, ri.block_size as usize);
+        println!(
+            "sub_volume:{} Block:{} Send a read spanning two extents",
+            index, block_index
+        );
+        let mut data = crucible::Buffer::repeat(99, 2, block_size as usize);
+        volume.read(offset, &mut data).await?;
 
-    println!("Sending a read spanning two extents");
-    volume.read(offset, &mut data).await?;
-
-    let dl = data.into_bytes();
-    match validate_vec(dl, block_index, &mut ri.write_log, ri.block_size, false)
-    {
-        ValidateStatus::Bad | ValidateStatus::InRange => {
-            bail!("Span read verify failed");
+        let dl = data.into_bytes();
+        match validate_vec(
+            dl,
+            block_index,
+            &mut di.write_log,
+            block_size,
+            false,
+        ) {
+            ValidateStatus::Bad | ValidateStatus::InRange => {
+                bail!("Span read verify failed");
+            }
+            ValidateStatus::Good => {}
         }
-        ValidateStatus::Good => {}
+
+        // Move to the start of the next extent.
+        extent_block_start += extent_size * sv.extent_count as usize;
+
+        // If our sub volume is not the last sub volume, do an IO that will
+        // span this one and the next.
+        if index < last_sub_volume {
+            let block_index = extent_block_start - 1;
+
+            // Update the counter for the blocks we are about to write.
+            di.write_log.update_wc(block_index);
+            di.write_log.update_wc(block_index + 1);
+
+            let offset = BlockIndex(block_index as u64);
+            let data = fill_vec(block_index, 2, &di.write_log, block_size);
+
+            println!(
+                "sub_volume:{} Block:{} Send a write spanning two sub_volumes",
+                index, block_index
+            );
+            volume.write(offset, data).await?;
+
+            println!("sub_volume:{index} Send a flush");
+            volume.flush(None).await?;
+
+            println!(
+                "sub_volume:{} Block:{} Send a read spanning two sub volumes",
+                index, block_index
+            );
+            let mut data = crucible::Buffer::repeat(99, 2, block_size as usize);
+            volume.read(offset, &mut data).await?;
+
+            let dl = data.into_bytes();
+            match validate_vec(
+                dl,
+                block_index,
+                &mut di.write_log,
+                block_size,
+                false,
+            ) {
+                ValidateStatus::Bad | ValidateStatus::InRange => {
+                    bail!("Span read verify failed");
+                }
+                ValidateStatus::Good => {}
+            }
+        }
     }
     Ok(())
 }
@@ -4036,14 +3749,15 @@ async fn span_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
  * Write, flush, then read every block in the volume.
  * We wait for each op to finish, so this is all sequential.
  */
-async fn big_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
-    for block_index in 0..ri.total_blocks {
+async fn big_workload(volume: &Volume, di: &mut DiskInfo) -> Result<()> {
+    for block_index in 0..di.volume_info.total_blocks() {
         /*
          * Update the write count for all blocks we plan to write to.
          */
-        ri.write_log.update_wc(block_index);
+        di.write_log.update_wc(block_index);
 
-        let data = fill_vec(block_index, 1, &ri.write_log, ri.block_size);
+        let data =
+            fill_vec(block_index, 1, &di.write_log, di.volume_info.block_size);
         /*
          * Convert block_index to its byte value.
          */
@@ -4053,15 +3767,19 @@ async fn big_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
 
         volume.flush(None).await?;
 
-        let mut data = crucible::Buffer::repeat(255, 1, ri.block_size as usize);
+        let mut data = crucible::Buffer::repeat(
+            255,
+            1,
+            di.volume_info.block_size as usize,
+        );
         volume.read(offset, &mut data).await?;
 
         let dl = data.into_bytes();
         match validate_vec(
             dl,
             block_index,
-            &mut ri.write_log,
-            ri.block_size,
+            &mut di.write_log,
+            di.volume_info.block_size,
             false,
         ) {
             ValidateStatus::Bad | ValidateStatus::InRange => {
@@ -4077,28 +3795,26 @@ async fn big_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
     Ok(())
 }
 
-async fn biggest_io_workload(
-    volume: &Volume,
-    ri: &mut RegionInfo,
-) -> Result<()> {
+async fn biggest_io_workload(volume: &Volume, di: &mut DiskInfo) -> Result<()> {
     /*
      * Based on our protocol, send the biggest IO we can.
      */
     println!("determine blocks for large io");
+    let total_blocks = di.volume_info.total_blocks();
     let biggest_io_in_blocks = {
         let crucible_max_io =
             crucible_protocol::CrucibleEncoder::max_io_blocks(
-                ri.block_size as usize,
+                di.volume_info.block_size as usize,
             )?;
 
-        if crucible_max_io < ri.total_blocks {
+        if crucible_max_io < total_blocks {
             crucible_max_io
         } else {
             println!(
                 "Volume total blocks {} smaller than max IO blocks {}",
-                ri.total_blocks, crucible_max_io,
+                total_blocks, crucible_max_io,
             );
-            ri.total_blocks
+            total_blocks
         }
     };
 
@@ -4107,22 +3823,26 @@ async fn biggest_io_workload(
         biggest_io_in_blocks
     );
     let mut block_index = 0;
-    while block_index < ri.total_blocks {
+    while block_index < total_blocks {
         let offset = BlockIndex(block_index as u64);
 
         let next_io_blocks =
-            if block_index + biggest_io_in_blocks > ri.total_blocks {
-                ri.total_blocks - block_index
+            if block_index + biggest_io_in_blocks > total_blocks {
+                total_blocks - block_index
             } else {
                 biggest_io_in_blocks
             };
 
         for i in 0..next_io_blocks {
-            ri.write_log.update_wc(block_index + i);
+            di.write_log.update_wc(block_index + i);
         }
 
-        let data =
-            fill_vec(block_index, next_io_blocks, &ri.write_log, ri.block_size);
+        let data = fill_vec(
+            block_index,
+            next_io_blocks,
+            &di.write_log,
+            di.volume_info.block_size,
+        );
 
         println!(
             "IO at block:{}  size in blocks:{}",
@@ -4143,28 +3863,27 @@ async fn biggest_io_workload(
  *
  * TODO: Make this test use the global write count, but remember, async.
  */
-async fn dep_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
-    let final_offset = ri.total_size - ri.block_size;
+async fn dep_workload(volume: &Volume, di: &mut DiskInfo) -> Result<()> {
+    let total_size = di.volume_info.total_size();
+    let final_offset = total_size - di.volume_info.block_size;
 
     let mut my_offset: u64 = 0;
     for my_count in 1..150 {
         let mut write_futures = FuturesOrdered::new();
         let mut read_futures = FuturesOrdered::new();
-
+        let block_size = di.volume_info.block_size;
         /*
          * Generate some number of operations
          */
         for ioc in 0..200 {
-            my_offset = (my_offset + ri.block_size) % final_offset;
+            my_offset = (my_offset + block_size) % final_offset;
             if random() {
                 /*
                  * Generate a write buffer with a locally unique value.
                  */
-                let mut data = BytesMut::with_capacity(ri.block_size as usize);
+                let mut data = BytesMut::with_capacity(block_size as usize);
                 let seed = ((my_offset % 254) + 1) as u8;
-                data.extend(
-                    std::iter::repeat(seed).take(ri.block_size as usize),
-                );
+                data.extend(std::iter::repeat(seed).take(block_size as usize));
 
                 println!(
                     "Loop:{} send write {} @ offset:{}  len:{}",
@@ -4177,7 +3896,7 @@ async fn dep_workload(volume: &Volume, ri: &mut RegionInfo) -> Result<()> {
                 write_futures.push_back(future);
             } else {
                 let mut data =
-                    crucible::Buffer::repeat(0, 1, ri.block_size as usize);
+                    crucible::Buffer::repeat(0, 1, block_size as usize);
 
                 println!(
                     "Loop:{} send read  {} @ offset:{} len:{}",
@@ -4962,88 +4681,5 @@ mod test {
             validate_vec(vec, 0, &mut write_log, bs, false),
             ValidateStatus::Good
         );
-    }
-
-    #[test]
-    fn test_95_small() {
-        // Test of one element
-        let fv = vec![10.0];
-        let pp = percentile(&fv, 95).unwrap();
-        assert_eq!(pp, 10.0);
-    }
-
-    #[test]
-    fn test_perc_bad_perc() {
-        // Should fail on a bad percentile value
-        let fv = vec![10.0];
-        let res = percentile(&fv, 0);
-        assert!(res.is_err());
-    }
-
-    #[test]
-    fn test_perc_bad_big_perc() {
-        // Should fail on a bad percentile value
-        let fv = vec![10.0];
-        let res = percentile(&fv, 100);
-        assert!(res.is_err());
-    }
-
-    #[test]
-    fn test_95_2() {
-        // Determine the 95th percentile value with 2 elements
-        // We must round up.
-        let fv = vec![10.0, 20.0];
-        let pp = percentile(&fv, 95).unwrap();
-        assert_eq!(pp, 20.0);
-    }
-
-    #[test]
-    fn test_95_10() {
-        // Determine the 95th percentile value with 10 elements
-        // We must round up.
-        let fv = vec![1.1, 2.2, 3.3, 4.4, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
-
-        let pp = percentile(&fv, 95).unwrap();
-        assert_eq!(pp, 10.0);
-    }
-    #[test]
-    fn test_95_20() {
-        // Determine the 95th percentile value with 20 elements
-        // There is a whole number position for this array, so we must
-        // return the average of two elements.
-        let fv = vec![
-            1.1, 2.2, 3.3, 4.4, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
-            13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0,
-        ];
-
-        let pp = percentile(&fv, 95).unwrap();
-        assert_eq!(pp, 19.5);
-    }
-    #[test]
-    fn test_95_21() {
-        // Determine the 95th percentile value with 21 elements
-        let fv = vec![
-            1.1, 2.2, 3.3, 4.4, 5.0, 6.0, 7.0, 8.0, 9.0, 8.0, 10.0, 11.0, 12.0,
-            13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0,
-        ];
-
-        let pp = percentile(&fv, 95).unwrap();
-        assert_eq!(pp, 19.0);
-    }
-    #[test]
-    fn test_perc_mixed() {
-        // Determine the 95th, 90th, and 20th percentile values
-        let fv = vec![
-            43.0, 54.0, 56.0, 61.0, 62.0, 66.0, 68.0, 69.0, 69.0, 70.0, 71.0,
-            72.0, 77.0, 78.0, 79.0, 85.0, 87.0, 88.0, 89.0, 93.0, 95.0, 96.0,
-            98.0, 99.0, 99.4,
-        ];
-
-        let pp = percentile(&fv, 95).unwrap();
-        assert_eq!(pp, 99.0);
-        let pp = percentile(&fv, 90).unwrap();
-        assert_eq!(pp, 98.0);
-        let pp = percentile(&fv, 20).unwrap();
-        assert_eq!(pp, 64.0);
     }
 }

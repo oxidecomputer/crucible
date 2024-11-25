@@ -34,13 +34,14 @@ pub enum CliMessage {
     Export,
     // Run the fill test.
     Fill(bool),
+    // Run the sparse fill test.
+    FillSparse,
     Flush,
     Generic(usize, bool),
-    Info(u64, u64, u64),
+    Info(VolumeInfo),
     InfoPlease,
     IsActive,
     MyUuid(Uuid),
-    Perf(usize, usize, usize, usize, usize),
     Read(usize, usize),
     RandRead,
     ReadResponse(usize, Result<Bytes, CrucibleError>),
@@ -219,7 +220,11 @@ mod tests {
 
     #[test]
     fn rt_info() -> Result<()> {
-        let input = CliMessage::Info(1, 2, 99);
+        let vi = VolumeInfo {
+            block_size: 512,
+            volumes: Vec::new(),
+        };
+        let input = CliMessage::Info(vi);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }
@@ -306,13 +311,6 @@ mod tests {
     #[test]
     fn rt_generic() -> Result<()> {
         let input = CliMessage::Generic(2, true);
-        assert_eq!(input, round_trip(&input)?);
-        Ok(())
-    }
-
-    #[test]
-    fn rt_perf() -> Result<()> {
-        let input = CliMessage::Perf(2, 3, 4, 2, 2);
         assert_eq!(input, round_trip(&input)?);
         Ok(())
     }

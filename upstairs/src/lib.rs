@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 pub use crucible_client_types::{
-    CrucibleOpts, ReplaceResult, VolumeConstructionRequest,
+    CrucibleOpts, RegionExtentInfo, ReplaceResult, VolumeConstructionRequest,
 };
 pub use crucible_common::*;
 pub use crucible_protocol::*;
@@ -47,9 +47,6 @@ pub use in_memory::InMemoryBlockIO;
 
 pub mod block_io;
 pub use block_io::{FileBlockIO, ReqwestBlockIO};
-
-pub(crate) mod backpressure;
-use backpressure::BackpressureGuard;
 
 pub mod block_req;
 pub(crate) use block_req::{BlockOpWaiter, BlockRes};
@@ -86,17 +83,32 @@ mod downstairs;
 mod upstairs;
 use upstairs::{UpCounters, UpstairsAction};
 
+mod io_limits;
+use io_limits::IOLimitGuard;
+
 /// Max number of write bytes between the upstairs and an offline downstairs
 ///
-/// If we exceed this value, the upstairs will give
-/// up and mark the offline downstairs as faulted.
-const IO_OUTSTANDING_MAX_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
+/// If we exceed this value, the upstairs will give up and mark the offline
+/// downstairs as faulted.
+const IO_OUTSTANDING_MAX_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
 
 /// Max number of outstanding IOs between the upstairs and an offline downstairs
 ///
 /// If we exceed this value, the upstairs will give up and mark that offline
 /// downstairs as faulted.
-pub const IO_OUTSTANDING_MAX_JOBS: usize = 10000;
+pub const IO_OUTSTANDING_MAX_JOBS: usize = 1000;
+
+/// Maximum of bytes to cache from complete (but un-flushed) IO
+///
+/// Caching complete jobs allows us to replay them if a Downstairs goes offline
+/// them comes back.
+const IO_CACHED_MAX_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
+
+/// Maximum of jobs to cache from complete (but un-flushed) IO
+///
+/// Caching complete jobs allows us to replay them if a Downstairs goes offline
+/// them comes back.
+const IO_CACHED_MAX_JOBS: u64 = 10000;
 
 /// The BlockIO trait behaves like a physical NVMe disk (or a virtio virtual
 /// disk): there is no contract about what order operations that are submitted
@@ -109,8 +121,9 @@ pub trait BlockIO: Sync {
     async fn deactivate(&self) -> Result<(), CrucibleError>;
 
     async fn query_is_active(&self) -> Result<bool, CrucibleError>;
-
-    async fn query_extent_size(&self) -> Result<Block, CrucibleError>;
+    async fn query_extent_info(
+        &self,
+    ) -> Result<Option<RegionExtentInfo>, CrucibleError>;
     async fn query_work_queue(&self) -> Result<WQCounts, CrucibleError>;
 
     // Total bytes of Volume
@@ -362,11 +375,6 @@ mod cdt {
     fn ds__repair__done(_: u64, _: u8) {}
     fn ds__noop__done(_: u64, _: u8) {}
     fn ds__reopen__done(_: u64, _: u8) {}
-    fn up__to__ds__read__done(_: u64) {}
-    fn up__to__ds__write__done(_: u64) {}
-    fn up__to__ds__write__unwritten__done(_: u64) {}
-    fn up__to__ds__flush__done(_: u64) {}
-    fn up__to__ds__barrier__done(_: u64) {}
     fn gw__read__done(_: u64) {}
     fn gw__write__done(_: u64) {}
     fn gw__write__unwritten__done(_: u64) {}
@@ -435,6 +443,11 @@ impl<T> ClientData<T> {
         ])
     }
 
+    /// Builds a new `ClientData` by applying a function to each item
+    pub fn map<U, F: FnMut(T) -> U>(self, f: F) -> ClientData<U> {
+        ClientData(self.0.map(f))
+    }
+
     #[cfg(test)]
     pub fn get(&self) -> &[T; 3] {
         &self.0
@@ -493,12 +506,6 @@ pub struct WorkCounts {
     error: u64,   // This IO had an error.
     skipped: u64, // Skipped
     done: u64,    // This IO has completed
-}
-
-impl WorkCounts {
-    fn completed_ok(&self) -> u64 {
-        self.done
-    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -707,27 +714,27 @@ pub(crate) struct RawReadResponse {
  * deactivated.
  *
  *                       │
- *                       ▼
- *                       │
- *                  ┌────┴──────┐
- *   ┌───────┐      │           ╞═════◄══════════════════╗
- *   │  Bad  │      │    New    ╞═════◄════════════════╗ ║
- *   │Version├──◄───┤           ├─────◄──────┐         ║ ║
- *   └───────┘      └────┬───┬──┘            │         ║ ║
- *                       ▼   └───►───┐       │         ║ ║
- *                  ┌────┴──────┐    │       │         ║ ║
- *                  │   Wait    │    │       │         ║ ║
- *                  │  Active   ├─►┐ │       │         ║ ║
- *                  └────┬──────┘  │ │  ┌────┴───────┐ ║ ║
- *   ┌───────┐      ┌────┴──────┐  │ └──┤            │ ║ ║
- *   │  Bad  │      │   Wait    │  └────┤Disconnected│ ║ ║
- *   │Region ├──◄───┤  Quorum   ├──►────┤            │ ║ ║
- *   └───────┘      └────┬──────┘       └────┬───────┘ ║ ║
- *               ........▼..........         │         ║ ║
- *  ┌─────────┐  :  ┌────┴──────┐  :         ▲         ║ ║
- *  │ Failed  │  :  │ Reconcile │  :         │       ╔═╝ ║
- *  │Reconcile├─◄───┤           ├──►─────────┘       ║   ║
- *  └─────────┘  :  └────┬──────┘  :                 ║   ║
+ *                ┌──┐   ▼
+ *             bad│  │   │
+ *         version│ ┌▼───┴──────┐
+ *                └─┤           ╞═════◄══════════════════╗
+ *    ┌─────────────►    New    ╞═════◄════════════════╗ ║
+ *    │       ┌─────►           ├─────◄──────┐         ║ ║
+ *    │       │     └────┬───┬──┘            │         ║ ║
+ *    │       │          ▼   └───►───┐ other │         ║ ║
+ *    │    bad│     ┌────┴──────┐    │ failures        ║ ║
+ *    │ region│     │   Wait    │    │       ▲         ║ ║
+ *    │       │     │  Active   ├─►┐ │       │         ║ ║
+ *    │       │     └────┬──────┘  │ │       │         ║ ║
+ *    │       │     ┌────┴──────┐  │ └───────┤         ║ ║
+ *    │       │     │   Wait    │  └─────────┤         ║ ║
+ *    │       └─────┤  Quorum   ├──►─────────┤         ║ ║
+ *    │             └────┬──────┘            │         ║ ║
+ *    │          ........▼..........         │         ║ ║
+ *    │failed    :  ┌────┴──────┐  :         │         ║ ║
+ *    │reconcile :  │ Reconcile │  :         │       ╔═╝ ║
+ *    └─────────────┤           ├──►─────────┘       ║   ║
+ *               :  └────┬──────┘  :                 ║   ║
  *  Not Active   :       │         :                 ▲   ▲  Not Active
  *  .............. . . . │. . . . ...................║...║............
  *  Active               ▼                           ║   ║  Active
@@ -778,10 +785,6 @@ pub enum DsState {
      */
     New,
     /*
-     * Incompatible software version reported.
-     */
-    BadVersion,
-    /*
      * Waiting for activation signal.
      */
     WaitActive,
@@ -790,23 +793,9 @@ pub enum DsState {
      */
     WaitQuorum,
     /*
-     * Incompatible region format reported.
-     */
-    BadRegion,
-    /*
-     * We were connected, but did not transition all the way to
-     * active before the connection went away. Arriving here means the
-     * downstairs has to go back through the whole negotiation process.
-     */
-    Disconnected,
-    /*
      * Initial startup, downstairs are repairing from each other.
      */
     Reconcile,
-    /*
-     * Failed when attempting to make consistent.
-     */
-    FailedReconcile,
     /*
      * Ready for and/or currently receiving IO
      */
@@ -826,10 +815,6 @@ pub enum DsState {
      * This downstairs is undergoing LiveRepair
      */
     LiveRepair,
-    /*
-     * This downstairs is being migrated to a new location
-     */
-    Migrating,
     /*
      * This downstairs was active, but is now no longer connected.
      * We may have work for it in memory, so a replay is possible
@@ -863,26 +848,14 @@ impl std::fmt::Display for DsState {
             DsState::New => {
                 write!(f, "New")
             }
-            DsState::BadVersion => {
-                write!(f, "BadVersion")
-            }
             DsState::WaitActive => {
                 write!(f, "WaitActive")
             }
             DsState::WaitQuorum => {
                 write!(f, "WaitQuorum")
             }
-            DsState::BadRegion => {
-                write!(f, "BadRegion")
-            }
-            DsState::Disconnected => {
-                write!(f, "Disconnected")
-            }
             DsState::Reconcile => {
                 write!(f, "Reconcile")
-            }
-            DsState::FailedReconcile => {
-                write!(f, "FailedReconcile")
             }
             DsState::Active => {
                 write!(f, "Active")
@@ -895,9 +868,6 @@ impl std::fmt::Display for DsState {
             }
             DsState::LiveRepair => {
                 write!(f, "LiveRepair")
-            }
-            DsState::Migrating => {
-                write!(f, "Migrating")
             }
             DsState::Offline => {
                 write!(f, "Offline")
@@ -916,17 +886,6 @@ impl std::fmt::Display for DsState {
             }
         }
     }
-}
-
-/// Results of validating a single block
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
-pub(crate) enum Validation {
-    /// The block has no hash / context and is empty
-    Empty,
-    /// For an unencrypted block, the result is the hash
-    Unencrypted(u64),
-    /// For an encrypted block, the result is the tag + nonce
-    Encrypted(crucible_protocol::EncryptionContext),
 }
 
 /*
@@ -954,18 +913,14 @@ struct DownstairsIO {
      */
     replay: bool,
 
-    /*
-     * If the operation is a Read, this holds the resulting buffer
-     * The validation vec holds the validation results for the read
-     */
-    data: Option<RawReadResponse>,
-    read_validations: Vec<Validation>,
-
-    /// Handle for this job's contribution to guest backpressure
+    /// If the operation is a Read, this holds the resulting buffer and hashes
     ///
-    /// Each of these guard handles will automatically decrement the
-    /// backpressure count for their respective Downstairs when dropped.
-    backpressure_guard: ClientMap<BackpressureGuard>,
+    /// The buffer _may_ be removed during the transfer to the Guest, to reduce
+    /// `memcpy` overhead.  If this occurs, the hashes remain present for
+    /// consistency checking with subsequent replies.
+    data: Option<RawReadResponse>,
+
+    io_limits: ClientMap<io_limits::ClientIOLimitGuard>,
 }
 
 impl DownstairsIO {
@@ -1322,6 +1277,11 @@ impl IOop {
                     // the downstairs to act based on that.
                     true
                 }
+                IOop::Barrier { .. } => {
+                    // The Barrier IOop doesn't actually touch any extents; it's
+                    // purely for dependency management.
+                    true
+                }
                 _ => {
                     panic!("Unsupported IO check {:?}", self);
                 }
@@ -1342,16 +1302,6 @@ impl IOop {
             IOop::Read {
                 count, block_size, ..
             } => *block_size * *count,
-            _ => 0,
-        }
-    }
-
-    /// Returns the number of bytes written
-    fn write_bytes(&self) -> u64 {
-        match &self {
-            IOop::Write { data, .. } | IOop::WriteUnwritten { data, .. } => {
-                data.len() as u64
-            }
             _ => 0,
         }
     }
@@ -1532,20 +1482,24 @@ pub(crate) enum BlockOp {
         offset: BlockIndex,
         data: Buffer,
         done: BlockRes<Buffer, (Buffer, CrucibleError)>,
+        io_guard: IOLimitGuard,
     },
     Write {
         offset: BlockIndex,
         data: BytesMut,
         done: BlockRes,
+        io_guard: IOLimitGuard,
     },
     WriteUnwritten {
         offset: BlockIndex,
         data: BytesMut,
         done: BlockRes,
+        io_guard: IOLimitGuard,
     },
     Flush {
         snapshot_details: Option<SnapshotDetails>,
         done: BlockRes,
+        io_guard: IOLimitGuard,
     },
     GoActive {
         done: BlockRes,
@@ -1578,8 +1532,8 @@ pub(crate) enum BlockOp {
         done: BlockRes<Uuid>,
     },
     // Begin testing options.
-    QueryExtentSize {
-        done: BlockRes<Block>,
+    QueryExtentInfo {
+        done: BlockRes<RegionExtentInfo>,
     },
     QueryWorkQueue {
         done: BlockRes<WQCounts>,
@@ -1601,86 +1555,6 @@ pub(crate) enum BlockOp {
     },
 }
 
-macro_rules! ceiling_div {
-    ($a: expr, $b: expr) => {
-        ($a + ($b - 1)) / $b
-    };
-}
-
-#[allow(unused)] // pending IOP limits being reimplemented
-impl BlockOp {
-    /*
-     * Compute number of IO operations represented by this BlockOp, rounding
-     * up. For example, if IOP size is 16k:
-     *
-     *   A read of 8k is 1 IOP
-     *   A write of 16k is 1 IOP
-     *   A write of 16001b is 2 IOPs
-     *   A flush isn't an IOP
-     *
-     * We are not counting WriteUnwritten ops as IO toward the users IO
-     * limits.  Though, if too many volumes are created with scrubbers
-     * running, we may have to revisit that.
-     */
-    pub fn iops(&self, iop_sz: usize) -> Option<usize> {
-        match self {
-            BlockOp::Read { data, .. } => {
-                Some(ceiling_div!(data.len(), iop_sz))
-            }
-            BlockOp::Write { data, .. } => {
-                Some(ceiling_div!(data.len(), iop_sz))
-            }
-            _ => None,
-        }
-    }
-
-    pub fn consumes_iops(&self) -> bool {
-        matches!(self, BlockOp::Read { .. } | BlockOp::Write { .. })
-    }
-
-    // Return the total size of this BlockOp
-    pub fn sz(&self) -> Option<usize> {
-        match self {
-            BlockOp::Read { data, .. } => Some(data.len()),
-            BlockOp::Write { data, .. } => Some(data.len()),
-            _ => None,
-        }
-    }
-}
-
-#[tokio::test]
-async fn test_return_iops() {
-    const IOP_SZ: usize = 16000;
-
-    let op = BlockOp::Read {
-        offset: BlockIndex(1),
-        data: Buffer::new(1, 512),
-        done: BlockOpWaiter::pair().1,
-    };
-    assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
-
-    let op = BlockOp::Read {
-        offset: BlockIndex(1),
-        data: Buffer::new(8, 512), // 4096 bytes
-        done: BlockOpWaiter::pair().1,
-    };
-    assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
-
-    let op = BlockOp::Read {
-        offset: BlockIndex(1),
-        data: Buffer::new(31, 512), // 15872 bytes < 16000
-        done: BlockOpWaiter::pair().1,
-    };
-    assert_eq!(op.iops(IOP_SZ).unwrap(), 1);
-
-    let op = BlockOp::Read {
-        offset: BlockIndex(1),
-        data: Buffer::new(32, 512), // 16384 bytes > 16000
-        done: BlockOpWaiter::pair().1,
-    };
-    assert_eq!(op.iops(IOP_SZ).unwrap(), 2);
-}
-
 /**
  * Stat counters struct used by DTrace
  */
@@ -1694,8 +1568,6 @@ pub struct Arg {
     pub up_counters: UpCounters,
     /// Next JobID
     pub next_job_id: JobId,
-    /// Backpressure value
-    pub up_backpressure: u64,
     /// Jobs on the downstairs work queue.
     pub ds_count: u32,
     /// Number of write bytes in flight
@@ -1774,7 +1646,7 @@ pub fn up_main(
     };
 
     #[cfg(test)]
-    let disable_backpressure = guest.is_queue_backpressure_disabled();
+    let disable_backpressure = guest.is_backpressure_disabled();
 
     /*
      * Build the Upstairs struct that we use to share data between
@@ -1785,7 +1657,7 @@ pub fn up_main(
 
     #[cfg(test)]
     if disable_backpressure {
-        up.disable_client_backpressure();
+        up.downstairs.disable_client_backpressure();
     }
 
     if let Some(pr) = producer_registry {

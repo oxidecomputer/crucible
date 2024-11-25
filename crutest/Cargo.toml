@@ -15,7 +15,6 @@ crucible-client-types.workspace = true
 crucible-common.workspace = true
 crucible-protocol.workspace = true
 crucible.workspace = true
-csv.workspace = true
 dsc-client.workspace = true
 human_bytes.workspace = true
 futures-core.workspace = true

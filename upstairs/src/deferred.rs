@@ -3,13 +3,12 @@
 use std::sync::Arc;
 
 use crate::{
-    backpressure::BackpressureGuard, client::ConnectionId,
-    upstairs::UpstairsConfig, BlockContext, BlockOp, ClientData, ClientId,
-    ImpactedBlocks, Message, RawWrite, Validation,
+    client::ConnectionId, io_limits::IOLimitGuard, upstairs::UpstairsConfig,
+    BlockContext, BlockOp, ClientId, ImpactedBlocks, Message, RawWrite,
 };
 use bytes::BytesMut;
 use crucible_common::{integrity_hash, CrucibleError, RegionDefinition};
-use crucible_protocol::ReadBlockContext;
+use crucible_protocol::{ReadBlockContext, ReadResponseHeader};
 use futures::{
     future::{ready, Either, Ready},
     stream::FuturesOrdered,
@@ -114,7 +113,7 @@ pub(crate) struct DeferredWrite {
     pub data: BytesMut,
     pub is_write_unwritten: bool,
     pub cfg: Arc<UpstairsConfig>,
-    pub guard: ClientData<BackpressureGuard>,
+    pub io_guard: IOLimitGuard,
 }
 
 /// Result of a deferred `BlockOp`
@@ -135,7 +134,7 @@ pub(crate) struct EncryptedWrite {
     pub data: RawWrite,
     pub impacted_blocks: ImpactedBlocks,
     pub is_write_unwritten: bool,
-    pub guard: ClientData<BackpressureGuard>,
+    pub io_guard: IOLimitGuard,
 }
 
 impl DeferredWrite {
@@ -183,7 +182,7 @@ impl DeferredWrite {
             data,
             impacted_blocks: self.impacted_blocks,
             is_write_unwritten: self.is_write_unwritten,
-            guard: self.guard,
+            io_guard: self.io_guard,
         }
     }
 }
@@ -192,10 +191,12 @@ impl DeferredWrite {
 
 #[derive(Debug)]
 pub(crate) struct DeferredMessage {
+    /// Message received from the client
+    ///
+    /// If the deferred message was a read, then the data and context blocks in
+    /// this [Message::ReadResponse] has been validated (and decrypted if
+    /// necessary).
     pub message: Message,
-
-    /// If this was a `ReadResponse`, then the validation result is stored here
-    pub hashes: Vec<Validation>,
 
     pub client_id: ClientId,
 
@@ -205,8 +206,8 @@ pub(crate) struct DeferredMessage {
 
 /// Standalone data structure which can perform decryption
 pub(crate) struct DeferredRead {
-    /// Message, which must be a `ReadResponse`
-    pub message: Message,
+    pub header: ReadResponseHeader,
+    pub data: BytesMut,
 
     /// Unique ID for this particular connection to the downstairs
     ///
@@ -225,20 +226,16 @@ impl DeferredRead {
     /// Consume the `DeferredRead` and perform decryption
     ///
     /// If decryption fails, then the resulting `Message` has an error in the
-    /// `responses` field, and `hashes` is empty.
+    /// `responses` field.
     pub fn run(mut self) -> DeferredMessage {
         use crate::client::{
             validate_encrypted_read_response,
             validate_unencrypted_read_response,
         };
-        let Message::ReadResponse { header, data } = &mut self.message else {
-            panic!("invalid DeferredRead");
-        };
-        let mut hashes = vec![];
 
-        if let Ok(rs) = header.blocks.as_mut() {
-            assert_eq!(data.len() % rs.len(), 0);
-            let block_size = data.len() / rs.len();
+        if let Ok(rs) = self.header.blocks.as_mut() {
+            assert_eq!(self.data.len() % rs.len(), 0);
+            let block_size = self.data.len() / rs.len();
             for (i, r) in rs.iter_mut().enumerate() {
                 let v = if let Some(ctx) = &self.cfg.encryption_context {
                     match r {
@@ -256,7 +253,7 @@ impl DeferredRead {
                     .and_then(|r| {
                         validate_encrypted_read_response(
                             r,
-                            &mut data[i * block_size..][..block_size],
+                            &mut self.data[i * block_size..][..block_size],
                             ctx,
                             &self.log,
                         )
@@ -279,28 +276,27 @@ impl DeferredRead {
                     .and_then(|r| {
                         validate_unencrypted_read_response(
                             r,
-                            &mut data[i * block_size..][..block_size],
+                            &mut self.data[i * block_size..][..block_size],
                             &self.log,
                         )
                     })
                 };
-                match v {
-                    Ok(hash) => hashes.push(hash),
-                    Err(e) => {
-                        error!(self.log, "decryption failure: {e:?}");
-                        header.blocks = Err(e);
-                        hashes.clear();
-                        break;
-                    }
+                if let Err(e) = v {
+                    error!(self.log, "decryption failure: {e:?}");
+                    self.header.blocks = Err(e);
+                    break;
                 }
             }
         }
 
+        let message = Message::ReadResponse {
+            header: self.header,
+            data: self.data,
+        };
         DeferredMessage {
             client_id: self.client_id,
-            message: self.message,
+            message,
             connection_id: self.connection_id,
-            hashes,
         }
     }
 }

@@ -7,14 +7,17 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::client::{CLIENT_RECONNECT_DELAY, CLIENT_TIMEOUT_SECS};
+use crate::client::{CLIENT_RECONNECT_DELAY, CLIENT_TIMEOUT};
 use crate::guest::Guest;
 use crate::up_main;
 use crate::BlockIO;
 use crate::Buffer;
 use crate::CrucibleError;
 use crate::DsState;
-use crate::{IO_OUTSTANDING_MAX_BYTES, IO_OUTSTANDING_MAX_JOBS};
+use crate::{
+    IO_CACHED_MAX_BYTES, IO_CACHED_MAX_JOBS, IO_OUTSTANDING_MAX_BYTES,
+    IO_OUTSTANDING_MAX_JOBS,
+};
 use crucible_client_types::CrucibleOpts;
 use crucible_common::Block;
 use crucible_common::BlockIndex;
@@ -47,6 +50,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tokio_util::codec::FramedRead;
 use tokio_util::codec::FramedWrite;
 use uuid::Uuid;
@@ -263,23 +267,26 @@ impl DownstairsHandle {
     /// # Panics
     /// If a non-flush message arrives
     pub async fn ack_flush(&mut self) -> u64 {
-        let Message::Flush {
-            job_id,
-            flush_number,
-            upstairs_id,
-            ..
-        } = self.recv().await.unwrap()
-        else {
-            panic!("saw non flush!");
-        };
-        self.send(Message::FlushAck {
-            upstairs_id,
-            session_id: self.upstairs_session_id.unwrap(),
-            job_id,
-            result: Ok(()),
-        })
-        .unwrap();
-        flush_number
+        match self.recv().await.unwrap() {
+            Message::Flush {
+                job_id,
+                flush_number,
+                upstairs_id,
+                ..
+            } => {
+                self.send(Message::FlushAck {
+                    upstairs_id,
+                    session_id: self.upstairs_session_id.unwrap(),
+                    job_id,
+                    result: Ok(()),
+                })
+                .unwrap();
+                flush_number
+            }
+            m => {
+                panic!("saw non flush {m:?}");
+            }
+        }
     }
 
     /// Awaits a `Message::Write { .. }` and sends a `WriteAck`
@@ -289,17 +296,45 @@ impl DownstairsHandle {
     /// # Panics
     /// If a non-write message arrives
     pub async fn ack_write(&mut self) -> JobId {
-        let Message::Write { header, .. } = self.recv().await.unwrap() else {
-            panic!("saw non write!");
-        };
-        self.send(Message::WriteAck {
-            upstairs_id: header.upstairs_id,
-            session_id: self.upstairs_session_id.unwrap(),
-            job_id: header.job_id,
-            result: Ok(()),
-        })
-        .unwrap();
-        header.job_id
+        match self.recv().await.unwrap() {
+            Message::Write { header, .. } => {
+                self.send(Message::WriteAck {
+                    upstairs_id: header.upstairs_id,
+                    session_id: self.upstairs_session_id.unwrap(),
+                    job_id: header.job_id,
+                    result: Ok(()),
+                })
+                .unwrap();
+                header.job_id
+            }
+            m => panic!("saw non write: {m:?}"),
+        }
+    }
+
+    /// Awaits a `Message::Barrier { .. }` and sends a `BarrierAck`
+    ///
+    /// Returns the job ID for further checks.
+    ///
+    /// # Panics
+    /// If a non-write message arrives
+    pub async fn ack_barrier(&mut self) -> JobId {
+        match self.recv().await.unwrap() {
+            Message::Barrier {
+                upstairs_id,
+                job_id,
+                ..
+            } => {
+                self.send(Message::BarrierAck {
+                    upstairs_id,
+                    session_id: self.upstairs_session_id.unwrap(),
+                    job_id,
+                    result: Ok(()),
+                })
+                .unwrap();
+                job_id
+            }
+            m => panic!("saw non barrier: {m:?}"),
+        }
     }
 
     /// Awaits a `Message::Read` and sends a blank `ReadResponse`
@@ -309,26 +344,27 @@ impl DownstairsHandle {
     /// # Panics
     /// If a non-read message arrives
     pub async fn ack_read(&mut self) -> JobId {
-        let Message::ReadRequest {
-            job_id,
-            upstairs_id,
-            ..
-        } = self.recv().await.unwrap()
-        else {
-            panic!("saw non write!");
-        };
-        let (block, data) = make_blank_read_response();
-        self.send(Message::ReadResponse {
-            header: ReadResponseHeader {
-                upstairs_id,
-                session_id: self.upstairs_session_id.unwrap(),
+        match self.recv().await.unwrap() {
+            Message::ReadRequest {
                 job_id,
-                blocks: Ok(vec![block]),
-            },
-            data: data.clone(),
-        })
-        .unwrap();
-        job_id
+                upstairs_id,
+                ..
+            } => {
+                let (block, data) = make_blank_read_response();
+                self.send(Message::ReadResponse {
+                    header: ReadResponseHeader {
+                        upstairs_id,
+                        session_id: self.upstairs_session_id.unwrap(),
+                        job_id,
+                        blocks: Ok(vec![block]),
+                    },
+                    data: data.clone(),
+                })
+                .unwrap();
+                job_id
+            }
+            m => panic!("saw non read {m:?}"),
+        }
     }
 }
 
@@ -470,14 +506,31 @@ pub struct TestHarness {
 
 /// Number of extents in `TestHarness::default_config`
 const DEFAULT_EXTENT_COUNT: u32 = 25;
+const DEFAULT_BLOCK_COUNT: u64 = 10;
+
+struct TestOpts {
+    flush_timeout: f32,
+    read_only: bool,
+    disable_backpressure: bool,
+}
 
 impl TestHarness {
     pub async fn new() -> TestHarness {
-        Self::new_(false).await
+        Self::new_with_opts(TestOpts {
+            flush_timeout: 86400.0,
+            read_only: false,
+            disable_backpressure: true,
+        })
+        .await
     }
 
     pub async fn new_ro() -> TestHarness {
-        Self::new_(true).await
+        Self::new_with_opts(TestOpts {
+            flush_timeout: 86400.0,
+            read_only: true,
+            disable_backpressure: true,
+        })
+        .await
     }
 
     pub fn ds1(&mut self) -> &mut DownstairsHandle {
@@ -493,7 +546,7 @@ impl TestHarness {
             // IO_OUTSTANDING_MAX_BYTES in less than IO_OUTSTANDING_MAX_JOBS,
             // i.e. letting us test both byte and job fault conditions.
             extent_count: DEFAULT_EXTENT_COUNT,
-            extent_size: Block::new_512(10),
+            extent_size: Block::new_512(DEFAULT_BLOCK_COUNT),
 
             gen_numbers: vec![0u64; DEFAULT_EXTENT_COUNT as usize],
             flush_numbers: vec![0u64; DEFAULT_EXTENT_COUNT as usize],
@@ -501,10 +554,10 @@ impl TestHarness {
         }
     }
 
-    async fn new_(read_only: bool) -> TestHarness {
+    async fn new_with_opts(opts: TestOpts) -> TestHarness {
         let log = csl();
 
-        let cfg = Self::default_config(read_only);
+        let cfg = Self::default_config(opts.read_only);
 
         let ds1 = cfg.clone().start(log.new(o!("downstairs" => 1))).await;
         let ds2 = cfg.clone().start(log.new(o!("downstairs" => 2))).await;
@@ -513,15 +566,16 @@ impl TestHarness {
         // Configure our guest without backpressure, to speed up tests which
         // require triggering a timeout
         let (g, mut io) = Guest::new(Some(log.clone()));
-        io.disable_queue_backpressure();
-        io.disable_byte_backpressure();
+        if opts.disable_backpressure {
+            io.disable_backpressure();
+        }
         let guest = Arc::new(g);
 
         let crucible_opts = CrucibleOpts {
             id: Uuid::new_v4(),
             target: vec![ds1.local_addr, ds2.local_addr, ds3.local_addr],
-            flush_timeout: Some(86400.0),
-            read_only,
+            flush_timeout: Some(opts.flush_timeout),
+            read_only: opts.read_only,
 
             ..Default::default()
         };
@@ -1445,11 +1499,12 @@ async fn test_byte_fault_condition() {
     // out.
     const WRITE_SIZE: usize = 105 * 1024; // 105 KiB
     let write_buf = BytesMut::from(vec![1; WRITE_SIZE].as_slice()); // 50 KiB
+    let barrier_point = IO_CACHED_MAX_BYTES as usize / write_buf.len();
     let num_jobs = IO_OUTSTANDING_MAX_BYTES as usize / write_buf.len() + 10;
     assert!(num_jobs < IO_OUTSTANDING_MAX_JOBS);
 
     // First, we'll send jobs until the timeout
-    for _ in 0..num_jobs {
+    for i in 0..num_jobs {
         // We must `spawn` here because `write` will wait for the response
         // to come back before returning
         let write_buf = write_buf.clone();
@@ -1457,11 +1512,11 @@ async fn test_byte_fault_condition() {
             guest.write(BlockIndex(0), write_buf).await.unwrap();
         });
 
-        // Before we're kicked out, assert we're seeing the read requests
-        assert!(matches!(
-            harness.ds1().recv().await.unwrap(),
-            Message::Write { .. },
-        ));
+        // Before we're kicked out, assert we're seeing the write requests
+        let m = harness.ds1().recv().await.unwrap();
+        if !matches!(m, Message::Write { .. },) {
+            panic!("got unexpected message {m:?}");
+        }
         harness.ds2.ack_write().await;
         harness.ds3.ack_write().await;
 
@@ -1473,16 +1528,27 @@ async fn test_byte_fault_condition() {
         assert_eq!(ds[ClientId::new(0)], DsState::Active);
         assert_eq!(ds[ClientId::new(1)], DsState::Active);
         assert_eq!(ds[ClientId::new(2)], DsState::Active);
+
+        // Once one of the Downstairs has cached more that a certain amount of
+        // bytes, it will automatically send a Barrier operation.
+        if i == barrier_point {
+            let m = harness.ds1().recv().await.unwrap();
+            if !matches!(m, Message::Barrier { .. }) {
+                panic!("expected Barrier, got message {m:?}");
+            }
+            harness.ds2.ack_barrier().await;
+            harness.ds3.ack_barrier().await;
+        }
     }
 
     // Sleep until we're confident that the Downstairs is kicked out
-    let sleep_time = CLIENT_TIMEOUT_SECS + 5.0;
+    let sleep_time = CLIENT_TIMEOUT.timeout() + Duration::from_secs(5);
     info!(
         harness.log,
-        "waiting {sleep_time} secs for Upstairs to kick out DS1"
+        "waiting {sleep_time:?} secs for Upstairs to kick out DS1"
     );
     tokio::select! {
-        _ = tokio::time::sleep(Duration::from_secs_f32(sleep_time)) => {
+        _ = tokio::time::sleep(sleep_time) => {
             // we're done!
         }
         // we don't listen to ds1 here, so we won't acknowledge any pings!
@@ -1516,8 +1582,8 @@ async fn test_byte_fault_condition_offline() {
     //   Active -> Offline (after 45 seconds).
     // - Then, after its job count hits IO_OUTSTANDING_MAX_BYTES, it will
     //   transition from Offline -> Faulted
-    const MARGIN_SECS: f32 = 2.0;
-    const SEND_JOBS_TIME: f32 = CLIENT_TIMEOUT_SECS - MARGIN_SECS;
+    const MARGIN: Duration = Duration::from_secs(2);
+    let send_jobs_time = CLIENT_TIMEOUT.timeout() - MARGIN;
     let start_time = tokio::time::Instant::now();
 
     // `num_jobs` sends enough bytes to hit the IO_OUTSTANDING_MAX_BYTES
@@ -1530,12 +1596,9 @@ async fn test_byte_fault_condition_offline() {
 
     // First, we'll send jobs until the timeout
     for i in 0..num_jobs / 2 {
-        // Delay so that we hit SEND_JOBS_TIME at the end of this loop
+        // Delay so that we hit `send_jobs_time` at the end of this loop
         tokio::time::sleep_until(
-            start_time
-                + Duration::from_secs_f32(
-                    SEND_JOBS_TIME * i as f32 / (num_jobs / 2) as f32,
-                ),
+            start_time + (send_jobs_time * i as u32) / (num_jobs as u32 / 2),
         )
         .await;
 
@@ -1566,7 +1629,7 @@ async fn test_byte_fault_condition_offline() {
 
     // Sleep until we're confident that the Downstairs is kicked out
     info!(harness.log, "waiting for Upstairs to kick out DS1");
-    tokio::time::sleep(Duration::from_secs_f32(2.0 * MARGIN_SECS)).await;
+    tokio::time::sleep(2 * MARGIN).await;
 
     // Check to make sure that happened
     let ds = harness.guest.downstairs_state().await.unwrap();
@@ -1607,6 +1670,13 @@ async fn test_byte_fault_condition_offline() {
             assert_eq!(ds[ClientId::new(1)], DsState::Active);
             assert_eq!(ds[ClientId::new(2)], DsState::Active);
         }
+
+        // If we've sent IO_CACHED_MAX_BYTES, then we expect the Upstairs to
+        // insert a Barrier (because it's trying to clean out finished jobs).
+        if IO_CACHED_MAX_BYTES as usize / WRITE_SIZE == i {
+            harness.ds2.ack_barrier().await;
+            harness.ds3.ack_barrier().await;
+        }
     }
 
     // Confirm that the system comes up after live-repair
@@ -1622,24 +1692,21 @@ async fn test_offline_can_deactivate() {
 
     // We're not replying to pings, so DS1 will eventually transition from
     // Active -> Offline (after CLIENT_TIMEOUT_SECS seconds).
-    const MARGIN_SECS: f32 = 5.0;
+    const MARGIN: Duration = Duration::from_secs(5);
 
     // Sleep until we're confident that the Downstairs is kicked out.  We do
     // a loop here so the other downstairs will have a chance to respond to
     // pings.
-    let sleep_time = 5.0;
-    let loop_stop_time = CLIENT_TIMEOUT_SECS + MARGIN_SECS;
-    let mut loop_time = 0.0;
+    let sleep_time = Duration::from_secs(5);
+    let loop_stop_time = Instant::now() + CLIENT_TIMEOUT.timeout() + MARGIN;
 
     // Sleep until we're confident that the Downstairs is kicked out
-    while loop_time < loop_stop_time {
-        tokio::time::sleep(Duration::from_secs_f32(sleep_time)).await;
+    while Instant::now() < loop_stop_time {
+        tokio::time::sleep(sleep_time).await;
         // Respond to pings, but drop anything else (we should not get
         // anything else)
         let _ = harness.ds2.try_recv();
         let _ = harness.ds3.try_recv();
-
-        loop_time += sleep_time;
     }
 
     // Check to make sure downstairs 1 is now offline.
@@ -1662,24 +1729,21 @@ async fn test_offline_with_io_can_deactivate() {
 
     // We're not replying to pings, so DS1 will eventually transition from
     // Active -> Offline (after CLIENT_TIMEOUT_SECS seconds).
-    const MARGIN_SECS: f32 = 5.0;
+    const MARGIN: Duration = Duration::from_secs(5);
 
     // Sleep until we're confident that the Downstairs is kicked out.  We do
     // a loop here so the other downstairs will have a chance to respond to
     // pings.
-    let sleep_time = 5.0;
-    let loop_stop_time = CLIENT_TIMEOUT_SECS + MARGIN_SECS;
-    let mut loop_time = 0.0;
+    let sleep_time = Duration::from_secs(5);
+    let loop_stop_time = Instant::now() + CLIENT_TIMEOUT.timeout() + MARGIN;
 
     // Sleep until we're confident that the Downstairs is kicked out
-    while loop_time < loop_stop_time {
-        tokio::time::sleep(Duration::from_secs_f32(sleep_time)).await;
+    while Instant::now() < loop_stop_time {
+        tokio::time::sleep(sleep_time).await;
         // Respond to pings, but drop anything else (we should not get
         // anything else)
         let _ = harness.ds2.try_recv();
         let _ = harness.ds3.try_recv();
-
-        loop_time += sleep_time;
     }
 
     // Check to make sure downstairs 1 is now offline.
@@ -1727,11 +1791,11 @@ async fn test_all_offline_with_io_can_deactivate() {
 
     // We're not replying to pings, so DS1 will eventually transition from
     // Active -> Offline (after CLIENT_TIMEOUT_SECS seconds).
-    const MARGIN_SECS: f32 = 5.0;
+    const MARGIN: Duration = Duration::from_secs(5);
 
     // Sleep until we're confident that all Downstairs are kicked out.
-    let wait_time = CLIENT_TIMEOUT_SECS + MARGIN_SECS;
-    tokio::time::sleep(Duration::from_secs_f32(wait_time)).await;
+    let wait_time = CLIENT_TIMEOUT.timeout() + MARGIN;
+    tokio::time::sleep(wait_time).await;
 
     // Check to make sure all downstairs are offline.
     let ds = harness.guest.downstairs_state().await.unwrap();
@@ -1768,7 +1832,7 @@ async fn test_job_fault_condition() {
     // timeout, so that when timeout hits, the downstairs will become Faulted
     // instead of Offline.
     let num_jobs = IO_OUTSTANDING_MAX_JOBS + 200;
-    for _ in 0..num_jobs {
+    for i in 0..num_jobs {
         // We must `spawn` here because `write` will wait for the response to
         // come back before returning
         let h = harness.spawn(|guest| async move {
@@ -1777,10 +1841,10 @@ async fn test_job_fault_condition() {
         });
 
         // DS1 should be receiving messages
-        assert!(matches!(
-            harness.ds1().recv().await.unwrap(),
-            Message::ReadRequest { .. },
-        ));
+        let m = harness.ds1().recv().await.unwrap();
+        if !matches!(m, Message::ReadRequest { .. },) {
+            panic!("got unexpected message {m:?}");
+        }
 
         // Respond with read responses for downstairs 2 and 3
         harness.ds2.ack_read().await;
@@ -1794,6 +1858,18 @@ async fn test_job_fault_condition() {
         assert_eq!(ds[ClientId::new(0)], DsState::Active);
         assert_eq!(ds[ClientId::new(1)], DsState::Active);
         assert_eq!(ds[ClientId::new(2)], DsState::Active);
+
+        // When we hit IO_CACHED_MAX_JOBS, the Upstairs will attempt to send a
+        // barrier to retire jobs.  The barrier won't succeed, because we're not
+        // acking it on DS1.
+        if i + 1 == IO_CACHED_MAX_JOBS as usize {
+            let m = harness.ds1().recv().await.unwrap();
+            if !matches!(m, Message::Barrier { .. }) {
+                panic!("expected Barrier, got message {m:?}");
+            }
+            harness.ds2.ack_barrier().await;
+            harness.ds3.ack_barrier().await;
+        }
     }
 
     // Sleep until we're confident that the Downstairs is kicked out
@@ -1801,14 +1877,14 @@ async fn test_job_fault_condition() {
     // Because it has so many pending jobs, it will become Faulted instead of
     // Offline (or rather, will transition Active -> Offline -> Faulted
     // immediately).
-    let sleep_time = CLIENT_TIMEOUT_SECS + 5.0;
+    let sleep_time = CLIENT_TIMEOUT.timeout() + Duration::from_secs(5);
     info!(harness.log, "waiting for Upstairs to kick out DS1");
     info!(
         harness.log,
-        "waiting {sleep_time} secs for Upstairs to kick out DS1"
+        "waiting {sleep_time:?} secs for Upstairs to kick out DS1"
     );
     tokio::select! {
-        _ = tokio::time::sleep(Duration::from_secs_f32(sleep_time)) => {
+        _ = tokio::time::sleep(sleep_time) => {
             // we're done!
         }
         // we don't listen to ds1 here, so we won't acknowledge any pings!
@@ -1843,18 +1919,15 @@ async fn test_job_fault_condition_offline() {
     // - Then, after its job count hits IO_OUTSTANDING_MAX_JOBS, it will
     //   transition from Offline -> Faulted
 
-    const MARGIN_SECS: f32 = 2.0;
-    const SEND_JOBS_TIME: f32 = CLIENT_TIMEOUT_SECS - MARGIN_SECS;
+    const MARGIN: Duration = Duration::from_secs(2);
+    let send_jobs_time = CLIENT_TIMEOUT.timeout() - MARGIN;
     let num_jobs = IO_OUTSTANDING_MAX_JOBS / 2;
     let start_time = tokio::time::Instant::now();
 
     for i in 0..num_jobs {
-        // Delay so that we hit SEND_JOBS_TIME at the end of this loop
+        // Delay so that we hit `send_jobs_time` at the end of this loop
         tokio::time::sleep_until(
-            start_time
-                + Duration::from_secs_f32(
-                    SEND_JOBS_TIME * i as f32 / num_jobs as f32,
-                ),
+            start_time + (send_jobs_time * i as u32) / num_jobs as u32,
         )
         .await;
 
@@ -1887,7 +1960,7 @@ async fn test_job_fault_condition_offline() {
 
     // Sleep until we're confident that the Downstairs is kicked out
     info!(harness.log, "waiting for Upstairs to kick out DS1");
-    tokio::time::sleep(Duration::from_secs_f32(2.0 * MARGIN_SECS)).await;
+    tokio::time::sleep(2 * MARGIN).await;
 
     // Check to make sure that happened
     let ds = harness.guest.downstairs_state().await.unwrap();
@@ -1899,6 +1972,7 @@ async fn test_job_fault_condition_offline() {
     // transition it to `Faulted` by sending it enough to hit
     // `IO_OUTSTANDING_MAX_JOBS`
     info!(harness.log, "sending more jobs to fault DS1");
+    let mut barrier_count = 0;
     for i in num_jobs..IO_OUTSTANDING_MAX_JOBS + 200 {
         let h = harness.spawn(|guest| async move {
             let mut buffer = Buffer::new(1, 512);
@@ -1921,8 +1995,17 @@ async fn test_job_fault_condition_offline() {
         // the Upstairs has finished updating its state).
         h.await.unwrap();
 
+        // If we've sent IO_CACHED_MAX_JOBS, then we expect the Upstairs to
+        // insert a Barrier (because it's trying to clean out finished jobs).
+        if i + 1 == IO_CACHED_MAX_JOBS as usize {
+            // nothing arrives on DS1, because it's offline
+            harness.ds2.ack_barrier().await;
+            harness.ds3.ack_barrier().await;
+            barrier_count += 1;
+        }
+
         let ds = harness.guest.downstairs_state().await.unwrap();
-        if i < IO_OUTSTANDING_MAX_JOBS {
+        if i + barrier_count < IO_OUTSTANDING_MAX_JOBS {
             // At this point, we should still be offline
             assert_eq!(ds[ClientId::new(0)], DsState::Offline);
             assert_eq!(ds[ClientId::new(1)], DsState::Active);
@@ -2656,7 +2739,7 @@ async fn test_no_send_offline() {
     // Sleep until we're confident that the Downstairs is kicked out, answering
     // pings from the other two Downstairs
     info!(harness.log, "waiting for Upstairs to kick out DS1");
-    let sleep_time = Duration::from_secs_f32(CLIENT_TIMEOUT_SECS + 5.0);
+    let sleep_time = CLIENT_TIMEOUT.timeout() + Duration::from_secs(5);
     tokio::select! {
         e = harness.ds1.as_mut().unwrap().recv() => {
             // We've been kicked out!
@@ -2726,4 +2809,84 @@ async fn test_no_send_offline() {
         }
         e => panic!("invalid message {e:?}; expected Write"),
     }
+}
+
+/// Test that barrier operations are sent periodically
+#[tokio::test]
+async fn test_jobs_based_barrier() {
+    let mut harness = TestHarness::new_with_opts(TestOpts {
+        flush_timeout: 0.5,
+        read_only: false,
+        disable_backpressure: false,
+    })
+    .await;
+
+    for i in 1..IO_CACHED_MAX_JOBS * 3 {
+        // Send a write, which will succeed
+        let write_handle = harness.spawn(|guest| async move {
+            let mut data = BytesMut::new();
+            data.resize(512, 1u8);
+            guest.write(BlockIndex(0), data).await.unwrap();
+        });
+
+        // Ensure that all three clients got the write request
+        harness.ds1().ack_write().await;
+        harness.ds2.ack_write().await;
+        harness.ds3.ack_write().await;
+
+        write_handle.await.unwrap();
+
+        if i % IO_CACHED_MAX_JOBS == 0 {
+            harness.ds1().ack_barrier().await;
+            harness.ds2.ack_barrier().await;
+            harness.ds3.ack_barrier().await;
+        }
+    }
+
+    // We should also automatically send a flush here
+    harness.ds1().ack_flush().await;
+    harness.ds2.ack_flush().await;
+    harness.ds3.ack_flush().await;
+}
+
+/// Test that barrier operations are sent periodically
+#[tokio::test]
+async fn test_bytes_based_barrier() {
+    let mut harness = TestHarness::new_with_opts(TestOpts {
+        flush_timeout: 0.5,
+        read_only: false,
+        disable_backpressure: false,
+    })
+    .await;
+
+    const WRITE_SIZE: usize = 105 * 1024; // 105 KiB
+    let write_buf = BytesMut::from(vec![1; WRITE_SIZE].as_slice()); // 50 KiB
+    let barrier_point =
+        (IO_CACHED_MAX_BYTES as usize).div_ceil(write_buf.len());
+
+    for i in 1..barrier_point * 3 + 10 {
+        // Send a write, which will succeed
+        let write_buf = write_buf.clone();
+        let write_handle = harness.spawn(|guest| async move {
+            guest.write(BlockIndex(0), write_buf).await.unwrap();
+        });
+
+        // Ensure that all three clients got the write request
+        harness.ds1().ack_write().await;
+        harness.ds2.ack_write().await;
+        harness.ds3.ack_write().await;
+
+        write_handle.await.unwrap();
+
+        if i % barrier_point == 0 {
+            harness.ds1().ack_barrier().await;
+            harness.ds2.ack_barrier().await;
+            harness.ds3.ack_barrier().await;
+        }
+    }
+
+    // We should also automatically send a flush here
+    harness.ds1().ack_flush().await;
+    harness.ds2.ack_flush().await;
+    harness.ds3.ack_flush().await;
 }

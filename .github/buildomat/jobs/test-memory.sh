@@ -5,8 +5,9 @@
 #: target = "helios-2.0"
 #: output_rules = [
 #:  "/tmp/*.txt",
-#:  "%/tmp/dtrace/*",
-#:  "/tmp/dsc/*.txt",
+#:  "/tmp/*.log",
+#:  "%/tmp/debug/*.txt",
+#:  "%/tmp/dsc/*.txt",
 #:  "/tmp/core.*",
 #: ]
 #: skip_clone = true
@@ -42,9 +43,20 @@ export BINDIR=/var/tmp/bins
 banner setup
 pfexec plimit -n 9123456 $$
 
-banner dtrace
-ls -l $input/scripts
-pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/dtrace/upstairs-info.txt 2>&1 &
+echo "Setup self timeout"
+# one hour should be enough
+jobpid=$$; (sleep 3600; banner fail-timeout; ps -ef; zfs list;kill $jobpid) &
 
-banner start
+echo "Setup debug logging"
+mkdir /tmp/debug
+psrinfo -v > /tmp/debug/psrinfo.txt
+df -h > /tmp/debug/df.txt || true
+prstat -d d -mLc 1 > /tmp/debug/prstat.txt 2>&1 &
+iostat -T d -xn 1 > /tmp/debug/iostat.txt 2>&1 &
+mpstat -T d 1 > /tmp/debug/mpstat.txt 2>&1 &
+vmstat -T d -p 1 < /dev/null > /tmp/debug/paging.txt 2>&1 &
+pfexec dtrace -Z -s $input/scripts/perf-downstairs-tick.d > /tmp/debug/perf.txt 2>&1 &
+pfexec dtrace -Z -s $input/scripts/upstairs_info.d > /tmp/debug/upinfo.txt 2>&1 &
+
+banner memtest
 ptime -m bash $input/scripts/test_mem.sh

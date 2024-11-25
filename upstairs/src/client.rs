@@ -1,15 +1,12 @@
 // Copyright 2023 Oxide Computer Company
 use crate::{
-    backpressure::BackpressureCounters, cdt, integrity_hash,
-    live_repair::ExtentInfo, upstairs::UpstairsConfig, upstairs::UpstairsState,
-    ClientIOStateCount, ClientId, CrucibleDecoder, CrucibleError, DownstairsIO,
-    DsState, EncryptionContext, IOState, IOop, JobId, Message, RawReadResponse,
+    cdt, integrity_hash, io_limits::ClientIOLimits, live_repair::ExtentInfo,
+    upstairs::UpstairsConfig, upstairs::UpstairsState, ClientIOStateCount,
+    ClientId, CrucibleDecoder, CrucibleError, DownstairsIO, DsState,
+    EncryptionContext, IOState, IOop, JobId, Message, RawReadResponse,
     ReconcileIO, ReconcileIOState, RegionDefinitionStatus, RegionMetadata,
-    Validation,
 };
-use crucible_common::{
-    deadline_secs, verbose_timeout, x509::TLSContext, ExtentId,
-};
+use crucible_common::{x509::TLSContext, ExtentId, VerboseTimeout};
 use crucible_protocol::{
     MessageWriter, ReconciliationId, CRUCIBLE_MESSAGE_VERSION,
 };
@@ -28,21 +25,18 @@ use slog::{debug, error, info, o, warn, Logger};
 use tokio::{
     net::{TcpSocket, TcpStream},
     sync::{mpsc, oneshot},
-    time::{sleep_until, Duration},
+    time::{sleep, sleep_until, Duration, Instant},
 };
 use tokio_util::codec::FramedRead;
 use uuid::Uuid;
 
-// How long we wait before logging a message that we have not heard from
-// the downstairs.
-const TIMEOUT_SECS: f32 = 15.0;
-// How many timeouts will we tolerate before we disconnect from a downstairs.
-const TIMEOUT_LIMIT: usize = 3;
-const PING_INTERVAL_SECS: f32 = 5.0;
+// Disconnect from downstairs upstairs after 45 sec, logging a warning every 15s
+pub(crate) const CLIENT_TIMEOUT: VerboseTimeout = VerboseTimeout {
+    tick: Duration::from_secs(15),
+    count: 3,
+};
 
-/// Total time before a client is timed out
-#[cfg(test)]
-pub const CLIENT_TIMEOUT_SECS: f32 = TIMEOUT_SECS * TIMEOUT_LIMIT as f32;
+const PING_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Delay before a client reconnects (to prevent spamming connections)
 pub const CLIENT_RECONNECT_DELAY: std::time::Duration =
@@ -128,11 +122,8 @@ pub(crate) struct DownstairsClient {
     /// Number of bytes associated with each IO state
     io_state_byte_count: ClientIOStateCount<u64>,
 
-    /// Jobs, write bytes, and total IO bytes in this client's queue
-    ///
-    /// These values are used for both global and local (per-client)
-    /// backpressure.
-    pub(crate) backpressure_counters: BackpressureCounters,
+    /// Absolute IO limits for this client
+    io_limits: ClientIOLimits,
 
     /// UUID for this downstairs region
     ///
@@ -206,6 +197,7 @@ impl DownstairsClient {
         client_id: ClientId,
         cfg: Arc<UpstairsConfig>,
         target_addr: Option<SocketAddr>,
+        io_limits: ClientIOLimits,
         log: Logger,
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
     ) -> Self {
@@ -222,6 +214,7 @@ impl DownstairsClient {
                 &log,
             ),
             client_id,
+            io_limits,
             region_uuid: None,
             needs_replay: false,
             negotiation_state: NegotiationState::Start,
@@ -238,7 +231,6 @@ impl DownstairsClient {
             repair_info: None,
             io_state_job_count: ClientIOStateCount::default(),
             io_state_byte_count: ClientIOStateCount::default(),
-            backpressure_counters: BackpressureCounters::new(),
             connection_id: ConnectionId(0),
             client_delay_us,
         }
@@ -262,6 +254,10 @@ impl DownstairsClient {
             cfg,
             client_task: Self::new_dummy_task(false),
             client_id: ClientId::new(0),
+            io_limits: ClientIOLimits::new(
+                crate::IO_OUTSTANDING_MAX_JOBS * 3 / 2,
+                crate::IO_OUTSTANDING_MAX_BYTES as usize * 3 / 2,
+            ),
             region_uuid: None,
             needs_replay: false,
             negotiation_state: NegotiationState::Start,
@@ -278,7 +274,6 @@ impl DownstairsClient {
             repair_info: None,
             io_state_job_count: ClientIOStateCount::default(),
             io_state_byte_count: ClientIOStateCount::default(),
-            backpressure_counters: BackpressureCounters::new(),
             connection_id: ConnectionId(0),
             client_delay_us,
         }
@@ -365,19 +360,24 @@ impl DownstairsClient {
         // Update our bytes-in-flight counter
         if was_running && !is_running {
             // Because the job is no longer running, it shouldn't count for
-            // backpressure.  Remove the backpressure guard for this client,
-            // which decrements backpressure counters on drop.
-            job.backpressure_guard.take(&self.client_id);
-        } else if is_running
-            && !was_running
-            && !job.backpressure_guard.contains(&self.client_id)
-        {
-            // This should only happen if a job is replayed, but that still
-            // counts!
-            job.backpressure_guard.insert(
-                self.client_id,
-                self.backpressure_counters.increment(&job.work),
-            );
+            // backpressure or IO limits.  Remove the backpressure guard for
+            // this client, which decrements backpressure counters on drop.
+            job.io_limits.take(&self.client_id);
+        } else if is_running && !was_running {
+            match self.io_limits.try_claim(job.work.job_bytes() as u32) {
+                Ok(g) => {
+                    job.io_limits.insert(self.client_id, g);
+                }
+                Err(e) => {
+                    // We can't handle the case of "running out of permits
+                    // during replay", because waiting for a permit would
+                    // deadlock the worker task.  Log the error and continue.
+                    warn!(
+                        self.log,
+                        "could not claim IO permits when replaying job: {e:?}"
+                    )
+                }
+            }
         }
 
         old_state
@@ -523,45 +523,6 @@ impl DownstairsClient {
         info!(self.log, " {} final dependency list {:?}", ds_id, deps);
     }
 
-    /// When the downstairs is marked as missing, handle its state transition
-    pub(crate) fn on_missing(&mut self) {
-        let current = &self.state;
-        let new_state = match current {
-            DsState::Active | DsState::Offline => DsState::Offline,
-
-            DsState::Faulted
-            | DsState::LiveRepair
-            | DsState::LiveRepairReady => DsState::Faulted,
-
-            DsState::New
-            | DsState::Deactivated
-            | DsState::Reconcile
-            | DsState::FailedReconcile
-            | DsState::Disconnected
-            | DsState::BadVersion
-            | DsState::WaitQuorum
-            | DsState::BadRegion
-            | DsState::WaitActive
-            | DsState::Disabled => DsState::Disconnected,
-
-            // If we have replaced a downstairs, don't forget that.
-            DsState::Replacing | DsState::Replaced => DsState::Replaced,
-
-            DsState::Migrating => panic!(),
-        };
-
-        if *current != new_state {
-            info!(
-                self.log,
-                "Gone missing, transition from {current:?} to {new_state:?}"
-            );
-        }
-
-        // Jobs are skipped and replayed in `Downstairs::reinitialize`, which is
-        // (probably) the caller of this function.
-        self.state = new_state;
-    }
-
     /// Checks whether this Downstairs is ready for the upstairs to deactivate
     ///
     /// # Panics
@@ -592,7 +553,11 @@ impl DownstairsClient {
     ///
     /// # Panics
     /// If `self.client_task` is not `None`, or `self.target_addr` is `None`
-    pub(crate) fn reinitialize(&mut self, auto_promote: bool) {
+    pub(crate) fn reinitialize(
+        &mut self,
+        up_state: &UpstairsState,
+        can_replay: bool,
+    ) {
         // Clear this Downstair's repair address, and let the YesItsMe set it.
         // This works if this Downstairs is new, reconnecting, or was replaced
         // entirely; the repair address could have changed in any of these
@@ -600,23 +565,55 @@ impl DownstairsClient {
         self.repair_addr = None;
         self.needs_replay = false;
 
-        if auto_promote {
-            self.promote_state = Some(PromoteState::Waiting);
-        } else {
-            self.promote_state = None;
-        }
+        // If the upstairs is already active (or trying to go active), then the
+        // downstairs should automatically call PromoteToActive when it reaches
+        // the relevant state.
+        self.promote_state = match up_state {
+            UpstairsState::Active | UpstairsState::GoActive(..) => {
+                Some(PromoteState::Waiting)
+            }
+            UpstairsState::Initializing
+            | UpstairsState::Deactivating { .. } => None,
+        };
+
         self.negotiation_state = NegotiationState::Start;
 
-        // TODO this is an awkward special case!
-        if self.state == DsState::Disconnected {
-            info!(self.log, "Disconnected -> New");
-            self.state = DsState::New;
+        let current = &self.state;
+        let new_state = match current {
+            DsState::Active | DsState::Offline if !can_replay => {
+                Some(DsState::Faulted)
+            }
+            DsState::Active => Some(DsState::Offline),
+            DsState::LiveRepair | DsState::LiveRepairReady => {
+                Some(DsState::Faulted)
+            }
+
+            DsState::Deactivated
+            | DsState::Reconcile
+            | DsState::WaitQuorum
+            | DsState::WaitActive
+            | DsState::Disabled => Some(DsState::New),
+
+            // If we have replaced a downstairs, don't forget that.
+            DsState::Replacing => Some(DsState::Replaced),
+
+            // We stay in these states through the task restart
+            DsState::Offline
+            | DsState::Faulted
+            | DsState::New
+            | DsState::Replaced => None,
+        };
+
+        // Jobs are skipped and replayed in `Downstairs::reinitialize`, which is
+        // (probably) the caller of this function.
+        if let Some(new_state) = new_state {
+            self.checked_state_transition(up_state, new_state);
         }
 
         self.connection_id.update();
 
-        // Restart with a short delay
-        self.start_task(true, auto_promote);
+        // Restart with a short delay, connecting if we're auto-promoting
+        self.start_task(true, self.promote_state.is_some());
     }
 
     /// Sets the `needs_replay` flag
@@ -850,29 +847,21 @@ impl DownstairsClient {
         self.state
     }
 
-    /// Sets the current state to `DsState::FailedReconcile`
-    pub(crate) fn set_failed_reconcile(&mut self, up_state: &UpstairsState) {
-        info!(
-            self.log,
-            "Transition from {} to FailedReconcile", self.state
-        );
-        self.checked_state_transition(up_state, DsState::FailedReconcile);
-        self.restart_connection(up_state, ClientStopReason::FailedReconcile)
-    }
-
     pub(crate) fn restart_connection(
         &mut self,
         up_state: &UpstairsState,
         reason: ClientStopReason,
     ) {
         let new_state = match self.state {
-            DsState::Active => DsState::Offline,
-            DsState::Offline => DsState::Offline,
-            DsState::Migrating => DsState::Faulted,
+            DsState::Active | DsState::Offline
+                if matches!(reason, ClientStopReason::IneligibleForReplay) =>
+            {
+                DsState::Faulted
+            }
+            DsState::Active | DsState::Offline => DsState::Offline,
             DsState::Faulted => DsState::Faulted,
             DsState::Deactivated => DsState::New,
             DsState::Reconcile => DsState::New,
-            DsState::FailedReconcile => DsState::New,
             DsState::LiveRepair => DsState::Faulted,
             DsState::LiveRepairReady => DsState::Faulted,
             DsState::Replacing => DsState::Replaced,
@@ -882,7 +871,7 @@ impl DownstairsClient {
                  * downstairs to receive IO, so we go to the back of the
                  * line and have to re-verify it again.
                  */
-                DsState::Disconnected
+                DsState::New
             }
         };
 
@@ -981,16 +970,11 @@ impl DownstairsClient {
             DsState::Offline => EnqueueResult::Hold,
 
             DsState::New
-            | DsState::BadVersion
             | DsState::WaitActive
             | DsState::WaitQuorum
-            | DsState::BadRegion
-            | DsState::Disconnected
             | DsState::Reconcile
-            | DsState::FailedReconcile
             | DsState::Deactivated
-            | DsState::Disabled
-            | DsState::Migrating => panic!(
+            | DsState::Disabled => panic!(
                 "enqueue should not be called from state {:?}",
                 self.state
             ),
@@ -1071,7 +1055,6 @@ impl DownstairsClient {
                     }
                 } else if old_state != DsState::New
                     && old_state != DsState::Faulted
-                    && old_state != DsState::Disconnected
                     && old_state != DsState::Replaced
                 {
                     panic!(
@@ -1085,9 +1068,6 @@ impl DownstairsClient {
             }
             DsState::WaitQuorum => {
                 assert_eq!(old_state, DsState::WaitActive);
-            }
-            DsState::FailedReconcile => {
-                assert_eq!(old_state, DsState::Reconcile);
             }
             DsState::Faulted => {
                 match old_state {
@@ -1167,7 +1147,8 @@ impl DownstairsClient {
                     DsState::Active
                     | DsState::Deactivated
                     | DsState::Faulted
-                    | DsState::FailedReconcile => {} // Okay
+                    | DsState::Reconcile
+                    | DsState::Disabled => {} // Okay
                     _ => {
                         panic_invalid();
                     }
@@ -1184,18 +1165,6 @@ impl DownstairsClient {
             DsState::Disabled => {
                 // A move to Disabled can happen at any time we are talking
                 // to a downstairs.
-            }
-            DsState::BadVersion => match old_state {
-                DsState::New | DsState::Disconnected => {}
-                _ => {
-                    panic_invalid();
-                }
-            },
-            _ => {
-                panic!(
-                    "[{}] Missing check for transition {} to {}",
-                    self.client_id, old_state, new_state
-                );
             }
         }
 
@@ -1263,35 +1232,97 @@ impl DownstairsClient {
 
     /// Handles a single IO operation
     ///
-    /// Returns `true` if the job is now ackable, `false` otherwise
-    ///
     /// If this is a read response, then the values in `responses` must
-    /// _already_ be decrypted (with corresponding validation results stored in
-    /// `read_validations`).
+    /// _already_ be decrypted, with validated contexts stored in
+    /// `responses.blocks`.
     pub(crate) fn process_io_completion(
         &mut self,
         ds_id: JobId,
         job: &mut DownstairsIO,
         responses: Result<RawReadResponse, CrucibleError>,
-        read_validations: Vec<Validation>,
-        deactivate: bool,
         extent_info: Option<ExtentInfo>,
-    ) -> bool {
+    ) {
         if job.state[self.client_id] == IOState::Skipped {
             // This job was already marked as skipped, and at that time
             // all required action was taken on it.  We can drop any more
             // processing of it here and return.
             warn!(self.log, "Dropping already skipped job {}", ds_id);
-            return false;
+            return;
         }
 
-        let mut jobs_completed_ok = job.state_count().completed_ok();
-        let mut ackable = false;
-
-        let new_state = match &responses {
-            Ok(..) => {
+        let new_state = match responses {
+            Ok(read_data) => {
                 // Messages have already been decrypted out-of-band
-                jobs_completed_ok += 1;
+                match job.work {
+                    IOop::Read { .. } => {
+                        assert!(!read_data.blocks.is_empty());
+                        assert!(extent_info.is_none());
+                        if job.data.is_none() {
+                            job.data = Some(read_data);
+                        } else {
+                            // If another job has finished already, we compare
+                            // our read hash to that and verify they are the
+                            // same.
+                            debug!(self.log, "Read already AckReady {ds_id}");
+                            let job_blocks = &job.data.as_ref().unwrap().blocks;
+                            if job_blocks != &read_data.blocks {
+                                // XXX This error needs to go to Nexus
+                                // XXX This will become the "force all
+                                // downstairs to stop and refuse to restart"
+                                // mode.
+                                let msg = format!(
+                                    "[{}] read hash mismatch on {} \n\
+                                        Expected {:x?}\n\
+                                        Computed {:x?}\n\
+                                        job: {:?}",
+                                    self.client_id,
+                                    ds_id,
+                                    job_blocks,
+                                    read_data.blocks,
+                                    job,
+                                );
+                                if job.replay {
+                                    info!(self.log, "REPLAY {msg}");
+                                } else {
+                                    panic!("{msg}");
+                                }
+                            }
+                        }
+                    }
+                    IOop::Write { .. }
+                    | IOop::WriteUnwritten { .. }
+                    | IOop::Barrier { .. } => {
+                        assert!(read_data.blocks.is_empty());
+                        assert!(read_data.data.is_empty());
+                        assert!(extent_info.is_none());
+                    }
+                    IOop::Flush { .. } => {
+                        assert!(read_data.blocks.is_empty());
+                        assert!(read_data.data.is_empty());
+                        assert!(extent_info.is_none());
+
+                        self.last_flush = ds_id;
+                    }
+                    IOop::ExtentFlushClose { .. } => {
+                        assert!(read_data.blocks.is_empty());
+                        assert!(read_data.data.is_empty());
+
+                        let ci = self.repair_info.replace(extent_info.unwrap());
+                        if ci.is_some() {
+                            panic!(
+                            "[{}] Unexpected repair found on insertion: {:?}",
+                            self.client_id, ci
+                        );
+                        }
+                    }
+                    IOop::ExtentLiveRepair { .. }
+                    | IOop::ExtentLiveReopen { .. }
+                    | IOop::ExtentLiveNoOp { .. } => {
+                        assert!(read_data.blocks.is_empty());
+                        assert!(read_data.data.is_empty());
+                        assert!(extent_info.is_none());
+                    }
+                }
                 IOState::Done
             }
             Err(e) => {
@@ -1300,306 +1331,56 @@ impl DownstairsClient {
                     self.log,
                     "DS Reports error {e:?} on job {}, {:?} EC", ds_id, job,
                 );
-                IOState::Error(e.clone())
+                match (&job.work, &e) {
+                    // Some errors can be returned without considering the
+                    // Downstairs bad. For example, it's still an error if a
+                    // snapshot exists already but we should not increment
+                    // `downstairs_errors` and transition that Downstairs to
+                    // Failed - that downstairs is still able to serve IO.
+                    (
+                        IOop::Flush {
+                            snapshot_details: Some(..),
+                            ..
+                        },
+                        CrucibleError::SnapshotExistsAlready(..),
+                    ) => (),
+
+                    // If a read job fails, we sometimes need to panic
+                    (IOop::Read { .. }, CrucibleError::HashMismatch) => {
+                        panic!(
+                            "{} [{}] {} read hash mismatch {:?} {:?}",
+                            self.cfg.session_id, self.client_id, ds_id, e, job
+                        );
+                    }
+                    (IOop::Read { .. }, CrucibleError::DecryptionError) => {
+                        panic!(
+                            "[{}] {} read decrypt error {:?} {:?}",
+                            self.client_id, ds_id, e, job
+                        );
+                    }
+
+                    // Other IO errors increment a counter and (higher up the
+                    // call stack) cause us to mark this Downstairs as faulted.
+                    //
+                    // XXX: Errors should be reported to nexus
+                    _ => {
+                        self.stats.downstairs_errors += 1;
+                    }
+                }
+                IOState::Error(e)
             }
         };
 
         // Update the state, maintaining various counters
-        let old_state = self.set_job_state(job, new_state.clone());
+        let old_state = self.set_job_state(job, new_state);
 
-        /*
-         * Verify the job was InProgress
-         */
-        if old_state != IOState::InProgress {
-            // This job is in an unexpected state.
-            panic!(
-                "[{}] Job {} completed while not InProgress: {:?} {:?}",
-                self.client_id, ds_id, old_state, job
-            );
-        }
-
-        if let IOState::Error(e) = new_state {
-            // Some errors can be returned without considering the Downstairs
-            // bad. For example, it's still an error if a snapshot exists
-            // already but we should not increment downstairs_errors and
-            // transition that Downstairs to Failed - that downstairs is still
-            // able to serve IO.
-            match e {
-                CrucibleError::SnapshotExistsAlready(_) => {
-                    // pass
-                }
-                _ => {
-                    match job.work {
-                        // Mark this downstairs as bad if this was a write,
-                        // a write unwritten, or a flush
-                        // XXX: Errors should be reported to nexus
-                        IOop::Write { .. }
-                        | IOop::WriteUnwritten { .. }
-                        | IOop::Flush { .. }
-                        | IOop::Barrier { .. } => {
-                            self.stats.downstairs_errors += 1;
-                        }
-
-                        // If a repair job errors, mark that downstairs as bad
-                        IOop::ExtentFlushClose { .. }
-                        | IOop::ExtentLiveRepair { .. }
-                        | IOop::ExtentLiveReopen { .. }
-                        | IOop::ExtentLiveNoOp { .. } => {
-                            self.stats.downstairs_errors += 1;
-                        }
-
-                        // If a read job fails, we sometimes need to panic.
-                        IOop::Read { .. } => {
-                            // It's possible we get a read error if the
-                            // downstairs disconnects. However XXX, someone
-                            // should be told about this error.
-                            //
-                            // Some errors, we need to panic on.
-                            match e {
-                                CrucibleError::HashMismatch => {
-                                    panic!(
-                                        "{} [{}] {} read hash mismatch {:?} {:?}",
-                                        self.cfg.session_id, self.client_id, ds_id, e, job
-                                    );
-                                }
-                                CrucibleError::DecryptionError => {
-                                    panic!(
-                                        "[{}] {} read decrypt error {:?} {:?}",
-                                        self.client_id, ds_id, e, job
-                                    );
-                                }
-                                _ => {
-                                    error!(
-                                        self.log,
-                                        "{} read error {:?} {:?}",
-                                        ds_id,
-                                        e,
-                                        job
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else if job.acked {
-            assert_eq!(new_state, IOState::Done);
-            /*
-             * If this job is already acked, then we don't have much
-             * more to do here.  If it's a flush, then we want to be
-             * sure to update the last flush for this client.
-             */
-            match &job.work {
-                IOop::Flush { .. } => {
-                    self.last_flush = ds_id;
-                }
-                IOop::Read {
-                    start_eid,
-                    start_offset,
-                    ..
-                } => {
-                    /*
-                     * For a read, make sure the data from a previous read
-                     * has the same hash
-                     */
-                    let read_data = responses.unwrap();
-                    assert!(!read_data.blocks.is_empty());
-                    if job.read_validations != read_validations {
-                        // XXX This error needs to go to Nexus
-                        // XXX This will become the "force all downstairs
-                        // to stop and refuse to restart" mode.
-                        let msg = format!(
-                            "[{}] read hash mismatch on id {}\n\
-                            session: {:?}\n\
-                            Expected {:x?}\n\
-                            Computed {:x?}\n\
-                            start eid:{:?} start offset:{:?}\n\
-                            job state:{:?}",
-                            self.client_id,
-                            ds_id,
-                            self.cfg.session_id,
-                            job.read_validations,
-                            read_validations,
-                            start_eid,
-                            start_offset,
-                            job.state,
-                        );
-                        if job.replay {
-                            info!(self.log, "REPLAY {}", msg);
-                        } else {
-                            panic!("{}", msg);
-                        }
-                    }
-                }
-                /*
-                 * Write and WriteUnwritten IOs have no action here
-                 * If this job was LiveRepair, we should never get here,
-                 * as those jobs should never be acked before all three
-                 * are done.
-                 */
-                IOop::Write { .. }
-                | IOop::WriteUnwritten { .. }
-                | IOop::Barrier { .. } => {}
-                IOop::ExtentFlushClose { .. }
-                | IOop::ExtentLiveRepair { .. }
-                | IOop::ExtentLiveReopen { .. }
-                | IOop::ExtentLiveNoOp { .. } => {
-                    panic!(
-                        "[{}] Bad job received in process_ds_completion: {:?}",
-                        self.client_id, job
-                    );
-                }
-            }
-        } else {
-            assert_eq!(new_state, IOState::Done);
-            assert!(!job.acked);
-
-            let read_data = responses.unwrap();
-
-            /*
-             * Transition this job from Done to AckReady if enough have
-             * returned ok.
-             */
-            match &job.work {
-                IOop::Read { .. } => {
-                    assert!(!read_data.blocks.is_empty());
-                    assert!(extent_info.is_none());
-                    if jobs_completed_ok == 1 {
-                        assert!(job.data.is_none());
-                        assert!(job.read_validations.is_empty());
-                        job.data = Some(read_data);
-                        job.read_validations = read_validations;
-                        assert!(!job.acked);
-                        ackable = true;
-                        debug!(self.log, "Read AckReady {}", ds_id.0);
-                        cdt::up__to__ds__read__done!(|| ds_id.0);
-                    } else {
-                        /*
-                         * If another job has finished already, we can
-                         * compare our read hash to
-                         * that and verify they are the same.
-                         */
-                        debug!(self.log, "Read already AckReady {ds_id}");
-                        if job.read_validations != read_validations {
-                            // XXX This error needs to go to Nexus
-                            // XXX This will become the "force all downstairs
-                            // to stop and refuse to restart" mode.
-                            panic!(
-                                "[{}] read hash mismatch on {} \n\
-                                Expected {:x?}\n\
-                                Computed {:x?}\n\
-                                job: {:?}",
-                                self.client_id,
-                                ds_id,
-                                job.read_validations,
-                                read_validations,
-                                job,
-                            );
-                        }
-                    }
-                }
-                IOop::Write { .. } => {
-                    assert!(read_data.blocks.is_empty());
-                    assert!(read_data.data.is_empty());
-                    assert!(extent_info.is_none());
-                    if jobs_completed_ok == 2 {
-                        ackable = true;
-                        cdt::up__to__ds__write__done!(|| ds_id.0);
-                    }
-                }
-                IOop::WriteUnwritten { .. } => {
-                    assert!(read_data.blocks.is_empty());
-                    assert!(read_data.data.is_empty());
-                    assert!(extent_info.is_none());
-                    if jobs_completed_ok == 2 {
-                        ackable = true;
-                        cdt::up__to__ds__write__unwritten__done!(|| ds_id.0);
-                    }
-                }
-                IOop::Flush {
-                    snapshot_details, ..
-                } => {
-                    assert!(read_data.blocks.is_empty());
-                    assert!(read_data.data.is_empty());
-                    assert!(extent_info.is_none());
-                    /*
-                     * If we are deactivating or have requested a
-                     * snapshot, then we want an ACK from all three
-                     * downstairs, not the usual two.
-                     *
-                     * TODO here for handling the case where one (or two,
-                     * or three! gasp!) downstairs are Offline.
-                     */
-                    let ack_at_num_jobs =
-                        if deactivate || snapshot_details.is_some() {
-                            3
-                        } else {
-                            2
-                        };
-
-                    if jobs_completed_ok == ack_at_num_jobs {
-                        ackable = true;
-                        cdt::up__to__ds__flush__done!(|| ds_id.0);
-                        if deactivate {
-                            debug!(self.log, "deactivate flush {ds_id} done");
-                        }
-                    }
-                    self.last_flush = ds_id;
-                }
-                IOop::Barrier { .. } => {
-                    assert!(read_data.blocks.is_empty());
-                    assert!(read_data.data.is_empty());
-                    assert!(extent_info.is_none());
-
-                    if jobs_completed_ok == 3 {
-                        ackable = true;
-                        cdt::up__to__ds__barrier__done!(|| ds_id.0);
-                    }
-                }
-                IOop::ExtentFlushClose { .. } => {
-                    assert!(read_data.blocks.is_empty());
-                    assert!(read_data.data.is_empty());
-
-                    let ci = self.repair_info.replace(extent_info.unwrap());
-                    if ci.is_some() {
-                        panic!(
-                            "[{}] Unexpected repair found on insertion: {:?}",
-                            self.client_id, ci
-                        );
-                    }
-
-                    if jobs_completed_ok == 3 {
-                        debug!(self.log, "ExtentFlushClose {ds_id} AckReady");
-                        ackable = true;
-                    }
-                }
-                IOop::ExtentLiveRepair { .. } => {
-                    assert!(read_data.blocks.is_empty());
-                    assert!(read_data.data.is_empty());
-                    if jobs_completed_ok == 3 {
-                        debug!(self.log, "ExtentLiveRepair AckReady {ds_id}");
-                        ackable = true;
-                    }
-                }
-                IOop::ExtentLiveReopen { .. } => {
-                    assert!(read_data.blocks.is_empty());
-                    assert!(read_data.data.is_empty());
-                    if jobs_completed_ok == 3 {
-                        debug!(self.log, "ExtentLiveReopen AckReady {ds_id}");
-                        ackable = true;
-                    }
-                }
-                IOop::ExtentLiveNoOp { .. } => {
-                    assert!(read_data.blocks.is_empty());
-                    assert!(read_data.data.is_empty());
-                    if jobs_completed_ok == 3 {
-                        debug!(self.log, "ExtentLiveNoOp AckReady {ds_id}");
-                        ackable = true;
-                    }
-                }
-            }
-        }
-        ackable
+        // The job must have been InProgress
+        assert_eq!(
+            old_state,
+            IOState::InProgress,
+            "[{}] Job {ds_id} completed while not InProgress: {job:?}",
+            self.client_id,
+        );
     }
 
     /// Mark this client as disabled and halt its IO task
@@ -1754,10 +1535,6 @@ impl DownstairsClient {
                         CRUCIBLE_MESSAGE_VERSION,
                         version
                     );
-                    self.checked_state_transition(
-                        up_state,
-                        DsState::BadVersion,
-                    );
                     self.restart_connection(
                         up_state,
                         ClientStopReason::Incompatible,
@@ -1816,7 +1593,6 @@ impl DownstairsClient {
                     "downstairs version is {version}, \
                      ours is {CRUCIBLE_MESSAGE_VERSION}"
                 );
-                self.checked_state_transition(up_state, DsState::BadVersion);
                 self.restart_connection(
                     up_state,
                     ClientStopReason::Incompatible,
@@ -1894,7 +1670,6 @@ impl DownstairsClient {
                             String::new()
                         },
                     );
-                    self.checked_state_transition(up_state, DsState::New);
                     if !match_gen {
                         let gen_error = format!(
                             "Generation requested:{} found:{}",
@@ -2290,7 +2065,7 @@ impl DownstairsClient {
     }
 
     pub(crate) fn total_bytes_outstanding(&self) -> usize {
-        self.backpressure_counters.get_io_bytes() as usize
+        self.io_state_byte_count.in_progress as usize
     }
 
     /// Returns a unique ID for the current connection, or `None`
@@ -2464,6 +2239,9 @@ pub(crate) enum ClientStopReason {
 
     /// The upstairs has requested that we deactivate when we were offline
     OfflineDeactivated,
+
+    /// The Upstairs has dropped jobs that would be needed for replay
+    IneligibleForReplay,
 }
 
 /// Response received from the I/O task
@@ -2695,7 +2473,7 @@ impl ClientIoTask {
         // Set a connect timeout, and connect to the target:
         info!(self.log, "connecting to {}", self.target);
         let tcp: TcpStream = tokio::select! {
-            _ = sleep_until(deadline_secs(10.0))=> {
+            _ = sleep(Duration::from_secs(10))=> {
                 warn!(self.log, "connect timeout");
                 return ClientRunResult::ConnectionTimeout;
             }
@@ -2791,7 +2569,7 @@ impl ClientIoTask {
             self.client_id,
         )));
 
-        let mut ping_interval = deadline_secs(PING_INTERVAL_SECS);
+        let mut ping_deadline = Instant::now() + PING_INTERVAL;
         let mut ping_count = 0u64;
         loop {
             tokio::select! {
@@ -2814,8 +2592,8 @@ impl ClientIoTask {
                     }
                 }
 
-                _ = sleep_until(ping_interval) => {
-                    ping_interval = deadline_secs(PING_INTERVAL_SECS);
+                _ = sleep_until(ping_deadline) => {
+                    ping_deadline = Instant::now() + PING_INTERVAL;
                     ping_count += 1;
                     cdt::ds__ping__sent!(|| (ping_count, self.client_id.get()));
 
@@ -2953,7 +2731,7 @@ where
                     }
                 }
             }
-            _ = verbose_timeout(TIMEOUT_SECS, TIMEOUT_LIMIT, log.clone()) => {
+            _ = CLIENT_TIMEOUT.wait(&log) => {
                 warn!(log, "inactivity timeout");
                 break ClientRunResult::Timeout;
             }
@@ -3000,18 +2778,15 @@ fn update_net_done_probes(m: &Message, cid: ClientId) {
 }
 
 /// Returns:
-/// - `Ok(Some(ctx))` for successfully decrypted data
-/// - `Ok(None)` if there is no block context and the block is all 0
+/// - `Ok(())` for successfully decrypted data, or if there is no block context
+///   and the block is all 0s (i.e. a valid empty block)
 /// - `Err(..)` otherwise
-///
-/// The return value of this will be stored with the job, and compared
-/// between each read.
 pub(crate) fn validate_encrypted_read_response(
     block_context: Option<crucible_protocol::EncryptionContext>,
     data: &mut [u8],
     encryption_context: &EncryptionContext,
     log: &Logger,
-) -> Result<Validation, CrucibleError> {
+) -> Result<(), CrucibleError> {
     // XXX because we don't have block generation numbers, an attacker
     // downstairs could:
     //
@@ -3033,7 +2808,7 @@ pub(crate) fn validate_encrypted_read_response(
         //
         // XXX if it's not a blank block, we may be under attack?
         if data.iter().all(|&x| x == 0) {
-            return Ok(Validation::Empty);
+            return Ok(());
         } else {
             error!(log, "got empty block context with non-blank block");
             return Err(CrucibleError::MissingBlockContext);
@@ -3055,7 +2830,7 @@ pub(crate) fn validate_encrypted_read_response(
         Tag::from_slice(&ctx.tag[..]),
     );
     if decryption_result.is_ok() {
-        Ok(Validation::Encrypted(ctx))
+        Ok(())
     } else {
         error!(log, "Decryption failed!");
         Err(CrucibleError::DecryptionError)
@@ -3063,21 +2838,20 @@ pub(crate) fn validate_encrypted_read_response(
 }
 
 /// Returns:
-/// - Ok(Some(valid_hash)) where the integrity hash matches
-/// - Ok(None) where there is no integrity hash in the response and the
-///   block is all 0
+/// - Ok(()) where the integrity hash matches (or the integrity hash is missing
+///   and the block is all 0s, indicating an empty block)
 /// - Err otherwise
 pub(crate) fn validate_unencrypted_read_response(
     block_hash: Option<u64>,
     data: &mut [u8],
     log: &Logger,
-) -> Result<Validation, CrucibleError> {
+) -> Result<(), CrucibleError> {
     if let Some(hash) = block_hash {
         // check integrity hashes - make sure it is correct
         let computed_hash = integrity_hash(&[data]);
 
         if computed_hash == hash {
-            Ok(Validation::Unencrypted(computed_hash))
+            Ok(())
         } else {
             // No integrity hash was correct for this response
             error!(log, "No match computed hash:0x{:x}", computed_hash,);
@@ -3101,7 +2875,7 @@ pub(crate) fn validate_unencrypted_read_response(
         //
         // XXX if it's not a blank block, we may be under attack?
         if data[..].iter().all(|&x| x == 0) {
-            Ok(Validation::Empty)
+            Ok(())
         } else {
             error!(log, "got empty block context with non-blank block");
             Err(CrucibleError::MissingBlockContext)

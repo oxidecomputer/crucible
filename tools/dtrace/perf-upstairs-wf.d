@@ -24,19 +24,10 @@ crucible_upstairs*:::up-to-ds-write-start
     substart[arg0] = timestamp;
 }
 
-crucible_upstairs*:::up-to-ds-flush-done,
-crucible_upstairs*:::up-to-ds-write-done
+crucible_upstairs*:::gw-flush-done,
+crucible_upstairs*:::gw-write-done
 /substart[arg0]/
 {
     @[probename] = quantize(timestamp - substart[arg0]);
     substart[arg0] = 0;
-    final[arg0] = timestamp;
-}
-
-crucible_upstairs*:::gw-flush-done,
-crucible_upstairs*:::gw-write-done
-/final[arg0]/
-{
-    @[probename] = quantize(timestamp - final[arg0]);
-    final[arg0] = 0;
 }
