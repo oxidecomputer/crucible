@@ -1157,7 +1157,6 @@ impl DownstairsClient {
     /// error is at or after `Message::YouAreNowActive`.
     ///
     /// Returns a flag indicating how to proceed
-    #[must_use]
     pub(crate) fn continue_negotiation(
         &mut self,
         m: Message,
@@ -1626,6 +1625,20 @@ impl DownstairsClient {
                         *state = NegotiationState::WaitQuorum;
                         out = NegotiationResult::WaitQuorum;
                     }
+                    // Special case: if a downstairs is replaced while we're
+                    // still trying to go active, then we use the WaitQuorum
+                    // path instead of LiveRepair.
+                    ConnectionMode::Replaced
+                        if matches!(
+                            up_state,
+                            UpstairsState::Initializing
+                                | UpstairsState::GoActive(..)
+                        ) =>
+                    {
+                        *state = NegotiationState::WaitQuorum;
+                        out = NegotiationResult::WaitQuorum;
+                    }
+
                     ConnectionMode::Faulted | ConnectionMode::Replaced => {
                         *state = NegotiationState::LiveRepairReady;
                         out = NegotiationResult::LiveRepair;
@@ -1793,7 +1806,10 @@ impl DownstairsClient {
 #[serde(rename_all = "snake_case")]
 #[serde(tag = "type", content = "value")]
 pub enum NegotiationState {
-    /// Initial state
+    /// Initial state, waiting to hear `YesItsMe` from the client
+    ///
+    /// Once this message is heard, transitions to either `WaitActive` (if
+    /// `auto_promote` is `false`) or `WaitQuorum` (if `auto_promote` is `true`)
     Start {
         auto_promote: bool,
     },
