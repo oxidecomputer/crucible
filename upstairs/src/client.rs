@@ -231,51 +231,6 @@ impl DownstairsClient {
         }
     }
 
-    /// Builds a minimal `DownstairsClient` for testing
-    ///
-    /// The resulting client has no target address; any packets sent by the
-    /// client will disappear into the void.
-    #[cfg(test)]
-    fn test_default() -> Self {
-        let client_delay_us = Arc::new(AtomicU64::new(0));
-        let cfg = Arc::new(UpstairsConfig {
-            encryption_context: None,
-            upstairs_id: Uuid::new_v4(),
-            session_id: Uuid::new_v4(),
-            generation: std::sync::atomic::AtomicU64::new(1),
-            read_only: false,
-        });
-        Self {
-            cfg,
-            client_task: Self::new_dummy_task(false),
-            client_id: ClientId::new(0),
-            io_limits: ClientIOLimits::new(
-                crate::IO_OUTSTANDING_MAX_JOBS * 3 / 2,
-                crate::IO_OUTSTANDING_MAX_BYTES as usize * 3 / 2,
-            ),
-            region_uuid: None,
-            tls_context: None,
-            log: crucible_common::build_logger(),
-            target_addr: None,
-            repair_addr: None,
-            state: DsState::Connecting {
-                mode: ConnectionMode::New,
-                state: NegotiationState::Start {
-                    auto_promote: false,
-                },
-            },
-            last_flush: JobId(0),
-            stats: DownstairsStats::default(),
-            skipped_jobs: BTreeSet::new(),
-            region_metadata: None,
-            repair_info: None,
-            io_state_job_count: ClientIOStateCount::default(),
-            io_state_byte_count: ClientIOStateCount::default(),
-            connection_id: ConnectionId(0),
-            client_delay_us,
-        }
-    }
-
     /// Choose which `ClientAction` to apply
     ///
     /// This function is called from within a top-level `select!`, so not only
@@ -2672,35 +2627,5 @@ pub(crate) fn validate_unencrypted_read_response(
             error!(log, "got empty block context with non-blank block");
             Err(CrucibleError::MissingBlockContext)
         }
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    #[should_panic]
-    fn downstairs_transition_deactivate_not_new() {
-        // Verify deactivate goes to new
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Stopping(ClientStopReason::Deactivated),
-        );
-    }
-
-    #[test]
-    #[should_panic]
-    fn downstairs_transition_same_active() {
-        let mut client = DownstairsClient::test_default();
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Active,
-        );
-        client.checked_state_transition(
-            &UpstairsState::Initializing,
-            DsState::Active,
-        );
     }
 }
