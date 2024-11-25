@@ -142,9 +142,6 @@ pub(crate) struct DownstairsClient {
     /// This is set to `None` during initialization
     pub(crate) repair_addr: Option<SocketAddr>,
 
-    /// Flag indicating that the Upstairs should replay jobs to this client
-    needs_replay: bool,
-
     /// TLS context (if present)
     ///
     /// This is passed as a pointer to minimize copies
@@ -212,7 +209,6 @@ impl DownstairsClient {
             client_id,
             io_limits,
             region_uuid: None,
-            needs_replay: false,
             tls_context,
             log,
             target_addr,
@@ -258,7 +254,6 @@ impl DownstairsClient {
                 crate::IO_OUTSTANDING_MAX_BYTES as usize * 3 / 2,
             ),
             region_uuid: None,
-            needs_replay: false,
             tls_context: None,
             log: crucible_common::build_logger(),
             target_addr: None,
@@ -326,7 +321,6 @@ impl DownstairsClient {
                 warn!(self.log, "failed to send stop request")
             }
             self.checked_state_transition(up_state, DsState::Stopping(r));
-            debug!(self.log, "NEW IO STATE {:?}", self.state);
         } else {
             warn!(self.log, "client task is already stopping")
         }
@@ -574,7 +568,6 @@ impl DownstairsClient {
         // entirely; the repair address could have changed in any of these
         // cases.
         self.repair_addr = None;
-        self.needs_replay = false;
 
         // If the upstairs is already active (or trying to go active), then the
         // downstairs should automatically call PromoteToActive when it reaches
@@ -628,16 +621,6 @@ impl DownstairsClient {
 
         // Restart with a short delay, connecting if we're auto-promoting
         self.start_task(true, auto_promote);
-    }
-
-    /// Sets the `needs_replay` flag
-    pub(crate) fn needs_replay(&mut self) {
-        self.needs_replay = true;
-    }
-
-    /// Returns and clears the `needs_replay` flag
-    pub(crate) fn check_replay(&mut self) -> bool {
-        std::mem::take(&mut self.needs_replay)
     }
 
     /// Returns the last flush ID handled by this client
@@ -1188,28 +1171,29 @@ impl DownstairsClient {
     /// Skips from `LiveRepairReady` to `Active`; a no-op otherwise
     ///
     /// # Panics
-    /// If this downstairs is not read-only, or we weren't previously in
-    /// `NegotiationState::LiveRepairReady`
+    /// If this downstairs is not read-only
     pub(crate) fn skip_live_repair(&mut self, up_state: &UpstairsState) {
         let DsState::Connecting { state, .. } = self.state else {
-            panic!("invalid call to SkipLiveRepair");
+            return;
         };
-        assert_eq!(state, NegotiationState::LiveRepairReady);
-        assert!(self.cfg.read_only);
+        if state == NegotiationState::LiveRepairReady {
+            assert!(self.cfg.read_only);
 
-        // TODO: could we do this transition early, by automatically
-        // skipping LiveRepairReady if read-only?
-        self.checked_state_transition(up_state, DsState::Active);
-        self.stats.ro_lr_skipped += 1;
+            // TODO: could we do this transition early, by automatically
+            // skipping LiveRepairReady if read-only?
+            self.checked_state_transition(up_state, DsState::Active);
+            self.stats.ro_lr_skipped += 1;
+        }
     }
 
-    /// Moves from `LiveRepairReady` to `LiveRepair`; panics otherwise
+    /// Moves from `LiveRepairReady` to `LiveRepair`, a no-op otherwise
     pub(crate) fn start_live_repair(&mut self, up_state: &UpstairsState) {
         let DsState::Connecting { state, .. } = self.state else {
-            panic!("invalid call to SkipLiveRepair");
+            return;
         };
-        assert_eq!(state, NegotiationState::LiveRepairReady);
-        self.checked_state_transition(up_state, DsState::LiveRepair);
+        if state == NegotiationState::LiveRepairReady {
+            self.checked_state_transition(up_state, DsState::LiveRepair);
+        }
     }
 
     /// Continues the negotiation and initial reconciliation process
@@ -1217,13 +1201,14 @@ impl DownstairsClient {
     /// Returns an error if the upstairs should go inactive, which occurs if the
     /// error is at or after `Message::YouAreNowActive`.
     ///
-    /// Returns `true` if negotiation for this downstairs is complete
+    /// Returns a flag indicating how to proceed
+    #[must_use]
     pub(crate) fn continue_negotiation(
         &mut self,
         m: Message,
         up_state: &UpstairsState,
         ddef: &mut RegionDefinitionStatus,
-    ) -> Result<bool, CrucibleError> {
+    ) -> Result<NegotiationResult, CrucibleError> {
         /*
          * Either we get all the way through the negotiation, or we hit the
          * timeout and exit to retry.
@@ -1324,8 +1309,9 @@ impl DownstairsClient {
                 up_state,
                 ClientNegotiationFailed::BadNegotiationOrder,
             );
-            return Ok(false);
+            return Ok(NegotiationResult::NotDone);
         };
+        let mut out = NegotiationResult::NotDone;
         let mode = *mode; // mode is immutable here
         match m {
             Message::YesItsMe {
@@ -1338,7 +1324,7 @@ impl DownstairsClient {
                         up_state,
                         ClientNegotiationFailed::BadNegotiationOrder,
                     );
-                    return Ok(false);
+                    return Ok(NegotiationResult::NotDone);
                 };
                 if version != CRUCIBLE_MESSAGE_VERSION {
                     error!(
@@ -1351,7 +1337,7 @@ impl DownstairsClient {
                         up_state,
                         ClientNegotiationFailed::Incompatible,
                     );
-                    return Ok(false);
+                    return Ok(NegotiationResult::NotDone);
                 }
                 self.repair_addr = Some(repair_addr);
                 if auto_promote {
@@ -1417,7 +1403,8 @@ impl DownstairsClient {
                         up_state,
                         ClientNegotiationFailed::BadNegotiationOrder,
                     );
-                    return Ok(false);
+                    // XXX why isn't this an error?
+                    return Ok(NegotiationResult::NotDone);
                 }
 
                 let match_uuid = self.cfg.upstairs_id == upstairs_id;
@@ -1483,7 +1470,7 @@ impl DownstairsClient {
                         up_state,
                         ClientNegotiationFailed::BadNegotiationOrder,
                     );
-                    return Ok(false);
+                    return Ok(NegotiationResult::NotDone);
                 }
                 info!(
                     self.log,
@@ -1500,7 +1487,7 @@ impl DownstairsClient {
                         up_state,
                         ClientNegotiationFailed::Incompatible,
                     );
-                    return Ok(false);
+                    return Ok(NegotiationResult::NotDone);
                 }
 
                 /*
@@ -1645,7 +1632,8 @@ impl DownstairsClient {
                         up_state,
                         ClientNegotiationFailed::BadNegotiationOrder,
                     );
-                    return Ok(false); // TODO should we trigger set_inactive?
+                    // TODO should we trigger set_inactive?
+                    return Ok(NegotiationResult::NotDone);
                 }
                 assert_eq!(
                     mode,
@@ -1659,9 +1647,10 @@ impl DownstairsClient {
                 );
                 assert_eq!(self.last_flush, last_flush_number);
 
-                // Immediately set the state to Active, since we've already
-                // copied over the jobs.
+                // Immediately set the state to Active, and return a flag
+                // indicating that jobs should be replayed.
                 self.checked_state_transition(up_state, DsState::Active);
+                out = NegotiationResult::Replay;
             }
             Message::ExtentVersions {
                 gen_numbers,
@@ -1674,14 +1663,17 @@ impl DownstairsClient {
                         up_state,
                         ClientNegotiationFailed::BadNegotiationOrder,
                     );
-                    return Ok(false); // TODO should we trigger set_inactive?
+                    // TODO should we trigger set_inactive?
+                    return Ok(NegotiationResult::NotDone);
                 }
                 match mode {
                     ConnectionMode::New => {
                         *state = NegotiationState::WaitQuorum;
+                        out = NegotiationResult::WaitQuorum;
                     }
                     ConnectionMode::Faulted | ConnectionMode::Replaced => {
                         *state = NegotiationState::LiveRepairReady;
+                        out = NegotiationResult::LiveRepair;
                     }
                     ConnectionMode::Offline => {
                         panic!(
@@ -1708,15 +1700,7 @@ impl DownstairsClient {
             }
             m => panic!("invalid message in continue_negotiation: {m:?}"),
         }
-        // TODO: reconsider this part?
-        Ok(matches!(
-            self.state,
-            DsState::Connecting {
-                state: NegotiationState::WaitQuorum // new
-                    | NegotiationState::LiveRepairReady, // live-repair
-                ..
-            } | DsState::Active // replay
-        ))
+        Ok(out)
     }
 
     /// Sends the next reconciliation job to all clients
@@ -1875,6 +1859,14 @@ pub enum NegotiationState {
 
     /// Waiting for live-repair to begin
     LiveRepairReady,
+}
+
+/// Result value returned when negotiation is complete
+pub(crate) enum NegotiationResult {
+    NotDone,
+    WaitQuorum,
+    Replay,
+    LiveRepair,
 }
 
 /// Result value from [`DownstairsClient::enqueue`]
