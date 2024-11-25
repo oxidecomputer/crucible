@@ -2602,6 +2602,14 @@ impl Downstairs {
                 continue;
             }
             match self.clients[client_id].state() {
+                // Replacement is allowed before starting, but not between
+                // activation and coming online
+                DsState::Connecting {
+                    state:
+                        NegotiationState::Start { .. }
+                        | NegotiationState::WaitActive,
+                    mode: ConnectionMode::New,
+                } => {}
                 DsState::Stopping(..)
                 | DsState::Connecting { .. }
                 | DsState::LiveRepair => {
@@ -2610,7 +2618,7 @@ impl Downstairs {
                         self.clients[client_id].state(),
                     )));
                 }
-                _ => {}
+                DsState::Active => {}
             }
         }
 
