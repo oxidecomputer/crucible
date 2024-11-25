@@ -686,18 +686,6 @@ impl Downstairs {
         }) {
             self.abort_reconciliation(up_state);
         }
-
-        // If this client is coming back from being offline, then mark that its
-        // jobs must be replayed when it completes negotiation.
-        if matches!(
-            self.clients[client_id].state(),
-            DsState::Connecting {
-                mode: ConnectionMode::Offline,
-                ..
-            }
-        ) {
-            self.clients[client_id].needs_replay();
-        }
     }
 
     /// Returns true if we can deactivate immediately
@@ -808,17 +796,10 @@ impl Downstairs {
         self.next_id
     }
 
-    /// Sends replay jobs to the given client if `needs_replay` is set
-    pub(crate) fn check_replay(&mut self, client_id: ClientId) {
-        if self.clients[client_id].check_replay() {
-            self.replay_jobs(client_id);
-        }
-    }
-
     /// Sends all pending jobs for the given client
     ///
     /// Jobs are pending if they have not yet been flushed by this client.
-    fn replay_jobs(&mut self, client_id: ClientId) {
+    pub(crate) fn replay_jobs(&mut self, client_id: ClientId) {
         let lf = self.clients[client_id].last_flush();
 
         info!(
@@ -4452,7 +4433,7 @@ pub(crate) mod test {
     }
 
     /// Helper function to legally move the given client to live-repair
-    fn move_to_live_repair(ds: &mut Downstairs, to_repair: ClientId) {
+    fn to_live_repair_ready(ds: &mut Downstairs, to_repair: ClientId) {
         ds.fault_client(
             to_repair,
             &UpstairsState::Active,
@@ -4471,6 +4452,11 @@ pub(crate) mod test {
                 DsState::Connecting { state, mode },
             );
         }
+    }
+
+    /// Helper function to legally move the given client to live-repair
+    fn move_to_live_repair(ds: &mut Downstairs, to_repair: ClientId) {
+        to_live_repair_ready(ds, to_repair);
         ds.clients[to_repair].checked_state_transition(
             &UpstairsState::Active,
             DsState::LiveRepair,
@@ -6185,6 +6171,7 @@ pub(crate) mod test {
         // in the FailedReconcile state. Verify that attempts to get new work
         // after a failed repair now return none.
         let mut ds = Downstairs::test_default();
+        set_all_reconcile(&mut ds);
 
         let up_state = UpstairsState::Active;
         let rep_id = ReconciliationId(0);
@@ -6244,6 +6231,7 @@ pub(crate) mod test {
     #[test]
     fn reconcile_repair_workflow_1() {
         let mut ds = Downstairs::test_default();
+        set_all_reconcile(&mut ds);
 
         let up_state = UpstairsState::Active;
         let close_id = ReconciliationId(0);
@@ -6291,6 +6279,7 @@ pub(crate) mod test {
     fn reconcile_repair_workflow_2() {
         // Verify Done or Skipped works when checking for a complete repair
         let mut ds = Downstairs::test_default();
+        set_all_reconcile(&mut ds);
 
         let up_state = UpstairsState::Active;
         let rep_id = ReconciliationId(1);
@@ -10035,11 +10024,7 @@ pub(crate) mod test {
 
         // Fault the downstairs
         let to_repair = ClientId::new(1);
-        ds.fault_client(
-            to_repair,
-            &UpstairsState::Active,
-            ClientFaultReason::RequestedFault,
-        );
+        to_live_repair_ready(&mut ds, to_repair);
 
         // Start the repair normally. This enqueues the close & reopen jobs, and
         // reserves Job IDs for the repair/noop

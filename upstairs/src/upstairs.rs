@@ -3,7 +3,8 @@
 use crate::{
     cdt,
     client::{
-        ClientAction, ClientRunResult, ClientStopReason, NegotiationState,
+        ClientAction, ClientRunResult, ClientStopReason, NegotiationResult,
+        NegotiationState,
     },
     control::ControlRequest,
     deferred::{
@@ -1706,44 +1707,23 @@ impl Upstairs {
                     // continue_negotiation returns an error if the upstairs
                     // should go inactive!
                     Err(e) => self.set_inactive(e),
-                    Ok(false) => (),
-                    Ok(true) => {
+                    Ok(NegotiationResult::NotDone) => (),
+                    Ok(NegotiationResult::WaitQuorum) => {
                         // Copy the region definition into the Downstairs
                         self.downstairs.set_ddef(self.ddef.get_def().unwrap());
-
-                        // Check to see whether we want to replay jobs (if the
-                        // Downstairs is coming back from being Offline)
-                        // TODO should we only do this in certain new states?
-                        self.downstairs.check_replay(client_id);
-
-                        // Negotiation succeeded for this Downstairs, let's see
-                        // what we can do from here
-                        match self.downstairs.clients[client_id].state() {
-                            DsState::Active => (),
-
-                            DsState::Connecting {
-                                state: NegotiationState::WaitQuorum,
-                                ..
-                            } => {
-                                // See if we have a quorum
-                                if self.connect_region_set() {
-                                    // We connected normally, so there's no need
-                                    // to check for live-repair.
-                                    self.repair_check_deadline = None;
-                                }
-                            }
-
-                            DsState::Connecting {
-                                state: NegotiationState::LiveRepairReady,
-                                ..
-                            } => {
-                                // Immediately check for live-repair
-                                self.repair_check_deadline =
-                                    Some(Instant::now());
-                            }
-
-                            s => panic!("bad state after negotiation: {s:?}"),
+                        // See if we have a quorum
+                        if self.connect_region_set() {
+                            // We connected normally, so there's no need
+                            // to check for live-repair.
+                            self.repair_check_deadline = None;
                         }
+                    }
+                    Ok(NegotiationResult::Replay) => {
+                        self.downstairs.replay_jobs(client_id);
+                    }
+                    Ok(NegotiationResult::LiveRepair) => {
+                        // Immediately check for live-repair
+                        self.repair_check_deadline = Some(Instant::now());
                     }
                 }
             }
@@ -2189,6 +2169,13 @@ pub(crate) mod test {
             &UpstairsState::Active,
             ClientFaultReason::RequestedFault,
         );
+        // Restart the IO task (because we'll be faking messages from it)
+        up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
+            client_id: to_repair,
+            action: ClientAction::TaskStopped(ClientRunResult::RequestedStop(
+                ClientStopReason::Fault(ClientFaultReason::RequestedFault),
+            )),
+        }));
         let mode = ConnectionMode::Faulted;
         for state in [
             NegotiationState::Start { auto_promote: true },
@@ -2198,7 +2185,7 @@ pub(crate) mod test {
             NegotiationState::LiveRepairReady,
         ] {
             up.downstairs.clients[to_repair].checked_state_transition(
-                &UpstairsState::Active,
+                &up.state,
                 DsState::Connecting { state, mode },
             );
         }
