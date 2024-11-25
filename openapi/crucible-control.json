@@ -370,7 +370,7 @@
         "description": "Tracks client negotiation progress",
         "oneOf": [
           {
-            "description": "Initial state",
+            "description": "Initial state, waiting to hear `YesItsMe` from the client\n\nOnce this message is heard, transitions to either `WaitActive` (if `auto_promote` is `false`) or `WaitQuorum` (if `auto_promote` is `true`)",
             "type": "object",
             "properties": {
               "type": {
