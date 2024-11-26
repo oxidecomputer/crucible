@@ -125,6 +125,8 @@ pub(crate) struct DeferredWrite {
 #[derive(Debug)]
 pub(crate) enum DeferredBlockOp {
     Write(EncryptedWrite),
+    AnonymousFlush(Option<IOLimitGuard>),
+    Barrier,
     Other(BlockOp),
 }
 
