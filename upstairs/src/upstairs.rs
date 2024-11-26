@@ -623,36 +623,40 @@ impl Upstairs {
         // Check for client-side deactivation
         if matches!(&self.state, UpstairsState::Deactivating(..)) {
             info!(self.log, "checking for deactivation");
-            for i in ClientId::iter() {
-                // Clients become Deactivated, then New (when the IO task
-                // completes and the client is restarted).  We don't try to
-                // deactivate them _again_ in such cases.
-                if matches!(
-                    self.downstairs.clients[i].state(),
-                    DsState::Deactivated | DsState::New
-                ) {
-                    debug!(self.log, "already deactivated {i}");
-                } else if self.downstairs.try_deactivate(i, &self.state) {
-                    info!(self.log, "deactivated client {i}");
-                } else {
-                    info!(self.log, "not ready to deactivate client {i}");
+            if !self.deferred_ops.is_empty() {
+                info!(self.log, "waiting for deferred ops...");
+            } else {
+                for i in ClientId::iter() {
+                    // Clients become Deactivated, then New (when the IO task
+                    // completes and the client is restarted).  We don't try to
+                    // deactivate them _again_ in such cases.
+                    if matches!(
+                        self.downstairs.clients[i].state(),
+                        DsState::Deactivated | DsState::New
+                    ) {
+                        debug!(self.log, "already deactivated {i}");
+                    } else if self.downstairs.try_deactivate(i, &self.state) {
+                        info!(self.log, "deactivated client {i}");
+                    } else {
+                        info!(self.log, "not ready to deactivate client {i}");
+                    }
                 }
-            }
-            if self
-                .downstairs
-                .clients
-                .iter()
-                .all(|c| c.ready_to_deactivate())
-            {
-                info!(self.log, "All DS in the proper state! -> INIT");
-                let prev = std::mem::replace(
-                    &mut self.state,
-                    UpstairsState::Initializing,
-                );
-                let UpstairsState::Deactivating(res) = prev else {
-                    panic!("invalid upstairs state {prev:?}"); // checked above
-                };
-                res.send_ok(());
+                if self
+                    .downstairs
+                    .clients
+                    .iter()
+                    .all(|c| c.ready_to_deactivate())
+                {
+                    info!(self.log, "All DS in the proper state! -> INIT");
+                    let prev = std::mem::replace(
+                        &mut self.state,
+                        UpstairsState::Initializing,
+                    );
+                    let UpstairsState::Deactivating(res) = prev else {
+                        panic!("invalid upstairs state {prev:?}");
+                    };
+                    res.send_ok(());
+                }
             }
         }
 
