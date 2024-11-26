@@ -39,7 +39,7 @@ tick-1s
 crucible_upstairs*:::up-status
 {
     show = show + 1;
-    session_id = json(copyinstr(arg1), "ok.session_id");
+    this->session_id = json(copyinstr(arg1), "ok.session_id");
 
     /*
      * I'm not very happy about this very long muli-line printf, but if
@@ -48,7 +48,7 @@ crucible_upstairs*:::up-status
      */
     printf("%5d %8s %17s %17s %17s %5s %5s %9s %10s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s\n",
     pid,
-    substr(session_id, 0, 8),
+    substr(this->session_id, 0, 8),
 
     /* State for the three downstairs */
     json(copyinstr(arg1), "ok.ds_state[0]"),

@@ -9,7 +9,6 @@
 dtrace:::BEGIN
 {
     show = 21;
-    last[pid] = 0;
 }
 
 /*
