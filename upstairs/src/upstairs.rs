@@ -211,7 +211,7 @@ pub(crate) struct Upstairs {
     /// issue a flush of its own to be sure that data is pushed to disk.  Note
     /// that this is not an indication of an ACK'd flush, just that the last IO
     /// command we put on the work queue was not a flush.
-    need_flush: bool,
+    need_flush: Option<AutoFlush>,
 
     /// Statistics for this upstairs
     ///
@@ -255,6 +255,11 @@ pub(crate) struct Upstairs {
 
     /// Thread pool for doing heavy CPU work outside the Tokio runtime
     pool: rayon::ThreadPool,
+}
+
+enum AutoFlush {
+    Needed,
+    Submitted,
 }
 
 /// Action to be taken which modifies the [`Upstairs`] state
@@ -411,7 +416,7 @@ impl Upstairs {
             guest,
             guest_dropped: false,
             ddef: rd_status,
-            need_flush: false,
+            need_flush: None,
             stats,
             counters,
             log,
@@ -565,9 +570,8 @@ impl Upstairs {
                 cdt::up__action_flush_check!(|| (self
                     .counters
                     .action_flush_check));
-                if self.need_flush {
-                    let io_guard = self.try_acquire_io(0);
-                    self.submit_flush(None, None, io_guard);
+                if matches!(self.need_flush, Some(AutoFlush::Needed)) {
+                    self.enqueue_anonymous_flush();
                 }
                 self.flush_deadline = Instant::now() + self.flush_interval;
             }
@@ -606,7 +610,11 @@ impl Upstairs {
         // Check whether we need to send a Barrier operation to clean out
         // complete-but-unflushed jobs.
         if self.downstairs.needs_barrier() {
-            self.submit_barrier()
+            if self.deferred_ops.is_empty() {
+                self.submit_barrier()
+            } else {
+                self.deferred_ops.push_immediate(DeferredBlockOp::Barrier);
+            }
         }
 
         // Check to see whether live-repair can continue
@@ -978,6 +986,10 @@ impl Upstairs {
         match op {
             DeferredBlockOp::Write(op) => self.submit_write(op),
             DeferredBlockOp::Other(op) => self.apply_guest_request_inner(op),
+            DeferredBlockOp::AnonymousFlush(guard) => {
+                self.submit_flush(None, None, guard)
+            }
+            DeferredBlockOp::Barrier => self.submit_barrier(),
         }
     }
 
@@ -1278,10 +1290,12 @@ impl Upstairs {
             }
             UpstairsState::Active => (),
         }
-        if self.need_flush || !self.downstairs.can_deactivate_immediately() {
+        if self.need_flush.is_some()
+            || !self.deferred_ops.is_empty()
+            || !self.downstairs.can_deactivate_immediately()
+        {
             debug!(self.log, "not ready to deactivate; submitting final flush");
-            let io_guard = self.try_acquire_io(0);
-            self.submit_flush(None, None, io_guard);
+            self.enqueue_anonymous_flush();
         } else {
             debug!(self.log, "ready to deactivate right away");
             // Deactivation is handled in the invariant-checking portion of
@@ -1289,6 +1303,18 @@ impl Upstairs {
         }
 
         self.state = UpstairsState::Deactivating(res);
+    }
+
+    /// Submit a flush without an associated `BlockRes`, respecting queues
+    fn enqueue_anonymous_flush(&mut self) {
+        let io_guard = self.try_acquire_io(0);
+        if self.deferred_ops.is_empty() {
+            self.submit_flush(None, None, io_guard);
+        } else {
+            self.deferred_ops
+                .push_immediate(DeferredBlockOp::AnonymousFlush(io_guard));
+            self.need_flush = Some(AutoFlush::Submitted);
+        }
     }
 
     pub(crate) fn submit_flush(
@@ -1302,7 +1328,7 @@ impl Upstairs {
         // (without the guest being involved), so the check is handled at the
         // BlockOp::Flush level above.
 
-        self.need_flush = false;
+        self.need_flush = None;
 
         /*
          * Get the next ID for our new guest work job. Note that the flush
@@ -1369,7 +1395,9 @@ impl Upstairs {
             return;
         }
 
-        self.need_flush = true;
+        if self.need_flush.is_none() {
+            self.need_flush = Some(AutoFlush::Needed);
+        }
 
         /*
          * Given the offset and buffer size, figure out what extent and
@@ -1506,7 +1534,9 @@ impl Upstairs {
          * end. This ID is also put into the IO struct we create that
          * handles the operation(s) on the storage side.
          */
-        self.need_flush = true;
+        if self.need_flush.is_none() {
+            self.need_flush = Some(AutoFlush::Needed);
+        }
 
         /*
          * Grab this ID after extent_from_offset: in case of Err we don't

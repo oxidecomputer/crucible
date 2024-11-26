@@ -2023,7 +2023,11 @@ impl Downstairs {
     /// A `Barrier` is needed if we have buffered more than
     /// `IO_CACHED_MAX_BYTES/JOBS` worth of complete jobs, and there are no
     /// other barrier (or flush) operations in flight
-    pub(crate) fn needs_barrier(&self) -> bool {
+    ///
+    /// If this function returns `true`, the caller **must** submit a barrier
+    /// operation.
+    #[must_use]
+    pub(crate) fn needs_barrier(&mut self) -> bool {
         if self.pending_barrier > 0 {
             return false;
         }
@@ -2055,8 +2059,14 @@ impl Downstairs {
             .max()
             .unwrap();
 
-        max_jobs as u64 >= crate::IO_CACHED_MAX_JOBS
+        if max_jobs as u64 >= crate::IO_CACHED_MAX_JOBS
             || max_bytes >= crate::IO_CACHED_MAX_BYTES
+        {
+            self.pending_barrier += 1;
+            true
+        } else {
+            false
+        }
     }
 
     pub(crate) fn submit_barrier(&mut self) -> JobId {
@@ -2069,7 +2079,6 @@ impl Downstairs {
         let dependencies = self.ds_active.deps_for_flush(next_id);
         debug!(self.log, "IO Barrier {next_id} has deps {dependencies:?}");
 
-        self.pending_barrier += 1;
         self.enqueue(next_id, IOop::Barrier { dependencies }, None, None);
         next_id
     }
