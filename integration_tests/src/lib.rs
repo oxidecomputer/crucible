@@ -5809,4 +5809,41 @@ mod test {
             }
         ));
     }
+
+    #[tokio::test]
+    async fn test_auto_flush_deactivate() {
+        let log = csl();
+        let child = TestDownstairsSet::small(false).await.unwrap();
+        let vcr = VolumeConstructionRequest::Volume {
+            id: Uuid::new_v4(),
+            block_size: 512,
+            sub_volumes: vec![VolumeConstructionRequest::Region {
+                block_size: 512,
+                blocks_per_extent: child.blocks_per_extent(),
+                extent_count: child.extent_count(),
+                opts: child.opts(),
+                gen: 2,
+            }],
+            read_only_parent: None,
+        };
+
+        let volume = Volume::construct(vcr, None, log.clone()).await.unwrap();
+        volume.activate().await.unwrap();
+
+        // Send exactly IO_CACHED_MAX_JOBS to force a Barrier to be sent.  The
+        // barrier empties out the active list, so deactivation may proceed.
+        for _ in 0..crucible::testing::IO_CACHED_MAX_JOBS {
+            let mut buf = Buffer::new(2, 512);
+            volume.read(BlockIndex(0), &mut buf).await.unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // At this point, need_flush is set, but there are no active jobs.
+        // Deactivation must be aware of the need_flush flag; otherwise, the
+        // Upstairs will attempt to submit that flush after deactivation.
+        volume.deactivate().await.unwrap();
+
+        // Make sure everything worked
+        volume.activate().await.unwrap();
+    }
 }
