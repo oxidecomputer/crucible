@@ -5832,7 +5832,7 @@ mod test {
 
         // Send exactly IO_CACHED_MAX_JOBS to force a Barrier to be sent.  The
         // barrier empties out the active list, so deactivation may proceed.
-        for _ in 0..10000 {
+        for _ in 0..crucible::testing::IO_CACHED_MAX_JOBS {
             let mut buf = Buffer::new(2, 512);
             volume.read(BlockIndex(0), &mut buf).await.unwrap();
         }

@@ -110,6 +110,12 @@ const IO_CACHED_MAX_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
 /// them comes back.
 const IO_CACHED_MAX_JOBS: u64 = 10000;
 
+// Re-exports for unit testing
+#[cfg(feature = "integration-tests")]
+pub mod testing {
+    pub const IO_CACHED_MAX_JOBS: u64 = super::IO_CACHED_MAX_JOBS;
+}
+
 /// The BlockIO trait behaves like a physical NVMe disk (or a virtio virtual
 /// disk): there is no contract about what order operations that are submitted
 /// between flushes are performed in.

@@ -19,7 +19,7 @@ crucible-client-types.workspace = true
 crucible-downstairs = { workspace = true, features = ["integration-tests"] }
 crucible-pantry-client.workspace = true
 crucible-pantry.workspace = true
-crucible.workspace = true
+crucible = { workspace = true, features = ["integration-tests"] }
 dropshot.workspace = true
 futures-core.workspace = true
 futures.workspace = true

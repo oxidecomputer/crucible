@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [features]
 asm = ["usdt/asm"]
 notify-nexus = ["nexus-client", "internal-dns", "progenitor-client", "http", "omicron-uuid-kinds"]
+integration-tests = []
 
 [dependencies]
 anyhow.workspace = true
