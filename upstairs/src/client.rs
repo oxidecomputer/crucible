@@ -438,7 +438,10 @@ impl DownstairsClient {
             panic!("invalid state {:?}", self.state);
         };
         assert_eq!(*state, NegotiationState::WaitQuorum);
-        assert_eq!(*mode, ConnectionMode::New); // XXX Replaced?
+        assert!(matches!(
+            mode,
+            ConnectionMode::New | ConnectionMode::Replaced
+        ));
         *state = NegotiationState::Reconcile;
     }
 
@@ -1684,7 +1687,7 @@ impl DownstairsClient {
             self.state,
             DsState::Connecting {
                 state: NegotiationState::Reconcile,
-                mode: ConnectionMode::New
+                mode: ConnectionMode::New | ConnectionMode::Replaced
             }
         ) {
             panic!(
