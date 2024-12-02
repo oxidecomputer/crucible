@@ -2602,23 +2602,25 @@ impl Downstairs {
                 continue;
             }
             match self.clients[client_id].state() {
-                // Replacement is allowed before starting, but not between
-                // activation and coming online
-                DsState::Connecting {
-                    state:
-                        NegotiationState::Start { .. }
-                        | NegotiationState::WaitActive,
-                    mode: ConnectionMode::New,
-                } => {}
                 DsState::Stopping(..)
-                | DsState::Connecting { .. }
-                | DsState::LiveRepair => {
+                | DsState::LiveRepair
+                | DsState::Connecting {
+                    mode:
+                        ConnectionMode::Replaced
+                        | ConnectionMode::Offline
+                        | ConnectionMode::Faulted,
+                    ..
+                } => {
                     return Err(CrucibleError::ReplaceRequestInvalid(format!(
                         "Replace {old} failed, downstairs {client_id} is {:?}",
                         self.clients[client_id].state(),
                     )));
                 }
-                DsState::Active => {}
+                DsState::Active
+                | DsState::Connecting {
+                    mode: ConnectionMode::New,
+                    ..
+                } => {}
             }
         }
 
