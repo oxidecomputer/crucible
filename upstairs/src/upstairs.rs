@@ -2172,9 +2172,7 @@ pub(crate) mod test {
         // Restart the IO task (because we'll be faking messages from it)
         up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
             client_id: to_repair,
-            action: ClientAction::TaskStopped(ClientRunResult::RequestedStop(
-                ClientStopReason::Fault(ClientFaultReason::RequestedFault),
-            )),
+            action: ClientAction::TaskStopped(ClientRunResult::RequestedStop),
         }));
         let mode = ConnectionMode::Faulted;
         for state in [
@@ -2285,9 +2283,7 @@ pub(crate) mod test {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id,
                 action: ClientAction::TaskStopped(
-                    ClientRunResult::RequestedStop(
-                        ClientStopReason::Deactivated,
-                    ),
+                    ClientRunResult::RequestedStop,
                 ),
             }));
 
@@ -3684,9 +3680,7 @@ pub(crate) mod test {
             up.apply(UpstairsAction::Downstairs(DownstairsAction::Client {
                 client_id,
                 action: ClientAction::TaskStopped(
-                    ClientRunResult::RequestedStop(
-                        ClientStopReason::Deactivated,
-                    ),
+                    ClientRunResult::RequestedStop,
                 ),
             }));
         }
