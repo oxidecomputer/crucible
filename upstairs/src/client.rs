@@ -26,7 +26,10 @@ use serde::{Deserialize, Serialize};
 use slog::{debug, error, info, o, warn, Logger};
 use tokio::{
     net::{TcpSocket, TcpStream},
-    sync::{mpsc, oneshot},
+    sync::{
+        mpsc,
+        oneshot::{self, error::RecvError},
+    },
     time::{sleep, sleep_until, Duration, Instant},
 };
 use tokio_util::codec::FramedRead;
@@ -2048,8 +2051,9 @@ pub(crate) enum ClientRunResult {
     #[allow(dead_code)]
     ReadFailed(anyhow::Error),
     /// The `DownstairsClient` requested that the task stop, so it did
-    #[allow(dead_code)]
-    RequestedStop(ClientStopReason),
+    ///
+    /// The reason for the stop will be in the `DsState::Stopping(..)` member
+    RequestedStop,
     /// The socket closed cleanly and the task exited
     Finished,
     /// One of the queues used to communicate with the main task closed
@@ -2063,6 +2067,16 @@ pub(crate) enum ClientRunResult {
     /// arbitrary order (so the main client task may be awaiting the rx task
     /// when the latter is cancelled)
     ReceiveTaskCancelled,
+}
+
+/// Convert a oneshot result into a `ClientStopReason`
+impl From<Result<ClientStopReason, RecvError>> for ClientRunResult {
+    fn from(value: Result<ClientStopReason, RecvError>) -> Self {
+        match value {
+            Ok(..) => ClientRunResult::RequestedStop,
+            Err(..) => ClientRunResult::QueueClosed,
+        }
+    }
 }
 
 /// Data structure to hold context for the client IO task
@@ -2182,18 +2196,11 @@ impl ClientIoTask {
         if self.delay {
             tokio::select! {
                 s = &mut self.stop => {
-                    warn!(self.log, "client IO task stopped during sleep");
-                    return match s {
-                        Ok(s) =>
-                            ClientRunResult::RequestedStop(s),
-                        Err(e) => {
-                            warn!(
-                                self.log,
-                               "client_stop_rx closed unexpectedly: {e:?}"
-                            );
-                            ClientRunResult::QueueClosed
-                        }
-                    }
+                    warn!(
+                        self.log,
+                        "client IO task stopped during sleep: {s:?}"
+                    );
+                    return s.into();
                 }
                 _ = tokio::time::sleep(CLIENT_RECONNECT_DELAY) => {
                     // this is fine
@@ -2214,18 +2221,11 @@ impl ClientIoTask {
                 // Otherwise, continue as usual
             }
             s = &mut self.stop => {
-                warn!(self.log, "client IO task stopped before connecting");
-                return match s {
-                    Ok(s) =>
-                        ClientRunResult::RequestedStop(s),
-                    Err(e) => {
-                        warn!(
-                            self.log,
-                           "client_stop_rx closed unexpectedly: {e:?}"
-                        );
-                        ClientRunResult::QueueClosed
-                    }
-                }
+                warn!(
+                    self.log,
+                    "client IO task stopped before connecting: {s:?}"
+                );
+                return s.into();
             }
         }
 
@@ -2264,18 +2264,11 @@ impl ClientIoTask {
                 }
             }
             s = &mut self.stop => {
-                warn!(self.log, "client IO task stopped during connection");
-                return match s {
-                    Ok(s) =>
-                        ClientRunResult::RequestedStop(s),
-                    Err(e) => {
-                        warn!(
-                            self.log,
-                           "client_stop_rx closed unexpectedly: {e:?}"
-                        );
-                        ClientRunResult::QueueClosed
-                    }
-                }
+                warn!(
+                    self.log,
+                    "client IO task stopped during connection: {s:?}"
+                );
+                return s.into();
             }
         };
 
@@ -2370,19 +2363,8 @@ impl ClientIoTask {
                 }
 
                 s = &mut self.stop => {
-                    match s {
-                        Ok(s) => {
-                            break ClientRunResult::RequestedStop(s);
-                        }
-
-                        Err(e) => {
-                            warn!(
-                                self.log,
-                                "client_stop_rx closed unexpectedly: {e:?}"
-                            );
-                            break ClientRunResult::QueueClosed;
-                        }
-                    }
+                    info!(self.log, "client stopping due to {s:?}");
+                    break s.into();
                 }
             }
         }
@@ -2440,19 +2422,8 @@ impl ClientIoTask {
                 }
             }
             s = &mut self.stop => {
-                match s {
-                    Ok(s) => {
-                        Err(ClientRunResult::RequestedStop(s))
-                    }
-
-                    Err(e) => {
-                        warn!(
-                            self.log,
-                            "client_stop_rx closed unexpectedly: {e:?}"
-                        );
-                        Err(ClientRunResult::QueueClosed)
-                    }
-                }
+                info!(self.log, "client stopped in write due to {s:?}");
+                Err(s.into())
             }
             join_result = self.recv_task.join() => {
                 Err(join_result)
