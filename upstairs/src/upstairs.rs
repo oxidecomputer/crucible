@@ -921,6 +921,7 @@ impl Upstairs {
                 Some(Instant::now() + REPAIR_CHECK_INTERVAL);
         } else {
             // We started the repair in the call to start_live_repair above
+            self.repair_check_deadline = None;
         }
     }
 
