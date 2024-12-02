@@ -645,6 +645,16 @@ impl Downstairs {
         client_id: ClientId,
         up_state: &UpstairsState,
     ) {
+        // Check whether we asked the IO task to stop ourselves
+        let stopped_due_to_fault = matches!(
+            self.clients[client_id].state(),
+            DsState::Stopping(ClientStopReason::Fault(..))
+        );
+
+        // Restart the IO task for that specific client, transitioning to a new
+        // state.
+        self.clients[client_id].reinitialize(up_state, self.can_replay);
+
         // If the IO task stops on its own, then under certain circumstances,
         // we want to skip all of its jobs.  (If we requested that the IO task
         // stop, then whoever made that request is responsible for skipping jobs
@@ -653,20 +663,16 @@ impl Downstairs {
         // Specifically, we want to skip jobs if the only path back online for
         // that client goes through live-repair; if that client can come back
         // through replay, then the jobs must remain live.
-        let client_state = self.clients[client_id].state();
-        if matches!(
-            client_state,
-            DsState::LiveRepair | DsState::LiveRepairReady
-        ) || matches!(
-            client_state,
-            DsState::Active | DsState::Offline if !self.can_replay
-        ) {
+        let now_faulted = matches!(
+            self.clients[client_id].state(),
+            DsState::Connecting {
+                mode: ConnectionMode::Faulted,
+                ..
+            }
+        );
+        if now_faulted && !stopped_due_to_fault {
             self.skip_all_jobs(client_id);
         }
-
-        // Restart the IO task for that specific client, transitioning to a new
-        // state.
-        self.clients[client_id].reinitialize(up_state, self.can_replay);
 
         for i in ClientId::iter() {
             // Clear per-client delay, because we're starting a new session
