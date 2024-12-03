@@ -541,43 +541,50 @@ impl DownstairsClient {
 
         let current = &self.state;
         let new_mode = match current {
+            // If we can't replay jobs, then reconnection must happen through
+            // live-repair (rather than replay).
             DsState::Active
             | DsState::Connecting {
                 mode: ConnectionMode::Offline,
                 ..
-            } if !can_replay => Some(ConnectionMode::Faulted),
+            } if !can_replay => ConnectionMode::Faulted,
+
+            // Other failures during connection preserve the previous mode
+            DsState::Connecting { mode, .. } => *mode,
+
+            // Faults or failures during live-repair must go through live-repair
             DsState::LiveRepair
             | DsState::Stopping(ClientStopReason::Fault(..)) => {
-                Some(ConnectionMode::Faulted)
+                ConnectionMode::Faulted
             }
 
-            DsState::Active => Some(ConnectionMode::Offline),
+            // If the Downstairs has spontaneously stopped, we will attempt to
+            // replay jobs when reconnecting
+            DsState::Active => ConnectionMode::Offline,
 
+            // Failures during negotiation or deactivation have to start from
+            // the very beginning.
             DsState::Stopping(ClientStopReason::NegotiationFailed(..))
             | DsState::Stopping(ClientStopReason::Disabled)
             | DsState::Stopping(ClientStopReason::Deactivated) => {
-                Some(ConnectionMode::New)
+                ConnectionMode::New
             }
 
-            // If we have replaced a downstairs, don't forget that.
+            // Deliberate Downstairs replacement connects using live-repair,
+            // with a flag that allows for the address to change
             DsState::Stopping(ClientStopReason::Replacing) => {
-                Some(ConnectionMode::Replaced)
+                ConnectionMode::Replaced
             }
-
-            // We stay in these states through the task restart
-            DsState::Connecting { .. } => None,
         };
-        let new_state = new_mode.map(|mode| DsState::Connecting {
-            mode,
+        let new_state = DsState::Connecting {
+            mode: new_mode,
             state: NegotiationState::Start { auto_promote },
-        });
+        };
 
-        // Jobs are skipped and replayed in `Downstairs::reinitialize`, which is
-        // (probably) the caller of this function.
-        if let Some(new_state) = new_state {
-            self.checked_state_transition(up_state, new_state);
-        }
+        // Note that jobs are skipped / replayed in `Downstairs::reinitialize`,
+        // which is (probably) the caller of this function!
 
+        self.checked_state_transition(up_state, new_state);
         self.connection_id.update();
 
         // Restart with a short delay, connecting if we're auto-promoting
