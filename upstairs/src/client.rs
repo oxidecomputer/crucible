@@ -441,10 +441,7 @@ impl DownstairsClient {
             panic!("invalid state {:?}", self.state);
         };
         assert_eq!(*state, NegotiationState::WaitQuorum);
-        assert!(matches!(
-            mode,
-            ConnectionMode::New | ConnectionMode::Replaced
-        ));
+        assert!(matches!(mode, ConnectionMode::New));
         *state = NegotiationState::Reconcile;
     }
 
@@ -570,11 +567,17 @@ impl DownstairsClient {
                 ConnectionMode::New
             }
 
-            // Deliberate Downstairs replacement connects using live-repair,
-            // with a flag that allows for the address to change
-            DsState::Stopping(ClientStopReason::Replacing) => {
-                ConnectionMode::Replaced
-            }
+            DsState::Stopping(ClientStopReason::Replacing) => match up_state {
+                // If we haven't activated yet, then start from New
+                UpstairsState::GoActive(..) | UpstairsState::Initializing => {
+                    ConnectionMode::New
+                }
+                // Otherwise, use live-repair; `ConnectionMode::Replaced`
+                // indicates that the address is allowed to change.
+                UpstairsState::Active | UpstairsState::Deactivating { .. } => {
+                    ConnectionMode::Replaced
+                }
+            },
         };
         let new_state = DsState::Connecting {
             mode: new_mode,
@@ -755,7 +758,7 @@ impl DownstairsClient {
         match &mut self.state {
             DsState::Connecting {
                 state: NegotiationState::Start { auto_promote },
-                mode: ConnectionMode::New | ConnectionMode::Replaced,
+                mode: ConnectionMode::New,
             } => {
                 if *auto_promote {
                     panic!("called set_active_request while already waiting")
@@ -769,7 +772,7 @@ impl DownstairsClient {
             }
             DsState::Connecting {
                 state: NegotiationState::WaitActive,
-                mode: ConnectionMode::New | ConnectionMode::Replaced,
+                mode: ConnectionMode::New,
             } => {
                 info!(
                     self.log,
