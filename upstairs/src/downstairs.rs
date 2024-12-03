@@ -4272,7 +4272,7 @@ impl Downstairs {
             ClientRunResult::ReadFailed(_) => {
                 DownstairsClientStoppedReason::ReadFailed
             }
-            ClientRunResult::RequestedStop(_) => {
+            ClientRunResult::RequestedStop => {
                 // skip this notification, it fires for *every* Upstairs
                 // deactivation
                 //DownstairsClientStoppedReason::RequestedStop
