@@ -1813,6 +1813,47 @@ impl DownstairsClient {
 }
 
 /// Tracks client negotiation progress
+///
+/// The exact path through negotiation depends on the [`ConnectionMode`].
+///
+/// There are three main paths, shown below:
+///
+/// ```text
+///              ┌───────┐
+///              │ Start ├────────┐
+///              └───┬───┘        │
+///                  │            │
+///            ┌─────▼──────┐     │
+///            │ WaitActive │     │ auto-promote
+///            └─────┬──────┘     │
+///                  │            │
+///          ┌───────▼────────┐   │
+///          │ WaitForPromote ◄───┘
+///          └───────┬────────┘
+///                  │
+///         ┌────────▼──────────┐
+///         │ WaitForRegionInfo │
+///         └──┬──────────────┬─┘
+///    Offline │              │ New / Faulted / Replaced
+///     ┌──────▼─────┐   ┌────▼────────────┐
+///     │GetLastFlush│   │GetExtentVersions│
+///     └──────┬─────┘   └─┬─────────────┬─┘
+///            │           │ New         │ Faulted / Replaced
+///            │    ┌──────▼───┐    ┌────▼──────────┐
+///            │    │WaitQuorum│    │LiveRepairReady│
+///            │    └────┬─────┘    └────┬──────────┘
+///            │         │               │
+///            │    ┌────▼────┐          │
+///            │    │Reconcile│          │
+///            │    └────┬────┘          │
+///            │         │               │
+///            │     ┌───▼──┐            │
+///            └─────► Done ◄────────────┘
+///                  └──────┘
+/// ```
+///
+/// `Done` isn't actually present in the state machine; it's indicated by
+/// returning a [`NegotiationResult`] other than [`NegotiationResult::NotDone`].
 #[derive(
     Debug, Copy, Clone, Eq, PartialEq, Serialize, Deserialize, JsonSchema,
 )]
@@ -1823,20 +1864,25 @@ pub enum NegotiationState {
     ///
     /// Once this message is heard, transitions to either `WaitActive` (if
     /// `auto_promote` is `false`) or `WaitQuorum` (if `auto_promote` is `true`)
-    Start {
-        auto_promote: bool,
-    },
+    Start { auto_promote: bool },
 
     /// Waiting for activation by the guest
     WaitActive,
 
+    /// Waiting to hear `YouAreNowActive` from the client
+    WaitForPromote,
+
+    /// Waiting to hear `RegionInfo` from the client
+    WaitForRegionInfo,
+
+    /// Waiting to hear `LastFlushAck` from the client
+    GetLastFlush,
+
+    /// Waiting to hear `ExtentVersions` from the client
+    GetExtentVersions,
+
     /// Waiting for the minimum number of downstairs to be present.
     WaitQuorum,
-
-    WaitForPromote,
-    WaitForRegionInfo,
-    GetLastFlush,
-    GetExtentVersions,
 
     /// Initial startup, downstairs are repairing from each other.
     Reconcile,
