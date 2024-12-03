@@ -921,6 +921,7 @@ impl Upstairs {
                 Some(Instant::now() + REPAIR_CHECK_INTERVAL);
         } else {
             // We started the repair in the call to start_live_repair above
+            self.repair_check_deadline = None;
         }
     }
 
@@ -1278,7 +1279,7 @@ impl Upstairs {
             }
             UpstairsState::Active => (),
         }
-        if !self.downstairs.can_deactivate_immediately() {
+        if self.need_flush || !self.downstairs.can_deactivate_immediately() {
             debug!(self.log, "not ready to deactivate; submitting final flush");
             let io_guard = self.try_acquire_io(0);
             self.submit_flush(None, None, io_guard);

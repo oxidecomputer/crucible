@@ -9,6 +9,11 @@
 dtrace:::BEGIN
 {
     show = 21;
+    /*
+     * We have to init something for last_id so we can use the
+     * default values for all the session IDs that we don't yet have.
+     */
+    last_id["string"] = (int64_t)1;
 }
 
 /*
@@ -20,7 +25,7 @@ tick-1s
 {
     printf("%8s ", "SESSION");
     printf("%17s %17s %17s", "DS STATE 0", "DS STATE 1", "DS STATE 2");
-    printf(" %5s %5s %9s %5s", "UPW", "DSW", "NEXT_JOB", "BAKPR");
+    printf(" %5s %5s %8s %5s", "UPW", "DSW", "NEXT_JOB", "DELTA");
     printf(" %10s", "WRITE_BO");
     printf("  %5s %5s %5s", "IP0", "IP1", "IP2");
     printf("  %5s %5s %5s", "D0", "D1", "D2");
@@ -35,16 +40,27 @@ crucible_upstairs*:::up-status
 /pid==$1/
 {
     show = show + 1;
-    session_id = json(copyinstr(arg1), "ok.session_id");
+    /*
+     * All these local variables require the "this->" so the probe firing
+     * from different sessions don't collide with each other.
+     */
+    this->full_session_id = json(copyinstr(arg1), "ok.session_id");
+    this->session_id = substr(this->full_session_id, 0, 8);
 
+    this->next_id_str = json(copyinstr(arg1), "ok.next_job_id");
+    this->next_id_value = strtoll(this->next_id_str);
+
+    this->delta = this->next_id_value - last_id[this->session_id];
+
+    /* Set this for the next loop */
+    last_id[this->session_id] = this->next_id_value;
     /*
      * I'm not very happy about this, but if we don't print it all on one
      * line, then multiple sessions will clobber each others output.
      */
-    printf("%8s %17s %17s %17s %5s %5s %5s %10s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s\n",
+    printf("%8s %17s %17s %17s %5s %5s %8s %5d %10s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s  %5s %5s %5s\n",
 
-    substr(session_id, 0, 8),
-
+    this->session_id,
     /*
      * State for the three downstairs
      */
@@ -59,9 +75,10 @@ crucible_upstairs*:::up-status
     json(copyinstr(arg1), "ok.ds_count"),
 
     /*
-     * Job ID delta and backpressure
+     * Job ID, job delta and write bytes outstanding
      */
     json(copyinstr(arg1), "ok.next_job_id"),
+    this->delta,
     json(copyinstr(arg1), "ok.write_bytes_out"),
 
     /*
@@ -93,5 +110,4 @@ crucible_upstairs*:::up-status
     json(copyinstr(arg1), "ok.ds_extents_confirmed[0]"),
     json(copyinstr(arg1), "ok.ds_extents_confirmed[1]"),
     json(copyinstr(arg1), "ok.ds_extents_confirmed[2]"));
-
 }

@@ -654,7 +654,14 @@ impl Downstairs {
         // Specifically, we want to skip jobs if the only path back online for
         // that client goes through live-repair; if that client can come back
         // through replay, then the jobs must remain live.
-        if matches!(self.clients[client_id].state(), DsState::LiveRepair) {
+        let client_state = self.clients[client_id].state();
+        if matches!(
+            client_state,
+            DsState::LiveRepair | DsState::LiveRepairReady
+        ) || matches!(
+            client_state,
+            DsState::Active | DsState::Offline if !self.can_replay
+        ) {
             self.skip_all_jobs(client_id);
         }
 
