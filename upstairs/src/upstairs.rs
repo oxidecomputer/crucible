@@ -2058,10 +2058,8 @@ impl Upstairs {
             "downstairs task for {client_id} stopped due to {reason:?}"
         );
 
-        #[cfg(feature = "notify-nexus")]
         self.downstairs
-            .notify_nexus_of_client_task_stopped(client_id, reason);
-
+            .notify_client_task_stopped(client_id, reason);
         self.downstairs.reinitialize(client_id, &self.state);
     }
 
