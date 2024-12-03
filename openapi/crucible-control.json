@@ -233,12 +233,35 @@
         ]
       },
       "ConnectionMode": {
-        "type": "string",
-        "enum": [
-          "offline",
-          "new",
-          "faulted",
-          "replaced"
+        "oneOf": [
+          {
+            "description": "Connect through reconciliation once a quorum has come online",
+            "type": "string",
+            "enum": [
+              "new"
+            ]
+          },
+          {
+            "description": "Replay cached jobs when reconnecting",
+            "type": "string",
+            "enum": [
+              "offline"
+            ]
+          },
+          {
+            "description": "Reconnect through live-repair",
+            "type": "string",
+            "enum": [
+              "faulted"
+            ]
+          },
+          {
+            "description": "Reconnect through live-repair; the address is allowed to change",
+            "type": "string",
+            "enum": [
+              "replaced"
+            ]
+          }
         ]
       },
       "DownstairsWork": {
@@ -264,6 +287,7 @@
         ]
       },
       "DsState": {
+        "description": "High-level states for a Downstairs\n\nThe state machine for a Downstairs is relatively simple:\n\n```text ┌────────────┐ ┌────► LiveRepair ├─────┐ ┌─────────┴┐   └─────┬──────┘   ┌─▼──────┐ │Connecting│         │          │Stopping│ └─▲───────┬┘   ┌─────▼──────┐   └─▲────┬─┘ │       └────►   Active   ├─────┘    │ │            └─────┬──────┘          │ │                  │                 │ └─────────────────◄┴─────────────────┘ ```\n\nComplexity is hidden in the `Connecting` state, which wraps a [`NegotiationState`] implementing the negotiation state machine.",
         "oneOf": [
           {
             "description": "New connection",
@@ -367,7 +391,7 @@
         ]
       },
       "NegotiationState": {
-        "description": "Tracks client negotiation progress",
+        "description": "Tracks client negotiation progress\n\nThe exact path through negotiation depends on the [`ConnectionMode`].\n\nThere are three main paths, shown below:\n\n```text ┌───────┐ │ Start ├────────┐ └───┬───┘        │ │            │ ┌─────▼──────┐     │ │ WaitActive │     │ auto-promote └─────┬──────┘     │ │            │ ┌───────▼────────┐   │ │ WaitForPromote ◄───┘ └───────┬────────┘ │ ┌────────▼──────────┐ │ WaitForRegionInfo │ └──┬──────────────┬─┘ Offline │              │ New / Faulted / Replaced ┌──────▼─────┐   ┌────▼────────────┐ │GetLastFlush│   │GetExtentVersions│ └──────┬─────┘   └─┬─────────────┬─┘ │           │ New         │ Faulted / Replaced │    ┌──────▼───┐    ┌────▼──────────┐ │    │WaitQuorum│    │LiveRepairReady│ │    └────┬─────┘    └────┬──────────┘ │         │               │ │    ┌────▼────┐          │ │    │Reconcile│          │ │    └────┬────┘          │ │         │               │ │     ┌───▼──┐            │ └─────► Done ◄────────────┘ └──────┘ ```\n\n`Done` isn't actually present in the state machine; it's indicated by returning a [`NegotiationResult`] other than [`NegotiationResult::NotDone`].",
         "oneOf": [
           {
             "description": "Initial state, waiting to hear `YesItsMe` from the client\n\nOnce this message is heard, transitions to either `WaitActive` (if `auto_promote` is `false`) or `WaitQuorum` (if `auto_promote` is `true`)",
@@ -412,21 +436,7 @@
             ]
           },
           {
-            "description": "Waiting for the minimum number of downstairs to be present.",
-            "type": "object",
-            "properties": {
-              "type": {
-                "type": "string",
-                "enum": [
-                  "wait_quorum"
-                ]
-              }
-            },
-            "required": [
-              "type"
-            ]
-          },
-          {
+            "description": "Waiting to hear `YouAreNowActive` from the client",
             "type": "object",
             "properties": {
               "type": {
@@ -441,6 +451,7 @@
             ]
           },
           {
+            "description": "Waiting to hear `RegionInfo` from the client",
             "type": "object",
             "properties": {
               "type": {
@@ -455,6 +466,7 @@
             ]
           },
           {
+            "description": "Waiting to hear `LastFlushAck` from the client",
             "type": "object",
             "properties": {
               "type": {
@@ -469,12 +481,28 @@
             ]
           },
           {
+            "description": "Waiting to hear `ExtentVersions` from the client",
             "type": "object",
             "properties": {
               "type": {
                 "type": "string",
                 "enum": [
                   "get_extent_versions"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "description": "Waiting for the minimum number of downstairs to be present.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "wait_quorum"
                 ]
               }
             },
