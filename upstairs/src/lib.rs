@@ -714,78 +714,24 @@ pub(crate) struct RawReadResponse {
     pub data: bytes::BytesMut,
 }
 
-/*
- * States of a downstairs
- *
- * This shows the different states a downstairs can be in from the point of
- * view of the upstairs.
- *
- * Double line paths can only be taken if an upstairs is active and goes to
- * deactivated.
- *
- *                       │
- *                ┌──┐   ▼
- *             bad│  │   │
- *         version│ ┌▼───┴──────┐
- *                └─┤           ╞═════◄══════════════════╗
- *    ┌─────────────►    New    ╞═════◄════════════════╗ ║
- *    │       ┌─────►           ├─────◄──────┐         ║ ║
- *    │       │     └────┬───┬──┘            │         ║ ║
- *    │       │          ▼   └───►───┐ other │         ║ ║
- *    │    bad│     ┌────┴──────┐    │ failures        ║ ║
- *    │ region│     │   Wait    │    │       ▲         ║ ║
- *    │       │     │  Active   ├─►┐ │       │         ║ ║
- *    │       │     └────┬──────┘  │ │       │         ║ ║
- *    │       │     ┌────┴──────┐  │ └───────┤         ║ ║
- *    │       │     │   Wait    │  └─────────┤         ║ ║
- *    │       └─────┤  Quorum   ├──►─────────┤         ║ ║
- *    │             └────┬──────┘            │         ║ ║
- *    │          ........▼..........         │         ║ ║
- *    │failed    :  ┌────┴──────┐  :         │         ║ ║
- *    │reconcile :  │ Reconcile │  :         │       ╔═╝ ║
- *    └─────────────┤           ├──►─────────┘       ║   ║
- *               :  └────┬──────┘  :                 ║   ║
- *  Not Active   :       │         :                 ▲   ▲  Not Active
- *  .............. . . . │. . . . ...................║...║............
- *  Active               ▼                           ║   ║  Active
- *                  ┌────┴──────┐         ┌──────────╨┐  ║
- *              ┌─►─┤  Active   ├─────►───┤Deactivated│  ║
- *              │   │           │  ┌──────┤           ├─◄──────┐
- *              │   └─┬───┬───┬─┘  │      └───────────┘  ║     │
- *              │     ▼   ▼   ▲    ▲                     ║     │
- *              │     │   │   │    │                     ║     │
- *              │     │   │   │    │                     ║     │
- *              │     │   │   │    │                     ║     │
- *              │     │   │   │    │                     ║     │
- *              │     │   │   │    │                     ║     │
- *              │     │   │   │    │                     ║     │
- *              │     │   │   │    │                     ║     │
- *              │     │   ▼   ▲    ▲                     ║     │
- *              │     │   │   │    │                     ▲     │
- *              │     │ ┌─┴───┴────┴┐       ┌────────────╨──┐  │
- *              │     │ │  Offline  │       │   Faulted     │  │
- *              │     │ │           ├─────►─┤               │  │
- *              │     │ └───────────┘       └─┬─┬───────┬─┬─┘  │
- *              │     │                       ▲ ▲       ▼ ▲    ▲
- *              │     └───────────►───────────┘ │       │ │    │
- *              │                               │       │ │    │
- *              │                      ┌────────┴─┐   ┌─┴─┴────┴─┐
- *              └──────────────────────┤   Live   ├─◄─┤  Live    │
- *                                     │  Repair  │   │  Repair  │
- *                                     │          │   │  Ready   │
- *                                     └──────────┘   └──────────┘
- *
- *
- *      The downstairs state can go to Disabled from any other state, as that
- *      transition happens when a message is received from the actual
- *      downstairs on the other side of the connection..
- *      The only path back at that point is for the Upstairs (who will self
- *      deactivate when it detects this) is to go back to New and through
- *      the reconcile process.
- *      ┌───────────┐
- *      │ Disabled  │
- *      └───────────┘
- */
+/// High-level states for a Downstairs
+///
+/// The state machine for a Downstairs is relatively simple:
+///
+/// ```text
+///                 ┌────────────┐
+///            ┌────► LiveRepair ├─────┐
+///  ┌─────────┴┐   └─────┬──────┘   ┌─▼──────┐
+///  │Connecting│         │          │Stopping│
+///  └─▲───────┬┘   ┌─────▼──────┐   └─▲────┬─┘
+///    │       └────►   Active   ├─────┘    │
+///    │            └─────┬──────┘          │
+///    │                  │                 │
+///    └─────────────────◄┴─────────────────┘
+/// ```
+///
+/// Complexity is hidden in the `Connecting` state, which wraps a
+/// [`NegotiationState`] implementing the negotiation state machine.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -806,6 +752,7 @@ pub enum DsState {
     /// The IO task for the client is being stopped
     Stopping(ClientStopReason),
 }
+
 impl std::fmt::Display for DsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -873,9 +820,13 @@ impl std::fmt::Display for DsState {
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionMode {
-    Offline,
+    /// Connect through reconciliation once a quorum has come online
     New,
+    /// Replay cached jobs when reconnecting
+    Offline,
+    /// Reconnect through live-repair
     Faulted,
+    /// Reconnect through live-repair; the address is allowed to change
     Replaced,
 }
 
