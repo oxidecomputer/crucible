@@ -10,11 +10,13 @@ use crate::{
     cdt,
     client::{
         ClientAction, ClientFaultReason, ClientNegotiationFailed,
-        ClientStopReason, DownstairsClient, EnqueueResult, NegotiationState,
+        ClientRunResult, ClientStopReason, DownstairsClient, EnqueueResult,
+        NegotiationState,
     },
     guest::GuestBlockRes,
     io_limits::{IOLimitGuard, IOLimits},
     live_repair::ExtentInfo,
+    notify::{NotifyQueue, NotifyRequest},
     stats::DownstairsStatOuter,
     upstairs::{UpstairsConfig, UpstairsState},
     AckStatus, ActiveJobs, AllocRingBuffer, BlockRes, Buffer, ClientData,
@@ -34,36 +36,11 @@ use ringbuffer::RingBuffer;
 use slog::{debug, error, info, o, warn, Logger};
 use uuid::Uuid;
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "notify-nexus")] {
-        use chrono::Utc;
-
-        use crate::client::ClientRunResult;
-        use crate::get_nexus_client;
-
-        use nexus_client::types::DownstairsClientStopped;
-        use nexus_client::types::DownstairsClientStoppedReason;
-        use nexus_client::types::DownstairsUnderRepair;
-        use nexus_client::types::RepairFinishInfo;
-        use nexus_client::types::RepairProgress;
-        use nexus_client::types::RepairStartInfo;
-        use nexus_client::types::UpstairsRepairType;
-
-        use omicron_uuid_kinds::DownstairsKind;
-        use omicron_uuid_kinds::GenericUuid;
-        use omicron_uuid_kinds::TypedUuid;
-        use omicron_uuid_kinds::UpstairsKind;
-        use omicron_uuid_kinds::UpstairsRepairKind;
-        use omicron_uuid_kinds::UpstairsSessionKind;
-    }
-}
-
 /// Downstairs data
 ///
 /// This data structure is responsible for tracking outstanding jobs from the
 /// perspective of the (3x) downstairs.  It contains a list of all active jobs,
 /// as well as three `DownstairsClient` with per-client data.
-#[derive(Debug)]
 pub(crate) struct Downstairs {
     /// Shared configuration
     cfg: Arc<UpstairsConfig>,
@@ -140,9 +117,8 @@ pub(crate) struct Downstairs {
     /// Handle for stats
     stats: DownstairsStatOuter,
 
-    /// A reqwest client, to be reused when creating Nexus clients
-    #[cfg(feature = "notify-nexus")]
-    reqwest_client: reqwest::Client,
+    /// A queue to send notifications to Nexus
+    notify: Option<NotifyQueue>,
 }
 
 /// Tuple storing a job and an optional result
@@ -343,6 +319,7 @@ impl Downstairs {
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
         stats: DownstairsStatOuter,
         io_limits: &IOLimits,
+        notify: Option<NotifyQueue>,
         log: Logger,
     ) -> Self {
         let mut clients = [None, None, None];
@@ -356,6 +333,7 @@ impl Downstairs {
                 tls_context.clone(),
             ));
         }
+
         let clients = clients.map(Option::unwrap);
         Self {
             clients: ClientData(clients),
@@ -393,13 +371,7 @@ impl Downstairs {
             repair: None,
             ddef: None,
             stats,
-
-            #[cfg(feature = "notify-nexus")]
-            reqwest_client: reqwest::ClientBuilder::new()
-                .connect_timeout(std::time::Duration::from_secs(15))
-                .timeout(std::time::Duration::from_secs(15))
-                .build()
-                .unwrap(),
+            notify,
         }
     }
 
@@ -422,8 +394,15 @@ impl Downstairs {
         // Build a set of fake IO limits that we won't hit
         let io_limits = IOLimits::new(u32::MAX as usize, u32::MAX as usize);
 
-        let mut ds =
-            Self::new(cfg, ClientMap::new(), None, stats, &io_limits, log);
+        let mut ds = Self::new(
+            cfg,
+            ClientMap::new(),
+            None,
+            stats,
+            &io_limits,
+            None,
+            log,
+        );
 
         // Create a fake repair address so this field is populated.
         for cid in ClientId::iter() {
@@ -996,11 +975,7 @@ impl Downstairs {
                 reconcile.reconcile_repair_needed,
             );
 
-            #[cfg(feature = "notify-nexus")]
-            {
-                self.notify_nexus_of_reconcile_start(&reconcile);
-            }
-
+            self.notify_reconcile_start(&reconcile);
             self.reconcile = Some(reconcile);
             self.reconcile_repaired = 0;
 
@@ -1095,11 +1070,8 @@ impl Downstairs {
             self.repair.as_ref().unwrap().id
         );
 
-        #[cfg(feature = "notify-nexus")]
-        {
-            let repair = self.repair.as_ref().unwrap();
-            self.notify_nexus_of_live_repair_start(repair);
-        }
+        let repair = self.repair.as_ref().unwrap();
+        self.notify_live_repair_start(repair);
 
         // We'll be back in on_live_repair once the initial job finishes
         true
@@ -1281,17 +1253,14 @@ impl Downstairs {
                     let aborting = repair.aborting_repair;
                     let source_downstairs = repair.source_downstairs;
 
-                    #[cfg(feature = "notify-nexus")]
-                    {
-                        let repair_id = repair.id;
-                        let extent_count = repair.extent_count;
+                    let repair_id = repair.id;
+                    let extent_count = repair.extent_count;
 
-                        self.notify_nexus_of_live_repair_progress(
-                            repair_id,
-                            active_extent,
-                            extent_count,
-                        );
-                    }
+                    self.notify_live_repair_progress(
+                        repair_id,
+                        active_extent,
+                        extent_count,
+                    );
 
                     self.begin_repair_for(
                         active_extent,
@@ -1316,11 +1285,8 @@ impl Downstairs {
                     }
                 }
 
-                #[cfg(feature = "notify-nexus")]
-                {
-                    let repair = self.repair.as_ref().unwrap();
-                    self.notify_nexus_of_live_repair_finish(repair);
-                }
+                let repair = self.repair.as_ref().unwrap();
+                self.notify_live_repair_finish(repair);
 
                 // Set `self.repair` to `None` on our way out the door (because
                 // repair is done, one way or the other)
@@ -1838,22 +1804,19 @@ impl Downstairs {
 
         reconcile.current_work = Some(next);
 
-        #[cfg(feature = "notify-nexus")]
-        {
-            let reconcile_id = reconcile.id;
+        let reconcile_id = reconcile.id;
 
-            // `on_reconciliation_job_done` increments one of these and
-            // decrements the other, so add them together to get total task
-            // count to send to Nexus.
-            let task_count =
-                self.reconcile_repaired + reconcile.reconcile_repair_needed;
+        // `on_reconciliation_job_done` increments one of these and
+        // decrements the other, so add them together to get total task
+        // count to send to Nexus.
+        let task_count =
+            self.reconcile_repaired + reconcile.reconcile_repair_needed;
 
-            self.notify_nexus_of_reconcile_progress(
-                reconcile_id,
-                self.reconcile_repaired,
-                task_count,
-            );
-        }
+        self.notify_reconcile_progress(
+            reconcile_id,
+            self.reconcile_repaired,
+            task_count,
+        );
 
         false
     }
@@ -1964,16 +1927,7 @@ impl Downstairs {
         info!(self.log, "Clear out existing repair work queue");
 
         if let Some(r) = self.reconcile.take() {
-            #[cfg(feature = "notify-nexus")]
-            {
-                self.notify_nexus_of_reconcile_finished(
-                    &r, true, /* aborted */
-                );
-            }
-            #[cfg(not(feature = "notify-nexus"))]
-            {
-                let _ = r; // avoid unused warning
-            }
+            self.notify_reconcile_finished(&r, true /* aborted */);
             self.reconcile_repaired = 0;
         } else {
             // If reconcile is None, then these should also be cleared
@@ -1997,13 +1951,7 @@ impl Downstairs {
             // reconciliation completed
             let r = self.reconcile.take().unwrap();
             assert!(r.task_list.is_empty());
-
-            #[cfg(feature = "notify-nexus")]
-            {
-                self.notify_nexus_of_reconcile_finished(
-                    &r, false, /* aborted */
-                );
-            }
+            self.notify_reconcile_finished(&r, false /* aborted */);
         } else {
             // no reconciliation was required
             assert!(self.reconcile.is_none());
@@ -3771,562 +3719,194 @@ impl Downstairs {
         }
     }
 
-    #[cfg(feature = "notify-nexus")]
-    fn get_target_addrs(&self) -> Vec<SocketAddr> {
-        self.clients
-            .iter()
-            .filter_map(|client| client.target_addr)
-            .collect()
+    fn notify_live_repair_start(&self, repair: &LiveRepairData) {
+        if let Some(notify) = &self.notify {
+            let log = self.log.new(o!("repair" => repair.id.to_string()));
+            let mut repairs =
+                Vec::with_capacity(repair.repair_downstairs.len());
+
+            for cid in &repair.repair_downstairs {
+                let Some(region_uuid) = self.clients[*cid].id() else {
+                    // A downstairs doesn't have an id but is being repaired...?
+                    warn!(log, "downstairs {cid} has a None id?");
+                    continue;
+                };
+
+                let Some(target_addr) = self.clients[*cid].target_addr else {
+                    // A downstairs doesn't have a target_addr but is being
+                    // repaired...?
+                    warn!(log, "downstairs {cid} has a None target_addr?");
+                    continue;
+                };
+
+                repairs.push((region_uuid, target_addr));
+            }
+
+            notify.send(NotifyRequest::LiveRepairStart {
+                upstairs_id: self.cfg.upstairs_id,
+                session_id: self.cfg.session_id,
+                repair_id: repair.id,
+                repairs,
+            })
+        }
     }
 
-    #[cfg(feature = "notify-nexus")]
-    fn notify_nexus_of_live_repair_start(&self, repair: &LiveRepairData) {
-        let log = self.log.new(o!("repair" => repair.id.to_string()));
+    fn notify_live_repair_finish(&self, repair: &LiveRepairData) {
+        if let Some(notify) = &self.notify {
+            let log = self.log.new(o!("repair" => repair.id.to_string()));
 
-        let mut repairs = Vec::with_capacity(repair.repair_downstairs.len());
+            let mut repairs =
+                Vec::with_capacity(repair.repair_downstairs.len());
 
-        for cid in &repair.repair_downstairs {
-            let Some(region_uuid) = self.clients[*cid].id() else {
-                // A downstairs doesn't have an id but is being repaired...?
-                warn!(log, "downstairs {cid} has a None id?");
-                continue;
-            };
+            for cid in &repair.repair_downstairs {
+                let Some(region_uuid) = self.clients[*cid].id() else {
+                    // A downstairs doesn't have an id but is being repaired...?
+                    warn!(log, "downstairs {cid} has a None id?");
+                    continue;
+                };
 
-            let Some(target_addr) = self.clients[*cid].target_addr else {
-                // A downstairs doesn't have a target_addr but is being
-                // repaired...?
-                warn!(log, "downstairs {cid} has a None target_addr?");
-                continue;
-            };
+                let Some(target_addr) = self.clients[*cid].target_addr else {
+                    // A downstairs doesn't have a target_addr but is being
+                    // repaired...?
+                    warn!(log, "downstairs {cid} has a None target_addr?");
+                    continue;
+                };
 
-            repairs.push(DownstairsUnderRepair {
-                region_uuid: region_uuid.into(),
-                target_addr: target_addr.to_string(),
+                repairs.push((region_uuid, target_addr));
+            }
+
+            notify.send(NotifyRequest::LiveRepairFinish {
+                upstairs_id: self.cfg.upstairs_id,
+                session_id: self.cfg.session_id,
+                repair_id: repair.id,
+                repairs,
+                aborted: repair.aborting_repair,
             });
         }
-
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-        let session_id: TypedUuid<UpstairsSessionKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.session_id);
-        let repair_id: TypedUuid<UpstairsRepairKind> =
-            TypedUuid::from_untyped_uuid(repair.id);
-
-        let now = Utc::now();
-
-        // Spawn a task so we don't block the main loop talking to
-        // Nexus.
-        let target_addrs = self.get_target_addrs();
-        let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
-            let Some(nexus_client) =
-                get_nexus_client(&log, client, &target_addrs).await
-            else {
-                // Exit if no Nexus client returned from DNS - our notification
-                // is best effort.
-                error!(
-                    log,
-                    "no Nexus client from DNS, aborting start notification"
-                );
-                return;
-            };
-
-            match omicron_common::retry_until_known_result(&log, || async {
-                nexus_client
-                    .cpapi_upstairs_repair_start(
-                        &upstairs_id,
-                        &RepairStartInfo {
-                            time: now,
-                            repair_id,
-                            repair_type: UpstairsRepairType::Live,
-                            session_id,
-                            repairs: repairs.clone(),
-                        },
-                    )
-                    .await
-            })
-            .await
-            {
-                Ok(_) => {
-                    info!(log, "notified Nexus of repair start");
-                }
-
-                Err(e) => {
-                    error!(log, "failed to notify Nexus of repair start! {e}");
-                }
-            }
-        });
     }
 
-    #[cfg(feature = "notify-nexus")]
-    fn notify_nexus_of_live_repair_finish(&self, repair: &LiveRepairData) {
-        let log = self.log.new(o!("repair" => repair.id.to_string()));
-
-        let aborted = repair.aborting_repair;
-
-        let mut repairs = Vec::with_capacity(repair.repair_downstairs.len());
-
-        for cid in &repair.repair_downstairs {
-            let Some(region_uuid) = self.clients[*cid].id() else {
-                // A downstairs doesn't have an id but is being repaired...?
-                warn!(log, "downstairs {cid} has a None id?");
-                continue;
-            };
-
-            let Some(target_addr) = self.clients[*cid].target_addr else {
-                // A downstairs doesn't have a target_addr but is being
-                // repaired...?
-                warn!(log, "downstairs {cid} has a None target_addr?");
-                continue;
-            };
-
-            repairs.push(DownstairsUnderRepair {
-                region_uuid: region_uuid.into(),
-                target_addr: target_addr.to_string(),
-            });
-        }
-
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-        let session_id: TypedUuid<UpstairsSessionKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.session_id);
-        let repair_id: TypedUuid<UpstairsRepairKind> =
-            TypedUuid::from_untyped_uuid(repair.id);
-
-        let now = Utc::now();
-
-        // Spawn a task so we don't block the main loop talking to
-        // Nexus.
-        let target_addrs = self.get_target_addrs();
-        let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
-            let Some(nexus_client) =
-                get_nexus_client(&log, client, &target_addrs).await
-            else {
-                // Exit if no Nexus client returned from DNS - our notification
-                // is best effort.
-                error!(
-                    log,
-                    "no Nexus client from DNS, aborting finish notification"
-                );
-                return;
-            };
-
-            match omicron_common::retry_until_known_result(&log, || async {
-                nexus_client
-                    .cpapi_upstairs_repair_finish(
-                        &upstairs_id,
-                        &RepairFinishInfo {
-                            time: now,
-                            repair_id,
-                            repair_type: UpstairsRepairType::Live,
-                            session_id,
-                            repairs: repairs.clone(),
-                            aborted,
-                        },
-                    )
-                    .await
-            })
-            .await
-            {
-                Ok(_) => {
-                    info!(log, "notified Nexus of repair finish");
-                }
-
-                Err(e) => {
-                    error!(log, "failed to notify Nexus of repair finish! {e}");
-                }
-            }
-        });
-    }
-
-    #[cfg(feature = "notify-nexus")]
-    fn notify_nexus_of_live_repair_progress(
+    fn notify_live_repair_progress(
         &self,
         repair_id: Uuid,
         current_extent: ExtentId,
         extent_count: u32,
     ) {
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-        let repair_id: TypedUuid<UpstairsRepairKind> =
-            TypedUuid::from_untyped_uuid(repair_id);
-
-        let now = Utc::now();
-        let log = self.log.new(o!("repair" => repair_id.to_string()));
-
-        // Spawn a task so we don't block the main loop talking to
-        // Nexus.
-        let target_addrs = self.get_target_addrs();
-        let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
-            let Some(nexus_client) =
-                get_nexus_client(&log, client, &target_addrs).await
-            else {
-                // Exit if no Nexus client returned from DNS - our notification
-                // is best effort.
-                error!(
-                    log,
-                    "no Nexus client from DNS, aborting progress notification"
-                );
-                return;
-            };
-
-            match omicron_common::retry_until_known_result(&log, || async {
-                nexus_client
-                    .cpapi_upstairs_repair_progress(
-                        &upstairs_id,
-                        &repair_id,
-                        &RepairProgress {
-                            time: now,
-                            // surely we won't have u64::MAX extents
-                            current_item: current_extent.0 as i64,
-                            // i am serious, and don't call me shirley
-                            total_items: extent_count as i64,
-                        },
-                    )
-                    .await
-            })
-            .await
-            {
-                Ok(_) => {
-                    info!(log, "notified Nexus of repair progress");
-                }
-
-                Err(e) => {
-                    error!(
-                        log,
-                        "failed to notify Nexus of repair progress! {e}"
-                    );
-                }
-            }
-        });
-    }
-
-    #[cfg(feature = "notify-nexus")]
-    fn notify_nexus_of_reconcile_start(&self, reconcile: &ReconcileData) {
-        let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
-
-        // Reconcilation involves everyone
-        let mut repairs = Vec::with_capacity(self.clients.len());
-
-        for (cid, client) in self.clients.iter().enumerate() {
-            let Some(region_uuid) = client.id() else {
-                // A downstairs doesn't have an id but is being reconciled...?
-                warn!(log, "downstairs {cid} has a None id?");
-                continue;
-            };
-
-            let Some(target_addr) = client.target_addr else {
-                // A downstairs doesn't have a target_addr but is being
-                // reconciled...?
-                warn!(log, "downstairs {cid} has a None target_addr?");
-                continue;
-            };
-
-            repairs.push(DownstairsUnderRepair {
-                region_uuid: region_uuid.into(),
-                target_addr: target_addr.to_string(),
+        if let Some(notify) = &self.notify {
+            notify.send(NotifyRequest::LiveRepairProgress {
+                upstairs_id: self.cfg.upstairs_id,
+                repair_id,
+                // surely we won't have u64::MAX extents
+                current_item: current_extent.0 as i64,
+                // i am serious, and don't call me shirley
+                total_items: extent_count as i64,
             });
         }
-
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-        let session_id: TypedUuid<UpstairsSessionKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.session_id);
-        let repair_id: TypedUuid<UpstairsRepairKind> =
-            TypedUuid::from_untyped_uuid(reconcile.id);
-
-        let now = Utc::now();
-
-        // Spawn a task so we don't block the main loop talking to
-        // Nexus.
-        let target_addrs = self.get_target_addrs();
-        let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
-            let Some(nexus_client) =
-                get_nexus_client(&log, client, &target_addrs).await
-            else {
-                // Exit if no Nexus client returned from DNS - our notification
-                // is best effort.
-                error!(
-                    log,
-                    "no Nexus client from DNS, aborting start notification"
-                );
-                return;
-            };
-
-            match omicron_common::retry_until_known_result(&log, || async {
-                nexus_client
-                    .cpapi_upstairs_repair_start(
-                        &upstairs_id,
-                        &RepairStartInfo {
-                            time: now,
-                            repair_id,
-                            repair_type: UpstairsRepairType::Reconciliation,
-                            session_id,
-                            repairs: repairs.clone(),
-                        },
-                    )
-                    .await
-            })
-            .await
-            {
-                Ok(_) => {
-                    info!(log, "notified Nexus of reconcile start");
-                }
-
-                Err(e) => {
-                    error!(
-                        log,
-                        "error notifying Nexus of reconcile start! {e}"
-                    );
-                }
-            }
-        });
     }
 
-    #[cfg(feature = "notify-nexus")]
-    fn notify_nexus_of_reconcile_finished(
+    fn notify_reconcile_start(&self, reconcile: &ReconcileData) {
+        if let Some(notify) = &self.notify {
+            let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
+
+            // Reconcilation involves everyone
+            let mut repairs = Vec::with_capacity(self.clients.len());
+
+            for (cid, client) in self.clients.iter().enumerate() {
+                let Some(region_uuid) = client.id() else {
+                    // A downstairs doesn't have an id but is being reconciled...?
+                    warn!(log, "downstairs {cid} has a None id?");
+                    continue;
+                };
+
+                let Some(target_addr) = client.target_addr else {
+                    // A downstairs doesn't have a target_addr but is being
+                    // reconciled...?
+                    warn!(log, "downstairs {cid} has a None target_addr?");
+                    continue;
+                };
+
+                repairs.push((region_uuid, target_addr));
+            }
+
+            notify.send(NotifyRequest::ReconcileStart {
+                upstairs_id: self.cfg.upstairs_id,
+                repair_id: reconcile.id,
+                session_id: self.cfg.session_id,
+                repairs,
+            });
+        }
+    }
+
+    fn notify_reconcile_finished(
         &self,
         reconcile: &ReconcileData,
         aborted: bool,
     ) {
-        let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
+        if let Some(notify) = &self.notify {
+            let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
 
-        // Reconcilation involves everyone
-        let mut repairs = Vec::with_capacity(self.clients.len());
+            // Reconcilation involves everyone
+            let mut repairs = Vec::with_capacity(self.clients.len());
 
-        for (cid, client) in self.clients.iter().enumerate() {
-            let Some(region_uuid) = client.id() else {
-                // A downstairs doesn't have an id but is being reconciled...?
-                warn!(log, "downstairs {cid} has a None id?");
-                continue;
-            };
+            for (cid, client) in self.clients.iter().enumerate() {
+                let Some(region_uuid) = client.id() else {
+                    // A downstairs doesn't have an id but is being reconciled...?
+                    warn!(log, "downstairs {cid} has a None id?");
+                    continue;
+                };
 
-            let Some(target_addr) = client.target_addr else {
-                // A downstairs doesn't have a target_addr but is being
-                // reconciled...?
-                warn!(log, "downstairs {cid} has a None target_addr?");
-                continue;
-            };
+                let Some(target_addr) = client.target_addr else {
+                    // A downstairs doesn't have a target_addr but is being
+                    // reconciled...?
+                    warn!(log, "downstairs {cid} has a None target_addr?");
+                    continue;
+                };
 
-            repairs.push(DownstairsUnderRepair {
-                region_uuid: region_uuid.into(),
-                target_addr: target_addr.to_string(),
+                repairs.push((region_uuid, target_addr));
+            }
+
+            notify.send(NotifyRequest::ReconcileFinish {
+                upstairs_id: self.cfg.upstairs_id,
+                session_id: self.cfg.session_id,
+                repair_id: reconcile.id,
+                aborted,
+                repairs,
             });
         }
-
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-        let session_id: TypedUuid<UpstairsSessionKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.session_id);
-        let repair_id: TypedUuid<UpstairsRepairKind> =
-            TypedUuid::from_untyped_uuid(reconcile.id);
-
-        let now = Utc::now();
-
-        // Spawn a task so we don't block the main loop talking to
-        // Nexus.
-        let target_addrs = self.get_target_addrs();
-        let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
-            let Some(nexus_client) =
-                get_nexus_client(&log, client, &target_addrs).await
-            else {
-                // Exit if no Nexus client returned from DNS - our notification
-                // is best effort.
-                error!(
-                    log,
-                    "no Nexus client from DNS, aborting finish notification"
-                );
-                return;
-            };
-
-            match omicron_common::retry_until_known_result(&log, || async {
-                nexus_client
-                    .cpapi_upstairs_repair_finish(
-                        &upstairs_id,
-                        &RepairFinishInfo {
-                            time: now,
-                            repair_id,
-                            repair_type: UpstairsRepairType::Reconciliation,
-                            session_id,
-                            repairs: repairs.clone(),
-                            aborted,
-                        },
-                    )
-                    .await
-            })
-            .await
-            {
-                Ok(_) => {
-                    info!(log, "notified Nexus of reconcile finish");
-                }
-
-                Err(e) => {
-                    error!(
-                        log,
-                        "failed to notify Nexus of reconcile finish! {e}"
-                    );
-                }
-            }
-        });
     }
 
-    #[cfg(feature = "notify-nexus")]
-    fn notify_nexus_of_reconcile_progress(
+    fn notify_reconcile_progress(
         &self,
         reconcile_id: Uuid,
         current_task: usize,
         task_count: usize,
     ) {
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-        let repair_id: TypedUuid<UpstairsRepairKind> =
-            TypedUuid::from_untyped_uuid(reconcile_id);
-
-        let now = Utc::now();
-        let log = self.log.new(o!("reconcile" => repair_id.to_string()));
-
-        // Spawn a task so we don't block the main loop talking to
-        // Nexus.
-        let target_addrs = self.get_target_addrs();
-        let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
-            let Some(nexus_client) =
-                get_nexus_client(&log, client, &target_addrs).await
-            else {
-                // Exit if no Nexus client returned from DNS - our notification
-                // is best effort.
-                error!(
-                    log,
-                    "no Nexus client from DNS, aborting progress notification"
-                );
-                return;
-            };
-
-            match omicron_common::retry_until_known_result(&log, || async {
-                nexus_client
-                    .cpapi_upstairs_repair_progress(
-                        &upstairs_id,
-                        &repair_id,
-                        &RepairProgress {
-                            time: now,
-                            // surely we won't have usize::MAX extents
-                            current_item: current_task as i64,
-                            // i am serious, and don't call me shirley
-                            total_items: task_count as i64,
-                        },
-                    )
-                    .await
-            })
-            .await
-            {
-                Ok(_) => {
-                    info!(log, "notified Nexus of reconcile progress");
-                }
-
-                Err(e) => {
-                    error!(
-                        log,
-                        "failed to notify Nexus of reconcile progress! {e}"
-                    );
-                }
-            }
-        });
+        if let Some(notify) = &self.notify {
+            notify.send(NotifyRequest::ReconcileProgress {
+                upstairs_id: self.cfg.upstairs_id,
+                repair_id: reconcile_id,
+                // surely we won't have usize::MAX extents
+                current_item: current_task as i64,
+                // i am serious, and don't call me shirley
+                total_items: task_count as i64,
+            });
+        }
     }
 
-    #[cfg(feature = "notify-nexus")]
-    pub(crate) fn notify_nexus_of_client_task_stopped(
+    pub(crate) fn notify_client_task_stopped(
         &self,
         client_id: ClientId,
         reason: ClientRunResult,
     ) {
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-
-        let Some(downstairs_id) = self.clients[client_id].id() else {
-            return;
-        };
-        let downstairs_id: TypedUuid<DownstairsKind> =
-            TypedUuid::from_untyped_uuid(downstairs_id);
-
-        let now = Utc::now();
-        let log = self
-            .log
-            .new(o!("downstairs_id" => downstairs_id.to_string()));
-
-        let reason = match reason {
-            ClientRunResult::ConnectionTimeout => {
-                DownstairsClientStoppedReason::ConnectionTimeout
-            }
-            ClientRunResult::ConnectionFailed(_) => {
-                // skip this notification, it's too noisy during connection
-                // retries
-                //DownstairsClientStoppedReason::ConnectionFailed
-                return;
-            }
-            ClientRunResult::Timeout => DownstairsClientStoppedReason::Timeout,
-            ClientRunResult::WriteFailed(_) => {
-                DownstairsClientStoppedReason::WriteFailed
-            }
-            ClientRunResult::ReadFailed(_) => {
-                DownstairsClientStoppedReason::ReadFailed
-            }
-            ClientRunResult::RequestedStop => {
-                // skip this notification, it fires for *every* Upstairs
-                // deactivation
-                //DownstairsClientStoppedReason::RequestedStop
-                return;
-            }
-            ClientRunResult::Finished => {
-                DownstairsClientStoppedReason::Finished
-            }
-            ClientRunResult::QueueClosed => {
-                DownstairsClientStoppedReason::QueueClosed
-            }
-            ClientRunResult::ReceiveTaskCancelled => {
-                DownstairsClientStoppedReason::ReceiveTaskCancelled
-            }
-        };
-
-        // Spawn a task so we don't block the main loop talking to
-        // Nexus.
-        let target_addrs = self.get_target_addrs();
-        let client = self.reqwest_client.clone();
-        tokio::spawn(async move {
-            let Some(nexus_client) =
-                get_nexus_client(&log, client, &target_addrs).await
-            else {
-                // Exit if no Nexus client returned from DNS - our notification
-                // is best effort.
+        if let Some(notify) = &self.notify {
+            let Some(downstairs_id) = self.clients[client_id].id() else {
                 return;
             };
-
-            match omicron_common::retry_until_known_result(&log, || async {
-                nexus_client
-                    .cpapi_downstairs_client_stopped(
-                        &upstairs_id,
-                        &downstairs_id,
-                        &DownstairsClientStopped { time: now, reason },
-                    )
-                    .await
-            })
-            .await
-            {
-                Ok(_) => {
-                    info!(log, "notified Nexus of client stopped");
-                }
-
-                Err(e) => {
-                    error!(
-                        log,
-                        "failed to notify Nexus of client stopped: {e}"
-                    );
-                }
-            }
-        });
+            notify.send(NotifyRequest::ClientTaskStopped {
+                upstairs_id: self.cfg.upstairs_id,
+                downstairs_id,
+                reason,
+            });
+        }
     }
 
     pub(crate) fn set_ddef(&mut self, ddef: RegionDefinition) {

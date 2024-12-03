@@ -387,12 +387,32 @@ impl Upstairs {
         });
 
         info!(log, "Crucible stats registered with UUID: {}", uuid);
+
+        // Use one of the Downstairs addresses for the Nexus notify task, since
+        // we just need a rack-internal IPv6 address.  Otherwise, we don't do
+        // any notifications (passing `notify: None`).
+        let ipv6_addr = ds_target.iter().find_map(|(_i, a)| match a {
+            std::net::SocketAddr::V6(addr) => Some(*addr.ip()),
+            _ => None,
+        });
+        let notify = match ipv6_addr {
+            Some(addr) if cfg!(feature = "notify-nexus") => {
+                Some(crate::notify::spawn_notify_task(addr, &log))
+            }
+            None if cfg!(feature = "notify-nexus") => {
+                warn!(log, "could not find Downstairs address for Nexus");
+                None
+            }
+            _ => None,
+        };
+
         let mut downstairs = Downstairs::new(
             cfg.clone(),
             ds_target,
             tls_context,
             stats.ds_stats(),
             guest.io_limits(),
+            notify,
             log.new(o!("" => "downstairs")),
         );
         let flush_timeout_secs = opt.flush_timeout.unwrap_or(0.5);
@@ -2093,10 +2113,8 @@ impl Upstairs {
             "downstairs task for {client_id} stopped due to {reason:?}"
         );
 
-        #[cfg(feature = "notify-nexus")]
         self.downstairs
-            .notify_nexus_of_client_task_stopped(client_id, reason);
-
+            .notify_client_task_stopped(client_id, reason);
         self.downstairs.reinitialize(client_id, &self.state);
     }
 
