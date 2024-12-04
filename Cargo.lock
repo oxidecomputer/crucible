@@ -928,7 +928,7 @@ dependencies = [
  "expectorate",
  "futures",
  "futures-core",
- "http 0.2.12",
+ "http",
  "humantime",
  "internal-dns",
  "itertools 0.13.0",
@@ -980,7 +980,7 @@ dependencies = [
  "dropshot",
  "expectorate",
  "futures",
- "http 0.2.12",
+ "http",
  "hyper",
  "omicron-common",
  "openapi-lint",
@@ -1085,7 +1085,7 @@ dependencies = [
  "futures",
  "futures-core",
  "hex",
- "http 0.2.12",
+ "http",
  "hyper",
  "hyper-staticfile",
  "itertools 0.13.0",
@@ -1230,7 +1230,7 @@ dependencies = [
  "expectorate",
  "futures",
  "hex",
- "http 0.2.12",
+ "http",
  "hyper",
  "omicron-common",
  "openapi-lint",
@@ -1674,7 +1674,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "expectorate",
- "http 1.1.0",
+ "http",
  "omicron-workspace-hack",
  "progenitor",
  "reqwest",
@@ -1714,7 +1714,7 @@ dependencies = [
  "form_urlencoded",
  "futures",
  "hostname 0.4.0",
- "http 1.1.0",
+ "http",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -2215,7 +2215,7 @@ dependencies = [
  "fnv",
  "futures-core",
  "futures-sink",
- "http 1.1.0",
+ "http",
  "indexmap 2.5.0",
  "slab",
  "tokio",
@@ -2390,20 +2390,9 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "0.2.12"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "601cbb57e577e2f5ef5be8e7b83f0f63994f25aa94d673e54a92d5c516d101f1"
-dependencies = [
- "bytes",
- "fnv",
- "itoa",
-]
-
-[[package]]
-name = "http"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "21b9ddb458710bc376481b842f5da65cdf31522de232c1ca8146abce2a358258"
+checksum = "f16ca2af56261c99fba8bac40a10251ce8188205a4c448fbb745a2e4daa76fea"
 dependencies = [
  "bytes",
  "fnv",
@@ -2417,7 +2406,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1efedce1fb8e6913f23e0c92de8e62cd5b772a67e7b3946df930a62566c93184"
 dependencies = [
  "bytes",
- "http 1.1.0",
+ "http",
 ]
 
 [[package]]
@@ -2428,7 +2417,7 @@ checksum = "793429d76616a256bcb62c2a2ec2bed781c8307e797e2598c50010f2bee2544f"
 dependencies = [
  "bytes",
  "futures-util",
- "http 1.1.0",
+ "http",
  "http-body",
  "pin-project-lite",
 ]
@@ -2462,7 +2451,7 @@ dependencies = [
  "crossbeam-channel",
  "form_urlencoded",
  "futures",
- "http 1.1.0",
+ "http",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -2518,7 +2507,7 @@ dependencies = [
  "futures-channel",
  "futures-util",
  "h2",
- "http 1.1.0",
+ "http",
  "http-body",
  "httparse",
  "httpdate",
@@ -2536,7 +2525,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "08afdbb5c31130e3034af566421053ab03787c640246a446327f550d11bcb333"
 dependencies = [
  "futures-util",
- "http 1.1.0",
+ "http",
  "hyper",
  "hyper-util",
  "rustls 0.23.13",
@@ -2554,7 +2543,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bc4bce64c32578957926e75f832032f81ebb30bcee74f86c5848b13a69e547eb"
 dependencies = [
  "futures-util",
- "http 1.1.0",
+ "http",
  "http-range",
  "httpdate",
  "hyper",
@@ -2591,7 +2580,7 @@ dependencies = [
  "bytes",
  "futures-channel",
  "futures-util",
- "http 1.1.0",
+ "http",
  "http-body",
  "hyper",
  "pin-project-lite",
@@ -3147,7 +3136,7 @@ dependencies = [
  "bytes",
  "encoding_rs",
  "futures-util",
- "http 1.1.0",
+ "http",
  "httparse",
  "memchr",
  "mime",
@@ -3273,7 +3262,7 @@ dependencies = [
  "dropshot",
  "futures",
  "gateway-client",
- "http 1.1.0",
+ "http",
  "humantime",
  "ipnetwork",
  "newtype-uuid",
@@ -3583,7 +3572,7 @@ dependencies = [
  "dropshot",
  "futures",
  "hex",
- "http 1.1.0",
+ "http",
  "ipnetwork",
  "macaddr",
  "mg-admin-client",
@@ -4402,7 +4391,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d85934a440963a69f9f04f48507ff6e7aa2952a5b2d8f96cc37fa3dd5c270f66"
 dependencies = [
  "heck 0.5.0",
- "http 1.1.0",
+ "http",
  "indexmap 2.5.0",
  "openapiv3",
  "proc-macro2",
@@ -4855,7 +4844,7 @@ dependencies = [
  "futures-core",
  "futures-util",
  "h2",
- "http 1.1.0",
+ "http",
  "http-body",
  "http-body-util",
  "hyper",
@@ -6399,7 +6388,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
 dependencies = [
  "cfg-if",
- "rand 0.6.5",
+ "rand 0.8.5",
  "static_assertions",
 ]
 
