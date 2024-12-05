@@ -116,7 +116,7 @@ pub(crate) struct Downstairs {
     stats: DownstairsStatOuter,
 
     /// A queue to send notifications to Nexus
-    notify: NotifyQueue,
+    notify: Option<NotifyQueue>,
 }
 
 /// Tuple storing a job and an optional result
@@ -317,6 +317,7 @@ impl Downstairs {
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
         stats: DownstairsStatOuter,
         io_limits: &IOLimits,
+        notify: Option<NotifyQueue>,
         log: Logger,
     ) -> Self {
         let mut clients = [None, None, None];
@@ -330,18 +331,6 @@ impl Downstairs {
                 tls_context.clone(),
             ));
         }
-
-        // Use one of the Downstairs addresses for the Nexus notify task, since
-        // we just need a rack-internal IP address.  Otherwise, spawn a dummy
-        // task, which doesn't do any work.
-        let ipv6_addr = ds_target.iter().find_map(|(_i, a)| match a {
-            SocketAddr::V6(addr) => Some(*addr.ip()),
-            _ => None,
-        });
-        let notify = match ipv6_addr {
-            Some(addr) => crate::notify::spawn_notify_task(addr, &log),
-            None => crate::notify::spawn_dummy_task(&log),
-        };
 
         let clients = clients.map(Option::unwrap);
         Self {
@@ -403,8 +392,15 @@ impl Downstairs {
         // Build a set of fake IO limits that we won't hit
         let io_limits = IOLimits::new(u32::MAX as usize, u32::MAX as usize);
 
-        let mut ds =
-            Self::new(cfg, ClientMap::new(), None, stats, &io_limits, log);
+        let mut ds = Self::new(
+            cfg,
+            ClientMap::new(),
+            None,
+            stats,
+            &io_limits,
+            None,
+            log,
+        );
 
         // Create a fake repair address so this field is populated.
         for cid in ClientId::iter() {
@@ -3677,66 +3673,69 @@ impl Downstairs {
     }
 
     fn notify_live_repair_start(&self, repair: &LiveRepairData) {
-        let log = self.log.new(o!("repair" => repair.id.to_string()));
+        if let Some(notify) = &self.notify {
+            let log = self.log.new(o!("repair" => repair.id.to_string()));
+            let mut repairs =
+                Vec::with_capacity(repair.repair_downstairs.len());
 
-        let mut repairs = Vec::with_capacity(repair.repair_downstairs.len());
+            for cid in &repair.repair_downstairs {
+                let Some(region_uuid) = self.clients[*cid].id() else {
+                    // A downstairs doesn't have an id but is being repaired...?
+                    warn!(log, "downstairs {cid} has a None id?");
+                    continue;
+                };
 
-        for cid in &repair.repair_downstairs {
-            let Some(region_uuid) = self.clients[*cid].id() else {
-                // A downstairs doesn't have an id but is being repaired...?
-                warn!(log, "downstairs {cid} has a None id?");
-                continue;
-            };
+                let Some(target_addr) = self.clients[*cid].target_addr else {
+                    // A downstairs doesn't have a target_addr but is being
+                    // repaired...?
+                    warn!(log, "downstairs {cid} has a None target_addr?");
+                    continue;
+                };
 
-            let Some(target_addr) = self.clients[*cid].target_addr else {
-                // A downstairs doesn't have a target_addr but is being
-                // repaired...?
-                warn!(log, "downstairs {cid} has a None target_addr?");
-                continue;
-            };
+                repairs.push((region_uuid, target_addr));
+            }
 
-            repairs.push((region_uuid, target_addr));
+            notify.send(NotifyRequest::LiveRepairStart {
+                upstairs_id: self.cfg.upstairs_id,
+                session_id: self.cfg.session_id,
+                repair_id: repair.id,
+                repairs,
+            })
         }
-
-        self.notify.send(NotifyRequest::LiveRepairStart {
-            upstairs_id: self.cfg.upstairs_id,
-            session_id: self.cfg.session_id,
-            repair_id: repair.id,
-            repairs,
-        });
     }
 
     fn notify_live_repair_finish(&self, repair: &LiveRepairData) {
-        let log = self.log.new(o!("repair" => repair.id.to_string()));
+        if let Some(notify) = &self.notify {
+            let log = self.log.new(o!("repair" => repair.id.to_string()));
 
-        let aborted = repair.aborting_repair;
+            let mut repairs =
+                Vec::with_capacity(repair.repair_downstairs.len());
 
-        let mut repairs = Vec::with_capacity(repair.repair_downstairs.len());
+            for cid in &repair.repair_downstairs {
+                let Some(region_uuid) = self.clients[*cid].id() else {
+                    // A downstairs doesn't have an id but is being repaired...?
+                    warn!(log, "downstairs {cid} has a None id?");
+                    continue;
+                };
 
-        for cid in &repair.repair_downstairs {
-            let Some(region_uuid) = self.clients[*cid].id() else {
-                // A downstairs doesn't have an id but is being repaired...?
-                warn!(log, "downstairs {cid} has a None id?");
-                continue;
-            };
+                let Some(target_addr) = self.clients[*cid].target_addr else {
+                    // A downstairs doesn't have a target_addr but is being
+                    // repaired...?
+                    warn!(log, "downstairs {cid} has a None target_addr?");
+                    continue;
+                };
 
-            let Some(target_addr) = self.clients[*cid].target_addr else {
-                // A downstairs doesn't have a target_addr but is being
-                // repaired...?
-                warn!(log, "downstairs {cid} has a None target_addr?");
-                continue;
-            };
+                repairs.push((region_uuid, target_addr));
+            }
 
-            repairs.push((region_uuid, target_addr));
+            notify.send(NotifyRequest::LiveRepairFinish {
+                upstairs_id: self.cfg.upstairs_id,
+                session_id: self.cfg.session_id,
+                repair_id: repair.id,
+                repairs,
+                aborted: repair.aborting_repair,
+            });
         }
-
-        self.notify.send(NotifyRequest::LiveRepairFinish {
-            upstairs_id: self.cfg.upstairs_id,
-            session_id: self.cfg.session_id,
-            repair_id: repair.id,
-            repairs,
-            aborted,
-        });
     }
 
     fn notify_live_repair_progress(
@@ -3745,45 +3744,49 @@ impl Downstairs {
         current_extent: ExtentId,
         extent_count: u32,
     ) {
-        self.notify.send(NotifyRequest::LiveRepairProgress {
-            upstairs_id: self.cfg.upstairs_id,
-            repair_id,
-            // surely we won't have u64::MAX extents
-            current_item: current_extent.0 as i64,
-            // i am serious, and don't call me shirley
-            total_items: extent_count as i64,
-        });
+        if let Some(notify) = &self.notify {
+            notify.send(NotifyRequest::LiveRepairProgress {
+                upstairs_id: self.cfg.upstairs_id,
+                repair_id,
+                // surely we won't have u64::MAX extents
+                current_item: current_extent.0 as i64,
+                // i am serious, and don't call me shirley
+                total_items: extent_count as i64,
+            });
+        }
     }
 
     fn notify_reconcile_start(&self, reconcile: &ReconcileData) {
-        let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
+        if let Some(notify) = &self.notify {
+            let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
 
-        // Reconcilation involves everyone
-        let mut repairs = Vec::with_capacity(self.clients.len());
+            // Reconcilation involves everyone
+            let mut repairs = Vec::with_capacity(self.clients.len());
 
-        for (cid, client) in self.clients.iter().enumerate() {
-            let Some(region_uuid) = client.id() else {
-                // A downstairs doesn't have an id but is being reconciled...?
-                warn!(log, "downstairs {cid} has a None id?");
-                continue;
-            };
+            for (cid, client) in self.clients.iter().enumerate() {
+                let Some(region_uuid) = client.id() else {
+                    // A downstairs doesn't have an id but is being reconciled...?
+                    warn!(log, "downstairs {cid} has a None id?");
+                    continue;
+                };
 
-            let Some(target_addr) = client.target_addr else {
-                // A downstairs doesn't have a target_addr but is being
-                // reconciled...?
-                warn!(log, "downstairs {cid} has a None target_addr?");
-                continue;
-            };
+                let Some(target_addr) = client.target_addr else {
+                    // A downstairs doesn't have a target_addr but is being
+                    // reconciled...?
+                    warn!(log, "downstairs {cid} has a None target_addr?");
+                    continue;
+                };
 
-            repairs.push((region_uuid, target_addr));
+                repairs.push((region_uuid, target_addr));
+            }
+
+            notify.send(NotifyRequest::ReconcileStart {
+                upstairs_id: self.cfg.upstairs_id,
+                repair_id: reconcile.id,
+                session_id: self.cfg.session_id,
+                repairs,
+            });
         }
-
-        self.notify.send(NotifyRequest::ReconcileStart {
-            upstairs_id: self.cfg.upstairs_id,
-            repair_id: reconcile.id,
-            session_id: self.cfg.session_id,
-            repairs,
-        });
     }
 
     fn notify_reconcile_finished(
@@ -3791,35 +3794,37 @@ impl Downstairs {
         reconcile: &ReconcileData,
         aborted: bool,
     ) {
-        let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
+        if let Some(notify) = &self.notify {
+            let log = self.log.new(o!("reconcile" => reconcile.id.to_string()));
 
-        // Reconcilation involves everyone
-        let mut repairs = Vec::with_capacity(self.clients.len());
+            // Reconcilation involves everyone
+            let mut repairs = Vec::with_capacity(self.clients.len());
 
-        for (cid, client) in self.clients.iter().enumerate() {
-            let Some(region_uuid) = client.id() else {
-                // A downstairs doesn't have an id but is being reconciled...?
-                warn!(log, "downstairs {cid} has a None id?");
-                continue;
-            };
+            for (cid, client) in self.clients.iter().enumerate() {
+                let Some(region_uuid) = client.id() else {
+                    // A downstairs doesn't have an id but is being reconciled...?
+                    warn!(log, "downstairs {cid} has a None id?");
+                    continue;
+                };
 
-            let Some(target_addr) = client.target_addr else {
-                // A downstairs doesn't have a target_addr but is being
-                // reconciled...?
-                warn!(log, "downstairs {cid} has a None target_addr?");
-                continue;
-            };
+                let Some(target_addr) = client.target_addr else {
+                    // A downstairs doesn't have a target_addr but is being
+                    // reconciled...?
+                    warn!(log, "downstairs {cid} has a None target_addr?");
+                    continue;
+                };
 
-            repairs.push((region_uuid, target_addr));
+                repairs.push((region_uuid, target_addr));
+            }
+
+            notify.send(NotifyRequest::ReconcileFinish {
+                upstairs_id: self.cfg.upstairs_id,
+                session_id: self.cfg.session_id,
+                repair_id: reconcile.id,
+                aborted,
+                repairs,
+            });
         }
-
-        self.notify.send(NotifyRequest::ReconcileFinish {
-            upstairs_id: self.cfg.upstairs_id,
-            session_id: self.cfg.session_id,
-            repair_id: reconcile.id,
-            aborted,
-            repairs,
-        });
     }
 
     fn notify_reconcile_progress(
@@ -3828,14 +3833,16 @@ impl Downstairs {
         current_task: usize,
         task_count: usize,
     ) {
-        self.notify.send(NotifyRequest::ReconcileProgress {
-            upstairs_id: self.cfg.upstairs_id,
-            repair_id: reconcile_id,
-            // surely we won't have usize::MAX extents
-            current_item: current_task as i64,
-            // i am serious, and don't call me shirley
-            total_items: task_count as i64,
-        });
+        if let Some(notify) = &self.notify {
+            notify.send(NotifyRequest::ReconcileProgress {
+                upstairs_id: self.cfg.upstairs_id,
+                repair_id: reconcile_id,
+                // surely we won't have usize::MAX extents
+                current_item: current_task as i64,
+                // i am serious, and don't call me shirley
+                total_items: task_count as i64,
+            });
+        }
     }
 
     pub(crate) fn notify_client_task_stopped(
@@ -3843,16 +3850,18 @@ impl Downstairs {
         client_id: ClientId,
         reason: ClientRunResult,
     ) {
-        let Some(downstairs_id) = self.clients[client_id].id() else {
-            return;
-        };
-        // Spawn a task so we don't block the main loop talking to
-        // Nexus.
-        self.notify.send(NotifyRequest::ClientTaskStopped {
-            upstairs_id: self.cfg.upstairs_id,
-            downstairs_id,
-            reason,
-        });
+        if let Some(notify) = &self.notify {
+            let Some(downstairs_id) = self.clients[client_id].id() else {
+                return;
+            };
+            // Spawn a task so we don't block the main loop talking to
+            // Nexus.
+            notify.send(NotifyRequest::ClientTaskStopped {
+                upstairs_id: self.cfg.upstairs_id,
+                downstairs_id,
+                reason,
+            });
+        }
     }
 
     pub(crate) fn set_ddef(&mut self, ddef: RegionDefinition) {

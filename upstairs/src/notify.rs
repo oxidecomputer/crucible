@@ -3,9 +3,6 @@
 //!
 //! The queue receives Crucible-flavored types, and converts them to
 //! Nexus-flavored types internally.
-//!
-//! If the `notify-nexus` feature is disabled, then the task simply drops values
-//! from the queue.
 
 use chrono::{DateTime, Utc};
 use slog::{debug, error, info, o, warn, Logger};
@@ -85,36 +82,14 @@ impl NotifyQueue {
 
 pub(crate) fn spawn_notify_task(addr: Ipv6Addr, log: &Logger) -> NotifyQueue {
     let (tx, rx) = mpsc::channel(128);
-    let task_log = log.new(o!("job" => "notify"));
-    tokio::spawn(async move {
-        #[cfg(feature = "notify-nexus")]
-        {
-            notify_task_nexus(addr, rx, task_log).await
-        }
-
-        #[cfg(not(feature = "notify-nexus"))]
-        {
-            let _ = addr;
-            notify_task_dummy(task_log, rx).await
-        }
-    });
+    let task_log = log.new(slog::o!("job" => "notify"));
+    tokio::spawn(async move { notify_task_nexus(addr, rx, task_log).await });
     NotifyQueue {
         tx,
         log: log.new(o!("job" => "notify_queue")),
     }
 }
 
-pub(crate) fn spawn_dummy_task(log: &Logger) -> NotifyQueue {
-    let (tx, rx) = mpsc::channel(128);
-    let task_log = log.new(o!("job" => "notify"));
-    tokio::spawn(async move { notify_task_dummy(task_log, rx).await });
-    NotifyQueue {
-        tx,
-        log: log.new(o!("job" => "notify_queue")),
-    }
-}
-
-#[cfg_attr(not(feature = "notify-nexus"), allow(unused))]
 async fn notify_task_nexus(
     addr: Ipv6Addr,
     mut rx: mpsc::Receiver<(DateTime<Utc>, NotifyRequest)>,
@@ -130,8 +105,13 @@ async fn notify_task_nexus(
         let client = reqwest_client.clone();
         let Some(nexus_client) = get_nexus_client(&log, client, addr).await
         else {
-            // Exit if no Nexus client returned from DNS - our notification
-            // is best effort.
+            // Skip if no Nexus client returned from DNS; our notification is
+            // best effort.
+            warn!(
+                log,
+                "could not find nexus client; \
+                 dropping nexus notification {m:?}"
+            );
             continue;
         };
         let (r, s) = match m {
@@ -205,7 +185,7 @@ async fn notify_task_nexus(
                 ref repairs,
             } => {
                 let upstairs_id = TypedUuid::from_untyped_uuid(upstairs_id);
-                let (s, repair_type) =
+                let (description, repair_type) =
                     if matches!(m, NotifyRequest::LiveRepairStart { .. }) {
                         ("live repair start", UpstairsRepairType::Live)
                     } else {
@@ -234,7 +214,7 @@ async fn notify_task_nexus(
                             .await
                     })
                     .await,
-                    s,
+                    description,
                 )
             }
             NotifyRequest::LiveRepairProgress {
@@ -251,12 +231,12 @@ async fn notify_task_nexus(
             } => {
                 let upstairs_id = TypedUuid::from_untyped_uuid(upstairs_id);
                 let repair_id = TypedUuid::from_untyped_uuid(repair_id);
-                let s = if matches!(m, NotifyRequest::LiveRepairProgress { .. })
-                {
-                    "live repair progress"
-                } else {
-                    "reconcile progress"
-                };
+                let description =
+                    if matches!(m, NotifyRequest::LiveRepairProgress { .. }) {
+                        "live repair progress"
+                    } else {
+                        "reconcile progress"
+                    };
 
                 (
                     omicron_common::retry_until_known_result(&log, || async {
@@ -273,7 +253,7 @@ async fn notify_task_nexus(
                             .await
                     })
                     .await,
-                    s,
+                    description,
                 )
             }
             NotifyRequest::LiveRepairFinish {
@@ -291,7 +271,7 @@ async fn notify_task_nexus(
                 ref repairs,
             } => {
                 let upstairs_id = TypedUuid::from_untyped_uuid(upstairs_id);
-                let (s, repair_type) =
+                let (description, repair_type) =
                     if matches!(m, NotifyRequest::LiveRepairFinish { .. }) {
                         ("live repair finish", UpstairsRepairType::Live)
                     } else {
@@ -321,7 +301,7 @@ async fn notify_task_nexus(
                             .await
                     })
                     .await,
-                    s,
+                    description,
                 )
             }
         };
@@ -371,16 +351,4 @@ pub(crate) async fn get_nexus_client(
         client,
         log.clone(),
     ))
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-async fn notify_task_dummy(
-    log: Logger,
-    mut rx: mpsc::Receiver<(DateTime<Utc>, NotifyRequest)>,
-) {
-    while let Some(m) = rx.recv().await {
-        debug!(log, "notify {m:?}");
-    }
-    info!(log, "notify_task exiting");
 }

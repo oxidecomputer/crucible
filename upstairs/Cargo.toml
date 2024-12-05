@@ -12,7 +12,7 @@ path = "src/lib.rs"
 
 [features]
 asm = ["usdt/asm"]
-notify-nexus = ["progenitor-client", "http"]
+notify-nexus = []
 integration-tests = []
 
 [dependencies]
@@ -59,8 +59,6 @@ crucible-workspace-hack.workspace = true
 nexus-client.workspace = true
 omicron-uuid-kinds.workspace = true
 internal-dns.workspace = true
-progenitor-client = { workspace = true, optional = true }
-http = { workspace = true, optional = true }
 
 [dev-dependencies]
 expectorate.workspace = true
