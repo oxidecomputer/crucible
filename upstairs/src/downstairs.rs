@@ -34,22 +34,6 @@ use ringbuffer::RingBuffer;
 use slog::{debug, error, info, o, warn, Logger};
 use uuid::Uuid;
 
-use chrono::Utc;
-
-use nexus_client::types::DownstairsClientStoppedReason;
-use nexus_client::types::DownstairsUnderRepair;
-use nexus_client::types::RepairFinishInfo;
-use nexus_client::types::RepairProgress;
-use nexus_client::types::RepairStartInfo;
-use nexus_client::types::UpstairsRepairType;
-
-use omicron_uuid_kinds::DownstairsKind;
-use omicron_uuid_kinds::GenericUuid;
-use omicron_uuid_kinds::TypedUuid;
-use omicron_uuid_kinds::UpstairsKind;
-use omicron_uuid_kinds::UpstairsRepairKind;
-use omicron_uuid_kinds::UpstairsSessionKind;
-
 /// Downstairs data
 ///
 /// This data structure is responsible for tracking outstanding jobs from the
@@ -333,7 +317,6 @@ impl Downstairs {
         tls_context: Option<Arc<crucible_common::x509::TLSContext>>,
         stats: DownstairsStatOuter,
         io_limits: &IOLimits,
-        notify: NotifyQueue,
         log: Logger,
     ) -> Self {
         let mut clients = [None, None, None];
@@ -347,6 +330,19 @@ impl Downstairs {
                 tls_context.clone(),
             ));
         }
+
+        // Use one of the Downstairs addresses for the Nexus notify task, since
+        // we just need a rack-internal IP address.  Otherwise, spawn a dummy
+        // task, which doesn't do any work.
+        let ipv6_addr = ds_target.iter().find_map(|(_i, a)| match a {
+            SocketAddr::V6(addr) => Some(*addr.ip()),
+            _ => None,
+        });
+        let notify = match ipv6_addr {
+            Some(addr) => crate::notify::spawn_notify_task(addr, &log),
+            None => crate::notify::spawn_dummy_task(&log),
+        };
+
         let clients = clients.map(Option::unwrap);
         Self {
             clients: ClientData(clients),
@@ -403,20 +399,12 @@ impl Downstairs {
             encryption_context: None,
         });
         let stats = DownstairsStatOuter::default();
-        let notify = crate::notify::spawn_dummy_task(&log);
 
         // Build a set of fake IO limits that we won't hit
         let io_limits = IOLimits::new(u32::MAX as usize, u32::MAX as usize);
 
-        let mut ds = Self::new(
-            cfg,
-            ClientMap::new(),
-            None,
-            stats,
-            &io_limits,
-            notify,
-            log,
-        );
+        let mut ds =
+            Self::new(cfg, ClientMap::new(), None, stats, &io_limits, log);
 
         // Create a fake repair address so this field is populated.
         for cid in ClientId::iter() {
@@ -3688,14 +3676,6 @@ impl Downstairs {
         }
     }
 
-    #[cfg(feature = "notify-nexus")]
-    fn get_target_addrs(&self) -> Vec<SocketAddr> {
-        self.clients
-            .iter()
-            .filter_map(|client| client.target_addr)
-            .collect()
-    }
-
     fn notify_live_repair_start(&self, repair: &LiveRepairData) {
         let log = self.log.new(o!("repair" => repair.id.to_string()));
 
@@ -3715,29 +3695,14 @@ impl Downstairs {
                 continue;
             };
 
-            repairs.push(DownstairsUnderRepair {
-                region_uuid: region_uuid.into(),
-                target_addr: target_addr.to_string(),
-            });
+            repairs.push((region_uuid, target_addr));
         }
 
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-        let session_id: TypedUuid<UpstairsSessionKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.session_id);
-        let repair_id: TypedUuid<UpstairsRepairKind> =
-            TypedUuid::from_untyped_uuid(repair.id);
-
-        let now = Utc::now();
-        self.notify.send(NotifyRequest::RepairStart {
-            upstairs_id,
-            info: RepairStartInfo {
-                time: now,
-                repair_id,
-                repair_type: UpstairsRepairType::Live,
-                session_id,
-                repairs,
-            },
+        self.notify.send(NotifyRequest::LiveRepairStart {
+            upstairs_id: self.cfg.upstairs_id,
+            session_id: self.cfg.session_id,
+            repair_id: repair.id,
+            repairs,
         });
     }
 
@@ -3762,30 +3727,15 @@ impl Downstairs {
                 continue;
             };
 
-            repairs.push(DownstairsUnderRepair {
-                region_uuid: region_uuid.into(),
-                target_addr: target_addr.to_string(),
-            });
+            repairs.push((region_uuid, target_addr));
         }
 
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-        let session_id: TypedUuid<UpstairsSessionKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.session_id);
-        let repair_id: TypedUuid<UpstairsRepairKind> =
-            TypedUuid::from_untyped_uuid(repair.id);
-
-        let now = Utc::now();
-        self.notify.send(NotifyRequest::RepairFinish {
-            upstairs_id,
-            info: RepairFinishInfo {
-                time: now,
-                repair_id,
-                repair_type: UpstairsRepairType::Live,
-                session_id,
-                repairs: repairs.clone(),
-                aborted,
-            },
+        self.notify.send(NotifyRequest::LiveRepairFinish {
+            upstairs_id: self.cfg.upstairs_id,
+            session_id: self.cfg.session_id,
+            repair_id: repair.id,
+            repairs,
+            aborted,
         });
     }
 
@@ -3795,22 +3745,13 @@ impl Downstairs {
         current_extent: ExtentId,
         extent_count: u32,
     ) {
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-        let repair_id: TypedUuid<UpstairsRepairKind> =
-            TypedUuid::from_untyped_uuid(repair_id);
-
-        let now = Utc::now();
-        self.notify.send(NotifyRequest::RepairProgress {
-            upstairs_id,
+        self.notify.send(NotifyRequest::LiveRepairProgress {
+            upstairs_id: self.cfg.upstairs_id,
             repair_id,
-            info: RepairProgress {
-                time: now,
-                // surely we won't have u64::MAX extents
-                current_item: current_extent.0 as i64,
-                // i am serious, and don't call me shirley
-                total_items: extent_count as i64,
-            },
+            // surely we won't have u64::MAX extents
+            current_item: current_extent.0 as i64,
+            // i am serious, and don't call me shirley
+            total_items: extent_count as i64,
         });
     }
 
@@ -3834,30 +3775,14 @@ impl Downstairs {
                 continue;
             };
 
-            repairs.push(DownstairsUnderRepair {
-                region_uuid: region_uuid.into(),
-                target_addr: target_addr.to_string(),
-            });
+            repairs.push((region_uuid, target_addr));
         }
 
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-        let session_id: TypedUuid<UpstairsSessionKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.session_id);
-        let repair_id: TypedUuid<UpstairsRepairKind> =
-            TypedUuid::from_untyped_uuid(reconcile.id);
-
-        let now = Utc::now();
-
         self.notify.send(NotifyRequest::ReconcileStart {
-            upstairs_id,
-            info: RepairStartInfo {
-                time: now,
-                repair_id,
-                repair_type: UpstairsRepairType::Reconciliation,
-                session_id,
-                repairs: repairs.clone(),
-            },
+            upstairs_id: self.cfg.upstairs_id,
+            repair_id: reconcile.id,
+            session_id: self.cfg.session_id,
+            repairs,
         });
     }
 
@@ -3885,30 +3810,15 @@ impl Downstairs {
                 continue;
             };
 
-            repairs.push(DownstairsUnderRepair {
-                region_uuid: region_uuid.into(),
-                target_addr: target_addr.to_string(),
-            });
+            repairs.push((region_uuid, target_addr));
         }
 
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-        let session_id: TypedUuid<UpstairsSessionKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.session_id);
-        let repair_id: TypedUuid<UpstairsRepairKind> =
-            TypedUuid::from_untyped_uuid(reconcile.id);
-
-        let now = Utc::now();
         self.notify.send(NotifyRequest::ReconcileFinish {
-            upstairs_id,
-            info: RepairFinishInfo {
-                time: now,
-                repair_id,
-                repair_type: UpstairsRepairType::Reconciliation,
-                session_id,
-                repairs: repairs.clone(),
-                aborted,
-            },
+            upstairs_id: self.cfg.upstairs_id,
+            session_id: self.cfg.session_id,
+            repair_id: reconcile.id,
+            aborted,
+            repairs,
         });
     }
 
@@ -3918,22 +3828,13 @@ impl Downstairs {
         current_task: usize,
         task_count: usize,
     ) {
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-        let repair_id: TypedUuid<UpstairsRepairKind> =
-            TypedUuid::from_untyped_uuid(reconcile_id);
-
-        let now = Utc::now();
         self.notify.send(NotifyRequest::ReconcileProgress {
-            upstairs_id,
-            repair_id,
-            info: RepairProgress {
-                time: now,
-                // surely we won't have usize::MAX extents
-                current_item: current_task as i64,
-                // i am serious, and don't call me shirley
-                total_items: task_count as i64,
-            },
+            upstairs_id: self.cfg.upstairs_id,
+            repair_id: reconcile_id,
+            // surely we won't have usize::MAX extents
+            current_item: current_task as i64,
+            // i am serious, and don't call me shirley
+            total_items: task_count as i64,
         });
     }
 
@@ -3942,58 +3843,14 @@ impl Downstairs {
         client_id: ClientId,
         reason: ClientRunResult,
     ) {
-        use omicron_uuid_kinds::UpstairsKind;
-
-        let upstairs_id: TypedUuid<UpstairsKind> =
-            TypedUuid::from_untyped_uuid(self.cfg.upstairs_id);
-
         let Some(downstairs_id) = self.clients[client_id].id() else {
             return;
         };
-        let downstairs_id: TypedUuid<DownstairsKind> =
-            TypedUuid::from_untyped_uuid(downstairs_id);
-
-        let now = Utc::now();
-        let reason = match reason {
-            ClientRunResult::ConnectionTimeout => {
-                DownstairsClientStoppedReason::ConnectionTimeout
-            }
-            ClientRunResult::ConnectionFailed(_) => {
-                // skip this notification, it's too noisy during connection
-                // retries
-                //DownstairsClientStoppedReason::ConnectionFailed
-                return;
-            }
-            ClientRunResult::Timeout => DownstairsClientStoppedReason::Timeout,
-            ClientRunResult::WriteFailed(_) => {
-                DownstairsClientStoppedReason::WriteFailed
-            }
-            ClientRunResult::ReadFailed(_) => {
-                DownstairsClientStoppedReason::ReadFailed
-            }
-            ClientRunResult::RequestedStop(_) => {
-                // skip this notification, it fires for *every* Upstairs
-                // deactivation
-                //DownstairsClientStoppedReason::RequestedStop
-                return;
-            }
-            ClientRunResult::Finished => {
-                DownstairsClientStoppedReason::Finished
-            }
-            ClientRunResult::QueueClosed => {
-                DownstairsClientStoppedReason::QueueClosed
-            }
-            ClientRunResult::ReceiveTaskCancelled => {
-                DownstairsClientStoppedReason::ReceiveTaskCancelled
-            }
-        };
-
         // Spawn a task so we don't block the main loop talking to
         // Nexus.
         self.notify.send(NotifyRequest::ClientTaskStopped {
-            upstairs_id,
+            upstairs_id: self.cfg.upstairs_id,
             downstairs_id,
-            time: now,
             reason,
         });
     }
