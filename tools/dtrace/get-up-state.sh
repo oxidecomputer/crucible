@@ -17,20 +17,3 @@ done
 grep "SESSION" "$filename"
 # Sort our result by PID and print it out.
 sort -n < $final
-
-exit 0
-
-# Zone PID, and the the rest
-# Print the zone first, then PID
-# Print the header
-echo -n "                        ZONE "
-grep "SESSION" "$filename"
-for id in $(cat $filename | grep -v SESSION | awk '{print $2}' | sort -n | uniq); do
-    # The PID is the first column
-    pid=$(grep "$id" "$filename" | sort -n | tail -1 | awk '{print $1}')
-    zone=$(ps -o zone -p $pid | tail -1 | cut -c 1-28)
-    echo -n "$zone "
-    grep "$id" "$filename" | sort -n | tail -1
-done
-
-exit 0
