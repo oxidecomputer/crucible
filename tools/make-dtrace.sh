@@ -27,6 +27,8 @@ tar cvf ../../out/crucible-dtrace.tar \
     get-ds-state.sh \
     get-lr-state.d \
     get-lr-state.sh \
+    get-up-state.d \
+    get-up-state.sh \
     perf-downstairs-os.d \
     perf-downstairs-three.d \
     perf-downstairs-tick.d \
