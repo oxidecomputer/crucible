@@ -16,7 +16,7 @@ dtrace:::BEGIN
     last_id["string"] = (int64_t)1;
     printf("%5s %8s ", "PID", "SESSION");
     printf("%3s %3s %3s", "DS0", "DS1", "DS2");
-    printf(" %10s %5s %4s", "NEXT_JOB", "DELTA", "CONN");
+    printf(" %10s %6s %4s", "NEXT_JOB", "DELTA", "CONN");
     printf(" %5s %5s", "ELR", "ELC");
     printf(" %5s %5s", "ERR", "ERN");
     printf("\n");
@@ -118,7 +118,7 @@ crucible_upstairs*:::up-status
         strtoll(json(copyinstr(arg1), "ok.ds_connected[1]")) +
         strtoll(json(copyinstr(arg1), "ok.ds_connected[2]"));
 
-    printf("%5d %8s %3s %3s %3s %10s %5d %4d %5d %5d %5s %5s\n",
+    printf("%5d %8s %3s %3s %3s %10s %6d %4d %5d %5d %5s %5s\n",
         pid,
         this->session_id,
         /*
