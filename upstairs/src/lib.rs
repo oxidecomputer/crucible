@@ -65,6 +65,10 @@ use guest::{GuestBlockRes, GuestIoHandle};
 
 mod stats;
 
+pub use client::{
+    ClientFaultReason, ClientNegotiationFailed, ClientStopReason,
+    NegotiationState,
+};
 pub use crucible_common::impacted_blocks::*;
 
 mod deferred;
@@ -710,188 +714,120 @@ pub(crate) struct RawReadResponse {
     pub data: bytes::BytesMut,
 }
 
-/*
- * States of a downstairs
- *
- * This shows the different states a downstairs can be in from the point of
- * view of the upstairs.
- *
- * Double line paths can only be taken if an upstairs is active and goes to
- * deactivated.
- *
- *                       │
- *                ┌──┐   ▼
- *             bad│  │   │
- *         version│ ┌▼───┴──────┐
- *                └─┤           ╞═════◄══════════════════╗
- *    ┌─────────────►    New    ╞═════◄════════════════╗ ║
- *    │       ┌─────►           ├─────◄──────┐         ║ ║
- *    │       │     └────┬───┬──┘            │         ║ ║
- *    │       │          ▼   └───►───┐ other │         ║ ║
- *    │    bad│     ┌────┴──────┐    │ failures        ║ ║
- *    │ region│     │   Wait    │    │       ▲         ║ ║
- *    │       │     │  Active   ├─►┐ │       │         ║ ║
- *    │       │     └────┬──────┘  │ │       │         ║ ║
- *    │       │     ┌────┴──────┐  │ └───────┤         ║ ║
- *    │       │     │   Wait    │  └─────────┤         ║ ║
- *    │       └─────┤  Quorum   ├──►─────────┤         ║ ║
- *    │             └────┬──────┘            │         ║ ║
- *    │          ........▼..........         │         ║ ║
- *    │failed    :  ┌────┴──────┐  :         │         ║ ║
- *    │reconcile :  │ Reconcile │  :         │       ╔═╝ ║
- *    └─────────────┤           ├──►─────────┘       ║   ║
- *               :  └────┬──────┘  :                 ║   ║
- *  Not Active   :       │         :                 ▲   ▲  Not Active
- *  .............. . . . │. . . . ...................║...║............
- *  Active               ▼                           ║   ║  Active
- *                  ┌────┴──────┐         ┌──────────╨┐  ║
- *              ┌─►─┤  Active   ├─────►───┤Deactivated│  ║
- *              │   │           │  ┌──────┤           ├─◄──────┐
- *              │   └─┬───┬───┬─┘  │      └───────────┘  ║     │
- *              │     ▼   ▼   ▲    ▲                     ║     │
- *              │     │   │   │    │                     ║     │
- *              │     │   │   │    │                     ║     │
- *              │     │   │   │    │                     ║     │
- *              │     │   │   │    │                     ║     │
- *              │     │   │   │    │                     ║     │
- *              │     │   │   │    │                     ║     │
- *              │     │   │   │    │                     ║     │
- *              │     │   ▼   ▲    ▲                     ║     │
- *              │     │   │   │    │                     ▲     │
- *              │     │ ┌─┴───┴────┴┐       ┌────────────╨──┐  │
- *              │     │ │  Offline  │       │   Faulted     │  │
- *              │     │ │           ├─────►─┤               │  │
- *              │     │ └───────────┘       └─┬─┬───────┬─┬─┘  │
- *              │     │                       ▲ ▲       ▼ ▲    ▲
- *              │     └───────────►───────────┘ │       │ │    │
- *              │                               │       │ │    │
- *              │                      ┌────────┴─┐   ┌─┴─┴────┴─┐
- *              └──────────────────────┤   Live   ├─◄─┤  Live    │
- *                                     │  Repair  │   │  Repair  │
- *                                     │          │   │  Ready   │
- *                                     └──────────┘   └──────────┘
- *
- *
- *      The downstairs state can go to Disabled from any other state, as that
- *      transition happens when a message is received from the actual
- *      downstairs on the other side of the connection..
- *      The only path back at that point is for the Upstairs (who will self
- *      deactivate when it detects this) is to go back to New and through
- *      the reconcile process.
- *      ┌───────────┐
- *      │ Disabled  │
- *      └───────────┘
- */
+/// High-level states for a Downstairs
+///
+/// The state machine for a Downstairs is relatively simple:
+///
+/// ```text
+///                 ┌────────────┐
+///            ┌────► LiveRepair ├─────┐
+///  ┌─────────┴┐   └─────┬──────┘   ┌─▼──────┐
+///  │Connecting│         │          │Stopping│
+///  └─▲───────┬┘   ┌─────▼──────┐   └─▲────┬─┘
+///    │       └────►   Active   ├─────┘    │
+///    │            └─────┬──────┘          │
+///    │                  │                 │
+///    └─────────────────◄┴─────────────────┘
+/// ```
+///
+/// Complexity is hidden in the `Connecting` state, which wraps a
+/// [`NegotiationState`] implementing the negotiation state machine.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+#[serde(tag = "type", content = "value")]
 pub enum DsState {
-    /*
-     * New connection
-     */
-    New,
-    /*
-     * Waiting for activation signal.
-     */
-    WaitActive,
-    /*
-     * Waiting for the minimum number of downstairs to be present.
-     */
-    WaitQuorum,
-    /*
-     * Initial startup, downstairs are repairing from each other.
-     */
-    Reconcile,
-    /*
-     * Ready for and/or currently receiving IO
-     */
+    /// New connection
+    Connecting {
+        state: NegotiationState,
+        mode: ConnectionMode,
+    },
+
+    /// Ready for and/or currently receiving IO
     Active,
-    /*
-     * IO attempts to this downstairs are failing at too high of a
-     * rate, or it is not able to keep up, or it is having some
-     * error such that we can no longer use it.
-     */
-    Faulted,
-    /*
-     * This downstairs was failed, but has disconnected and now we
-     * are ready to repair it.
-     */
-    LiveRepairReady,
-    /*
-     * This downstairs is undergoing LiveRepair
-     */
+
+    /// This downstairs is undergoing LiveRepair
     LiveRepair,
-    /*
-     * This downstairs was active, but is now no longer connected.
-     * We may have work for it in memory, so a replay is possible
-     * if this downstairs reconnects in time.
-     */
-    Offline,
-    /*
-     * A guest requested deactivation, this downstairs has completed all
-     * its outstanding work and is now waiting for the upstairs to
-     * transition back to initializing.
-     */
-    Deactivated,
-    /*
-     * Another Upstairs has connected and is now active.
-     */
-    Disabled,
-    /*
-     * This downstairs is being replaced, Any active task needs to clear
-     * any state and exit.
-     */
-    Replacing,
-    /*
-     * The current downstairs tasks have ended and the replacement has
-     * begun.
-     */
-    Replaced,
+
+    /// The IO task for the client is being stopped
+    Stopping(ClientStopReason),
 }
+
 impl std::fmt::Display for DsState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DsState::New => {
-                write!(f, "New")
-            }
-            DsState::WaitActive => {
+            DsState::Connecting {
+                state: NegotiationState::WaitActive,
+                ..
+            } => {
                 write!(f, "WaitActive")
             }
-            DsState::WaitQuorum => {
+            DsState::Connecting {
+                state: NegotiationState::WaitQuorum,
+                ..
+            } => {
                 write!(f, "WaitQuorum")
             }
-            DsState::Reconcile => {
+            DsState::Connecting {
+                state: NegotiationState::Reconcile,
+                ..
+            } => {
                 write!(f, "Reconcile")
+            }
+            DsState::Connecting {
+                state: NegotiationState::LiveRepairReady,
+                ..
+            } => {
+                write!(f, "LiveRepairReady")
             }
             DsState::Active => {
                 write!(f, "Active")
             }
-            DsState::Faulted => {
+            DsState::Connecting {
+                mode: ConnectionMode::New,
+                ..
+            } => {
+                write!(f, "New")
+            }
+            DsState::Connecting {
+                mode: ConnectionMode::Faulted,
+                ..
+            } => {
                 write!(f, "Faulted")
             }
-            DsState::LiveRepairReady => {
-                write!(f, "LiveRepairReady")
+            DsState::Connecting {
+                mode: ConnectionMode::Offline,
+                ..
+            } => {
+                write!(f, "Offline")
+            }
+            DsState::Connecting {
+                mode: ConnectionMode::Replaced,
+                ..
+            } => {
+                write!(f, "Replaced")
             }
             DsState::LiveRepair => {
                 write!(f, "LiveRepair")
             }
-            DsState::Offline => {
-                write!(f, "Offline")
-            }
-            DsState::Deactivated => {
-                write!(f, "Deactivated")
-            }
-            DsState::Disabled => {
-                write!(f, "Disabled")
-            }
-            DsState::Replacing => {
-                write!(f, "Replacing")
-            }
-            DsState::Replaced => {
-                write!(f, "Replaced")
+            DsState::Stopping(..) => {
+                write!(f, "Stopping")
             }
         }
     }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionMode {
+    /// Connect through reconciliation once a quorum has come online
+    New,
+    /// Replay cached jobs when reconnecting
+    Offline,
+    /// Reconnect through live-repair
+    Faulted,
+    /// Reconnect through live-repair; the address is allowed to change
+    Replaced,
 }
 
 /*
