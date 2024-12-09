@@ -154,7 +154,7 @@
               "type": {
                 "type": "string",
                 "enum": [
-                  "replaced"
+                  "replacing"
                 ]
               }
             },
