@@ -989,7 +989,7 @@ impl DownstairsClient {
         self.checked_state_transition(up_state, DsState::Replacing);
         self.stats.replaced += 1;
 
-        self.halt_io_task(ClientStopReason::Replaced);
+        self.halt_io_task(ClientStopReason::Replacing);
     }
 
     /// Sets `self.state` to `new_state`, with logging and validity checking
@@ -2180,7 +2180,7 @@ pub(crate) struct DownstairsStats {
 #[derive(Debug)]
 pub(crate) enum ClientStopReason {
     /// We are about to replace the client task
-    Replaced,
+    Replacing,
 
     /// We have disabled the downstairs client for some reason
     ///
