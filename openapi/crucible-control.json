@@ -65,6 +65,173 @@
           "acked"
         ]
       },
+      "ClientFaultReason": {
+        "description": "Subset of [`ClientStopReason`] for faulting a client",
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "requested_fault"
+            ]
+          },
+          {
+            "description": "Received an error from some non-recoverable IO (write or flush)",
+            "type": "string",
+            "enum": [
+              "i_o_error"
+            ]
+          },
+          {
+            "description": "Live-repair failed",
+            "type": "string",
+            "enum": [
+              "failed_live_repair"
+            ]
+          },
+          {
+            "description": "Too many jobs in the queue",
+            "type": "string",
+            "enum": [
+              "too_many_outstanding_jobs"
+            ]
+          },
+          {
+            "description": "Too many bytes in the queue",
+            "type": "string",
+            "enum": [
+              "too_many_outstanding_bytes"
+            ]
+          },
+          {
+            "description": "The upstairs has requested that we deactivate when we were offline",
+            "type": "string",
+            "enum": [
+              "offline_deactivated"
+            ]
+          },
+          {
+            "description": "The Upstairs has dropped jobs that would be needed for replay",
+            "type": "string",
+            "enum": [
+              "ineligible_for_replay"
+            ]
+          }
+        ]
+      },
+      "ClientNegotiationFailed": {
+        "description": "Subset of [`ClientStopReason`] for faulting a client",
+        "oneOf": [
+          {
+            "description": "Reconcile failed and we're restarting",
+            "type": "string",
+            "enum": [
+              "failed_reconcile"
+            ]
+          },
+          {
+            "description": "Negotiation message received out of order",
+            "type": "string",
+            "enum": [
+              "bad_negotiation_order"
+            ]
+          },
+          {
+            "description": "Negotiation says that we are incompatible",
+            "type": "string",
+            "enum": [
+              "incompatible"
+            ]
+          }
+        ]
+      },
+      "ClientStopReason": {
+        "description": "When the upstairs halts the IO client task, it must provide a reason",
+        "oneOf": [
+          {
+            "description": "We are about to replace the client task",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "replacing"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "description": "We have disabled the downstairs client for some reason\n\n(for example, we have received `Message::YouAreNoLongerActive`)",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "disabled"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "description": "The upstairs has requested that we deactivate",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "deactivated"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "description": "Something went wrong during negotiation",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "negotiation_failed"
+                ]
+              },
+              "value": {
+                "$ref": "#/components/schemas/ClientNegotiationFailed"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ]
+          },
+          {
+            "description": "We have explicitly faulted the client",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "fault"
+                ]
+              },
+              "value": {
+                "$ref": "#/components/schemas/ClientFaultReason"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ]
+          }
+        ]
+      },
       "DownstairsWork": {
         "description": "`DownstairsWork` holds the information gathered from the downstairs",
         "type": "object",
@@ -88,21 +255,166 @@
         ]
       },
       "DsState": {
-        "type": "string",
-        "enum": [
-          "new",
-          "wait_active",
-          "wait_quorum",
-          "reconcile",
-          "active",
-          "faulted",
-          "live_repair_ready",
-          "live_repair",
-          "offline",
-          "deactivated",
-          "disabled",
-          "replacing",
-          "replaced"
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "new"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "wait_active"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "wait_quorum"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "reconcile"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "active"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "faulted"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "live_repair_ready"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "live_repair"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "offline"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "replaced"
+                ]
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          {
+            "description": "The IO task for the client is being stopped",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "stopping"
+                ]
+              },
+              "value": {
+                "$ref": "#/components/schemas/ClientStopReason"
+              }
+            },
+            "required": [
+              "type",
+              "value"
+            ]
+          }
         ]
       },
       "Error": {
