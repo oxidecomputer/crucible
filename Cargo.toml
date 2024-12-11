@@ -121,7 +121,6 @@ openapi-lint = { git = "https://github.com/oxidecomputer/openapi-lint", branch =
 oximeter = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 oximeter-producer = { git = "https://github.com/oxidecomputer/omicron", branch = "main" }
 progenitor = "0.8.0"
-progenitor-client = "0.8.0"
 
 # local path
 crucible = { path = "./upstairs" }
