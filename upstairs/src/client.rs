@@ -531,7 +531,10 @@ impl DownstairsClient {
         // downstairs should automatically call PromoteToActive when it reaches
         // the relevant state.
         let auto_promote = match up_state {
-            UpstairsState::Active | UpstairsState::GoActive(..) => true,
+            UpstairsState::Active | UpstairsState::GoActive(..) => !matches!(
+                self.state,
+                DsState::Stopping(ClientStopReason::Disabled)
+            ),
             UpstairsState::Initializing
             | UpstairsState::Deactivating { .. } => false,
         };

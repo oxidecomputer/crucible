@@ -3410,6 +3410,7 @@ impl Downstairs {
                     "Saw CrucibleError::UpstairsInactive on client {}!",
                     client_id
                 );
+                // XXX should we also change the upstairs state here?
                 self.clients[client_id].disable(up_state);
             }
             Some(CrucibleError::DecryptionError) => {
