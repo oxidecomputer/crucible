@@ -567,6 +567,8 @@ impl DownstairsClient {
             DsState::Stopping(ClientStopReason::NegotiationFailed(..))
             | DsState::Stopping(ClientStopReason::Disabled)
             | DsState::Stopping(ClientStopReason::Deactivated) => {
+                // XXX NegotiationFailed could also be hit during reconnection,
+                // in which case we shouldn't use `ConnectionMode::New` (?)
                 ConnectionMode::New
             }
 
