@@ -3854,8 +3854,6 @@ impl Downstairs {
             let Some(downstairs_id) = self.clients[client_id].id() else {
                 return;
             };
-            // Spawn a task so we don't block the main loop talking to
-            // Nexus.
             notify.send(NotifyRequest::ClientTaskStopped {
                 upstairs_id: self.cfg.upstairs_id,
                 downstairs_id,

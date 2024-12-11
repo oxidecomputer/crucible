@@ -318,7 +318,7 @@ async fn notify_task_nexus(
     info!(log, "notify_task exiting");
 }
 
-/// Gets a Nexus client based on any IPv6 address
+/// Gets a Nexus client based on any rack-internal IPv6 address
 pub(crate) async fn get_nexus_client(
     log: &Logger,
     client: reqwest::Client,
